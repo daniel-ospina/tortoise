@@ -99,8 +99,8 @@ would be swallowed entirely.
 
 1. A dedicated `ArmConflictError(Exception)` is raised by **`run.py` at arm
    resolution, before the question loop** — the block at `run.py:3488-3512` that
-   resolves `coverage_loop` (`:3499-3501`) and `aggregative_flag` (`:3508`). There
-   is **no `try:` between `run_evaluation`'s def (`:3292`) and that block**, so it
+   resolves `coverage_loop` (`:3524-3526`) and `aggregative_flag` (`:3533`). There
+   is **no `try:` between `run_evaluation`'s def (`:3317`) and that block**, so it
    never enters a fail-open region.
 2. The resolved arm **and** guard are threaded into `retrieve_for_question` exactly
    as `coverage_loop=coverage_loop` is today (`run.py:4073`) — so env-only arming
@@ -296,9 +296,9 @@ surface as the base pool via the **harness-local
 `annotate_pool_additions(hits, props, dates, *, match_source="session")`**, record
 the arm marker + census. **Fingerprint convention (pinned): both keys are the
 resolved bools, ALWAYS present** — matching every sibling boolean arm
-(`evidence_boost` `run.py:3613`, `entity_key_expansion` `:3619`, `coverage_loop`
-`:3623`, `aggregative_flag` `:3627`), NOT the value-conditional `tr_top_k` pattern
-(`:3648`, the only `if != DEFAULT` site). Concretely: `session_reinjection` = the
+(`evidence_boost` `run.py:3613`, `entity_key_expansion` `:3644`, `coverage_loop`
+`:3648`, `aggregative_flag` `:3652`), NOT the value-conditional `tr_top_k` pattern
+(`:3673`, the only `if != DEFAULT` site). Concretely: `session_reinjection` = the
 resolved arm bool; `session_reinjection_guard` = the resolved guard bool (present
 whenever the arm key is present, i.e. governed by the **arm's** OFF, not the
 guard's). `tests/test_eval_resume_retry_failed.py::_resume_fingerprint()` gains

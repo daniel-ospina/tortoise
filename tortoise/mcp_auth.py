@@ -23,11 +23,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import inspect
 import ipaddress
+import logging
 import os
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
@@ -43,6 +46,11 @@ from tortoise.rate_buckets import (
     _bucket_touch,
 )
 from tortoise.sdk import TortoiseSDK
+
+#: This module had no logger before the wait-bound `on_starved` seam (#10602
+#: residual): a monitoring failure there must be FINDABLE, and an `async def`
+#: callback that nothing awaits is a silent black hole unless something says so.
+_logger = logging.getLogger(__name__)
 
 # ── ContextVars ─────────────────────────────────────────────────────────────
 # Reserved placeholder org id for selfhost transports (auth_mode "static"/"none",
@@ -1152,7 +1160,9 @@ async def _drain_cold_setup() -> None:
 
 
 async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
-                                 reference: float, owner: object | None = None):
+                                 reference: float, owner: object | None = None,
+                                 on_starved: Callable[[float], None] | None = None,
+                                 budget_state: dict | None = None):
     """Await ``task`` under ``timeout``, exempting one-time PROCESS SETUP (#4055).
 
     Both bound seams (REST ``hosted_api.WaitBoundMiddleware`` and MCP
@@ -1190,19 +1200,106 @@ async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
     bound with ``embeddings.request_load_owner`` BEFORE spawning ``task``; it
     is what attributes a load to THIS request (identity, not merely a time
     window — see ``_cold_setup_ran_during``). ``owner=None`` never exempts.
+
+    ``on_starved`` is an optional **synchronous** one-argument callable, invoked
+    with this seam's effective budget ORIGIN (the possibly re-armed ``reference``)
+    when this wait returns the task's own result — OR re-raises the finished
+    task's own exception — AFTER the bound had elapsed: the breach the timer
+    could not turn into a refusal (the handler finished, whether or not the
+    deadline callback ran first). It is the only
+    place that fact is knowable: this helper owns ``exempted`` and ``reference``,
+    and a caller can see neither an exemption nor the true arrival from the
+    outside.
+
+    ⛔ It is never reached by the cold-setup FIRST arm: that arm ``continue``s
+    into a RE-ARMED budget with ``reference`` re-stamped beside it, so the
+    measured interval is always the arm that actually answered. (The re-stamp
+    matters when the drain outlasts the original budget — an instant answer after
+    a 0.9 s drain on a 0.5 s bound must not read as a 0.9 s breach of the
+    request's own budget.) The exemption FLAG is not a mute: leaving it in the
+    guard made the re-armed arm uncountable, measured as a 10x starved breach
+    reported nowhere.
+
+    ``budget_state`` is an optional mutable dict this seam keeps in step with
+    the budget an answer is being served under: it is stamped with the effective
+    ORIGIN (the possibly re-armed ``reference``) and it is the only way a caller
+    that keeps its OWN arm — the REST middleware's already-started-response arm,
+    which never sees this helper's `reference` — can decide "did the head reach
+    the caller inside the budget that governed the answer?" without re-deriving
+    an origin it cannot know. ⛔ Without it, that arm compared a re-armed answer's
+    head against the ORIGINAL arrival and counted a served-in-time cold start as
+    a breach (measured).
+
+    ⛔ It never converts the answer into a refusal — the caller HAS a response,
+    and refusing a computed answer late is worse than serving it. The callable is
+    wrapped: measurement must never become a new failure mode of the request it
+    measures. It MUST be synchronous; an ``async def`` callback is rejected with
+    a warning rather than silently dropped (a dropped coroutine would count
+    nothing, forever, with no failure anywhere).
     """
     remaining = max(0.0, float(timeout))
     exempted = False
+    if budget_state is not None:
+        budget_state["origin"] = reference
+
+    def _note_starved() -> None:
+        """Report a return AFTER the bound, when the caller asked to know.
+
+        ⛔ Swallowed, not propagated: this is a monitoring write on the
+        caller's happy path, and an exception escaping here would turn a served
+        response into a 500 — measurement must never become a new failure mode
+        of the request it measures (the rule every `record_*` write in
+        `monitoring` carries). Nothing is lost by the swallow: every caller
+        wraps its own counter and logs the failure there at WARNING
+        (`hosted_api`'s `_count_starved` does), and the callable is arbitrary, so
+        the belt belongs here too. ⛔ WARNING rather than debug on purpose: the
+        hosted process runs uvicorn's default logging config, so a DEBUG record
+        is dropped in production and a dead counter would read a silent zero.
+        """
+        if on_starved is None:
+            return
+        try:
+            if time.monotonic() - reference > float(timeout):
+                returned = on_starved(reference)
+                # ⛔ An `async def` callback returns a coroutine that nobody
+                # awaits: it would be garbage-collected un-executed, so the
+                # channel would go permanently silent with NO exception and no
+                # log line (the call itself succeeds). Close it and say so.
+                if inspect.isawaitable(returned):
+                    _close = getattr(returned, "close", None)
+                    if callable(_close):
+                        _close()
+                    _logger.warning(
+                        "wait-bound on_starved must be SYNCHRONOUS; the async "
+                        "callback was dropped un-awaited (nothing was counted)")
+        except Exception:
+            # Measurement must never become a new failure mode of the request it
+            # measures — but it must stay FINDABLE, so this is WARNING, not
+            # debug: the hosted process runs uvicorn's default logging config and
+            # nothing raises this logger's level, so a DEBUG record would be
+            # dropped in production and a dead counter would read a silent zero.
+            _logger.warning("wait-bound starved observation failed",
+                            exc_info=True)
+
     while True:
         try:
             # ``wait_for`` + ``shield``: the primitive both seams already used.
             # ``shield`` is REQUIRED — ``wait_for`` alone CANCELS the awaited
             # future on timeout, and these bounds ABANDON, never cancel.
-            return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+            result = await asyncio.wait_for(asyncio.shield(task),
+                                            timeout=remaining)
         except TimeoutError:
             if task.done():
                 # The dispatch finished as the deadline expired: surface its own
-                # result/exception. A handler's ``TimeoutError`` is NOT a breach.
+                # result/exception. A handler's ``TimeoutError`` is NOT rewritten
+                # into a refusal — it IS counted by the served-late channel below
+                # when the bound was already blown (measured), so do not read the
+                # next words as "not a breach".
+                # Counted as starved when the clock says the bound had already
+                # been blown by the time this answer existed — the same hidden
+                # breach as the normal-return arm below, reached when the timer
+                # callback and the completion raced.
+                _note_starved()
                 return task.result()
             if (exempted or float(timeout) <= 0.0
                     or not _cold_setup_ran_during(reference, owner)):
@@ -1210,6 +1307,36 @@ async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
             exempted = True
             await _drain_cold_setup()
             remaining = max(0.0, float(timeout))
+            # ⛔ RE-STAMP THE REFERENCE WITH THE BUDGET. The lateness this helper
+            # reports must be measured against the budget the ANSWER was served
+            # under, and after this arm that budget is brand new. Leaving
+            # ``reference`` at the original arrival (and/or treating ``exempted``
+            # as a permanent mute, which an earlier revision of this change did)
+            # makes the re-armed arm uncountable: measured on a 0.05 s bound with
+            # an instant drain and the request's OWN work blocking the loop 0.4 s
+            # — result returned at 0.501 s, `on_starved` fired 0 times, i.e. a
+            # 10x starved breach reported nowhere. The cold-setup arm itself
+            # still never counts: it reaches this line by ``continue``, never by a
+            # normal return.
+            reference = time.monotonic()
+            if budget_state is not None:
+                budget_state["origin"] = reference
+            continue
+        # ── returned NORMALLY: inside the bound, or AFTER it ─────────────
+        # One of the two ways a served-late breach reaches the caller. ⛔ Which arm
+        # fires is a scheduling detail, and BOTH are pinned synthetically
+        # (`test_the_normal_return_arm_is_counted`, `test_the_timeout_race_arm_is
+        # _counted`) precisely because it is NOT predictable: instrumented, the
+        # blocked-loop tests in `test_10602` reach the ``task.done()`` race arm
+        # 3/3, while a 260-request probe of the same shape reached it 0/260. What
+        # both arms share is the outcome — nothing was refused and the caller is
+        # served its own answer after the bound — which is what the callback
+        # counts; ⛔ do not restate it as "the deadline never fired". Measured on
+        # a private lane with a 0.05 s bound and a handler blocking the loop
+        # 0.4 s: ``elapsed 0.400 s``, status 401, and NOTHING in the breach
+        # channel moved before this change.
+        _note_starved()
+        return result
 
 
 # ── #3144 / #3812: the Retry-After contract on an auth-plane 503 ───────────

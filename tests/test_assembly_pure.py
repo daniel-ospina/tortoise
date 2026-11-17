@@ -2359,10 +2359,23 @@ def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
     for st in ("superseded", "deprecated", "archived", "outdated"):
         assert st not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
     # #3302: the successor-probe set is EXACTLY the canonical OBJECT vocabulary
-    # plus its one load-bearing divergence. `outdated` is not a dead member —
-    # create_entity/update_entity can write it through the public MCP surface
-    # (`status` is not server-managed), so an exact pin is required rather than
-    # a subset check.
+    # plus its one load-bearing divergence. `outdated` is not a dead member here:
+    # a row can HOLD it (`create_entity`/`update_entity` could write it through
+    # the public MCP surface before #11824 S0, `status` is not server-managed, and
+    # stored rows are not backfilled), so an exact pin is required rather than a
+    # subset check.
+    #
+    # ⚠️ #11824 S0 CLOSED that write path (the word is now refused at the ONE
+    # lifecycle door, `tortoise/lifecycle_vocabulary.py`) and STILL LEFT THIS
+    # MEMBER IN PLACE, deliberately. The member covers STORED rows, not writers:
+    # a pre-S0 graph, a raw Cypher producer, or a JSONL replay can hold
+    # `status='outdated'`, there is no backfill (#11824 §1), and dropping the
+    # member would flip such a legacy successor from recall-excluded (NAME-ONLY)
+    # to a verified link. Removing a value from a reader before the stored
+    # population is rewritten is the inverted order this slice exists to avoid.
+    # The drop is the stored-rows rewrite's (#12855) and is S4's acceptance —
+    # S0's own acceptance is that NOTHING is dropped from any filter here. So the
+    # pin is UNCHANGED by S0, and it still fails if the member is dropped early.
     assert set(_RECALL_OBJECT_EXCLUDED_STATUSES) == \
         set(OBJECT_TERMINAL_STATUSES) | {"outdated"}
 

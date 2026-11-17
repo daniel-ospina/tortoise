@@ -756,6 +756,7 @@ _EXPECTED_TOOL_SITES = {
     "tools/embedding_residual_scan.py": 1,      # #11642's read-only dense-leg scan (bound: `**_bounded_server_socket_kwargs()`)
     "tools/graph_write_repair.py": 2,            # per-DB scan client + the repair client
     "tools/longmem_eval/server_posture.py": 1,   # pre-existing, already resolver-bound
+    "tools/text_gate_13099.py": 2,              # #13107's seed client + the arms' measurement client (both `**_bounded_server_socket_kwargs()`)
 }
 
 

@@ -232,7 +232,13 @@ def test_an_undeclared_word_cannot_ride_a_colliding_hash(env):
     pid = _live(sdk)
     before = _row(sdk, pid)
 
-    with pytest.raises(ValueError, match="Invalid status"):
+    # ⛔ #11824 S0 moved the refusal's TEXT: the Point arm no longer spells its
+    # own `Invalid status …` — it forwards to the ONE lifecycle door, whose
+    # three-part message names the fault and the four accepted words. The
+    # PROPERTY is unchanged (an undeclared word never lands), and the content
+    # read is what makes it true: `_CollidingHash` claims `'garbage'`, so a
+    # hash/eq-answered vocabulary test would still admit it.
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.update_knowledge(pid, status=_CollidingHash("garbage"))
 
     assert _row(sdk, pid) == before, (
@@ -256,18 +262,26 @@ def test_the_legacy_outdated_flag_alone_makes_the_point_dead(env):
 def test_deprecated_is_terminal_even_though_the_map_has_no_key(env):
     """Terminality is the SHARED predicate, not an entry in the transition map.
 
-    ``deprecated`` is terminal in ``live.is_terminal_status`` and has NO key in
-    ``_ALLOWED_TRANSITIONS``, so a guard that re-derived terminality from the map
-    (or from an empty declared-target set) would let this write through. The
-    shared instrument refuses it — which is what makes "is this claim dead?" and
-    "which status may it become?" answer from ONE place rather than two.
+    ``deprecated`` is terminal in ``live.is_terminal_status``, and the map's
+    entry for it declares NO outgoing transition — so a guard that re-derived
+    terminality from "the declared target set is non-empty" would let this write
+    through. The shared instrument refuses it — which is what makes "is this
+    claim dead?" and "which status may it become?" answer from ONE place rather
+    than two.
+
+    ⚠️ #11824 S0 gave `deprecated` a MAP KEY (the word joined the vocabulary, so
+    the table gained its row); before that the arm's non-vacuity came from the
+    key being ABSENT. The property to pin is the EMPTY outgoing set, which is
+    what the row below asserts — an absent key is now impossible for a real
+    terminal word (every member of `live.TERMINAL_EXCLUDED_STATUSES` has one).
     """
     sdk, _ = env
     pid = _live(sdk)
     _force_status(sdk, pid, "deprecated")
     before = _row(sdk, pid)
-    assert "deprecated" not in _ALLOWED_TRANSITIONS, (
-        "this arm is only non-vacuous while the map carries no `deprecated` key")
+    assert _ALLOWED_TRANSITIONS.get("deprecated") == frozenset(), (
+        "this arm is only non-vacuous while `deprecated` declares no outgoing "
+        f"transition: {_ALLOWED_TRANSITIONS.get('deprecated')!r}")
 
     with pytest.raises(ValueError, match="terminal"):
         sdk.update_knowledge(pid, validTo="2030-01-01T00:00:00Z")
@@ -719,18 +733,28 @@ def test_a_draft_point_still_promotes_through_this_door(env):
 # The declared map is consulted for the non-terminal transition question
 # ══════════════════════════════════════════════════════════════════════
 
-@pytest.mark.parametrize("target", ["archived", "outdated", "retracted",
-                                    "superseded"])
+@pytest.mark.parametrize("target", ["draft"])
 def test_an_undeclared_transition_from_live_is_refused(env, target):
-    """``_ALLOWED_TRANSITIONS['live']`` declares exactly retracted/superseded.
+    """``_ALLOWED_TRANSITIONS['live']`` declares exactly deprecated/superseded.
 
-    ``archived`` is *"reserved — no v1 write path"* and ``outdated`` is written
-    only by ``invalidate_point`` / ``supersede_point``; neither is a declared
-    transition from ``live``, so the generic door must not mint them.
-    ``retracted`` / ``superseded`` are declared and stay legal — ⛔ and since
-    #12592 a declared ``superseded`` must ALSO name its successor, because
-    ONTOLOGY §4.3 defines the word as *"replaced: it names the successor"*. The
-    two halves are pinned here: the bare word is refused, the pair is accepted.
+    ⛔ #11824 S0 CHANGED WHICH WORDS REACH THIS DOOR, so the pin moved with it
+    rather than being retired. Three params used to sit here and each is now a
+    DIFFERENT refusal, spelled out below so the delta is on the record:
+
+    * ``retracted`` / ``archived`` are declared SYNONYMS of ``deprecated``, so
+      they are normalised by ``lifecycle_vocabulary`` BEFORE this loop runs and
+      they are now LEGAL transitions out of ``live`` (stored as ``deprecated``);
+    * ``outdated`` is refused by the VOCABULARY door, which runs first — its
+      message names the choice between two words, not a transition, and it is
+      pinned by ``test_11926_derived_invalidation.py`` and the `outdated` rows in
+      ``test_11825_event_terminal_status_refused.py``;
+    * ``draft`` is the remaining word that is a real, undeclared BACKWARD
+      transition from ``live``, so it is what exercises this arm now.
+
+    ``superseded`` is declared and stays legal — ⛔ and since #12592 a declared
+    ``superseded`` must ALSO name its successor, because ONTOLOGY §4.3 defines
+    the word as *"replaced: it names the successor"*. The two halves are pinned
+    here: the bare word is refused, the pair is accepted.
     """
     sdk, _ = env
     pid = _live(sdk)
@@ -755,6 +779,22 @@ def test_an_undeclared_transition_from_live_is_refused(env, target):
     assert target in text and "transition" in text.lower(), (
         f"the refusal must name the target status and the transition: {text!r}")
     assert _row(sdk, pid)["status"] == "live"
+
+    # …the two halves the params above retired, asserted as the model now
+    # states them: a synonym LANDS (as the canonical word)…
+    for _synonym, _canonical in (("retracted", "deprecated"),
+                                 ("archived", "deprecated")):
+        _pid = _live(sdk, f"live -> {_synonym}")
+        sdk.update_knowledge(_pid, status=_synonym)
+        assert _row(sdk, _pid)["status"] == _canonical, (
+            f"{_synonym!r} is a declared synonym of {_canonical!r} since #11824 "
+            f"S0, so a live Point must accept it: {_row(sdk, _pid)!r}")
+    # …and `outdated` is refused EARLIER, by the vocabulary door, because it
+    # names a choice between two lifecycle words and never picks one.
+    _pid = _live(sdk, "live -> outdated")
+    with pytest.raises(ValueError, match=r"was refused"):
+        sdk.update_knowledge(_pid, status="outdated")
+    assert _row(sdk, _pid)["status"] == "live"
 
 
 def test_restating_the_same_status_is_a_no_op_not_a_refusal(env):
@@ -807,8 +847,12 @@ def test_the_generic_door_still_serves_the_other_labels(env):
     every one of them (``missing_ok`` exists for exactly this)."""
     sdk, _ = env
     obj = sdk.create_object("Widget", kind="core:entity")["id"]
+    # ⛔ #11824 S0: `archived` is a declared SYNONYM of `deprecated`, so the
+    # write lands and the store holds the canonical word — the whole point of
+    # moving the pack words onto the position axis is that ONE four-word
+    # vocabulary is minted for every knowledge kind.
     sdk.update_knowledge(obj, status="archived")
-    assert sdk.get_entity(obj)["status"] == "archived"
+    assert sdk.get_entity(obj)["status"] == "deprecated"
 
     subj = sdk.create_subject("team-x")["id"]
     # ⛔ #12592: the bare word is refused on every label now (§4.3), so the
@@ -948,6 +992,8 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
     provenance = sdk.create_point(
         "statement", "carries provenance", dedup=False,
         status="retracted", eventId="ev-9649-prov")["id"]
+    # The status the writers actually STORED (S0's door canonicalises the word).
+    _retracted_stored = sdk.get_entity(provenance)["status"]
     sdk._get_proj().g.query(
         "CREATE (e:Event {eventId:'ev-9649-prov', name:'session'})")
 
@@ -977,7 +1023,12 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
         "MATCH (e:Event {eventId:'ev-9649-prov'}) RETURN e.validTo",
     ).result_set == [["2031-01-01T00:00:00Z"]], (
         "the Event the caller addressed must take the write")
-    assert sdk.get_entity(provenance)["status"] == "retracted", (
+    # ⛔ Compared against the STORED word read back, not the literal the fixture
+    # passed: `#11824`/`#13143` S0 folds `retracted` -> `deprecated` at the one
+    # lifecycle door (the store keeps the CANONICAL word), so a literal here pins
+    # the synonym table rather than this test's claim — which is that the OTHER
+    # node is untouched.
+    assert sdk.get_entity(provenance)["status"] == _retracted_stored, (
         "the provenance Point must be untouched")
 
 
@@ -1016,7 +1067,7 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
 
     with pytest.raises(ValueError, match="transition"):
         sdk.update_knowledge("src://hybrid-9649", status="draft")
-    with pytest.raises(ValueError, match="Invalid status"):
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.update_knowledge("src://hybrid-9649", status="garbage")
     assert _row(sdk, pid)["status"] == "live", (
         "a refused hybrid status write must not touch the row")
@@ -1083,7 +1134,7 @@ def test_a_null_status_point_still_validates_and_journals_its_status(env):
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status=NULL", params={"id": pid})
 
-    with pytest.raises(ValueError, match="Invalid status"):
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.update_knowledge(pid, status="garbage")
     assert _row(sdk, pid)["status"] is None, (
         "a refused vocabulary must not store anything")
@@ -1249,8 +1300,11 @@ def test_operator_points_keep_their_documented_lifecycle(env):
     a = _live(sdk, "op src")
     b = _live(sdk, "op tgt")
     live_op = sdk.create_operator("IMPL", a, [b])["id"]
+    # ⛔ `retracted` is a declared SYNONYM of `deprecated` since #11824 S0, so
+    # the write LANDS and the store holds the canonical word (a one-way read
+    # delta: nothing may be minted as `retracted`).
     sdk.update_knowledge(live_op, status="retracted")
-    assert _row(sdk, live_op)["status"] == "retracted"
+    assert _row(sdk, live_op)["status"] == "deprecated"
 
     dead_op = sdk.create_operator("NAND", a, [b])["id"]
     sdk._get_proj().g.query(
@@ -1312,8 +1366,10 @@ def test_a_map_less_stored_status_still_defers(env):
 
     sdk.update_knowledge(pid, status="live")
     assert _row(sdk, pid)["status"] == "live"
+    # (`retracted` is a synonym of `deprecated` since #11824 S0 — it lands, and
+    # the store keeps the canonical word.)
     sdk.update_knowledge(pid, status="retracted")
-    assert _row(sdk, pid)["status"] == "retracted"
+    assert _row(sdk, pid)["status"] == "deprecated"
 
 
 def test_two_address_arms_resolving_one_id_ask_the_guard_once(env, monkeypatch):
@@ -1632,7 +1688,7 @@ def test_a_hash_overriding_status_key_cannot_store_an_undeclared_word(env):
     sdk, _ = env
     pid = _live(sdk, "a live claim")
 
-    with pytest.raises(ValueError, match="Invalid status"):
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.update_knowledge(pid, **{_KHash("status"): "garbage"})
 
     assert _row(sdk, pid)["status"] == "live", (
@@ -1648,18 +1704,26 @@ def test_a_plain_status_key_still_gets_the_documented_answer(env):
     needs no partner. ``superseded`` stopped being usable as this control in
     #12592: ONTOLOGY §4.3 makes the bare word a refusal, and the declared-but-
     partnerless shape is pinned in
-    ``test_an_undeclared_transition_from_live_is_refused``.
+    ``test_an_undeclared_transition_from_live_is_refused``. Since #11824 S0 the
+    control also asserts the SYNONYM half: ``retracted`` is a spelling of
+    ``deprecated``, so the row lands as ``deprecated``.
     """
     sdk, _ = env
     pid = _live(sdk, "a live claim")
 
     sdk.update_knowledge(pid, status="retracted")
-    assert _row(sdk, pid)["status"] == "retracted", (
-        "a DECLARED transition must still land — the arm is not simply closed")
+    assert _row(sdk, pid)["status"] == "deprecated", (
+        "a DECLARED transition must still land — the arm is not simply closed "
+        "— and a declared synonym is stored as the word it means")
 
     # ...and the plain spelling is then refused on the SAME guarantee the exotic
     # keys were refused on, so the family is one rule and not two.
-    with pytest.raises(ValueError, match="retracted"):
+    # Two instruments can answer this one and BOTH are correct: the dead-claim
+    # guard (the row is `deprecated`, which is terminal) and, if that guard were
+    # disarmed, the declared-transition loop. The point of the control is that
+    # the write is REFUSED, so the assertion names both texts.
+    with pytest.raises(ValueError,
+                       match=r"dead claim|refused the status transition"):
         sdk.update_knowledge(pid, status="live")
 
 
@@ -1707,7 +1771,7 @@ def test_a_rendered_status_key_is_validated_against_the_SUBJECT_vocabulary(env):
     sdk, _ = env
     sid = sdk.create_entity("subject", "Rendered Key Co")["node"]["id"]
 
-    with pytest.raises(ValueError, match="Invalid status"):
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.update_knowledge(sid, **{_KHash("status"): "dead"})
 
     row = sdk._get_proj().g.query(
@@ -1765,3 +1829,59 @@ def test_the_id_less_refusal_prescribes_no_unperformable_route(env):
         f"the re-create route is the one that works and must be named: {text!r}")
     assert "_sanitize_props" in text, (
         f"the message must say WHY no SDK door can stamp the id: {text!r}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #11824 S0 review (P2) — an echo of a LEGACY terminal word is entailed
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("retire", ["retracted", "archived"])
+def test_an_echo_of_a_legacy_terminal_word_is_an_entailed_write(env, retire):
+    """The read-modify-write shape a generic tenant PUT sends over a dead row.
+
+    #11824 S0 put the lifecycle door on this arm, and the door NORMALISES a
+    declared synonym (`retracted` / `archived` -> `deprecated`) while the row
+    still HOLDS the legacy word — `retract_point`'s CAS writes
+    `status='retracted'` (a stated residual of this slice), and `archived` is a
+    pre-#11824 stored word (no backfill, #11824 §1).
+
+    So a caller that fetches the point and PUTs it back with its own status
+    arrived at the declared-transition loop as `retracted` -> `deprecated`: the
+    loop called that a TRANSITION, `_ALLOWED_TRANSITIONS['retracted']` is empty
+    (terminal), and the door refused a write that changes nothing. The
+    entailment test ABOVE the loop had already (correctly) said "not a
+    transition", so the SAME call was judged both ways — and the terminal guard
+    had been disarmed on the strength of that first judgement.
+
+    Mutant that reddens: compare spellings again (`str.__eq__(_stored, _status)`
+    and `_ALLOWED_TRANSITIONS.get(_stored)`) instead of reading both sides
+    through `_lifecycle_meaning`; both params then raise
+    `update_entity refused the status transition … is terminal`.
+
+    ⚠️ The echo rewrites NOTHING: the row keeps the legacy spelling it holds
+    (`retracted` / `archived`), because an entailed call mints no word — the
+    door's canonical spelling governs what may be MINTED, not what an echo of an
+    existing row may rewrite. The row must stay DEAD either way, which this
+    asserts alongside the acceptance.
+    """
+    sdk, _ = env
+    if retire == "retracted":
+        pid = _live(sdk, "a claim retired by the shipped verb")
+        sdk.retract_point(pid)              # the CAS writes 'retracted'
+    else:
+        pid = _live(sdk, "a claim a pre-fix writer archived")
+        _force_status(sdk, pid, "archived")
+    assert _row(sdk, pid)["status"] == retire
+
+    sdk.update_knowledge(pid, status=retire, content="echoed, rewritten")
+
+    after = _row(sdk, pid)
+    assert after["status"] == retire, (
+        "an entailed echo must not rewrite the stored word: " + repr(after))
+    assert sdk.get_point(pid)["content"] == "echoed, rewritten", (
+        "the entailed path must still write the content it carried")
+
+    # …and the point is still DEAD: the echo is not a resurrection.
+    with pytest.raises(ValueError, match=r"terminal|dead"):
+        sdk.update_knowledge(pid, status="live")
+    assert _row(sdk, pid)["status"] == retire

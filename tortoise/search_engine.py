@@ -2366,6 +2366,42 @@ MECHANISM_SCAN_FALLBACK = "scan_fallback"
 #: in-graph index is dropped, is a store that has not been migrated.
 MECHANISM_PGVECTOR = "pgvector"
 
+#: The dense leg's DEFAULT budget, in ms — ONE home for the number, because two
+#: callers now have to agree on it (#11691). :func:`run_vector_query`'s
+#: ``timeout_ms`` is this by default, :func:`degradation_chain` falls back to it,
+#: and the RECORD leg's statement timeout is bound by it at construction
+#: (``sdk._record_vector_searcher(timeout_ms=…)`` → ``record_vector.searcher``).
+#: They are not independent: the record leg used to inherit
+#: ``record_serve.RECORD_STATEMENT_TIMEOUT_MS`` (15 s) while the graph branches
+#: got this, and the fused read JOINS its workers, so a leg on a different budget
+#: is a leg the cap cannot bound.
+VECTOR_LEG_BUDGET_MS = 500
+
+
+def remaining_read_ms(started_at: float, read_budget_ms: int) -> int:
+    """What is LEFT of a read's budget, measured from the leg that spent it.
+
+    This is the reserve the record leg's division exists to create (#11691), and
+    it is computed rather than assumed: the arithmetic that keeps the graph
+    fallback inside the read has to be the SAME clock the collector uses, so this
+    subtracts the time already spent — measured from just before the record leg
+    was called, which includes the door's pool borrow, the connect and the
+    ``set_config`` round trips that the statement timer itself starts after.
+
+    The floor is ``1``, not ``0``, for the reason :func:`record_vector.
+    record_statement_ms` floors its quotient: FalkorDB/Postgres drivers read a
+    ``timeout`` of ``0`` as NO TIMEOUT AT ALL, so an exhausted read that computed
+    ``0`` here would hand the graph branch an UNBOUNDED query — the exact trap
+    this change exists to close, in the other leg.
+
+    ⚠️ It never WIDENS the budget: a ``started_at`` in the future would make the
+    elapsed time negative, and the ``min`` clamps that back to the read's own
+    budget — a tightening only, like the door's ceiling.
+    """
+    elapsed_ms = int((time.monotonic() - started_at) * 1000.0)
+    return max(1, min(int(read_budget_ms), int(read_budget_ms) - elapsed_ms))
+
+
 # ── #2518: which PASS produced a leg entry ─────────────────────────────────
 # A leg can now be asked MORE THAN ONCE in one read: the entity/fact-augmented
 # key expansion's dense half runs the vector leg a second time with a composed
@@ -3523,7 +3559,8 @@ def run_bm25_query(
 
 
 def run_vector_query(
-    graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
+    graph, query_vec: list[float], limit: int = 20,
+    timeout_ms: int = VECTOR_LEG_BUDGET_MS,
     is_embedded: bool = True, entity_type: str = "point",
     vector_index_api: str | None = None, excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
@@ -3533,6 +3570,7 @@ def run_vector_query(
     provenance: str | None = None,
     pg_vector: Callable[[str, Sequence[float], int, tuple | None],
                         list[tuple[str, float, Any]] | None] | None = None,
+    vector_indexed_labels: frozenset[str] | set[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -3627,6 +3665,47 @@ def run_vector_query(
     one vector leg — the same composition ``run_bm25_query``'s ``meter`` exists
     for (``#8488``).
 
+    vector_indexed_labels (#13108) — the labels the STORE has already been
+    MEASURED to carry a VECTOR index for
+    (``FalkorProjection._vector_indexed_labels_for_reads``, filled by
+    ``_record_vector_index_inventory``: the declared served set intersected with
+    the engine's own catalogue). When this is supplied and the read's label is
+    NOT in it, the two ``queryNodes`` attempts below are skipped and the read
+    goes straight to the brute-force scan.
+
+    ⛔ **SUPPLY THE BEHAVIOURAL HALF, NOT THE REPORTED PAIR.** The supplier must
+    hand over ``_vector_indexed_labels_for_reads``, never
+    ``_vector_indexed_labels``. The reporting half deliberately collapses "the
+    catalogue was returned but nothing in it parsed" into an EMPTY set (#11087's
+    pinned semantic, and the right one for a message); acting on that same value
+    would read an engine catalogue reshape as "this store indexes nothing" and
+    demote every dense read — ``:Point`` included, the label the product ships
+    indexed — to a full scan, with only an INFO pair as the signal. The
+    behavioural half is ``None`` in that lane, so the read attempts as before.
+    The two sets are equal in every other lane.
+
+    ⛔ WHY. On an unindexed label both attempts can only be REFUSED, and this
+    engine does not even say so distinctly — ``Invalid arguments for
+    procedure 'db.idx.vector.queryNodes'`` is what it answers for a missing index
+    AND for a wrong argument order (measured on
+    ``falkordb/falkordb-server:v4.20.6`` — the pin ``tools/test_lane.py`` launches
+    — with ``tools/dense_leg_probe_13108.py``). Paying them costs real time on
+    every such read: measured **34.78 ms p50 for an ``:Object`` dense read, of
+    which 20.17 ms is the two refused round trips** — 58.0 % of the leg spent
+    producing a known error (``fix-1000-paired-at-rest.json``: the 20.17 is
+    ``index_attempt[0].elapsed_ms``, 10.18 + 9.97, against that same artifact's
+    ``arms["object[nohint]@c1"].latency_ms.p50``). The scan that follows is
+    UNCHANGED, and
+    the read is still recorded :data:`MECHANISM_SCAN_FALLBACK` — `#4999`'s "an
+    index was expected and was not used" — so the alert surface and the
+    `#4997` unindexed-label notice keep their meaning. This is NOT the index
+    decision (``STORAGE-ARCHITECTURE.md`` §14.3 V3): it creates no index and
+    does not make a scan cheaper, it stops paying twice for the same absence.
+
+    Default ``None`` = attempt as before, so every existing caller is
+    byte-identical and a store that could not measure its catalogue (the
+    inventory's ``None`` lane) keeps the historic behaviour rather than a guess.
+
     pg_vector (#11642 / #4051 V1) is the ANN leg from the POSTGRES RECORD:
     a callable
     ``(entity_type, query_vec, limit, excluded_statuses) -> rows | None``,
@@ -3642,6 +3721,35 @@ def run_vector_query(
     took the INDEX, not the property. Default ``None`` = the graph branches
     only, byte-identical to the pre-#11642 behaviour, so a box with no record
     armed is unchanged and every existing caller is unchanged.
+
+    ⛔ THE RECORD LEG'S DEADLINE IS BOUND WHEN IT IS CONSTRUCTED, NOT HERE
+    (#11691) — ``searcher(..., timeout_ms=…)`` captures ``timeout_ms`` at
+    construction and the returned callable stays FOUR-argument, deliberately:
+    one shape for both legs is what makes the single ordering pass
+    ranking-identical between them. So the budget reaches the record's
+    ``statement_timeout`` as ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``, where
+    the quotient is ``record_vector.record_statement_ms`` — a THIRD of the read
+    per statement, because the leg may issue two of them and this collector takes
+    only futures that are already done when its deadline expires. That leaves the
+    graph branch a reserve to answer from after a cancellation, so a record query
+    slower than the read is cancelled INSIDE the read, the graph answers, and the
+    trace records the NAMED fallback rather than ``reason="timeout"`` with the
+    rows discarded. Callers that construct the searcher must therefore pass the
+    SAME budget they pass here (``sdk._record_vector_searcher`` does).
+
+    ⛔ AND THE RESERVE IS HANDED OVER, NOT MERELY LEFT ON THE CLOCK (#11691
+    review P2). When this call falls through to the graph branches because the
+    record leg raised, answered with fewer rows than the filter selects, or
+    returned nothing, those branches are queried with
+    :func:`remaining_read_ms` — what is left of ``timeout_ms`` measured from THIS
+    leg's start — instead of the whole budget. Giving them the whole budget is
+    how a leg cancelled at 166 ms of a 500 ms read could then spend another
+    500 ms and end at ~666 ms, past the collector's deadline: the rows are
+    discarded and the trace records ``reason="timeout"``, which is the outcome
+    the division exists to prevent. With the remainder handed over, the fallback
+    is bounded by the read rather than by itself. A caller that supplies NO
+    ``pg_vector`` (no record armed) is untouched — it gets ``timeout_ms`` whole,
+    exactly as before.
 
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side.
@@ -3812,11 +3920,22 @@ def run_vector_query(
                          "scope un-embedded", e)
             _scope_hollow = True
 
-    # #4999: did THIS call attempt an index query? Embedded mode never does
-    # (the scan is the design, not a fallback); docker mode always does, and a
-    # failure falls through to the scan below. That distinction is what makes
-    # ``scan`` and ``scan_fallback`` tellable apart.
+    # #4999: did THIS call EXPECT an index it could not use? TWO lanes set it —
+    # the attempt below, and #13108's measured-absent skip — so docker mode does
+    # NOT always attempt one, it always EXPECTS one. Embedded mode never does
+    # either (the scan is the design, not a fallback). That distinction is what
+    # makes ``scan`` and ``scan_fallback`` tellable apart, and ``scan_fallback``
+    # is the right answer for a skip: the index was expected and was not used.
     index_attempted = False
+
+    # #11691 review P2: the GRAPH branches below are handed what is LEFT of the
+    # read, not the whole budget, once a record leg has spent part of it. It
+    # starts at `timeout_ms` (no record leg has run yet), so the graph-only
+    # caller keeps `timeout_ms` byte-identically — the pre-#11642 behaviour every
+    # existing caller (and every test that pins the timeout it was given) relies
+    # on — and is narrowed ONLY on a record fall-through.
+    _graph_timeout_ms: int = timeout_ms
+    _leg_started_at = time.monotonic()
 
     # ── #11642 / #4051 V1: the ANN leg, from the POSTGRES RECORD ──────────
     # This is what the two `CALL db.idx.vector.queryNodes` sites below became.
@@ -3850,6 +3969,10 @@ def run_vector_query(
                                 excluded_statuses)
         except Exception as e:  # noqa: BLE001, RUF100 — every failure takes the fallback
             index_attempted = True
+            # The record leg spent part of the read and did not answer: the
+            # graph branch that answers in its place is bounded by the
+            # REMAINDER, never by the whole budget again.
+            _graph_timeout_ms = remaining_read_ms(_leg_started_at, timeout_ms)
             logger.info(
                 "record dense leg did not answer (%s: %s) — falling back to "
                 "the graph", type(e).__name__, e)
@@ -3870,6 +3993,7 @@ def run_vector_query(
                 # which is exactly what happened — an ANN was asked and did not
                 # answer (`#4999`: a fallback must report the fallback).
                 index_attempted = True
+                _graph_timeout_ms = remaining_read_ms(_leg_started_at, timeout_ms)
                 logger.info(
                     "the record's dense leg returned no rows for %s in scope — "
                     "consulting the graph (the record is a fold without a "
@@ -3907,8 +4031,40 @@ def run_vector_query(
                         mechanism=MECHANISM_PGVECTOR)
                 return out
 
+    # ── #13108: do not pay for an index the store has already measured absent ──
+    # ⛔ The caller supplies `FalkorProjection._vector_indexed_labels_for_reads`
+    # — the BEHAVIOURAL half, never the reported pair above it. The reported pair
+    # collapses "the catalogue came back but nothing in it parsed" into an empty
+    # set (#11087's pinned message semantic), so acting on that value would read
+    # an engine catalogue reshape as "this store indexes nothing" and demote
+    # every dense read to a scan. The behavioural half is None in exactly that
+    # lane. Both are equal in every other lane.
+    # ⚠️ RESIDUAL, disclosed rather than compared away (#13121 round 14): the
+    # inventory is filled ONLY by `_ensure_indexes` / `_create_vector_index_api`
+    # (projection/__init__.py:21668, :21724) — the only in-process re-measure is
+    # the destructive `rebuild_from_record`. So a long-lived projection (an SDK
+    # session, the MCP server) that outlives an OUT-OF-BAND
+    # `CREATE VECTOR INDEX` — precisely the remedy the `#4997` notice
+    # recommends — keeps scanning ``scan_fallback`` until its next setup, where
+    # before #13108 the NEXT CALL picked the index up. Results stay correct and
+    # the direction is fail-safe (a stale skip costs the scan that the refused
+    # round trip preceded anyway), but a stale line here is a stale DECISION, not
+    # merely the stale `#4997` MESSAGE an operator can read around.
+    # None means NOT MEASURED (the inventory's fail-open lane): attempt as before
+    # rather than assume absence, because a wrong skip would demote every read of
+    # an indexed label to a scan.
+    _index_known_absent = (vector_indexed_labels is not None
+                           and label not in vector_indexed_labels)
+    if not is_embedded and _index_known_absent:
+        # #4999: this is still scan_FALLBACK, not `scan` — an index was expected
+        # for this label and was not used. Only the two doomed round trips go.
+        index_attempted = True
+        logger.debug(
+            "#13108: %s carries no vector index on this store — skipping the "
+            "queryNodes attempt and scanning (recorded scan_fallback)", label)
+
     # Docker/server mode → try index-accelerated vector search (#7777)
-    if not is_embedded:
+    if not is_embedded and not _index_known_absent:
         index_attempted = True
         # #689: retracted Points must not leak into vector results.
         # D10 (#5026): the Source label holds both the document node
@@ -3968,7 +4124,7 @@ def run_vector_query(
                 return graph.query(
                     _sig_cypher(sig),
                     params={"query_vec": query_vec, "limit": limit},
-                    timeout=timeout_ms,
+                    timeout=_graph_timeout_ms,
                 ).result_set
 
             def _signature_failure(msg: str) -> bool:
@@ -4151,12 +4307,14 @@ def run_vector_query(
             "LIMIT $limit"
         )
         rows = graph.query(
-            cypher, params={"query_vec": query_vec, "limit": limit}, timeout=timeout_ms
+            cypher, params={"query_vec": query_vec, "limit": limit},
+            timeout=_graph_timeout_ms
         ).result_set
         elapsed = (time.monotonic() - start) * 1000
-        if elapsed > timeout_ms:
+        if elapsed > _graph_timeout_ms:
             # #561: latency warning only — return the results.
-            logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
+            logger.warning("Vector query exceeded timeout: %.0fms > %dms",
+                           elapsed, _graph_timeout_ms)
         _breaker_record("vector", True)
         if rows:
             out = [(row[0], float(row[1])) for row in rows]
@@ -4188,7 +4346,7 @@ def run_vector_query(
             try:
                 cnt_rows = graph.query(
                     f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
-                    "RETURN count(*)", timeout=timeout_ms).result_set
+                    "RETURN count(*)", timeout=_graph_timeout_ms).result_set
                 embedded = cnt_rows[0][0] if cnt_rows else 0
             except Exception:  # noqa: BLE001, RUF100
                 embedded = 0
@@ -4662,6 +4820,7 @@ def degradation_chain(
     scope_kinds: tuple[str, ...] | None = None,
     pg_vector: Callable[[str, Sequence[float], int, tuple | None],
                         list[tuple[str, float, Any]] | None] | None = None,
+    vector_indexed_labels: frozenset[str] | set[str] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -4744,6 +4903,12 @@ def degradation_chain(
         :func:`run_vector_query`, which then judges the dense leg's material
         against that scope instead of the whole entity label.
         Default None = pre-#4199 behavior.
+
+    vector_indexed_labels (#13108): optional set of labels the store has been
+        MEASURED to carry a VECTOR index for. Forwarded verbatim to
+        :func:`run_vector_query`, which skips the doomed index attempt for a
+        label that is absent from it. Default None = pre-#13108 behaviour
+        (attempt as before), merged into the submit kwargs only when supplied.
     """
     # #5404: this is the public orchestration entry point, and the collection
     # loop below swallows every strategy exception by design (a failed leg
@@ -4768,7 +4933,7 @@ def degradation_chain(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         # Submit all enabled strategies in parallel
-        runner_timeout = int(elevated_timeout_ms or 500)
+        runner_timeout = int(elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
         # R3 (#1542) D4: the per-strategy private list is passed ONLY when
         # tracing is active — a default (leg_trace=None) caller sees
         # byte-identical submit kwargs (the bench fakes in
@@ -4813,6 +4978,11 @@ def degradation_chain(
                 # the request thread by `record_vector.searcher()`, and this
                 # thread cannot read it (ContextVars do not cross threads).
                 _vec_kwargs["pg_vector"] = pg_vector
+            if vector_indexed_labels is not None:
+                # #13108: merged ONLY when supplied — same pinned-contract
+                # posture as `min_similarity`/`scope_kinds` above, so a default
+                # caller's submit kwargs stay byte-identical.
+                _vec_kwargs["vector_indexed_labels"] = vector_indexed_labels
             futures[executor.submit(
                 bind_metering_context(_retrieval_metering.bind_worker_context(
                     run_vector_query)), graph, query_vec,
@@ -4836,7 +5006,7 @@ def degradation_chain(
         # hasn't completed within 500ms from the start of iteration.
         # #316: elevated_timeout_ms threads the benchmark cap into the
         # deadline too (default-off — production callers keep 0.5s).
-        deadline = (elevated_timeout_ms or 500) / 1000.0
+        deadline = (elevated_timeout_ms or VECTOR_LEG_BUDGET_MS) / 1000.0
         timed_out: set[str] = set()
         try:
             for future in concurrent.futures.as_completed(futures, timeout=deadline):
