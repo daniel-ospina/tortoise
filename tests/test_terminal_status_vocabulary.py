@@ -97,8 +97,10 @@ def test_terminal_set_is_the_vocabularys_terminal_half() -> None:
     restated.
 
     ⛔ The pre-S0 form of this test pinned ``TERMINAL_STATUS_VALUES ==
-    POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES`` — i.e. the WRITE set and
-    the READ set were the SAME set. `#11824` S0 deliberately split them: the
+    POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES`` — i.e. the READ set was
+    exactly the NON-CURRENT half of the WRITE set, so no word a writer could set
+    went unclassified. It never pinned ``READ == WRITE``; with a non-empty
+    CURRENT that could not hold. `#11824` S0 deliberately split them: the
     WRITE vocabulary narrowed to four words (``draft``/``live``/``deprecated``/
     ``superseded``) while the READ set keeps every legacy word a reader must
     still hide (``retracted``/``outdated``/``archived``), because stored rows
@@ -113,11 +115,15 @@ def test_terminal_set_is_the_vocabularys_terminal_half() -> None:
     ``archived``. Until S2 and S4 land, what holds instead is the pair of
     properties the split implies.
 
-    ⚠️ A narrowing of the READ set is NOT caught here — ``TERMINAL_STATUS_VALUES``
-    and ``TERMINAL_EXCLUDED_STATUSES`` are derived from each other, so they move
-    together. That absolute pin lives at ``tests/test_lifecycle_guards.py:78-82``,
-    which spells the five words out as a literal expectation. This arm is the
-    derivation and the classification trap; that one is the value pin.
+    ⚠️ A narrowing of the READ set is mostly NOT caught here: the READ-side sets
+    are derived from each other, so dropping a word the write set does not itself
+    carry (``archived`` / ``outdated`` / ``retracted``) moves both and stays
+    green. The exception is ``superseded`` — it is also a word a writer may set,
+    so it sits inside ``writable_terminal`` and removing it DOES redline the
+    ``<=`` below. Either way the ABSOLUTE width is pinned only by
+    ``tests/test_lifecycle_guards.py:80-82``, which spells the five words out as
+    a literal expectation. This arm is the derivation and the classification
+    trap; that one is the value pin.
     """
     writable = POINT_STATUS_VALUES
     writable_terminal = writable - CURRENT_POINT_STATUS_VALUES
@@ -131,8 +137,10 @@ def test_terminal_set_is_the_vocabularys_terminal_half() -> None:
     # a word a writer may set as an ending is never served as current (design §8:
     # "what a reader hides is wider than what a writer may create"). Its ABSOLUTE
     # width cannot be checked by derivation in this file: EXCLUDED is BUILT from
-    # TERMINAL_STATUS_VALUES, so a shrinking READ set moves both and this `<=`
-    # stays true — that literal pin is `tests/test_lifecycle_guards.py:80-82`.
+    # TERMINAL_STATUS_VALUES, so dropping a READ word that the write set does not
+    # carry moves both and this `<=` stays green — that literal pin is
+    # `tests/test_lifecycle_guards.py:80-82`. `superseded` is the one READ word
+    # this line DOES catch, because a writer may set it too.
     assert writable_terminal <= TERMINAL_EXCLUDED_STATUSES, (
         "a status a writer may set is served as current: "
         f"{sorted(writable_terminal - TERMINAL_EXCLUDED_STATUSES)}"
