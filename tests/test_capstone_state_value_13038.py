@@ -484,9 +484,21 @@ def test_every_recipe_declares_the_refs_it_needs(narrative):
     )
     # The SAME key set `Ingestor._record` attributes a log row to — `ref` OR `old` OR
     # `goal` (and `pipeline`): reading only `op["ref"]` hid the `old`/`goal`-shaped ops.
+    # TWO sets, deliberately (#13303 cycle 7): `identities` is what `Ingestor.refs` can
+    # actually hold — only `object`/`point`/`reading` ops write a ref there — so it is the
+    # set a recipe's declaration is graded against. `produced` is the WIDER attribution set
+    # `_record` files a log row under (`ingest_ref_key`, including `pipeline`), used for the
+    # coverage union below. Grading the typo guard on `produced` accepted `core:plan` as a
+    # resolvable ref, and a recipe declaring it would be `blocked` on every healthy run with
+    # the guard green (measured: 51 passed with `withdrawn = [..., "core:plan"]`).
+    identities = {
+        op["ref"]
+        for op in narrative["ingest"]["ops"]
+        if op.get("op") in ("object", "point", "reading") and op.get("ref")
+    }
     produced = {cap.ingest_ref_key(op) for op in narrative["ingest"]["ops"]} - {""}
     for recipe, refs in cap.RECIPE_REFS.items():
-        unknown = set(refs) - produced
+        unknown = set(refs) - identities
         assert not unknown, (
             f"{recipe} needs refs the narrative never produces: {sorted(unknown)} — it "
             "would read as `blocked` on every run, including a healthy one"
