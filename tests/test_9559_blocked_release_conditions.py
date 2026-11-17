@@ -1673,14 +1673,41 @@ def test_the_refresh_keeps_its_fail_closed_arm():
     guard (the zeroing then fires over an empty audit — a fleet-wide fail-open),
     or delete the `RAISE WARNING` arm (the operator signal vanishes silently).
     """
-    candidates = sorted(
-        (_REPO / "supabase" / "migrations").glob("*_postgres_residency_zero_*.sql"))
+    # ⛔ SELECTED BY WHAT THE FILE CONTAINS, NOT BY ITS NAME. A glob on
+    # `*_postgres_residency_zero_*` binds this gate to one filename, and the
+    # append-only rule (#1095) GUARANTEES the next correction arrives under a NEW
+    # name — so a gate keyed on `zero` would keep asserting over a superseded body
+    # and stay green while the live function lost its guard. The candidate set is
+    # therefore every migration that DEFINES the function, and the newest one (the
+    # 14-digit prefix sorts chronologically) is the live definition.
+    #
+    # ⛔ `OR REPLACE` IS OPTIONAL, AND THAT IS NOT COSMETIC. A first cut matched
+    # only `CREATE OR REPLACE FUNCTION`, and this directory already writes the
+    # other spelling — 13 definitions across 6 migrations use
+    # `DROP FUNCTION IF EXISTS …; CREATE FUNCTION …` (e.g.
+    # `20260918000001_metering_period_window.sql`, `20261010000001_metering_
+    # period_end_refresh.sql`). A correction written that way was INVISIBLE to the
+    # selector: measured, a renamed `CREATE FUNCTION` redefinition carrying
+    # `IF TRUE` for the guard left this gate GREEN while the live function had no
+    # fail-closed arm — a false PASS of exactly the class this selection exists to
+    # close, one spelling further in. Both spellings are matched below.
+    #
+    # Residual, disclosed and fail-closed by construction: this scan reads the raw
+    # file, `--` comments included, while the body scan below strips them. A header
+    # that quotes this DDL therefore ADDS a candidate — which can only make the
+    # gate assert over a newer, comment-only file and RED, never pass over a live
+    # body it did not read.
+    defs_rx = re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+public\.postgres_residency_snapshot\b")
+    candidates = [
+        p for p in sorted((_REPO / "supabase" / "migrations").glob("*.sql"))
+        if defs_rx.search(p.read_text(encoding="utf-8"))
+    ]
     assert candidates, (
-        "no forward migration replaces postgres_residency_snapshot() any more — "
-        "the erased-org fix (an org the audit stops reporting must not be frozen "
+        "no migration DEFINES postgres_residency_snapshot() any more — the "
+        "erased-org fix (an org the audit stops reporting must not be frozen "
         "stale) has no home; restore it as an APPEND-ONLY migration (#1095)")
     sql = candidates[-1].read_text(encoding="utf-8")
-
     # The executed text: from the function's `AS $$` to its closing `$$;`, minus
     # `--` comments (the header's prose must not satisfy this).
     marker = "AS $$"
