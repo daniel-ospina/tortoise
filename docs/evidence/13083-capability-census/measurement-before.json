@@ -1,0 +1,149 @@
+{
+  "arm": "before",
+  "tree": {
+    "git_head": "6850b74c147a898bd8b682d99045bf478e4556c5",
+    "module": "/home/cmux/tortoise/.worktrees/13083-capability-audit/tortoise/sdk.py"
+  },
+  "corpus": {
+    "sessions": 6,
+    "turns_per_session": 10,
+    "turn_chars": 1500,
+    "dim": 384
+  },
+  "graph": {
+    "graph_name": "test_r13083_shapes_tortoise",
+    "nodes_by_label": {
+      "EpMeta": 1,
+      "Event": 3,
+      "GraphEvent": 67,
+      "GraphEventMeta": 1,
+      "Object": 2,
+      "Point": 66,
+      "Session": 7,
+      "Source": 2,
+      "Subject": 2
+    }
+  },
+  "used_memory_bytes": {
+    "before": 4166640,
+    "after": 7410192,
+    "delta": 3243552
+  },
+  "repr_bytes_by_label": {
+    "EpMeta": {
+      "ep_version": 1
+    },
+    "Event": {
+      "eventId": 154,
+      "id": 154,
+      "name": 63,
+      "startedAt": 57,
+      "eventKind": 33,
+      "endedAt": 32,
+      "content": 30,
+      "eventStatus": 27,
+      "classificationLevel": 24,
+      "sessionId": 24,
+      "keywords": 21,
+      "participants": 20,
+      "format": 15,
+      "note": 10,
+      "is_episodic": 8,
+      "classification_level": 8,
+      "subject": 0,
+      "object": 0
+    },
+    "GraphEvent": {
+      "payload": 8218,
+      "ts": 2144,
+      "event_id": 1608,
+      "type": 673,
+      "seq": 125
+    },
+    "GraphEventMeta": {
+      "last_seq": 2,
+      "first_seq": 1
+    },
+    "Object": {
+      "createdAt": 64,
+      "id": 48,
+      "name": 26,
+      "canonical_name": 22,
+      "objectKind": 21,
+      "title": 12,
+      "is_episodic": 5
+    },
+    "Point": {
+      "embedding": 474348,
+      "content": 93287,
+      "story_arc": 90000,
+      "content_hash": 4224,
+      "createdAt": 1692,
+      "updatedAt": 1692,
+      "id": 809,
+      "speaker": 416,
+      "pointKind": 338,
+      "is_operator": 330,
+      "status": 328,
+      "is_episodic": 261,
+      "sourceVersionTransit": 94,
+      "eventId": 65,
+      "ingested_at": 32,
+      "lastDreamedAt": 32,
+      "extractedFrom": 20,
+      "session_id": 12,
+      "source_session": 12,
+      "project": 10,
+      "source_harness": 7,
+      "ep_dirty": 4,
+      "ep_dirty_at": 1,
+      "quote": 0
+    },
+    "Session": {
+      "created_at": 182,
+      "id": 60,
+      "is_episodic": 28,
+      "turn_count": 13,
+      "turn_max_index": 7,
+      "capture_redactions": 7,
+      "capture_ok": 4,
+      "capture_extractor": 2
+    },
+    "Source": {
+      "summary": 98,
+      "topics": 88,
+      "urlAliases": 73,
+      "_searchText": 69,
+      "url": 65,
+      "canonicalUrl": 65,
+      "eventId": 65,
+      "contentHash": 64,
+      "ingestedAt": 64,
+      "updatedAt": 64,
+      "id": 45,
+      "title": 39,
+      "capturedAt": 32,
+      "validFrom": 32,
+      "sourceKind": 20,
+      "sessionId": 12,
+      "domain": 8,
+      "documentKind": 6,
+      "is_episodic": 4,
+      "credibilityTier": 2,
+      "version": 1,
+      "externalId": 0
+    },
+    "Subject": {
+      "id": 38,
+      "createdAt": 32,
+      "name": 29,
+      "canonical_name": 29,
+      "subjectKind": 11
+    }
+  },
+  "legacy_prose_arm": true,
+  "limits": [
+    "repr_bytes_by_label is a RENDERED size, not the engine's stored size: it is exact for a STRING and over-reports a numeric ARRAY by ~4.7x (a 384-dim float vector renders as ~7,187 characters; its stored float32 payload is 1536 B). Derive an array's footprint from its width; never read it off this column.",
+    "used_memory includes block/index matrices; small corpora over-state the marginal per-node cost, and its baseline drifts between runs."
+  ]
+}
