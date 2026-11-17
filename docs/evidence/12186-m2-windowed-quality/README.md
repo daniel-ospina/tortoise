@@ -314,7 +314,7 @@ conclusion is narrower than "the policy does not matter":
   only.
 - `TORTOISE_RESIDENCY` is **unarmed**, so no response carries a residency verdict.
 - The two reason strings §7 requires (`degraded: "truncated_boundary"` /
-  `degraded: "insufficient_graph"`) appear nowhere in the tree.
+  `degraded: "insufficient_graph"`) appear in no module of the tree.
 
 So the 46.9 % of demoted entity queries that came back empty under `tail@0.5` (36.4 % under
 `random@0.5`) came back empty with

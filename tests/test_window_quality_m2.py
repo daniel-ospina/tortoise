@@ -321,7 +321,7 @@ def test_the_artifact_records_a_keyword_only_lexical_run(artifact):
     assert artifact["retrieval"]["legs_seen"].get("vector") in (False, None)
 
 
-def test_the_artifact_records_that_the_loss_carries_no_signal(artifact):
+def test_the_artifact_records_that_the_loss_carries_no_signal(artifact, monkeypatch):
     """§5 Q2 is violated by construction, and the record's claim rests on this.
 
     ⛔ The four claims that carry the "**and it is silent**" half of the verdict
@@ -341,10 +341,18 @@ def test_the_artifact_records_that_the_loss_carries_no_signal(artifact):
         "capture_prior_truncation": False,
         "residency_marker_armed": False,
     }
+    # ⛔ HERMETIC: `residency_marker_armed` is resolved from `TORTOISE_RESIDENCY`,
+    # an AMBIENT deployment flag, so a developer shell with it set reded this pin
+    # with "a signal has been wired" when no code had moved (#13126 round 5,
+    # Finding 6/P3). What is pinned is the CODE's default (unarmed), so the
+    # environment is fixed here rather than read from whoever runs the suite.
+    from tortoise.residency import RESIDENCY_FLAG_ENV
+    monkeypatch.delenv(RESIDENCY_FLAG_ENV, raising=False)
     assert artifact["signal"] == _signal_available(), (
         "the code now resolves a different silence state than the committed "
-        "artifact records — a signal has been wired (or removed), so the record's "
-        "'and it is silent' half and §1.5's justification must be re-derived")
+        "artifact records — with `" + RESIDENCY_FLAG_ENV + "` unset, a signal has "
+        "been wired (or removed), so the record's 'and it is silent' half and "
+        "§1.5's justification must be re-derived")
 
 
 def test_the_silence_claims_are_bound_to_the_code_that_makes_them():
@@ -366,16 +374,31 @@ def test_the_silence_claims_are_bound_to_the_code_that_makes_them():
         f"`whole-graph` is now {status!r} in record_serve — if a record-served set "
         f"read exists, §9.1's 'no set read to repair from' and the record's route 3 "
         f"both change; correct them in that PR")
-    # …and the two reason strings §7 requires still appear NOWHERE in the tree.
+    # …and the two reason strings §7 requires still appear in NO MODULE of the
+    # tree. ⛔ The scan used to read `tortoise/` only, while the claim it pins is
+    # tree-wide (README: "appear in no module of the tree"; §9.1 the same): a
+    # reason string landed in `tools/` — the tree that SHIPS the instrument — and
+    # the pin stayed green (#13126 round 5, Finding 4/P2). The scan is therefore
+    # tree-wide over Python modules, and the only exclusion is THIS file, which
+    # must name the strings in order to forbid them.
     reason_strings = ("truncated_boundary", "insufficient_graph")
-    offenders = sorted(
-        f"{path.relative_to(ROOT)}" for path in (ROOT / "tortoise").rglob("*.py")
-        if any(s in path.read_text(encoding="utf-8", errors="ignore")
-               for s in reason_strings))
+    this_file = Path(__file__).resolve()
+    skip_dirs = {".venv", ".git", "node_modules", ".worktrees", "build", "dist",
+                 "__pycache__", ".mypy_cache", ".pytest_cache"}
+    offenders = []
+    for path in ROOT.rglob("*.py"):
+        parts = path.relative_to(ROOT).parts
+        if set(parts) & skip_dirs or any(p.startswith(".") for p in parts):
+            continue
+        if path.resolve() == this_file:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if any(s in text for s in reason_strings):
+            offenders.append(str(path.relative_to(ROOT)))
     assert not offenders, (
-        f"a §7 reason string now appears in {offenders} — the record's Finding 5 "
-        f"('the two reason strings appear nowhere in the tree') is stale, and §7's "
-        f"signal requirement is closer than the record says")
+        f"a §7 reason string now appears in {sorted(offenders)} — the record's "
+        f"Finding 5 ('the two reason strings appear in no module of the tree') is "
+        f"stale, and §7's signal requirement is closer than the record says")
 
 
 def test_no_arm_returns_a_demoted_node(artifact):
@@ -572,6 +595,99 @@ def test_the_record_does_not_present_its_digest_as_provenance():
         "the record no longer denies the provenance claim it used to make")
 
 
+FILTERS = ("too_short", "no_span", "sanitised_out", "duplicate_span")
+
+
+def _assert_point_build_accounting(pb: dict, *, requested: int,
+                                   arms_nodes: int) -> None:
+    """The funnel contract for ONE `corpus.point_build` block, both shapes.
+
+    ⛔ TWO artifact shapes exist and BOTH must pass (#13126 round 5, Finding 1/P1):
+    the COMMITTED block predates the accounting (`split_recorded: false`, the gap
+    size in `unattributed`, plus `reason`/`causes`), and a run of the CURRENT
+    instrument records the four filters and emits **no** `split_recorded` and
+    **no** `unattributed` at all (`build_point_population`'s funnel). Branching on
+    the flag therefore rejected a CORRECT artifact on the record's own documented
+    regeneration path — the `KeyError` merely became an `AssertionError`, so the
+    instrument→artifact→pin loop was still open.
+
+    So the branch is keyed on the PROPERTY, not on a flag: a block records the
+    split iff it carries all four filter counters. A flag, when present, must
+    agree with that — a `split_recorded: true` over a block with no counters is a
+    claim the block does not support.
+    """
+    # the request and the result are the artifact's own declared numbers, not
+    # copies that may drift from them
+    assert pb["requested"] == requested, (
+        f"point_build.requested {pb['requested']} != params.points {requested}")
+    assert pb["built"] == arms_nodes, (
+        f"point_build.built {pb['built']} != populations.point.nodes {arms_nodes}")
+    assert pb["requested"] >= pb["built"], "the builder cannot build more than asked"
+
+    lost = pb["requested"] - pb["built"]
+    has_split = all(f in pb for f in FILTERS)
+
+    if "split_recorded" in pb:
+        assert pb["split_recorded"] == has_split, (
+            f"`split_recorded: {pb['split_recorded']}` but the four filter counts "
+            f"are {'all' if has_split else 'NOT all'} present in {sorted(pb)} — the "
+            f"flag and the counters disagree about whether the split was recorded")
+
+    if has_split:
+        assert sum(pb[f] for f in FILTERS) == lost, (
+            f"the funnel accounts for {sum(pb[f] for f in FILTERS)} of the {lost} "
+            f"texts lost — a drop is unaccounted for")
+    else:
+        # no split: the size of the gap must still be recorded, and explained
+        assert pb.get("unattributed") == lost, (
+            f"the block records neither the four filter counts {FILTERS} nor the "
+            f"gap size: a run without the split must state {lost} in "
+            f"`unattributed`, and it says {pb.get('unattributed')!r}")
+        assert pb.get("reason", "").strip(), (
+            "a run that did not record the split must say why, not leave it silent")
+        assert set(pb.get("causes", ())) == set(FILTERS), (
+            "the possible causes must be named, or 'unattributed' is unreadable")
+
+
+def test_the_point_build_pin_accepts_the_block_the_current_instrument_emits():
+    """⛔ The loop CLOSED, tested against the instrument's real output.
+
+    #13126 round 5, Finding 1/P1. The previous round keyed the pin on
+    `split_recorded`, a key the instrument does not emit, so every artifact the
+    current instrument can produce failed the pin (`assert None == 114`), and the
+    README's documented regeneration path led to a red on a CORRECT artifact.
+    A hand-typed dict would restate the shape under test, so this asks
+    `build_point_population` for it: eight distinct long texts plus two whose span
+    is already claimed, and the funnel it fills in must satisfy the pin.
+
+    Measured pre-fix: `AssertionError: the run did not record the split, so the
+    gap size (2) must be stated in `unattributed`; it says None`.
+    """
+    long_tail = " and more words here to pass the eighty character gate"
+    subjects = ["reservation window", "eviction order", "coverage sweep",
+                "canonical phrase", "silent demotion", "prior read status",
+                "truncation boundary", "anchor read"]
+    verbs = ["holds closed components", "ranks least referenced",
+             "measures resident share", "repeats verbatim",
+             "labels every answer", "records the flag", "refuses a claim",
+             "repairs the set"]
+    texts = [f"the {subject} {verb} inside the window while the sweep proceeds"
+             f"{long_tail}" for subject, verb in zip(subjects, verbs, strict=True)]
+    texts += [texts[0], texts[1]]        # spans already claimed -> duplicate_span
+    funnel: dict = {}
+    pop = build_point_population(texts, len(texts), sanitise=lambda s: s,
+                                 stats=funnel)
+
+    # the shape this test exists to accept is the one WITHOUT the legacy keys
+    assert "split_recorded" not in funnel and "unattributed" not in funnel, (
+        f"the instrument now emits one of the legacy keys — the two shapes are no "
+        f"longer what this test distinguishes: {sorted(funnel)}")
+    assert funnel["duplicate_span"] == 2, funnel
+    assert funnel["built"] == len(pop) == 8, funnel
+    _assert_point_build_accounting(funnel, requested=len(texts),
+                                  arms_nodes=len(pop))
+
+
 def test_the_artifact_records_the_point_population_drop_funnel(artifact):
     """`--points 900` is a REQUEST; the 786 built and the 114 lost are accounted.
 
@@ -585,46 +701,14 @@ def test_the_artifact_records_the_point_population_drop_funnel(artifact):
     ⛔ It does NOT invent the split for the committed run: that run predates the
     accounting, and the block says so (`split_recorded: false`). A pin that
     demanded four counts here would have to be satisfied by guessing them, which
-    is the defect, not the fix — so the assertion is `split_recorded false => the
-    size of the gap is stated and a reason is given`, and `split_recorded true =>
-    the four filters add up to the whole gap`.
+    is the defect, not the fix. The rule itself lives in
+    `_assert_point_build_accounting`, shared with the test that asks the CURRENT
+    instrument for its block — one owner, so the two shapes cannot drift apart.
     """
-    pb = artifact["corpus"]["point_build"]
-    arms_nodes = artifact["populations"]["point"]["nodes"]
-    requested = artifact["params"]["points"]
-
-    # the request and the result are the artifact's own declared numbers, not
-    # copies that may drift from them
-    assert pb["requested"] == requested, (
-        f"point_build.requested {pb['requested']} != params.points {requested}")
-    assert pb["built"] == arms_nodes, (
-        f"point_build.built {pb['built']} != populations.point.nodes {arms_nodes}")
-    assert pb["requested"] >= pb["built"], "the builder cannot build more than asked"
-
-    lost = pb["requested"] - pb["built"]
-    filters = ("too_short", "no_span", "sanitised_out", "duplicate_span")
-    # ⛔ The CURRENT instrument emits the four counters and no `split_recorded`
-    # key, so `pb["split_recorded"]` made the documented regeneration path
-    # (`README.md`: "a run of the current instrument reports the four counts
-    # instead") produce an artifact this pin rejected with a KeyError — the
-    # instrument→artifact→pin loop was not closed (#13126 round 5). The key is
-    # read with a default, and the funnel is verified from whichever shape the
-    # block has.
-    if pb.get("split_recorded"):
-        assert all(f in pb for f in filters), (
-            "split_recorded is true but the four filter counts are not all present")
-        assert sum(pb[f] for f in filters) == lost, (
-            f"the funnel accounts for {sum(pb[f] for f in filters)} of the {lost} "
-            f"texts lost — a drop is unaccounted for")
-    else:
-        # the size of the gap must still be recorded, and the absence explained
-        assert pb.get("unattributed") == lost, (
-            f"the run did not record the split, so the gap size ({lost}) must be "
-            f"stated in `unattributed`; it says {pb.get('unattributed')!r}")
-        assert pb.get("reason", "").strip(), (
-            "a run that did not record the split must say why, not leave it silent")
-        assert set(pb.get("causes", ())) == set(filters), (
-            "the possible causes must be named, or 'unattributed' is unreadable")
+    _assert_point_build_accounting(
+        artifact["corpus"]["point_build"],
+        requested=artifact["params"]["points"],
+        arms_nodes=artifact["populations"]["point"]["nodes"])
 
 
 def test_the_point_population_accounts_for_every_drop():
@@ -654,7 +738,13 @@ def test_the_point_population_accounts_for_every_drop():
         ["too short to be a claim", ok, dup, dup, no_span], 10,
         sanitise=lambda s: s, stats=stats)
 
-    assert [r["query"] for r in pop] == [row["query"] for row in pop]
+    # ⛔ The duplicate must not contribute a SECOND Point, and the two surviving
+    # queries must be DISTINCT. The assertion here used to compare `pop` to
+    # itself — an identity that cannot fail, in the one test whose subject is
+    # `duplicate_span` (#13126 round 5, Finding 5/P3).
+    queries = [r["query"] for r in pop]
+    assert len(set(queries)) == len(queries), queries
+    assert all(q.strip() for q in queries), queries
     assert len(pop) == 2, pop                       # `ok` and the first `dup`
     assert stats["requested"] == 10
     assert stats["texts_considered"] == 5
@@ -1636,6 +1726,23 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
     # required to be one of the metrics the pair actually matches.
     metrics = ("recall@3", "found_deep", "recall@5", "recall@10", "recall@15")
     label_re = re.compile(r"(recall@\d+|found_deep)[`*)\s]*$")
+
+    def _effective_label(text: str, pos: int) -> str | None:
+        """The metric a reader carries at `pos`: the label placed immediately
+        before the operands, else the last one named in the SAME sentence.
+
+        A bare pair in a clause sequence (`(found_deep 51.7 vs 49.7 …) and
+        behind (20.3 vs 25.3 …)`) inherits the metric of the clause it continues,
+        which is why deleting a label is a false statement rather than a
+        formatting change.
+        """
+        immediate = label_re.search(text[max(0, pos - 40):pos])
+        if immediate:
+            return immediate.group(1)
+        paragraph = text[:pos].split("\n\n")[-1]
+        sentence = re.split(r"(?<=[.!?])\s+", paragraph)[-1]
+        named = re.findall(r"recall@\d+|found_deep", sentence)
+        return named[-1] if named else None
     for found in present:
         a, b, cov = found.group(1), found.group(2), found.group(3)
         k = str(float(cov))          # "0.50" -> "0.5"; arm keys are un-padded
@@ -1652,12 +1759,17 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
             tail = obj[f"tail@{k}"][m]
             rnd = obj[f"random@{k}"][m]
             assert (float(a) > float(b)) == (tail > rnd), (cov, m, a, b, tail, rnd)
-        # …and a metric the clause NAMES beside the operands must be one of them
-        before = found.string[max(0, found.start() - 40):found.start()]
-        named = label_re.search(before)
-        if named:
-            assert named.group(1) in hits, (
-                f"{a} vs {b} at {cov} is labelled `{named.group(1)}`, but those "
+        # …and the metric a reader CARRIES at the operands must be one of them.
+        # ⛔ `if named:` alone left the DELETION arm blind: removing the label
+        # left the pair inheriting the previous clause's metric — the exact defect
+        # this check exists for — and stayed green (#13126 round 5, Finding 3/P2).
+        # So an absent label resolves to the last metric named in the SAME
+        # sentence, and an inherited label has to match too.
+        label = _effective_label(found.string, found.start())
+        if label:
+            assert label in hits, (
+                f"{a} vs {b} at {cov} reads as `{label}` (named beside the "
+                f"operands, or inherited from the same sentence), but those "
                 f"operands are the cell of {hits} — the label sends a reader to "
                 f"the wrong metric")
 
@@ -1688,9 +1800,15 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
     # the two ranges must actually differ, or the binding below proves nothing
     assert (tail_lo, tail_hi) != (rand_lo, rand_hi), (tail_lo, tail_hi)
 
+    # ⛔ `at the target size` is REQUIRED, not optional. The group used to be
+    # `(?:\s+at the target size)?`, so the qualification the round added to the
+    # README was bound by nothing and deleting it stayed green — reverting the
+    # prose to the flat "loses N points to the eviction" sentence this commit
+    # exists to fix (#13126 round 5, Finding 2/P2). Observed pre-fix: delete it
+    # from `README.md:280` -> 56 passed.
     clause = re.search(
         r"cold-tail arm loses\s+\*\*(\d+\.\d) to (\d+\.\d) points\*\*\s+"
-        r"to the eviction(?:\s+at the target size)?\s+and the random control\s+"
+        r"to the eviction\s+at the target size\s+and the random control\s+"
         r"\*\*(\d+\.\d) to (\d+\.\d)\*\*",
         body,
     )
@@ -1943,6 +2061,13 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
         (changelog, f"{pt_population['nodes']} `:Point` claims",
          "artifact.populations.point.nodes"),
     ]
+    # ⛔ `unattributed` exists ONLY in the legacy block shape. A run of the CURRENT
+    # instrument records the four filters and writes no such key, and the
+    # `pb['unattributed']` read above made the record's own documented regeneration
+    # path die with `KeyError` instead of a verdict (#13126 round 5, Finding 1/P1).
+    if "unattributed" not in pb:
+        rows = [r for r in rows
+                if r[2] != "corpus.point_build unattributed (= requested - built)"]
     # the README quotes `signal` verbatim, and it is the evidence for half the
     # verdict ("— and it is SILENT"). Nothing compared the quote to the artifact,
     # so `"residency_marker_armed": true` in the fence left 51 green (#13126
