@@ -150,7 +150,7 @@ marked **none**.
 | `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
 | `tortoise/search_engine.py:4350-4352` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
 | `tortoise/search_engine.py:3938` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
-| `tortoise/domain_validators.py:105` (and the same property-join shape at `:174-182`, `:197-205`) | `MATCH (req) WHERE (req:Point OR req:Object) AND req.pointKind IN $req_kinds`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
+| `tortoise/domain_validators.py:105` (and the same property-join shape at `:174-182`, `:197-205`) | `MATCH (req) WHERE (req:Point OR req:Object) AND (req.pointKind IN $req_kinds OR req.objectKind IN $req_kinds)`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
 | `tortoise/domain_validators.py:153-158` (`orphan_use_case`) | `OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, op_type:'composedOf'})-[:hasPart]->(jtbd:Point)` — a **2-hop `hasPart` walk**, i.e. every parented use-case is found THROUGH the tree | **adjacency** |
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
 | **the whole-node accessor family** — `tortoise/sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296` (`get_point`'s `_cache_answer`), `:40513`; `tortoise/record_serve.py:306` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
@@ -232,7 +232,7 @@ them from queries whose ANSWERS need adjacency — `stored_turns` comes from a `
 from two `aboutObject` walks — so a `public.session` row cannot reproduce either, however plain the
 projection looks. **`turn_max_index` is `graph` too**, by the same rule and one query family over — but the justification is
 **single-site**, and an earlier draft of this paragraph claimed two. At `hosted_api.py:43929-43946` the
-returned answer IS composed with the walk: `total = int(count(t) or 0)` then `total = max(total, mark + 1)`,
+returned answer IS composed with the walk: `total = int(nodes or 0)` then `total = max(total, mark + 1)`,
 the anti-phantom prior count. At `sdk.py:4152-4159` the walk supplies a **sibling column** —
 `_prior_mark_index(_prior[0][0], _prior[0][1])` takes only `turn_max_index` and `turn_count`, and
 `collect(t.id)` is consumed by a different variable (`_split_graph_turn_ids`) — so that site alone does not
@@ -324,10 +324,10 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 |---|---|---|
 | `:GraphEventMeta` | `event_store.py:557`, `:657`; `hosted_backup.py:842`; `sdk.py:13761`; `webhook_delivery.py:1052` (the head fallback) (reads); `:491`/`:738` are the `MERGE` and `:1103` a `SET` **RMW** that advance or restore the watermark | **none** |
 | `:EpMeta` | `sdk.py:36069`; `ep.py:473` | **none** |
-| `:Meta` | `residency.py:244`, `:292`; `sdk.py:55647` (reads); `:298` is a `DETACH DELETE`, not a read | **none** |
-| `:WhySnapshot` | `why_snapshot.py:237` (read); `:303`/`:350` are the retention `DELETE` prunes, not reads | **none** |
+| `:Meta` | `residency.py:244`, `:292`; `sdk.py:55647` (reads); `:298` is a `DETACH DELETE` scoped by an IDENTITY key only (`MATCH (n:Meta {key:$key})`) — see the criterion note under this table | **none** |
+| `:WhySnapshot` | `why_snapshot.py:237` (read); `:303`/`:350` are the retention `DELETE` prunes — scoped by TIME, not by a node property the statement must know | **none** |
 | `:CommitRecord` | `hosted_api.py:22228-22232` (the live commit path's read — it consumes `x.value_nodes_declared` as a predicate); `commit_idempotency.py:57` (read), `:65` — `MATCH … SET r.status=$status RETURN r.session_id, r.status, r.write_ops_billed, r.written_at, r.value_nodes_declared`, a **read-modify-write** (`CommitRecordStore.update` consumes all five returned columns, so `RMW` is the right word — an earlier draft called it read-free, which was wrong), and `:194` — the idempotency `DELETE`, whose `WHERE r.status = 'partial' AND coalesce(r.write_ops_billed, 0) = 0 AND r.value_nodes_declared IS NULL` **consumes three node properties as predicates**, so by this table's own criterion it is a reader (an earlier draft called it "not a read"); `hosted_api.py:21691-21692` (`MATCH (r:CommitRecord …)` then `SET r.telemetry=$t, r.budget_warn=$warn`) and `:23760-23761` (`SET r.write_ops_billed=1`, a LITERAL — not a parameter) have **no `RETURN`** and assign parameters/literals, so they read nothing of the node and are WRITERS (§1 row 13). ⚠️ Three drafts of this row called writers readers, then over-corrected `:65` to read-free, then called `:194` read-free; the table now separates read / RMW / predicate-consuming DELETE / writer, site by site | **none** |
-| `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`); `:502` is the `MAX_RECEIPTS` `DETACH DELETE`, `:487` the CREATE — neither is a reader | **none** |
+| `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`); `:502` is the `MAX_RECEIPTS` `DETACH DELETE`, `:487` the CREATE — see the criterion note under this table | **none** |
 | `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
 | `:PipelineStage` | `pipeline.py:349` (read); `:685`/`:731`/`:754-756` are `SET` statements — writes with no read of the node, not `RMW` and not reads | **none** |
 | `:PackManifest` | `pack_manifest_store.py:524` (`MATCH (m:PackManifest) RETURN m.namespace, …`), `:539` (`RETURN m.namespace, m.yaml`), `export.py:133` (`MATCH (m:PackManifest {namespace:$ns}) RETURN m.yaml`); `:550` is the `DELETE`, `:467` the writer named in §1 | **none** |
@@ -342,6 +342,17 @@ review: `:Tag` (`graph` — see §2.5) and the onboarding pair (`graph` — row 
 recorded for the rest — none has a record table, so none
 can be expressed as a tier today. They are cheap *individually* (1–2 nodes per graph) and this document
 does not pretend otherwise: they are listed because the census is complete, not because they are a lever.
+
+⚠️ **The criterion for a predicate `DELETE`, stated once so the rows above stop looking inconsistent.** A
+`DELETE`/`DETACH DELETE` is a **reader** when its `WHERE` (or its `MATCH` map) has to evaluate **node content** —
+`commit_idempotency.py:194`'s `r.status = 'partial' AND coalesce(r.write_ops_billed,0)=0 AND
+r.value_nodes_declared IS NULL` is the model — and it is **not** a reader when it is scoped by an **identity key or
+a clock** the caller already holds (`residency.py:298`'s `{key:$key}`, `why_snapshot.py:303`/`:350`'s
+`assembled_at < $cutoff`, `webhook_delivery.py:502`'s `ORDER BY r.ts DESC, r.receipt_id DESC` + `LIMIT`). §2.6's
+`event_store.py:1029`/`:1053` are listed as readers because `:1053` **orders by `n.seq`** (a property the statement
+must read to choose its victims) even though `:1029`'s `ts < $cutoff` does not — so that row is the one genuinely
+borderline case, and it is capability `none` either way. Four drafts read these sites as a mix of "reader" and
+"not a read" because the rule was never written down; it is written down here.
 
 ---
 
