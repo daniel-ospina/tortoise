@@ -410,7 +410,7 @@ def test_the_multiset_sort_key_agrees_with_the_equality_for_collections_too():
 
 
 def test_a_type_family_inside_a_collection_is_still_a_difference():
-    """`bool` vs `int` nested in a list/map must redden — it is a FAMILY change.
+    """`bool` vs `int` nested in a list/map/set must redden — it is a FAMILY change.
 
     ⛔ `_family` answered only for the TOP-LEVEL value, so two lists compared as
     `list` vs `list` and Python's own `[True] == [1]` then called them equal: the
@@ -421,7 +421,8 @@ def test_a_type_family_inside_a_collection_is_still_a_difference():
     candidate = harness.Candidate(name="families", cypher="", sql="",
                                  columns=("id", "v"), ordered=False)
     cols = ["id", "v"]
-    for cypher_val, sql_val in (([True], [1]), ({"k": True}, {"k": 1}), ([1], ["1"])):
+    pairs = (([True], [1]), ({"k": True}, {"k": 1}), ([1], ["1"]), ({True}, {1}))
+    for cypher_val, sql_val in pairs:
         result = harness.diff(candidate, [("a", cypher_val)], cols,
                              [("a", sql_val)], cols, ["a"])
         assert result["equal"] is False, (cypher_val, sql_val, result["differences"])
@@ -431,24 +432,72 @@ def test_a_type_family_inside_a_collection_is_still_a_difference():
     assert numeric["equal"] is True, numeric["differences"]
 
 
-def test_a_non_string_dict_key_does_not_take_the_diff_down():
-    """A `Decimal` map KEY must not raise after every comparison has succeeded.
+def test_a_shape_change_is_a_VALUE_difference_not_a_family_one():
+    """Structure is not a family: arity, key names and emptiness must read `value`.
 
-    `json.dumps` accepts only str/int/float/bool/None keys; a bare `_norm` dump
-    raised there — a `TypeError` out of `diff()` instead of a verdict (`#13098`
-    review P3). Reachability is nil today (psycopg2's `jsonb` and FalkorDB's maps
-    both yield str keys), which is exactly why it needs a pin rather than a reader.
+    ⛔ The first cut of the recursive check carried ARITY and KEY NAMES in the
+    compared signature, so a list that merely grew an element was relabelled
+    `kind: family` — and the `continue` then skipped the value comparison that used
+    to name it. That is a diagnostic regression: `kind` is what the CLI prints and
+    what §5 of the census doc documents (`#13098` review P3).
+    """
+    candidate = harness.Candidate(name="shape", cypher="", sql="",
+                                 columns=("id", "v"), ordered=False)
+    cols = ["id", "v"]
+    pairs = (([1], [1, 2]), ([1, 2], [1, 2, 3]), ({"a": 1}, {"a": 1, "b": 2}),
+             ({"a": 1}, {"b": 1}), ([], [1]), ({}, {"a": 1}), ([1], []))
+    for cypher_val, sql_val in pairs:
+        result = harness.diff(candidate, [("a", cypher_val)], cols,
+                             [("a", sql_val)], cols, ["a"])
+        assert result["equal"] is False, (cypher_val, sql_val)
+        assert [d["kind"] for d in result["differences"]] == ["value"], \
+            (cypher_val, sql_val, result["differences"])
+
+
+def test_the_same_nan_on_both_sides_is_not_a_difference():
+    """A NaN must compare EQUAL to itself, at any depth.
+
+    Python says `nan != nan`, so the same NaN on both sides reddened forever on a
+    column that can legitimately hold one — and nested it depended on whether the
+    driver handed back one object or two, i.e. on allocation rather than on data
+    (`#13098` review P3).
+    """
+    candidate = harness.Candidate(name="nan", cypher="", sql="",
+                                 columns=("id", "v"), ordered=False)
+    cols = ["id", "v"]
+    nan = float("nan")
+    for cypher_val, sql_val in ((nan, float("nan")), ([nan], [float("nan")]),
+                                ([nan], [nan]), ({"k": nan}, {"k": float("nan")})):
+        result = harness.diff(candidate, [("a", cypher_val)], cols,
+                             [("a", sql_val)], cols, ["a"])
+        assert result["equal"] is True, (cypher_val, sql_val, result["differences"])
+    # …but a NaN is NOT equal to a number, to null, or to the string "nan"
+    for other in (0, 1, None, "nan"):
+        result = harness.diff(candidate, [("a", nan)], cols, [("a", other)], cols, ["a"])
+        assert result["equal"] is False, other
+
+
+def test_a_non_string_dict_key_does_not_take_the_diff_down():
+    """A map KEY of any type must not raise after every comparison has succeeded.
+
+    `json.dumps` accepts only str/int/float/bool/None keys — a bare `_norm` dump
+    raised there — and `_norm`'s own `sorted(value.items())` raised for a map mixing
+    key TYPES. Either one is a `TypeError` out of `diff()` instead of a verdict
+    (`#13098` review P3). Reachability is nil today (psycopg2's `jsonb` and
+    FalkorDB's maps both yield str keys), which is why it needs a pin.
     """
     from decimal import Decimal
 
     candidate = harness.Candidate(name="keys", cypher="", sql="",
                                  columns=("id", "v"), ordered=False)
     cols = ["id", "v"]
-    row = ("a", {Decimal("1"): "x"})
-    result = harness.diff(candidate, [row], cols, [row], cols, ["a"])
-    assert result["equal"] is True, result["differences"]
-    assert result["fingerprint"], "the fingerprint is computed after the sort — it must survive too"
-
+    rows = [("a", {Decimal("1"): "x"}),
+            ("a", {Decimal("1"): "x", "a": "y"}),   # two key TYPES
+            ("a", {1: "x", "1": "y"})]              # two keys, one rendering
+    for row in rows:
+        result = harness.diff(candidate, [row], cols, [row], cols, ["a"])
+        assert result["equal"] is True, (row, result["differences"])
+        assert result["fingerprint"], "the fingerprint is computed after the sort — it must survive"
 
 def test_a_projection_that_drifts_on_both_sides_still_reddens_against_the_declaration():
     """`Candidate.columns` is a CONTRACT, not a comment (`#13098` review P3).

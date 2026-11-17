@@ -570,35 +570,54 @@ def _family(value: Any) -> str:
     return type(value).__name__
 
 
-def _family_signature(value: Any) -> Any:
-    """`_family` applied RECURSIVELY, so a bool inside a list is still a bool.
+def _leaf_families(value: Any) -> frozenset:
+    """The DISTINCT families of `value`'s leaves, blind to arity and key names.
 
-    ⛔ `_family` alone answers only for the top-level value, so a collection was
-    compared as `list` vs `list` and its ELEMENTS' families were never checked:
-    `[True]` and `[1]` reached the value pass as two `list`s, and Python's own
-    `[True] == [1]` then called them equal — the module header's rule ("a type
-    family change — int vs str, bool vs int — is a DIFFERENCE") was silently not
-    applied inside a collection (`#13098` review P3). A false PASS is the worst
-    class this file can produce, so the family check is recursive now rather than
-    left to a sort-order accident.
+    ⛔ Structure is not a family. `[1]` vs `[1, 2]` and `{'a': 1}` vs `{'b': 1}` are
+    VALUE differences, and a signature that carries arity or key names relabels
+    them `family` — which is a diagnostic regression, not a fix (`#13098` review
+    P3). What must still redden as `family` is a LEAF whose type family changed one
+    level down, so that is all this returns.
     """
     family = _family(value)
-    if family == "list":
-        return (family, tuple(_family_signature(v) for v in value))
+    if family in ("list", "set", "frozenset"):
+        leaves: set = set()
+        for item in value:
+            leaves |= _leaf_families(item)
+        return frozenset(leaves)
     if family == "dict":
-        return (family, tuple(sorted((str(k), _family_signature(v)) for k, v in value.items())))
-    return family
+        leaves = set()
+        for item in value.values():
+            leaves |= _leaf_families(item)
+        return frozenset(leaves)
+    return frozenset((family,))
 
 
 def _norm(value: Any) -> Any:
-    """Normalize for VALUE comparison only — never for the family check."""
+    """Normalize for VALUE comparison only — never for the family check.
+
+    ⛔ A NaN must compare EQUAL to itself: Python says `nan != nan`, so a column
+    that legitimately holds one reddened forever — and nested it depended on
+    whether the driver handed back one object or two (`#13098` review P3).
+    """
     if isinstance(value, Decimal):
-        return float(value)
+        value = float(value)
+    if isinstance(value, float) and value != value:
+        return "NaN"
     if isinstance(value, (list, tuple)):
         return [_norm(v) for v in value]
     if isinstance(value, dict):
-        return {k: _norm(v) for k, v in sorted(value.items())}
+        # A TOTAL order: `sorted` on raw items raises for a map mixing key TYPES
+        # (`{}` with a `Decimal` and a `str` key), and it leaves two distinct keys
+        # that render alike — `1` and `"1"` — in insertion order, which differs
+        # per engine (`#13098` review P3).
+        return {k: _norm(v) for k, v in sorted(value.items(), key=_key_order)}
     return value
+
+
+def _key_order(item: tuple) -> tuple:
+    """A sort key total over every possible dict key type."""
+    return (str(item[0]), repr(item[0]))
 
 
 def _canon(row: Sequence[Any]) -> str:
@@ -734,7 +753,15 @@ def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
         for col_index in range(width):
             c_val = c_row[col_index] if col_index < len(c_row) else "<absent>"
             s_val = s_row[col_index] if col_index < len(s_row) else "<absent>"
-            c_fam, s_fam = _family_signature(c_val), _family_signature(s_val)
+            c_fam, s_fam = _family(c_val), _family(s_val)
+            # a LEAF family that changed one level down is still a family difference
+            # — but only when both sides carry leaves, so `{}` vs `{'a': 1}` stays a
+            # value difference instead of being relabelled (`#13098` review P3)
+            if c_fam == s_fam and c_fam in ("list", "dict", "set", "frozenset"):
+                c_leaves, s_leaves = _leaf_families(c_val), _leaf_families(s_val)
+                if c_leaves and s_leaves and c_leaves != s_leaves:
+                    c_fam = f"{c_fam}{sorted(c_leaves)}"
+                    s_fam = f"{s_fam}{sorted(s_leaves)}"
             # null handling is THREE-WAY: null != '' != 0 != False != 'None'
             if c_fam != s_fam:
                 value_diffs.append({"kind": "family", "row": row_index,
