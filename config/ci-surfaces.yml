@@ -1098,10 +1098,14 @@ surfaces:
   # head, the `api` summary reads `177 additions` from the repo root, `4` from the repo with
   # `tortoise/` removed (those four pin `api` through `tools/sdk_surface_declaration.py` or
   # `docs/client-server-split.md`, so the extraction must keep `tools/` and `docs/` for the
-  # reading to match), and `0` from a `tests/` + `config/`-only tree — and it is on THAT last
-  # reading that this file's candidate line turns into
-  # `(shared: tests/_live_utils.py)  ⚠ no api pin resolved — … confirm before removing`. A
-  # removal candidate in such a run is the ABSENT SOURCE TREE, not an unregistered arm.
+  # reading to match), and `0` from a tree holding only `tests/`, `config/` and the script
+  # itself (363 no-pin, nothing left to resolve — and that shape must KEEP the script to be
+  # runnable at all, because `REPO` is derived from `__file__`, `tools/ci_selection.py:78`).
+  # ⛔ The removal candidate is NOT that last reading's alone: this file's line turns into
+  # `(shared: tests/_live_utils.py)  ⚠ no api pin resolved — … confirm before removing` on
+  # BOTH no-`tortoise/` trees — MEASURED, it is already there on the `4`-addition one — so the
+  # `4` reading is not a safe tree either, and a removal candidate in ANY run with the source
+  # absent is the ABSENT SOURCE TREE, not an unregistered arm.
   # ⛔ `test_12592_supersede_door.py` is NOT noise either: it is a PRE-EXISTING gap of the
   # same class on main — registered `core` only, imports the same `mcp_auth` names, and NOT
   # selected on a `mcp_auth.py`-only diff (measured: `selected: False`). Reported as a
