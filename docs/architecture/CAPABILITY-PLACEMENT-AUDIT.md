@@ -81,9 +81,9 @@ bookkeeping with **no record table** (relevant in §5.2).
 | 10 | `:Meta` (residency declaration) | `residency.py:284` | — | 0 (arm not exercised) |
 | 11 | `:WhySnapshot` | `why_snapshot.py:484` | — | 0 (arm not exercised) |
 | 12 | `:Tag` | `projection/edges.py:1881` (`MERGE (t:Tag {name:$tag})`, reached from `sdk`'s tag sync) | — | 0 (arm not exercised) |
-| 13 | `:CommitRecord` (idempotency) | `commit_idempotency.py:45` | — | 0 (not exercised) |
+| 13 | `:CommitRecord` (idempotency) | `commit_idempotency.py:45` (`_MERGE_CYPHER`), `:65` (`_UPDATE_CYPHER`, the `status` transition) | — | 0 (not exercised) |
 | 14 | `:DeliveryReceipt` (webhook) | `webhook_delivery.py:487` | — | 0 (not exercised) |
-| 15 | `:Batch`, `:PipelineStage`, `:PackInstall`, `:PackSelection` | `mining.py`, `pipeline.py`, `pack_state.py`, `hosted_api:32965` | — | 0 (not exercised) |
+| 15 | `:Batch`, `:PipelineStage`, `:PackInstall`, `:PackSelection`, `:PackManifest` | `mining.py`, `pipeline.py`, `pack_state.py`, `hosted_api:32965`, `pack_manifest_store.py:467` | — | 0 (not exercised) |
 | 16 | `:ContextSubscription` (webhook registration) | `webhook_delivery.py:406` (`CREATE (s:ContextSubscription {…})`) | — | 0 (not exercised) |
 | 17 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:317` (`MERGE (n:OnboardingState {org_id})`), `:322`/`:929` (`MERGE (s:OnboardingStep {org_id, step_id})`), `:324`/`:934` (`MERGE (n)-[:COMPLETED_STEP]->(s)`) | — (`COMPLETED_STEP` is an EDGE type, not a record table — `NODE_TABLES` has six labels and onboarding is not one of them) | 0 (not exercised) |
 | 18 | **found, NOT censused** — `:Pipeline` (`pipeline.py:525`), `:MeteringRecord` (`metering.py:108`, `:840`, `:1146`, `:1608`), `:MeteringUnmeteredIncrement` (`metering.py:616`), `:WebhookEvent` (`hosted_api.py:47787`), and the tenancy/registry labels `:Team` (`sdk.py:46612`), `:Membership` (`:47262`), `:APIKey` (`:47409`), `:TeamMeta` (`:46671`), `:Graph` (`:46753`), `:SignupToken` (`hosted_api.py:34901`), `:Invitation` (`hosted_api.py:30343`) | sdk / metering / pipeline | — | **not censused — a GAP, see §7** |
@@ -139,9 +139,9 @@ marked **none**.
 | `tortoise/domain_validators.py:153-158` (`orphan_use_case`) | `OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, op_type:'composedOf'})-[:hasPart]->(jtbd:Point)` — a **2-hop `hasPart` walk**, i.e. every parented use-case is found THROUGH the tree | **adjacency** |
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
 
-**Verdict: `graph`.** Thirteen readers, twelve of them capability-carrying (the thirteenth; `domain_validators.py:105`, is `none`), across six files (§2.1's table spans
-`projection/propagation.py`, `sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`,
-`domain_validators.py`; its fourteenth row, `domain_validators.py:105`, is deliberately **`none`**); a
+**Verdict: `graph`.** Fourteen readers, **thirteen of them capability-carrying** (the twelfth,
+`domain_validators.py:105`, is deliberately `none`), across six files (`projection/propagation.py`,
+`sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`, `domain_validators.py`); a
 record-backed copy could not answer any of them without re-implementing belief
 propagation, the fulltext index or HNSW in SQL (which is `#13082` Phase 2 and its stop condition).
 
@@ -247,7 +247,7 @@ Every Cypher site above is a point lookup or a property guard — capability **`
 | `tortoise/audit.py:810` (and `:2445`, `:2456`) | `OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy AND id(carrier) <> id(sup)` — **no relationship in the pattern**; a property-equality scan | **none** |
 | `tortoise/definite_description_backfill.py:434` | `MATCH (o:Object) OPTIONAL MATCH (o)<-[r]-() WITH o, count(r) …` — degree census | **adjacency** |
 | `tortoise/sdk.py:34355` | `MATCH (s:Subject {id:$sid})-[r]->(n)` | **adjacency** |
-| `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; `entity_type='subject'` at `mcp_server.py:4368`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6826` and `("Object", ["name"])` at `:6830` | **fulltext index** |
+| `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no in-tree caller passes the literal `'subject'` — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5035`, `:5475`, `:7911`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6826` and `("Object", ["name"])` at `:6830` | **fulltext index** |
 
 `:Tag` belongs on this row too, and an earlier draft got it **wrong** by calling it bookkeeping: every tag
 read resolves the node **through the edge** — `sdk.py:28069`
@@ -293,15 +293,16 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:EpMeta` | `sdk.py:36069`; `ep.py:473` | **none** |
 | `:Meta` | `residency.py:244`, `:292`; `sdk.py:55647` (reads); `:298` is a `DETACH DELETE`, not a read | **none** |
 | `:WhySnapshot` | `why_snapshot.py:237` (read); `:303`/`:350` are the retention `DELETE` prunes, not reads | **none** |
-| `:CommitRecord` | `commit_idempotency.py:57`, `:65` (reads); `:194` is the idempotency `DELETE`, not a read | **none** |
+| `:CommitRecord` | `commit_idempotency.py:57` (read); `:65` is the `SET r.status` **RMW** (the status transition — also a writer of this shape, §1 row 13), `:194` the idempotency `DELETE` — neither is a read | **none** |
 | `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`); `:502` is the `MAX_RECEIPTS` `DETACH DELETE`, `:487` the CREATE — neither is a reader | **none** |
 | `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
 | `:PipelineStage` | `pipeline.py:349` (read); `:685`/`:731` are `SET` **RMW**, not reads | **none** |
+| `:PackManifest` | `pack_manifest_store.py:524` (`MATCH (m:PackManifest) RETURN m.namespace, …`), `:539` (`RETURN m.namespace, m.yaml`); `:550` is the `DELETE`, `:467` the writer named in §1 | **none** |
 | `:PackInstall` / `:PackSelection` | `export.py:126` (`:PackInstall`); `pack_state.py:878-881` (`MATCH (s:PackSelection) RETURN s.revision, s.configured_at, s.updated_by`) | **none** |
 | `:ContextSubscription` | `webhook_delivery.py:425`, `:435`, `:444`, `:452`, `:461`, `:1113`; `why_snapshot.py:557` (reads; `:406` is the `CREATE` named in §1) | **none** |
 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:759-763` (`MATCH (n:OnboardingState {org_id:$org_id})-[:COMPLETED_STEP]->(s:OnboardingStep) RETURN s.step_id`) | **adjacency** → **`graph`** (§3 row 11c) — listed here only so the label is not missing from the table |
 
-**Verdict `record_only` for the eleven above except `:OnboardingState`/`:OnboardingStep`, which is `graph`.**
+**Verdict `record_only` for the twelve above except `:OnboardingState`/`:OnboardingStep`, which is `graph`.**
 Each row cites readers; where a line is a **read-modify-write** it is labelled `RMW` rather than presented as
 a pure read, and the writer itself is the one named in §1. ⚠️ Two labels were moved OUT of this table by
 review: `:Tag` (`graph` — see §2.5) and the onboarding pair (`graph` — row above). §5.2's blocker is
@@ -474,7 +475,7 @@ re-run the closure the moment the pin decision lands.
 
 ### 5.2 ⛔ NOT SHIPPABLE under this mechanism, and exactly why
 
-The census's largest non-Point verdict (`:GraphEvent`, §2.6) and eleven bookkeeping labels cannot be moved by
+The census's largest non-Point verdict (`:GraphEvent`, §2.6) and twelve bookkeeping labels cannot be moved by
 `cache_tier`, and the reason is a **precondition of the mechanism**, not an oversight:
 
 > `cache_tier` is a column on **`public.point`**. `read_record_view` applies the tier predicate **only**
@@ -482,7 +483,7 @@ The census's largest non-Point verdict (`:GraphEvent`, §2.6) and eleven bookkee
 > meaning because a **record table holds it**. A shape with **no record table** has nowhere for the row to
 > live once the graph refuses it.
 
-So for `:GraphEvent` and the eleven bookkeeping labels the sequence must be: **give it a record home**
+So for `:GraphEvent` and the twelve bookkeeping labels the sequence must be: **give it a record home**
 (a `journal_event`-backed feed for `:GraphEvent`; a table for the others) → **then** tier it. That is
 `#13082` Phase 1 territory ("a migrated query must be *deleted* from the graph path in the same PR, and
 the graph-side data it needed becomes a candidate for `record_only` in the next capability audit").
@@ -495,7 +496,7 @@ eviction policy — that is `#13084` and P0-c.
 
 | precondition | shapes it blocks | what unblocks it |
 |---|---|---|
-| **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the ten other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
+| **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the eleven other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
 | **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` | `#10429`: widen the completeness pin with a tail-only category (§5.1) |
 | **a record table but no tier COLUMN** → having a row is not having a tier | `:Session` telemetry row 7b (and every non-`:Point` label) | a `cache_tier` column on `public.session` (one migration per label, `cache_projection.py:3633`) |
 
