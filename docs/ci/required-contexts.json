@@ -158,6 +158,12 @@
         "deploy-dashboard"
       ]
     ],
+    "differential": [
+      [
+        "cypher-diff.yml",
+        "differential"
+      ]
+    ],
     "docs": [
       [
         "ci.yml",
@@ -551,7 +557,7 @@
       ]
     ]
   },
-  "gate_digest": "416a60adeaa113431c55095b852d4d86c5f6032de2b18030524d0fbd384893b5",
+  "gate_digest": "40ce94e0f2d6ae69884ebb6435651072f212d13f5ff3cb422c0a6d43a161359c",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -575,5 +581,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-11-14T01:49:06Z"
+  "verified_at": "2026-11-17T08:01:20Z"
 }
