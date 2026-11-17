@@ -455,6 +455,28 @@ def apply_stage_fold(cur: dict, pipeline_key: str, decl: dict | None,
     ``no-pipeline`` (nothing declared — a configuration error, distinct from an
     unrecognised stage) and ``unknown-stage`` (the target is not in the
     declaration).
+
+    ⚠️ **BOUND (#13143 review, note 2) — the fold and the ``advance_stage`` verb
+    can resolve DIFFERENT declarations for the same row.** The verb resolves
+    through :func:`effective_pipeline`, which prefers a graph ``:Pipeline``
+    override; this function resolves ``decl``, and BOTH of its callers pass the
+    PACK declaration (``projection/entities.py``: ``index.pipeline_for(kind)``;
+    ``cache_projection``'s replay: the same index, or
+    ``BUILTIN_CONNECTOR_PIPELINE``). So on a graph that edited a pipeline
+    (copy-on-write override) a fold can write a stage the override RETIRED, and
+    the ``pipelineSlot`` / ``pipelineOutcome`` it stores carry the pack's opinion
+    rather than the graph's. The reopen path is NOT affected:
+    ``stage_move_refusal`` keys ``was_closed`` off the DURABLE ``isClosed``
+    marker, which the fold writes from the pack declaration, so
+    ``advance_stage(..., reopen=True)`` still admits the move.
+
+    ⛔ Do NOT fix this on the live side alone. The replay path
+    (``cache_projection``) reads the pack index and the record carries no
+    pipeline override, so a live-only override read would make the live fold and
+    the rebuilt fold disagree — the exact live ≢ rebuilt asymmetry this slice
+    exists to close (#10189). The fix needs the override on the REPLAY path (the
+    #2814 config registry), which is why it is recorded as a follow-up on #11824
+    rather than patched here.
     """
     if not decl or not decl.get("stages"):
         return "no-pipeline", {}

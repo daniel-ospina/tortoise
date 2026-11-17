@@ -105,9 +105,13 @@ LIFECYCLE_STATUS_SYNONYMS: dict[str, str] = {
 _POSITION_WORD_REPAIRS: dict[str, str] = {
     "in_progress": (
         "`in_progress` is a POSITION, not a lifecycle word — advance the work "
-        "instead: `advance_stage(<id>, <pipelineKey>, 'in_progress')`, a stage "
-        "in the `active` slot. The `status` field keeps one of the four "
-        "lifecycle words, and a thing in progress is still `live`."
+        "instead: `advance_stage(<id>, <pipelineKey>, <the stage in the "
+        "`active` slot>)`. The CORE work-item pipeline spells that stage "
+        "`in_progress`; a pack declares its own spelling (`packs/venture` "
+        "declares `in-progress`), so pass the id YOUR pipeline declares — a "
+        "literal from another pipeline parks as an unknown stage. The `status` "
+        "field keeps one of the four lifecycle words, and a thing in progress "
+        "is still `live`."
     ),
     "completed": (
         "`completed` is a POSITION, not a lifecycle word — advance the work "
@@ -124,11 +128,14 @@ _POSITION_WORD_REPAIRS: dict[str, str] = {
         "stays `live`."
     ),
     "active": (
-        "`active` is a SLOT (`entry` / `active` / `suspended` / `terminal`), "
-        "not a lifecycle word AND not a stage name — name the stage you mean "
-        "and advance it: `advance_stage(<id>, <pipelineKey>, <stageId>)`. The "
-        "`status` field keeps one of the four lifecycle words, and a thing "
-        "being worked on is `live`."
+        "`active` is a SLOT (`entry` / `active` / `suspended` / `terminal`) "
+        "before it is anything else, so on its own it does not say which stage "
+        "you mean — name that stage and advance it: "
+        "`advance_stage(<id>, <pipelineKey>, <stageId>)`. Some pipelines DO "
+        "declare a stage whose id is `active` (`packs/venture` declares it in "
+        "three), and there the word is the stage to pass; what it never is, is "
+        "a `status`. The `status` field keeps one of the four lifecycle words, "
+        "and a thing being worked on is `live`."
     ),
 }
 

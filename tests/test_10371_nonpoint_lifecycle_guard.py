@@ -360,6 +360,60 @@ def test_a_position_word_is_refused_as_a_status_with_a_stage_repair(sdk, word):
     assert _stored(sdk, node)["status"] == "live"
 
 
+def test_every_position_word_repair_is_TRUE_of_the_shipped_pipelines():
+    """#13143 review — a repair text must not deny what the shipped packs declare.
+
+    ``_POSITION_WORD_REPAIRS`` is caller-facing ADVICE, and advice that is false
+    costs a round trip. The ``active`` repair used to say the word is *"not a
+    stage name"* while ``packs/venture`` declares ``id: active`` in three
+    pipelines (``manifest.yaml:117,147,212``), so the caller who is shown that
+    refusal is told to stop passing a stage id the shipped catalog resolves. The
+    same shape sat in ``in_progress``, whose text quoted the CORE spelling as if
+    it were the only one (``packs/venture`` declares ``in-progress``).
+
+    The rule is DERIVED from the declarations, never a literal in the test:
+
+    * a word that IS a declared stage id anywhere in the shipped pipelines (or in
+      the CORE work-item default) may not be denied as a stage name;
+    * every literal stage reference a repair QUOTES must be declared by some
+      shipped pipeline — a prescription naming an id nothing declares parks the
+      write as ``unknown-stage``, which is not a repair.
+    """
+    import re
+    from pathlib import Path
+
+    from tortoise.lifecycle_vocabulary import _POSITION_WORD_REPAIRS
+    from tortoise.pack_registry import PackRegistry
+    from tortoise.pipeline import CORE_WORK_ITEM_PIPELINE
+
+    declared = {str(s["id"]) for s in CORE_WORK_ITEM_PIPELINE["stages"]}
+    reg = PackRegistry(Path(__file__).resolve().parent.parent / "packs")
+    reg.load_all()
+    for pack in reg.packs.values():
+        for kind_def in pack.kind_defs.values():
+            pipeline = (kind_def or {}).get("pipeline") or {}
+            for stage in pipeline.get("stages") or ():
+                if stage.get("id"):
+                    declared.add(str(stage["id"]))
+
+    # The premise the first rule rests on: if this ever stops holding, the
+    # denial is harmless and the assertion below would be the false one.
+    assert "active" in declared, (
+        "fixture premise: a shipped pipeline declares the stage id `active` "
+        f"(declared stage ids: {sorted(declared)})")
+
+    for word, text in _POSITION_WORD_REPAIRS.items():
+        if word in declared:
+            assert "not a stage name" not in text, (
+                f"the {word!r} repair DENIES a stage name the shipped pipelines "
+                f"declare (packs declare id={word!r}): {text}")
+        for quoted in re.findall(r"'([A-Za-z_][\w.-]*)'", text):
+            assert quoted in declared, (
+                f"the {word!r} repair prescribes the stage id {quoted!r}, which "
+                "no shipped pipeline declares — that call parks as "
+                f"unknown-stage: {text}")
+
+
 def test_the_outdated_repair_names_BOTH_words_and_the_supersede_route(sdk):
     """`outdated` is refused because it names a CHOICE, and the choice is named.
 
