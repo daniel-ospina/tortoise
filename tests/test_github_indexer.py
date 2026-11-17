@@ -433,6 +433,68 @@ def test_repeated_transitions_mint_monotonic_ids(sdk):
         "a connector close folded a LIFECYCLE word onto the four-word axis")
 
 
+def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
+    """#13222 review round 2, finding 1 (P1): reading a SUBSET of the fold's decision.
+
+    Round 1 fixed the re-spelling of the ended-ness test (`isClosed is True` vs the
+    shared `bool()`). But the fold refuses to move a row for MORE reasons than "the
+    position records an end": `_fold_object_stage` also refuses when the LIFECYCLE
+    word is terminal (the status latch), and `apply_stage_fold` resolves the current
+    stage from the DECLARATION by id, so a row whose `pipelineSlot` PROP was never
+    written is still terminal by id. Each of those read as OPEN here while the fold
+    wrote nothing — the same mint-per-poll loop one guard over (measured pre-fix:
+    `1/1/1` on every shape below, the row never moving, one permanent Event per poll
+    in the journal, and `-closed-N` without bound).
+
+    The read now goes through `live.is_terminal_status` — the composed mirror of the
+    Cypher predicate the recall/search legs use — and resolves the stage slot from
+    the declaration, as the fold does.
+    """
+    oid = "github-issue-acme/repo1-1"
+    shapes = {
+        "a terminal LIFECYCLE word with a live position": (
+            "SET o.status='deprecated', o.pipelineStageId='in_progress', "
+            "o.pipelineSlot='active', o.isClosed=false"),
+        "a terminal STAGE with no slot prop written": (
+            "SET o.pipelineStageId='done', o.pipelineSlot=null, o.isClosed=null"),
+        "a legacy `outdated` flag with a live position": (
+            "SET o.outdated=true, o.pipelineStageId='in_progress', "
+            "o.pipelineSlot='active', o.isClosed=false"),
+        "a truthy NON-boolean isClosed marker": (
+            "SET o.isClosed=1, o.pipelineStageId='in_progress', "
+            "o.pipelineSlot='active'"),
+    }
+    for why, mutate in shapes.items():
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        proj.g.query("MATCH (e:Event) DETACH DELETE e")
+        t = MockGitHubTransport(issues=[gh_issue(1)])
+        _run(_indexer(t), sdk)
+        proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) {mutate}")
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="closed", closed_at="2026-07-20T08:00:00Z",
+            updated_at="2026-07-20T08:00:00Z")]
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+        assert mints == [0, 0, 0], (
+            f"{why}: the row was read as OPEN, so every poll minted another close "
+            f"({mints}) while the fold refused to move it")
+        # …and the CONTROL, on the same fixture: a row the fold WOULD move mints
+        # exactly one close and then stops. Without this, a reader that never
+        # answers "closed" at all would pass the loop above.
+        proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) SET o.status=null, "
+                     "o.isClosed=false, o.pipelineStageId='in_progress', "
+                     "o.pipelineSlot='active'")
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="open", updated_at="2026-07-24T08:00:00Z")]
+        _run(_indexer(t), sdk)  # back to open (mints -reopened)
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="closed", closed_at="2026-07-25T08:00:00Z",
+            updated_at="2026-07-25T08:00:00Z")]
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)]
+        assert mints == [1, 0], (
+            f"{why}: the control did not mint exactly one close then stop ({mints})")
+
+
 def test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
     """#13143 review F1: the state diff must read `isClosed` the way the FOLD does.
 
@@ -470,6 +532,24 @@ def test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
     ).result_set
     assert sorted(r[0] for r in rows) == ["github.issue.open"], (
         f"a repeated false close was minted: {sorted(r[0] for r in rows)}")
+    # ⛔ THE DISCRIMINATOR (round-2 finding P2). `events_minted == 0` alone cannot
+    # tell "the row was read as CLOSED" from "the row was not read at all"
+    # (`prev_state is None`, the pre-PR bug) — both mint nothing, so that half
+    # passed on the pre-PR reader. A REOPEN can only be minted when
+    # `prev_state == "closed"` (the transition arm is gated on `prev_state is not
+    # None`), so it is the observation that separates the two readings.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", closed_at=None, updated_at="2026-07-23T08:00:00Z")]
+    stats = _run(_indexer(t), sdk)
+    assert stats["events_minted"] == 1, (
+        "the row was not READ as closed: a reopen after it minted nothing, which "
+        "is what the pre-fix reader (prev_state=None, 'first ingest') does")
+    reopened = proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId ENDS WITH '-reopened' "
+        "RETURN e.eventId, e.eventKind"
+    ).result_set
+    assert [tuple(r) for r in reopened] == [
+        ("github-issue-acme/repo1-1-reopened", "github.issue.reopened")]
 
 
 # ── P1-5 (PR #1792): indexer is a routing pass-through ───────────────
