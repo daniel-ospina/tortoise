@@ -1729,12 +1729,18 @@ def _strip_sql_comments(sql: str) -> str:
     false PASS the selection exists to close, reachable from the comment form the
     residual claimed could only RED.
 
-    String literals are NOT parsed — single-quoted (#13382's unlanded hardening) or
-    dollar-quoted. For the TWO COMMENT FORMS MODELLED ABOVE the direction is
-    fail-closed: a `--` inside a literal truncates that line, which can only REMOVE
-    text an assertion needs.
+    ⛔ AND A STRING LITERAL IS NOT A COMMENT. PostgreSQL's lexer ends a `'…'`
+    literal only at an unescaped `'` (`''` is the escape inside one), so a `/*` or
+    `--` INSIDE a literal is DATA the server executes. An earlier cut of this
+    function did not model that and the direction was NOT fail-closed, which the
+    review measured: `_strip_sql_comments` feeds the CANDIDATE scan too, so a
+    correction migration whose string literal contained `/*` had its tail deleted,
+    stopped matching `_RESIDENCY_DEFS_RX`, and dropped OUT of `candidates` — the
+    gate then asserted over the SUPERSEDED body and went GREEN over a live,
+    unguarded function. Removing text can hide a file as easily as it can hide a
+    comment, so the literal is now skipped verbatim.
 
-    ⛔ THE DOLLAR-QUOTED CASE IS NOT FAIL-CLOSED, and an earlier cut of this
+    ⛔ THE DOLLAR-QUOTED CASE IS STILL NOT FAIL-CLOSED, and an earlier cut of this
     docstring claimed the whole function was. A migration whose sole content is
     `SELECT $x$ … CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()
     … $$ … $$ … $x$;` is left INTACT here, so the declaration inside the literal
@@ -1749,11 +1755,30 @@ def _strip_sql_comments(sql: str) -> str:
     tweak. Open, reproduced on `main`, and recorded as item 1 of #13393 (P2
     fail-open) — which is why that issue stays OPEN after #13398: the selector
     order was one of its items, this literal case is not.
+
+    Not modelled, stated so the next reader does not have to guess: `E'…'`
+    backslash escapes (`E'\''` would end the literal early here — measured, 19
+    `E'` occurrences across `supabase/migrations`, **0** of which carry `\'`). And
+    a `$tag$` region is NOT treated as opaque — comments inside it ARE stripped,
+    because a plpgsql body IS a dollar-quoted region and its `--`/`/* */` comments
+    are the ones the body scan has to remove.
     """
     out: list[str] = []
     i, n, depth = 0, len(sql), 0
+    in_literal = False
     while i < n:
+        ch = sql[i]
         pair = sql[i:i + 2]
+        if in_literal:
+            out.append(ch)
+            if ch == "'":
+                if sql[i + 1:i + 2] == "'":
+                    out.append("'")
+                    i += 2
+                    continue
+                in_literal = False
+            i += 1
+            continue
         if depth:
             if pair == "/*":
                 depth += 1
@@ -1767,6 +1792,11 @@ def _strip_sql_comments(sql: str) -> str:
             else:
                 i += 1
             continue
+        if ch == "'":
+            in_literal = True
+            out.append(ch)
+            i += 1
+            continue
         if pair == "/*":
             depth = 1
             i += 2
@@ -1775,7 +1805,7 @@ def _strip_sql_comments(sql: str) -> str:
             line_end = sql.find("\n", i)
             i = n if line_end < 0 else line_end
             continue
-        out.append(sql[i])
+        out.append(ch)
         i += 1
     return "".join(out)
 
@@ -2097,6 +2127,8 @@ def test_the_body_scan_honours_a_named_dollar_tag():
 
 
 # --------------------------------------------------------------------------- #
+# The live-definition WINDOW: the last declaration in the file is the live one.
+# --------------------------------------------------------------------------- #
 def test_the_body_window_is_the_LIVE_definition_not_the_first_one():
     """A file that defines the function twice leaves the SECOND definition live.
 
@@ -2132,10 +2164,9 @@ def test_the_body_window_is_the_LIVE_definition_not_the_first_one():
         f"the window missed the live (last) definition: {live_guarded!r}")
 
 
-
+# --------------------------------------------------------------------------- #
 # The two REVIEW findings on this selector — both "the gate asserts over text the
 # server does not execute", one spelling further in than the defect it replaced.
-# --------------------------------------------------------------------------- #
 def test_the_selector_is_closed_over_the_definition_spelling_space(tmp_path):
     """The gate's OWN pattern sees every legal spelling of the definition.
 
@@ -2186,7 +2217,7 @@ def test_the_selector_is_closed_over_the_definition_spelling_space(tmp_path):
         "a file that merely MENTIONS the function was selected as defining it — "
         "the body scan would then read a file that has no body")
 
-    # Non-vacuity: the pattern this replaces MISSES three of the five, so the row
+    # Non-vacuity: the pattern this replaces MISSES four of the five, so the row
     # reddens the moment the space narrows back.
     narrower = re.compile(
         r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.postgres_residency_snapshot\b")
@@ -2271,3 +2302,109 @@ def test_a_block_comment_cannot_supply_the_live_body(tmp_path):
         "A /* outer /* inner */ still-outer */ B").split() == ["A", "B"], (
         "block comments do not NEST — the scan ends at the first `*/`, so text the "
         "server never executes is read as SQL")
+
+
+def test_a_string_literal_is_not_a_comment_and_cannot_hide_a_migration(tmp_path):
+    """REVIEW FINDING (P2, fail-open): stripping without modelling `'…'` deletes DATA.
+
+    PostgreSQL ends a `'…'` literal only at an unescaped `'` (`''` escapes one), so
+    a `/*` inside a literal is text the server executes. `_strip_sql_comments`
+    feeds the CANDIDATE scan as well as the body scan, so a correction migration
+    whose literal contained `/*` had its tail deleted, stopped matching
+    `_RESIDENCY_DEFS_RX`, and dropped out of `candidates` — the gate then asserted
+    over the SUPERSEDED file and went GREEN over a live, unguarded function.
+
+    ⛔ Both halves are pinned here because they fail in opposite directions:
+    removing text can HIDE A FILE (this row), and failing to remove comment text
+    can FAKE A BODY (the row above).
+    """
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    live_name = "20261118000001_postgres_residency_fix.sql"
+    (migrations / "20261117000003_postgres_residency_zero_vanished.sql").write_text(
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  IF jsonb_array_length(v_audit->'orgs') > 0 THEN\n"
+        "    RAISE WARNING 'guarded';\n"
+        "    RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "  END IF;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n",
+        encoding="utf-8")
+    (migrations / live_name).write_text(
+        "-- correction: the guard is gone, and the log line quotes a path\n"
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  RAISE WARNING 'wrote /* not a comment */ to the ledger';\n"
+        "  RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n",
+        encoding="utf-8")
+
+    got = [p.name for p in _defining_migrations(migrations, _RESIDENCY_DEFS_RX)]
+    assert live_name in got, (
+        "the correction dropped OUT of the candidate set because a `/*` inside a "
+        "string literal was read as a comment and its tail deleted — the gate "
+        f"would assert over the superseded file. candidates={got}")
+    assert got[-1] == live_name, f"newest-first is broken: {got}"
+    code = _function_body(
+        (migrations / live_name).read_text(encoding="utf-8"), _RESIDENCY_DEFS_RX)
+    assert code is not None
+    assert "not a comment" in code, (
+        "the literal's own text was deleted from the body — the server executes it")
+    assert not re.search(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)", code), (
+        "the live body's lost guard was satisfied by another file — false PASS")
+
+    # The escape rule, spelled out: `''` inside a literal does not end it.
+    assert _strip_sql_comments("SELECT 'it''s /* kept */'; SELECT 2;").strip() == (
+        "SELECT 'it''s /* kept */'; SELECT 2;"), "`''` must not end the literal"
+    assert _strip_sql_comments("SELECT 'a -- b' AS x").strip() == (
+        "SELECT 'a -- b' AS x"), "`--` inside a literal must not start a comment"
+
+
+def test_a_block_comment_inside_the_BODY_cannot_satisfy_the_assertion():
+    """REVIEW FINDING (P2): the BODY-scan call site of the strip had no mutant.
+
+    `_function_body` strips comments itself, and reverting that ONE call site (to
+    the pre-diff `--`-only strip, or to raw text) reddened nothing: the candidate
+    rows all exercise `_defining_migrations`, not the body window. So the most
+    load-bearing half of the fix was unattributable.
+
+    The subject: a live body that has LOST its guard but keeps a `/* … */` note
+    quoting the guarded text — the shape a migration writes when it explains what
+    it removed. With the strip, the note is gone and the assertion REDs (correct);
+    without it, the note satisfies the guard and the gate is GREEN over a live
+    function with no fail-closed arm.
+    """
+    sql = (
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  /* was: IF jsonb_array_length(v_audit->'orgs') > 0 THEN\n"
+        "     RAISE WARNING 'the audit reported nobody'; */\n"
+        "  RAISE WARNING 'wrote rows';\n"
+        "  RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n"
+    )
+    code = _function_body(sql, _RESIDENCY_DEFS_RX)
+    assert code is not None
+    assert "RAISE WARNING" in code, "the live arm must survive the strip"
+    assert not re.search(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0",
+        code), (
+        "a `/* … */` NOTE inside the body satisfied the guard assertion — the gate "
+        "reports a fail-closed arm the executed function no longer has")
+
+    # Non-vacuity: the strip is what removes it. The `--`-only cut this replaces
+    # (and raw text) both still contain the guard, so both would pass the wrong way.
+    line_only = "\n".join(
+        ln.split("--", 1)[0] for ln in sql.splitlines())
+    assert re.search(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0",
+        line_only), (
+        "the `--`-only strip no longer keeps the note's guard text — this row has "
+        "lost its subject, so it cannot attribute the body-scan call site")
