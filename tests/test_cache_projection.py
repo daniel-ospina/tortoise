@@ -2159,6 +2159,67 @@ def test_a_terminal_status_latches_the_STAGE_arms_of_the_replay_too():
         f"stage — otherwise the assertion above proves nothing: {control.props!r}")
 
 
+def test_the_terminal_status_latch_binds_the_DECLARED_stage_arm_too():
+    """The declared/pack arm of the same latch — a SEPARATE arm, so separate pin.
+
+    `apply_event_stream_folds` has TWO stage arms (a pack's declared `stage:`
+    target, and the built-in core work-item fold) and each carries its own
+    `if not _is_terminal_status(status)`. The test above exercises the BUILT-IN
+    arm only (`github.issue.closed`), and it was measured that deleting the
+    declared arm's conjunct reds NOTHING there — so without this row the fix is
+    one `if True:` from silently returning, on the arm the shipped packs
+    actually use (`packs/venture` folds `disbursement` to `stage: released`,
+    a `slot: terminal` stage).
+
+    Mutant: `if not _is_terminal_status(status):` -> `if True:` at the
+    `fold_target.axis == FOLD_AXIS_STAGE` branch.
+    """
+    from tortoise.status_folds import FOLD_AXIS_STAGE, FoldTarget, StatusFoldIndex
+
+    pipe = {
+        "defaultStage": "contact",
+        "stages": [
+            {"id": "contact", "label": "Contact", "order": 0, "slot": "entry"},
+            {"id": "released", "label": "Released", "order": 1,
+             "slot": "terminal", "outcome": "completed"},
+        ],
+    }
+    index = StatusFoldIndex()
+    index.by_event = {"disbursement": [
+        FoldTarget("venture:tranche", FOLD_AXIS_STAGE, "released")]}
+    index.pipelines_by_kind = {"venture:tranche": pipe}
+    index.lifecycle_kinds = frozenset({"venture:tranche"})
+    index.kind_forms = frozenset({"venture:tranche", "tranche"})
+
+    row = {"id": "t-latch", "name": "tranche-a", "object_kind": "tranche",
+           "status": "live"}
+
+    def folded(events):
+        return cp.apply_event_stream_folds(
+            (cp.node_from_row("Object", row),), events, index=index)[0]
+
+    latched = folded((
+        cp.LifecycleEvent(seq=1, event_kind="", restatus_status="deprecated",
+                          target_id="t-latch", target_label="Object"),
+        cp.LifecycleEvent(seq=2, event_kind="disbursement",
+                          object_name="tranche-a"),
+    ))
+    assert latched.props.get("status") == "deprecated", latched.props
+    assert "pipelineStageId" not in latched.props, (
+        "the DECLARED stage arm moved a stage on a row the live fold refuses "
+        f"(its `status` is terminal): {latched.props!r}")
+
+    control = folded((
+        cp.LifecycleEvent(seq=1, event_kind="disbursement",
+                          object_name="tranche-a"),
+    ))
+    assert (control.props.get("pipelineStageId"),
+            control.props.get("isClosed")) == ("released", True), (
+        "control: with no terminal status the declared fold must still advance "
+        f"the stage — otherwise the assertion above proves nothing: "
+        f"{control.props!r}")
+
+
 def test_a_birth_record_cannot_resurrect_a_terminal_the_graph_holds():
     """Review P1: the birth arm must not overwrite a TERMINAL it finds held.
 

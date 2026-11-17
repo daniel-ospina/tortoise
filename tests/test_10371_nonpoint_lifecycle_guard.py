@@ -1036,3 +1036,54 @@ def test_a_point_keeps_its_declared_transitions(sdk):
     assert _stored(sdk, pid)["status"] == DEAD_WORD
     with pytest.raises(ValueError):
         sdk.update_knowledge(pid, status="live")   # terminal: no outgoing edge
+
+
+# ── the MEASUREMENT device: `normalised` and `refused` are different counts ──
+
+def test_the_write_outcome_counter_distinguishes_a_QUESTION_from_a_WRITE():
+    """`STATUS_WRITE_OUTCOMES` is this slice's own measurement, so it is pinned.
+
+    `status_refusal_reason` is documented as *"`read_caller_status` as a
+    QUESTION"* and the ingest bundle validator asks it once per item. Before
+    `count=False` was threaded through it, ONE write was counted TWICE as a
+    normalisation (the question's count plus the write's) — measured at
+    `c14e3830`: `status_refusal_reason(' Live ')` then
+    `read_caller_status(' Live ')` -> `{'normalised': 2}` for a single write.
+    A rejected 200-item bundle could then dominate a counter whose stated
+    purpose is *"is the vocabulary too narrow?"* / *"how many calls arrive in
+    the wrong spelling?"*.
+
+    Mutants that redden: drop `count=False` from `status_refusal_reason` (the
+    question form then moves the counters), unthread `count=` from `_refusal`
+    (a refused QUESTION counts), or collapse the two keys into one label — which
+    is the AX §2 failure the split exists to prevent.
+    """
+    from tortoise import lifecycle_vocabulary as lv
+
+    def _snapshot():
+        return dict(lv.STATUS_WRITE_OUTCOMES)
+
+    before = _snapshot()
+
+    # A QUESTION — on every shape: a re-spelling, a synonym, a refused word, a
+    # non-string. It stores nothing and declines nothing, so it counts nothing.
+    assert lv.status_refusal_reason(" Live ") is None
+    assert lv.status_refusal_reason("archived") is None
+    assert lv.status_refusal_reason("banana")
+    assert lv.status_refusal_reason(1)
+    assert _snapshot() == before, (
+        "the QUESTION form counted an outcome: " + repr(_snapshot()))
+
+    # A WRITE — a re-spelling is `normalised`, and it is not also `refused`.
+    assert lv.read_caller_status("Live") == "live"
+    after_write = _snapshot()
+    assert after_write["normalised"] == before["normalised"] + 1, after_write
+    assert after_write["refused"] == before["refused"], after_write
+
+    # A REFUSED write lands on `refused` only — one label for both would flatten
+    # different failures into one number (AX §2).
+    with pytest.raises(ValueError):
+        lv.read_caller_status("banana")
+    after_refusal = _snapshot()
+    assert after_refusal["refused"] == after_write["refused"] + 1, after_refusal
+    assert after_refusal["normalised"] == after_write["normalised"], after_refusal
