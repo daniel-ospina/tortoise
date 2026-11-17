@@ -192,6 +192,114 @@ def test_each_rewrite_is_journaled_as_a_status_mutation(env):
         "the record must be scoped to the label the write landed on")
 
 
+def test_a_truncated_POST_read_is_reported_not_certified(env, monkeypatch):
+    """The POST-condition must be judged on the POST read.
+
+    A truncated post-read can show `remaining == 0` while rows remain; if the
+    post-read's own truncation flag is dropped, `--execute` reports success on a
+    graph it could not see. (Mutation-tested: deleting the fold left this suite
+    green before this test existed.)
+    """
+    sdk, _events = env
+    _seed(sdk)
+
+    real_collect = tool.collect
+    calls = {"n": 0}
+
+    def second_read_truncated(proj, *, sample=20):
+        rep = real_collect(proj, sample=sample)
+        calls["n"] += 1
+        if calls["n"] >= 2:            # the post-write read
+            rep.truncated = True
+        return rep
+
+    monkeypatch.setattr(tool, "collect", second_read_truncated)
+
+    rep = tool.run(sdk, execute=True)
+
+    assert rep.truncated is True, "a truncated post-read must not be reported clean"
+    assert tool.main(["--db-path", str(env[0]._db_path), "--execute"]) in (1, 2)
+
+
+def test_a_fanout_that_clears_before_the_write_is_written_not_refused(env):
+    """The fan-out report must follow the WRITE, not the preview's snapshot.
+
+    A sibling deleted between the preview and `--execute` means the address is
+    unambiguous by the time of the write: the row IS rewritten, and the report
+    must not keep telling the operator it was "refused, never written" (nor keep
+    `main` at exit 1 on a clean run — the sequencing step depends on that 0).
+    """
+    sdk, _events = env
+    oid = sdk.create_object("cleared", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    sdk.create_point("stmt", "temporary sibling", id=oid)
+
+    preview = tool.run(sdk, execute=False)
+    assert [r["id"] for r in preview.fanout] == [oid], preview.fanout
+
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": oid})
+
+    rep = tool.run(sdk, execute=True, report=preview)
+
+    assert rep.rewritten == [oid], rep.failures
+    assert rep.fanout == [], "a refused row that WAS written must not still be listed"
+    assert rep.pending == [], rep.pending
+
+
+def test_a_post_write_status_that_did_not_move_is_a_failure(env, monkeypatch):
+    """The post-write guard is measured: a write that did not reach the row fails.
+
+    `update_knowledge` returns a dict whatever happened, and it resolves by label
+    precedence — so the guard must be the `:Object` node's own stored status.
+    """
+    sdk, _events = env
+    ids = _seed(sdk)
+
+    monkeypatch.setattr(tool, "_object_status", lambda proj, rid: "outdated")
+
+    rep = tool.run(sdk, execute=True)
+
+    assert rep.rewritten == [], rep.rewritten
+    assert len(rep.failures) == len(ids) - 1, rep.failures   # `_seed` has one live row
+    assert all("left the :Object" in f["error"] for f in rep.failures), rep.failures
+
+
+def test_a_failed_run_leaves_a_marker_that_stops_the_zero_rows_conclusion(env):
+    """A FAILED run must not hand the next preview a clean-looking "0 rows".
+
+    The live write lands, the record does not, the run exits 1 — and the very
+    next preview would otherwise print the sentence that authorises dropping the
+    `assembly` member. The marker written BEFORE the first write is what makes
+    that impossible (and covers a SIGTERM, which writes nothing at all).
+    """
+    sdk, events = env
+    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+
+    real_append = EventLog.append
+
+    def boom(self, event):
+        raise OSError("journal is read-only")
+
+    EventLog.append = boom
+    try:
+        rep = tool.run(sdk, execute=True)
+    finally:
+        EventLog.append = real_append
+
+    assert rep.failures, "precondition: the run must have failed"
+    assert rep.remaining == {w: 0 for w in tool.LEGACY_WORDS}, rep.remaining
+
+    second = tool.run(sdk, execute=False)
+
+    assert second.total == 0, "precondition: the live graph reads clean"
+    assert second.pending == [oid], second.pending
+    assert "dead weight" not in tool.render(second)
+    assert tool.main(["--db-path", str(env[0]._db_path),
+                      "--event-log-path", str(events / "events.jsonl")]) == 1
+
+
 def test_the_rewrite_survives_a_rebuild_all(env):
     """ACCEPTANCE: the post-rewrite state reproduces from the journal.
 
@@ -709,7 +817,11 @@ def test_two_targets_at_once_are_refused_not_silently_resolved(
 
     assert rc == 2, "two targets must be refused, not silently resolved"
     err = capsys.readouterr().err
-    assert tool.REFUSE_EMPTY_FLAG in err, err
+    # The ambiguity has its OWN reason token: the defect is two stores named at
+    # once, not an empty value, and `empty-target-flag` on this line read as the
+    # wrong defect (review nit).
+    assert tool.REFUSE_AMBIGUOUS_TARGET in err, err
+    assert tool.REFUSE_EMPTY_FLAG not in err, err
     assert tool.REFUSE_NO_JOURNAL not in err, (
         "the wrong refusal answered: a journal WAS supplied, so rc=2 must be the "
         f"ambiguity guard's. stderr: {err!r}")
@@ -801,18 +913,19 @@ def test_main_execute_rewrites_the_population_and_exits_zero(tmp_path, monkeypat
         sdk.close()
 
 
-def test_an_unreadable_journal_position_fails_the_row_instead_of_skipping(env, monkeypatch):
-    """The per-row probe FAILS CLOSED on `None`, which is what its docstring says.
+def test_an_unreadable_journal_probe_fails_the_row_instead_of_skipping(env, monkeypatch):
+    """The per-row durability probe FAILS CLOSED, which is what its docstring says.
 
-    `_journal_position` answers `None` when the position cannot be read. The batch
-    gate treats a `None` delta as failure, so a per-row probe that instead SKIPPED
-    would certify rows on a measurement it never took — the two gates opposite,
-    and the weaker one guarding the finer-grained question (review finding,
-    2026-11-17).
+    The probe is IDENTITY-based (`cursor_at_end` + `read_after`: the records
+    appended in this row's window must contain THIS row's own record), so an
+    unreadable cursor answers `None`. A row must not be certified on a
+    measurement that was never taken — the batch gate fails on a `None` delta for
+    the same reason, and a skip would leave the two gates opposite, the weaker
+    one guarding the finer-grained question (review finding, 2026-11-17).
     """
     sdk, _events = env
     _seed(sdk)
-    monkeypatch.setattr(tool, "_journal_position", lambda log: None)
+    monkeypatch.setattr(tool, "_journal_cursor", lambda log: None)
 
     rep = tool.run(sdk, execute=True)
 

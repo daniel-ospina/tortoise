@@ -193,6 +193,7 @@ REFUSE_EMPTY_FLAG = "empty-target-flag"
 REFUSE_UNADDRESSABLE = "unaddressable-row"
 REFUSE_TRUNCATED = "truncated-read"
 REFUSE_FANOUT = "id-fanout-or-foreign-label"
+REFUSE_AMBIGUOUS_TARGET = "ambiguous-target-flag"
 
 #: Knowledge labels a ``:Object`` must NOT also carry. ``update_knowledge``
 #: dispatches on the label, so a dual-labelled row takes the other family's arm
@@ -221,6 +222,101 @@ def _journal_position(log):
         return None
 
 
+def _journal_cursor(log):
+    """An opaque end-of-log cursor, or ``None`` when it cannot be taken.
+
+    ⛔ The cursor is what makes the durability check IDENTITY-based. A
+    `position()` DELTA proves only that the journal GREW, and `position()` is
+    documented as diagnostics, not evidence (``tortoise/log.py``: "under
+    concurrency the number it names belongs to a peer's record"). A peer writing
+    this graph's journal during our failed append therefore satisfies a delta gate
+    and leaves a LIVE-ONLY row certified as recorded — measured. A cursor lets us
+    read back the records appended in the window and look for OUR row's record.
+    """
+    try:
+        return log.cursor_at_end()
+    except (AttributeError, OSError, TypeError):
+        return None
+
+
+def _journal_records_since(log, cursor):
+    """The records appended after ``cursor``; ``None`` when unreadable."""
+    if cursor is None:
+        return None
+    try:
+        return log.read_after(cursor)
+    except (AttributeError, OSError, TypeError):
+        return None
+
+
+def _row_recorded(records, rid) -> bool:
+    """True only when THIS row's own status record is among ``records``.
+
+    Matching on `(type, label, id, state.status)` — not on a count — is what
+    makes the gate independent of a concurrent writer: a peer's record for
+    another row cannot stand in for ours.
+    """
+    for rec in records or ():
+        if not isinstance(rec, dict):
+            continue
+        if (rec.get("type") == "EntityMutated"
+                and rec.get("label") == "Object"
+                and str(rec.get("id")) == str(rid)
+                and (rec.get("state") or {}).get("status") == REWRITE_TO):
+            return True
+    return False
+
+
+def _pending_path(journal: str | None):
+    """The durable marker beside the journal, or ``None`` when there is no path.
+
+    ⛔ WHY A FILE. A failed (or SIGTERM'd) run leaves rows written LIVE-ONLY: the
+    node says `deprecated`, the journal still replays `outdated`, and nothing on
+    disk records that. The next PREVIEW then sees 0 rows and prints the sentence
+    that authorises dropping the `assembly` member — a false measurement produced
+    by the tool itself, and the one thing this migration must not do. The marker
+    is written BEFORE the first write and removed only by a run that ends clean,
+    so a killed run is covered too.
+    """
+    if not journal:
+        return None
+    return Path(str(journal) + ".rewrite-pending")
+
+
+def _write_pending(journal: str | None, ids: list) -> None:
+    """Record the intent to write these ids. Best effort, never fatal."""
+    path = _pending_path(journal)
+    if path is None:
+        return
+    try:
+        path.write_text("\n".join(str(i) for i in ids) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_pending(journal: str | None) -> None:
+    path = _pending_path(journal)
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except (OSError, AttributeError):
+        pass
+
+
+def _read_pending(journal: str | None) -> list[str]:
+    """The ids a previous run may have left live-only, or ``[]``."""
+    path = _pending_path(journal)
+    if path is None:
+        return []
+    try:
+        return [line.strip()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    except (OSError, AttributeError):
+        return []
+
+
 def _nodes_sharing_id(g, rid: str) -> list[list[str]]:
     """Every node the WRITE DOOR would bind for ``rid``, as its label list.
 
@@ -247,7 +343,17 @@ _BINDING_CYPHER: str | None = None
 
 def _binding_cypher() -> str:
     """The identity resolution used by :func:`_nodes_sharing_id`, built from the
-    write door's canonical identity tables (so it cannot drift from them)."""
+    write door's canonical identity tables (so it cannot drift from them).
+
+    ⛔ LABEL-SCOPED ARMS, UNIONed. A `MATCH (m) WHERE (m:Point AND m.id=$rid) OR
+    …` is an unlabelled full-node scan — measured ≈1.5 µs/node, i.e. ≈60 ms at
+    40 k nodes, and it runs several times per legacy row on a tool meant for
+    production. Each arm here is an indexed label+property lookup, and the repo's
+    own write door resolves its ids the same way (``sdk.py``'s ``_lifecycle_ids``).
+    ``UNION`` (not ``UNION ALL``) so a node matching two of its own arms — a
+    `:Source` carrying both the id and the url, a dual-labelled node — is counted
+    ONCE.
+    """
     global _BINDING_CYPHER
     if _BINDING_CYPHER is None:
         from tortoise.projection import (
@@ -256,9 +362,9 @@ def _binding_cypher() -> str:
         )
         pairs = (list(_CANONICAL_ENTITY_ID_PROPS)
                  + list(_CANONICAL_ENTITY_SECONDARY_ID_PROPS))
-        arms = " OR ".join(
-            f"(m:{label} AND m.{prop} = $rid)" for label, prop in pairs)
-        _BINDING_CYPHER = f"MATCH (m) WHERE {arms} RETURN labels(m)"
+        arms = [f"MATCH (m:{label} {{{prop}: $rid}}) RETURN labels(m)"
+                for label, prop in pairs]
+        _BINDING_CYPHER = "\nUNION\n".join(arms)
     return _BINDING_CYPHER
 
 
@@ -418,6 +524,10 @@ class Report:
     #: (n:Object)`; Points own the flag's meaningful population and are NOT
     #: counted here — see the note rendered beside it), reported, never written.
     flag_count: int = 0
+    #: Ids a PREVIOUS run may have left LIVE-ONLY (read from the marker beside
+    #: the journal). While non-empty the graph's "0 rows" state is not a
+    #: measurement, so the sequenced drop must not proceed on it.
+    pending: list[str] = field(default_factory=list)
     #: Rows whose `id` is bound by more than one node, or by a node whose label
     #: set is not `:Object`-only. `update_knowledge` binds on the ID, so writing
     #: such a row can restamp a `:Point`/`:Subject` sibling (#12855 forbids it)
@@ -542,6 +652,11 @@ def rewrite(sdk, rep: Report) -> Report:
     if refusal is not None:
         rep.executed = False
         raise refusal
+    # ⛔ WRITE THE MARKER BEFORE THE FIRST WRITE, not after a failure: a run
+    # killed mid-loop leaves live-only rows and no stdout. Only a run that ends
+    # clean clears it (end of this function).
+    _write_pending(rep.journal, [r.get("id") for r in rep.rows
+                                 if r.get("id") is not None])
     log = sdk._get_event_log()
     # ⛔ THE JOURNAL PRECONDITION BELONGS HERE TOO (review finding, 2026-11-17).
     # `run` answers it, but `rewrite` is the public writer the docstring above
@@ -582,7 +697,7 @@ def rewrite(sdk, rep: Report) -> Report:
                 "error": _binding_refusal(rid, nodes_now),
             })
             continue
-        _row_before = _journal_position(log)
+        _row_cursor = _journal_cursor(log)
         try:
             landed = sdk.update_knowledge(rid, status=REWRITE_TO)
         except Exception as exc:
@@ -617,11 +732,19 @@ def rewrite(sdk, rep: Report) -> Report:
         # ⛔ A JOURNAL RECORD IS PART OF THE WRITE. The SDK's append is
         # best-effort and `_update_entity` ignores its result (#4240/#7951), so
         # a failed append leaves a LIVE-ONLY row that the next `rebuild_all`
-        # reverts — with no exception anywhere. A batch delta cannot attribute
-        # that to a row; this probe can.
-        _row_after = _journal_position(log)
-        if _row_before is None or _row_after is None:
-            # FAIL CLOSED on an unreadable position: "could not measure" is not
+        # reverts — with no exception anywhere.
+        #
+        # ⛔ AND THE PROOF MUST NAME THE ROW. A `position()` DELTA only proves the
+        # journal GREW: `position()` is diagnostics, not evidence ("under
+        # concurrency the number it names belongs to a peer's record"), so a peer
+        # writing this graph's journal in the same window satisfies a delta gate
+        # over OUR failed append — measured, and the row then rebuilt back to
+        # `outdated` while the run reported success. So the records appended in
+        # this row's window are read back and searched for THIS row's own
+        # `EntityMutated{label: Object, id: rid, state.status: deprecated}`.
+        _records = _journal_records_since(log, _row_cursor)
+        if _records is None:
+            # FAIL CLOSED on an unreadable cursor: "could not measure" is not
             # "recorded". The batch gate fails on a `None` delta for the same
             # reason, and a row must not be certified on a probe that never ran.
             rep.failures.append({
@@ -632,12 +755,13 @@ def rewrite(sdk, rep: Report) -> Report:
                           "`rebuild_all` (#4240). Not counted as rewritten."),
             })
             continue
-        if _row_after - _row_before < 1:
+        if not _row_recorded(_records, rid):
             rep.failures.append({
                 "id": rid,
-                "error": ("the write landed but appended NO journal record: "
-                          "it is LIVE-ONLY and the next `rebuild_all` will "
-                          "revert it (#4240). Not counted as rewritten."),
+                "error": ("the write landed but its OWN journal record is not "
+                          "there: the row is LIVE-ONLY and the next "
+                          "`rebuild_all` will revert it (#4240). Not counted as "
+                          "rewritten."),
             })
             continue
         rep.rewritten.append(rid)
@@ -667,6 +791,13 @@ def rewrite(sdk, rep: Report) -> Report:
     for row in after.fanout:
         if row.get("id") not in written and row.get("id") not in _listed:
             rep.fanout.append(row)
+    # ⛔ CLEAR THE MARKER ONLY ON A CLEAN END. Anything else — a failed row, a
+    # truncated post-read, a row still carrying a legacy word — leaves it in
+    # place, so the next PREVIEW cannot present "0 rows" as a measurement.
+    if not (rep.failures or rep.truncated or rep.unaddressable or rep.fanout
+            or any(rep.remaining.get(w, 0) for w in LEGACY_WORDS)):
+        _clear_pending(rep.journal)
+        rep.pending = []
     return rep
 
 
@@ -715,6 +846,15 @@ def render(rep: Report) -> str:
             "on the id, so the write would reach that sibling):")
         for row in rep.fanout[:5]:
             lines.append(f"    {row['id']}  nodes={row.get('nodes')!r}")
+    if rep.pending:
+        lines.append(
+            f"  ⛔ {len(rep.pending)} row(s) may be LIVE-ONLY from a previous "
+            "run that did not finish cleanly "
+            f"({', '.join(rep.pending[:5])}{'…' if len(rep.pending) > 5 else ''}): "
+            "their live status was written but their journal record may not "
+            "have landed, so `rebuild_all` can restore the legacy word. "
+            "The `0 rows` reading on this graph is NOT a measurement until they "
+            "are repaired — re-run `--execute` after `rebuild_all`.")
     if rep.flag_count:
         lines.append(
             f"  note: {rep.flag_count} :Object row(s) carry the legacy `outdated` "
@@ -740,7 +880,7 @@ def render(rep: Report) -> str:
         # refusal — the safe rows still get rewritten), so it does not gate this
         # advice; it is named beside them instead.
         blockers = bool(rep.truncated or rep.unaddressable)
-        if rep.total == 0 and not rep.truncated:
+        if rep.total == 0 and not rep.truncated and not rep.pending:
             lines.append(
                 "  ⇒ 0 rows carry 'outdated' or 'retracted' on this graph. No rewrite "
                 "is needed, and `assembly._RECALL_OBJECT_EXCLUDED_STATUSES`'s "
@@ -767,8 +907,8 @@ def render(rep: Report) -> str:
 # ── entry point ──────────────────────────────────────────────────────────
 
 
-def _empty_flag(args) -> str | None:
-    """A target flag passed EMPTY is not "no flag" — it selects a different store.
+def _empty_flag(args) -> tuple[str, str] | None:
+    """A target flag that selects a different store than the operator named.
 
     The same refusal `turn_parity_census.empty_graph_target_flag` makes, restated
     here in one line because this tool opens ONE store through the SDK and a
@@ -779,15 +919,21 @@ def _empty_flag(args) -> str | None:
     EMBEDDED store while the operator believes it addressed the container — and
     the journal it appends to is whichever `--event-log-path` names, so a
     production journal can receive a record for a write that never touched the
-    production graph. Refused rather than resolved.
+    production graph. Refused rather than resolved, under its OWN reason token
+    (the defect is ambiguity, not emptiness).
+
+    Returns ``(reason_token, message)`` or ``None``.
     """
     if getattr(args, "uri", None) is not None and \
             getattr(args, "db_path", None) is not None:
-        return "--uri and --db-path were both passed, and they name two stores"
+        return (REFUSE_AMBIGUOUS_TARGET,
+                "--uri and --db-path were both passed, and they name two stores")
     for name in ("uri", "db_path", "graph_name", "event_log_path"):
         value = getattr(args, name, None)
         if value is not None and not str(value).strip():
-            return f"--{name.replace('_', '-')} was passed EMPTY"
+            return (REFUSE_EMPTY_FLAG,
+                    f"--{name.replace('_', '-')} was passed EMPTY — an empty "
+                    "target flag is not 'no flag', it selects a different store")
     return None
 
 
@@ -851,6 +997,9 @@ def run(sdk, *, execute: bool = False, sample: int = 20,
     rep.graph = getattr(proj, "graph_name", None)
     log = sdk._get_event_log()
     rep.journal = str(getattr(log, "path", None)) if log is not None else None
+    # A previous run may have left rows LIVE-ONLY; that makes this graph's "0
+    # rows" state unmeasurable, so it must travel with the report.
+    rep.pending = _read_pending(rep.journal)
     if not execute:
         return rep
     # ⛔ THE REFUSALS ARE MADE HERE, not only in `main`. `main` answers them with
@@ -890,9 +1039,9 @@ def main(argv: list[str] | None = None) -> int:
 
     bad = _empty_flag(args)
     if bad is not None:
+        reason, message = bad
         sys.stderr.write(
-            f"rewrite_object_status: REFUSED {REFUSE_EMPTY_FLAG}: {bad}. An empty "
-            "target flag is not 'no flag' — it selects a different store. "
+            f"rewrite_object_status: REFUSED {reason}: {message}. "
             "Nothing was read and nothing was written.\n")
         return 2
 
@@ -964,7 +1113,8 @@ def main(argv: list[str] | None = None) -> int:
         # A preview is the MEASUREMENT that unblocks dropping the `assembly`
         # member, so it must not exit 0 over a read it could not complete —
         # otherwise the `0 rows` sentence below reads as a complete answer.
-        return 1 if (rep.truncated or rep.unaddressable or rep.fanout) else 0
+        return 1 if (rep.truncated or rep.unaddressable or rep.fanout
+                      or rep.pending) else 0
     leftover = sum(rep.remaining.get(w, 0) for w in LEGACY_WORDS)
     # ⛔ The record is part of the write: a run whose journal grew by fewer
     # records than rows it rewrote has live-only rows that the next
@@ -972,7 +1122,7 @@ def main(argv: list[str] | None = None) -> int:
     record_short = (rep.journal_delta is None
                     or rep.journal_delta < len(rep.rewritten))
     if (rep.failures or rep.truncated or leftover or rep.unaddressable
-            or record_short):
+            or record_short or rep.pending):
         return 1
     return 0
 
