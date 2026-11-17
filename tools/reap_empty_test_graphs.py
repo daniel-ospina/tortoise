@@ -63,19 +63,31 @@ partial run is never reported as clean.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE every import — `test_entry_point_python_guard`
+# requires the guard to precede the import block, because a module-level 3.11+-only
+# import raises ImportError before a later-placed guard could run. Landing this guard
+# BELOW `argparse`/`json`/`re` reds that census for every PR (#10754's class).
+#
+# #4053/#11342: the refusal must not wear a VERDICT's status. This tool's answers are
+# 0 (clean / dry run) and 1 (a deletion FAILED, or the store named a failure), so
+# `raise SystemExit(<message>)` — which exits 1 — would report a failed reap on a box
+# whose interpreter is simply old. 2 is this tool's own REFUSED (it returns it when the
+# report cannot be built), which is what an old interpreter IS. `SystemExit(<int>)`
+# carries no message, so the refusal is printed explicitly.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/reap_empty_test_graphs.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/reap_empty_test_graphs.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import json
 import re
-import sys
-
-# #5128: refuse a <3.12 interpreter before the imports below (see the sibling
-# graph-scripts for the same guard).
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
-        f"tools/reap_empty_test_graphs.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/reap_empty_test_graphs.py`"
-    )
 
 from tortoise.sdk import canonical_org_graph_name
 

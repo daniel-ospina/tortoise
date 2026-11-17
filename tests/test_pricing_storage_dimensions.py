@@ -562,8 +562,11 @@ class TestTheLoaderContract:
         so a storage key in it would arm `graph_storage` on a path that never
         passed `quota._arm_graph_storage` — the ONE seam `#13084` built, which
         carries the tier number from the artifact AND the estimate rule with it —
-        and would arm `postgres_storage`, still BLOCKED for want of a per-org
-        byte meter, answering HTTP 500 on every gated write.
+        and would arm `postgres_storage`, still BLOCKED — its `blocked_reason`
+        and `release` tokens name the obstacle and what would lift it, and
+        `test_9559_blocked_release_conditions.py` re-checks them, so this
+        sentence does not repeat a reason that has already gone stale once —
+        answering HTTP 500 on every gated write.
 
         Mutation this REDs: moving either storage key into `tier_limits()`'s
         return dict "for symmetry" with the other limits.

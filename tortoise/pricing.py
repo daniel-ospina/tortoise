@@ -178,10 +178,15 @@ def storage_limits(tier: str) -> dict:
     refuses at ``used >= allowance``: a 0 cap would refuse the first byte on a
     tier that still grants a graph. ``zero_means_unarmed`` is that departure, and
     it covers an EXACT zero only (a negative is a fault).
-    ``postgres_storage`` is the ONE dimension that
-    is still **BLOCKED** — it has no per-org byte meter, and a per-org split
-    would be an ALLOCATION, not a measurement — so its key is carried here for
-    the money arithmetic and refuses (fail closed) if it is ever configured.
+    ``postgres_storage`` is the ONE dimension that is still **BLOCKED**, so its
+    key is carried here for the money arithmetic and refuses (fail closed) if it
+    is ever configured. ⛔ Its REASON is deliberately NOT restated here: it lives
+    in ``allowance_gate.DIMENSIONS[*].blocked_reason``, together with the
+    ``release`` tokens that would lift it, and
+    ``tests/test_9559_blocked_release_conditions.py`` re-checks both on every PR.
+    Restating it here is how a claim the two files shared stayed quoted long
+    after ``#12762`` landed the attribution it called missing — so an obstacle
+    named here would already be wrong.
 
     Returns ``{<allowance_key>: value | None}`` for every STORAGE dimension —
     ``None`` meaning UNCONFIGURED (the gate's own reading of it), never 0-by-0.
