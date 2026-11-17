@@ -319,6 +319,42 @@ def test_an_uninformative_entity_read_says_so(sdk):
     assert r3.signals_informative is True
 
 
+def test_a_read_that_answers_no_rows_is_relevance_only_not_not_applicable(sdk):
+    """A ZERO-row answer is `False`, not `None` — the field's gate is the REQUEST.
+
+    Pre-fix the assignment sat behind `and signals`, so an id the graph does not
+    hold (a Source keyed by a `url` no node carries, a stale id) left
+    `signals_informative` at its `None` default. Callers render `None` as "not
+    applicable", while the order produced by that read WAS relevance-only:
+    `graph_boost` answers `0.0` for every row because there is no signal to
+    read. "The set is not applicable" and "the set answered nothing" are
+    different facts, and only the first is `None`.
+    """
+    r = GraphRanker(sdk._get_proj())
+    r.rerank([{"id": "no-such-object-id-12184", "scores": {"rrf": 0.5}}],
+             entity_type="object")
+    assert r.signals_read is False, "the read answered nothing at all"
+    assert r.signals_informative is False, (
+        "…and nothing is not 'not applicable': the order IS relevance-only")
+
+    # The `None` label keeps its meaning: a label with no entity signal set is
+    # genuinely not applicable, and must not be swept into the new `False`.
+    r2 = GraphRanker(sdk._get_proj())
+    r2.rerank([{"id": "no-such-point-id-12184", "scores": {"rrf": 0.5}}],
+              entity_type="point")
+    assert r2.signals_informative is None, (
+        "a non-entity label has no entity signal set to be informative about")
+
+    # …and so does a ranker with no projection: there is no read to be
+    # informative, so the field has no subject. This is the second half of the
+    # boundary — the gate is the REQUEST *with a projection*, never the row
+    # count, so the no-graph unit-test shape is unchanged.
+    r3 = GraphRanker(None)
+    r3.rerank([{"id": "no-such-object-id-12184", "scores": {"rrf": 0.5}}],
+              entity_type="object")
+    assert r3.signals_informative is None
+
+
 # ── 4. The identity term applies to entity rows only ─────────────────────
 
 def test_identity_floors_relevance_for_an_entity_row():

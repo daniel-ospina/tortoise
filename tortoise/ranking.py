@@ -1007,7 +1007,7 @@ class GraphRanker:
         signals = signals or {}
         self.signals_answered = frozenset(
             pid for pid, sig in signals.items() if sig.get("has_prior"))
-        if entity_type in ENTITY_SIGNAL_SPECS and signals:
+        if entity_type in ENTITY_SIGNAL_SPECS and self.projection is not None:
             # #12184: an entity read that answered all-`(0, None)` measured
             # NOTHING that could order the rows. Say so rather than letting a
             # constant graph term pass as a graph judgement (the shape the
@@ -1015,10 +1015,26 @@ class GraphRanker:
             # `graph_boost`, and `signals_informative` is the field that
             # distinguishes "the graph ranked these" from "the graph had
             # nothing and relevance did the work".
-            self.signals_informative = any(
+            #
+            # ⚠️ The gate is the REQUEST (with a projection to read), not the
+            # row count (#12184 review, recorded-then-closed): gating on
+            # `and signals` left the field `None` — "not applicable" — when
+            # the read answered ZERO rows, which is the strongest possible
+            # "nothing distinguishes these rows" and whose order IS
+            # relevance-only. Reachable whenever a pool row's key is not the
+            # node's own (a Source keyed by `url` that the graph does not
+            # hold, a stale id). `None` keeps its own meaning: no entity
+            # signal set to be informative about (a non-entity label) or no
+            # projection to read at all.
+            self.signals_informative = bool(signals) and any(
                 (sig.get("degree") or 0) > 0 or sig.get("confidence") is not None
                 for sig in signals.values())
-            if not self.signals_informative:
+            if not self.signals_informative and not signals:
+                logger.info(
+                    "entity signal read answered NO rows for %d %r row(s) — "
+                    "the order is relevance-only (signals_informative=False)",
+                    len(ids), entity_type)
+            elif not self.signals_informative:
                 # INFO, not WARNING (round-2 review N2): this is the steady
                 # state of ANY claim-less entity corpus — e.g. the committed
                 # eval graph, or a freshly-created Object store — so on a
