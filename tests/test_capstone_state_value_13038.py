@@ -886,7 +886,9 @@ def test_verdicts_out_cannot_cross_runs_into_the_bundle(tmp_path):
         (),
         {
             "packet": str(ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json"),
-            "verdicts": str(ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json"),
+            "verdicts": str(
+                ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json"
+            ),
             "judge_cmd": None,
             "out": str(tmp_path),
             "verdicts_out": str(cap.DEFAULT_OUT / "verdicts-baseline.json"),

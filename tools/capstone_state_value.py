@@ -2212,6 +2212,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     # flag-keyed guard let the documented reproduction command replace the committed
     # baseline with a non-result while the README said that could not happen. Measured:
     # `--judge fresh` with `--judge-cmd true` changed all three committed files.
+    # A board that carries real `blocked` rows is still publishable: `blocked` is a measured
+    # outcome, `unjudged` is not.
+    publishing = out_dir.resolve() == DEFAULT_OUT.resolve()
     if not may_publish(board, out_dir):
         if not args.json:
             print(render_markdown(board))
@@ -2226,12 +2229,6 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     packet_path.write_text(json.dumps(packet, indent=2, default=str))
     run_json = out_dir / f"run-{target.kind}.json"
-    # The guard above keys on the MODE; this one keys on the ARTIFACT (#13303 cycle 8, P1).
-    # `--judge fresh` whose reader cannot run (not found, timeout, unparseable) and
-    # `--judge file` with a partial verdict map BOTH produce an all-`unjudged` board, and
-    # both used to publish it into the bundle — the same harm the mode guard exists to stop,
-    # reachable through the two doors that look safe. A board that carries real `blocked`
-    # rows is still publishable: `blocked` is a measured outcome, `unjudged` is not.
     run_json.write_text(json.dumps(board, indent=2, default=str))
     md = render_markdown(board)
     (out_dir / f"scoreboard-{target.kind}.md").write_text(md)
@@ -2248,7 +2245,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         if verdicts_out.parent.resolve() == DEFAULT_OUT.resolve() and not publishing:
             print(
                 f"capstone: refusing to write verdicts into the bundle {DEFAULT_OUT} — "
-                "the board is not fully judged, so it would not describe the committed run",
+                "these verdicts are not the ones published beside it",
                 file=sys.stderr,
             )
             return 1
