@@ -48,8 +48,10 @@ is the defect it exists to prevent). It is:
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 import tokenize
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -108,21 +110,23 @@ def _postgres_residency_gauge(meter: Any = _UNSET) -> tuple[bool, str]:
 
     ⛔ Not "the gate has a meter at all", and the difference is measured, not
     pedantic: reviewer round 1 showed that the weaker form reports SATISFIED when
-    the existing ledger READER is wired as the meter, which is the single most
-    likely next edit and exactly the figure the block names as insufficient. So
-    the two known-inadequate readers are named and REFUSED here; what remains is a
-    disclosed residual (a THIRD inadequate reader could still satisfy this line),
-    and the block's own text carries the substance.
+    an inadequate reader is wired as the meter, which is the single most likely
+    edit and exactly the figure the block named as insufficient.
 
-    ⛔ ``meter`` IS AN INJECTION SEAM, and it exists because reviewer round 5
-    measured this arm as UNREACHABLE: while the live registry holds
-    ``meter=None``, the function returns on the line below before the refusal dict
-    is ever consulted, so deleting the whole refusal — or renaming one of the
-    readers it matches — stayed GREEN. That is the same dead-arm class round 2
-    fixed for ``read_per_org_bytes``, one ``getattr(..., None)`` over. A seam lets
-    the arm be EXECUTED (``test_the_residency_refusal_still_fires``) and a
-    name-resolution assert makes a rename RED instead of silent. The no-argument
-    call is still the live reading, so the registry is what the other rows test.
+    ⛔ AND NOT "some reader we do not recognise" EITHER. While the gauge did not
+    exist this returned False on ``meter is None``; #9559 wired one, so the
+    condition is now SATISFIED — and a predicate that reported that on the mere
+    presence of an unknown callable would be the round-1 defect one edit over.
+    So it revalidates the ARTIFACTS the claim rests on: the snapshot table and
+    its refresh RPC are declared in a migration, the reader exists in
+    ``metering``, and the dimension's meter IS the residency meter. A rename,
+    a dropped migration or a re-wiring REDs here — and the two known-inadequate
+    readers stay refused by name (``per_org_bytes`` is a whole-table audit,
+    ``get_postgres_bytes_written`` is the window ADDEND).
+
+    ``meter`` is an injection seam so the refusal arm can be EXECUTED while the
+    live reading is whatever the registry holds; the no-argument call is the live
+    one.
     """
     if meter is _UNSET:
         meter = _dim("postgres_storage").meter
@@ -133,10 +137,6 @@ def _postgres_residency_gauge(meter: Any = _UNSET) -> tuple[bool, str]:
     from tortoise import metering
 
     inadequate = {
-        # ⛔ ONE entry per reader that EXISTS. ``read_per_org_bytes`` was listed
-        # here and is not a name in the module (the audit entry point is
-        # ``per_org_bytes``); ``getattr(..., None)`` turned that into a dead arm
-        # guarded by a dict lookup, so it protected nothing.
         getattr(postgres_bytes, "per_org_bytes", None): "the whole-table audit",
         getattr(metering, "get_postgres_bytes_written", None): "the window addend",
     }
@@ -146,7 +146,19 @@ def _postgres_residency_gauge(meter: Any = _UNSET) -> tuple[bool, str]:
         return False, (
             f"postgres_storage meter={meter!r} is {why}, which the block names "
             f"as insufficient on a write path")
-    return True, f"postgres_storage meter={meter!r} (not either known-inadequate reader)"
+
+    # The artifact chain the SATISFIED answer stands on.
+    reader = callable(getattr(metering, "get_postgres_residency", None))
+    wired = meter is allowance_gate._postgres_stored_bytes
+    migration = sorted((_REPO / "supabase" / "migrations").glob(
+        "*_postgres_residency_gauge.sql"))
+    declared = bool(migration) and all(
+        token in migration[0].read_text(encoding="utf-8")
+        for token in ("org_postgres_residency", "postgres_residency_snapshot"))
+    return (reader and wired and declared), (
+        f"metering.get_postgres_residency={reader}; meter is the residency "
+        f"reader={wired}; the snapshot table + refresh RPC are declared={declared} "
+        f"({migration[0].name if migration else 'NO MIGRATION'})")
 
 
 def _storage_included_amounts_confirmed() -> tuple[bool, str]:
@@ -176,7 +188,13 @@ def _storage_included_amounts_confirmed() -> tuple[bool, str]:
 
 
 def _vector_index_measurable() -> tuple[bool, str]:
-    """The HNSW vector index is measurable, so the graph reading may carry a cap."""
+    """The HNSW vector index is measurable — NECESSARY, not sufficient, for a cap.
+
+    ⛔ This condition alone never makes the graph reading cappable: an EMPTY
+    graph reads ~346 KiB while it rents ~1.46 MB, so the parallel
+    ``per_graph_overhead_attributed`` token is the other half of the same block.
+    A lane that clears this one and lifts the block arms an evadable cap.
+    """
     note = str(graph_storage.PRECISION_NOTE)
     forbids = "until the vector index is measurable" in note
     excluded = graph_storage.VECTOR_INDEX_EXCLUDED in graph_storage.EXCLUDED_OVERHEAD
@@ -185,11 +203,71 @@ def _vector_index_measurable() -> tuple[bool, str]:
         f"VECTOR_INDEX_EXCLUDED still declared as excluded overhead={excluded}")
 
 
+def _per_graph_overhead_attributed() -> tuple[bool, str]:
+    """Per-graph OVERHEAD is charged to the graph, so a cap cannot be evaded.
+
+    ⛔ THE SECOND BLINDNESS, and the reason it is its own token rather than a
+    footnote on the index one. Measured on production 2026-11-16: the instance
+    holds **841 MB** while the sum of per-graph readings over **182** graphs is
+    **419 MB** — the meter sees about HALF — and deleting **148 EMPTY** tenant
+    graphs freed **216 MB**, i.e. **~1.46 MB** of rent per graph that
+    ``GRAPH.MEMORY USAGE`` attributes to **NO** graph (a newly-created graph
+    reads ~**346 KiB**).
+
+    That is not a rounding error; it is an EVASION. A tenant that spreads its
+    storage over many near-empty graphs pays ~1.46 MB of real rent each while the
+    reading sees a few hundred KiB, so a cap summed from these readings never
+    fires for the tenant who grows that way — the ``#1178`` "a cap that can be
+    evaded" class. Clearing the INDEX condition does nothing about it: the two
+    numbers have different causes.
+
+    ⛔ BEHAVIOURAL, NOT TEXTUAL. A source/docstring probe would be satisfied by a
+    sentence, and ``EXCLUDED_OVERHEAD`` alone by deleting an entry. So this asks
+    the module to DO it: remove the exclusion AND charge overhead when readings
+    are combined. Two synthetic zero-byte graphs must come back with a positive
+    total, because two empty graphs are 2 x 1.46 MB of rent, not zero.
+    """
+    excluded = any(
+        str(entry).startswith("per-graph overhead")
+        for entry in graph_storage.EXCLUDED_OVERHEAD)
+    note_excludes = "EXCLUDES per-graph" in str(graph_storage.PRECISION_NOTE)
+    charged = False
+    try:
+        stamps = "2026-11-16T00:00:00+00:00"
+        synthetic = [
+            graph_storage.GraphStorageReading(
+                graph_name=f"probe-{i}", ok=True, total_mb=0.0,
+                indices_mb=0.0, samples=graph_storage.SAMPLES_DEFAULT,
+                repeats=1, readings_mb=(0.0,), min_mb=0.0, max_mb=0.0,
+                spread_mb=0.0, measured_at=stamps)
+            for i in range(2)
+        ]
+        combined = graph_storage.combine_graph_storage_readings(synthetic)
+        # ⛔ A MAGNITUDE, not "some positive number": review round 7 measured a
+        # +1e-9 MB per-graph charge as SATISFIED, which would leave the evasion
+        # intact while ticking the box. The measurement is ~1.46 MB/graph, so two
+        # graphs must combine to at least 1 MB each (2.0) — deliberately below
+        # 1.46 so a conservative per-graph charge still passes, and far above any
+        # token amount.
+        total = float(combined.total_mb or 0.0) if combined else 0.0
+        charged = bool(combined and combined.ok and total >= 2.0)
+    except Exception as e:
+        return False, (
+            f"the combined-reading probe could not be built ({type(e).__name__}: "
+            f"{e}), so overhead attribution is UNPROVEN — failing closed")
+    return (not excluded and not note_excludes and charged), (
+        f"EXCLUDED_OVERHEAD still declares per-graph overhead={excluded}; "
+        f"PRECISION_NOTE still says it EXCLUDES per-graph={note_excludes}; "
+        f"two EMPTY graphs combine to >= 1 MB each (overhead charged)={charged}; "
+        f"combined total={total:.4f} MB")
+
+
 _PREDICATES = {
     "per_org_postgres_attribution": _per_org_postgres_attribution,
     "postgres_residency_gauge": _postgres_residency_gauge,
     "storage_included_amounts_confirmed": _storage_included_amounts_confirmed,
     "vector_index_measurable": _vector_index_measurable,
+    "per_graph_overhead_attributed": _per_graph_overhead_attributed,
 }
 
 #: Phrases a SATISFIED condition must NOT appear as, in a live ``blocked_reason``.
@@ -235,6 +313,13 @@ _RELEASED_PHRASES = {
         "cap MUST NOT be wired",
         "until the vector index is measurable",
     ),
+    "per_graph_overhead_attributed": (
+        # ⛔ The LIVE wording of the SECOND ground, not a summary of it. The
+        # measured shape a stale reason would quote is the per-graph rent being
+        # invisible; both phrasings below occur in the block today.
+        "attributes to NO graph",
+        "~1.46 MB of rent per graph",
+    ),
 }
 
 
@@ -268,17 +353,394 @@ def test_every_release_token_has_a_predicate_and_vice_versa():
         "would appear as, or the arm protects nothing")
 
 
+def test_the_residency_meter_is_the_gauge_and_never_the_addend(monkeypatch):
+    """★ THE WIRING: the meter reads RESIDENCY, and NO ROW is NO READING (#9559).
+
+    The block on ``postgres_storage`` named the difference this test pins — "the
+    ledger reader is the window ADDEND, not the org's stored footprint" — because
+    a storage cap held against bytes-written-this-window does not cap what the
+    org stores (a tenant that wrote 10 GB last window and nothing this one reads
+    as zero). So there are three facts to hold:
+
+    1. the meter CALLS the residency reader, not the ledger reader;
+    2. no snapshot row is NO READING (``None``), never a zero — the fail-open
+       this file documents for every other dimension's absent-value case;
+    3. a snapshot row becomes a reading in the dimension's OWN unit (BYTES, not
+       MB) carrying the audit's ``measured_at`` so the age bound can bite.
+    """
+    calls: list[str] = []
+
+    def fake_reader(org_id: str) -> dict:
+        calls.append(org_id)
+        return {"measured": True, "unmeasured_reason": None,
+                "stored_bytes": 12_345_678, "rows": 42,
+                "measured_at": "2026-11-17T00:00:00+00:00", "source": "audit"}
+
+    monkeypatch.setattr(metering, "get_postgres_residency", fake_reader, raising=True)
+    reading = allowance_gate._postgres_stored_bytes("org_wired")
+    assert calls == ["org_wired"], (
+        "the meter did not call metering.get_postgres_residency — it is wired to "
+        f"something else (called {calls!r})")
+    assert reading is not None and reading.used == 12_345_678, (
+        f"a snapshot row must yield a reading in BYTES ({reading!r}) — the "
+        f"dimension's limit key is max_postgres_storage_bytes")
+    assert reading.measured_at == "2026-11-17T00:00:00+00:00", (
+        "the reading must carry the AUDIT's measured_at, so stale_after_seconds "
+        f"ages the measurement rather than the row write ({reading!r})")
+    assert reading.estimated is False, (
+        "residency is a measured figure (the audit's own per-org row bytes), not "
+        "an estimate — the note must not claim otherwise")
+
+    # ⛔ "NO ROW" IS THREE ANSWERS, and the meter must map them to three DIFFERENT
+    # outcomes — this is the review finding that came out of the owner's own
+    # measurement (#13084/#13102), not from reading the code:
+    #
+    #   absent      -> ABSENT  (the gauge HAS reported; this org stores nothing)
+    #   unreported  -> refuse  (the table is EMPTY: a zero would be fleet-wide)
+    #   read_error  -> refuse  (our fault, still fail-closed)
+    def _unmeasured(reason: str) -> dict:
+        return {"measured": False, "unmeasured_reason": reason,
+                "stored_bytes": None, "rows": None,
+                "measured_at": None, "source": None}
+
+    monkeypatch.setattr(
+        metering, "get_postgres_residency",
+        lambda org_id: _unmeasured("absent")
+        | {"gauge_measured_at": "2026-11-17T00:00:00+00:00"}, raising=True)
+    fresh = allowance_gate._postgres_stored_bytes("org_fresh")
+    assert isinstance(fresh, allowance_gate.MeterReading) and fresh.used == 0.0, (
+        "an org with NO row while the gauge HAS reported stores nothing: that is "
+        "a TRUE ZERO reading, not a refusal — the snapshot row is derived from "
+        "rows only a served write can create, so refusing here deadlocks a fresh "
+        f"tenant's first write forever (#13084 measured it as HTTP 500) ({fresh!r})")
+    # ⛔ AND IT IS STAMPED. An unstamped zero escapes the dimension's age bound:
+    # the snapshot table only ever gains rows, so one refresh would serve every
+    # never-snapshotted org at 0 bytes for good (review round 5, P1, measured).
+    assert fresh.measured_at == "2026-11-17T00:00:00+00:00", (
+        "the zero-by-absence must carry the GAUGE's own instant so "
+        f"stale_after_seconds can age it ({fresh!r})")
+    monkeypatch.setattr(
+        metering, "get_postgres_residency",
+        lambda org_id: _unmeasured("absent"), raising=True)
+    try:
+        allowance_gate._postgres_stored_bytes("org_fresh")
+    except allowance_gate.MeterUnavailable:
+        pass
+    else:
+        raise AssertionError(
+            "an absence the gauge cannot STAMP must be refused, not served: a "
+            "zero nobody can age is the unaged bypass this dimension's evidence "
+            "bound exists to prevent")
+
+    for reason in ("unreported", "read_error", "some_future_reason"):
+        monkeypatch.setattr(
+            metering, "get_postgres_residency",
+            lambda org_id, r=reason: _unmeasured(r), raising=True)
+        try:
+            got = allowance_gate._postgres_stored_bytes("org_x")
+        except allowance_gate.MeterUnavailable:
+            continue
+        raise AssertionError(
+            f"reason {reason!r} must be a NAMED refusal (MeterUnavailable), not "
+            f"{got!r} — 'unreported' read as a zero is a FLEET-WIDE fail-open "
+            "(every org passes any cap), and an unknown reason folded into "
+            "'absent' would silently disarm an allowance the day the reader "
+            "grows one")
+
+    # …and a row whose measured_at is missing cannot be aged, so it is NO READING
+    # too (the gate treats an unageable reading as stale on a bounded dimension).
+    monkeypatch.setattr(
+        metering, "get_postgres_residency",
+        lambda org_id: {"measured": True, "unmeasured_reason": None,
+                        "stored_bytes": 5, "rows": 1,
+                        "measured_at": None, "source": "audit"}, raising=True)
+    try:
+        allowance_gate._postgres_stored_bytes("org_no_timestamp")
+    except allowance_gate.MeterUnavailable:
+        pass
+    else:
+        raise AssertionError(
+            "a snapshot with no measured_at cannot prove freshness on a "
+            "dimension with stale_after_seconds, so it must not become a reading")
+
+
+def test_the_reader_names_why_it_has_no_figure(monkeypatch):
+    """★ `get_postgres_residency` must NAME the no-figure state, not collapse it.
+
+    ⛔ The layer BELOW the meter, and reviewer round 1 measured it as entirely
+    untested: turning the fault branch into `{"stored_bytes": 0,
+    "measured_at": now}` kept the whole suite green. That is the fail-open this
+    dimension's design exists to prevent — a PostgREST fault, an unapplied
+    migration or a broken grant would make EVERY org read 0 bytes and pass any
+    configured cap.
+
+    ⛔ AND THE OPPOSITE COLLAPSE IS ALSO A DEFECT (the owner's `#13084`/`#13102`
+    measurement, arrived at from the gate side): returning one `None` for every
+    no-figure state refuses a fresh tenant's FIRST write forever, because the
+    snapshot row is derived from rows that only a served write can create. That
+    is HTTP 500 on `POST /v1/points` for a brand-new paying tenant, measured in
+    CI twice. So the reader distinguishes:
+
+    * ``absent``      — the gauge HAS reported (some org has a row) and this one
+      holds nothing ⇒ a TRUE zero, consumed only by the dimension's declaration;
+    * ``unreported``  — the table is EMPTY ⇒ nothing measured for anyone;
+    * ``read_error``  — our fault.
+
+    Mutation this REDs: fold any two of the three into one another (measured).
+    """
+    # 1. No org context (stdio/operator) — nothing to look up.
+    assert metering.get_postgres_residency("")["unmeasured_reason"] == "read_error", (
+        "an empty org_id establishes nothing; it must not be reported as a "
+        "tenant-absent zero")
+
+    # 2. The registry/embedded lane has no residency table — UNREPORTED, not zero:
+    #    a zero there would arm a cap against a figure nobody measures.
+    monkeypatch.setattr(metering, "_supabase_mode", lambda: False, raising=True)
+    lane = metering.get_postgres_residency("org_registry")
+    assert lane["measured"] is False and lane["unmeasured_reason"] == "unreported", (
+        f"outside Supabase mode there is no residency gauge, so the answer must "
+        f"be UNREPORTED — a zero would let every org pass a storage cap there "
+        f"({lane!r})")
+
+    # 3. A read FAULT is read_error (refused), never absent and never a zero.
+    monkeypatch.setattr(metering, "_supabase_mode", lambda: True, raising=True)
+
+    class _Boom:
+        def query(self, *_a, **_k):
+            raise RuntimeError("postgrest 503")
+
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: _Boom(),
+        raising=True)
+    faulted = metering.get_postgres_residency("org_fault")
+    assert faulted["measured"] is False         and faulted["unmeasured_reason"] == "read_error", (
+        "a read FAULT must be read_error, never 'absent': an unreadable snapshot "
+        f"reported as an absent org would read as 0 bytes and pass every cap "
+        f"(got {faulted!r})")
+
+    # 4. NO ROW FOR THIS ORG, but the gauge has reported → `absent` (a true zero).
+    class _GaugeReported:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def query(self, _table, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs.get("filters"):
+                return []                      # this org has no row
+            return [{"measured_at": "2026-11-17T00:00:00+00:00"}]  # others do
+
+    plane = _GaugeReported()
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: plane, raising=True)
+    absent = metering.get_postgres_residency("org_fresh")
+    assert absent["unmeasured_reason"] == "absent", (
+        f"an org with no row while OTHER orgs have one stores nothing — that is "
+        f"a true zero, not an unknown ({absent!r})")
+    assert len(plane.calls) == 2, (
+        "the absent answer must be ESTABLISHED by asking whether the gauge has "
+        "ever reported (one extra, limit=1 probe), not assumed from an empty "
+        f"result (calls={plane.calls!r})")
+    assert plane.calls[1].get("limit") == 1, (
+        "the gauge-state probe must be bounded — it runs on the write path, so "
+        f"it may not read the whole table ({plane.calls[1]!r})")
+    assert plane.calls[1].get("order") == "measured_at.desc", (
+        "the probe must ask for the NEWEST report: 'has the gauge ever run' is "
+        "true forever in a table that only gains rows, so an unordered probe "
+        "hands the gate an arbitrary age and lets a 400-day-old refresh serve "
+        f"every never-snapshotted org at 0 bytes ({plane.calls[1]!r})")
+    assert absent["gauge_measured_at"] == "2026-11-17T00:00:00+00:00", (
+        "the absence must carry the probe's instant so the gate can age it "
+        f"against stale_after_seconds ({absent!r})")
+
+    # 5. NO ROW AND the table is EMPTY → `unreported`: nothing measured for
+    #    anyone, which a zero would turn into a fleet-wide fail-open.
+    class _NeverRan:
+        def query(self, _table, **_kwargs):
+            return []
+
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: _NeverRan(),
+        raising=True)
+    never = metering.get_postgres_residency("org_any")
+    assert never["measured"] is False         and never["unmeasured_reason"] == "unreported", (
+        "an EMPTY snapshot table means the refresh has never run, so a zero "
+        "here would be a FLEET-WIDE fail-open — every org comparing as 0 bytes "
+        f"and passing any cap (got {never!r})")
+
+    # 6. A row IS found → measured, with the audit's own stamp.
+    class _HasRow:
+        def query(self, _table, **_kwargs):
+            return [{"stored_bytes": 4096, "rows": 3,
+                     "measured_at": "2026-11-17T00:00:00+00:00",
+                     "source": "audit"}]
+
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: _HasRow(),
+        raising=True)
+    measured = metering.get_postgres_residency("org_has_row")
+    assert measured["measured"] is True and measured["stored_bytes"] == 4096         and measured["measured_at"] == "2026-11-17T00:00:00+00:00", (
+        f"a snapshot row must be returned as a MEASURED reading ({measured!r})")
+
+
+def test_a_fresh_org_is_served_at_zero_instead_of_deadlocking(monkeypatch):
+    """★ THE DEADLOCK, end to end through the GATE (not just the meter).
+
+    A brand-new tenant, a live gauge (other orgs have snapshots), no row of its
+    own, and an allowance configured. The correct outcome is SERVED at 0 bytes —
+    and this is the acceptance the issue's own Objective states ("rather than
+    being inert or 500-ing").
+
+    ⛔ Why serving is correct and not a fail-open: the snapshot row is DERIVED
+    from the org's rows, which only a served write can create. Refusing here
+    refuses the write that would make the row appear — forever. Measured for the
+    sibling gauge in CI (`#13084`/`#13102`): `POST /v1/points` → HTTP 500 for a
+    tenant far under its cap.
+
+    Mutation this REDs: drop ``absent_is_zero=True`` from the dimension (the
+    ABSENT sentinel then degrades to no-reading and the write is refused), or
+    make the meter return ``None`` for ``absent``.
+    """
+    # ⛔ The ARMED copy: the live dimension is BLOCKED, so the gate refuses
+    # before any meter is consulted. This test is about the state that exists
+    # AFTER the block lifts, which is the state the wiring must be right for —
+    # the issue's whole ordering rule ("before any allowance is configured").
+    dim = dataclasses.replace(
+        _dim("postgres_storage"), blocked_reason=None,
+        meter=lambda org_id: allowance_gate.MeterReading(
+            used=0.0,
+            measured_at=datetime.now(UTC).isoformat(),
+            estimated=False,
+            note="no rows attributed to this org at the gauge's last refresh"))
+    assert dim.absent_is_zero is False, (
+        "postgres_storage must NOT declare absent_is_zero: that routes the "
+        "unageable ABSENT sentinel around _stale, and a GAUGE's absence does "
+        "have an age (the refresh that reported it). Measured: with the "
+        "declaration the same call served 0 bytes at a 400-day-old gauge age")
+
+    reading = allowance_gate._reading(dim, "org_fresh", None, observed_only=False)
+    assert reading is not None and reading.used == 0.0, (
+        "a fresh org with no residency row must read as a TRUE ZERO, not "
+        f"refuse: refusing deadlocks its first write (#13084) ({reading!r})")
+
+    # ★ THE HALF THAT MAKES IT SAFE: the same zero, aged, is REFUSED. Without
+    # this the deadlock fix would be a permanent bypass — in a table that only
+    # ever gains rows, "the gauge has reported" is true forever after one run.
+    stale_dim = dataclasses.replace(
+        dim,
+        meter=lambda org_id: allowance_gate.MeterReading(
+            used=0.0,
+            measured_at=(datetime.now(UTC)
+                         - timedelta(seconds=400_000)).isoformat(),
+            estimated=False,
+            note=""))
+    with pytest.raises(allowance_gate.QuotaCheckError) as stale_exc:
+        allowance_gate._reading(stale_dim, "org_fresh", None, observed_only=False)
+    assert "stale" in str(stale_exc.value).lower(), (
+        "a zero-by-absence measured at a gauge age beyond the bound must be "
+        f"REFUSED as stale, not served ({stale_exc.value})")
+
+
+def test_a_never_scheduled_refresh_refuses_instead_of_reading_zero(monkeypatch):
+    """★ The other half: `unreported` must NOT ride in on the same door as `absent`.
+
+    If ``absent_is_zero`` consumed ``unreported`` too, arming a cap on a fleet
+    whose refresh has never run would read EVERY org as 0 bytes — a cap that
+    binds for nobody, i.e. the fail-open in its purest form. The dimension's
+    declaration is only safe BECAUSE the reader separates the two.
+
+    Mutation this REDs: make the reader report ``absent`` when the snapshot table
+    is empty (one-line change, measured).
+    """
+    def _unreported(org_id: str):
+        raise allowance_gate.MeterUnavailable(
+            "the postgres residency gauge has never reported")
+
+    dim = dataclasses.replace(
+        _dim("postgres_storage"), blocked_reason=None, meter=_unreported)
+
+    try:
+        allowance_gate._reading(dim, "org_any", None, observed_only=False)
+    except allowance_gate.QuotaCheckError as exc:
+        assert "no reading" in str(exc) or "could not be measured" in str(exc), (
+            f"the refusal must name a MISSING FIGURE, not a cap breach ({exc})")
+    else:
+        raise AssertionError(
+            "a gauge that has never reported must REFUSE rather than read as 0 "
+            "bytes — a zero there passes every org's cap (fleet-wide fail-open)")
+
+
+def test_a_stale_snapshot_is_refused_rather_than_enforced(monkeypatch):
+    """The evidence-age bound: a snapshot older than the bound REFUSES the write.
+
+    A residency snapshot describes the table as of ``measured_at``. Enforcing a
+    cap against a figure from before a large write would bill or refuse on rows
+    that no longer describe the org — which is why the dimension carries
+    ``stale_after_seconds`` at all, and why the answer to "too old" is a refusal
+    rather than a silent pass.
+
+    ⛔ THE GATE-LEVEL LEG DRIVES AN **UNBLOCKED** DIMENSION (review finding 5).
+    It used to call ``enforce_allowances`` on the LIVE ``postgres_storage``,
+    which still carries ``blocked_reason`` — so ``_reading``'s TOP guard raised
+    *before any meter was consulted*, and the assert passed only because that
+    BLOCKED message happens to contain the token ``stale_after_seconds``. The
+    line meant "a stale snapshot is refused, naming staleness" and proved "a
+    blocked dimension is refused": deleting ``_reading``'s stale arm left it
+    GREEN (measured — round 5 recorded it, round 6 measured it still here).
+    It now asserts a phrase staleness OWNS (``older than``, which the blocked
+    reason does not contain) on a dimension the block cannot pre-empt.
+
+    Mutation this REDs: drop ``stale_after_seconds`` from the dimension (the
+    reading then enforces at any age), or ignore ``measured_at`` in ``_stale``,
+    or delete ``_reading``'s stale raise.
+    """
+    dim = _dim("postgres_storage")
+    assert dim.stale_after_seconds, (
+        "postgres_storage must declare an evidence-age bound: a snapshot has an "
+        "age, and enforcing one without a bound decides from a figure we cannot "
+        "defend")
+
+    def old_reader(org_id: str) -> dict:
+        return {"measured": True, "unmeasured_reason": None,
+                "stored_bytes": 1_000, "rows": 1,
+                "measured_at": "2000-01-01T00:00:00+00:00", "source": "audit"}
+
+    monkeypatch.setattr(metering, "get_postgres_residency", old_reader, raising=True)
+    assert allowance_gate._stale(
+        allowance_gate._postgres_stored_bytes("org_old"), dim) is True, (
+        "a 2000-vintage snapshot is stale against a 24 h bound")
+
+    # ⛔ THE ARMED COPY, exactly as the sibling "fresh org" test builds it: the
+    # LIVE dimension is BLOCKED, so a gate-level call on it can never reach the
+    # staleness arm. This is the state that exists AFTER the block lifts, which
+    # is the state the arm has to be right for.
+    armed = dataclasses.replace(dim, blocked_reason=None)
+    monkeypatch.setattr(allowance_gate, "DIMENSIONS",
+                        tuple(armed if d.dimension == dim.dimension else d
+                              for d in DIMENSIONS))
+    # The gate's own entry point (``quota`` reaches it through
+    # ``enforce_org_limit``, which takes no meter seam). This is the same function
+    # the configured-allowance path calls.
+    with pytest.raises(allowance_gate.QuotaCheckError) as excinfo:
+        allowance_gate.enforce_allowances(
+            {dim.limit_key: 10_000}, org_id="org_old", resource="points")
+    message = str(excinfo.value)
+    assert "older than" in message and str(dim.stale_after_seconds) in message, (
+        "a stale snapshot must be REFUSED with the message the STALENESS arm "
+        "owns (the age and the bound), not with a blocked-dimension message "
+        f"that merely quotes ``stale_after_seconds``, got: {message}")
+
+
 def test_the_residency_refusal_still_fires():
     """★ The refusal arm, EXECUTED — not merely spelled in the predicate.
 
-    ⛔ Reviewer round 5 measured this arm as unreachable: the live registry holds
-    ``postgres_storage.meter=None``, so ``_postgres_residency_gauge()`` returns
-    before the inadequate-reader dict is consulted, and BOTH of these mutants
-    stayed GREEN — deleting the refusal entirely, and renaming
+    ⛔ Reviewer round 5 measured this arm as UNREACHABLE while the live registry
+    held ``postgres_storage.meter=None``: the predicate returned before the
+    inadequate-reader dict was consulted, so BOTH of these mutants stayed GREEN —
+    deleting the refusal entirely, and renaming
     ``metering.get_postgres_bytes_written`` so the ``getattr(..., None)`` lookup
-    missed and the entry was ``pop``ped away. That is the dead-arm class round 2
-    already fixed once here (``read_per_org_bytes``), so the arm is now driven
-    through the seam and the two reader NAMES are pinned by resolution.
+    missed and the entry was ``pop``ped away. #9559 wires a real meter, and the
+    seam below keeps the arm executable anyway; the reader NAMES are pinned by
+    resolution so a rename REDs instead of going silent.
 
     Mutation this REDs: delete the ``why`` arm, or rename/isdelete either reader
     the dict matches, or make ``meter`` default to something other than the live
@@ -310,19 +772,71 @@ def test_the_residency_refusal_still_fires():
             f"the refusal for {reader!r} does not say WHY it is insufficient "
             f"(expected {why!r}):\n  {evidence}")
 
-    # …and a reader that is neither known-inadequate still reports SATISFIED, so
-    # the arm refuses specifically rather than always.
-    sentinel = object()
-    satisfied, evidence = _postgres_residency_gauge(meter=sentinel)
-    assert satisfied is True, (
-        f"an unrelated meter must still satisfy the predicate, or the refusal is "
-        f"really an always-False:\n  {evidence}")
+    # …an UNRELATED callable is not a gauge either. Since #9559 the condition IS
+    # satisfied, and the tempting shortcut is to satisfy it on any callable that
+    # is not one of the two refusals — round 1's defect one edit over. The
+    # artifact chain is revalidated, so a stranger is refused.
+    satisfied, evidence = _postgres_residency_gauge(meter=lambda org_id: None)
+    assert satisfied is False and "residency reader=False" in evidence, (
+        "an unrelated meter must NOT satisfy the residency gauge — satisfaction "
+        "rests on the snapshot reader being the one the gate calls:\n  "
+        f"{evidence}")
 
-    # …and the live reading is still the registry, not the seam's default.
+    # …and the POSITIVE control: the wired residency reader DOES satisfy it, so
+    # the predicate is not an always-False.
+    satisfied, evidence = _postgres_residency_gauge(
+        meter=allowance_gate._postgres_stored_bytes)
+    assert satisfied is True, (
+        "the residency reader the dimension is wired to must satisfy its own "
+        f"condition, or the block can never end:\n  {evidence}")
+
+    # …and the no-argument call reads the LIVE registry, which since #9559 holds
+    # the residency meter — NOT either inadequate reader, which is the property
+    # this row exists to keep true now that the gauge is wired.
     live, live_evidence = _postgres_residency_gauge()
-    assert live is False and "meter=None" in live_evidence, (
-        "the no-argument call must read the LIVE registry (postgres_storage.meter "
-        f"is None today):\n  {live_evidence}")
+    assert live is True, (
+        "the no-argument call must read the LIVE registry, whose meter is now the "
+        f"residency gauge (#9559):\n  {live_evidence}")
+    assert allowance_gate._postgres_stored_bytes in (
+        _dim("postgres_storage").meter, ) or (
+            _dim("postgres_storage").meter is allowance_gate._postgres_stored_bytes), (
+        "postgres_storage's meter is not the residency reader — the gauge this "
+        "condition reports SATISFIED for is not the one the gate calls")
+
+
+def test_the_graph_block_names_BOTH_grounds_the_meter_is_blind_to():
+    """★ The graph block has TWO obstacles, and lifting one does not lift the block.
+
+    Measured on production 2026-11-16: **841 MB** resident vs **419 MB** summed
+    over **182** graphs — the meter sees about HALF. Two causes, and they are
+    independent:
+
+    * the **vector index** share is under-reported 8.5x-21.7x (its own token);
+    * **per-graph overhead** (~1.46 MB each) is attributed to **NO** graph —
+      deleting 148 EMPTY graphs freed 216 MB, while a newly-created graph reads
+      ~346 KiB. That is the EVASION: spread storage over near-empty graphs and a
+      cap summed from these readings never fires.
+
+    So a lane that makes the index measurable and lifts the block on that alone
+    would arm a cap the tenant can step around at ~1.46 MB a graph. The release
+    MUST name both, which is why this asserts the pair rather than membership of
+    one.
+
+    Mutation this REDs: drop either token from ``release`` (measured).
+    """
+    dim = _dim("graph_storage")
+    assert set(dim.release) >= {
+        "vector_index_measurable", "per_graph_overhead_attributed"}, (
+        "the graph block must name BOTH blindnesses — the vector index AND the "
+        f"per-graph overhead a tenant can multiply (got {dim.release!r})")
+    reason = dim.blocked_reason or ""
+    assert "1.46 MB" in reason and "841 MB" in reason, (
+        "the reason must carry the PRODUCTION measurement the second ground "
+        "rests on: a paraphrase is what let the first ground go stale (" +
+        reason[:200] + ")")
+    assert "BOTH" in reason.upper(), (
+        "the reason must say the block waits on both conditions, or a lane "
+        "reads it as a checklist and lifts on the cheaper one")
 
 
 @pytest.mark.parametrize("dim", [d for d in DIMENSIONS if d.blocked],
@@ -394,7 +908,10 @@ def test_a_satisfied_condition_is_not_quoted_as_the_obstacle(dim):
         if not satisfied:
             continue
         for phrase in _RELEASED_PHRASES[token]:
-            assert phrase not in reason, (
+            # Casfolded for the reason above: a stale premise quoted
+            # sentence-initial is the same defect with a capital letter.
+            assert " ".join(phrase.split()).casefold() not in " ".join(
+                reason.split()).casefold(), (
                 f"{dim.dimension!r}: release condition {token!r} is SATISFIED "
                 f"({evidence}) but its phrase {phrase!r} is still quoted as the "
                 f"current obstacle in blocked_reason:\n  {reason}")
@@ -430,7 +947,8 @@ def test_an_unsatisfied_condition_phrase_is_live_against_its_block(dim, token):
         pytest.skip(f"{token} is SATISFIED — the complementary arm covers it")
     assert dim.blocked_reason, f"{dim.dimension} cites {token} but has no reason"
     flat = " ".join(str(dim.blocked_reason).split())
-    live = [p for p in _RELEASED_PHRASES[token] if " ".join(p.split()) in flat]
+    live = [p for p in _RELEASED_PHRASES[token]
+            if " ".join(p.split()).casefold() in flat.casefold()]
     assert live, (
         f"{dim.dimension} is blocked on the UNSATISFIED condition {token!r} "
         f"({why}), but NONE of its registered phrases appears in the live "
@@ -459,7 +977,7 @@ def test_the_staleness_guard_has_at_least_one_live_token():
         "file's staleness coverage must be re-homed deliberately, not assumed")
 
 
-def test_exactly_the_attribution_condition_is_satisfied_today():
+def test_exactly_the_two_MEASUREMENT_conditions_are_satisfied_today():
     """The one SATISFIED condition is asserted POSITIVELY, so its proof cannot lapse.
 
     `per_org_postgres_attribution` is the finding of this issue (#12762 landed the
@@ -482,7 +1000,7 @@ def test_exactly_the_attribution_condition_is_satisfied_today():
     # is pinned, so a second condition firing is a lane's prompt to LIFT A BLOCK
     # (the docstring above) rather than a silent change in what this file proves.
     now = {t for t, fn in _PREDICATES.items() if fn()[0]}
-    assert now == {"per_org_postgres_attribution"}, (
+    assert now == {"per_org_postgres_attribution", "postgres_residency_gauge"}, (
         f"the set of satisfied release conditions changed: {sorted(now)} — if a "
         f"condition genuinely fired, re-derive every blocked dimension that cites "
         f"it (lift the block, or add the NEW condition with its evidence); if it "
@@ -536,8 +1054,16 @@ def test_the_falsified_premise_is_actually_recorded_as_released():
 
 # ── the falsified-premise scan, as a UNIT, so its GRANULARITY is testable ─────
 #
-# Phrasings that assert the per-org byte attribution does NOT exist.
+# Phrasings that assert a RETIRED premise as current. ⛔ EVERY premise this issue
+# has retired, not just the first: reviewer round 1 measured the scan as blind to
+# the SECOND — #9559 wires the residency gauge, and "no per-org RESIDENCY GAUGE"
+# was still asserted as current in two files outside this dict, including the ops
+# doc the gate's own OVERRIDES line cites. A scan that covers one retired premise
+# and not the next is the same defect one round later.
 _RELEASED_ASSERTIONS = (
+    "no per-org RESIDENCY GAUGE",
+    "no per-org gauge exists that is affordable per write",
+    "neither the audit nor",
     "no per-org figure at all",
     "HAS NO PER-ORG BYTE METER",
     "records no per-org byte ownership",
@@ -595,7 +1121,18 @@ def _premise_offenders(text: str) -> list[str]:
             continue
         for sentence in _scannable(flat):
             for phrase in _RELEASED_ASSERTIONS:
-                if " ".join(phrase.split()) in sentence:
+                # ⛔ CASEFOLDED. Reviewer round 2 measured the case-sensitive form
+                # as blind to the most natural restatement of a premise: with
+                # "No per-org RESIDENCY GAUGE exists that this gate can afford on
+                # a write path." at the head of the live ``blocked_reason`` the
+                # suite was COMPLETELY GREEN, while the identical sentence with a
+                # lowercase ``n`` REDdened. That is not the documented
+                # paraphrase limit — it is the SAME registered string, differing
+                # only in the case of its first letter, i.e. the shape any lane
+                # writes when it restates a premise as a sentence. Measured: zero
+                # false-red candidates across the scanned surfaces under a
+                # casefolded matcher.
+                if " ".join(phrase.split()).casefold() in sentence.casefold():
                     hits.append(f"{phrase!r} in: {sentence[:90]}")
     return hits
 
@@ -630,6 +1167,63 @@ def test_the_marker_exemption_covers_only_the_sentence_that_asks_for_it():
         f"scan did not fire: {hits!r}")
 
 
+def test_the_two_artifacts_that_named_the_missing_gauge_now_name_it():
+    """The sentence #9559 retires, pinned by FINGERPRINT in the two files that
+    carried it — and pinned POSITIVELY, so the correction cannot be reverted by
+    deleting a paragraph.
+
+    Round 1 of this PR measured the premise scan (above) as blind to the SECOND
+    retired premise: the ops doc the gate's own ``OVERRIDES:`` line cites still
+    said arming needs *"a per-org gauge the gate can afford on a write path
+    (neither the audit nor the ledger addend is one)"*, and the sibling test's
+    docstring still said the block rested on two grounds. Both are the artifact a
+    lane READS before re-deriving — the failure mode this issue exists to stop.
+
+    ⛔ NOT a phrase scan. These files legitimately carry history and negative
+    assertions, so the guard is the positive one: each file must NAME the gauge
+    that now exists, and the retracted fingerprint must be gone.
+
+    Mutation this REDs: revert either text (the ops doc to "neither the audit nor
+    the ledger addend is one", the test docstring to "has no per-org RESIDENCY
+    gauge"), or delete the gauge's name from either.
+    """
+    ops = (_REPO / "docs" / "ops" / "postgres-storage-measurement.md").read_text(
+        encoding="utf-8")
+    flat_ops = " ".join(ops.split())
+    assert "postgres_residency_snapshot" in flat_ops, (
+        "the ops doc does not name the refresh RPC — an operator reading the "
+        "authoritative record cannot schedule what it never mentions")
+    assert "org_postgres_residency" in flat_ops, (
+        "the ops doc does not name the snapshot table the gate reads")
+    # ⛔ CASEFOLDED, for round 2's reason applied to this guard too (round 3
+    # measured it as still lowercase-only): a fingerprint is matched against
+    # prose, and prose starts sentences with a capital. A sentence-initial
+    # "Neither the audit nor the ledger addend is one." restates the retired
+    # position and was invisible here while the round-2 matchers were fixed.
+    assert "neither the audit nor the ledger addend is one".casefold() not in (
+        flat_ops.casefold()), (
+        "the ops doc still states the RETIRED position (that no affordable "
+        "per-org figure exists) — #9559 wired one, and this is the artifact the "
+        "gate's OVERRIDES line cites as the record")
+
+    sibling = (_REPO / "tests" / "test_allowance_gate.py").read_text(
+        encoding="utf-8")
+    flat_sib = " ".join(sibling.split())
+    # The one allowed form is the HISTORICAL "… existed"; casefold both sides so
+    # an exemption cannot be defeated by a capital and the fingerprint cannot be
+    # hidden by one.
+    assert "no per-org RESIDENCY gauge".casefold() not in flat_sib.casefold().replace(
+        "no per-org residency gauge existed", ""), (
+        "tests/test_allowance_gate.py still asserts the gauge is missing as "
+        "current (only the HISTORICAL form \"no per-org RESIDENCY gauge "
+        "existed\" is allowed) — a docstring is what the next lane reads before "
+        "editing the assertion below it")
+    assert "#9559" in flat_sib, (
+        "tests/test_allowance_gate.py's docstring does not record that #9559 "
+        "wired the gauge, so the next reader concludes the block still waits on "
+        "it")
+
+
 def test_no_other_surface_still_asserts_a_released_ground_as_current():
     """The scan surface for the falsified premise, beyond ``blocked_reason``.
 
@@ -652,6 +1246,14 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
         # is the drift this issue is about.
         "cost_dimensions module docstring": cost_dimensions.__doc__ or "",
     }
+    # ⛔ TWO ARTIFACTS ARE DELIBERATELY NOT IN THIS DICT, and the reason is
+    # measured, not squeamish: `docs/ops/postgres-storage-measurement.md` states
+    # "Postgres records no per-org byte ownership" about the SERVER (still true —
+    # the audit derives the figure from rows) and `tests/test_allowance_gate.py`
+    # ASSERTS the absence of a retracted phrase. A phrase tripwire cannot tell a
+    # true statement or a negative assertion from a restatement, so it false-reds
+    # on both (measured). Their correction is pinned precisely instead, by
+    # ``test_the_two_artifacts_that_named_the_missing_gauge_now_name_it``.
     # Phrasings and the exemption's granularity live in ``_premise_offenders``
     # above, so the GRANULARITY is itself asserted
     # (``test_the_marker_exemption_covers_only_the_sentence_that_asks_for_it``)
@@ -986,3 +1588,6 @@ def test_the_restore_verb_still_exists():
         "or its branch no longer CALLS the handler, so the G5 pin's premise (a "
         "door a tenant reaches) is false. Re-derive which file now holds the "
         "restore door and add it to the G5 scan set")
+
+
+

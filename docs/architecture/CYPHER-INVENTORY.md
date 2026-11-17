@@ -35,8 +35,8 @@ this document classifies **statements**.
 | `fulltext` | 2 |
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 106 |
-| non-Cypher door calls (excluded from every shape total) | 256 |
-| **AST door calls** = census + non-Cypher | **1567** |
+| non-Cypher door calls (excluded from every shape total) | 258 |
+| **AST door calls** = census + non-Cypher | **1569** |
 
 > **The finding, with its count: 578 of 1311 product statements (44.1 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
@@ -97,15 +97,15 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,620 occurrences of the door predicate across 108 files
-2,340 occurrences of the verb predicate across 142 files   (upper-bound shape, see below)
+1,622 occurrences of the door predicate across 108 files
+2,342 occurrences of the verb predicate across 142 files   (upper-bound shape, see below)
 
-1,620  regex door-pattern occurrences
+1,622  regex door-pattern occurrences
   −53  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,567  occurrences on a line carrying a door CALL          [measured]
+= 1,569  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,567  AST door calls
-= 1311  classified Cypher statements + 256 non-Cypher door calls
+= 1,569  AST door calls
+= 1311  classified Cypher statements + 258 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -113,19 +113,19 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,620** across **108** files: exactly the
-tool's number. A bare `rg … tortoise/` gives 1,626 / 109, the 6 extra occurrences living in
-`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,620 / 108 on this tree, because
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,622** across **108** files: exactly the
+tool's number. A bare `rg … tortoise/` gives 1,628 / 109, the 6 extra occurrences living in
+`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,622 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,327** across **141** files, while the tool
-reports 2,340 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,329** across **141** files, while the tool
+reports 2,342 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
 concatenation leaves `MATCH` and its `(` on two lines, one occurrence to the tool and none to `rg`.
-(A bare case-sensitive `rg` gives 2,061, and `-i` without the exclusion 2,399 — which is why the
+(A bare case-sensitive `rg` gives 2,060, and `-i` without the exclusion 2,401 — which is why the
 number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
-the **= 1,565 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+the **= 1,569 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
@@ -239,8 +239,8 @@ The order a campaign should take, derived from §3 rather than chosen:
 | # | class | why here | size |
 |---|---|---|---|
 | 1 | `plain` reads already served by `record_serve` (`point-by-id`, `node-by-key`) | simplest shape (one node, one key) **and** the seam serving it already shipped with a parity rule | 2 reads, measured in §5 |
-| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 575 |
-| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 575 |
+| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 578 |
+| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 578 |
 | 4 | `plain` writes | **not a Cypher→SQL move** — these disappear with the node when `#13083` makes the shape `record_only` | 281 |
 | — | `adjacency` / `traversal` / `ep` / `fulltext` | **do not flip without a reopen on `#4051`** | 329 |
 
@@ -391,16 +391,61 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where these numbers were last cut:** `origin/main` **`b8f56fdec4`** — `non_cypher_door_calls`
-258→256 and `ast_door_calls` 1569→1567 (no `sites`/`plain`/`candidates` movement), Appendix A
-regenerated with `--markdown`. `#13249` is the PR that moved them: it converted the two
+**Where THESE numbers were cut:** `#13249`'s branch, merged with `origin/main` **`a218f8867b`**, and
+re-derived from that merged tree — not by arithmetic on the markers. The branch converts the two
 `public.graphs` reads in the org purge to `query_all`, and `query_all` is not a `DOORS` entry
 (`tools/cypher_inventory.py:148`), so each conversion REMOVES **one** door call and adds no
-statement site — two conversions, Δ−2, which is why `sites`/`plain`/`candidates` did not move. ⛔ Exactly the hazard this section describes — the branch measured 1567/256 at its
-own head while `origin/main` had moved three commits on, so the pins were re-cut **after** the
-merge, which is the order this procedure mandates.
+statement site: `ast_door_calls` **1571→1569** and `non_cypher_door_calls` **260→258**, while
+`sites`/`plain`/`candidates` are unchanged (1311 / 859 / 578 — the 578 is the `plain` READ half,
+which is also the migration-candidate count). `files_scanned` stays 297 and `files_with_sites` 99:
+both conversions land in a file that already carries sites. The `rg` reconciliation in §1 is
+re-measured on this tree (1,622 / 2,329 / 1,628 bare / 2,060 / 2,401), Appendix A is regenerated
+with `--markdown`, and `--check` reports **`25 pinned counts match`**.
+⛔ **The re-derivation is not a formality at this head, and this is the case that proves it:** the
+branch's own pre-merge tree measured **1567 / 256**, and `origin/main`'s measured **1571 / 260** —
+**neither is the answer.** `#9559` (`a218f8867b`) ADDED two door calls to the same counter `#13249`
+removes two from, so the merged tree's composition is neither parent's; a lane that carried either
+number forward, or that reused the pre-merge cut this branch had already recorded, would have
+written wrong pins that `--check` would then have accepted. Two different compositions of adds and
+removes reach one total, and only running the tool says which tree you are holding.
 
-**Previous cut:** `origin/main` **`97fd713ffb`** — `sites` 1306→1308, `plain`
+The paragraph below is `#9559`'s cut on `main`, kept as the record of it.
+
+**Where these numbers were last cut:** the PINS by `main`'s **`05fe46e94e`**, re-derived at
+`origin/main` **`b8f56fdec4`**. ⚠️ Both columns below are the CENSUS's own measurements at those two
+commits, not the marker values — the markers `main` carried into the re-cut were themselves stale,
+which is why the two sets differ:
+
+| what | measured at `534f3e1bee` (parent of the re-cut) | measured at `b8f56fdec4` |
+|---|---|---|
+| `sites` | 1309 (its marker said **1308**) | 1311 |
+| `files` | 98 | 99 |
+| `shape_plain` | 857 (its marker said **856**) | 859 |
+| `ast_door_calls` | 1567 (its marker said **1565**) | 1569 |
+| `files_scanned` | 297 | 297 (unchanged) |
+
+`tools/cypher_inventory.py --check` was **RC=1** at `534f3e1bee` on six counts, so `05fe46e94e`
+corrected six, not three: the three rows above (their stale markers in parentheses) **plus**
+`candidates` (575→576), `shape_plain_read` (575→576) and `non_cypher_door_calls` (257→258).
+(`files` 98→99 did NOT drift: the population stayed at 297 scanned files, and `tortoise/api.py`
+gained its FIRST statement site inside `#12910`'s own diff — a file newly carrying sites, not a
+count that was wrong.) Re-derived by running the tool at both commits and diffing the sets of
+carrying files; nothing here is arithmetic on the marker values.
+
+⛔ **Appendix A, however, was NOT re-cut by that commit, and this is the defect that keeps
+recurring here:** the pins are 25 SCALARS, so an insertion inside a file that already carries
+sites moves the `file:line` rows and moves no count. Measured at `b8f56fdec4`: `--check` prints
+`25 pinned counts match` while **6 appendix rows name lines that no longer carry their statement** —
+five in `tortoise/metering.py` (`measure_write_ops`, `_record_graph_storage_reading_locked`,
+`get_graph_storage_reading`, `record_postgres_bytes_written`, and the reading writer below them)
+and one in `tortoise/postgres_bytes.py`. This change regenerates Appendix A with `--markdown` at
+that head (verified byte-identical to a fresh run) and adds
+`tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` so the next
+main-move cannot repeat it — which is step 1 of the procedure above enforced instead of trusted.
+
+<details><summary>the previous cut (kept as history)</summary>
+
+`origin/main` **`97fd713ffb`** — `sites` 1306→1308, `plain`
 854→856 (read 573→575; the 281 write half is unchanged), `candidates` 573→575, `files_scanned`
 296→297, `ast_door_calls` 1563→1565, the `rg` reconciliation in §1 re-measured on this tree, and
 Appendix A regenerated with `--markdown`.
@@ -412,7 +457,9 @@ the pin it inherited (`1302` + its own four) instead of re-deriving from the mer
 measured on `7c1df6e7d6` — stayed absorbed only on paper. Measured, not inferred: `--json` at
 `7c1df6e7d6` reports 1304 sites with 0 in `tortoise/planned_occurrence.py`; at `97fd713ffb` it reports
 1308 with that one file carrying exactly 4, and `tortoise/projection/entities.py` reads 54 at BOTH.
-The numbers above are re-derived from `97fd713ffb`'s tree; this PR adds no statement site of its own.
+The numbers above are re-derived from `97fd713ffb`'s tree; that PR added no statement site of its own.
+
+</details>
 
 `.github/workflows/cypher-diff.yml` runs the **differential harness steps first and this census step
 LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers are then wrong), but
@@ -441,8 +488,8 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_traversal_read = 3 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 106 -->
-<!-- cypher-inventory:non_cypher_door_calls = 256 -->
-<!-- cypher-inventory:ast_door_calls = 1567 -->
+<!-- cypher-inventory:non_cypher_door_calls = 258 -->
+<!-- cypher-inventory:ast_door_calls = 1569 -->
 <!-- cypher-inventory:partial = 314 -->
 
 ---
@@ -967,11 +1014,11 @@ the order was fixed (`#13098` review F8).
 | `tortoise/metering.py:2126` | `get_cohort_spend_usd` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord) WHERE m.org_id IN $ids AND m.period_start <…` |
 | `tortoise/metering.py:2218` | `get_current_usage` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
 | `tortoise/metering.py:2235` | `get_current_usage` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $tid}) RETURN t.tier` |
-| `tortoise/metering.py:2469` | `measure_write_ops` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
-| `tortoise/metering.py:2708` | `_record_graph_storage_reading_locked` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
-| `tortoise/metering.py:2808` | `get_graph_storage_reading` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
-| `tortoise/metering.py:2922` | `record_postgres_bytes_written` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
-| `tortoise/metering.py:2975` | `get_postgres_bytes_written` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
+| `tortoise/metering.py:2474` | `measure_write_ops` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
+| `tortoise/metering.py:2713` | `_record_graph_storage_reading_locked` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
+| `tortoise/metering.py:2813` | `get_graph_storage_reading` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
+| `tortoise/metering.py:2927` | `record_postgres_bytes_written` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
+| `tortoise/metering.py:2980` | `get_postgres_bytes_written` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
 | `tortoise/migrate_db.py:77` | `_count_nodes` | plain | read | candidate:SQL-shaped | `MATCH (n) RETURN count(n)` |
 | `tortoise/migrate_kinds.py:296` | `relabel_legacy_documents` | plain | read | candidate:SQL-shaped | `MATCH (n:Document) RETURN ID(n), n.id, n.url, n.ingestedAt, n.create…` |
 | `tortoise/migrate_kinds.py:309` | `relabel_legacy_documents` | plain | read | candidate:SQL-shaped | `MATCH (n:Document:Source) RETURN ID(n)` |
@@ -1046,7 +1093,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/planned_occurrence.py:468` | `create_plan` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$o}) RETURN properties(o)` |
 | `tortoise/planned_occurrence.py:850` | `_resolve_plan` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$o}) RETURN o.objectKind, o.status, coalesce(o.o…` |
 | `tortoise/planned_occurrence.py:924` | `planned_without_occurrence` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (p:Object) WHERE p.objectKind IN $kinds OPTIONAL MATCH (e:Even…` |
-| `tortoise/postgres_bytes.py:336` | `_meter_statement` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/postgres_bytes.py:344` | `_meter_statement` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/projection/__init__.py:1913` | `read_config_reset` | plain | read | candidate:SQL-shaped | `MATCH (n:Meta {key:$key}) RETURN properties(n)` |
 | `tortoise/projection/__init__.py:1933` | `set_config_reset_marker` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (n:Meta {key:$key}) SET n += $props` |
 | `tortoise/projection/__init__.py:1951` | `clear_config_reset` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (n:Meta {key:$key}) DETACH DELETE n` |
