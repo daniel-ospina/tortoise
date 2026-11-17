@@ -209,9 +209,25 @@ queries whose ANSWERS need adjacency — `stored_turns` comes from a `CONTAINS` 
 ⚠️ An earlier draft said these properties had "no Cypher reader of their own", and its §2.4 table omitted
 `session_schema.py` entirely, which is why the falsifying readers went unseen; §6.1 records the correction.
 The **remainder** (`capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_*`,
-`draft_count`, `commit_count`) has no Cypher reader at all and reads back only through whole-node reads —
-that is `record_only` (row 7b), a **property-level** question listed in §6, not silently folded into this
-row verdict.
+`draft_count`, `commit_count`) is a MIXED set, and precision here is the point — it is not one claim:
+
+- **Read by Cypher, `none` capability:** `value_nodes_*` are named by the commit-path state load
+  (`hosted_api.py:21561`) and incremented by a `SET` that reads them
+  (`hosted_api.py:22234-22236`); `machine_id`, `model`, `client_captured_at`,
+  `client_captured_at_source` are named by the session-detail read (`sdk.py:52229-52251`), with
+  `client_captured_at` also read inside a `SET` (`sdk.py:4018-4021`); **`draft_count` and `commit_count`**
+  are read inside the same commit-statement `SET` (`hosted_api.py:22237-22240`) — §1's reader rule, exactly
+  as `provenance_spans` is counted in §2.2, and an earlier revision of this paragraph omitted them.
+- **NOT read by Cypher at all:** `capture_redactions`. `sdk.py:2682` and `:2705` only WRITE it
+  (`SET s.capture_redactions=$redactions`); its one reader is the Postgres record
+  (`record_read.py:1001`, `SELECT … capture_redactions …`). The graph has never read this count back.
+
+Every Cypher site above is a point lookup or a property guard — capability **`none`** — so `record_only`
+(row 7b) stands on the CAPABILITY rule, not on their being unread; a **property-level** question listed in
+§6, not silently folded into this row verdict. ⚠️ One site changes what §6.1 can ask: the
+`value_nodes_*`/`draft_count`/`commit_count` increments live in the **same statement** as the Session
+`MERGE` (`hosted_api.py:22231-22243`), so no `public.session` row can join that atom — the read is
+`none`-capability, but the WRITE is graph-coupled, which is a live input to the placement ruling.
 
 ### 2.5 `:Object` and `:Subject`
 
@@ -299,7 +315,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 5 | `:Event` core | §2.3 | **yes** — `aboutObject`/`aboutSubject` adjacency **and a fulltext index on `subject`/`name`** | **graph** | lifecycle edges are how status folds, and `name`/`subject` are FTS fields |
 | 6 | `:Session` core (`id`, `harness`, counters) | §2.4 | **yes** — `CONTAINS` | **graph** | the session→turn/claim walk is the read path |
 | 7 | `:Session` retrofit-audit properties (`capture_ok`, `capture_extractor`, `entity_links_created`, `entity_links_attempted`) | `session_schema.py:855-862`, `:892`, `:906-917`; `sdk.py:17082` | **yes** — returned from queries whose answers need `CONTAINS` / `aboutObject` adjacency | **graph** | the audit's shortfall count and its entity-link under-count ARE adjacency queries; no `public.session` row answers either |
-| 7b | `:Session` telemetry, the remainder (`capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_*`, `draft_count`, `commit_count`) | whole-node reads only | **no** | **`record_only`** (property-level; §6.1) | a write stamp, not an edge — but see the blocker |
+| 7b | `:Session` telemetry, the remainder (`capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_*`, `draft_count`, `commit_count`) | point lookups and `SET`-that-reads: `hosted_api.py:21561`, `:22234-22240` (`value_nodes_*`, `draft_count`, `commit_count`), `sdk.py:52229-52251` (session detail), `sdk.py:4018-4021`; `capture_redactions` is read only from the RECORD (`record_read.py:1001`) | **no** — `none` capability | **`record_only`** (property-level; §6.1) | read, but by nothing that needs the graph — property guards, not edges; the counter increments are graph-coupled though, so see §6.1 |
 | 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject` adjacency (`assembly.py:2629`), the `-[r]->` walk (`sdk.py:34355`) **and a fulltext index on `name`** | **graph** | an Event reaches its Object by EDGE; ⚠️ `supersededBy` is a **string matched by equality** (`audit.py:810`), not a walk — SQL-shaped, and an earlier draft wrongly cited it as the reason |
 | 9 | `story_arc` (on **any** label) | **none** — zero Cypher readers | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one reader is `public.session_narrative`; the mechanism CAN deny it, two policy pins currently refuse the entry |
 | 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no record table (§5.2) |
@@ -495,13 +511,26 @@ drop, not tier"* — would have deleted data two shipped audit classes depend on
 What remains arguable is the **remainder** of the family — `capture_redactions`, `machine_id`, `model`,
 `client_captured_at*`, `value_nodes_*`, `draft_count`, `commit_count`:
 
-- **Why it is arguable:** no Cypher reader names those — but they **are** returned by whole-node reads, so
-  they are not unread, only un-*needed*. Moving them is a **property-level** placement, which the
-  row-level tier cannot express.
-- **The question that settles it:** *is there a whole-node read that returns them to a caller who would
-  break without them?* If `get_session_detail`/`list_sessions` project them to an API consumer, the
-  placement decision is a **contract change**, not a storage move, and belongs to a product ruling; if
-  nothing reads them but a test, they are dead weight on both stores and should be dropped, not tiered.
+- **Why it is arguable:** they are **not unread** and must not be treated as such. `value_nodes_*` are
+  named by the commit-state load (`hosted_api.py:21561`) and incremented by a `SET` that reads them
+  (`hosted_api.py:22234-22236`); `machine_id`/`model`/`client_captured_at*` by the session-detail read
+  (`sdk.py:52229-52251`) with `client_captured_at` also read inside a `SET` (`sdk.py:4018-4021`); and
+  `draft_count`/`commit_count` are read inside that same commit-statement `SET`
+  (`hosted_api.py:22237-22240`). Every one is a point lookup or property guard — capability **`none`** —
+  which is why the verdict is `record_only` on the CAPABILITY rule, never on the false premise "unread".
+  Moving them is a **property-level** placement, which the row-level tier cannot express.
+- **The question that settles it:** *does every one of those readers keep working off a `public.session`
+  row?* ⚠️ For most of them the honest answer is "yes, once the row is read" — but the counters are a
+  different case: `value_nodes_created`, `draft_count` and `commit_count` are incremented in the **same
+  statement** as the Session `MERGE` (`hosted_api.py:22231-22243`), so their WRITE is graph-coupled even
+  though their read needs no capability. That makes this a **contract/placement ruling**, not a storage
+  move: `value_nodes_*` is the budget numerator the commit reconciliation consumes, and the
+  capture-provenance columns are served to SDK callers and mirrored by the hosted endpoint. ⛔ An earlier
+  draft's remedy here — *"if nothing reads them but a test, they are dead weight on both stores and should
+  be dropped, not tiered"* — rested on a premise this section disproves, and would have deleted counters
+  the commit path and the session read depend on. They are not deletion candidates; they are candidates
+  for a product ruling on placement. (`capture_redactions` is the one property here with no Cypher reader
+  at all — the graph only writes it — so its disposition is the record's to decide.)
 
 ### 6.2 `:Point` listing-only families (`pointKind` filters)
 
