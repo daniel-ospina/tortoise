@@ -38,10 +38,10 @@ this document classifies **statements**.
 | non-Cypher door calls (excluded from every shape total) | 256 |
 | **AST door calls** = census + non-Cypher | **1567** |
 
-> **The finding, with its count: 577 of 1310 product statements (44.0 %) need none of the
+> **The finding, with its count: 578 of 1311 product statements (44.1 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
-> not an adjective; it is 577 statements.
+> not an adjective; it is 578 statements.
 
 ---
 
@@ -65,7 +65,7 @@ the box, are:
 
 | mode | statement sites | files | note |
 |---|---|---|---|
-| product surface (this census) | **1310** | **99** | `tortoise/**/*.py`, test modules excluded |
+| product surface (this census) | **1311** | **99** | `tortoise/**/*.py`, test modules excluded |
 | every tracked surface (`--all-surface`) | **8,908** | **805** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement, NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it read 8,791 here, which is no tree this tool can print) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
@@ -105,7 +105,7 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 = 1,567  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
 = 1,567  AST door calls
-= 1310  classified Cypher statements + 257 non-Cypher door calls
+= 1311  classified Cypher statements + 256 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -395,7 +395,7 @@ halves:
 258→256 and `ast_door_calls` 1569→1567 (no `sites`/`plain`/`candidates` movement), Appendix A
 regenerated with `--markdown`. `#13249` is the PR that moved them: it converted the two
 `public.graphs` reads in the org purge to `query_all`, and `query_all` is not a `DOORS` entry
-(`tools/cypher_inventory.py:148`), so each conversion REMOVES two door calls without adding a
+(`tools/cypher_inventory.py:148`), so each conversion REMOVES one door call without adding a
 statement site. ⛔ Exactly the hazard this section describes — the branch measured 1567/256 at its
 own head while `origin/main` had moved three commits on, so the pins were re-cut **after** the
 merge, which is the order this procedure mandates.

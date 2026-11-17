@@ -26,6 +26,7 @@ than report agreement.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from decimal import Decimal
@@ -1017,6 +1018,66 @@ def test_the_files_scanned_count_is_pinned_too(tmp_path):
     with contextlib.redirect_stderr(captured):
         census.check(path, result)
     assert "DRIFT files_scanned" in captured.getvalue(), captured.getvalue()
+
+
+def test_the_published_decomposition_names_the_measured_operands():
+    """§0/§1 reconcile ARITHMETICALLY over operands, and the operands are the claim.
+
+    ⛔ The failure this refuses is the exact shape `test_the_census_reconciles_
+    arithmetically` was written against, one layer up: at the parent commit §0 read
+    `= 1310 classified Cypher statements + 257 non-Cypher door calls`, and the
+    census measured `1311` statement sites and `256` non-Cypher door calls. Both
+    terms were off by ONE in OPPOSITE directions, so the line's own total still
+    closed at 1,567 and every pin stayed green (`#13249` review round 13 F1, round
+    14). Nothing could see it: `check()` reads only the HTML pins, and the
+    reconciliation test recomputes from MEASURED values, never from this prose.
+
+    The narrative in §0 and the `--all-surface` comparison table in §1 publish the
+    same two quantities, so they are pinned by the same test — they were wrong at
+    the same commit and for the same reason (the pins were re-cut, the prose was
+    not). A re-cut that moves any of these numbers must move this line with it.
+    """
+    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    result = census.census(("tortoise",))
+    sites = len(result["sites"])
+    non_cypher = result["non_cypher_door_calls"]
+    candidates = sum(1 for s in result["sites"] if s.verdict.startswith("candidate"))
+
+    # (a) §0's decomposition: `= N classified Cypher statements + M non-Cypher door calls`
+    decomposition = re.search(
+        r"^= ([\d,]+) +classified Cypher statements \+ ([\d,]+) non-Cypher door calls$",
+        doc_text, re.MULTILINE)
+    assert decomposition, "§0's decomposition line moved or changed shape; re-cut this pin with it"
+    doc_sites = int(decomposition.group(1).replace(",", ""))
+    doc_non_cypher = int(decomposition.group(2).replace(",", ""))
+    assert (doc_sites, doc_non_cypher) == (sites, non_cypher), (
+        "§0's decomposition states the deltas it explains, and it disagrees with the census: "
+        f"doc={doc_sites}+{doc_non_cypher} measured={sites}+{non_cypher}")
+
+    # (b) §0's narrative: `N of M product statements (P %)` — N is the candidate
+    # count (plain READS), M is the statement sites, and P is DERIVED from them.
+    narrative = re.search(
+        r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)", doc_text)
+    assert narrative, "§0's 'N of M product statements (P %)' line moved; re-cut this pin with it"
+    doc_candidates = int(narrative.group(1).replace(",", ""))
+    doc_statement_sites = int(narrative.group(2).replace(",", ""))
+    doc_percent = float(narrative.group(3))
+    assert (doc_candidates, doc_statement_sites) == (candidates, sites), (
+        "§0's narrative count disagrees with the census: "
+        f"doc={doc_candidates} of {doc_statement_sites} measured={candidates} of {sites}")
+    assert doc_percent == round(candidates / sites * 100, 1), (
+        f"§0's percentage is {doc_percent}, but {candidates}/{sites} is "
+        f"{round(candidates / sites * 100, 1)}")
+
+    # (c) §1's comparison table: the product-surface row, and the files carrying a site.
+    table_row = re.search(
+        r"^\| product surface \(this census\) \| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \|",
+        doc_text, re.MULTILINE)
+    assert table_row, "§1's product-surface table row moved; re-cut this pin with it"
+    assert (int(table_row.group(1)), int(table_row.group(2))) == (sites, result["files_with_sites"]), (
+        "§1's comparison table disagrees with the census: "
+        f"doc={table_row.group(1)} sites / {table_row.group(2)} files, "
+        f"measured={sites} / {result['files_with_sites']}")
 
 
 def test_a_corpus_row_that_lost_its_edge_property_is_refused(monkeypatch, capsys):
