@@ -747,7 +747,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     mirror — GitHub says `open` for a row the projection refuses to move — is
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term NO WRITER CAN CLEAR (`_upsert_object` writes `o.status` ON CREATE only,
-    `entities.py:5121-5123`), so each poll minted another `-reopened`
+    `entities.py:5128-5130`), so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6228`).
@@ -1081,10 +1081,13 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
 
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
-    type`. That value is ONE supported write away (`update_knowledge(id,
-    status=['live'])` stores it verbatim; `live.py` documents the same hazard for
-    `endpoint_permits_operator_promotion`), and the FOLD tolerates it because its
-    own `excluded` is a LIST (an `==` scan, no hash).
+    type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
+    JSONL replay of either (`sdk.py:53859-53861`); it is NOT reachable through
+    `update_knowledge` any more — the lifecycle doors refuse a non-string status at
+    intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
+    so `update_knowledge(id, status=['live'])` raises rather than storing. The row
+    persists anyway, and the FOLD tolerates it because its own `excluded` is a LIST
+    (an `==` scan, no hash).
 
     A raise here is not a quiet skip: `_project_issue` runs BEFORE the Object
     write and the exception lands in the per-issue handler, so that issue is

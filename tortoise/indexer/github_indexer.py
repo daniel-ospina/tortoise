@@ -65,11 +65,22 @@ Lifecycle decision table (THE rule):
   symptom (``events_minted: 0`` on a close) for that population. That answer is
   unconditional in every other prop (it is taken before the polarity arms, see the
   refusal bullet above), so it does not flip to ``"closed"`` on a row that also
-  carries ``isClosed`` — the shape that would loop. It is BOUNDED (no mint loop)
-  and one config away from being live, so it is stated here rather than guessed at.
-  Resolving the declaration the way the fold does — through the pack index — is the
-  honest close, and it is deliberately NOT done in the loop fix: it would put the
-  pack registry on the indexer's read path as part of it.
+  carries ``isClosed`` — the shape that would loop, and THAT shape is bounded.
+  ⛔ ``None`` is not unconditional and the bound is not unconditional: it holds for
+  a row a PACK fold keyed. ``_fold_object_stage`` carries a SECOND silent refusal
+  this reader does not model — the kind-OWNERSHIP guard (``declared_kinds``, passed
+  at ``projection/entities.py:6187``, applied at ``:6239-6241``) — and the query
+  below does not even fetch ``o.objectKind`` (``:1288-1293``). So the moment a pack
+  DECLARES state on ``pm:issue`` (a ``statuses:``/``pipeline:`` block on
+  ``kindDefs.issue``, which ``packs/*/manifest.yaml`` does not have today), the
+  built-in fold returns ``False`` for EVERY indexed issue row while this read
+  answers a polarity from the CORE declaration — and a row indexed before that
+  change (``pipelineStageKey='core:workitem'``, ``isClosed=false``) meets a GitHub
+  close with ``"open"`` ⇒ ``-closed``, fold writes nothing, next poll identical ⇒
+  ``-closed-2``, ``-closed-3``, … without bound. Stated, not fixed: the honest close
+  is the SAME pack-index read this paragraph defers (resolve the declaring
+  declaration, and answer ``None`` when the kind owns its state), and doing it
+  halfway — the residual alone — would be the superset this PR exists to remove.
 
 The (dormant) statement machinery writes ``statement`` ONLY — never
 ``observation`` (removed kind, §5). DORMANT since #1844: the default path
@@ -107,7 +118,13 @@ from tortoise.pipeline import (
     CORE_WORK_ITEM_PIPELINE_KEY,
 )
 from tortoise.quota import QuotaCheckError, QuotaExceededError
-from tortoise.sdk import UnapprovedKindNamespace  # #5475: a refused kind fails the RUN
+from tortoise.sdk import (  # #5475: a refused kind fails the RUN
+    UnapprovedKindNamespace,
+    # #13289 review F5: the repo's ONE type-first word test (#13065). Private to
+    # `sdk.py`, but there is no public twin, and a second spelling of a predicate the
+    # repo says has one home is the defect this import avoids.
+    _is_lifecycle_word,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -281,7 +298,7 @@ def _row_is_frozen(status, outdated) -> bool:
     ⚠️ The invariant is "the CLOSING direction has no live holder", NOT "no
     writer can clear it" — the stronger claim is false. A coherent un-supersede
     (``update_entity(obj, status='live', supersededBy=None, supersededAt=None)``,
-    admitted at ``sdk.py:53952-53962`` and documented as the NOT MONOTONE
+    admitted at ``sdk.py:54012-54021`` and documented as the NOT MONOTONE
     exception at ``sdk.py:6030-6048``) DOES clear ``superseded``, and this read
     resumes the moment it does because the answer is derived from the stored row
     and never cached. What ``_upsert_object`` guarantees is narrower and is the
@@ -293,11 +310,13 @@ def _row_is_frozen(status, outdated) -> bool:
     ⚠️ It answers only the LIFECYCLE question, and the POSITION axis is
     deliberately not passed (position is the axis a diff CAN converge on, so it is
     read separately below). ⛔ It is NOT the shared ``live.is_terminal_status``,
-    and the omission is deliberate: that helper is a ``frozenset`` membership test,
-    so it HASHES the value and raises on a stored ARRAY ``status`` the fold
-    tolerates (the hashing guard below states that row). The two terms are spelled
-    out here instead, and ``live.TERMINAL_EXCLUDED_STATUSES`` — the shared set — is
-    still the vocabulary they agree with, so no local second vocabulary is defined.
+    and the omission is deliberate: that helper spells its word half as
+    ``(status or "") in TERMINAL_EXCLUDED_STATUSES`` (``live.py:404``), a bare
+    ``frozenset`` membership that HASHES the value and raises on a stored ARRAY
+    ``status`` the fold tolerates (the hashing guard below states that row). The word
+    test here is ``sdk._is_lifecycle_word`` instead — the repo's type-first one — and
+    ``live.TERMINAL_EXCLUDED_STATUSES`` is still the set it is asked about, so no
+    local second vocabulary is defined.
     """
     # ⛔ HASHING GUARD (#13289 review F6): `frozenset` membership HASHES the value,
     # so a stored ARRAY `status` would raise `TypeError: unhashable type` and take the
@@ -311,14 +330,13 @@ def _row_is_frozen(status, outdated) -> bool:
     # refuse it at intake (`lifecycle_vocabulary.py:279-286`, reached from S0's
     # `_read_caller_status` on both the update and create paths). It is kept readable
     # because rows persist — `lifecycle_vocabulary.py:263-264` records the history
-    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:53808-53811`
+    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:53859-53861`
     # enumerates the routes from the other side (a pre-fix SDK, a raw Cypher producer, a
     # JSONL replay of either) — and this repo deliberately keeps readers wider than its
     # doors (`live.py:100-108`). ⛔ Deliberately NOT citing the individual `sdk.py` call
     # sites here: two earlier cuts named the wrong hop, and a prose justification does
     # not need them. `lifecycle_vocabulary.py:279-286` is the refusal.
-    return bool(outdated) or (
-        isinstance(status, str) and status in TERMINAL_EXCLUDED_STATUSES)
+    return bool(outdated) or _is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
 
 
 def _status_is_latched(status) -> bool:
@@ -348,8 +366,12 @@ def _status_is_latched(status) -> bool:
     # ⛔ HASHING GUARD (#13289 review F6) — see `_row_is_frozen`. A LEGACY row can
     # carry a list/dict `status` (the current doors refuse one), and membership in
     # the `frozenset` would raise. The fold's own list-based `in` does not, so a
-    # non-string status is simply not a latched word here either.
-    return isinstance(status, str) and status in OBJECT_TERMINAL_STATUSES
+    # non-string status is simply not a latched word here either. That guard is
+    # `_is_lifecycle_word`'s, not a fourth local spelling of it: it is type-first
+    # (`issubclass(type(v), str)`, so a `str` SUBCLASS that nulls `__hash__` cannot
+    # raise where a bare `isinstance` + `in` would) and it normalises with
+    # `str.__str__`, so an override cannot answer for a word it does not spell.
+    return _is_lifecycle_word(status, OBJECT_TERMINAL_STATUSES)
 
 
 def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
@@ -1281,7 +1303,7 @@ class GitHubIndexer:
         answer the POSITION, and `None` only where the position is live
         (`_row_is_frozen` — the close fold is unreachable for them, the reopen fold
         is not). "Written once and never cleared" was the earlier, WRONG summary:
-        a coherent un-supersede does clear `superseded` (`sdk.py:53952-53962`). Answering `"closed"` there was the fix's own regression:
+        a coherent un-supersede does clear `superseded` (`sdk.py:54012-54021`). Answering `"closed"` there was the fix's own regression:
         it is a SUPERSET of the fold's guard set, and a superset re-fires exactly
         as a subset does.
         """
