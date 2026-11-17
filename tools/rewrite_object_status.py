@@ -1425,9 +1425,12 @@ def run(sdk, *, execute: bool = False, sample: int = 20,
         raise Refused(REFUSE_PENDING_UNREADABLE, (
             f"the durability marker {_pending_path(rep.journal)} exists but "
             "could not be read, so it is unknown whether a previous run left "
-            "rows LIVE-ONLY. Nothing was written. Repair: read the file (it is "
-            "one row id per line) and, once every id in it is confirmed durable "
-            "by a preview, delete it by hand — this tool will not guess."))
+            "rows LIVE-ONLY. Nothing was written. Repair: both arms refuse until "
+            "this file is readable, so it cannot be discharged by running the "
+            "tool — fix what blocks the read (permissions, or a replacement file "
+            "with one row id per line), and delete it only once every id in it "
+            "either reads `deprecated` live or has a `deprecated` record as the "
+            "LAST record for it in the journal. This tool will not guess."))
     if rep.pending and log is not None:
         # ⛔ The PREVIEW gets the same discharge test the write arm applies, or a
         # marker left by a killed run (naming only ids whose records landed)
