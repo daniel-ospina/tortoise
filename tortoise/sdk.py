@@ -6357,7 +6357,8 @@ def _is_lifecycle_word(value: object, vocabulary) -> bool:
 
 def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                                      goal_ending=None,
-                                     may_target_existing_node: bool = False) -> None:
+                                     may_target_existing_node: bool = False,
+                                     status_lands: bool | None = None) -> None:
     """Refuse a goal write that ends it on one field and runs it on the other.
 
     #13035. Operates on the STATE THE WRITE LEAVES — the value in ``props`` when
@@ -6445,6 +6446,14 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
     # and left unbound. Rebinding is behaviour-neutral for an honest `str`: a
     # plain subclass already stores its content today.
     _rebind_guarded_words(props, rendered)
+    if status_lands is False:
+        # The MERGE/ADOPT lane drops EVERY key rendering as `status`
+        # (`_persist_extra_props`' render-aware skip, #12869 round 3/4), so
+        # `status` cannot be part of a doubled-name ambiguity there: no word
+        # lands, and refusing would be a false block that also costs the
+        # already-stamped write. `goalState` is NOT dropped by that skip, so it
+        # keeps the unconditional treatment.
+        doubled = [name for name in doubled if name != "status"]
     if doubled:
         # ⛔ ONE WORDING WITH THE DOOR'S OWN CHECK (`update_entity`'s
         # `_status_write_is_ambiguous` refusal, #12786): a caller that trips this
@@ -8660,8 +8669,26 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_claim_class: bool = False,
                     money_views: list[dict] | None = None,
                     value_shapes: frozenset[str] | None = None,
-                    goal_ending=None) -> dict:
+                    goal_ending=None,
+                    status_lands: bool | None = None) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
+
+    ``status_lands`` (#12869 merge reconciliation): does a `status` this call
+    declares actually REACH the node? ``False`` means the write MERGEs onto (or
+    ADOPTs) an existing node, where `_persist_extra_props`' skip drops every key
+    rendering as `status` — so nothing lands and the doubled-name ambiguity
+    below has no word to be ambiguous ABOUT. ``None`` (every door that does not
+    ask) keeps the refusal unconditional.
+
+    ⛔ WHY THIS IS A PARAMETER AND NOT A WEAKENING: the create door resolves
+    (and `_adopt_idless_holder` STAMPS an id onto an id-less live holder) BEFORE
+    this intake is reachable, so an unconditional refusal here is a refusal that
+    COSTS A WRITE — a live-without-durable row (#3590) produced by a call that
+    was supposed to write nothing (#9287/#10192, and the P2 `#12869` fix this
+    branch already carries). MEASURED at the merge head: `create_object` on an
+    existing holder with `{"status": None, KHash("status"): ["live"]}` raised
+    here with the id stamped and the journal at 0 lines. Where the status DOES
+    land (a fresh mint) the refusal is unchanged and still fires.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
     operator ``--upgrade-all`` path (projection maps ``source_path`` →
@@ -9269,7 +9296,8 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # `goalState`) while every other reader serves it as current (they read
     # `status`). See `_refuse_inconsistent_goal_ending`.
     _refuse_inconsistent_goal_ending(props, surface="_sanitize_props",
-                                     goal_ending=goal_ending)
+                                     goal_ending=goal_ending,
+                                     status_lands=status_lands)
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props
@@ -10195,6 +10223,259 @@ def _status_is_stored_unhashable(value: object) -> bool:
 
     return (not _status_is_evaluable(value)
             and _is_persistable_prop_value(value))
+
+
+def _refuse_unencodable_object_status(props, *, door: str, target: object) -> None:
+    """#12869 — refuse a declared ``status`` the RECORD cannot carry, before any write.
+
+    ⛔ THIS IS A QUESTION ABOUT THE RECORD, AND IT IS ANSWERED BEFORE THE WRITE.
+    ``dropped`` is a claim about the NODE: ``#7369`` degrades a value FalkorDB
+    cannot store to null, so no node ever carries it. At a door that ALWAYS
+    appends a JSON record the same value is placed on the event envelope and
+    handed to ``json.dumps``, which has no ``default=`` (``tortoise/log.py:1563``)
+    and therefore RAISES. Measured at the pre-fix head, ``EventAPI.add_object(…,
+    status=b'live')`` raised ``TypeError: Object of type bytes is not JSON
+    serializable`` out of ``EventLog.append`` — the bare traceback #12869 exists
+    to replace.
+
+    ⛔ IT MUST RUN BEFORE ``_registration_id``, which is why it is a separate
+    helper rather than a flag on ``_refuse_non_string_object_status``. That
+    method's own ``#11948`` rule — stated in its docstring — is that a refusal
+    after ``_registration_id`` "would have taken the lock for a write that cannot
+    happen". A landing-gated check inside the shared helper cannot satisfy that:
+    on the ADOPT path ``resolve_or_mint`` has ALREADY stamped ``n.id`` onto an
+    id-less holder by the time the helper is reachable, and ``lands()`` then
+    answers False (the id now exists), so the helper returns and the encoder
+    raises afterwards — a refusal that COSTS A WRITE, leaving an id-bearing row
+    with ZERO journal lines (the ``#3590`` live-without-durable class). Measured
+    before this split: MERGE, ADOPT and the projection-less lane all escaped with
+    the raw ``TypeError``, and on ADOPT it followed the stamp.
+
+    ⛔ AND IT IS SCOPED TO THE DOOR THAT RAISES. ``create_entity(type='object')``
+    deliberately does NOT call it: its journal leg is ``_journal_entity_event``,
+    which SWALLOWS the encoder failure and logs "LIVE-ONLY and will not survive a
+    rebuild" (``#4240``) — uniformly for every unencodable prop, ``tags=
+    frozenset(...)`` included. Refusing there would narrow ``status`` alone on a
+    mechanism that is not ``status``-specific.
+
+    ``dict`` DOES have a JSON form and stays accepted (the node drops it, the
+    record carries it — no crash, no write to protect).
+    """
+    declared = lifecycle_props_by_rendering(props, {"status"})
+    if not declared:
+        return
+    word = declared["status"]
+    import json as _json
+    try:
+        _json.dumps(word)
+    except Exception:  # noqa: BLE001, RUF100 — a hostile __iter__/keys() is not a JSON form
+        raise ValueError(
+            f"{door} refused a non-string status for {_refusal_repr(target)}: "
+            f"{_refusal_repr(word)} is {_refusal_type_name(word)}, which has no "
+            f"JSON form, and this door records every write. The NODE would "
+            f"drop the value (#7369) but the record cannot carry it, so the "
+            f"write would fail inside the event log after this door had "
+            f"already stamped an id (#12869). Pass `status` as a plain str. "
+            f"Nothing was written."
+        ) from None
+
+
+def _refuse_non_string_object_status(props, *, door: str, target: object,
+                                    lands=None) -> None:
+    """#12869 — refuse a PERSISTABLE NON-STRING Object ``status`` at a write door.
+
+    ⛔ THIS IS NOT A VOCABULARY. ONTOLOGY §4.3 declares the property's TYPE as
+    ``string`` and leaves the WORD SET open per kind ("pack-declared kinds
+    validate against their own declared words"), which ``#10371`` records as a
+    constraint rather than a to-do — ``packs/venture`` stores ``active`` /
+    ``invested`` / ``paused``. A non-string is therefore the ONE value undeclared
+    for EVERY Object kind, and arbitrary STRINGS must keep being accepted.
+
+    ⛔ AND IT IS SCOPED BY "WOULD THIS LAND?", not by "is it a string?". A
+    value FalkorDB cannot store (a dict/set/bytes) is DROPPED by the writers —
+    ``#7369`` degrades it to null before dispatch — so no node ever carries it
+    and refusing it "would reject a write the writer performs", the recorded
+    ``#7925`` review-round-4 decision.
+
+    ⛔ THE PREDICATE IS THE TRANSPORT GATE ITSELF — ``projection._value_ok``,
+    the ``#7369`` check that decides whether the value reaches the node — because
+    that IS the landing question. It was first written as the OR of that gate and
+    the FOLD's own filter (``_is_persistable_prop_value``), on the theory that
+    either writer keeping the value means it lands. Measured, that OR is wrong in
+    BOTH directions and the review caught it:
+
+    * the fold filter UNDER-approximates: ``np.int64`` is not an ``int`` subclass,
+      so it answers False while the node really stores the value. (The transport
+      gate answers True for it, which is why the gate alone still catches it.)
+    * the fold filter OVER-approximates too: ``['a\x00b']`` answers True for the
+      fold and False for the transport, and the node stores NOTHING. So the fold
+      half added exactly one thing over the gate — a refusal of a write the
+      writer performs, which is the over-block this docstring opens by refusing.
+      It was unpinned: reducing the predicate to the gate reds no arm at all
+      (measured).
+
+    One predicate, and it is the one that measures the actual event.
+
+    ⛔ AND IT IS DELIBERATELY NOT ``live._status_is_discarded_by_every_writer``.
+    That helper's THIRD clause is the JOURNAL ENCODER, and this door's framing is
+    the LIVE write; measured on ``main``, ``create_object(status=b'live')`` — and
+    ``bytearray``, ``frozenset``, ``dict`` — is ACCEPTED and stored as ABSENT.
+    Using that helper made all four REFUSE, an over-block (the ``#7925``
+    round-4 class). ⚠️ But "dropped" is a claim about THIS write only, and the
+    review was right that it does not hold for the RECORD: the encoder question
+    is ``_refuse_unencodable_object_status``'s, above.
+
+    ⛔ ONE KEY, OR NO ANSWER — the ambiguity refusal. ``lifecycle_props_by_rendering``
+    is FIRST-wins over the renderer union (its own docstring), while the live map
+    write applies ``str(key)`` and the journal keeps the content, so a call
+    carrying TWO keys that render as ``status`` makes "what the guard reads" and
+    "what the writer keeps" different keys. Measured through the create door
+    before this check: ``create_object(name, kind, **{"status": None,
+    <str subclass, __hash__→424242>("status"): ["live"]})`` was read as the CLEAR
+    and the node stored ``['live']`` — the unaddressable row ``#12869`` exists to
+    remove, minted by the guard's own blind spot. The update door already refused
+    this (``_status_write_is_ambiguous``, ``#12786`` rounds 2-3); the other two
+    did not, which is the same two-doors-one-gap shape as the guard itself. It
+    lives HERE now so a fourth door cannot miss it.
+
+    ⛔ AND ``lands`` IS THE DOOR'S OWN LANDING TEST. ``status`` is written
+    ``ON CREATE`` only, so a write that MERGES onto (or ADOPTS) an existing node
+    drops it — and refusing there is an over-block (``#7925``: a bundle's array
+    refusal fires only at the item that MINTS the name). It is a THUNK so the
+    doors that need a graph read pay for it ONLY when a refusal is on the table;
+    an ordinary create issues exactly the queries it did before. ⚠️ A door with
+    NO GRAPH (``EventAPI`` built without a projection — the documented
+    journal-only ``__main__``/``m0.py`` lane, ``api.py``'s own ``_registration_id``
+    and ``_emit`` branches) can never land anything, so its ``lands`` must answer
+    False rather than dereference a ``None`` handle: that lane accepted this call
+    before ``#12869`` and must keep accepting it (the review measured an
+    ``AttributeError`` here, a regression this helper introduced).
+
+    ⛔ ``journals`` — "DROPPED" IS NOT TRUE OF THE RECORD, at ONE door. A
+    non-persistable value is dropped from the NODE, and at ``EventAPI.add_object``
+    the same value is handed to the JSON encoder, which does NOT drop it:
+    measured, ``add_object(…, status=b'live')`` raised ``TypeError: Object of type
+    bytes is not JSON serializable`` out of ``EventLog.append`` — a bare traceback
+    from the very method this guard was added to, after ``_registration_id`` had
+    stamped an id onto an adopted holder. ``bytes``/``bytearray``/``frozenset``
+    have no JSON form; ``dict`` does and stays accepted.
+
+    ⛔ AND THAT CHECK IS **NOT IN THIS FUNCTION**, on purpose (review round 5,
+    P1; restated round 6). ``lands`` is a question about the NODE; the encoder is
+    a question about the RECORD, and the record is written on EVERY path. An
+    earlier cut of this helper carried a ``journals`` flag and asked the encoder
+    BELOW the ``lands`` early return — true of the node, FALSE of the record: on
+    MERGE, ADOPT and the projection-less lane ``lands`` answers False, the helper
+    returned, and the encoder still raised. On ADOPT that ``TypeError`` FOLLOWED
+    the id stamp, so a refusal left a mutated row with zero journal lines
+    (``#3590``). Moving the block above ``lands`` would still have been too late,
+    because the stamp happens in ``EventAPI.add_object`` BEFORE this helper is
+    called at all. So the encoder check is its own function —
+    :func:`_refuse_unencodable_object_status` — invoked by that door BEFORE the
+    lock and the id resolution, and it reads the props, not ``lands``.
+    ⛔ A FOURTH ``lands``-PASSING DOOR THAT NEEDS THE RECORD ANSWER MUST CALL
+    THAT FUNCTION TOO; this one will not give it.
+
+    ⚠️ AND IT IS SCOPED TO THAT DOOR, because the mechanism is not general and
+    the first cut of this paragraph claimed it was (review round 3, P2).
+    ``create_entity`` does NOT raise: its journal leg is ``_journal_entity_event``,
+    which SWALLOWS the encoder failure and logs "the write is LIVE-ONLY and will
+    not survive a rebuild" (``#4240``). Measured: on ``main``,
+    ``create_object(status=b'live')`` with a journal is ACCEPTED, stores nothing,
+    and warns — and so is every OTHER unencodable prop on that lane (``tags=
+    frozenset(...)`` behaves identically at this head). Refusing there would
+    narrow ``status`` alone on a mechanism that is not ``status``-specific, with
+    no record to gain: the node never carries the value either way. So the
+    refusal is the door that RAISES, and ``#4240`` keeps the live-only lane.
+
+    ⛔ ONE HELPER, THREE CALLERS (``create_entity(type='object')``,
+    ``update_entity``'s Object arm, and ``EventAPI.add_object``). A rule stated
+    at two doors and silently absent at the third is the defect ``#11835``
+    review round 4 and ``#11948`` each measured — and this family has a THIRD
+    door precisely because it splats a caller's dict onto a journal envelope.
+    """
+    from .projection import _value_ok
+
+    declared = lifecycle_props_by_rendering(props, {"status"})
+    if not declared:
+        return
+    word = declared["status"]
+    # ⛔ THE RECORD-SIDE QUESTION IS ASKED ELSEWHERE, ON PURPOSE. A value with no
+    # JSON form is refused by `_refuse_unencodable_object_status`, BEFORE
+    # `_registration_id` — because on the ADOPT path the id is stamped by
+    # `resolve_or_mint` before this helper is even reachable, so any refusal here
+    # is a refusal that COSTS A WRITE (`#1198`'s rule, this method's own
+    # docstring). It is not a flag on this function because that helper's
+    # landing test is a NODE question and the encoder is a RECORD question, and
+    # the record is written on every path (review round 5, P1: putting it below
+    # the `lands` return made it unreachable on MERGE/ADOPT/projection-less).
+    # ⛔ THE LANDING TEST, for the NODE-side refusals below.
+    # A write that MERGES onto (or ADOPTS) an existing node drops a declared
+    # `status` entirely (`#7925` round 4), so there is nothing for THOSE to
+    # refuse. The ORDER is not cosmetic: at the create door `lands` is asked
+    # AFTER `resolve_or_mint`, which has already stamped an id onto an id-less
+    # live holder on the ADOPT path — so a node-side refusal raised above this
+    # line is a refusal that COSTS A WRITE (`#9287`/`#10192`).
+    # ⚠️ `declared` is asked FIRST, so a call that names no status issues no
+    # graph read: the thunk is paid for only where a refusal was on the table.
+    # ⛔ IT NO LONGER PROTECTS THE RECORD-SIDE CHECK, which is above it by design:
+    # an earlier cut put that check BELOW this return and claimed "asking `lands`
+    # first makes the claim true by construction", which was true of the node and
+    # FALSE of the record — it made the check unreachable on precisely the paths
+    # (MERGE/ADOPT/projection-less) where the encoder goes on to raise.
+    if lands is not None and not lands():
+        return                                      # ON CREATE only: not stored
+    # ⛔ BEFORE reading the value: two keys rendering as `status` make the read
+    # below (FIRST-wins) and the write (LAST-wins) different keys, so ANY value
+    # this function concludes about is not the value that lands. Measured: a
+    # `None` first key hid a `['live']` second key at the create door.
+    if _status_write_is_ambiguous(props):
+        raise ValueError(
+            f"{door} refused a CONFLICTING status write for {_refusal_repr(target)}: more "
+            f"than one key in this call renders as `status`. A `str` subclass "
+            f"whose content and `__str__` differ is filed under one name by "
+            f"the live write and the other by the journal, so which value "
+            f"lands cannot be known here — and reading the first one allowed a "
+            f"`None` key to hide a non-scalar behind it (#12869). Pass `status` "
+            f"ONCE, as a plain str."
+        )
+    if word is None:
+        return                                      # the documented CLEAR
+    if isinstance(word, str):
+        # ⛔ NO HASHABILITY PROBE HERE. An earlier round put one at this line and
+        # the review was right that it over-blocked: only `update_entity`'s
+        # dead-row path hashes the caller's word (`_np_status in _np_terminal`);
+        # a CREATE stores a `str` subclass by content, it round-trips from
+        # FalkorDB as a plain `str`, and `origin/main` measured ACCEPTED plus a
+        # normal later status write. The crash is therefore refused where it
+        # happens (the membership test), not at every door that shares this
+        # helper — refusing here rejected a write the writer performs, the
+        # `#7925` round-4 class this docstring opens by refusing.
+        return                                      # a word
+    if not _value_ok(word):
+        return                                      # the #7369 gate drops it
+    # ⛔ FOR THIS REFUSAL, `lands` IS ALREADY SPENT ABOVE: the node-side landing
+    # test runs before every NODE-side refusal, so a refusal here can never
+    # follow a write. The RECORD-side encoder check is NOT here — it is
+    # `_refuse_unencodable_object_status`, called by the door before the lock and
+    # the id resolution, because a refusal that ran after `_registration_id`
+    # would have taken the lock for a write that cannot happen (`#11948`).
+    # ⛔ The class NAME goes through `_refusal_type_name`: `type(word)` is
+    # shadowed at one caller (`create_entity(type, …)`) and a raising
+    # metaclass `__name__` replaced the promise (MEASURED: `name-boom`).
+    raise ValueError(
+        f"{door} refused a non-string status for {_refusal_repr(target)}: "
+        f"{_refusal_repr(word)} is {_refusal_type_name(word)}, not a `str`. ONTOLOGY §4.3 declares "
+        f"`status` as a STRING, and the Object family's word set is "
+        f"deliberately OPEN — a pack kind validates against its own declared "
+        f"words (#10371), so arbitrary STRINGS stay accepted and are not "
+        f"narrowed here. A non-string is not a declared word under ANY kind, "
+        f"and it cannot be stored: `:Object.status` is what the lifecycle "
+        f"guard hashes to decide whether a row is terminal, so a non-scalar "
+        f"stored here makes every later lifecycle write on this row fail "
+        f"instead of being answered (#12869). Pass `status` as a plain str. "
+        f"Nothing was written."
+    )
 
 
 def _item_effective_is_operator(item: dict, depth: int = 1) -> tuple[bool, bool]:
@@ -32162,7 +32443,7 @@ class TortoiseSDK:
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{own_status!r} for a :{_item_label} — the writer "
+                           f"{_refusal_repr(own_status)} for a :{_item_label} — the writer "
                            f"validates against the declared lifecycle and "
                            f"refuses it mid-write, so the bundle is "
                            f"rejected at validation. {_status_refusal}",
@@ -32457,11 +32738,63 @@ class TortoiseSDK:
                 _mint = _item_effective_status(
                     item, _item_flatten_depth(item, "entities"))
             if not _status_is_stored_unhashable(_mint):
+                # ── #12869: the OBJECT door's type refusal, at Phase 1 too ──
+                # `create_entity(type='object')` now refuses a persistable
+                # NON-STRING status, so leaving it to step 3 means the earlier
+                # items commit and THEN the write raises — the #2422/#7925
+                # partial-mutation class this whole Phase-1 sweep exists to
+                # close, the identical reasoning stated for the `:Event` terminal
+                # arm just above and for the `:Subject` vocabulary before it.
+                # ⛔ THE PREDICATE CANNOT BE `_status_is_stored_unhashable`
+                # alone: that helper asks about UNHASHABLE values, so `123` /
+                # `True` / `1.5` answer False and would still pass here. The
+                # question this arm asks is the DOOR's — "would a persistable
+                # non-string land?" — so a non-persistable value stays accepted
+                # (the writer drops it, #7369) and so do `None` and a `str`.
+                # ⛔ OBJECT ONLY. The `:Event` family already has its own
+                # non-string refusal, in `live.refuse_terminal_event_state`
+                # (`live.py:1066`: "`status` is a STRING drawn from
+                # the vocabulary") — measured, `create_event(status=123)` and
+                # `status=['x']` both refuse there TODAY, on `main`. So this arm
+                # must not grow an Event half: that would be a second, divergent
+                # copy of a rule which already holds, the `#11835` round-4
+                # defect one level down. Object was the family with NO guard.
+                if _elabel != "Object":
+                    continue
+                if _mint is None or isinstance(_mint, str):
+                    continue
+                from .projection import _value_ok
+                # ⛔ THE DOOR'S OWN PREDICATE, NOT THE OR (review round 4, P3).
+                # This arm asked
+                # `not (_is_persistable_prop_value(_mint) or _value_ok(_mint))`
+                # — the fold filter OR the transport gate — while the door asks
+                # `_value_ok` ALONE, and one file over the same OR was measured
+                # WRONG IN BOTH DIRECTIONS (see the helper's docstring). The
+                # divergence was caller-visible: `status=('a\x00b',)` answers
+                # True to the fold and False to the gate, so the validator
+                # refused a bundle whose own message said "the write door
+                # refuses a non-string (#12869), so this bundle would abort at
+                # step 3" — a refusal asserting a refusal that does not happen,
+                # while `create_object(…, status=('a\x00b',))` is ACCEPTED and
+                # stores nothing. One predicate, and it is the door's.
+                if not _value_ok(_mint):
+                    continue
+                violations.append({
+                    "section": "entities", "index": i,
+                    "message": f"ingest: entities[{i}] would store a "
+                               f"non-string status {_refusal_repr(_mint)} on the "
+                               f"{_elabel} — ONTOLOGY §4.3 declares `status` "
+                               f"as a STRING, and the write door refuses a "
+                               f"non-string (#12869), so this bundle would "
+                               f"abort at step 3 with the earlier items "
+                               f"already committed (#2422/#7925). Pass a "
+                               f"plain str.",
+                })
                 continue
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] would store status "
-                           f"{_mint!r} on the {_elabel} — an array is stored "
+                           f"{_refusal_repr(_mint)} on the {_elabel} — an array is stored "
                            f"verbatim and the direct-edge terminal check "
                            f"cannot evaluate it (it raises mid-write), so "
                            f"the bundle is rejected at validation (#7925)",
@@ -34225,7 +34558,14 @@ class TortoiseSDK:
           ``SUBJECT_STATUS_VALUES`` before the name merge, so an invalid value
           (outside that set, non-string, or an explicit ``null``) on ANY entity
           item is a Phase-1 violation, while ``:Object``/``:Event`` statuses
-          are stored verbatim and stay accepted. ⛔ A ``:Event`` status is
+          are stored verbatim and stay accepted — EXCEPT a ``:Object`` status
+          that is a PERSISTABLE NON-STRING, which #12869 refuses at Phase 1 for
+          the same partial-mutation reason (the arm is ``api.py``'s call into
+          ``_refuse_non_string_object_status``; a value every writer DISCARDS
+          is still dropped rather than refused, #7369 / #7925 round 4 — note
+          that #11824 S0's door refuses non-strings earlier still for the SDK
+          routes, so this arm covers the ingest route, not the whole surface).
+          ⛔ A ``:Event`` status is
           refused bundle-wide, and since #13100 (S7) that means ANY non-``None``
           ``status`` — the terminal half alone was #11825's interim boundary, and
           the non-terminal half is retired too because "will happen" is a PLAN's
@@ -50501,7 +50841,8 @@ class TortoiseSDK:
                        *, _skip_sanitize: bool = False,
                        is_episodic: bool | None = None,
                        _return_apply_result: bool = False,
-                       _journal_extra: dict | None = None) -> dict | tuple[dict, object]:
+                       _journal_extra: dict | None = None,
+                       _status_lands: bool | None = None) -> dict | tuple[dict, object]:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
@@ -50568,7 +50909,8 @@ class TortoiseSDK:
         # into the event dict AFTER sanitize.
         if not _skip_sanitize:
             props = _sanitize_props(props, reject_id=True,
-                                    reject_belief_props=True)
+                                    reject_belief_props=True,
+                                    status_lands=_status_lands)
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         # #10192: the CREATE door is the SECOND way to write a lifecycle CARRIER
@@ -53218,24 +53560,20 @@ class TortoiseSDK:
         # (`_assert_lifecycle_guard` refuses on the stored terminal marker). Two
         # different mechanisms, neither of them this arm's.
         #
-        # ⚠️ RESIDUAL, on the STORED side, and NARROWED BY THIS PR (#12896 review,
-        # P2) rather than left as it was: this fix guards the TARGET's type and
-        # hashability. A row whose stored `status` is a list was reachable at all
-        # only because a LIVE row USED TO accept `status=['live']` — the
-        # vocabulary hole #11824 S0 closed at the write door (a non-string is now
-        # refused as the door's FIRST arm, shape before vocabulary, the ordering
-        # #12869/#12910 gives the Object doors). Rows written before that still
-        # hold the shape, which is the population this arm answers for. Before the
-        # P2 above, that stored shape made the dead-set build raise
-        # `TypeError: unhashable type: 'list'` on the NEXT lifecycle write; the
-        # dead set now takes `str` stored values only, so NO traceback escapes
-        # here (measured BEFORE S0's door: stored `['live']`, then
-        # `'live'`/`['live']`/`123`/`None` all were ACCEPTED, row intact; today
-        # only `'live'` lands — the other three are refused with the door's
-        # `ValueError`, which is the narrowing this work was for). What is left
-        # is the STORED-side question, not
-        # a traceback and no longer a write-side hole — #12869's wording predates
-        # both narrowings and should be re-measured there before it is restated.
+        # ⛔ THE STORED SIDE IS CLOSED TOO (#12869 / #12896 review, P2): this
+        # loop used to read a row whose stored `status` is a list as CURRENT —
+        # the dead set took `str` stored values only, so the unreadable shape
+        # fell through to a silent ACCEPT, the fail-open direction. `_np_foreign`
+        # above now REFUSES that row before this dead set is built, so no
+        # `TypeError` escapes AND no write lands on a row the guard cannot read.
+        # That population is bounded, and #11824 S0 is why: the WRITE side is
+        # closed at the door (a non-string is the door's FIRST arm, shape before
+        # vocabulary), so the only rows still holding a non-`str` stored status
+        # are ones a pre-S0 SDK / raw Cypher / journal replay wrote — there is no
+        # backfill (#11824 §1). What is left here is therefore the STORED-shape
+        # question, not a traceback and not a write-side hole; how THIS arm reads
+        # the shape is pinned by `test_a_NON_PERSISTABLE_status_is_still_DROPPED_not_refused`
+        # and the `_np_foreign` refusal arms in `tests/test_status_projection.py`.
         #
         # ⛔ THE REMEDY IS `supersede_knowledge` (#12914 review P3): #12592 gave
         # the Object/Subject families their OWN supersede path, so this paragraph
@@ -53422,8 +53760,94 @@ class TortoiseSDK:
                 # holds no status — the legacy shape, which reads as live and is
                 # the backfill's business, not this guard's.
                 _np_stored = tuple(_np_row[1] or ())
+                # ── #12869: the OBJECT family's one declared constraint ──────
+                # §4.3 declares `status` as a STRING, and this family
+                # deliberately has NO closed word set — `#10371` keeps the
+                # vocabulary half OPEN because "pack-declared kinds validate
+                # against their own declared words" (§4.3, exercised by
+                # `packs/venture`). That leaves exactly ONE thing undeclared for
+                # EVERY Object kind: a NON-STRING. `['live']` / `123` / `True`
+                # are not words under any kind, so refusing them is not a
+                # vocabulary narrowing — arbitrary STRINGS stay accepted.
+                # The `:Subject` and `:Point` families already refuse a
+                # non-string downstream (the `#1423` guard below, and
+                # `POINT_STATUS_VALUES` in the Point arm), which is why this
+                # check lives on the Object arm alone.
+                # ⛔ IT MUST RUN BEFORE the `_np_stored` test. The row this most
+                # often refuses is the row with NO stored status at all
+                # (`create_object` seeds none, `#9974` R1), so gating the check
+                # on a stored value would let the FIRST non-string write through
+                # — measured, and that is exactly how the row in this issue's
+                # repro was made: a LIVE never-statused Object accepted
+                # `status=['live']` and stored the list verbatim.
+                # ⚠️ `None` is NOT refused: it is the documented CLEAR (`a null
+                # status reads live`, `#9974` R1), and the bare-carrier guard
+                # below is the one that must speak to a null status — refusing it
+                # here would answer a carrier question with a type message and
+                # turn `_BARE_CARRIER_SHAPES`' null arms into a false positive.
+                # The refusal itself lives in ONE helper the three Object write
+                # doors share (`_refuse_non_string_object_status`), because a
+                # rule stated at two doors and absent at a third is the defect
+                # `#11835` round 4 / `#11948` each measured. This arm already
+                # KNOWS the row exists, so the landing question is answered by
+                # construction (`lands=None`).
+                if _np_label == "Object":
+                    _refuse_non_string_object_status(
+                        props, door="update_entity", target=id_val)
                 if not _np_stored:
                     continue
+                # ── #12869 (the STORED side): fail CLOSED, never raise ───────
+                # A row that ALREADY holds a non-scalar — written by a pre-fix
+                # SDK, a raw Cypher producer, or a JSONL replay of either — must
+                # be REFUSED, not raised at. Building the dead set with
+                # `isinstance`-gated membership also removes the `TypeError`,
+                # but it does so by reading an unreadable row as LIVE (dead set
+                # empty -> the write is `continue`d), which is the fail-OPEN
+                # direction: it lets a status write through a lifecycle check
+                # that never actually ran. The guard cannot answer "is this row
+                # dead?" from a value that is not a word, and it will not guess.
+                # ⛔ THE FAIL-OPEN IS MEASURED, not argued: on the TOLERATE side
+                # a row storing `['archived']` accepts `status='live'` (the
+                # target is not a dead WORD, so the dead set is empty and the
+                # write is `continue`d) and the row reads CURRENT again — the
+                # resurrection every guard in this loop exists to refuse. Same
+                # for `status=None`, which REMOVES the property and reads live by
+                # absence (#9974 R1). `None` cannot appear here as a STORED value
+                # (`collect` DROPS nulls).
+                # ⛔ THIS REFUSAL APPLIES TO :Subject TOO, and that is a stated
+                # decision rather than an accident of the loop's shape (review
+                # round 3, P2 — it narrows a family the write-side guard leaves
+                # alone). The crash being removed is in THIS shared loop, so both
+                # families raised `TypeError` on an unhashable stored value; and
+                # an unreadable row is exactly as unreadable on one label as the
+                # other. `main` accepted a status write on such a Subject row —
+                # which is the fail-open direction this check exists to close, not
+                # a behaviour worth preserving. Pinned by
+                # `test_a_non_scalar_stored_STATUS_is_refused_for_a_SUBJECT_too`.
+                _np_foreign = [s for s in _np_stored
+                               if s is not None and not isinstance(s, str)]
+                if _np_foreign:
+                    raise ValueError(
+                        f"update_entity refused the status write "
+                        f"{_np_safe_repr(_np_status)} on {_np_label} {_np_safe_repr(id_val)}: "
+                        f"this row's STORED status is {_np_safe_repr(_np_foreign[0])} "
+                        f"({type(_np_foreign[0]).__name__}), which is not a "
+                        f"lifecycle word. ONTOLOGY {_np_section} declares "
+                        f"`status` as a STRING, so this guard cannot tell "
+                        f"whether the row is dead — and it will not guess by "
+                        f"treating an unreadable value as current. ⛔ NO SDK "
+                        f"DOOR REPAIRS THIS, and that is deliberate rather "
+                        f"than an oversight: the same check refuses every "
+                        f"status write here, so `status='live'` and `status=None` "
+                        f"are refused too — writing any word would be guessing "
+                        f"the state this guard just declined to read. `None`-only "
+                        f"is not a safe exception either: it would let a dead "
+                        f"row read current. Non-status edits are still "
+                        f"accepted on this row, and the repair is a write "
+                        f"OUTSIDE this guard: a raw `MATCH (n:<label> "
+                        f"{{id:$id}}) SET n.status = $word` naming a declared "
+                        f"word, or a replay from a journal that records one."
+                    )
                 # ⛔ NO `isinstance` SKIP HERE (see the block comment ABOVE): a
                 # non-string target is not a dead WORD, and that is exactly why it
                 # must not be exempted — it is a target the family's dead set does
@@ -53449,28 +53873,33 @@ class TortoiseSDK:
                 # exact `str`, and a non-`str` one fails it, so it changes no
                 # outcome — it is kept as an exactness statement so a later edit
                 # cannot quietly reintroduce a subclass here. Only the STORED-side
-                # conjunct defends.
+                # conjunct defends — and since `#12869` refuses a non-`str` stored
+                # value ABOVE, that defence is now second-line: the first is the
+                # `_np_foreign` refusal, which is why this loop cannot be reached
+                # with such a value at all. Kept anyway so a future edit that
+                # moves or weakens `_np_foreign` cannot turn this line into a
+                # `TypeError`.
                 if (type(_np_status) is str
                         and all(isinstance(s, str)
                                 and str.__eq__(s, _np_status) is True
                                 for s in _np_stored)):
                     continue            # entailed: no transition asked for
-                # The DEAD set is built from `str` STORED values only, and that
-                # conjunct is a REGRESSION FIX, not decoration (#12896 review,
-                # P2 — measured). Excluding a non-`str` stored value from the
-                # entailed test above (it must never reach `str.__eq__`) means
-                # this line is now REACHED for that shape, and `in` raises
-                # `TypeError: unhashable type` on an unhashable one — so an
-                # IDEMPOTENT rewrite of a stored `['live']` went from CONTINUED
-                # to a traceback out of `update_entity`. It cannot resurrect
-                # anything: a non-`str` stored value is not a dead WORD (a dead
-                # row cannot even be given one — every non-`str` target on a dead
-                # row is REFUSED above), so the dead set is empty and the write
-                # is `continue`d exactly as it was before the guard learned to
-                # look at the target's type. The unhashable-stored shape was
-                # #12869's; this narrows its symptom at this site to nothing (a
-                # traceback is not a protection), and #12869 should be re-measured
-                # before its own claim is restated.
+                # The DEAD set is built from `str` STORED values only. That
+                # conjunct is defence-in-depth at this head rather than the
+                # mechanism: `_np_foreign` above has already REFUSED every row
+                # that holds a non-`str` stored value, so this line cannot see
+                # one. It is kept because the alternative readings are both
+                # wrong — an unhashable value in `in` raises `TypeError`, and
+                # excluding it from the set alone would make the dead set EMPTY
+                # and the write `continue`, which is the fail-open `_np_foreign`
+                # exists to close. ⛔ `#12869`'s claim was re-measured at this
+                # head, as `#12896` asked: the shape is reachable only from a
+                # pre-fix SDK / raw Cypher / journal replay, and the door now
+                # answers it with the `ValueError` above — not a traceback, and
+                # not a silent accept. Pinned by
+                # `test_a_row_that_ALREADY_holds_a_non_scalar_is_REFUSED_not_crashed`
+                # and, for the no-traceback half, by
+                # `test_a_non_string_stored_status_does_not_crash_the_dead_set`.
                 _np_dead = sorted(
                     s for s in _np_stored
                     if isinstance(s, str) and s in _np_terminal)
@@ -54197,7 +54626,7 @@ class TortoiseSDK:
             if _status_write_is_ambiguous(props):
                 raise ValueError(
                     f"create_entity refused a CONFLICTING status write for "
-                    f"{name!r}: more than one key in this call renders as "
+                    f"{_refusal_repr(name)}: more than one key in this call renders as "
                     f"`status`. A `str` subclass whose content and `__str__` "
                     f"differ is filed under one name by the live write and the "
                     f"other by the journal, so which word lands cannot be known "
@@ -54249,6 +54678,17 @@ class TortoiseSDK:
             # be a second spelling of one rule (and would refuse the un-named
             # sentinel the old block validated for no reason). `roleHolder`
             # validation below is unchanged and still runs before any write.
+            #
+            # ⛔ THAT DOOR, NOT THIS ONE, IS ALSO WHERE #12869's P1 WENT: the
+            # presence test it replaced (`props.get("status")`) hashed the literal
+            # name, so a key that only RENDERS as `status` passed unread and was
+            # written by the extra-props lane on `str(key)`; the shared door reads
+            # the renderer UNION (`keys_rendering_as` / `lifecycle_props_by_rendering`)
+            # and refuses a bag that names it twice, so re-stating either arm here
+            # would be the drift this file keeps paying for. The ambiguity refusal
+            # below is the CREATE-side one for both knowledge kinds, and it renders
+            # its `name` operand through `_refusal_repr` — a caller `__repr__` must
+            # not replace the promised `ValueError` (#12910 review P2-1).
             if _role_holder is not None:
                 # #12047 review F5: pre-flight, so a refusal writes nothing.
                 # ⛔ The kind is compared through `named_kind` — the SAME
@@ -54312,15 +54752,104 @@ class TortoiseSDK:
                 from .entity_resolver import wire_holds_role
                 wire_holds_role(self, _role_holder, _subject_id)
         elif t == "object":
-            from .entity_identity import entity_create_lock
+            # ⛔ #12869: this was the row's MINTING door and it carried NO status
+            # check at all — not a vocabulary one (correctly: §4.3 leaves the
+            # word set OPEN per kind, #10371) and not even a TYPE one. So
+            # `create_object('Held', status=['live'])` stored the list verbatim
+            # on a live row, and EVERY later lifecycle write on that row raised
+            # `TypeError: unhashable type: 'list'` out of the guard instead of
+            # refusing — the row became unaddressable by the one guard that
+            # exists to protect its lifecycle. Guarding only `update_entity`
+            # would have left the defect one call away, exactly as the `#1423`
+            # Subject twin records for its own door (`create_entity`'s subject
+            # arm validates too, and says why).
+            # §4.3 declares the property's type as `string`, so a NON-STRING is
+            # the one value undeclared for every Object kind; arbitrary STRINGS
+            # still ride the open vocabulary. `None` stays legal and is a no-op
+            # here (an absent status reads live, `#9974` R1).
+            # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (`lifecycle_props_by_
+            # rendering`), the same one the update door's guard uses: a `str`
+            # SUBCLASS key that overrides `__hash__` is missed by
+            # `"status" in props` while the write still files it under `status`
+            # (`live.lifecycle_props_by_rendering`'s docstring records the
+            # measured #11825 round-4/8 case). FIRST-WINS, so an ordinary plain
+            # `str` key makes this identical to `props["status"]`.
+            # ⛔ `type` IS A PARAMETER HERE (`type: str`), so `type(x)` would call
+            # the string; `_refusal_type_name(x)` is shadow-free AND hostile-safe.
+            # ⛔ AND THIS GUARD IS A LANDING TEST, NOT A PRESENCE TEST (#12869).
+            # A create whose name is already held by a single LIVE row MERGES
+            # onto it, and `_upsert_object`'s ON MATCH lane never rewrites
+            # `status` (it is projection-owned) — so a declared status is
+            # DROPPED there and that row is never poisoned. Refusing it would
+            # reverse the recorded `#7925` round-4 decision that the bundle's
+            # array refusal fires ONLY at the item that MINTS the name (pinned by
+            # `test_object_item_status_is_accepted_when_a_holder_owns_the_name`
+            # and `test_second_same_name_item_declaring_array_is_dropped`).
+            #
+            # ⛔ SO THE TEST IS "WILL THIS CALL CREATE THE NODE?", AND
+            # `resolve_or_mint`'s `created` FLAG IS NOT THAT QUESTION. It means
+            # "an id was minted", which is ALSO true for the ADOPT path — one
+            # LIVE id-less legacy holder that gets a stamped id (#3590 review
+            # F2). An adopt lands on an EXISTING node, so the status is dropped
+            # there too, and `_adopt_idless_holder` has already WRITTEN the stamp
+            # by the time this flag is readable: refusing on it would be a
+            # refusal that COSTS A WRITE, the atomicity rule `#9287`/`#10192`
+            # states and that this function's own `#12047` review F5 note
+            # re-states twenty lines up ("a refusal here leaves NOTHING
+            # behind"). The flag also cannot separate an `explicit_id` re-create
+            # from a first mint. So the node's own EXISTENCE is asked instead —
+            # the one question that is true exactly when the status would land.
+            # ⚠️ A non-persistable shape (dict/set/bytes) is DROPPED by the
+            # writer and never stored (#7369), so it cannot be a value this
+            # refuses — the same `#7925` round-4 decision, which is why the test
+            # is the transport gate (`_value_ok`) and not "not a string".
+            # ⛔ THIS DOOR DOES NOT PASS `journals` (#12869 review, P2). It used
+            # to, on the claim that it made a `bytes`/`frozenset` status
+            # "refused instead of being handed to the JSON encoder" — which was
+            # false on the RESOLVE branch (`_obj_created` False skips this call
+            # entirely, so the value still reached the encoder and
+            # `_journal_write_failures` incremented) and, on the mint branch,
+            # narrowed `status` alone on a mechanism that is not
+            # `status`-specific: `_journal_entity_event` SWALLOWS the encoder
+            # failure and logs "LIVE-ONLY and will not survive a rebuild"
+            # (#4240), exactly as it does for `tags=frozenset(...)`. So the
+            # refusal lives at the ONE door that raises (`EventAPI.add_object`)
+            # and #4240 keeps this lane, uniformly for every unencodable prop.
+            from .entity_identity import entity_create_lock, resolve_or_mint
             with entity_create_lock("Object", name):
+                _obj_target, _obj_created = resolve_or_mint(
+                    self._get_proj().g, "Object", name,
+                    explicit_id=_server_id)
+                # ⛔ THE SAME QUESTION THE `lands` THUNK ASKS, asked ONCE so the
+                # two guards cannot disagree (#12869): does this call's declared
+                # `status` REACH a node, or is it dropped by the merge lane? The
+                # `_sanitize_props` ambiguity refusal must know it too — it runs
+                # inside `_create_entity`, i.e. AFTER `resolve_or_mint` has
+                # already stamped an id on the ADOPT path, so refusing there on a
+                # MERGE write would cost that write (a live-without-durable row,
+                # #3590). Asked only when the call NAMES a status, so a
+                # status-less create issues no extra read — the same economy the
+                # `declared`-first rule above states.
+                def _np_lands() -> bool:
+                    """Does a declared `status` REACH a node, or is it dropped?"""
+                    return not self._get_proj().g.query(
+                        "MATCH (n:Object {id:$id}) RETURN count(n)",
+                        params={"id": _obj_target},
+                    ).result_set[0][0]
+                _status_lands = (None
+                                 if not lifecycle_props_by_rendering(props, {"status"})
+                                 else _np_lands())
+                if _obj_created:
+                    _refuse_non_string_object_status(
+                        props, door="create_entity(type='object')",
+                        target=name,
+                        lands=_np_lands)
                 node = self._create_entity(
-                    "Object",
-                    self._entity_identity_for("Object", name,
-                                              explicit_id=_server_id),
+                    "Object", _obj_target,
                     _entity_door_props(
                         "objectKind", name, _with_folded_entity_name(name, props)),
-                    "ObjectRegistered", is_episodic=is_episodic)
+                    "ObjectRegistered", is_episodic=is_episodic,
+                    _status_lands=_status_lands)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
             # stripped HERE, at the Event door, because ``event`` is the

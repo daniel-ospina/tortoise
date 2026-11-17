@@ -2676,7 +2676,22 @@ class _EntityHandlers:
         skip = self._META_KEYS | handled_keys
         extra = {}
         for k, v in ev.items():
-            if k in skip or v is None or not _is_persistable_prop_value(v):
+            # ⛔ TWO RENDERINGS, because the skip set is literal names and the
+            # WRITE is not (#12869 review round 3, P0). `skip` is a frozenset of
+            # plain `str`, so `k in skip` HASHES the raw key: a `str` SUBCLASS
+            # whose `__hash__` is overridden (or whose `__str__` renders
+            # `status`) is not found, so it fell through to `SET n += $extra`
+            # — and the live transport inlines `str(key)`, so it was written
+            # under `status` on the ON MATCH lane, AFTER the door's guard had
+            # declined to look at it. MEASURED: `create_object(name, kind,
+            # **{KHash("status"): ['live']})` on an EXISTING node stored
+            # `['live']` and made the row unaddressable by every SDK status
+            # write — the exact poison #12869 removes, through the merge branch
+            # the guard skips by design. TWO tests: `k in skip` (content, via
+            # hash/eq) and `str(k)` (live). A key that ALSO overrides `__hash__`
+            # misses both — live=`__str__`, journal=content, replay poisons (#13149).
+            if (k in skip or str(k) in skip) or v is None \
+                    or not _is_persistable_prop_value(v):
                 continue
             if allow_keys is not None and k not in allow_keys:
                 continue

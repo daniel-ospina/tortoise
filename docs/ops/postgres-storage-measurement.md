@@ -254,9 +254,11 @@ purpose (a migration is not usage), and `reconcile` discloses it.
 
 **What the meter does not do.** It measures rows written from the day it lands.
 It does not backfill, does not prune, and does **not** arm `allowance_gate` —
-arming `postgres_storage` needs the `free`/`anon` included amounts decided first
-(#12762 is measurement only; `product/pricing.json` and the tier boundaries are
-untouched).
+arming `postgres_storage` needs the `free`/`anon` included amounts decided first,
+**and** a per-org gauge the gate can afford on a write path (neither the audit nor
+the ledger addend is one). Both are declared on the gate itself:
+`allowance_gate.RELEASE_CONDITIONS` (#12762/#9559 is measurement only;
+`product/pricing.json` and the tier boundaries are untouched).
 
 **Retention.** `#3843`/`#3853` (“no retention window of any length”) bind
 `analytics_events` (migration 0004's immutable trigger). They say nothing about

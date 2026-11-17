@@ -555,9 +555,11 @@ class TestTheLoaderContract:
     def test_the_storage_keys_are_NOT_in_tier_limits(self):
         """⛔ THE ANTI-ARMING INVARIANT. `allowance_gate.enforce_allowances`
         arms on key PRESENCE (`if dim.limit_key not in limits: continue`), and
-        BOTH storage dimensions are BLOCKED there — `postgres_storage` has no
-        per-org byte meter, and `graph_storage`'s own contract forbids capping
-        on a figure that under-reports the HNSW index 8.5x-21.7x. The
+        BOTH storage dimensions are BLOCKED there — `postgres_storage` has a
+        per-org ATTRIBUTION but no per-org GAUGE the gate can read on a write
+        path (and its included amounts are unconfirmed), while `graph_storage`'s
+        own contract forbids capping on a figure that under-reports the HNSW
+        index 8.5x-21.7x. The
         `tier_limits()` dict is what callers hand around as "the org's limits",
         so a storage key in it is one `{**tier_limits(t), ...}` away from
         arming a blocked dimension and answering HTTP 500 on every gated write.
