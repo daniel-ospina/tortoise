@@ -34,7 +34,7 @@ speed matters but is **not** the top criterion. That ranking is **this document'
 owner ruling** (no artefact carries the sentence), and every ordering below follows it; §5 states it as Q1–Q5
 so a reader can disagree with the ranking explicitly rather than inherit it.
 
-**Decision (owner, 2026-11-17) — every served label's embeddings belong in Postgres, and the search is to
+**Decision (owner, 2026-11-17) — the embeddings of every label the search serves belong in Postgres, including the ones that carry no index today, and the search is to
 be aligned with that** (`#13220`). The owner's words: *"if indexing improves search for
 Object/Subject/Event of course we want that, and we just need it in Postgres and the search aligned with
 that and everything armed and working"* … *"we should likely also index source also in postgres"*. **This
