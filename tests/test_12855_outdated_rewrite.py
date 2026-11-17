@@ -575,6 +575,81 @@ def test_a_PREVIEW_discharges_a_durable_only_marker(env, monkeypatch):
     assert "rebuild_all" not in text, text
 
 
+def test_the_DISCHARGE_write_holds_the_run_lock(env, monkeypatch):
+    """The exact-set write must happen UNDER the lock the read was taken under.
+
+    Splitting the discharge into "locked read … unlocked write" leaves the one
+    write that can DELETE a peer's id unprotected: a merge landing in the gap is
+    silently erased, its live-only row loses the only durable trace, and the next
+    preview certifies the graph. Measured from a SECOND file descriptor, which
+    `flock` treats as a different holder even inside one process — so this probe
+    answers "is the lock held right now", which is exactly the question.
+    """
+    sdk, events = env
+    _seed(sdk)
+    journal = str(events / "events.jsonl")
+    marker = tool._pending_path(journal)
+    lock_path = marker.with_name(marker.name + ".lock")
+
+    real_set = tool._set_pending_locked
+    real_clear = tool._clear_pending_locked
+    seen = {"locked": None}
+
+    def probe_set(journal_arg, ids):
+        seen["locked"] = is_flock_held(lock_path)
+        return real_set(journal_arg, ids)
+
+    def probe_clear(journal_arg):
+        seen["locked"] = is_flock_held(lock_path)
+        return real_clear(journal_arg)
+
+    monkeypatch.setattr(tool, "_set_pending_locked", probe_set)
+    monkeypatch.setattr(tool, "_clear_pending_locked", probe_clear)
+    rep = tool.run(sdk, execute=True)
+    monkeypatch.setattr(tool, "_set_pending_locked", real_set)
+    monkeypatch.setattr(tool, "_clear_pending_locked", real_clear)
+
+    assert seen["locked"] is not None, "precondition: the discharge wrote the marker"
+
+    assert rep.rewritten, "precondition: rows were rewritten"
+    assert seen["locked"] is True, (
+        "the discharge wrote the marker with NO lock held — a peer's merge "
+        "landing in that gap is erased and the next preview prints a false "
+        "`0 rows ⇒ dead weight`")
+
+
+def is_flock_held(lock_path) -> bool:
+    import fcntl
+    with open(lock_path, "a+") as fh:            # a DIFFERENT fd = another holder
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def test_a_SYMLINKED_journal_gets_ONE_marker(tmp_path):
+    """Two spellings of one journal must not be two markers.
+
+    `resolve()` follows a symlink, but naming the marker after the UNRESOLVED
+    basename put it beside the target under the link's name — so an `--execute`
+    that failed through the link leaves a marker a preview through the real path
+    cannot see, restoring the false "0 rows" reading with no re-run.
+    """
+    real = tmp_path / "a" / "events.jsonl"
+    real.parent.mkdir(parents=True)
+    real.write_text("", encoding="utf-8")
+    link_dir = tmp_path / "b"
+    link_dir.mkdir()
+    link = link_dir / "alias.jsonl"
+    link.symlink_to(real)
+
+    assert tool._pending_path(str(link)) == tool._pending_path(str(real)), (
+        f"one journal, two markers: {tool._pending_path(str(link))} vs "
+        f"{tool._pending_path(str(real))}")
+
+
 def test_a_SECOND_concurrent_run_is_refused_by_name(env):
     """Two runs on one journal must not interleave their read-modify-writes.
 

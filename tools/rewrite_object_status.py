@@ -324,8 +324,14 @@ def _pending_path(journal: str | None):
     """
     if not journal:
         return None
-    return Path(journal).expanduser().resolve().with_name(
-        Path(journal).name + ".rewrite-pending")
+    # ⛔ BOTH halves from the RESOLVED path. `resolve()` follows a symlink, but
+    # naming the marker after the UNRESOLVED basename put it beside the TARGET
+    # under the LINK's name: one journal, two markers, and an `--execute` that
+    # failed through one spelling leaves a marker a preview through the other
+    # cannot see — the false reading this function exists to prevent (measured
+    # with `b/alias.jsonl -> a/events.jsonl`).
+    resolved = Path(journal).expanduser().resolve()
+    return resolved.with_name(resolved.name + ".rewrite-pending")
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -398,13 +404,18 @@ def _set_pending(journal: str | None, ids: list) -> bool:
     never be discharged again — the marker would be poisoned forever and the
     graph permanently unmeasurable (measured: 3 runs, ids stuck on disk).
     """
+    with _marker_lock(journal):
+        return _set_pending_locked(journal, ids)
+
+
+def _set_pending_locked(journal: str | None, ids: list) -> bool:
     path = _pending_path(journal)
     if path is None:
         return True
     ids = sorted({str(i) for i in ids if i is not None})
     try:
         if not ids:
-            _clear_pending(journal)
+            _clear_pending_locked(journal)
             return True
         _atomic_write(path, "\n".join(ids) + "\n")
     except OSError:
@@ -490,7 +501,11 @@ def _release_run_lock(token) -> None:
     if held[1] > 0:
         return
     _RUN_LOCKS.pop(key, None)
-    with contextlib.suppress(OSError, AttributeError, ValueError):
+    with contextlib.suppress(ImportError, OSError, AttributeError, ValueError):
+        # `ImportError` matters: `_acquire_run_lock` deliberately supports a
+        # platform without `fcntl` and returns an unlocked token there, so a
+        # release that re-imported it unguarded would crash AFTER the migration
+        # ran — a traceback and a non-zero exit over completed work.
         import fcntl
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     with contextlib.suppress(OSError, AttributeError):
@@ -542,6 +557,11 @@ def _kept_pending(pending, population, log) -> list[str]:
 
 
 def _clear_pending(journal: str | None) -> None:
+    with _marker_lock(journal):
+        _clear_pending_locked(journal)
+
+
+def _clear_pending_locked(journal: str | None) -> None:
     path = _pending_path(journal)
     if path is None:
         return
@@ -1114,11 +1134,18 @@ def rewrite(sdk, rep: Report) -> Report:
     # So the same identity proof is applied to the marker's OWN ids: an id
     # carrying a durable rewrite record is discharged, one without it is kept.
     _discharged = {str(i) for i in rep.rewritten}
-    # ⛔ ONE LOCKED READ-FILTER-WRITE. Computing the kept set from a read taken
-    # OUTSIDE this lock is the lost-update this tool must not have: an id a peer
-    # merges in between is dropped when the exact set is written back.
+    # ⛔ ONE CRITICAL SECTION — read, filter AND write under the same lock. Taking
+    # the lock for the read and again for the write, with nothing held in between,
+    # leaves the exact-set write unprotected: a peer's merge landing in that gap is
+    # silently erased, so its live-only row loses the only durable trace and the
+    # next preview certifies the graph (measured: a real peer `_write_pending`
+    # succeeded mid-discharge and its id was gone afterwards).
     with _marker_lock(rep.journal):
-        _on_disk = _read_pending(rep.journal)
+        return _discharge_locked(rep, log, _discharged, _marker_ids)
+
+
+def _discharge_locked(rep, log, _discharged, _marker_ids) -> Report:
+    _on_disk = _read_pending(rep.journal)
     if _on_disk is None:
         # An unreadable marker is not an empty one (see `_read_pending`); do not
         # shrink a set nobody could read, and say so.
@@ -1129,19 +1156,18 @@ def rewrite(sdk, rep: Report) -> Report:
                       f"{_pending_path(rep.journal)} became unreadable during "
                       "the run, so its ids could not be discharged."),
         })
-    with _marker_lock(rep.journal):
-        _still = [pid for pid in _kept_pending(
-            sorted(set(_on_disk) | _marker_ids), _population_ids(rep), log)
-            if pid not in _discharged]
+    _still = [pid for pid in _kept_pending(
+        sorted(set(_on_disk) | _marker_ids), _population_ids(rep), log)
+        if pid not in _discharged]
     _write_failed = None
     if (rep.failures or rep.truncated or rep.unaddressable or rep.fanout
             or _still
             or any(rep.remaining.get(w, 0) for w in LEGACY_WORDS)):
         rep.pending = _still
-        if not _set_pending(rep.journal, _still):
+        if not _set_pending_locked(rep.journal, _still):
             _write_failed = _still or list(_on_disk)
     else:
-        _clear_pending(rep.journal)
+        _clear_pending_locked(rep.journal)
         rep.pending = []
     if _write_failed is not None:
         # A failed discharge is not a silent success: the marker on disk still
