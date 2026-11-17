@@ -6244,9 +6244,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # at this head rather than carried, because a red on `main` blocks every head.
         # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only; the rows
         # above pin `tortoise/sdk.py`, `search_engine.py`, `pack_registry.py` — THOSE THREE,
-        # not the directory: `git diff --stat origin/main...HEAD -- <those>` is EMPTY,
-        # `-- tortoise/` is NOT (the branch also carries a `tortoise/tool_registry.py` 3+/2-
-        # edit). "Repaired" means this pair is re-pointed, never a claim about any other row.
+        # not the directory: `git diff --stat origin/main...HEAD -- <those>` is EMPTY (so is
+        # `-- tortoise/` since the merge took `main`'s identical `tool_registry.py` fix).
+        # "Repaired" means this pair is re-pointed, never a claim about any other row.
         # The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
