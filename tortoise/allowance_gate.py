@@ -1021,13 +1021,27 @@ def enforce_allowances(
             continue  # ABSENT = unlimited. No invented cap, and the dimension
             #           keeps being metered by its own writer.
         allowance = _limit(limits.get(dim.limit_key), dim, org_id)
-        if allowance is None or (allowance <= 0 and dim.zero_means_unarmed):
-            # ``None`` is the documented unlimited; a non-positive amount on a
-            # dimension that declares ``zero_means_unarmed`` is the artifact's
-            # UNSET sentinel (see ``graph_storage``) and is equally unarmed.
+        if allowance is None or (allowance == 0 and dim.zero_means_unarmed):
+            # ``None`` is the documented unlimited; a ZERO amount on a dimension
+            # that declares ``zero_means_unarmed`` is the artifact's UNSET
+            # sentinel (see ``graph_storage``) and is equally unarmed.
             # Both still METER: unset is not a reason to stop measuring.
             _reading(dim, org_id, meters, observed_only=True)
             continue
+        if allowance < 0:
+            # ⛔ NEGATIVE IS NOT A SENTINEL (#13102 review, P3). The artifact
+            # spells "unset" as 0, so a negative is a corrupt figure — and
+            # reading ``allowance <= 0`` as unarmed made it fail OPEN (uncapped)
+            # on a paid tier, while the money path refuses the same value. A
+            # non-positive amount is only ever the sentinel when it IS zero.
+            _logger.error(
+                "allowance limit negative (fail-closed): team=%s dimension=%s "
+                "field=%s value=%r", org_id, dim.dimension, dim.limit_key,
+                allowance)
+            raise QuotaCheckError(
+                f"team limits {dim.limit_key} is negative for dimension "
+                f"{dim.dimension!r} ({allowance!r}) — an unset amount is 0, "
+                f"never a negative figure")
         reading = _reading(dim, org_id, meters, observed_only=False)
         if reading is None:  # _reading refuses, so this is belt-and-braces
             raise QuotaCheckError(

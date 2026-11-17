@@ -62,11 +62,16 @@ def _meter(used: float, **kwargs):
 
 
 def test_solo_pro_team_are_armed_at_the_derived_tier_numbers():
-    """$19 x 30 % / $74 per GB-month = 77 MB; pro 102; team 615.
+    """The tier numbers of ``SEARCH-ARCHITECTURE.md`` §8 — 77 / 102 / 615.
 
-    The figures are asserted against ``product/pricing.json`` through its ONE
-    accessor, so this test fails if either the cap or the price moves — which is
-    the point: two numbers for one allowance is how a cap and a price drift.
+    §8 solves the window TOGETHER WITH DENSITY
+    (``p = (0.30·P − $0.125) ÷ ($43.75/1000 + $85/8000)``, window ``= 0.75·p``),
+    because the shared project line is part of the same budget; the "30 % of the
+    price ÷ $74/GB-month" shortcut reproduces solo and nothing else (pro would be
+    101.4, team 604.1). The figures are asserted against ``product/pricing.json``
+    through its ONE accessor, so this test fails if either the cap or the price
+    moves — which is the point: two numbers for one allowance is how a cap and a
+    price drift.
     """
     assert pricing.storage_limits("solo")["max_graph_storage_mb"] == 77
     assert pricing.storage_limits("pro")["max_graph_storage_mb"] == 102
@@ -89,6 +94,31 @@ def test_free_and_anon_are_UNARMED_and_say_so():
         assert "max_graph_storage_mb" not in limits, tier
         # ...and if a surface ever emits the 0 anyway, the gate is defended.
         enforce_allowances(_limits(tier=tier, max_graph_storage_mb=0),
+                           meters={"graph_storage": _meter(0.0)})
+
+
+def test_a_NEGATIVE_artifact_amount_REFUSES_rather_than_reading_as_unset(monkeypatch):
+    """A negative is a corrupt figure, not the artifact's ``0`` unset sentinel.
+
+    Reading ``<= 0`` as unarmed left a PAID tier silently UNCAPPED, while the
+    money path raises ``ValueError`` on the same value — one corrupt input, two
+    opposite answers (#13102 review, P3). The arming seam now fails closed, the
+    way it already does for an unreadable amount.
+    """
+    monkeypatch.setattr(pricing, "storage_limits",
+                        lambda _tier: {"max_graph_storage_mb": -5})
+    with pytest.raises(QuotaCheckError, match="negative"):
+        _arm_graph_storage({"org_id": ORG, "tier": "solo"}, "solo")
+
+
+def test_a_NEGATIVE_limit_in_the_gate_REFUSES_rather_than_uncapping():
+    """The gate's defensive half: only ZERO is the unarmed sentinel.
+
+    A surface that hands the gate a negative allowance (a hand-built dict, an
+    older resolver) must not get an uncapped paid tier out of it.
+    """
+    with pytest.raises(QuotaCheckError, match="negative"):
+        enforce_allowances(_limits(max_graph_storage_mb=-5),
                            meters={"graph_storage": _meter(0.0)})
 
 

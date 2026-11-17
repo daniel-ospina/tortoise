@@ -719,6 +719,18 @@ def _arm_graph_storage(limits: dict, tier: str) -> dict:
             f"pricing.json tier {tier!r} {key} is unreadable ({value!r})") from e
     if mb > 0:
         limits[key] = mb
+    elif mb < 0:
+        # ⛔ A NEGATIVE AMOUNT IS NOT THE UNSET SENTINEL. The artifact marks
+        # "unset" with ``0`` (free/anon, deliberately unarmed); a negative is a
+        # corrupt figure, and folding it into "unset" would silently leave a
+        # PAID tier UNCAPPED on the enforcement path while the money path
+        # (``metering.storage_overage_cost_usd`` -> ``_number``) raises
+        # ``ValueError`` on the same value — one corrupt input, two opposite
+        # answers (#13102 review, P3). Fail the way the unreadable branch above
+        # already fails.
+        raise QuotaCheckError(
+            f"pricing.json tier {tier!r} {key} is negative ({value!r}) — an "
+            f"unset amount is 0, never a negative figure")
     return limits
 
 
