@@ -8125,9 +8125,9 @@ def test_a_stale_cite_names_the_line_the_anchor_really_lives_on(tmp_path):
         assert reported and "cannot grade" in reported[0] and unsupported in reported[0], (
             f"an ungradeable row kind must be REPORTED, not raised: {reported}")
     # 6. ⛔ ONE ARM PER `_locate_hint` SITE IN THIS FILE (#13033 round-12 review, P2 —
-    #    MEASURED, and the measurement is the point). Round 11's claim on the row of
-    #    `config/ci-surfaces.yml` was that the sites are pinned; mutating EACH of the
-    #    seven in turn, line-count preserving, with `(lambda *a, **k: "ZZZ")(` left
+    #    MEASURED, and the measurement is the point). The over-claim was THIS test's
+    #    own docstring above, not the config row (which said three); mutating EACH of
+    #    the seven in turn, line-count preserving, with `(lambda *a, **k: "ZZZ")(` left
     #    FIVE of them green (417 passed): the `def` anchor, the `span` anchor, the
     #    `span` end spec, the `method-span` def anchor and the `method-span` end spec.
     #    Those are `_BUNDLE_RULES`' own live kinds (`the entry point` is `def`,
