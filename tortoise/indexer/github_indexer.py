@@ -33,22 +33,33 @@ Lifecycle decision table (THE rule):
   the closed state) — the one-time legacy backfill is the only other source
   of ``-closed`` events (marker-gated, T2-P3).
 - a row NO fold can reconcile records NO transition ("cannot place") → the diff
-  answers ``None`` and the transition arm is gated off. Two families: a row whose
-  position the fold cannot resolve (foreign ``pipelineStageKey`` / stage id absent
-  from its declaration), and a row carrying a lifecycle LATCH term (``status`` in
-  ``commit_ops.OBJECT_TERMINAL_STATUSES``, or the legacy ``outdated`` flag/word) —
-  such a row is not LIVE, so no fold ever reaches it. ⚠️ Stated trade, symmetric: it
-  records neither ``-closed`` nor ``-reopened``. Bounded and inspectable; an
-  unbounded mint loop is neither (#13143, #13288 F1). This is NOT the pre-#13143
-  bug returning — that was a real close reading as "first ingest"; both refusals
-  above are shapes for which no fold writes anything.
-  ⛔ BOTH are answered BEFORE the polarity (closed/open) arms, on purpose: the
-  answer therefore does not depend on ``isClosed``. It must not, because
-  ``is_position_ended`` short-circuits on the marker alone and never looks at the
-  slot, so a marker-carrying row with an unplaceable position would otherwise
-  answer ``"closed"`` and mint ``-reopened``, ``-reopened-2``, … on every poll of
-  an OPEN issue (measured at ``[1,1,1]`` — #13288 F1). A lookup the fold refuses to
-  perform is not a negative result; it is a third answer.
+  answers ``None`` and the transition arm is gated off. THREE families:
+  1. a row whose position the fold cannot resolve (foreign ``pipelineStageKey`` /
+     stage id absent from its declaration);
+  2. a row carrying a lifecycle LATCH term (``status`` in
+     ``commit_ops.OBJECT_TERMINAL_STATUSES``, or the legacy ``outdated``
+     flag/word) — such a row is not LIVE, so no fold ever reaches it;
+  3. a row whose ``isClosed`` marker is a FALSY NON-BOOLEAN (``0`` / ``0.0`` /
+     ``""``) — the doors store it verbatim, and the fold's live-holder probe is
+     type-sensitive, so such a row is not live either and nothing writes back a
+     repair (#13326).
+  ⚠️ Stated trade, symmetric: these rows record no transition at all, so neither
+  ``-closed`` nor ``-reopened``. Bounded and inspectable; an unbounded mint loop
+  is neither (#13143, #13288 F1). This is NOT the pre-#13143 bug returning — that
+  was a real close reading as "first ingest"; all three are shapes for which no
+  fold writes anything.
+  ⛔ FAMILIES 1 AND 2 ARE ANSWERED BEFORE THE POSITION (closed/open) arms, on
+  purpose: their answer therefore does not depend on ``isClosed``. It must not,
+  because ``is_position_ended`` short-circuits on the marker alone and never
+  looks at the slot, so a marker-carrying row with an unplaceable position would
+  otherwise answer ``"closed"`` and mint ``-reopened``, ``-reopened-2``, … on
+  every poll of an OPEN issue (measured at ``[1,1,1]`` — #13288 F1). A lookup the
+  fold refuses to perform is not a negative result; it is a third answer.
+  ⛔ FAMILY 3 IS ANSWERED AFTER THEM, and only where neither position arm records
+  an end — its reason is the MARKER's excluded middle, not the position. A falsy
+  marker on an ENDED position is still read ``"closed"``: that is the reading the
+  reopen fold reaches and repairs, so answering ``None`` there would end that
+  row's close/reopen history for ever (#13326 F1).
 
   **Stated residual (#13288 review, note).** The declaration this reader resolves
   against is ``core:workitem`` only, because that is the only pipeline the BUILT-IN
@@ -1251,33 +1262,59 @@ class GitHubIndexer:
             _key = str(stage_key or CORE_WORK_ITEM_PIPELINE_KEY)
             if _key not in _PIPELINE_DECLS or declared_slot is None:
                 return None                  # the fold refuses (see above)
-        # ⛔ A NON-BOOLEAN `isClosed` IS THE SAME EXCLUDED MIDDLE, one field over.
-        # The doors store it VERBATIM — `update_knowledge(id, isClosed=0)` stores the
-        # INTEGER `0` (measured on the merged head: `typeof(o.isClosed)` →
-        # `['Integer']`) — and the two sides then read it differently: this file
-        # (and `apply_stage_fold`) read it by `bool()`, while the fold's LIVE-holder
-        # probe compares it in Cypher, `coalesce(n.isClosed, false) = false`, where
-        # `0 = false` is FALSE under FalkorDB's strict types. So the row has NO live
-        # holder, no fold ever reaches it, and NOTHING repairs it (unlike the truthy
-        # half, which the reopen arm repairs by writing a real boolean).
-        # Measured on the merged head, four polls of a CLOSED issue over a row at
-        # `update_knowledge(id, isClosed=0)`: mints `[1, 1, 1, 1]`, four `-closed`
-        # Events, the row byte-identical (`[0, 'active', 'in_progress', None]`) and
-        # the graph saying open for ever.
-        # `None` is the only loop-free answer here: it gates the transition arm off
-        # (`if prev_state is not None:`), the worst cost is ONE lost transition on a
-        # row no in-contract writer produces, and an unbounded mint is not a
-        # defensible alternative. The truthy half is deliberately NOT answered here —
-        # it reaches the position arms below and reads `"closed"`, which is right:
-        # the reopen arm resolves such a row BY NAME and REPLACES the marker with a
-        # real boolean (measured `1/active/in_progress` → `False/active/in_progress`),
-        # so it self-heals after one repairing `-reopened`.
-        if is_closed is not None and not isinstance(is_closed, bool) and not is_closed:
-            return None                      # 0 / 0.0 / "" — unplaceable, never live
         if is_position_ended(is_closed=is_closed, stage_slot=slot):
             return "closed"
         if is_position_ended(is_closed=is_closed, stage_slot=declared_slot):
             return "closed"
+        # ⛔ A FALSY NON-BOOLEAN `isClosed` IS THE SAME EXCLUDED MIDDLE, one field
+        # over — answered `None` for the ANSWER's reason, not the fold's reach.
+        # The doors store the marker VERBATIM: `update_knowledge(id, isClosed=0)`
+        # stores the INTEGER `0` (measured on the merged head: `typeof(o.isClosed)`
+        # → `['Integer']`), and the two sides then read it differently. This file
+        # (and `apply_stage_fold`) read it by `bool()`, so `0` is not ended; the
+        # fold's LIVE-holder probe compares it in Cypher,
+        # `coalesce(n.isClosed, false) = false`, where `0 = false` is FALSE under
+        # FalkorDB's strict types (vendor-documented: booleans are stored
+        # numerically but comparisons are type-sensitive, so `1 = true` is false
+        # and `toBoolean(0)` is the explicit coercion). So the row has NO live
+        # holder while this reader, reading `bool(0)`, calls it live — the measured
+        # pre-fix symptom, four polls of a CLOSED issue over a row at
+        # `update_knowledge(id, isClosed=0)`: mints `[1, 1, 1, 1]`, four `-closed`
+        # Events, the row byte-identical (`[0, 'active', 'in_progress', None]`),
+        # the graph saying open for ever.
+        # ⛔ THE REACH AND THE ANSWER ARE DIFFERENT FACTS, and only the second one
+        # grounds `None`. The reopen arm's by-name reach does NOT test the marker's
+        # TYPE: `_reopen_targets_closed` keys on "no live holder" + ONE registered
+        # incarnation (`projection/entities.py:6158-6164`: `object_id = _held[0]`,
+        # reached BEFORE `resolve_fold_name`), `_held` comes from
+        # `all_name_holder_ids` (any status — an Integer-`0` row IS held,
+        # `entity_identity.py:447-470`), and `_live_holders` uses the same
+        # `coalesce(n.isClosed, false) = false` predicate that calls Integer `0`
+        # not-live (`live.py:209-213`). So a falsy-marked row sits in exactly the
+        # predicate state a truthy-marked one does, and a `github.issue.reopened`
+        # fold that REACHES it rewrites `isClosed` to a real boolean
+        # (`pipeline.py:434`, `"isClosed": target.is_terminal`). What makes the
+        # truthy half self-heal is not the fold's reach — it is that this reader
+        # ANSWERS `"closed"` for it, so the fold is triggered at all.
+        # The asymmetry that DOES justify `None` is the folds that REFUSE. `None`
+        # cannot loop under ANY fold outcome (it gates the transition arm off,
+        # `if prev_state is not None:`). `"closed"` loops unboundedly wherever the
+        # reopen fold refuses the row while GitHub says open: `len(_held) != 1`
+        # (the name is held by 2+ incarnations), the regression guard,
+        # `unresolvable-current-stage`, `cross-pipeline` — one `-reopened` per poll,
+        # for ever. That is the choice, and it is the one not to reverse.
+        # ⛔ AND IT IS ANSWERED AFTER THE POSITION ARMS, deliberately: a falsy marker
+        # on an ENDED position still reads `"closed"` above, which is the reading
+        # the fold reaches and REPAIRS. Answering `None` there would cost that row
+        # its entire remaining close/reopen history (no mint ⇒ no fold ⇒ no repair,
+        # every poll for ever — pinned by
+        # `test_a_FALSY_isClosed_on_an_ENDED_position_still_records_its_reopen`).
+        # The shape the bug was measured on is an ACTIVE slot, where BOTH position
+        # arms are `False`, so narrowing costs that fix nothing.
+        # Cost, stated: one lost transition on a row no in-contract writer produces,
+        # against an unbounded journal mint, which is not a defensible alternative.
+        if is_closed is not None and not isinstance(is_closed, bool) and not is_closed:
+            return None                      # 0 / 0.0 / "" — no live holder, unplaceable
         if stage_id is not None or slot is not None:
             return "open"
         if status is None:
