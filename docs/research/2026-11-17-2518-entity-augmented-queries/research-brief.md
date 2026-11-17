@@ -475,7 +475,7 @@ certified by the strict per-window predicate (`search_engine.require_hybrid_read
 `has_embedder`.
 
 **What is pinned by tests:** the harness's structural facts and the two pre-existing artifacts
-(`tests/test_candidate_recall_11901.py`). ⛔ The three artifacts in this directory are **not** pinned by
+(`tests/test_candidate_recall_11901.py`). ⛔ The five artifacts in this directory are **not** pinned by
 that suite — they are a dated measurement of a live corpus, and a pin would rot exactly as the corpus
 does. The numbers the dispatch can re-check are the decompositions above, and each is re-derivable from
 the committed JSON with `jq '.arms.exact'`.
