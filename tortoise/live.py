@@ -91,20 +91,33 @@ DRAFT_STATUS = "draft"
 #: is CURRENT (draft is not-yet-published, not dead).
 CURRENT_POINT_STATUS_VALUES = frozenset({DRAFT_STATUS, "live"})
 
-#: The vocabulary's terminal members (ontology §5: retracted/superseded are
-#: terminal; ``outdated`` is the legacy supersede/invalidate status;
-#: ``archived`` is reserved — no v1 write path).
+#: The vocabulary's READ-side terminal members (ontology §5: retracted/superseded
+#: are terminal; ``outdated`` is the legacy supersede/invalidate status;
+#: ``archived`` is a declared synonym of ``deprecated`` at the write door).
+#: ⚠️ This is the READER's set, not the WRITER's: since `#11824` S0 the write
+#: vocabulary is the four words in ``lifecycle_vocabulary.LIFECYCLE_STATUS_VALUES``
+#: (``sdk.POINT_STATUS_VALUES``), which does NOT contain ``retracted``,
+#: ``outdated`` or ``archived``. Rows written before S0 still hold those words and
+#: nothing is backfilled (#11824 §1), so a reader must keep hiding them — design
+#: §8, "what a reader hides is wider than what a writer may create". Do not
+#: derive the write set from this one, and do not narrow it to match.
 TERMINAL_STATUS_VALUES = frozenset(
     {"retracted", "superseded", "outdated", "archived"})
 
-#: ``deprecated`` is deliberately NOT in ``POINT_STATUS_VALUES``: no SDK/API
-#: write path emits it (only direct graph writes / legacy assessment paths
-#: ever did — see tests/test_lifecycle_guards.py, which asserts its absence),
-#: so it is not a legal create-time status. It IS present in legacy graphs and
-#: must never be served as current, so it joins the EXCLUSION set below but
-#: not ``TERMINAL_STATUS_VALUES``. #2901 inverse-shape ruling: the vocabulary
-#: is right (no writer) and the recall_state test that sets ``n.status =
-#: 'deprecated'`` directly is a legitimate simulation of legacy graph data.
+#: ``deprecated`` is in ``LEGACY_NON_CURRENT_STATUS_VALUES`` because it must be
+#: HIDDEN as current, NOT because it is unwritable. ⚠️ `#11824` S0 made it a WRITE
+#: word too: the four-word lifecycle is ``draft``/``live``/``deprecated``/
+#: ``superseded`` (``lifecycle_vocabulary.LIFECYCLE_STATUS_VALUES``, re-exported
+#: as ``sdk.POINT_STATUS_VALUES``), and ``tests/test_lifecycle_guards.py:85-97``
+#: records that reversal on the record — the pre-S0 note here claimed the
+#: opposite and asserted the guards pinned an ABSENCE that they no longer do.
+#: The word is unbounded on both sides for one reason: ``superseded`` NAMES ITS
+#: SUCCESSOR, so a row where nothing replaced the statement needs
+#: ``deprecated`` to say "this ended and nothing replaced it".
+#: #2901 inverse-shape ruling stands: it joins the EXCLUSION set below but not
+#: ``TERMINAL_STATUS_VALUES``, and the recall_state test that sets
+#: ``n.status = 'deprecated'`` directly remains a legitimate simulation of legacy
+#: graph data.
 LEGACY_NON_CURRENT_STATUS_VALUES = frozenset({"deprecated"})
 
 #: Every status a read surface (FTS/vector/structural, EP factor extraction,
