@@ -575,6 +575,11 @@ def test_a_FALSY_isClosed_with_NO_position_still_withholds_the_open_word(sdk):
     stored = proj.g.query(
         f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.status, o.isClosed, "
         "typeof(o.isClosed), o.pipelineStageId, o.pipelineSlot").result_set[0]
+    # PREMISE PIN, not coverage: a door or a projection that started coercing the
+    # marker, dropping the word, or recording a position would leave the pin below
+    # passing for a shape it is not about — so the precondition is asserted, never
+    # assumed. The diff adds READS only, so these can not vary under a mutation of
+    # it and must not be counted as guards (#13326 F2, agent-infra#3442 rule 3).
     assert stored[1] == 0 and stored[2] == "Integer", (
         f"the door did not store the uncoerced integer this pin is about: {stored!r}")
     assert stored[0] == "live", (

@@ -1614,10 +1614,13 @@ class GitHubIndexer:
         # arm is `False`, so narrowing costs that fix nothing.
         # Cost, stated: the shape the bug was measured on (a falsy marker on a LIVE
         # position, the row every props door can produce — `update_knowledge(id,
-        # isClosed=0)` stores the integer verbatim, `sdk.py:22388-22563`, the door
-        # and the props relay it forwards to) then
-        # records NO transition at all: `prev_state is None` gates the mint off and
-        # nothing repairs the marker, so nothing re-fires. Bounded and inspectable —
+        # isClosed=0)` stores the integer verbatim: `update_knowledge`
+        # (`sdk.py:22388-22563`) relays through `_update_entity_any` to
+        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54512`)
+        # applies the caller's props unchanged — `isClosed` is no reserved name, so
+        # nothing coerces it) then records NO transition at all: `prev_state is None`
+        # gates the mint off and nothing repairs the marker, so nothing re-fires.
+        # Bounded and inspectable —
         # the same symmetric trade the table above states — against an unbounded
         # journal mint, which is not a defensible alternative.
         # The polarity the remaining axes give, computed ONCE so the falsy marker is
