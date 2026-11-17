@@ -693,9 +693,16 @@ _EVENT_KEY_NAME_RE = r"[\"']?" + _EVENT_KEY_CONSTRAINT + r"[\"']?(?![A-Za-z0-9_$
 _EVENT_KEY_DROP_RE = re.compile(
     r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?" + _EVENT_KEY_NAME_RE,
     re.IGNORECASE)
+#: ⛔ THE BODY MAY CROSS A `;` INSIDE A LITERAL, and the modifier list is not just
+#: `NOT VALID`: `CHECK (node_key = 'a;b')` and a re-declaration carrying
+#: `NO INHERIT` are ordinary DDL, and the first spelling of this pattern answered
+#: both with the HISTORICAL expression (measured) — a false green in the exact
+#: direction this premise exists for. The literal alternative
+#: (`'(?:[^']|'')*'`) keeps the captured text verbatim, doubled quotes included.
 _EVENT_KEY_DECL_RE = re.compile(
     r"(?:ADD\s+)?CONSTRAINT\s+(?P<name>" + _EVENT_KEY_NAME_RE
-    + r")\s+CHECK\s*(?P<expr>\([^;]*?\))\s*(?:NOT\s+VALID\s*)?[\"']*[,;]",
+    + r")\s+CHECK\s*(?P<expr>\((?:[^;']|'(?:[^']|'')*')*?\))"
+    r"\s*(?:(?:NOT\s+VALID|NO\s+INHERIT)\s*)*[\"']*[,;]",
     re.IGNORECASE | re.DOTALL)
 _EVENT_KEY_RENAME_RE = re.compile(
     r"RENAME\s+CONSTRAINT\s+(?P<old>[\"']?[A-Za-z0-9_]+[\"']?)\s+TO\s+"
@@ -796,9 +803,9 @@ def _effective_event_node_key_check(sql: str) -> str | None:
         edited away or the migration set replaced);
       * a `RENAME CONSTRAINT` either FROM or TO this name. ⛔ A rename is NOT
         caught by the first `assert`: the landed `CREATE TABLE` keeps the
-        original name for ever in append-only history, so `stated` stays `True`
-        through a rename and a returned historical expression would be a false
-        green (measured before this arm existed).
+        original name for ever in append-only history, so `events` is never empty
+        through a rename — and without this arm the reader would return the
+        HISTORICAL expression, a false green (measured before the arm existed).
 
     ⚠️ SEEN, NOT OMNISCIENT: it reads LITERAL statements, so the re-key spellings
     this repo's house style produces are covered — a plain `ALTER TABLE`, a
@@ -811,6 +818,19 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     variable, a name built from a catalog query) is invisible here and is NOT
     claimed to be covered; a migration written that way must update this reader
     deliberately.
+
+    ⚠️ TWO LIMITS THIS READER DOES NOT MODEL, both stated rather than implied:
+    a `$tag$`-quoted STRING is not distinguished from a dollar-quoted BODY, and
+    an `E'…'` backslash escape is not modelled — so an apostrophe inside one
+    (e.g. `RAISE NOTICE $m$don't$m$;`) flips the comment scanner's literal state
+    for the rest of the file, which can make a COMMENTED-OUT statement read as
+    DDL (measured: false red). No record migration does either today.
+
+    ⚠️ "LAST" MEANS LAST IN `RECORD_MIGRATIONS`, WHICH IS HAND-MAINTAINED LIST
+    ORDER AND NOT FILE-NAME SORTED (measured: the list is not `sorted()` — two
+    entries are out of date order). Today only one migration names this
+    constraint, so the answer is unambiguous; a re-key must be APPENDED TO THE END
+    of that list, or "last" is the wrong last.
 
     ⚠️ A RENAME raises CONSERVATIVELY: a rename FROM this name, a rename TO it,
     and a rename away-and-back all raise, and the last two leave the premise
@@ -971,6 +991,25 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
         "(event_id is not null and node_key = payload ->> ''ref'')"), (
         "an `EXECUTE '…'` re-key inside a `DO $$` block was invisible — the "
         "reader did not reach the expression the record now enforces")
+
+    # 1c-bis. Two ordinary re-declaration shapes the first pattern mis-read:
+    #     a CHECK modifier other than `NOT VALID` (`NO INHERIT` is the same
+    #     family) and a `;` INSIDE the expression's own string literal. Measured
+    #     before this fix: both answered the HISTORICAL expression (a false green).
+    no_inherit = landed + (
+        f"\nALTER TABLE public.event DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        f"ALTER TABLE public.event ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT} "
+        f"    {re_keyed_sql} NO INHERIT;\n")
+    assert _effective_event_node_key_check(no_inherit) == re_keyed_expr, (
+        "a `NO INHERIT` re-declaration was not read — the modifier list must "
+        "not be limited to `NOT VALID`")
+    semicolon = landed + (
+        f"\nALTER TABLE public.event DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        f"ALTER TABLE public.event ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT}"
+        "     CHECK (node_key = 'a;b');\n")
+    assert _effective_event_node_key_check(semicolon) == "(node_key = 'a;b')", (
+        "a `;` inside the expression's own string literal stopped the match — a "
+        "legal CHECK was read as no re-key at all")
 
     # 1d. A SIBLING name is not this constraint: `…_v2` must NOT move the reader.
     #     Without an identifier boundary the `DROP` arm cleared the premise and
