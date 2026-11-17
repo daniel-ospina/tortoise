@@ -702,6 +702,22 @@ NOT_BOUND_BY_A_PYTHON_VALUE: frozenset[str] = frozenset({
     "event.embedding_vec",
     "point.embedding_vec",
     "source.embedding_vec",
+    # ── the two fingerprints the RECORD derives (#13220) ─────────────
+    # `object`/`subject` now carry `embedding` + `embedding_vec` (owner ruling
+    # 2026-11-17). The GENERATED halves are the same shape as the three above.
+    # ⚠️ `object.embedding`/`subject.embedding` have NO Python value in this
+    # corpus for a DIFFERENT reason than the generated pair: their value is
+    # derived by the WRITE SEAM (`record_writer.derived_embedding_columns`) and
+    # travels into the plan as the `derived` argument to `replay_plan`, never as
+    # a record payload — deliberately, so that a DB-free pin's statement set does
+    # not depend on whether an embedder happened to load in the environment
+    # (`replay_plan`'s `derived` docstring). The derived value is judged where it
+    # is produced: `tests/test_13220_record_label_embeddings.py` binds it and
+    # asserts the JSON-text encoding a `jsonb` column requires.
+    "object.embedding",
+    "object.embedding_vec",
+    "subject.embedding",
+    "subject.embedding_vec",
     # ── event ───────────────────────────────────────────────────────
     "event.captured_at",
     "event.classification_level",

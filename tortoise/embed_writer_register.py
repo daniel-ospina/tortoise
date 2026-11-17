@@ -211,7 +211,8 @@ claim and a slogan:
   every writer that reaches the seam by CALL: `api::_point`, `projection::_revise_point`,
   `projection.entities::_upsert_point_props`, `projection.entities::_upsert_subject`,
   `projection.entities::_upsert_object`, `projection.entities::_upsert_document`,
-  `projection.entities::_upsert_event`, `sdk::create_point`, `sdk::update_point`. ⛔ That list is
+  `projection.entities::_upsert_event`, `record_writer::derived_embedding_columns`,
+  `sdk::create_point`, `sdk::update_point`. ⛔ That list is
   not counted here and is not its own authority — the INSTRUMENT is:
   `tests/test_embed_writer_register.py::test_the_seam_CALL_population_is_the_one_the_register_names`
   re-derives it at HEAD and reds when this sentence loses a member or names one discovery does not
@@ -225,7 +226,11 @@ claim and a slogan:
   dict for `_upsert_point_props`, the CALL itself for `_upsert_event`), which is exactly why the
   shape-blind branch had to admit them and why a census of
   that shape cannot count them — so "every" read as a complete extension of a
-  population a `#11086` reader would then have under-counted. Membership and visibility are different
+  population a `#11086` reader would then have under-counted. ⚠️ It was re-derived a SECOND time by
+  `#13220`, which added the tenth member — `record_writer::derived_embedding_columns`, the record's
+  own derivation (`RecordWriter.write` is its only caller) — and the pin below is what made that
+  edit unavoidable rather than optional: the new writer reached the seam by CALL while the sentence
+  still said "every". Membership and visibility are different
   questions; the writers whose membership the AST pass actually bought are `api::add_point`,
   `consistency::_graph_fingerprint`, `sdk::_index_gate_read` and `sdk::_write_capture_turns` (the
   four named at the start of this bullet), and nothing else.

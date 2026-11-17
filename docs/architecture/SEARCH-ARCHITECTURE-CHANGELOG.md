@@ -242,3 +242,45 @@ serving the demoted corpus, which this instrument caught as recall above the arm
 What this does **not** decide: the vector leg (unarmed in this run, so every figure is the lexical leg's),
 the byte-vs-node question (§8 budgets bytes, coverage here is a node share), and the lexical leg's own low
 ceiling on claims — M3's ranking matter, measured there and not re-run here.
+
+## `#13220` — 2026-11-17: V2 and V3's index half are placement answers, and §3's coverage now says which labels that is
+
+**The ruling, verbatim:** *"if indexing improves search for Object/Subject/Event of course we want that,
+and we just need it in Postgres and the search aligned with that and everything armed and working"* …
+*"we should likely also index source also in postgres"*. It is recorded on `#13220` with the measurement
+it was asked against.
+
+**Why it belongs in THIS document.** V1's own decision block — at the head of this document, above §1 —
+settles where the vector index lives and
+explicitly not which labels carry one — so when the owner answers the label question as a *placement*
+answer (*"just … in Postgres and the search aligned with that"*), the canonical home for it is the search
+document, exactly as `#4051`'s 2026-11-07 ruling was. **What this entry adds to the design document is a
+decision block after the 2026-11-07 one — carrying the per-label gate table and the four-condition
+arming paragraph it ends in — and one row of §3:** the vector-search row now names the served
+set (`Point`, `Event`, `Object`, `Source`, `Subject`, and the `Document` rows that are `:Source`'s other kind) instead of leaving coverage unsaid. ⛔ **No mechanism
+moved:** §6.1's filtered-ANN guard, §6.2's decision that the text index stays in FalkorDB, and §1.5's
+phase split are all untouched, because the ruling changes *which rows* the index answers, not *which
+engine* answers.
+
+**The load-bearing distinction, recorded so it is not flattened later.** `#11901` closed the index half as
+*"not earned"* on a 390 s sweep, and that verdict is **about FalkorDB**: `CALL db.indexes()` showed a
+single vector index (`Point`), so indexing the other served labels meant four further resident HNSW
+structures — five total — on provisioned RAM with no eviction (`STORAGE-ARCHITECTURE.md` §12.1c).
+**The record's mechanism is an `embedding_vec` column plus a pgvector index on the table that owns the
+rows — the shape `public.point`/`public.source`/`public.event` already carry** — which is the whole
+reason §12.1c's per-label argument, about
+permanently resident structures on the most expensive resource we have, does not transfer to them. **The second distinction is the KEEP ruling, and it has moved once since it was made.** Indexing
+`:Object`/`:Subject` in Postgres is **compatible** with the 2026-11-10 ruling that forbids removing their
+graph-side embeddings; ⛔ **but that ruling was itself SUPERSEDED for the GRAPH COPY on 2026-11-17**
+(owner, `#11395` comment `6956793300`, with its `OVERRIDES:` line): the graph copy **may** be removed and
+its write stopped **once the record holds and indexes those vectors** — record first (`#13220` step 1),
+graph removal second, in a later release, and never before (removing it early would delete the only copy,
+the failure the original ruling existed to prevent). `:Event`/`:Source` were never named by that ruling,
+so their graph copies were already retirable once the record serves them.
+
+**What the design document does NOT gain, on purpose.** No delivery state and no census: the per-label
+vector population is still `tools/dod_5090_probe.py --census`'s to measure on a named graph, the probe's
+docstring still forbids re-quoting the 2026-09-24 count, and `#13108`'s read-time measurement still carries
+its own scope (it decided nothing and created no index). The work the ruling orders — columns and writer,
+the record-served dense leg through `record_vector.LABEL_SERVED`, the retirements, the arming — is
+`#13220`'s and is not this document's narration.

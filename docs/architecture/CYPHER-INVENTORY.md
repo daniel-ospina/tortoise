@@ -38,17 +38,6 @@ this document classifies **statements**.
 | non-Cypher door calls (excluded from every shape total) | 260 |
 | **AST door calls** = census + non-Cypher | **1571** |
 
-> ⛔ **`files_scanned` is 297 at this (merged) head.** The `301` this note used to carry does NOT
-> reproduce — not at this tree, and not at `main` either (measured at `1d10fb3b` in a detached
-> worktree: `tools/cypher_inventory.py --check` → `DRIFT files_scanned: doc=301 tool=297`, RC=1, so
-> the pin was red on `main` before this merge). It is re-derived here from the tree the pin is
-> checked against rather than carried forward: a number inherited from a different union reads as a
-> measurement of THIS population and is not one. The pins and Appendix A below are re-derived from the merged tree
-> (`python tools/cypher_inventory.py --markdown`, `--check` → "25 pinned counts match"); the
-> narrative figures below that still say "297" are the measurements they were taken over — §1's
-> two `rg` reconciliation counts are per-297-file runs and are left at that population rather than
-> re-scaled by hand.
-
 > **The finding, with its count: 578 of 1311 product statements (44.1 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
@@ -1333,7 +1322,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/record_allocator.py:534` | `_transition` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_allocator.py:658` | `execute_allocation` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_backup.py:512` | `require_bypassing_role` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/record_projection.py:7689` | `replay` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/record_projection.py:7804` | `replay` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_reconcile.py:532` | `scan_cache_view` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) RETURN properties(n)` |
 | `tortoise/record_restore.py:474` | `_target_nodes_before` | plain | read | candidate:SQL-shaped | `MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) RETURN count(…` |
 | `tortoise/rerank.py:555` | `_fetch_embeddings` | plain | read | candidate:SQL-shaped | `MATCH (n:Point) WHERE n.id IN $ids AND n.embedding IS NOT NULL RETUR…` |
