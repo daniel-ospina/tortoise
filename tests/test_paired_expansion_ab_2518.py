@@ -21,6 +21,7 @@ carries:
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import os
@@ -882,6 +883,27 @@ def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
     for art in (head, short, ctrl):
         _assert_the_evidence_shape_the_brief_leans_on(art)
 
+    # ⛔ the FOURTH evidence file (review at `24737b02`): §5's first falsifier NAMES
+    # `corpus-snapshot-manifest.json`, §3/§5 quote its digest/files/lines/bytes — and
+    # no test read the file at all. Three separate substitutions measured GREEN: a
+    # re-staled §3 figure, a re-staled 64-hex §5 digest, and a corrupted manifest
+    # digest. The manifest is re-DERIVED here, then required to agree with a
+    # committed artifact and with the prose that quotes it.
+    man = _artifact("corpus-snapshot-manifest.json")
+    assert P.snapshot_digest(man) == man["digest"], (
+        "the manifest's aggregate digest does not re-derive from its own rows")
+    for art in (head, short, ctrl):
+        assert art["snapshot"]["digest"] == man["digest"], (
+            "an artifact reads a snapshot the committed manifest does not describe")
+        assert art["snapshot"]["files"] == man["files"], (
+            "an artifact's snapshot file list differs from the manifest's")
+    for quoted in (f"{man['digest'][:16]}\u2026", man["digest"],
+                   f"{man['file_count']} files",
+                   f"{man['total_lines']:,} lines",
+                   f"{man['total_bytes']:,} bytes"):
+        assert quoted in brief, (
+            f"the brief must quote its own snapshot's {quoted!r}")
+
     # F4: `git_head` never stands alone as the code identity again
     for art in (head, short, ctrl):
         assert art["provenance"]["git_head"] == art["git_head"]
@@ -945,6 +967,37 @@ def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
             f"the index row does not carry {what} as {shown!r}: {row[:400]}")
     # and the class-conditional caveat travels with the lift
     assert "class-conditional" in row
+
+    # ⛔ Measured survivors at `3ae4980b1d` (six substitutions, each green on the
+    # whole suite): `p = 2 × 10⁻⁵ → 0.5`, `CI [+3.33, +8.33] → [+3.33, +9.99]`,
+    # `5 of 300 items whose seed moved → 299 of 300`, and `3 out of the k-window
+    # → 0`. The checks above cover the counts and the deltas; the exact McNemar
+    # TAIL, the bootstrap CI and the harm cell are printed in shapes `row_checks`
+    # does not parse, so they re-staled green. The tail is superscript
+    # scientific notation, which `_printed` cannot read — `_sci_printed` reads it
+    # at the same one-unit-in-the-last-printed-place tolerance.
+    short = _artifact("paired-point-300-short-query.json")
+    boot = k15["bootstrap"]
+    assert (f"CI [+{boot['ci95'][0] * 100:.2f}, +{boot['ci95'][1] * 100:.2f}]"
+            in row), (
+        "the row's CI is not the artifact's own seeded bootstrap interval")
+    printed = _sci_printed(row)
+    assert len(printed) == 2, (
+        "the row must print both exact McNemar tails in scientific notation; "
+        f"it prints {len(printed)}")
+    for (shown, tol), value, where in zip(
+            printed, (k15["mcnemar_exact_p"], k10["mcnemar_exact_p"]),
+            ("k=15", "k=10"), strict=True):
+        assert abs(shown - value) <= tol + 1e-12, (
+            f"the index row prints {shown:g} for {where} but its artifact "
+            f"holds {value!r}")
+    seed = short["arms"]["point"]["per_k"]["k=15"]["seed_effect"]
+    moved = seed["seed_lost_from_window"] + seed["seed_demoted_but_kept"]
+    assert (f"{moved} of {short['population']['sample']} items whose seed moved "
+            f"({seed['seed_lost_from_window']} out of the k-window, "
+            f"{seed['seed_demoted_but_kept']} demoted but kept)" in row), (
+        "the harm side is not the short-query artifact's own seed cells — all "
+        "three numbers, not just their sum")
 
 
 # ── 2e. the published RESULT figures, recomputed cell by cell ────────────────
@@ -1144,6 +1197,30 @@ def _fraction(cell: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
+_SUPERSCRIPT = str.maketrans("\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079",
+                             "0123456789")
+
+
+def _sci_printed(cell: str) -> list[tuple[float, float]]:
+    """Every `<mantissa> × 10<n>` a cell prints, with the tolerance its digits allow.
+
+    ⛔ `docs/00_index.md` is prose, and its McNemar tails are printed in
+    scientific notation (`2 × 10⁻⁵`, `2.4 × 10⁻⁴`) — the shape `_printed` cannot
+    read, because the exponent is supercripted rather than ASCII. Rounding is the
+    row's own (`2` for `1.52587890625e-05`), so the honest bound is one unit in
+    the last printed place of the MANTISSA, scaled by the exponent — the same
+    rule `_printed` applies to every other cell.
+    """
+    out: list[tuple[float, float]] = []
+    for mantissa, sign, digits in re.findall(
+            r"(\d+(?:\.\d+)?)\s*×\s*10([\u207b+]?)([\u2070\u00b9\u00b2\u00b3\u2074-\u2079]+)",
+            cell, flags=re.S):
+        exp = int(digits.translate(_SUPERSCRIPT)) * (-1 if sign == "\u207b" else 1)
+        decimals = len(mantissa.split(".")[1]) if "." in mantissa else 0
+        out.append((float(mantissa) * 10.0 ** exp, 10.0 ** (exp - decimals)))
+    return out
+
+
 def test_the_briefs_result_tables_repeat_their_artifacts_cell_by_cell():
     """⛔ F1, the prose half: a figure re-staled in the BRIEF reds here.
 
@@ -1284,7 +1361,7 @@ def test_the_mde_direction_is_pinned_and_not_only_its_values():
     per_k = _artifact("paired-point-300.json")["arms"]["point"]["per_k"]
     mdes = {int(k.split("=")[1]): v["mde_paired"] for k, v in per_k.items()}
     ks = sorted(mdes)
-    assert all(mdes[a] < mdes[b] for a, b in zip(ks, ks[1:])), (
+    assert all(mdes[a] < mdes[b] for a, b in itertools.pairwise(ks)), (
         "this pin encodes the measured shape — the MDE rises with k; the artifact "
         f"now says {mdes}, so re-derive the brief's power claim before trusting it")
     # 3 pp is resolvable exactly where the MDE sits below it. Said by the brief as
@@ -1692,6 +1769,9 @@ def test_no_k_below_its_own_mde_is_published_as_a_winner():
         delta_pp = (cell["on_hits"] - cell["off_hits"]) / n * 100
         mde_pp = cell["mde_paired"] * 100
         bold = "**" in row[p_col]
+        # the MDE cell the rule is read against must be the artifact's own number:
+        # the column was collected and never used, so it could re-stale freely
+        _assert_prints(row[mde_col], mde_pp, f"brief §4 k={k}: the MDE column")
         resolves = delta_pp >= mde_pp - 1e-9
         assert bold is resolves, (
             f"brief §4 k={k}: the p-value is {'bold' if bold else 'plain'} but "
@@ -1743,8 +1823,18 @@ def test_the_snapshot_digest_and_every_load_trace_are_pinned_where_quoted():
     assert brief.count(digest[:16]) >= 2, (
         "the digest is quoted at two sites (§3 as a prefix, §5 in full)")
     assert digest[:16] in index, "the index row must quote the same digest"
-    assert f"{manifest['total_lines']:,} lines" in brief
-    assert f"{manifest['file_count']} files" in brief
+    # ⛔ site-scoped, not presence: a whole-file `f"{n} files" in brief` let ONE of
+    # the three sites re-stale (measured GREEN at `3ae4980b1d` — `:92`'s
+    # `23 files / 14,225 lines` and `:138`'s `…, 23 files, 14,225 lines,
+    # 78,571,361 bytes` each replaced on its own, the other sites satisfying the
+    # presence check). The two SHAPES the brief actually prints are derived from
+    # the manifest here, so a re-stale at either site loses its own form.
+    pair_form = f"{manifest['file_count']} files / {manifest['total_lines']:,} lines"
+    trio_form = (f"{manifest['file_count']} files, {manifest['total_lines']:,} lines, "
+                 f"{manifest['total_bytes']:,} bytes")
+    for form, where in ((pair_form, "the §1/§3 file+line pair"),
+                        (trio_form, "the §3/§5 digest/files/lines/bytes trio")):
+        assert form in brief, f"the brief must print {where} as {form!r}"
 
     # ⛔ EVERY load trace the brief prints must be one an artifact recorded: a
     # presence check let one of the two headline sites re-stale. The object
