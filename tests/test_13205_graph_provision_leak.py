@@ -606,10 +606,16 @@ class TestTheSharedDoubleDerivesItsCertificate:
     ``_org_graph_names`` REFUSES an uncertified walk, so a fake that always
     certifies makes a walk production would refuse look green.
 
-    The three arms are the three edges of the real rule (``supabase_control``:
-    ``advanceable = [c for c in cursors if c]; if not advanceable: break``) — a
+    The arms below are four edges of the real rule (``supabase_control``):
+    ``advanceable = [c for c in cursors if c]; if not advanceable: break`` — a
     page with NO cursor cannot advance; a page with one can, and keeping its
-    uncursored rows is what production does; and an ordinary page certifies.
+    uncursored rows is what production does; an ordinary page certifies; and
+    ``if any(a >= b for a, b in itertools.pairwise(advanceable)): break`` — a
+    page that is NOT STRICTLY ASCENDING cannot certify either, because the server
+    may have ignored ``order`` and a later cursor would step OVER rows that were
+    never served. That fourth edge was missing until review round 17: the double
+    certified a duplicated page while the store refuses it, which is the LOOSE
+    direction and the one that matters to a purge.
     """
 
     @staticmethod
@@ -648,6 +654,59 @@ class TestTheSharedDoubleDerivesItsCertificate:
         assert complete is True, (
             "the derivation must certify an ordinary walk — otherwise the "
             "refusal arms would be satisfied by a double that refuses everything")
+
+    def test_a_page_that_is_NOT_STRICTLY_ASCENDING_is_REFUSED_the_certificate(self):
+        """⛔ Production refuses a page that is not STRICTLY ascending on the
+        cursor: ``if any(a >= b for a, b in itertools.pairwise(advanceable)):
+        break``. A server that ignored ``order`` would have the walk step OVER
+        rows that were never served and STILL end on an empty page, reporting a
+        COMPLETE walk over a subset. Omitting the gate is the LOOSE direction —
+        the double certifies what the store refuses — so it is pinned on the
+        predicate itself.
+
+        ⛔ THE PREDICATE, NOT ``query_all``, ON PURPOSE: ``query_all`` reads
+        through ``query_with_total(order=cursor)``, and this fake HONOURS
+        ``order`` by sorting — so a descending fixture arrives ascending and the
+        shape can never reach ``_certifiable`` that way. The duplicate stays
+        reachable through ``query_all`` and is asserted that way too.
+
+        Mutant: delete the ``pairwise`` check from ``_certifiable`` — this reds
+        while every other arm in this class stays green.
+        """
+        from tests.fake_control_plane import FakeControlPlane
+
+        certifiable = FakeControlPlane._certifiable
+        assert certifiable([{"id": "g1"}, {"id": "g1"}], None, "id") is False, (
+            "a DUPLICATE cursor must not certify — the real walk breaks on "
+            "`a >= b` and never certifies")
+        assert certifiable([{"id": "g2"}, {"id": "g1"}], None, "id") is False, (
+            "a DESCENDING page must not certify, for the same reason")
+        assert certifiable([{"id": "g1"}, {"id": "g2"}], None, "id") is True, (
+            "…while a strictly ascending page still does, so the gate cannot be "
+            "satisfied by refusing everything")
+
+    def test_a_DUPLICATE_cursor_is_REFUSED_through_query_all_too(self):
+        """The reachable shape of the same gate: a duplicated page."""
+        cp = self._cp([{"id": "g1", "namespace": "org_1"},
+                       {"id": "g1", "namespace": "org_2"}])
+        _rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert complete is False, (
+            "the double certified a page with a REPEATED cursor; the real walk "
+            "breaks on `a >= b`, so `_org_graph_names` would refuse the purge "
+            "while this double called it green")
+
+    def test_an_EMPTY_page_is_the_end_of_the_walk_and_CERTIFIES(self):
+        cp = self._cp([])
+        rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert rows == []
+        assert complete is True, (
+            "an EMPTY page is the sound end-of-walk signal (production: `if not "
+            "page: exhausted = True; break`), so it CERTIFIES. Refusing it is "
+            "STRICTER than the store, and `_org_graph_names` RAISES on an "
+            "uncertified walk — so an org owning no custom graphs could never be "
+            "purged at all")
 
 
 # ── 3. the reaper: safe by construction ──────────────────────────────────────

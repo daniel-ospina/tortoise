@@ -38,21 +38,6 @@ this document classifies **statements**.
 | non-Cypher door calls (excluded from every shape total) | 258 |
 | **AST door calls** = census + non-Cypher | **1569** |
 
-> ⛔ **`files_scanned` is **297**, and the `301` this note asserted is not a measurement of any tree.**
-> `#13102` (`5745ade253`) set the pin to 301 and described it as "301 at THIS (merged) head, and it
-> was 297 on EACH parent alone" — but that commit is a SINGLE-PARENT squash of `#13102` onto
-> `a218f8867b` (whose pin and measurement are both 297), not a merge; and the tool prints **297** at
-> `5745ade253` itself, at its parent, and at every commit since. The population has never been 301.
-> So `--check` has reported **RC=1** `DRIFT files_scanned: doc=301 tool=297` continuously since that
-> commit, and ⚠️ nothing caught it because `.github/workflows/cypher-diff.yml` has NO `push` trigger:
-> `differential` runs on `pull_request` and `workflow_dispatch` only, so a wrong pin on `main` stays
-> invisible until the next PR touches these paths — which is this one (`#13249`). The pin is
-> re-derived to the measured **297** here: a pin is a measurement of the tree it sits on, never a
-> number carried forward or adjusted by hand (`#13133`). The pins and Appendix A below are
-> re-derived from the merged tree (`python tools/cypher_inventory.py --markdown`, `--check` →
-> "25 pinned counts match"); §1's two `rg` reconciliation counts are per-297-file runs, which is
-> also this tree's population.
-
 > **The finding, with its count: 578 of 1311 product statements (44.1 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
@@ -113,7 +98,7 @@ door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
 1,622 occurrences of the door predicate across 108 files
-2,342 occurrences of the verb predicate across 142 files   (upper-bound shape, see below)
+2,343 occurrences of the verb predicate across 143 files   (upper-bound shape, see below)
 
 1,622  regex door-pattern occurrences
   −53  occurrences on a line carrying NO door call (comments and docstrings)
@@ -133,8 +118,8 @@ tool's number. A bare `rg … tortoise/` gives 1,628 / 109, the 6 extra occurren
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,622 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,329** across **141** files, while the tool
-reports 2,342 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **142** files, while the tool
+reports 2,343 / 143. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — a wrapped English sentence in ten (e.g. `oauth.py:1600`'s “limits match” / “(#329): preserve
@@ -144,8 +129,10 @@ over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone 
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
 which is why the tool's verb total is an upper bound.
-(A bare case-sensitive `rg` gives 2,063, and `-i` without the exclusion 2,401 — which is why the
-number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
+(A BARE case-sensitive `rg … tortoise/` gives 2,064 — that population includes `tortoise/test_*.py`
+and one `.ts` hook, so it is NOT the 2,061 the same predicate finds over the 297-file set above; `-i`
+without the exclusion gives 2,402. Both figures are stated with their population because that is why
+the number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
 the **= 1,569 on a door-call line** are both counts, not differences.⛔ The **residual** row is
@@ -414,19 +401,21 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where THESE numbers were cut:** `#13249`'s branch, merged with `origin/main` **`54682177bc`**, and
-re-derived from that merged tree — not by arithmetic on the markers. The PINS, the §1 `rg`
-reconciliations AND Appendix A are all cut at that SAME merge here, deliberately: the appendix is
-`file:line` rows, so it must be re-derived at the tree the doc actually ships at — an earlier cut of
-this branch had the pins at one base and the appendix at another (`04dddf4f`), which is a provenance
-split `--check` cannot see because it grades 25 scalars. The branch converts the two
+**Where THESE numbers were cut:** `#13249`'s branch, merged with `origin/main` **`1d10fb3bf0`**, and
+re-derived from that merged tree — not by arithmetic on the markers. (The PINS and the `rg`
+reconciliations below were cut at that merge; **Appendix A was re-derived twice more** — at
+`origin/main` **`54682177bc`** in `04dddf4f`, and again at THIS head in `20961bdd99`, whose
+`_drop_org_acl_users` docstring edit moved `hosted_api.py` by +2 lines and shifted 61 `file:line`
+rows. The appendix is `file:line` rows, so any later edit that moves lines changes them while
+changing no count. A lane reproducing the appendix must use the HEAD the doc ships
+at, not `1d10fb3bf0`.) The branch converts the two
 `public.graphs` reads in the org purge to `query_all`, and `query_all` is not a `DOORS` entry
 (`tools/cypher_inventory.py:148`), so each conversion REMOVES **one** door call and adds no
 statement site: `ast_door_calls` **1571→1569** and `non_cypher_door_calls` **260→258**, while
 `sites`/`plain`/`candidates` are unchanged (1311 / 859 / 578 — the 578 is the `plain` READ half,
 which is also the migration-candidate count). `files_scanned` stays 297 and `files_with_sites` 99:
 both conversions land in a file that already carries sites. The `rg` reconciliation in §1 is
-re-measured on this tree (1,622 / 2,329 / 1,628 bare / 2,063 / 2,401), Appendix A is regenerated
+re-measured on this tree (1,622 / 2,330 / 1,628 bare / 2,061 / 2,064 bare-case-sensitive / 2,402), Appendix A is regenerated
 with `--markdown`, and `--check` reports **`25 pinned counts match`**.
 ⛔ **The re-derivation is not a formality at this head, and this is the case that proves it:** the
 branch's own pre-merge tree measured **1567 / 256**, and `origin/main`'s measured **1571 / 260** —
@@ -435,29 +424,8 @@ removes two from, so the merged tree's composition is neither parent's; a lane t
 number forward, or that reused the pre-merge cut this branch had already recorded, would have
 written wrong pins that `--check` would then have accepted. Two different compositions of adds and
 removes reach one total, and only running the tool says which tree you are holding.
-⚠️ **One pin was not re-cut but REPAIRED, and it is main's:** `files_scanned` was pinned at **301**
-by `#13102` (`5745ade253`) and measures **297** on that commit, on its parent and on every commit
-since, so `--check` has been **RC=1** on `main` from there — see §0's note for the full measurement
-and for why no gate caught it (the `differential` job has no `push` trigger). Corrected to the
-measured 297 in this same re-cut, which is also why this PR's `differential` job can be green at all.
 
 The paragraph below is `#9559`'s cut on `main`, kept as the record of it.
-
-**Where THESE numbers were cut:** `#9559`'s branch, merged with `origin/main` **`9cb527275a`**, and
-re-derived from that merged tree — not by arithmetic on the markers. The branch adds two non-Cypher
-door calls (`metering.get_postgres_residency`, the per-org residency reader's two control-plane
-reads) and **no** Cypher statement site, so `ast_door_calls` **1569→1571** and
-`non_cypher_door_calls` **258→260** while `sites`/`plain`/`candidates` are unchanged (1311 / 859 /
-578 — the 578 is the `plain` READ half, which is also the migration-candidate count). `files_scanned`
-stays 297 and `files_with_sites` 99: the reader lives in a file that already carries sites. The
-`rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,329 / 1,630 bare / 2,063 / 2,401),
-Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts match`**.
-⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
-inside files that already carried sites, so the re-cut moved **31 of Appendix A's 1,313 rows** while
-all 25 scalars stayed identical — the exact `file:line`-versus-SCALAR gap this section describes,
-caught by measuring rather than by trusting the pins.
-
-The paragraph below is `main`'s cut, kept as the record of it.
 
 **Where these numbers were last cut:** the PINS by `main`'s **`05fe46e94e`**, re-derived at
 `origin/main` **`b8f56fdec4`**. ⚠️ Both columns below are the CENSUS's own measurements at those two
@@ -500,12 +468,15 @@ still said `8,908 / 805` against `8,939 / 810` on this tree, §1's bare case-sen
 §1. Re-derive the quoted prose too, not just the two carriers that are checked.
 
 ⛔ **This head is the third instance of exactly that, and it is worth recording because a MERGE
-did it.** `#13249` combines two lanes that resolved this file independently; the resolution briefly
-shipped `--all-surface` at **8,971** (a value from a mid-merge tree where both sides' test files were
-still present) against **8,965 / 811** measured here, and reverted `main`'s `#13251` `2,063` back to
-`2,060` — while keeping `2,063` in §7, so the document contradicted itself. `--check` was GREEN
-through all of it. Both are corrected above, and this paragraph — which the merge had DELETED — is
-restored.
+did it.** `#13249` combines two lanes that resolved this file independently. The resolution briefly
+shipped `--all-surface` at **8,971** — a value from a mid-merge tree that still held both sides'
+test files — against **8,965 / 811** measured here, and restored `main`'s `2,060` under the label
+"bare case-sensitive" while §7 said `2,063`, so the document contradicted itself. `--check` printed
+`25 pinned counts match` through all of it, which is the point: this class is invisible to every
+gate. Both are corrected above — the row states `8,965 / 811`, and §1 now states each verb figure
+WITH the population it belongs to (`2,064` bare / `2,061` over the 297-file set) rather than one
+number wearing the other's label — and this paragraph, which the resolution had DELETED, is
+restored, because it is the only thing that tells the next re-cutter the prose is a carrier too.
 
 <details><summary>the previous cut (kept as history)</summary>
 
@@ -1374,7 +1345,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/record_allocator.py:534` | `_transition` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_allocator.py:658` | `execute_allocation` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_backup.py:512` | `require_bypassing_role` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/record_projection.py:7689` | `replay` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/record_projection.py:7804` | `replay` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_reconcile.py:532` | `scan_cache_view` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) RETURN properties(n)` |
 | `tortoise/record_restore.py:474` | `_target_nodes_before` | plain | read | candidate:SQL-shaped | `MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) RETURN count(…` |
 | `tortoise/rerank.py:555` | `_fetch_embeddings` | plain | read | candidate:SQL-shaped | `MATCH (n:Point) WHERE n.id IN $ids AND n.embedding IS NOT NULL RETUR…` |
