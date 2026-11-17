@@ -257,7 +257,10 @@ def read_journal(path: str | Path, *, salvage: bool = False) -> Journal:
         # ⚠ BUT AN UNREPORTED COUNT IS NOT AN UNKNOWN COMPLETENESS: the reader is
         # STRICT unless `salvage=True` (`journal_segments.py:949-953` raises
         # `JournalLayoutError`), so a non-salvage segmented read that RETURNS has
-        # skipped nothing and its completion claim is supportable. That is why
+        # lost no COMPLETE record — a torn tail FRAGMENT is still dropped
+        # unmeasured and unclassified (the gap `_journal_damage_lines` names,
+        # #13280), but a fragment never was a record, so it shifts no position —
+        # and its completion claim is supportable. That is why
         # `cmd_status` keys `completeness_unknown` on `salvage` alone and not on
         # `corrupt is None` (review P2 #13210: keying it on `corrupt is None`
         # withdrew the claim on every `<graph dir>` read, clean or not).
@@ -842,11 +845,13 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
     P2 #13272). `apply` refuses `--salvage`, and a non-salvage read RAISES on
     MID-FILE damage (`journal_segments.py:949-953`) — so a fold cannot skip a
     record. But an unparseable TORN TAIL is tolerated by BOTH readers (the
-    segmented one only warns, `:954-957`; `EventLog.read_all` keeps the fragment
-    on the last line, `log.py:2470`), so `apply` CAN fold a journal that dropped a
-    torn tail fragment, undisclosed, and it never consults
-    `torn_tail_revival_records()` — the #3316 contract that a torn tail whose loss
-    could REVIVE removed state must be refused before any wipe or fold
+    segmented one only warns, `:954-957`; `EventLog.read_all` tolerates a
+    malformed line only at EOF, `log.py:2491-2493` + `_keep_torn` `:2501-2524`,
+    where the fragment is SKIPPED, counted in `torn_trailing_count` and its full
+    text retained in `torn_trailing_raw` for the #3316 classifier), so `apply` CAN
+    fold a journal that dropped a torn tail fragment, undisclosed, and it never
+    consults `torn_tail_revival_records()` — the #3316 contract that a torn tail
+    whose loss could REVIVE removed state must be refused before any wipe or fold
     (`log.py:2355-2365`). That gap is pre-existing and out of this file's scope;
     this docstring states it instead of asserting the state cannot occur, because
     a maintainer reading "impossible" would not go looking for it.
@@ -856,12 +861,26 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
                 "return them — it REFUSES mid-file damage unless asked to "
                 "salvage, and it DROPS a torn tail fragment with a log-only "
                 "warning — so damage here is unmeasured rather than absent"]
-    if j["corrupt_lines"] or j["torn_tails"]:
-        return [f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s), "
-                f"{j['torn_tails']} torn tail fragment(s) — a SKIPPED line "
-                f"SHIFTS every later record's position, so this is NOT a "
-                f"completeness claim"]
-    return []
+    # ⛔ TWO DAMAGE CLASSES, TWO DIFFERENT FACTS (review P2 #13272). A mid-file
+    # skipped line SHIFTS every later position, so it voids the completeness
+    # claim; a torn TAIL fragment was never a complete record, so it shifts
+    # nothing and `fully_consumed: true` is correct beside it. Rendering one
+    # sentence for both made this line contradict its own JSON in the same
+    # invocation (measured: `fully_consumed: True` printed directly above "this is
+    # NOT a completeness claim"). The tail class still matters — a dropped REMOVAL
+    # record is #3316's check — so it is named, just not as a positional lie.
+    lines: list[str] = []
+    if j["corrupt_lines"]:
+        lines.append(
+            f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s) — a "
+            f"SKIPPED line SHIFTS every later record's position, so this is NOT "
+            f"a completeness claim")
+    if j["torn_tails"]:
+        lines.append(
+            f"  ⚠ torn tail: {j['torn_tails']} fragment(s) — a tail fragment was "
+            f"never a complete record, so positions are UNSHIFTED; a dropped "
+            f"removal record is #3316's check (#13280)")
+    return lines
 
 
 def _render_plan(report: PlanReport) -> str:
@@ -1200,8 +1219,10 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
     # ⚠ `salvage` ALONE, not `salvage or corrupt is None` (review P2 #13210): an
     # UNREPORTED counter is not an UNKNOWN completion. The segmented reader is
     # strict unless asked to salvage, so a `<graph dir>` read that returns has
-    # skipped nothing — keying on `corrupt is None` withdrew the claim on every
-    # directory read, which is a documented input (`--journal <graph dir>`).
+    # lost no COMPLETE record (a torn tail fragment can still be dropped — it
+    # shifts no position, and #13280 carries it), so keying on `corrupt is None`
+    # withdrew the claim on every directory read, which is a documented input
+    # (`--journal <graph dir>`).
     completeness_unknown = journal.salvage
     payload = {
         "verb": "status",

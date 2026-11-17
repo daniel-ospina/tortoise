@@ -671,6 +671,52 @@ def test_a_CLEAN_segmented_read_STILL_reports_completion(monkeypatch, capsys):
     assert "complete: UNKNOWN" not in out
 
 
+def test_the_torn_tail_line_does_not_contradict_its_own_fully_consumed(
+        monkeypatch, capsys):
+    """⛔ P2 (review #13272): one sentence for TWO damage classes was a lie in one of them.
+
+    A mid-file skipped line SHIFTS every later position, so it voids the
+    completeness claim. A torn TAIL fragment was never a complete record, so it
+    shifts nothing — `fully_consumed: true` is correct beside it. Rendering the
+    mid-file sentence for both made `status` contradict its own JSON in one
+    invocation (measured: `fully_consumed: True` printed directly above "this is
+    NOT a completeness claim"). The tail class still MATTERS (a dropped removal
+    record is #3316's check, #13280), so it is named — just not as a positional
+    lie.
+    """
+    journal = Journal(path=FIXTURE,
+                      records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
+                      segmented=False, salvage=False, corrupt=0, torn=1)
+    monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "torn tail: 1 fragment(s)" in out
+    assert "UNSHIFTED" in out and "#13280" in out
+    # the mid-file sentence is FALSE for this class and must not be printed
+    assert "NOT a completeness claim" not in out
+    assert "mid-file line(s)" not in out
+
+
+def test_a_MID_FILE_skip_still_voids_the_completeness_claim(monkeypatch, capsys):
+    """The other arm of the split: mid-file damage keeps the SHIFTS sentence."""
+    journal = Journal(path=FIXTURE,
+                      records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
+                      segmented=False, salvage=True, corrupt=1, torn=0)
+    monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "damaged input: 1 mid-file line(s)" in out
+    assert "NOT a completeness claim" in out
+    assert "UNSHIFTED" not in out
+
+
 def test_plan_allocate_does_not_hand_over_an_acknowledgement(monkeypatch, capsys):
     """⛔ P2 (PR #13210): the only unguarded arm of the acknowledgement block.
 
