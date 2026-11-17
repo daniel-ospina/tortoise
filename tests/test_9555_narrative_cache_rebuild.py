@@ -423,11 +423,11 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_an_event():
             "— §9.1/D1 places it in public.session_narrative only (#10000)")
 
         # ...and the surface still works for a prop it is FOR.
-        sdk.update_knowledge(eid, eventStatus="completed")
+        sdk.update_knowledge(eid, eventStatus="indexed")
         rows = sdk._get_proj().g.query(
             "MATCH (e:Event {eventId:$e}) RETURN e.eventStatus",
             params={"e": eid}).result_set
-        assert rows and rows[0][0] == "completed", (
+        assert rows and rows[0][0] == "indexed", (
             "the refusal was too broad — `eventStatus` is an ordinary Event prop "
             "and must still land through this route")
     finally:

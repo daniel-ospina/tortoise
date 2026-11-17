@@ -441,6 +441,44 @@ _CAPTURE_SESSIONS: dict[str, int] = {}
 _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
     "a capture for this session_id is already in flight — retry shortly")
 
+# ── #12992: the capacity refusal is TYPED, and its refusals are COUNTED ────
+# The capacity 429 used to answer a bare detail STRING while its sibling on the
+# same route (`_ingest_rate_limited`, #4051 §3.1) already answers a dict carrying
+# `code` + `retry_after`. Consequence, measured in #12992: a client that wants to
+# branch on the refusal must prose-match the message, and the only machine-
+# readable form of the retry instruction was the `Retry-After` HEADER — which the
+# capture clients that produced the issue's log lines never read
+# (`reflect-hook.ts`, `.../tortoise-capture.ts`: neither parses the header — the
+# first does one POST and throws, the deployed one re-arms on 30 s × 2^(n-1)
+# (research §5, #11225). So the delay is published in the BODY as well: a JSON
+# client gets it for free; the header stays for HTTP clients that honour it.
+#
+# ⚠️ The `message` keeps the EXACT pre-#12992 wording. A body that is now an
+# object is a shape change for any reader that did `detail in text`; keeping the
+# sentence identical means those readers keep matching while the typed fields are
+# additive.
+_CAPTURE_CAPACITY_CODE = "capture_capacity_saturated"
+_CAPTURE_CAPACITY_RETRY_AFTER_S = 30
+_CAPTURE_CAPACITY_MESSAGE = (
+    "capture capacity saturated — too many captures in "
+    "flight; retry shortly")
+#: Refusals the capacity gate has ANSWERED, and when it last did.
+#:
+#: Two values, because they answer two different questions and only one of them
+#: is ever a rate: `_CAPTURE_CAPACITY_REFUSED_TOTAL` (= CAPACITY refusals only —
+#: the sibling ``409`` duplicate-in-flight is a different class and is deliberately
+#: uncounted here, so one label never answers two questions) is cumulative since
+#: process start (never reset), and `_CAPTURE_LAST_REFUSED_AT` is the wall clock of
+#: the most recent refusal — which is what lets `/health` answer "is this happening
+#: NOW" instead of "has this ever happened" (#10185's forever-red: `refusing` keys on the WINDOW).
+_CAPTURE_CAPACITY_REFUSED_TOTAL = 0
+_CAPTURE_LAST_REFUSED_AT: float | None = None
+#: How recently a refusal must have happened for `/health` to call the gate
+#: "refusing". 10x the advertised `Retry-After`: long enough that a client
+#: retrying exactly as instructed is still counted, short enough that one burst
+#: does not pin the reading for the life of the process.
+_CAPTURE_REFUSAL_WINDOW_S = 300.0
+
 # NOTE (merge of #2850 x #2988/#3060): the dedicated ``_HEALTH_PROBE_EXECUTOR``
 # and its ``_HEALTH_PROBE_BUDGET_S`` wall bound were REMOVED here. They existed
 # so ``/health`` could run ``_probe_db`` off the shared default pool with a
@@ -1244,16 +1282,31 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     caller passes a key already scoped by TENANT AND RESOLVED GRAPH
     (`_capture_session_key`, whose graph component is `_data_graph_name` —
     the graph the request will actually open, #3365).
+
+    #12992: a CAPACITY refusal is now a typed condition (``detail.code`` +
+    ``detail.retry_after``, with the ``Retry-After`` header retained) and every
+    one of them is counted for ``/health`` — see ``_CAPTURE_CAPACITY_CODE``.
     """
-    global _CAPTURE_IN_FLIGHT
+    global _CAPTURE_IN_FLIGHT, _CAPTURE_CAPACITY_REFUSED_TOTAL, _CAPTURE_LAST_REFUSED_AT
     session_key = session_key or None
     with _CAPTURE_IN_FLIGHT_LOCK:
         if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
+            # #12992: count BEFORE raising, under the same lock, so an ANSWERED
+            # refusal is always already COUNTED. ⛔ One direction only — nothing makes
+            # the increment and the raise atomic. Read INSIDE the lock and passed in
+            # the body, the value is LIVE: the gate raises on `>=`, so it EQUALS the limit.
+            _CAPTURE_CAPACITY_REFUSED_TOTAL += 1
+            _CAPTURE_LAST_REFUSED_AT = time.time()
             raise HTTPException(
                 status_code=429,
-                detail=("capture capacity saturated — too many captures in "
-                        "flight; retry shortly"),
-                headers={"Retry-After": "30"})
+                detail={
+                    "code": _CAPTURE_CAPACITY_CODE,
+                    "message": _CAPTURE_CAPACITY_MESSAGE,
+                    "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+                    "in_flight": _CAPTURE_IN_FLIGHT,
+                    "limit": _CAPTURE_MAX_IN_FLIGHT,
+                },
+                headers={"Retry-After": str(_CAPTURE_CAPACITY_RETRY_AFTER_S)})
         if session_key in _CAPTURE_SESSIONS:
             raise HTTPException(
                 status_code=409,
@@ -6229,6 +6282,21 @@ class WaitBoundMiddleware:
     #3718's direction (move the blocking work off-loop). Pinned so the limit is
     visible rather than assumed —
     ``test_synchronous_handler_is_not_bounded_it_is_stated_not_assumed``.
+
+    ⛔ BUT NOT CONVERTING IS NOT THE SAME AS NOT COUNTING, and the difference was
+    measured as a defect: a request that answers late is still a request the
+    bound did not honour, and the refusal channel is structurally blind to it
+    (``wait_bound_breaches`` is written only on the refusal path, so an answer —
+    not a refusal — cannot increment it; the refusal SHARE was separately blind
+    because the answer may be a 401, which ``_WAIT_BOUND_NON_DATA_STATUSES``
+    keeps out of its denominator). Measured on the live deployment
+    2026-11-17 (`55ec2c71b165`): **401 at 20.27 s against a 10 s bound** with
+    `wait_bound_breaches.total` unmoved — the field an operator reads to answer
+    "is the bound honoured?" reporting a clean zero over a 2x breach. So this
+    arm passes ``on_starved`` and the answer is counted in
+    ``monitoring.record_wait_bound_starved`` (`/health` → `wait_bound_starved`),
+    by SURFACE, cumulative, and deliberately NOT into the #12477 window — see
+    that writer for why widening the refusal verdict is a different decision.
     """
 
     def __init__(self, app):
@@ -6251,6 +6319,11 @@ class WaitBoundMiddleware:
             return
 
         response_started = False
+        #: Mono-clock instant the response HEAD went out, or ``None``. The wait
+        #: bound's promise is about when the CALLER LEARNS something, so an
+        #: exchange whose head reached it inside the bound is not a breach
+        #: however long the body/stream then takes — see `_count_starved`.
+        response_started_at: float | None = None
         refused = False
         attempt_counted = False
 
@@ -6281,7 +6354,7 @@ class WaitBoundMiddleware:
                                                         scope.get("method")))
 
         async def _guarded_send(message):
-            nonlocal response_started, status_seen
+            nonlocal response_started, response_started_at, status_seen
             if refused:
                 # The caller already has the refusal. An ASGI send after
                 # response.end is a protocol violation, so the abandoned
@@ -6289,6 +6362,7 @@ class WaitBoundMiddleware:
                 return
             if message.get("type") == "http.response.start":
                 response_started = True
+                response_started_at = time.monotonic()
                 status_seen = message.get("status")
                 _count_attempt_once()
             await send(message)
@@ -6311,6 +6385,95 @@ class WaitBoundMiddleware:
         surface = (_monitoring.WAIT_BOUND_SURFACE_MCP
                    if _is_jsonrpc_surface(route_path)
                    else _monitoring.WAIT_BOUND_SURFACE_REST)
+
+        def _count_starved(origin: float | None = None) -> None:
+            """Count this request as a breach that was SERVED, not refused.
+
+            Handed to ``mcp_auth.await_under_wait_bound`` as ``on_starved``, and
+            called directly on the started-response arm below. It is the breach
+            shape the refusal channel cannot see: an answer is not a refusal,
+            and a 401 is even kept out of the share's denominator.
+
+            ⛔ ABSTAINS WHEN A REFUSAL WAS ALREADY SUBSTITUTED, and that is a
+            measured over-count rather than defensive paranoia: the MCP dispatch
+            seam refuses by RETURNING its `-32009` result, not by raising, so the
+            outer helper sees an ordinary late return for a request the caller
+            was just refused — measured as `breach +1, starved +1` for ONE
+            request, the served-answer channel reporting a refusal as a served
+            answer. `_WAIT_BOUND_COUNTED_STATE` is the seam's own claim (the
+            exactly-once contract) and `_WAIT_BOUND_REFUSED_STATE` this
+            middleware's; either one means nothing was served. ⚠️ The REFUSED
+            half is DEFENSIVE ONLY on this path: this middleware writes that flag
+            on the branch that RETURNS the refusal, which cannot reach here — so
+            no test can discriminate it (the COUNTED half is the live one, pinned
+            by `test_a_refusal_substituted_by_the_mcp_seam_is_not_a_starved_
+            breach`). Kept because a future call site on a refusal path would
+            otherwise double-count, and it can only ever abstain.
+
+            ⛔ AND IT ABSTAINS WHEN THE RESPONSE HEAD WENT OUT INSIDE THE BOUND.
+            The promise this channel reports is "the caller learned SOMETHING
+            within the bound", so a head delivered in time is not a breach
+            whichever arm then reaches here: a long-lived SSE stream (`GET /mcp`
+            is exactly that — fastmcp sends the headers immediately and holds
+            the stream for the session's life) closes hours later and would
+            otherwise add one false "starved" per session, and a handler that
+            sends its head at t≈0 and then blocks would count for a caller that
+            already had the answer in hand. Both were measured as false positives
+            (`GET /mcp` app, 0.05 s bound, head at t≈0, close at 0.4 s ⇒
+            `starved +1`). The head's own lateness is not lost: a request that
+            has sent NOTHING when its budget expires is refused when the timer
+            wins, and is counted HERE when the loop was held and the answer goes
+            out late — those are the two outcomes of one breach, and this field
+            is the served one.
+
+            ``origin`` is the instant the budget THIS answer was served under
+            began: the helper passes its (possibly re-armed) reference, the
+            started arm below passes that same published origin (falling back to
+            the transport arrival only when the helper never stamped one).
+
+            ⚠️ ON A #4055 COLD START the origin excludes a head emitted after the
+            ORIGINAL bound but BEFORE the RE-ARM: its delta against the re-armed
+            origin is NEGATIVE, so the drain's lateness is not charged to the
+            request. Measured with the arrival as origin instead — 0.5 s bound,
+            0.9 s drain, head at ≈0.95 s, body held past the re-armed deadline —
+            `starved +1`, indistinguishable from a genuinely late head.
+
+            Wrapped for the rule every other monitoring write on a request path
+            here carries — measurement must never be a new failure mode for the
+            request it measures. Deliberately cumulative only: no window stamp,
+            so the #12477 refusal verdict cannot be widened by a served-but-late
+            answer (see ``monitoring.record_wait_bound_starved``).
+            """
+            origin = t0 if origin is None else origin
+            st = scope.get("state")
+            if isinstance(st, dict) and (st.get(_WAIT_BOUND_REFUSED_STATE)
+                                         or st.get(_WAIT_BOUND_COUNTED_STATE)):
+                return
+            if (response_started_at is not None
+                    and response_started_at - origin
+                    <= _mcp_auth._TRANSPORT_WAIT_BOUND_S):
+                return
+            try:
+                if (time.monotonic() - origin
+                        > _mcp_auth._TRANSPORT_WAIT_BOUND_S):
+                    _monitoring.record_wait_bound_starved(surface)
+            except Exception:
+                # WARNING, not debug: a permanently dead counter must be
+                # findable, and the hosted process runs uvicorn's default
+                # logging config (nothing sets this logger's level), so a DEBUG
+                # record is dropped in production — a silent zero is exactly the
+                # false-zero class this channel exists to expose. Same level as
+                # `monitoring`'s own breach-stamp failure.
+                _logger.warning("wait-bound starved count failed", exc_info=True)
+
+        # The budget an answer is being served under, kept by the helper (#4055
+        # may RE-ARM it after a cold-setup drain). Read by the started arm below,
+        # which has no other way to learn the re-armed origin: comparing a
+        # re-armed answer's head against the ORIGINAL arrival counted a served-in-
+        # time cold start as a breach (measured, and pinned by the middleware
+        # cold-start test).
+        _budget_state: dict = {}
+
         # The attempt is stamped on the way OUT (once the exchange has produced a
         # status) and on the refusal path — never here on the way in: see
         # `_count_wait_bound_attempt_if_served`.
@@ -6380,10 +6543,20 @@ class WaitBoundMiddleware:
             # #4055: the wait itself is delegated to ``mcp_auth`` so this arm and
             # the MCP seam share ONE implementation — including the one-time
             # embedder-setup exemption (the bound times the WAITING, not the
-            # SETTING UP).
+            # SETTING UP). ``on_starved`` is the OTHER half of the breach: NO
+            # refusal was substituted and the caller is about to be served this
+            # handler's own answer after the bound — the timer may have fired and
+            # lost the race to a finished handler, or never have fired at all.
+            # Counted here, by surface, so the breach is observable even when
+            # nothing was refused — the 401-at-20.27s shape that left
+            # `wait_bound_breaches` at zero. It receives this seam's effective
+            # budget origin (the re-armed instant after a cold-setup extension),
+            # so the served-late decision is measured against the budget the
+            # answer was actually served under.
             result = await _mcp_auth.await_under_wait_bound(
                 task, _mcp_auth._TRANSPORT_WAIT_BOUND_S, reference=t0,
-                owner=owner)
+                owner=owner, on_starved=_count_starved,
+                budget_state=_budget_state)
             return result
         except asyncio.CancelledError:
             # The caller was cancelled (client disconnect, server shutdown).
@@ -6416,7 +6589,55 @@ class WaitBoundMiddleware:
         if response_started:
             # The response already began; a refusal can no longer be
             # substituted, so the request is allowed to finish.
-            await task
+            #
+            # ⛔ The head MAY have reached the caller inside the budget or after
+            # it, and this arm cannot tell which: the deadline callback can be
+            # LATE (a blocked loop) and the head can go out after the deadline
+            # yet before this arm is reached. So the decision is `_count_starved`'s
+            # — it abstains on a head that went out inside the budget that
+            # governed the answer (a long-lived SSE stream, `GET /mcp` among
+            # them, closes much later and must not add one "starved" per
+            # session) and counts a head that missed it (`test_a_head_that_
+            # misses_the_bound_is_counted` pins that direction). Passing the
+            # helper's budget origin
+            # is what makes a cold-setup RE-ARM compare the head against the
+            # budget the answer was actually served under. The call is kept so
+            # every served exit funnels through ONE predicate instead of a rule
+            # per arm — and so an arm added later cannot silently skip the
+            # abstentions.
+            # ⛔ THE RAISING ARM TOO — hence `except BaseException` beside the
+            # `else`, not a bare `await task`: a handler that RAISES from its
+            # started response is still a caller that waited past the budget with
+            # a head already out (measured: 0.05 s bound, head at 0.4 s, then a
+            # YIELD, then `raise RuntimeError` — the exception propagated and the
+            # arm counted nothing; raising in the same step instead finishes the
+            # task first, so the helper's `task.done()` arm catches that shape and
+            # cannot discriminate this one). Not moved before the `await`: a
+            # caller that cancels while the response is still in flight must
+            # count in NEITHER channel (exclusion 4), and only the outcome after
+            # the await separates that from a served answer.
+            try:
+                await task
+            except asyncio.CancelledError:
+                # ⛔ NOT counted: the caller was CANCELLED (client disconnect,
+                # server shutdown) after a head was emitted, and got no ANSWER.
+                # (Every request this arm governs already had a head out — that
+                # is what `response_started` means; the no-head case never
+                # reaches here.) ⚠️ These are NOT all false positives: a late head
+                # with a reader that then vanished is a real breach, and this
+                # exclusion drops it. Stated because the alternative reading —
+                # "cancellation is noise" — would be wrong: it is a DELIBERATE
+                # gap. Counting on `finally` booked one deploy's cancelled
+                # streams as a burst of breaches (measured: `starved +1` at
+                # 0.35 s), and a deploy-time burst is indistinguishable from a
+                # loop-block episode on this channel. So: counted in NEITHER
+                # channel — see `monitoring.record_wait_bound_starved`.
+                raise
+            except BaseException:
+                _count_starved(_budget_state.get("origin", t0))
+                raise
+            else:
+                _count_starved(_budget_state.get("origin", t0))
             return
 
         refused = True
@@ -7365,6 +7586,78 @@ _READY_PROBE = HealthProbe(
     lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
+def _capture_health() -> dict:
+    """#12992: the capture gate's own state, as `/health` reports it.
+
+    The capacity 429 was a LOG LINE and nothing else, so "how often is the gate
+    refusing captures" was unanswerable: the two refusals that filed #12992 left
+    no datum anywhere, and the brief that investigated them could not measure the
+    concurrency at the moment they happened. This block is that read, on the
+    surface an operator already curls.
+
+    It publishes the CAPACITY facts (``in_flight`` / ``max_in_flight`` /
+    ``workers``) beside the REFUSAL facts, because the two together are what
+    distinguish the failure modes: a gate at 8/8 refusing steadily is a saturated
+    consumer, while ``capacity_refused_total`` climbing with ``in_flight`` low is a
+    burst of arrivals that each waited and left — neither is derivable from the other.
+
+    `workers` is on the block deliberately: `_CAPTURE_MAX_IN_FLIGHT` (8) is
+    ABOVE the pool size (4), so up to four ADMITTED captures hold their slots
+    while queued behind running extractions. Publishing only the ceiling made
+    "8 slots" read as "8 can run", which is not what the machine does
+    (``_CAPTURE_EXECUTOR``).
+
+    ⛔ It does NOT fold into `status`, the same rule as `change_feed` and
+    `wait_bound_breaches` — and UNLIKE `record`, whose `.ok` IS one of its three
+    terms: a saturated capture gate is not liveness (the process serves every
+    other route normally), and a cumulative counter must never pin it (#10185).
+    `refusing` is the WINDOWED reading (``_CAPTURE_REFUSAL_WINDOW_S``), so a
+    reader who wants "now" has it without re-deriving a rate from a total that
+    never resets.
+
+    Never raises, collects no I/O (#2850): one lock, three ints, one timestamp.
+    """
+    try:
+        with _CAPTURE_IN_FLIGHT_LOCK:
+            in_flight = _CAPTURE_IN_FLIGHT
+            refused = _CAPTURE_CAPACITY_REFUSED_TOTAL
+            last = _CAPTURE_LAST_REFUSED_AT
+            ceiling = _CAPTURE_MAX_IN_FLIGHT
+            # `_max_workers` survives a shut-down executor, so it needs no guard.
+            # ⛔ THE FORMATTING IS IN-GUARD: `fromtimestamp` can raise → a 500.
+            workers = _CAPTURE_EXECUTOR._max_workers
+            last_refused_at = None if last is None else datetime.fromtimestamp(
+                last, UTC).isoformat()
+    except Exception as exc:  # a health path must always answer
+        # ⛔ THE DEGRADED ARM PUBLISHES THE SAME KEYS AS THE HEALTHY ONE (#12992
+        # review P2). An ad-hoc short dict is the defect this file records in
+        # `health()`'s `refusals` arm — the "250 lines below" this used to say
+        # was head-bound and wrong; state the SYMBOL, not a distance. A
+        # 2-of-13-key dict gets a `KeyError` on `refusals["share"]`
+        # in exactly the degraded path the dashboard reads, measured twice. The operator
+        # contract in `docs/infra-runbook.md` §4.1.1b documents ten keys, so a
+        # jq `.capture.retry_after` on this arm must not raise.
+        return {"in_flight": None, "max_in_flight": None, "workers": None,
+                "capacity_refused_total": None, "last_refused_at": None,
+                "refusing": None, "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
+                "code": _CAPTURE_CAPACITY_CODE,
+                "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+                "error": str(exc)[:200]}
+    refusing = last is not None and (time.time() - last) <= _CAPTURE_REFUSAL_WINDOW_S
+    return {
+        "in_flight": in_flight,
+        "max_in_flight": ceiling,
+        "workers": workers,
+        "capacity_refused_total": refused,
+        "last_refused_at": last_refused_at,
+        "refusing": refusing,
+        "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
+        "code": _CAPTURE_CAPACITY_CODE,
+        "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+        "error": None,
+    }
+
+
 def _change_feed_health() -> dict:
     """#9208: degraded `:GraphEvent` feeds, as `/health` reports them.
 
@@ -8093,7 +8386,7 @@ async def health():
     VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
     "is this deployed?" was previously unanswerable from this endpoint: a stale
     build served ``status: ok`` and every other block happily. Like
-    ``change_feed`` and ``record`` it does NOT fold into ``status`` — a stale
+    ``change_feed`` and ``record``'s counters it does NOT fold into ``status`` — a stale
     deploy is up, and calling it degraded would make Fly restart a healthy
     process forever. Currency is a COMPARISON (``check-deploy-staleness.sh``
     against ``origin/main``); this block publishes the datum that comparison
@@ -8117,6 +8410,16 @@ async def health():
     a CODE, never `consent_token_secret_problem`'s message — that message names
     the byte length of a short key, which on an unauthenticated surface would
     narrow exactly the key space the `_MIN_SECRET_BYTES` floor exists to refuse.
+
+    Capture-gate check (#12992): ``capture`` publishes the capture admission
+    gate's capacity and its REFUSALS — ``in_flight``, ``max_in_flight``,
+    ``workers``, ``capacity_refused_total``, ``last_refused_at``, ``refusing`` (a window,
+    not the cumulative total). Same class as ``change_feed``: state that lives in
+    process memory and was previously visible only as a log line on the CLIENT
+    that was refused. It does NOT fold into ``status`` (see ``_capture_health``):
+    a saturated capture gate refuses `POST /v1/sessions` while every other route
+    — including this one — is healthy, and restarting the process would neither
+    drain the extractions holding the slots nor clear a burst of arrivals.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -8140,6 +8443,22 @@ async def health():
         # exists on the bad path (and here it would be the REMOVED `recent`).
         breaches = {"total": None, "by_surface": None,
                     "error": f"wait_bound_breaches unreadable: {type(exc).__name__}"}
+    # The OTHER outcome of the same breach: NO refusal was substituted and the
+    # caller was SERVED the handler's own result after the bound — the timer may
+    # have fired and lost the race to a finished handler, or never have fired.
+    # Structurally invisible to `wait_bound_breaches` (that counter is written
+    # only on the refusal path, and an answer is not a refusal; the refusal
+    # SHARE was separately blind because a 401 is kept out of its denominator by
+    # design), so the 401-at-20.27s measurement read
+    # `wait_bound_breaches.total: 0`. This key is what makes that visible; same
+    # shape and the same None-never-zero rule as its sibling, so a dashboard can
+    # read both the same way. REPORTED, never folded into `status`, and never
+    # into the #12477 window below.
+    try:
+        starved = _monitoring.wait_bound_starved_counts()
+    except Exception as exc:  # a monitoring read must never 5xx
+        starved = {"total": None, "by_surface": None,
+                   "error": f"wait_bound_starved unreadable: {type(exc).__name__}"}
     # ── #12477: a REFUSED request is a failure observable NOW ─────────────
     # The cumulative counter above is deliberately not folded into `status`
     # (#10185/#10620: a total that never resets would pin a deployment degraded
@@ -8199,6 +8518,10 @@ async def health():
             # means `db.ok`, `backup_watcher.ok` and `record.ok` (the three
             # terms in the `status` expression above), not the counter.
             "wait_bound_breaches": breaches,
+            # The ANSWERED half of the same breach — see the read above. Beside
+            # its sibling rather than inside it: `total` means "refused", which
+            # the runbook's §4.1.1 states, and an answer is the opposite outcome.
+            "wait_bound_starved": starved,
             # #10749: the POSITIVE pair beside that count. The clamp publishes this counter on
             # `monitoring.metrics()`, which reaches the standalone `/health` — JSON — and, as the
             # Prometheus family `tortoise_health_setup_clamped_total`, `/metrics` (which is the
@@ -8221,6 +8544,12 @@ async def health():
             # review, P3; measured: `AttributeError` out of `health()` on a partial module).
             "health_setup_clamped": _health_setup_clamped(),
             "record": record, "build": _build_identity(),
+            # #12992: the CAPTURE gate. A capacity refusal is a product-health
+            # signal (captures refused/min) that used to exist only as a log
+            # line on the refusing client, so a fleet could be refusing a live
+            # agent's capture and NOTHING on this surface said so. Reported,
+            # never folded into `status` — see `_capture_health`'s docstring.
+            "capture": _capture_health(),
             # #10488: the consent bridge's key, published as a truncated hash so
             # a split between this deployment and the Pages mint is one COMPARISON
             # instead of a diagnosis cycle. Reported, never folded into `status`
@@ -22506,7 +22835,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         "SET e.id=$eid, e.eventKind='AgentSession', e.name=$name, "
         "    e.capturedAt=$cap, e.startedAt=$cap, e.endedAt=$cap, "
         "    e.sessionId=$sid, e.summary=$sum, "
-        "    e.is_episodic=true, e.keywords=$kw, e.eventStatus='scheduled', "
+        "    e.is_episodic=true, e.keywords=$kw, e.eventStatus='pending', "
         "    e.updatedAt=$now",
         params={"eid": event_id, "name": payload.summary or session_id,
                 "cap": payload.captured_at, "sid": session_id,
@@ -49897,7 +50226,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 189 tracked files (706 distinct
+# ABSOLUTE line number from 189 tracked files (708 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

@@ -1,4 +1,4 @@
-"""#11825 — an `:Event` carries no lifecycle state, so the TERMINAL half is refused.
+"""#11825 → #13100 — an `:Event` carries no lifecycle state, so `status` is refused.
 
 Measured at #11825's head, on three doors:
 
@@ -15,15 +15,19 @@ label-blindly (``status in TERMINAL_EXCLUDED_STATUSES or bool(outdated)``), whil
 filters an ``:Event`` (``search_engine._STATUS_FILTERED_LABELS`` omits it). A node dead to belief and
 live to every read.
 
-The boundary this file pins: an Event may still carry a **non-terminal** ``status`` (the prop lane
-#2788 declares, read by ``_promote_incident_operators`` as the live/draft gate, #7853/#10828), and the
-**terminal** half of the vocabulary is refused before any write — the exact predicate the belief layer
-applies, imported from the same module, so the two cannot drift.
+The boundary this file pins has MOVED once, and the move is the record worth
+keeping. #11825 refused only the **terminal** half of the vocabulary and left a
+non-terminal ``status`` riding the prop lane, because ``_promote_incident_operators``
+read it as the live/draft gate (#7853/#10828). #13100 (S7, the approved model §8)
+retires the key outright: *a thing that has not happened yet is not an event — it
+is a plan*. So the whole declaration is refused before any write, ``status=None``
+stays the repair route for a legacy row, and the suppression is re-homed onto the
+plan's position (``live.endpoint_permits_operator_promotion``, pinned by
+``tests/test_13100_planned_occurrences.py``).
 
 ⛔ Every refusal test here goes RED if the guard is removed: the write is ACCEPTED at the parent head.
-⛔ T5 is the other half — the guard must not over-block a Point, a Subject, or a non-terminal Event
-status (``status="scheduled"`` is pinned on main by
-``tests/test_operator_dedup_parity.py::test_create_entity_event_journals_single_line``).
+⛔ T5 is the other half — the guard must not over-block a Point or a Subject, and it must
+still accept ``status=None`` (the documented clear route for a legacy Event).
 
 Runnable (URI-less embedded), or through the lane container:
 
@@ -48,7 +52,7 @@ from tortoise.live import (
     EPISTEMIC_LABELS,
     STATUS_CARRYING_EPISTEMIC_LABELS,
     TERMINAL_EXCLUDED_STATUSES,
-    refuse_terminal_event_state,
+    refuse_event_lifecycle_state,
     status_as_reported,
 )
 from tortoise.log import EventLog
@@ -67,9 +71,11 @@ _EITHER_REFUSAL = r"(not writable on an :Event|not an exact `str`)"
 #: The terminal half, as a sorted tuple so a parametrized id list is stable.
 _TERMINAL = tuple(sorted(TERMINAL_EXCLUDED_STATUSES))
 
-#: Values that must KEEP working — the prop lane, not a lifecycle. `scheduled`
-#: is an ingest marker and is pinned on main (#2061 parity test).
-_NON_TERMINAL = ("draft", "live", "scheduled", "completed")
+#: The words that KEPT working under #11825's interim boundary (terminal refused,
+#: non-terminal accepted). #13100 retires the whole key, so every one of these is
+#: refused now — the tuple is kept as the parametrization of THAT refusal, so
+#: relaxing it again would have to face all four at the door and at Phase 1.
+_RETIRED_WORDS = ("draft", "live", "scheduled", "completed")
 
 
 @pytest.fixture()
@@ -100,6 +106,19 @@ def _journal_lines(path):
         return [line for line in fh.read().splitlines() if line.strip()]
 
 
+def _legacy_status(sdk, eid, word):
+    """Put a status on an Event BELOW the doors — a legacy/out-of-tree row.
+
+    The reader net stays wider than the write door (#2977): no value can be
+    WRITTEN any more (#13100), and the guards must still answer correctly about a
+    row that already carries one, so the fixtures for those tests need a write
+    the doors cannot be used for.
+    """
+    sdk._get_proj().g.query(
+        "MATCH (e:Event {eventId:$e}) SET e.status=$st",
+        params={"e": eid, "st": word})
+
+
 def _props(sdk, eid):
     rows = sdk._get_proj().g.query(
         "MATCH (e:Event {eventId:$e}) RETURN properties(e)",
@@ -126,12 +145,12 @@ class TestTheRefusalPredicate:
             live, "TERMINAL_EXCLUDED_STATUSES",
             live.TERMINAL_EXCLUDED_STATUSES | {"novel_terminal"})
         with pytest.raises(ValueError, match=":Event"):
-            refuse_terminal_event_state({"status": "novel_terminal"}, door="test")
+            refuse_event_lifecycle_state({"status": "novel_terminal"}, door="test")
         # …and the pre-existing members are still refused (the vocabulary grew,
         # it did not move)
         for value in _TERMINAL:
             with pytest.raises(ValueError, match=":Event"):
-                refuse_terminal_event_state({"status": value}, door="test")
+                refuse_event_lifecycle_state({"status": value}, door="test")
 
     def test_it_does_not_invent_an_event_status_family(self):
         """A write-side refusal is not a status family.
@@ -149,19 +168,27 @@ class TestTheRefusalPredicate:
         assert status_as_reported("live", label="Event") == "live"
         assert status_as_reported(None) == "live"
 
-    def test_non_terminal_values_are_allowed_by_the_predicate(self):
-        for value in _NON_TERMINAL:
-            refuse_terminal_event_state({"status": value}, door="test")
+    @pytest.mark.parametrize("value", _RETIRED_WORDS)
+    def test_every_retired_word_is_refused_by_the_predicate(self, value):
+        """#13100: the whole key, not just the terminal half.
+
+        Each word here was ACCEPTED under #11825's boundary — that is exactly why
+        they are the parametrization: the reopening is visible in the diff.
+        """
+        with pytest.raises(ValueError, match=":Event"):
+            refuse_event_lifecycle_state({"status": value}, door="test")
+
+    def test_only_a_clear_and_an_absent_key_ride_through(self):
         # a clear (the legacy repair route) and an absent key are both fine
-        refuse_terminal_event_state({"status": None}, door="test")
-        refuse_terminal_event_state({}, door="test")
+        refuse_event_lifecycle_state({"status": None}, door="test")
+        refuse_event_lifecycle_state({}, door="test")
         # `outdated=False` is not a terminal marker; `ep.py` reads truthiness
-        refuse_terminal_event_state({"outdated": False}, door="test")
+        refuse_event_lifecycle_state({"outdated": False}, door="test")
 
     def test_the_outdated_flag_is_refused_by_the_same_predicate(self):
         """The vocabulary's OTHER terminal marker — `ep.py` honours it identically."""
         with pytest.raises(ValueError, match="not writable on an :Event"):
-            refuse_terminal_event_state({"outdated": True}, door="test")
+            refuse_event_lifecycle_state({"outdated": True}, door="test")
 
     @pytest.mark.parametrize("value", ["", 0, 0.0, 1, "true", "false"])
     def test_a_non_boolean_outdated_is_refused_not_half_read(self, value):
@@ -175,7 +202,7 @@ class TestTheRefusalPredicate:
         boolean, so a non-boolean is refused rather than half-read.
         """
         with pytest.raises(ValueError, match="not a legal value on an :Event"):
-            refuse_terminal_event_state({"outdated": value}, door="test")
+            refuse_event_lifecycle_state({"outdated": value}, door="test")
 
 
 # ── T3: both create doors ───────────────────────────────────────────────────
@@ -205,11 +232,16 @@ class TestTheCreateDoors:
             sdk.create_entity("event", "Flagged", eventKind="deployment",
                               outdated=True)
 
-    @pytest.mark.parametrize("status", _NON_TERMINAL)
-    def test_a_non_terminal_status_still_lands(self, sdk, status):
-        """#2788's prop lane, and main's #2061 parity pin (`status="scheduled"`)."""
-        eid = _event(sdk, name=f"Ok-{status}", status=status)
-        assert _props(sdk, eid).get("status") == status
+    @pytest.mark.parametrize("status", _RETIRED_WORDS)
+    def test_a_non_terminal_status_is_refused_at_the_create_door(self, sdk, status):
+        """#13100 reopens #11825's non-terminal allowance — nothing is minted."""
+        with pytest.raises(ValueError, match=":Event"):
+            sdk.create_entity("event", f"Ok-{status}", eventKind="deployment",
+                              status=status)
+        assert not sdk._get_proj().g.query(
+            "MATCH (e:Event {name:$n}) RETURN count(e)",
+            params={"n": f"Ok-{status}"},
+        ).result_set[0][0]
 
 
 # ── T1/T2/T6: the update door ───────────────────────────────────────────────
@@ -256,18 +288,14 @@ class TestTheUpdateDoor:
         assert len(_journal_lines(sdk._test_log)) == records_before, (
             "a refused update must not journal a restatus the fold would replay")
 
-    def test_a_non_terminal_update_still_lands_on_a_multi_label_event(self, sdk):
-        """No over-block: `live` is a legal `:Event` prop-lane write (#2788).
-
-        ⛔ The node is born `draft`, not `live`: created `live`, the assertion below
-        held with the write deleted entirely, so it pinned nothing (measured,
-        review cycle 11 P2). The pin is the MOVE.
-        """
+    def test_a_non_terminal_update_is_refused_on_a_multi_label_event(self, sdk):
+        """#13100: the multi-label arm refuses every word, not just the terminal ones."""
         pid = self._multi_label(sdk, "Multi-live", event_id=False,
                                 status="draft")
         assert self._state(sdk, pid)[0] == "draft"
-        sdk.update_knowledge(pid, status="live")
-        assert self._state(sdk, pid)[0] == "live"
+        with pytest.raises(ValueError, match=":Event"):
+            sdk.update_knowledge(pid, status="live")
+        assert self._state(sdk, pid)[0] == "draft"
 
     def test_a_refused_rename_costs_no_status_write(self, sdk):
         """#12222: every refusal on this surface precedes every write.
@@ -335,12 +363,12 @@ class TestTheUpdateDoor:
             "MATCH (e:Event {eventId:'ev-key-only'}) RETURN properties(e)"
         ).result_set[0][0]
 
-    def test_a_non_terminal_update_still_lands(self, sdk):
-        eid = _event(sdk, name="Restatus")
-        sdk.update_knowledge(eid, status="draft")
-        assert _props(sdk, eid).get("status") == "draft"
-        sdk.update_knowledge(eid, status="scheduled")
-        assert _props(sdk, eid).get("status") == "scheduled"
+    @pytest.mark.parametrize("status", _RETIRED_WORDS)
+    def test_a_non_terminal_update_is_refused(self, sdk, status):
+        eid = _event(sdk, name=f"Restatus-{status}")
+        with pytest.raises(ValueError, match=":Event"):
+            sdk.update_knowledge(eid, status=status)
+        assert "status" not in _props(sdk, eid)
 
 
 # ── The lifecycle doors: retract / supersede / invalidate ────────────────────
@@ -486,10 +514,13 @@ class TestTheEventApiDoor:
             "MATCH (e:Event {eventId:'ev-api-flag'}) RETURN count(e)"
         ).result_set[0][0]
 
-    def test_add_event_still_accepts_a_non_terminal_status(self, sdk):
+    def test_add_event_refuses_a_non_terminal_status(self, sdk):
         api = self._api(sdk)
-        api.add_event("ev-api-ok", "deployment", status="scheduled")
-        assert _props(sdk, "ev-api-ok").get("status") == "scheduled"
+        with pytest.raises(ValueError, match=":Event"):
+            api.add_event("ev-api-ok", "deployment", status="scheduled")
+        assert not sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:'ev-api-ok'}) RETURN count(e)"
+        ).result_set[0][0]
 
     def test_a_nested_props_map_is_inert_at_this_door(self, sdk):
         """`add_event` never flattens, so `props={…}` is not a status lane here.
@@ -535,7 +566,7 @@ class TestTheEventApiDoor:
         scoped to those, see the drop pin below.
         """
         api = self._api(sdk)
-        with pytest.raises(ValueError, match="not a legal value on an :Event"):
+        with pytest.raises(ValueError, match="not writable on an :Event"):
             api.add_event("ev-api-typed", "deployment", status=value)
         assert _journal_lines(sdk._test_log) == []
 
@@ -552,7 +583,7 @@ class TestTheEventApiDoor:
         would have appended a record).
         """
         api = self._api(sdk)
-        with pytest.raises(ValueError, match="not a legal value on an :Event"):
+        with pytest.raises(ValueError, match="not writable on an :Event"):
             api.add_event("ev-api-unencodable", "deployment", status=value)
         assert _journal_lines(sdk._test_log) == []
 
@@ -574,8 +605,8 @@ class TestTheEventApiDoor:
                  "np.bool_": lambda: np.bool_(True),
                  "Decimal": lambda: Decimal("0.25")}[factory]()
         eid = _event(sdk, name=f"Transport-{factory}")
-        sdk.update_knowledge(eid, status="draft")
-        with pytest.raises(ValueError, match="not a legal value on an :Event"):
+        _legacy_status(sdk, eid, "draft")
+        with pytest.raises(ValueError, match="not writable on an :Event"):
             sdk.update_knowledge(eid, status=value)
         assert _props(sdk, eid)["status"] == "draft"
 
@@ -599,7 +630,7 @@ class TestTheEventApiDoor:
                 return "status"
 
         eid = _event(sdk, name="KeyRenders")
-        sdk.update_knowledge(eid, status="draft")
+        _legacy_status(sdk, eid, "draft")
         with pytest.raises(ValueError, match="not writable on an :Event"):
             sdk.update_knowledge(eid, **{_KeyLiar("x"): "superseded"})
         assert _props(sdk, eid)["status"] == "draft"
@@ -743,7 +774,7 @@ class TestTheEventApiDoor:
         `EventRecorded` arm above already does.
         """
         eid = _event(sdk, name="PosRecord")
-        sdk.update_knowledge(eid, status="draft")
+        _legacy_status(sdk, eid, "draft")
         api = self._api(sdk)
         with pytest.raises(ValueError, match="not writable on an :Event"):
             api._emit("EntityMutated", {"id": eid, "label": "Event",
@@ -751,30 +782,29 @@ class TestTheEventApiDoor:
                                         "state": {"status": "superseded"}})
         assert _props(sdk, eid)["status"] == "draft"
 
-    def test_the_two_doors_handle_a_dropped_status_differently_and_both_are_legal(self, sdk):
-        """Review cycle 3, P2 — "dropped" is FOLD behaviour, not a universal rule.
+    def test_no_door_drops_a_status_any_more(self, sdk):
+        """#13100 — the "accepted but dropped" asymmetry is GONE.
 
-        The fold skips a non-persistable property (``_persist_extra_props``), so
-        ``add_event`` leaves an EXISTING status untouched. The live write door
-        hands the same value to the ``#7369`` transport gate, which nulls it —
-        and ``SET n += {status: null}`` REMOVES the property, so
-        ``update_entity`` CLEARS it. Two different outcomes from one accepted
-        value; neither can PRODUCE a terminal state, which is the only property
-        this gate is about (and clearing is permitted by design: ``status=None``
-        clears). Pinned because the docstring's first revision claimed the fold's
-        outcome was universal, and nothing measured the other door.
+        #11825 accepted a MAP `status` (a value no writer keeps) and pinned the
+        two doors' different outcomes: the fold left an existing status
+        untouched, the live door cleared it. Both were legal because the
+        declaration itself was legal. Since #13100 the declaration is the defect,
+        so every door refuses it and neither outcome is reachable — the caller is
+        told to drop the key instead of having it silently discarded.
         """
         api = self._api(sdk)
-        api.add_event("ev-drop-fold", "deployment", status="draft")
-        assert _props(sdk, "ev-drop-fold")["status"] == "draft"
-        api.add_event("ev-drop-fold", "deployment", status={"a": 1})
-        assert _props(sdk, "ev-drop-fold")["status"] == "draft"
+        with pytest.raises(ValueError, match=_EITHER_REFUSAL):
+            api.add_event("ev-drop-fold", "deployment", status={"a": 1})
+        assert not sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:'ev-drop-fold'}) RETURN count(e)"
+        ).result_set[0][0]
 
         eid = _event(sdk, name="DropLive")
-        sdk.update_knowledge(eid, status="draft")
-        assert _props(sdk, eid)["status"] == "draft"
-        sdk.update_knowledge(eid, status={"a": 1})
-        assert "status" not in _props(sdk, eid)
+        _legacy_status(sdk, eid, "draft")
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            sdk.update_knowledge(eid, status={"a": 1})
+        assert _props(sdk, eid)["status"] == "draft", (
+            "a refused write must leave the legacy word untouched")
 
     def test_an_unhashable_string_subclass_is_refused_by_name(self, sdk):
         """Review cycle 3, P3 — a ``str`` SUBCLASS can be unhashable.
@@ -836,7 +866,7 @@ class TestTheEventApiDoor:
             assert _journal_lines(sdk._test_log) == []
 
         eid = _event(sdk, name="KeyedUpdate")
-        sdk.update_knowledge(eid, status="draft")
+        _legacy_status(sdk, eid, "draft")
         with pytest.raises(ValueError, match="not writable on an :Event"):
             sdk.update_knowledge(eid, **{_ConstHashKey("status"): "superseded"})
         assert _props(sdk, eid)["status"] == "draft"
@@ -872,36 +902,31 @@ class TestTheEventApiDoor:
                           status=_LyingStr("superseded"))
         assert _journal_lines(sdk._test_log) == []
     @pytest.mark.parametrize("value", [{"a": 1}, {"a": {"b": []}}])
-    def test_a_non_persistable_status_is_dropped_not_refused(self, sdk, value):
-        """#7925 (recorded decision) — a value the WRITER DROPS is not refused.
+    def test_a_non_persistable_status_is_ALSO_refused(self, sdk, value):
+        """#13100 REOPENS #7925's over-rejection rule here, and this is the record.
 
-        `tests/test_ingest_event_endpoint.py::
-        test_direct_route_object_and_event_status_values_not_over_rejected` pins
-        this for the direct route: a map/set/bytes `status` is filtered out
-        before the `SET`, so the node never carries it and no predicate can read
-        it as terminal. Refusing it rejects a write the writers accept — the
-        over-rejection class #7925 round 4 already fixed once, which the first
-        revision of this guard re-introduced by asking only
-        `isinstance(status, str)` (measured RED there, and it is why this arm
-        asks `live._status_is_discarded_by_every_writer` instead).
+        #7925 round 4 fixed a real over-rejection: under a VALUE-scoped guard, a
+        map no writer keeps was filtered out before the `SET`, so refusing it
+        rejected a write the writers accepted. That rule governed a guard whose
+        question was "can this value make the Event terminal?".
 
-        Pinned as a REGRESSION guard, not a new-guard assertion: it passes on
-        the pre-fix code too, by design.
-
-        ⛔ SCOPE: a MAP, and only a map. `bytes`/`set`/`bytearray` are
-        non-persistable too, but they are NOT accepted: no journal can encode
-        them, so accepting one made the record append raise a bare `TypeError`
-        (and, at `emit_belief`, drop the record silently). They are refused by
-        name in
-        `test_a_value_the_journal_cannot_encode_is_refused_not_left_to_crash`,
-        which is the neighbouring arm of this same three-predicate rule.
+        #13100 changes the question to "was a lifecycle DECLARED at all?", and on
+        that question the value is irrelevant: a caller passing
+        `status={"a": 1}` is asking for a lifecycle the model does not have, and
+        "accepted and then silently dropped" is the half-honoured shape #11825
+        itself records. So the arm refuses it — and the sibling pin in
+        `tests/test_ingest_event_endpoint.py` now covers `:Object` only, which is
+        where #7925's rule still applies unchanged.
         """
         api = self._api(sdk)
-        api.add_event("ev-api-dropped", "deployment", status=value)
-        # Accepted, and the value is genuinely DROPPED rather than stored: the
-        # node carries no `status` at all, which is what makes the terminal
-        # predicates unable to see it.
-        assert "status" not in _props(sdk, "ev-api-dropped")
+        # #13100 refuses the DECLARATION, not the value: a map no writer keeps is
+        # still a caller asking for a lifecycle the model does not have, and
+        # "accepted and then dropped" was the half-honoured shape #11825 records.
+        with pytest.raises(ValueError, match=_EITHER_REFUSAL):
+            api.add_event("ev-api-dropped", "deployment", status=value)
+        assert not sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:'ev-api-dropped'}) RETURN count(e)"
+        ).result_set[0][0]
 
 
 class TestTheBeliefSeam:
@@ -1078,13 +1103,14 @@ class TestTheBeliefSeam:
                 state={"outdated": True})
         assert "outdated" not in _props(sdk, eid)
 
-    def test_emit_belief_state_op_with_a_non_terminal_status_still_lands(self, sdk):
-        """No over-block: `draft`/`live` are the prop lane, and #2788 pins it."""
+    def test_emit_belief_state_op_with_a_non_terminal_status_is_refused(self, sdk):
+        """#13100: the state-op shape is one of the SIX doors, and all six refuse."""
         eid = _event(sdk, name="BeliefStateLive")
-        self._api(sdk).emit_belief(
-            "EntityMutated", id=eid, label="Event", op="restatus",
-            state={"status": "live"})
-        assert _props(sdk, eid)["status"] == "live"
+        with pytest.raises(ValueError, match=":Event"):
+            self._api(sdk).emit_belief(
+                "EntityMutated", id=eid, label="Event", op="restatus",
+                state={"status": "live"})
+        assert "status" not in _props(sdk, eid)
 
 
 # ── the bundle door: Phase 1 must refuse what step 3 would refuse mid-write ──
@@ -1313,12 +1339,13 @@ class TestTheBundleValidationDoor:
         # it pinned a different arm (review cycle 13). The writer-side `strip()` is
         # pinned by `test_the_writer_resolves_the_type_by_content_too`.
 
-    def test_a_non_terminal_event_item_is_not_a_violation(self, sdk):
-        """No over-block: the door accepts `scheduled`, so Phase 1 must too."""
+    def test_a_non_terminal_event_item_is_a_violation(self, sdk):
+        """#13100: the door refuses `scheduled`, so Phase 1 must too — otherwise
+        `ingest` commits the earlier items and THEN raises (partial mutation)."""
         assert sdk._validate_bundle({
             "entities": [{"ref": "e1", "type": "event", "name": "Sched",
                           "eventKind": "deployment", "status": "scheduled"}],
-        }) == []
+        }), "a non-terminal Event status passed Phase 1"
 
     def test_an_object_item_with_a_terminal_status_is_not_a_violation(self, sdk):
         """`:Object` has a lifecycle — its writer stores the value (T5)."""
@@ -1365,7 +1392,7 @@ class TestTheBundleValidationDoor:
             self, sdk, status):
         """Review cycle 6, P1 — the TYPE dimension of the same door.
 
-        `refuse_terminal_event_state` refuses a PERSISTABLE non-string status,
+        `refuse_event_lifecycle_state` refuses a PERSISTABLE non-string status,
         because an int glides through the vocabulary test and stores a status no
         reader can name. Phase 1 did not mirror that dimension, so this bundle
         passed validation and raised in step 3 with the point already committed
@@ -1380,24 +1407,21 @@ class TestTheBundleValidationDoor:
         assert violations, (
             f"status={status!r} passed Phase 1 — ingest would then raise "
             "mid-write with the point already committed")
-        assert any("STRING" in v["message"] for v in violations)
+        assert any("carries no lifecycle" in v["message"] for v in violations)
 
     @pytest.mark.parametrize("status", [{"a": 1}, {"a": {"b": []}}])
-    def test_a_non_persistable_status_is_accepted_and_dropped(self, sdk, status):
-        """The other half of the door's rule (#7925): it is never stored.
+    def test_a_non_persistable_status_is_also_refused(self, sdk, status):
+        """#13100 refuses the DECLARATION, not the value.
 
-        ⛔ SCOPE — a MAP, and this is the cross-lane merge's decision, not a
-        narrowing for convenience. `{1, 2}` and `b"raw"` are non-persistable
-        too, so under the FOLD's filter alone they belonged in this list; but the
-        journal cannot JSON-encode them, and accepting them made the record
-        append raise a bare `TypeError` (and, at `emit_belief`, drop the record
-        silently). `_status_is_discarded_by_every_writer` therefore asks all
-        THREE writers, and those two values are violations — pinned next.
+        Under #11825's value-based boundary a map no writer keeps was accepted
+        and dropped — the "accepted and half-honoured" shape #11825 itself
+        records, since the caller asked for a lifecycle the model does not have.
+        The door now refuses it, so Phase 1 does too; no value escapes the rule.
         """
         assert sdk._validate_bundle({
             "entities": [{"ref": "e1", "type": "event", "name": "Drop",
                           "eventKind": "deployment", "status": status}],
-        }) == []
+        }), "a non-persistable Event status passed Phase 1"
 
     @pytest.mark.parametrize("status", [{1, 2}, b"raw", bytearray(b"raw")])
     def test_a_status_no_journal_can_encode_is_a_phase_1_violation(
@@ -1415,7 +1439,7 @@ class TestTheBundleValidationDoor:
                           "eventKind": "deployment", "status": status}],
         })
         assert violations, f"status={status!r} passed Phase 1"
-        assert any("STRING" in v["message"] for v in violations)
+        assert any("carries no lifecycle" in v["message"] for v in violations)
 
     def test_phase_1_refuses_an_aliased_key_the_door_would_refuse(self, sdk):
         """Review cycle 6, P1 — the Phase-1 readers hashed the literal name.
@@ -1446,7 +1470,8 @@ class TestTheBundleValidationDoor:
         ]}), "the door refuses the top-level terminal status; Phase 1 must too"
         assert sdk._validate_bundle({"entities": [
             {**base, "status": "live", "props": {"status": "superseded"}},
-        ]}) == [], "the writer keeps the top-level `live`; Phase 1 must not over-reject"
+        ]}), ("`live` is refused too since #13100 — Phase 1 must mirror the door, "
+              "not the retired non-terminal allowance")
         # (a) an aliased `status: live` plus a nested terminal status: the door
         # merges both and refuses, so Phase 1 must too.
         assert sdk._validate_bundle({"entities": [
@@ -1546,7 +1571,7 @@ class TestTheBundleValidationDoor:
                    for m in (v["message"] for v in sdk._validate_bundle(alone))), (
             "an unreferenced terminal Event item passed Phase 1")
 
-    def test_the_violation_names_the_TERMINAL_declaration_when_a_legal_one_masks_it(
+    def test_the_violation_names_EVERY_declaration_when_one_masks_another(
             self, sdk):
         """Conflict-sweep lane F, P3 — the message rendered `_status_values[-1]`.
 
@@ -1580,9 +1605,12 @@ class TestTheBundleValidationDoor:
         assert msgs, "the masked-terminal item passed Phase 1 entirely"
         event_msg = [m for m in msgs if "for an :Event" in m]
         assert event_msg, msgs
+        # #13100: BOTH declarations are refused, so the message names both —
+        # the caller has to drop the whole key, not pick the "legal" one.
         assert any("'superseded'" in m for m in event_msg), (
-            "the message must NAME the terminal declaration that failed",
-            event_msg)
+            "the message must NAME every declaration that failed", event_msg)
+        assert any("'live'" in m for m in event_msg), (
+            "the second declaration is refused too, and must be named", event_msg)
 
 
 # ── T5: no over-block on the other labels ───────────────────────────────────
@@ -1659,13 +1687,12 @@ class TestTheGuardDoesNotOverBlock:
         assert row[0][0] != "superseded"
 
     def test_a_legacy_terminal_event_can_still_be_repaired(self, sdk):
-        """The repair route a denylist (unlike an allowlist) preserves.
+        """The repair route survives the widening: ``status=None`` CLEARS.
 
-        A pre-fix head — or raw Cypher — can leave a terminal status on an
-        Event. It cannot be written again, but it can be CLEARED, which is the
-        only route a tenant has; `status="live"` and `status=None` are both
-        non-terminal and therefore still accepted. Pinned because an allowlist
-        of `{live, draft}` would have kept `None` refused and made the state
+        A pre-fix head — or raw Cypher — can leave a status on an Event. No value
+        can be written again (#13100), but the word can be CLEARED, which is the
+        only route a tenant has. ``status=None`` is therefore still accepted, and
+        pinned here: an allowlist of legal words would have made the state
         permanent for existing data (PLAN-VERIFY round 1, finding 7).
         """
         eid = _event(sdk, name="Legacy")
@@ -1673,12 +1700,11 @@ class TestTheGuardDoesNotOverBlock:
             "MATCH (e:Event {eventId:$e}) SET e.status='superseded'",
             params={"e": eid})
         assert _props(sdk, eid).get("status") == "superseded"
-        # the terminal value can no longer be written…
-        with pytest.raises(ValueError, match=":Event"):
-            sdk.update_knowledge(eid, status="superseded")
+        # no value can be written again — terminal or not…
+        for word in ("superseded", "live"):
+            with pytest.raises(ValueError, match=":Event"):
+                sdk.update_knowledge(eid, status=word)
         # …and the legacy mark can be lifted
-        sdk.update_knowledge(eid, status="live")
-        assert _props(sdk, eid).get("status") == "live"
         sdk.update_knowledge(eid, status=None)
         assert "status" not in _props(sdk, eid)
 

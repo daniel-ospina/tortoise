@@ -995,20 +995,66 @@ def test_a_graph_this_harness_did_not_build_is_refused_not_wiped():
     )
 
 
-def test_the_seed_refuses_a_foreign_graph_before_it_deletes(monkeypatch):
+@pytest.mark.parametrize("knob", [None, "none", "0"],
+                         ids=["unset", "opt-out-none", "opt-out-zero"])
+def test_the_seed_refuses_a_foreign_graph_before_it_deletes(monkeypatch, knob):
     """The guard is WIRED into `seed_graph`, not merely available.
 
     ⛔ Calling `_refuse_a_foreign_graph` directly (the test above) stays green if
     the call site is deleted — measured: replacing it with `pass` survived. This
     drives `seed_graph` through a stand-in `falkordb` so a missing call REDDENS.
+
+    ⛔ The stand-in `from_url` takes `**kwargs` because the construction now
+    carries the product's read bound (#13211 governs this fix; #13140 is the
+    defect's origin) — and it ASSERTS the bound rather than accepting it
+    blindly: a stub that swallowed `**kwargs` would leave the seed's socket
+    policy unpinned here, and `socket_timeout` absent from the received kwargs
+    reds this test (the shape the seed had before the fix).
+
+    ⛔ IT ASSERTS THE BOUND WAS *PASSED*, NOT THE VALUE IT RESOLVED TO (#13212
+    review P2-1). The first cut asserted `seen["socket_timeout"] is not None`,
+    which is the RESOLVED value: `_bounded_server_socket_kwargs()` returns
+    `socket_timeout=None` for every spelling of the DOCUMENTED opt-out
+    (`TORTOISE_DB_SOCKET_TIMEOUT` = `none`/`off`/`false`/`0`/any value ≤ 0, see
+    `tortoise/projection/__init__.py`), a configuration the sibling suite pins
+    as CORRECT — so an operator shell that exported the opt-out reddened this
+    row on a tree that obeyed #3065, accusing the seed of a defect it did not
+    have. The presence of the kwarg is the thing this pin is about; its VALUE is
+    the operator's business, asserted below only for the two documented shapes.
     """
     from types import SimpleNamespace
 
+    # The operator's own shell must not decide this row's verdict — the repo's
+    # established shape for that (`tests/test_cache_eviction_census.py`, and
+    # `_graph_viz_connection_module` in `test_bounded_raw_clients_3065.py`).
+    monkeypatch.delenv("TORTOISE_DB_SOCKET_TIMEOUT", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", raising=False)
+    if knob is not None:
+        monkeypatch.setenv("TORTOISE_DB_SOCKET_TIMEOUT", knob)
+
     client = SimpleNamespace(select_graph=lambda name: _FakeGraph({"Point", "Operator"}, []))
+    seen: dict = {}
+
+    def _from_url(url, **kwargs):
+        seen.update(kwargs)
+        return client
+
     monkeypatch.setitem(sys.modules, "falkordb",
-                        SimpleNamespace(FalkorDB=SimpleNamespace(from_url=lambda url: client)))
+                        SimpleNamespace(FalkorDB=SimpleNamespace(from_url=_from_url)))
     with pytest.raises(RuntimeError, match="Operator"):
         harness.seed_graph("docker://:p@127.0.0.1:1", "real-graph")
+    assert "socket_timeout" in seen, (
+        "the seed's client was constructed with NO read bound (#3065/#8118): "
+        f"from_url received {sorted(seen)}")
+    if knob is None:
+        assert seen["socket_timeout"] > 0, (
+            "the seed's client received `socket_timeout=None` with no opt-out "
+            f"exported (#3065/#8118): from_url received {seen}")
+    else:
+        assert seen["socket_timeout"] is None, (
+            f"TORTOISE_DB_SOCKET_TIMEOUT={knob} is the documented unbounded "
+            "opt-out and the resolver's answer must reach the seed too — this "
+            f"arm exists so the pin above cannot accuse correct code: {seen}")
 
 
 @pytest.mark.parametrize("axis", [None, "--graph-uri", "--record-dsn"],

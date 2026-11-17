@@ -23,7 +23,7 @@ from .kind_fallbacks import named_kind
 # Event node, after `create_entity` and `_update_entity` — refuses the terminal
 # half of the status vocabulary too. `live` is the leaf status module (it
 # imports nothing from here), so this adds no cycle.
-from .live import label_names_an_event, refuse_terminal_event_state
+from .live import label_names_an_event, refuse_event_lifecycle_state
 
 # #2782: the money value's WRITE gate, at the one seam that bypasses
 # `_sanitize_props`. `money` imports only `numeric_domain` (no cycle).
@@ -1641,7 +1641,7 @@ class EventAPI:
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
         # ── #11825: the `EventRecorded` CHOKEPOINT ──
         # A record-gated guard on the ONE seam every record must pass. The three
-        # tenant doors each call `refuse_terminal_event_state` as well, for a
+        # tenant doors each call `refuse_event_lifecycle_state` as well, for a
         # refusal that NAMES the door the caller used — but a door list is not a
         # boundary, and this seam is what makes the answer independent of it:
         # measured at the previous head (review cycle 2, P0), a fourth caller
@@ -1660,7 +1660,7 @@ class EventAPI:
                 if not isinstance(_map, dict):
                     continue
                 _inner = _map.get("event")
-                refuse_terminal_event_state(
+                refuse_event_lifecycle_state(
                     _inner if isinstance(_inner, dict) else _map,
                     door=f"the `{type_}` envelope")
         # ── #11825 (review cycle 3, P1; moved to this chokepoint in cycle 6) ──
@@ -1747,7 +1747,7 @@ class EventAPI:
                     and label_names_an_event(_map.get("label"))
                     and _op in _ENTITY_MUTATION_STATE_OPS):
                 _state = _map.get("state")
-                refuse_terminal_event_state(
+                refuse_event_lifecycle_state(
                     _state if isinstance(_state, dict) else {},
                     door=f"the `{type_}` envelope")
         if record:
@@ -2295,7 +2295,7 @@ class EventAPI:
         # `_emit`, so the two cannot disagree about which map is the record.
         if type_ == "EventRecorded":
             _inner = payload.get("event")
-            refuse_terminal_event_state(
+            refuse_event_lifecycle_state(
                 _inner if isinstance(_inner, dict) else payload,
                 door="EventAPI.emit_belief")
         # ── #11825 (review cycle 3, P1): the FIFTH shape — a STATE OP on an `:Event` ──
@@ -2350,7 +2350,7 @@ class EventAPI:
                 and isinstance(payload.get("op"), str) \
                 and payload.get("op") in _ENTITY_MUTATION_STATE_OPS:
             _state = payload.get("state")
-            refuse_terminal_event_state(
+            refuse_event_lifecycle_state(
                 _state if isinstance(_state, dict) else {},
                 door="EventAPI.emit_belief")
         try:
@@ -3080,10 +3080,11 @@ class EventAPI:
         outdated=True)`` stored the flag — the two markers `ep.py` reads
         label-blindly to strip a node from every factor, while every retrieval
         leg keeps serving it. Both are refused here, through the ONE shared
-        predicate the SDK doors use (`live.refuse_terminal_event_state`), so a
-        fourth door cannot be wired with half of it. The rule is the terminal
-        half only: a non-terminal ``status`` rides the prop lane exactly as it
-        did (and as #2788 pins).
+        predicate the SDK doors use (`live.refuse_event_lifecycle_state`), so a
+        fourth door cannot be wired with half of it. Since #13100 (S7) the rule
+        is the WHOLE key: any non-``None`` ``status`` is refused, because a
+        thing that has not happened yet is a PLAN
+        (``tortoise/planned_occurrence.py``), not an Event with a progress word.
 
         ⛔ This door is not "internal": `EventAPI` is a shipped public class,
         the MCP server constructs it for `mine_conversation`, and
@@ -3095,7 +3096,7 @@ class EventAPI:
         _refuse_caller_named_funnel_keys(extra, "`add_event`")
         # #11825: refused BEFORE the emit, so a refused call appends nothing to
         # the journal and writes nothing to the graph.
-        refuse_terminal_event_state(extra, door="EventAPI.add_event")
+        refuse_event_lifecycle_state(extra, door="EventAPI.add_event")
         self._emit("EventRecorded",
                    id=event_id,
                    eventKind=event_kind,

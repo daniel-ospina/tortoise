@@ -252,8 +252,8 @@ leg (`tortoise/bm25.py`,
 `#8488`) found **neither rarity nor length** priced into the scoring, measured on the **embedded
 (falkordblite) lane** — not on the hosted `db.idx.fulltext` leg, which is unmeasured here. What the move
 decisively changes is the **order** the fusion consumes, not the score scale: `rrf_fusion` is RANK-based
-(`RRF(d) = Σ w_i / (k + rank_i)`, `search_engine.py:3021` — and it DISCARDS the leg's own score outright,
-`for rank, (pid, _score) in enumerate(ranked)`, `:3091-3093`), so the `{"vector": 1.5}` + implicit 1.0
+(`RRF(d) = Σ w_i / (k + rank_i)`, `search_engine.py:3046` — and it DISCARDS the leg's own score outright,
+`for rank, (pid, _score) in enumerate(ranked)`, `:3116-3118`), so the `{"vector": 1.5}` + implicit 1.0
 weights are multipliers on a rank and a rescale leaves them untouched, and on the multi-leg arm a caller's
 `threshold` is compared against the **fused** score (`sdk.py:38445`), never against the leg's own.
 ⚠️ The magnitude does enter ONE arm, and it is stated because a later lane would otherwise be surprised

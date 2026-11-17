@@ -1676,8 +1676,8 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     (`tortoise/hosted_backup.py` — a file the population had not previously reached,
     carrying no `:Document` mention at `4f68a2aa7`; its added mentions are the
     dump-and-restore prose about pre-D10 artifacts), #11682's own
-    `tortoise/search_engine.py:3389` corpus-join comment (one line, an existing
-    file; the block opens at `:3388` — re-measured at this head, review round 25,
+    `tortoise/search_engine.py:3414` corpus-join comment (one line, an existing
+    file; the block opens at `:3413` — re-measured at this head, review round 25,
     because the `:2107`/`:2109` this sentence used to carry was true only at
     `d06c001ff9` and had drifted since), #12015's edge-vector prose — three lines in
     that same `hosted_backup.py` bound plus one in `tortoise/cache_projection.py`
