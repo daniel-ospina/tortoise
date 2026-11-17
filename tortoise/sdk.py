@@ -8414,8 +8414,24 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # here — it is the documented no-SDK-guarantee path (see `api.py`
     # `add_point`), so the vocabulary is enforced at the SDK/MCP boundary, not
     # at the projection choke point that live writes and replay share.
-    if "goalState" in props and props["goalState"] is not None:
-        _goal_state = props["goalState"]
+    #
+    # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (#13065 review ROUND 8, finding 1,
+    # P2). `"goalState" in props` hashes the LITERAL name while the live
+    # transport files a key by `str(key)`, so a `str`-subclass key rendering as
+    # `goalState` skipped this boundary ENTIRELY and the word the owner REMOVED
+    # from the vocabulary landed on the node — measured: `K("harmless",
+    # "goalState"): "guideline"` was ADMITTED on `update_knowledge`,
+    # `create_object` and `create_entity`, read back as
+    # `goalState='guideline'`, while the literal spelling was refused. That made
+    # `test_guideline_is_refused_on_every_door` assert a boundary false on three
+    # of its four doors. The read goes through
+    # :func:`lifecycle_props_by_rendering` (the renderer UNION, first-wins) — the
+    # same fix the two ending guards took, applied to the gate they all sit
+    # behind.
+    _vocab_goal = lifecycle_props_by_rendering(props, ("goalState",)).get(
+        "goalState")
+    if _vocab_goal is not None:
+        _goal_state = _vocab_goal
         if not isinstance(_goal_state, str) or _goal_state not in GOAL_STATE_VALUES:
             _hint = ""
             if _goal_state == "guideline":

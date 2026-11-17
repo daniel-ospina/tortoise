@@ -13337,16 +13337,17 @@ durations:
   # The weight is a DELIBERATE local reading, not a junit sweep (this file has
   # never run on main): one graph per case through the shared `sdk_factory`, and
   # the only expensive one is the cross-product proof (48 single-write goal
-  # creates in ONE graph, no EP, no judgement). ⛔ NO CASE COUNT IS PINNED (it
-  # moves whenever a review round adds an arm — 11 at first landing, 23 by
-  # round 5, 26 by round 6, 27 after round 7 — so any count written here is
-  # stale prose by the next round). MEASURED whole file on THIS box (`test_lane.py
-  # run -- tests/test_13035_goal_ending_consistency.py -q`): `26 passed in
-  # 14.08 s` at the head that closed round 6, `27 passed in 14.21 s` after the
-  # round-7 arm; the earlier ~119 s reading was taken at load ~110. The weight
-  # below is that local reading (14.0, raised from 6.0 which lagged the real
-  # cost by more than half), and `tools/ci_timing.py --refresh-durations`
-  # replaces it from the first push-to-main junit sweep that includes the file.
+  # creates in ONE graph, no EP, no judgement). ⛔ NO CASE COUNT IS PINNED, and
+  # none is restated here: it moved every review round (11 at first landing, 23
+  # by round 5, 26 by round 6, 28 after round 8), so any number written here is
+  # stale prose by the next round — a review found exactly that twice. MEASURED
+  # whole file on THIS box (`test_lane.py run --
+  # tests/test_13035_goal_ending_consistency.py -q`): 13-14 s across the heads
+  # that closed rounds 6-8; the earlier ~119 s reading was taken at load ~110.
+  # The weight below is that local reading (14.0, raised from 6.0 which lagged
+  # the real cost by more than half), and `tools/ci_timing.py
+  # --refresh-durations` replaces it from the first push-to-main junit sweep
+  # that includes the file.
   test_13035_goal_ending_consistency.py: 14.0
   test_7902_write_path_label_widening.py: 8.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 7.4
   test_7925_route_parity.py: 2.3  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 61.0

@@ -523,6 +523,44 @@ def test_guideline_is_refused_on_every_door(sdk):
     assert sdk.get_entity(goal["id"])["goalState"] == "active"
 
 
+def test_guideline_is_refused_through_a_RENDERED_key_too(sdk):
+    """#13065 review ROUND 8, finding 1 (P2) — the vocabulary gate itself was a
+    ONE-RENDERER presence test, so the test above asserted a boundary that was
+    false on three of its four doors.
+
+    MEASURED before the fix: `K("harmless", "goalState"): "guideline"` was
+    ADMITTED on `update_knowledge`, `create_object` AND `create_entity` and the
+    node stored `goalState='guideline'` — the word the owner REMOVED (#13035,
+    owner ruling 2026-11-16) — while the literal spelling in the same run was
+    refused. The gate reads through `lifecycle_props_by_rendering` now, the same
+    renderer union the two ending guards use.
+    """
+    class Rendered(str):
+        def __str__(self):                      # files as `goalState`
+            return "goalState"
+
+        def __hash__(self):                     # ...and misses `in props`
+            return hash("not-the-literal-name")
+
+    goal = _goal(sdk, tag="rendered-guideline")
+    point = sdk.create_point("goal", "GOAL - rendered guideline")
+    for call in (
+        lambda: sdk.create_object("G", objectKind="goal",
+                                  **{Rendered("harmless"): "guideline"}),
+        lambda: sdk.create_point("goal", "GOAL - rg",
+                                 **{Rendered("harmless"): "guideline"}),
+        lambda: sdk.update_knowledge(goal["id"],
+                                     **{Rendered("harmless"): "guideline"}),
+        lambda: sdk.update_point(point["id"],
+                                 **{Rendered("harmless"): "guideline"}),
+    ):
+        with pytest.raises(ValueError, match="guideline"):
+            call()
+    # nothing landed, on either door
+    assert sdk.get_entity(goal["id"])["goalState"] == "active"
+    assert sdk.get_point(point["id"]).get("goalState") is None
+
+
 def test_no_code_path_still_EXPECTS_guideline():
     """The grep half of the acceptance: `guideline` may survive only as the
     refusal's own explanation (`sdk.py`), never as a set member, a comparison
