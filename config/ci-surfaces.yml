@@ -6375,20 +6375,10 @@ surfaces:
   # the refusal arms) would be green-by-absence, which for a "harness that can
   # fail" is the one thing it cannot afford. No count is quoted on purpose, for
   # the reason this file's own `durations:` rows state: a figure beside a weight
-  # re-stales against the run it came from, and the count is `tools/ci_selection.py
-  # --integrity`'s business — this comment said "22" while the suite was already 48
-  # items, and had re-staled before that (`#13098` review P3).
-  # Hermetic: the census is `subprocess` + `ast` over the git index, and the
-  # harness cases drive `diff()` /
-  # `_mutated()` / `bootstrap_record()` in process with the store and `subprocess`
-  # seams patched — no DB, no graph, no docker, no network, no model call. The
-  # DB-backed legs are their own job (`.github/workflows/cypher-diff.yml`).
-  # fail" is the one thing it cannot afford.
-  # ⛔ No CASE COUNT is quoted above, for the reason the `durations` row for this
-  # file states in its own words: a count moves whenever a review round adds a
-  # pin, and the authority is `tools/ci_selection.py --integrity`, not a number
-  # beside it (`#13098` review P3 — an earlier revision of this comment said "22
-  # pins", which was never right at any commit on this branch).
+  # re-stales against the run it came from, and the count is
+  # `tools/ci_selection.py --integrity`'s business — this comment said "22" while
+  # the suite was already 48 items, and had re-staled before that (`#13098` review
+  # P3).
   # Hermetic: the census is `subprocess` + `ast` over the git index, and the
   # harness cases drive `diff()` / `_mutated()` / `bootstrap_record()` in process
   # with the store and `subprocess` seams patched — no DB, no graph, no docker, no
