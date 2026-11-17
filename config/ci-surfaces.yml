@@ -5156,20 +5156,26 @@ surfaces:
   # readers stop answering it themselves. ⛔ REGISTERED LATE, and this row is the main-red
   # repair: the file landed on main with NO manifest row, so `ci_selection.py --integrity`
   # went red ('manifest drift') and `python-ci`'s manifest-integrity leg went with it —
-  # an unlisted file is a #1262 red AND runs in no leg (#1349/#2938). ⛔ TWO legs, not one:
-  # `tests/test_ci_selection.py` asserts the same `integrity(load_manifest()) == []` against
-  # the real tree, and it is a gating-slow file (`slow_files`, not `carve_out`, not
-  # on-demand), so the drift reds `test-slow` as well — MEASURED on main at `55ec2c71b1`
-  # (run 44025094904, job `test-slow (c)` 133859918151, the shard that carries
-  # `tests/test_ci_selection.py`): `test_integrity_covers_all_test_files`,
-  # `test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it`,
-  # `test_the_blank_session_id_guard_keeps_its_core_arm_too`,
-  # `test_the_lane_is_a_classification_for_integrity_too` and
-  # `test_integrity_still_notices_an_absent_stamp_and_exits_zero` each red asserting this
-  # exact filename. ⛔ NOT `test-slow (a)` from that same run: it is red for an UNRELATED
-  # class — every one of its failures is `tests/test_surface_manifest.py` (a shallow clone
-  # that cannot resolve `cut_at_commit`, plus the `tortoise_query` digest) — which is the
-  # next paragraph's subject, not this row's.
+  # an unlisted file is a #1262 red AND runs in no leg (#1349/#2938). ⛔ THREE legs, not one:
+  # `manifest-integrity`; the FAST shard `test (c)` (run 44025094904, job 133859918441), where
+  # `tests/test_ci_manifest.py::test_integrity_notices_unknown_and_still_fails_red` drives
+  # `--integrity` over a copy of the committed manifest and reds `assert 1 == 0` (that job's
+  # ONLY failure: 1 failed, 5160 passed); and the slow leg below, because
+  # `tests/test_ci_selection.py` makes the same assertion and is a gating-slow file
+  # (`slow_files`, not `carve_out`, not on-demand) — job `test-slow (c)` 133859918151, the
+  # shard that carries it, reds SIX of its tests from this one cause:
+  # `test_integrity_covers_all_test_files`,
+  # `test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it` and
+  # `test_the_blank_session_id_guard_keeps_its_core_arm_too` assert the integrity result
+  # carrying this filename; `test_the_lane_is_a_classification_for_integrity_too` asserts the
+  # lane's file must not read as drift; and
+  # `test_integrity_still_notices_an_absent_stamp_and_exits_zero` plus
+  # `test_null_or_non_mapping_durations_reports_instead_of_tracebacking` are exit-code arms
+  # (`_integrity_with_stamp(...) == 0`, `main() == 0`) that this row's absence reds at exit 1
+  # without ever naming the file. ⛔ NOT `test-slow (a)` from that same run: it is red for an
+  # UNRELATED class — every one of its failures is `tests/test_surface_manifest.py` (a
+  # shallow clone that cannot resolve `cut_at_commit`, plus the `tortoise_query` digest) —
+  # which is the next paragraph's subject, not this row's.
   # Reproduced locally too: `integrity()` over this manifest is `[]`, and over the same
   # manifest with this file's rows removed from BOTH lists (the state `main` was in) it
   # returns `['test_13034_currency_rule_reads_position.py']`. ⛔ Removing only the `core`
