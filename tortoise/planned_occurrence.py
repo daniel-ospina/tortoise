@@ -293,7 +293,7 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     ⛔ The returned node is only a *staged* plan if the advance actually applied.
     A create **name** is a natural key that re-mentions its single live holder
     (#452), so this call can land on a plan that already exists. FOUR arms, and
-    only the second leaves the graph untouched:
+    only the second SUCCEEDS without writing:
 
     * **live, open and POSITION-LESS** (the extractor-minted `core:plan`): the
       call falls through the re-mention and STAGES the record — "created" is not
@@ -302,7 +302,7 @@ def create_plan(sdk, name: str, *, title: str | None = None,
       suppression OFF;
     * **live, open, positioned, and of the BINDABLE spelling**: a no-op success,
       nothing re-staged, because that is exactly what was asked for. This is the
-      only arm that writes nothing;
+      only arm that succeeds without writing;
     * **live, open and positioned but stored under a spelling no pipeline can
       bind** (the bare `plan` kind): also falls through, and the door's
       namespaced `objectKind` REPAIRS the binding — a write, deliberately: a
@@ -310,6 +310,10 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     * **settled / ENDED** — the durable marker, a terminal stage, or a retired
       status word: RAISES, naming the stage it is at and the route to a new
       record.
+
+    Two further REFUSALS apply to an existing holder before any of that, and
+    neither writes: a holder whose kind is not a plan (this call would retag it),
+    and a plan whose position does not resolve (`_unresolvable_message`).
     """
     from . import pipeline
 
@@ -725,7 +729,12 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
     round 4, F1).
     """
     from . import pipeline
-    from .entity_identity import AmbiguousEntityName, resolve_entity_id_same_entity
+    from .entity_identity import (
+        AmbiguousEntityName,
+        non_folded_entries,
+        record_non_folded,
+        resolve_entity_id_same_entity,
+    )
     from .live import is_terminal_status
 
     graph = sdk._get_proj().g
@@ -736,13 +745,18 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
     # default, so a genuinely absent name is still recorded as a miss.
     # ⛔ AMBIGUITY is the case that justification does NOT cover: the live arm
     # raises before the retry can run, so suppressing the record there would drop
-    # the only evidence of an ambiguous plan name. Re-raise through the recording
-    # arm — same answer, and the refusal is recorded (#13100 review round 5).
+    # the only evidence of an ambiguous plan name. Record it once from the caught
+    # refusal — NEVER by re-invoking the resolver: that arm records through
+    # `_refuse`, which ignores `record_misses` on the duplicate-id shape, so a
+    # second call would file the SAME entry twice and inflate the refused-event
+    # set (#13100 review round 6). The snapshot makes "once" true on both shapes.
+    _entries_before = len(non_folded_entries())
     try:
         plan_id = resolve_entity_id_same_entity(graph, "Object", plan_ref,
                                                 record_misses=False)
-    except AmbiguousEntityName:
-        resolve_entity_id_same_entity(graph, "Object", plan_ref)
+    except AmbiguousEntityName as exc:
+        if len(non_folded_entries()) == _entries_before:
+            record_non_folded(exc.label, exc.name, exc.candidate_ids)
         raise
     if plan_id is None:
         plan_id = resolve_entity_id_same_entity(graph, "Object", plan_ref,

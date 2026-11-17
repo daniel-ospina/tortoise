@@ -777,6 +777,20 @@ class TestThePlanPipeline:
             params={"o": plan["id"]})
         assert PO.record_occurrence(sdk, plan["id"])["move"].applied
 
+    def test_a_NON_STRING_status_does_not_hide_the_OUTDATED_flag(self, sdk):
+        """Normalising the word must not normalise the FLAG with it.
+
+        The two are separate sources of the same answer; a gate that read
+        `outdated` only on the string branch would let the normalisation silence
+        a legacy ending beside a foreign status (#13100 review round 6).
+        """
+        plan = PO.create_plan(sdk, "Listy and outdated")
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$o}) SET o.status = ['archived'], "
+            "o.outdated = true", params={"o": plan["id"]})
+        with pytest.raises(ValueError, match="outdated marker set"):
+            PO.record_occurrence(sdk, plan["id"])
+
     def test_an_AMBIGUOUS_plan_name_still_leaves_its_R8_record(self, sdk):
         """The speculative probe must not suppress the record it cannot retry.
 
@@ -798,8 +812,31 @@ class TestThePlanPipeline:
         before = len(non_folded_entries())
         with pytest.raises(AmbiguousEntityName):
             PO.record_occurrence(sdk, "Twin plan")
-        assert len(non_folded_entries()) > before, (
-            "the ambiguity refusal left no R8 record")
+        assert len(non_folded_entries()) == before + 1, (
+            "the ambiguity must leave exactly ONE R8 record")
+
+    def test_a_DUPLICATE_ID_plan_coordinate_is_recorded_ONCE(self, sdk):
+        """The duplicate-id refusal records even under `record_misses=False`.
+
+        `resolve_entity_id`'s duplicate-id arm calls `_refuse` unconditionally, so
+        a fix that restored the missing evidence by RE-INVOKING the resolver
+        filed the same entry twice (measured: 2 entries, both
+        `shape='duplicate-id'`) — inflating the refused-event set the R9
+        invariant asserts on. The gate now records from the caught exception and
+        only when the probe left nothing behind (#13100 review round 6).
+        """
+        from tortoise.entity_identity import AmbiguousEntityName, non_folded_entries
+
+        g = sdk._get_proj().g
+        for _ in range(2):
+            g.query(
+                "CREATE (o:Object {id:'dup-plan', name:'Duplicate id plan', "
+                "objectKind:$k})", params={"k": PO.PLAN_PIPELINE_KEY})
+        before = len(non_folded_entries())
+        with pytest.raises(AmbiguousEntityName):
+            PO.record_occurrence(sdk, "dup-plan")
+        assert len(non_folded_entries()) == before + 1, (
+            "the duplicate-id refusal was recorded more than once")
 
     def test_a_name_held_by_a_SETTLED_and_a_LIVE_plan_resolves_the_LIVE_one(
             self, sdk):
