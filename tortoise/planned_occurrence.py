@@ -208,6 +208,14 @@ def plan_position(stage_id, slot=None, outcome=None, *,
     # caller that did not supply the key at all gets the benefit of the doubt.
     if pipeline_key is _KEY_UNSPECIFIED:
         bound_elsewhere = False
+    elif not isinstance(pipeline_key, str):
+        # ⛔ A NON-STRING key is FOREIGN, not a crash: `str.__str__` on an int is
+        # a `TypeError`, and this resolver is on the operator-promotion path
+        # (which runs AFTER its CAS has already set the point live) and on the Q5
+        # read (where one bad row would fail the whole answer). A prop write
+        # reaches it — `update_knowledge(id, pipelineStageKey=5)` is accepted —
+        # and the WRITER's own answer on that row is a refusal, not a raise.
+        bound_elsewhere = True
     else:
         bound_elsewhere = (pipeline_key is None
                            or str.__str__(pipeline_key) != PLAN_PIPELINE_KEY)

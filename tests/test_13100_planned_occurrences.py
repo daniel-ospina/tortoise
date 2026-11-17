@@ -234,7 +234,11 @@ class TestThePlanPipeline:
         g = sdk._get_proj().g
         for label, mutate in (
                 ("cleared", "SET p.pipelineStageKey=null"),
-                ("foreign", "SET p.pipelineStageKey='core:goal'")):
+                ("foreign", "SET p.pipelineStageKey='core:goal'"),
+                # A NON-STRING key is foreign too — and must not raise: this
+                # resolver runs on the promotion path after its CAS, and on the Q5
+                # read where one bad row would fail every plan.
+                ("non-string", "SET p.pipelineStageKey=5")):
             plan = PO.create_plan(sdk, f"key {label}")
             g.query(f"MATCH (p:Object {{id:$p}}) {mutate}",
                     params={"p": plan["id"]})
