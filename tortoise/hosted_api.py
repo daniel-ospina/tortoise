@@ -34590,10 +34590,26 @@ def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
             is_supabase_enabled,
         )
         if is_supabase_enabled():
-            rows = get_control_plane().query(
-                "graphs", select=["namespace"],
-                filters=[("org_id", "eq", org_id)],
+            # ⛔ `query_all`, not `query` (review round 6). A single page is
+            # silently capped at the deployment's `max_rows` (1000) and cannot
+            # report its own truncation, so an org owning more graphs than one
+            # page — which is reachable: `max_graphs_per_team` is `null`, i.e.
+            # UNLIMITED, on pro and team, and ONLY those two (free/solo/anon
+            # cap at 1/2/1; #10743 measures that table) — would have its tail
+            # of custom graphs dropped from the
+            # deprovision list, and `purge_org_control_plane` would then delete
+            # the rows that named them: unnameable, unreapable, permanently
+            # resident. Exactly the partial erasure this function's raise exists
+            # to prevent. The cursor column must ride in `select`.
+            rows, complete = get_control_plane().query_all(
+                "graphs", select=["id", "namespace"],
+                filters=[("org_id", "eq", org_id)], cursor="id",
             )
+            if not complete:
+                raise RuntimeError(
+                    f"the graphs walk for org {org_id} could not be certified "
+                    f"complete — a truncated page would silently omit custom "
+                    f"graphs from the deprovision list")
             candidates += [r.get("namespace") for r in rows]
         else:
             nodes = _make_sdk(namespace="registry")._get_registry().query(
@@ -34686,16 +34702,80 @@ def _drop_org_acl_users(org_id: str) -> None:
     forever). Registry: enumerate Graph nodes by org_id (incl. the default
     node's gid — its drop hook is a harmless no-op, the default graph has
     no ACL user). Supabase: the graphs table holds custom rows only.
-    Best-effort per graph (a committed purge never fails on a drop)."""
+    Best-effort per graph (a committed purge never fails on a drop).
+
+    ⛔ THE ENUMERATION MUST BE COMPLETE, and it was ONE page (#13205 review
+    round 7). `_org_graph_names` refuses a subset of this same table one
+    function up, but this SECOND read was still a single `cp.query` — capped at
+    the deployment's `max_rows` with no truncation signal. An org past one page
+    (reachable: `max_graphs_per_team` is `null` — unlimited — on pro and team,
+    and only on those two tiers; free/solo/anon cap at 1/2/1, which is what
+    #10743 measures) then lost the TAIL of its graphs' `tenant_<gid>` users,
+    while `_drop_org_graphs_strict` deleted those graphs and
+    `purge_org_control_plane` cascaded away the rows that carried the gids: orphaned GLOBAL credentials nothing can name or reap — what this
+    docstring calls orphaning "the live credentials forever". So the read is a
+    certified `query_all` walk (cursor `id`, which must ride in `select`).
+
+    ⛔ AN UNCERTIFIED WALK IS NOT PROMOTED TO A FAILURE HERE. This function has
+    carried the policy "Best-effort per graph (a committed purge never fails on
+    a drop)" since C4 landed it (`e2131c6847`, PR #2220) — it is a REVIEW
+    FINDING RECORDED IN THIS DOCSTRING, not an issue-level decision: it is not
+    stated on #2113 or in the C4 plan, so cite THE COMMIT when this policy is
+    argued, and do not claim an issue said it. Its job is to drop users, not to
+    adjudicate the purge. The ONE site that reaches this read (the supabase lane
+    of `_purge_deleted_orgs_locked`) calls `_drop_org_graphs_strict` immediately
+    after, whose `_org_graph_names` walk certifies the SAME table with the SAME
+    filter, cursor and page bounds and RAISES when it cannot — so when the two
+    walks refuse TOGETHER, the graph drops and the row cascade never run and the
+    org row stays as the #926 retry anchor.
+
+    ⛔ THEY ARE TWO INDEPENDENT WALKS OVER CHANGING STATE, so "refuse together"
+    is not a guarantee: a transient anomaly the client detects (a page that is
+    not strictly ascending, or a filter the server did not apply — both of which
+    make `query_all` refuse to certify) can leave `complete=False` HERE while the
+    sibling, re-reading a moment later, certifies. That purge DOES drop graphs
+    whose gids were never enumerated, and the credential is orphaned with no #926
+    retry — the residual #13287 owns. This warning therefore does not claim the
+    tail is safe; it announces the bound so the credential can be found and
+    dropped by hand, which is the one thing silence would prevent.
+
+    ⛔ THE SAME DIVERGENCE EXISTS WITHOUT `complete=False` AT ALL, and it is the
+    WORSE arm — do not read the paragraph above as the whole residual.
+    `query_all` RAISES on an outage by contract (`supabase_control.query_all`:
+    "Failures RAISE … an outage is not an incomplete result"), so an ordinary
+    5xx or timeout on this ONE request takes the `except` below, which logs
+    "enumeration failed (best-effort)" and RETURNS — with `ids == []`, before the
+    `LOWER BOUND` warning can fire. The sibling walk one statement later can
+    still certify on its own retry, and then `_drop_org_graphs_strict` deletes
+    EVERY graph and `purge_org_control_plane` cascades the rows away: every
+    `tenant_<gid>` credential of the org is orphaned. The only announcement is
+    that arm's own hedge that they "may be orphaned" — emitted before it can
+    know whether the sibling will certify — so nothing announces the LOSS once
+    it has happened.
+    Same #13287, and WORSE than the partial case rather than "ten times" it: the
+    partial arm loses only the rows past one page (`PAGE_READ_SIZE` = 1000 — so
+    ZERO for an org within a page, and a fraction that GROWS TOWARD THE WHOLE SET
+    as the org grows, since it is `1 - 1000/N`), while this arm loses the whole
+    set at every size — and it is the likelier trigger, an ordinary 5xx rather
+    than a store anomaly. One enumeration (deriving the gids
+    from the certified namespace list) closes both arms; until then the `except`
+    arm is a fail-open and is recorded as such.
+    """
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
+    complete = True
+    ids: list = []
     try:
         if is_supabase_enabled():
-            rows = get_control_plane().query(
+            # The same bare `query_all` the sibling `_org_graph_names` uses —
+            # deliberately NOT a `getattr` fallback: two reads of this table in
+            # one purge must have one shape, or a seam that lacks the walk gets a
+            # FALSE "lower bound" here and a refusing raise one call later.
+            rows, complete = get_control_plane().query_all(
                 "graphs", select=["id"],
-                filters=[("org_id", "eq", org_id)],
+                filters=[("org_id", "eq", org_id)], cursor="id",
             )
             ids = [r["id"] for r in rows]
         else:
@@ -34705,10 +34785,29 @@ def _drop_org_acl_users(org_id: str) -> None:
             ).result_set
             ids = [r[0] for r in rows]
     except Exception as e:
+        # ⛔ A fail-open arm, recorded above and owned by #13287: this RETURN
+        # does not stop the caller, which drops every graph and cascades the rows
+        # naming them while NO `tenant_<gid>` user was dropped. Nag loudly enough
+        # that the operator can act, since this arm emits no `LOWER BOUND` above.
         _logger.warning(
-            "team ACL-user enumeration failed for %s (best-effort): %s",
+            "team ACL-user enumeration failed for %s (best-effort): %s — the "
+            "graph drops that follow are NOT blocked, so this org's `tenant_*` "
+            "ACL users may be orphaned; check them by hand (#13287)",
             org_id, e)
         return
+    if not complete:
+        # Not fatal — the policy this docstring records (`e2131c6847`) — and not
+        # silent, which is the failure mode.
+        _logger.warning(
+            "team ACL-user enumeration for %s is a LOWER BOUND (%d gid(s), walk "
+            "UNCERTIFIED): only the enumerated graphs' `tenant_<gid>` users are "
+            "dropped here. `_org_graph_names` walks the same table with the same "
+            "bounds and refuses this purge on the same condition, so this stays "
+            "best-effort (the `e2131c6847` policy) — but that is a SECOND walk, "
+            "not a derivation, "
+            "so a transient anomaly visible only here still orphans credentials "
+            "(#13287): check this org's `tenant_*` users by hand",
+            org_id, len(ids))
     for gid in ids:
         try:  # noqa: SIM105
             _acl_user_drop_hook(gid)
