@@ -50,10 +50,18 @@ from __future__ import annotations
 
 import tokenize
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from tortoise import allowance_gate, cost_dimensions, graph_storage, postgres_bytes, pricing
+from tortoise import (
+    allowance_gate,
+    cost_dimensions,
+    graph_storage,
+    metering,
+    postgres_bytes,
+    pricing,
+)
 from tortoise.allowance_gate import (
     DIMENSIONS,
     RELEASE_CONDITIONS,
@@ -91,7 +99,10 @@ def _per_org_postgres_attribution() -> tuple[bool, str]:
     )
 
 
-def _postgres_residency_gauge() -> tuple[bool, str]:
+_UNSET: Any = object()
+
+
+def _postgres_residency_gauge(meter: Any = _UNSET) -> tuple[bool, str]:
     """A per-org RESIDENCY GAUGE **this gate can afford on a write path**.
 
     ⛔ Not "the gate has a meter at all", and the difference is measured, not
@@ -101,8 +112,19 @@ def _postgres_residency_gauge() -> tuple[bool, str]:
     the two known-inadequate readers are named and REFUSED here; what remains is a
     disclosed residual (a THIRD inadequate reader could still satisfy this line),
     and the block's own text carries the substance.
+
+    ⛔ ``meter`` IS AN INJECTION SEAM, and it exists because reviewer round 5
+    measured this arm as UNREACHABLE: while the live registry holds
+    ``meter=None``, the function returns on the line below before the refusal dict
+    is ever consulted, so deleting the whole refusal — or renaming one of the
+    readers it matches — stayed GREEN. That is the same dead-arm class round 2
+    fixed for ``read_per_org_bytes``, one ``getattr(..., None)`` over. A seam lets
+    the arm be EXECUTED (``test_the_residency_refusal_still_fires``) and a
+    name-resolution assert makes a rename RED instead of silent. The no-argument
+    call is still the live reading, so the registry is what the other rows test.
     """
-    meter = _dim("postgres_storage").meter
+    if meter is _UNSET:
+        meter = _dim("postgres_storage").meter
     if meter is None:
         return False, "postgres_storage meter=None (nothing to read per org)"
     # The audit: a whole-table aggregation per call. The ledger column: a window
@@ -216,6 +238,63 @@ def test_every_release_token_has_a_predicate_and_vice_versa():
     assert set(_RELEASED_PHRASES) == set(RELEASE_CONDITIONS), (
         "a release token has no phrase list, so its staleness guard is "
         f"vacuous: {sorted(set(RELEASE_CONDITIONS) - set(_RELEASED_PHRASES))}")
+
+
+def test_the_residency_refusal_still_fires():
+    """★ The refusal arm, EXECUTED — not merely spelled in the predicate.
+
+    ⛔ Reviewer round 5 measured this arm as unreachable: the live registry holds
+    ``postgres_storage.meter=None``, so ``_postgres_residency_gauge()`` returns
+    before the inadequate-reader dict is consulted, and BOTH of these mutants
+    stayed GREEN — deleting the refusal entirely, and renaming
+    ``metering.get_postgres_bytes_written`` so the ``getattr(..., None)`` lookup
+    missed and the entry was ``pop``ped away. That is the dead-arm class round 2
+    already fixed once here (``read_per_org_bytes``), so the arm is now driven
+    through the seam and the two reader NAMES are pinned by resolution.
+
+    Mutation this REDs: delete the ``why`` arm, or rename/isdelete either reader
+    the dict matches, or make ``meter`` default to something other than the live
+    registry reading.
+    """
+    # The two known-inadequate readers, by the names the predicate looks up. A
+    # rename makes the dict entry vanish and the arm go silent, so the names are
+    # asserted to RESOLVE before the arm is exercised over them.
+    audit = getattr(postgres_bytes, "per_org_bytes", None)
+    ledger = getattr(metering, "get_postgres_bytes_written", None)
+    assert callable(audit), (
+        "postgres_bytes.per_org_bytes no longer resolves — the residency refusal "
+        "matches it by name, so a rename silently empties that dict entry and the "
+        "arm stops guarding")
+    assert callable(ledger), (
+        "metering.get_postgres_bytes_written no longer resolves — same failure: "
+        "the getattr(..., None) lookup returns None, the entry is popped, and the "
+        "refusal covers nothing"
+    )
+
+    for reader, why in ((audit, "whole-table audit"),
+                        (ledger, "window addend")):
+        satisfied, evidence = _postgres_residency_gauge(meter=reader)
+        assert satisfied is False, (
+            f"wiring {reader!r} as the postgres_storage meter must NOT satisfy "
+            f"the residency gauge — it is the {why}, which the block names as "
+            f"insufficient on a write path:\n  {evidence}")
+        assert why in evidence, (
+            f"the refusal for {reader!r} does not say WHY it is insufficient "
+            f"(expected {why!r}):\n  {evidence}")
+
+    # …and a reader that is neither known-inadequate still reports SATISFIED, so
+    # the arm refuses specifically rather than always.
+    sentinel = object()
+    satisfied, evidence = _postgres_residency_gauge(meter=sentinel)
+    assert satisfied is True, (
+        f"an unrelated meter must still satisfy the predicate, or the refusal is "
+        f"really an always-False:\n  {evidence}")
+
+    # …and the live reading is still the registry, not the seam's default.
+    live, live_evidence = _postgres_residency_gauge()
+    assert live is False and "meter=None" in live_evidence, (
+        "the no-argument call must read the LIVE registry (postgres_storage.meter "
+        f"is None today):\n  {live_evidence}")
 
 
 @pytest.mark.parametrize("dim", [d for d in DIMENSIONS if d.blocked],
@@ -354,9 +433,16 @@ def test_the_falsified_premise_is_actually_recorded_as_released():
         "test's premise (a sentence was overridden) is stale — re-derive it")
 
     reason = str(_dim("postgres_storage").blocked_reason)
-    assert "for_org" in reason or "per_org_bytes" in reason, (
+    # ⛔ THE QUALIFIED NAME, not a bare ``for_org``/``per_org_bytes``. Reviewer
+    # round 5 measured the loose form as satisfiable by the RPC name
+    # ``postgres_per_org_bytes`` alone: both genuine mentions could be stripped
+    # from the reason and this assertion stayed GREEN, so it only reddened on a
+    # full revert. A reader who is told the attribution exists has to be able to
+    # find the METHOD.
+    assert "PerOrgPostgresBytes.for_org" in reason, (
         "postgres_storage's blocked_reason no longer names the per-org "
-        "attribution that now exists — a reader would conclude it is missing:\n"
+        "attribution's entry point (PerOrgPostgresBytes.for_org) that now exists "
+        "— a reader would conclude it is missing:\n"
         f"  {reason}")
     assert "NOT OWNER-CONFIRMED" in reason, (
         "blocked_reason no longer names the included-amount decision that is "
@@ -401,7 +487,6 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
         "no per-org split",
     )
     offenders = []
-    nonempty = 0
     for name, text in surfaces.items():
         # ⛔ NORMALISE FIRST. These are wrapped docstrings, so on the pre-fix tree
         # the phrase "no per-org figure at all" appeared with a line break inside
@@ -418,23 +503,31 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
         # asserts it without one is the defect.
         for para in text.split("\n\n"):
             flat = " ".join(para.split())
+            # ⛔ SKIP EMPTY PARAGRAPHS: `str.split` returns at least one element
+            # for ANY string (`"".split("\n\n") == [""]`), so an empty paragraph
+            # is always present and would otherwise be matched as text. The
+            # surface-level half is the `empty` assert after the loop — the
+            # `scanned` and `nonempty` counters were each measured to be
+            # unfalsifiable in turn, so this is a PER-SURFACE property now.
             if not flat:
                 continue
-            # ⛔ COUNT ONLY NON-EMPTY PARAGRAPHS. `str.split` returns at least
-            # one element for ANY string (`"".split("\n\n") == [""]`), so the
-            # earlier `scanned >= len(surfaces)` could NEVER fire — a vacuity
-            # guard that was itself vacuous. A surface that silently became ""
-            # (renamed, docstring removed) is exactly what it must catch.
-            nonempty += 1
             if "OVERRIDES" in flat:
                 continue
             for phrase in released_assertions:
                 if " ".join(phrase.split()) in flat:
                     offenders.append(f"{name}: {phrase!r} in: {flat[:90]}")
-    assert nonempty >= len(surfaces), (
-        f"only {nonempty} non-empty paragraph(s) across {len(surfaces)} "
-        f"surface(s) — at least one surface is empty, so the scan has become "
-        f"vacuous (a renamed or removed docstring is not a passing surface)")
+    # ⛔ PER SURFACE, not aggregated. Reviewer round 5 measured the aggregate
+    # form: emptying ONE surface left 21 non-empty paragraphs across 4, so
+    # ``nonempty >= len(surfaces)`` stayed GREEN — the third round running in
+    # which a vacuity guard could not fire for the case its own comment names.
+    # An empty surface IS a renamed or removed docstring, and it is precisely the
+    # surface the scan then covers nothing of, so each one is asserted on its own.
+    empty = sorted(n for n, t in surfaces.items()
+                   if not any(" ".join(x.split()) for x in t.split("\n\n")))
+    assert not empty, (
+        f"surface(s) with no non-empty paragraph: {empty} — a renamed or "
+        f"removed docstring is not a passing surface, and the scan covers "
+        f"nothing in an empty one")
     assert not offenders, (
         "a surface an arming lane reads still asserts the FALSIFIED premise "
         "(the per-org byte attribution exists — #12762, "
@@ -476,7 +569,11 @@ def test_the_gate_import_check_rejects_all_three_shapes():
         allowance_gate._check_release_conditions((unknown_token,))
 
     # …and the real registry passes, so the check is not just always-raising.
-    assert allowance_gate._check_release_conditions(DIMENSIONS) == len(DIMENSIONS)
+    # ⛔ NAMES, not a count: reviewer round 5 measured that an integer result is
+    # forgeable — `RELEASE_CHECKED = len(DIMENSIONS)` is the same value a real run
+    # returns, so a count-based assertion stays green over a check that never ran.
+    assert allowance_gate._check_release_conditions(DIMENSIONS) == tuple(
+        d.dimension for d in DIMENSIONS)
 
 
 def test_the_release_check_actually_RAN_at_import():
@@ -488,11 +585,19 @@ def test_the_release_check_actually_RAN_at_import():
     exists to catch. ``RELEASE_CHECKED`` is the import-time call's RETURN VALUE, so
     deleting the call makes the name absent (AttributeError here) and deleting the
     assignment makes the module fail to import.
+
+    ⛔ IT PINS THE NAMES, not a count. Reviewer round 5 measured the count form:
+    ``RELEASE_CHECKED = len(DIMENSIONS)`` — an edit that never calls the check —
+    produced the same integer and stayed GREEN, so "the check RUNS" could be
+    satisfied by a value that only resembles a run. A tuple of the validated names
+    cannot be forged that way without reimplementing the function.
     """
-    assert len(DIMENSIONS) == allowance_gate.RELEASE_CHECKED, (
+    expected = tuple(d.dimension for d in DIMENSIONS)
+    assert expected == allowance_gate.RELEASE_CHECKED, (
         "the import-time release check validated "
-        f"{allowance_gate.RELEASE_CHECKED} dimension(s), not {len(DIMENSIONS)} — "
-        "a dimension can now carry a block nothing revalidates")
+        f"{allowance_gate.RELEASE_CHECKED!r}, not {expected!r} — a dimension can "
+        "now carry a block nothing revalidates, or the published value was "
+        "replaced by something that only looks like a run")
 
 
 def test_the_database_grain_reader_no_longer_denies_the_per_org_byte_figure():

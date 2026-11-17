@@ -629,8 +629,9 @@ ALLOWANCE_GATED_RESOURCES = frozenset().union(
 # itself the point: a loop can only be tested by grepping the source, and a
 # source grep stays green on `if False:`. A callable can be handed synthetic
 # dimensions, so each arm is proved to RAISE instead of proved to be spelled.
-def _check_release_conditions(dims: Iterable[AllowanceDimension]) -> int:
-    """Refuse a block that cannot be revalidated (#9559 R11). Returns the count.
+def _check_release_conditions(
+        dims: Iterable[AllowanceDimension]) -> tuple[str, ...]:
+    """Refuse a block that cannot be revalidated (#9559 R11). Returns the NAMES.
 
     Three arms, each a distinct way a ``release`` declaration goes wrong: a block
     that names nothing that would end it, a condition carried by a dimension that
@@ -640,6 +641,13 @@ def _check_release_conditions(dims: Iterable[AllowanceDimension]) -> int:
     ⛔ ``dims`` has NO default, on purpose: a default of ``()`` makes
     ``_check_release_conditions()`` a silent no-op, i.e. exactly the inert
     enforcer this function exists to be the opposite of.
+
+    ⛔ IT RETURNS NAMES, NOT A COUNT — and that is load bearing, not style. An
+    integer result is forgeable: reviewer round 5 measured that
+    ``RELEASE_CHECKED = len(DIMENSIONS)`` stays GREEN, because 3 is what a run
+    over 3 dimensions also returns, so the "Existence is not wiring: the check
+    must have RUN" claim could be satisfied by an edit that never calls it. A
+    tuple of the validated names cannot be produced that way.
     """
     materialised = tuple(dims)
     for d in materialised:
@@ -660,14 +668,15 @@ def _check_release_conditions(dims: Iterable[AllowanceDimension]) -> int:
                 f"allowance dimension {d.dimension!r} declares release "
                 f"condition(s) {unknown!r} that RELEASE_CONDITIONS does not "
                 f"define — a typo'd condition would never be revalidated")
-    return len(materialised)
+    return tuple(d.dimension for d in materialised)
 
 
-#: How many declared dimensions the import-time release check validated. ⛔
+#: The declared dimensions the import-time release check VALIDATED, by name. ⛔
 #: Published so the WIRING is testable: delete the call below and this name is
 #: absent (AttributeError in the test), delete the assignment and the module does
 #: not import — so "the check exists" and "the check RUNS" cannot drift apart. A
 #: source-grep test could not tell those apart: `if False:` leaves the text.
+#: Names, not a count, for the reason in the docstring above.
 RELEASE_CHECKED = _check_release_conditions(DIMENSIONS)
 
 
