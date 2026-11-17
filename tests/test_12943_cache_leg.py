@@ -908,3 +908,29 @@ def test_a_replay_is_NOT_recorded_as_a_live_write(monkeypatch, tmp_path):
     assert cache_write_targets() == {}, (
         "a replay must not be counted as a live write — got "
         f"{cache_write_targets()!r}")
+
+
+def test_an_UNREADABLE_target_registry_is_NULL_and_never_an_empty_map(monkeypatch):
+    """The failure arm must not impersonate the success arm (#12943 review P1).
+
+    ``metrics()['cache_write_targets']`` is ``{target: writes}``, so ``{}`` is
+    the SUCCESS reading — "this process has taken no live cache write".
+    Publishing an empty map from the ``except`` arm makes an agent that cannot
+    READ the registry report byte-identically to the deployment shape this key
+    was added to expose (measured: ``{}`` while its in-process writes went
+    elsewhere), which is the illusion the whole change exists to end.
+    ``/health`` already seeds ``None`` on that arm; both surfaces read the same
+    registry, so both must spell "unreadable" the same way.
+    """
+    def _boom(*a, **k):
+        raise RuntimeError("target registry unreadable")
+
+    # Patched on `tortoise.cache_leg`, not through `monitoring`:
+    # `_cache_write_targets` imports the accessor INSIDE the function body, so
+    # the local import re-reads this attribute at call time.
+    monkeypatch.setattr("tortoise.cache_leg.cache_write_targets", _boom)
+    payload = monitoring.metrics()
+    assert "cache_write_targets" in payload, sorted(payload)
+    assert payload["cache_write_targets"] is None, (
+        "an unreadable registry must be null, never {} — {} means 'this "
+        f"process took no live write' — got {payload['cache_write_targets']!r}")

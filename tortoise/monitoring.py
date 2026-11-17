@@ -7589,21 +7589,31 @@ def _reset_graph_size_worker() -> None:
     reset_daemon_worker(GRAPH_SIZE_WORKER_NAME)
 
 
-def _cache_write_targets() -> dict[str, int]:
+def _cache_write_targets() -> dict[str, int] | None:
     """This process's live-write targets, without a module-level import cycle.
 
     ``cache_leg`` imports ``monitoring`` (it counts through
     ``record_cache_leg_failure``), so the registry's accessor is reached HERE
-    rather than at module scope. A failure to reach it is reported as an EMPTY
-    map and never raised: ``metrics()`` is a health surface and must answer
+    rather than at module scope. A failure to reach it is reported as ``None``
+    and never raised: ``metrics()`` is a health surface and must answer
     (#2850 — no I/O, and no exception, on the health path).
+
+    ⛔ ``None``, never ``{}`` (#12943 review, P1): the registry is `{target:
+    writes}`, so an EMPTY map is the SUCCESS reading — "this process has taken
+    no live cache write" — and publishing one from the failure arm would report
+    the unobservable case as the healthy one, byte-identical to the deployment
+    shape this key was added to expose (``{}`` while writes went elsewhere).
+    ``/health`` already seeds ``None`` for exactly this reason
+    (``hosted_api._record_health``); both surfaces read the same registry, so
+    "could not be READ" is spelled the same way on both. ``monitoring.py``'s
+    own rule for a counter it cannot read is ``None``, not ``{}``.
     """
     try:
         from .cache_leg import cache_write_targets
 
         return cache_write_targets()
     except Exception:  # noqa: BLE001, RUF100 — a health surface always answers
-        return {}
+        return None
 
 
 def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
