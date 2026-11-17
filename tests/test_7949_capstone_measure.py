@@ -6544,9 +6544,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # still hold EXACTLY at the new START, so the START is confirmed by structure rather
         # than assumed from one bumped number:
         # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:14779`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14737` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:14747` (inside it), and `:14785` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:14786`.
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14808` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:14818` (inside it), and `:14856` is
+        # the blank line immediately before `return OrgInfoResponse(` at `:14857`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14779", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
@@ -6675,15 +6675,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:14779-14785`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:14779-14856`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:14747` (both needles are the file's only occurrences —
-    # `:14737` and `:14747` — so a later end cannot change the sum). Ends below `:14747` fail
+    # true for any end at or beyond `:14818` (both needles are the file's only occurrences —
+    # `:14808` and `:14818` — so a later end cannot change the sum). Ends below `:14818` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:14779`-`:14746` gives a non-empty window that lacks the second needle, and an
+    # end in `:14779`-`:14817` gives a non-empty window that lacks the second needle, and an
     # end below `:14779` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
@@ -6706,6 +6706,24 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "04-plan.md I7's range end (`:14856`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
+
+    # ⛔ THE SIBLING NUMBERS THE NOTE ABOVE NAMES ARE DERIVED HERE, not trusted.
+    # The note is the RECIPE for re-deriving this row, so a stale number in it misdirects the
+    # next lane — that is exactly how `:14737`/`:14747`/`:14785`/`:14786` (the pre-`:14779`
+    # positions) survived a half-done re-derivation: the assertion was bumped, its prose was
+    # not, and both stayed GREEN. The START and END are pinned above; these are the two
+    # interior anchors the note cites by number, and each is checked against the line it
+    # claims, so a shift that leaves the pinned endpoints alone still cannot leave the recipe
+    # stale. (The `:14856`/`:14857` pair is the structural check directly above.)
+    for _num, _needle, _what in (
+        (14808, "nodes_used = await asyncio.to_thread(", "the nodes_used read"),
+        (14818, 'max_nodes = org.get("max_points")', "the max_nodes derivation"),
+    ):
+        assert _needle in _org_info[_num - 1], (
+            f"the I7 re-derivation note above names `:{_num}` for {_what}, but that line is "
+            f"{_org_info[_num - 1].strip()!r} — re-derive the NOTE as well as the range, "
+            "because a half-done re-derivation leaves the recipe asserting a number that "
+            "does not resolve")
 
     # ⛔ THE BLOCK ARM — the claim `03-test-design.md` actually makes, checked
     # against the structure instead of a number that a tool rewrites under it.
