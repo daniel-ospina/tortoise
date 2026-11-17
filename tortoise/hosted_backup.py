@@ -2375,23 +2375,32 @@ def list_backups(storage: BackupStorage, org_id: str,
       concurrently-pruned object are ordinary states of a live bucket, not an
       outage, and on the SUCCESS path they are logged (`logger.warning`) exactly
       as before. On the FAILURE path `Executor.map` SUBMITS every key up front and
-      CANCELS only what is still QUEUED, and that cancel fires when the
-      in-INPUT-order iterator reaches the failing key — so how much still runs
-      depends on how SLOW the failure is, NOT on `_LIST_MANIFEST_MAX_INFLIGHT`.
-      Measured over 40 keys (every other key 10 ms): an instantly-failing first
-      key leaves **9** downloads (the 8 workers plus the one key a freed worker
-      picks up), a first key 50 ms slower than the rest leaves **37**, and one
-      200 ms slower leaves **40 of 40** — a slow failure drains the queue behind
-      it, so a listing over a stalled backend issues its remaining GETs before the
-      error surfaces. That is still bounded by the key set a SUCCESSFUL listing
-      would have fetched, and `map`'s `with` block waits for the in-flight batch
-      before the exception reaches the caller, so a decisive failure can arrive up
-      to one download timeout later than the serial loop, which never started the
-      keys after the failing one. That wait is deliberate: returning while workers
-      still hold connections would move the load onto a request that has already
-      failed. ⛔ Do not restate this as "at most `_LIST_MANIFEST_MAX_INFLIGHT` still
-      runs" — that bound is false for every slow failure, and an earlier revision
-      of this paragraph said it (and quoted a 9 that refuted its own bound).
+      CANCELS only what is still QUEUED — and that cancel fires only once the
+      in-INPUT-order iterator reaches the failing key, so every key a freed worker
+      picked up before then has already run. Measured over 40 keys (non-failing
+      keys 10 ms, the FIRST key in `storage.list()` order failing with
+      `PermissionError`), downloads issued before the error surfaced:
+
+      | first-key delay | w=2 | w=4 | w=8 | w=16 |
+      |---|---|---|---|---|
+      | 0 ms | 2 | 5 | 9 | 17 |
+      | 50 ms | 7 | 17 | 37 | 40 |
+
+      Three consequences a future tuner needs, all of them from that table rather
+      than from reasoning: the failure-path volume is NOT bounded by
+      `_LIST_MANIFEST_MAX_INFLIGHT` (a stalled backend drains toward the whole key
+      set); it GROWS with the constant (0 ms: `w+1`; 50 ms: 7 → 17 → 37 → 40), so
+      raising the bound raises exactly the load a stalled backend sees; and it is
+      still capped by the key set a SUCCESSFUL listing would have fetched.
+      `map`'s `with` block then waits for the in-flight batch before the exception
+      reaches the caller, so a decisive failure can arrive up to one download
+      timeout later than the serial loop, which never started the keys after the
+      failing one. That wait is deliberate: returning while workers still hold
+      connections would move the load onto a request that has already failed.
+      ⛔ Two earlier revisions of this paragraph were WRONG and are not to be
+      restored: "keys already submitted still run" (they are cancelled) and "at
+      most `_LIST_MANIFEST_MAX_INFLIGHT` still runs" (it quotes a 9, which
+      refutes an 8). Any future edit must keep a measured table.
     """
     _validate_org_id(org_id)
     if graph_id is not None:
