@@ -6001,7 +6001,11 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
     caller's ZERO-ARG PROBE for that stored side (``{"status", "goalState",
     "successor"}``) and it is called AT MOST ONCE — but ⛔ NOT only when the bag
     alone cannot answer. On the two UPDATE doors it is read only when the write
-    cannot answer by itself (a bag naming both fields pays nothing there, which
+    cannot answer by itself (a bag naming both fields WITH an ENDING `goalState`
+    pays nothing there — #13065 review ROUND 11, finding 3: a bag naming both
+    fields with a LIVE `goalState` DOES pay one read, because the legacy
+    `outdated` flag can end a row whose `status` says nothing, and this sentence
+    asserted the wider claim), which
     matters because this runs on every SDK write); on a door that can land on an
     ALREADY EXISTING node (``may_target_existing_node``) it is read
     UNCONDITIONALLY, because there a stored ending can end the goal no matter
@@ -6219,27 +6223,42 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                  or bool(_stored_view().get("outdated")))):
         want = (_SUPERSEDED_STATUS
                 if status == _SUPERSEDED_STATUS else "abandoned")
-        _carrier = ("" if _is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
-                    else (f" The stored row carries no terminal `status`; it is "
-                          f"ended by the LEGACY `outdated` flag (the pre-#2901 "
-                          f"retirement), which `derived_invalidation` reads as "
-                          f"an ending."))
+        _by_status = _is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
+        # ⛔ #13065 review ROUND 11, finding 2 (P3): the headline and BOTH repairs
+        # must describe the carrier that actually ended the row. The round-10 fix
+        # let `outdated` end it while `status` stays None, and the message then
+        # said "status=None ends the goal" — false — with two repairs that are
+        # NO-OPS on that row (measured: `status='live'` alone leaves
+        # `outdated=True`, so the same refusal comes back; `goalState='abandoned'`
+        # alone is refused by the FIRST arm because `status` is still
+        # non-terminal). AX rule 2: say exactly what to do, in one step.
+        _headline = (f"status={status!r} ends the goal" if _by_status else
+                     "the stored row is ended by the LEGACY `outdated` flag")
+        _repair1 = (("pass status='archived' together with goalState='abandoned'"
+                     " — one write, both fields")
+                    if not _by_status else
+                    ("add the ending to `goalState` — pass goalState="
+                     f"{want!r}"
+                     + (" together with the successor's id, supersededBy=<successor "
+                        "id>" if want == _SUPERSEDED_STATUS else "")))
+        _repair2 = (("if the row should not be ended at all, clear the legacy "
+                     "flag itself (`outdated=False` on the row) rather than "
+                     "writing a live achievement word over it")
+                    if not _by_status else
+                    ("drop the ending from `status` — pass status='live' (or "
+                     "'draft'), or leave `status` out of the call if you did "
+                     "not mean to end the goal"))
         raise ValueError(
-            f"REFUSED: status={status!r} ends the goal, but "
+            f"REFUSED: {_headline}, but "
             f"goalState={goal_state!r} "
             f"still describes a live commitment (through {surface}). #13035: "
             f"`status` ends the goal and `goalState` never ends it alone, so "
             f"the ending has to be said on BOTH fields — otherwise the goal "
             f"reads as ended to one surface and as a live commitment to the "
-            f"next reader that asks about its achievement.{_carrier}\n"
+            f"next reader that asks about its achievement.\n"
             f"Two ways to fix it, either is accepted:\n"
-            f"  1. add the ending to `goalState` — pass goalState={want!r}"
-            + (" together with the successor's id, supersededBy=<successor "
-                "id>" if want == _SUPERSEDED_STATUS else "")
-            + ";\n"
-            "  2. drop the ending from `status` — pass status='live' (or "
-            "'draft'), or leave `status` out of the call if you did not mean "
-            "to end the goal."
+            f"  1. {_repair1};\n"
+            f"  2. {_repair2}."
         )
 
     if _stored_ending and (
@@ -6419,7 +6438,19 @@ def _stored_goal_ending_view(proj, id_val: str, *,
     # (`_is_lifecycle_word`); the STORED side is normalised by the same
     # type-first rule and turned into a PLAIN `str` key, so nothing here hashes
     # the raw value and a `str` SUBCLASS cannot forge one either.
+    # ⛔ #13065 review ROUND 11, finding 1 (P2): `outdated` belongs in the
+    # CONFLICT test too. It became part of "did this goal end?" in round 10, but
+    # the disagreement set still compared only `status`/`goalState` — so two
+    # nodes sharing one id that agree on those and differ ONLY on the flag set
+    # no `conflict`, and the verdict was taken from `rows[0]`'s flag: measured
+    # (two `:Point`s, one id, both `live`/`active`, flags False/True)
+    # `endings`=1, `conflict`=False, and `create_point(…, id=<that id>,
+    # status='live', goalState='met')` was ADMITTED on the first attempt and
+    # REFUSED on the re-run once the landed write shifted the row order — a
+    # plan-order-dependent verdict, exactly what the conflict arm exists to
+    # prevent. Every field the ended-predicate reads must be in this key.
     endings = {_ending_key(row[0]) + "\x00" + _ending_key(row[1])
+               + "\x00" + _ending_key(row[4] if len(row) > 4 else None)
                for row in rows}
     status, goal_state, carrier, corrects = rows[0][:4]
     legacy_outdated = rows[0][4] if len(rows[0]) > 4 else None

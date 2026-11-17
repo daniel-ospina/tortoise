@@ -606,12 +606,15 @@ def test_the_judgement_cache_writes_only_met_and_unmet():
 
 def test_the_stored_half_is_read_ONLY_when_the_write_cannot_answer(sdk):
     """The read the door adds (``_stored_goal_ending_view``) must not run on the
-    ordinary write: a bag naming BOTH fields, a bag naming NEITHER, and a
-    non-terminal ``status`` write are all answered from the bag alone. What does
-    cost one read is any ``goalState`` write (the node's ``status`` decides
-    whether the achievement word is being revived over an ended goal) and an
-    ENDED ``status`` write (the node's ``goalState`` is the other half). Pinned by
-    counting calls, because this sits on every SDK write.
+    ordinary write: a bag naming BOTH fields with an ENDING ``goalState``, a bag
+    naming NEITHER, and a non-terminal ``status`` write are all answered from the
+    bag alone. What does cost one read is any ``goalState`` write (the node's
+    ``status`` decides whether the achievement word is being revived over an
+    ended goal), an ENDED ``status`` write (the node's ``goalState`` is the other
+    half), and — since #13065 review round 11 finding 3 — a bag naming both
+    fields with a LIVE ``goalState``, because a row can be ended by the legacy
+    ``outdated`` flag while its ``status`` says nothing. Pinned by counting
+    calls, because this sits on every SDK write.
     """
     import tortoise.sdk as sdk_mod
 
@@ -723,6 +726,31 @@ def test_the_create_door_cannot_RESURRECT_an_ended_goal_by_naming_both(sdk):
     after = sdk.get_point(goal["id"])
     assert after["goalState"] == "abandoned"          # the ending survived
     assert live.is_terminal_status(after["status"])
+
+
+def test_DUPLICATE_ids_differing_ONLY_on_the_legacy_flag_are_a_CONFLICT(sdk):
+    """#13065 review ROUND 11, finding 1 (P2) — every field the ended-predicate
+    reads must be in the disagreement key.
+
+    Round 10 made `outdated` part of "did this goal end?", but the conflict set
+    still compared only `status`/`goalState`. Two nodes sharing one id that agree
+    on those and differ ONLY on the flag therefore set no `conflict`, and the
+    verdict came from `rows[0]`'s flag: MEASURED — `endings`=1, `conflict`=False,
+    `create_point(…, id=<that id>, status='live', goalState='met')` ADMITTED on
+    the first attempt, then REFUSED on the re-run once the landed write shifted
+    the row order. Plan-order dependent, which is exactly what this arm exists to
+    prevent.
+    """
+    goal = sdk.create_point("goal", "GOAL - dup flag [a]",
+                            goalState="active", status="live")
+    sdk._get_proj().g.query(
+        "CREATE (:Point {id:$id, name:'GOAL - dup flag [b]', "
+        "status:'live', goalState:'active', outdated:true})",
+        params={"id": goal["id"]},
+    )
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="met")
+    assert "more than one node" in str(exc.value), str(exc.value)
 
 
 def test_DUPLICATE_ids_that_disagree_refuse_rather_than_answer_from_one(sdk):
