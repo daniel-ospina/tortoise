@@ -79,13 +79,13 @@ file — `search_engine.py` FTS
 `:6830`; `sdk.py`'s second `capture_redactions` writer `:2705`; `audit.py`'s carrier probe `:2445`/`:2456`;
 and `mcp_server.py`'s `entity_type` passthrough `:5475` — and the drift figure
 above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so this revision moved it**:
-it **adds 18** resolved pairs and **drops 1** (a `hosted_api.py` write cite superseded by the range beside it), a net **+17**;
+it **adds 18** resolved pairs and **drops 1** (the `hosted_api.py` commit-state-load cite superseded by the range beside it), a net **+17**;
 **11** of the 18 drift and the dropped pair drifted as well, a net **+10** — 98 (the `main` copy) + 10 = **108** — and
 every one of the **18** was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this
 header holds.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
-re-running the stated method over this file (the figures at the top of §0) instead of enumerated here.
+re-running the stated method over this file (the figures at the top of this header) instead of enumerated here.
 ⛔ **The `:3524` address in `sdk.py` that §2.4 retracts is NOT counted**, because it is a **comment line**: it is spelled
 bare, not as a `path.py:NNNN` pair. A cite that cannot be opened on the line its row quotes is worse than
 no cite: the handle beside it then reads as corroboration of a line nobody read.
@@ -299,7 +299,9 @@ found **six more in `sdk.py` alone** — `:40752` (`MATCH (e:Event {eventId:$eid
 `:53744` — every one a whole-node `:Event` read in product code. ⛔ **The count is stated as a lower bound on
 purpose**: the earlier draft asserted completeness for exactly two, which is the same omission class §2.1
 records against itself for `:Point` ("which is how the `story_arc` 'zero readers' error survived three
-drafts"), and the check is `git grep -n 'properties(e)' -- 'tortoise/*.py'`, not another review. All eight are
+drafts"), and the check is `git grep -n 'properties(e)\|properties(n)' -- 'tortoise/*.py'` — the second
+pattern for the label-generic `MATCH (n:{label}) RETURN properties(n)` class `record_reconcile.py:533` belongs
+to — not another review. All eight are
 capability **`none`**, so they add no capability and change no verdict — they are named so that the census's
 "each row is a reader" claim is true rather than merely convenient.
 
@@ -547,7 +549,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 14 | `Point.mentions` (the held-phrase JSON tail prop, `projection/entities.py:1206`) | `sdk.py:27210` (`get_point` — *"Returns dict of all properties"*, the whole-node read); `projection/__init__.py:22118-22120` — a **write-only** fold (the branch is computed in Python at `:22109` from the journal payload, so the `SET` reads no node; `none`); `sdk.py:18841` is **not** a reader of the stored shape — it reads the extractor PAYLOAD dict, `pt` bound at `:18769` | **no** | **`record_only`** ⛔ gated — the two test pins refuse the declaration (§5.1) | nothing walks, filters or indexes it, and it is **not** an embedding input (`sdk.py:15975` composes from `quote`/`content` only) — but the move is blocked |
 
 ⚠️ **Row 13 has now been corrected TWICE, in opposite directions, and the second correction is the one to remember.** Draft one said "no Cypher reader names it" — false. This revision found the OPPOSITE error: the row carried `✅ already shipped`, which reads as "the shape has moved", while in fact the only thing that shipped is a **projection DENY** (`cache_projection.py:2653-2657` is its own comment; the executable deny is `:2658-2660`, and the doors that actually refuse the value are `:2742-2744` (tail) and `:2750` (column)) — a decision NOT to put the value in the record. A deny is not a move: it leaves the byte in the graph, written by the live capture path (§3 row 13's writer column, and the 98 B the instrument measures). ⛔ **A lane reading "already shipped" would have skipped row 13 as done**; the honest state is `record_only` by capability, **unshipped** by mechanism, and the reason is §5.3's, not a missing census item.
-⚠️ **Row 13 has now been corrected THREE times, and the third is a count, not a verdict.** `three WRITERS` was one short: `hosted_api.py:22309` inside `_execute_commit_writes` (`:22113`) writes the same episodic `:Source.summary` **unconditionally** (`s.title=$title, s.summary=$summary, … s.is_episodic=true`), so a lane removing the three named writers would leave it live; and `entities.py:5598`'s parent symbol was `_upsert_source`, which is `_upsert_document` (`:5282`) — the line opened, the symbol did not, which is exactly the half that survives a drift (§0). The reader column had the mirror defect: it cited `cache_projection.py:2653-2657`, five comment lines, for a READ that lives at `:2479-2485`. Verdict, mechanism and the 98 B are unchanged.
+⚠️ **Row 13 has now been corrected THREE times, and the third is a count, not a verdict.** `three WRITERS` was one short: `hosted_api.py:22309` inside `_execute_commit_writes` (`:22113`) writes the same episodic `:Source.summary` **unconditionally** (`s.title=$title, s.summary=$summary, … s.is_episodic=true`), so a lane removing the three named writers would leave it live; and `entities.py:5598`'s parent symbol was `_upsert_source`, which is `_upsert_document` (`:5282`) — the line opened, the symbol did not, which is exactly the half that survives a drift (the header above). The reader column had the mirror defect: it cited `cache_projection.py:2653-2657`, five comment lines, for a READ that lives at `:2479-2485`. Verdict, mechanism and the 98 B are unchanged.
 
 ⚠️ **Rows 2b–2f and 5b were added by the `#13095` follow-up, and their absence was a real hole rather than a
 formatting one.** The table classified every *label* and left six *property families* in no row at all — the exact
