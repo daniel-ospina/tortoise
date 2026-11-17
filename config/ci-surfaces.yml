@@ -1040,6 +1040,21 @@ surfaces:
   # resolves `['api','onboarding']`, and a `core`-only registration drops this file
   # from that selection — the #1349/#3332 silent-drop class.
   - test_10749_health_tail_under_transport_bound.py
+  # #13034 (PR #13075, merged at a09a0b3840): the `api` half of the dual registration —
+  # the `core` row is further up this file, and both exist for the #1349/#3332 reason. The
+  # file pins `tortoise/hosted_api.py` behaviour directly:
+  # `test_the_hosted_list_route_drops_it` drives `hosted_api.list_points` to prove the
+  # public list route asks the shared `live._terminal_excluded` predicate (#432/#689 arm).
+  # `hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match that REPLACES the `core`
+  # fallback, so a `core`-only registration drops this file from every `hosted_api.py`-only
+  # diff — MEASURED with the `core` row alone, `select(['tortoise/hosted_api.py'])`
+  # resolves `['api','onboarding']` with this file ABSENT, which no `core` entry can fix.
+  # ⛔ The `mcp_auth.py` co-import that `--surface-audit` also reports is inherited noise
+  # (main-side rows like `test_12592_supersede_door.py` carry the same shape); the
+  # behavioural pin is `hosted_api.py`. ⛔ NOT hermetic — four of its seven classes are
+  # `@_needs_db` (see the `core` row above); the arm registered HERE is one of the three
+  # pure-Python ones, so this leg's value does not depend on a database being served.
+  - test_13034_currency_rule_reads_position.py
   # #12477/#2876: the health surfaces must not read green over a failing data plane. Added
   # to `main` by `ea5d476e9b` (#12488) WITHOUT a manifest row, so `--integrity` reported it
   # as drift on every head carrying that file and red `manifest-integrity` (a `needs` of the
@@ -5120,6 +5135,14 @@ surfaces:
   # `tortoise/pipeline.py` (the position axis) — both EXACT `core` selections (measured:
   # `--changed-files tortoise/live.py` -> surfaces: ['core']); its `tortoise/sdk.py` /
   # `tortoise/mcp_server.py` imports select the FULL matrix, so no arm is dropped there.
+  # ⛔ BUT one arm IS dropped by a `core`-only row, so this file is DUAL-REGISTERED
+  # `core` + `api` (the `api` row is further down this file): the hosted list-route arm
+  # (`test_the_hosted_list_route_drops_it`) drives `tortoise/hosted_api.py::list_points`,
+  # and `hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match that REPLACES the `core`
+  # fallback — MEASURED with this `core` row alone, `--changed-files tortoise/hosted_api.py`
+  # resolves `['api','onboarding']` with this file ABSENT, so the #432/#689 arm carried no
+  # guard on its own module's diff (the #1349/#3332 silent-drop class). `--surface-audit`
+  # reports it as an api addition candidate for exactly that reason.
   # ⛔ NOT hermetic, contrary to a first reading of it: its own header says "Lane: needs a
   # live FalkorDB" and the live classes are `skipif(not FALKORDB_AVAILABLE)` — on a leg with
   # no database they SKIP GREEN rather than fail, and a `durations` row is exactly what a
