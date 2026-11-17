@@ -1636,9 +1636,21 @@ def test_search_projects_through_the_served_row_helper():
     t._sdk = _SDK()
     t.search_timeout_ms = 0
     served = t.search("q").rows
-    assert served == [cap._served_row(row)], (
-        "search() projected its rows somewhere other than `_served_row`"
-    )
+    # The EXPECTED dict is written out, not `_served_row(row)` — comparing the function to
+    # itself holds for any implementation, so it pinned none of the seven fields
+    # (#13303 cycle 14: dropping `supersedes`, or reading `r.get("score")` instead of
+    # `scores.rrf`, left all 75 green).
+    assert served == [
+        {
+            "id": "x",
+            "what": prose,
+            "kind": "fact",
+            "status": "live",
+            "score": 0.5,
+            "match": "fts",
+            "supersedes": ["y"],
+        }
+    ], "search() served the wrong values for this row"
     assert served[0]["what"] == prose, (
         "the product's words were rewritten on the way into the packet"
     )
@@ -1651,6 +1663,23 @@ def test_search_projects_through_the_served_row_helper():
     import textwrap
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(cap.LocalTarget.search)))
+
+    def _refs(node_ast, name: str, *, store_only: bool = False) -> bool:
+        """Does this subtree reference the NAME `name`? Identifiers, never dumps.
+
+        Substring matching was wrong in both directions (#13303 cycle 14): `"served" in
+        ast.dump(target)` matched a legitimate `served_overlap = _overlap(query, served)`
+        and reported a projection that does not exist, while `"_served_row" in
+        ast.dump(value)` accepted a duplicate relocating into `_served_row_legacy` — the
+        exact "moved into a helper" shape this check exists to catch.
+        """
+        return any(
+            isinstance(s, ast.Name)
+            and s.id == name
+            and (not store_only or isinstance(s.ctx, ast.Store))
+            for s in ast.walk(node_ast)
+        )
+
     bindings = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -1659,10 +1688,10 @@ def test_search_projects_through_the_served_row_helper():
             targets = [node.target]
         else:
             continue
-        if any("served" in ast.dump(t) for t in targets):
+        if any(_refs(t, "served", store_only=True) for t in targets):
             bindings.append(node)
     assert bindings, "search() no longer binds `served` — this pin has gone stale"
-    missing = [ast.unparse(n)[:90] for n in bindings if "_served_row" not in ast.dump(n.value)]
+    missing = [ast.unparse(n)[:90] for n in bindings if not _refs(n.value, "_served_row")]
     assert not missing, (
         f"`served` is projected without `_served_row` (a duplicate that can drift): {missing}"
     )
@@ -1724,7 +1753,7 @@ def test_every_post_ingestion_refusal_drops_the_graph(monkeypatch, tmp_path):
     )
     # kind-independent: `run-local.json` is `f"run-{target.kind}.json"`, so keying the
     # assert to `kind` let a two-line edit restore this pin's vacuity (#13303 cycle 13).
-    assert not list(scratch.iterdir()), (
+    assert not scratch.exists() or not list(scratch.iterdir()), (
         "the refusal happened AFTER artifacts were written: "
         f"{sorted(p.name for p in scratch.iterdir())}"
     )
