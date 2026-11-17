@@ -752,13 +752,13 @@ _EXPECTED_TOOL_SITES = {
     "tools/backfill_graph_turns.py": 1,          # #10017's read-only pre-delete census
     "tools/cache_eviction_census.py": 2,         # #10976's INFO client + the measurement handle
     "tools/dod_5090_probe.py": 1,                # #10465's GRAPH.LIST on the census handle
+    "tools/cypher_diff_harness.py": 3,          # #13098's seed / verdict / bench clients, bounded by #13211 (the issue that governs this fix; #13140 is the defect's origin — ⛔ NOT #13163, which is `tools/text_gate_13099.py`'s pair and never mentions this harness). All three are `**_bounded_server_socket_kwargs()`, and they were unbounded on `origin/main`, which is what redded this guard for the whole tree. ⛔ ONE row, not two: an earlier resolution of this branch bound this key TWICE in this same literal (#13140's comment and this one), and Python keeps the LAST binding — so the first row was dead data no edit could redden (#13102 review round 8, F1).
     "tools/edge_census.py": 2,                   # GRAPH.LIST + the measurement handle
     "tools/embedding_residual_scan.py": 1,      # #11642's read-only dense-leg scan (bound: `**_bounded_server_socket_kwargs()`)
     "tools/graph_write_repair.py": 2,            # per-DB scan client + the repair client
     "tools/longmem_eval/server_posture.py": 1,   # pre-existing, already resolver-bound
     "tools/ram_window_census.py": 2,            # #13084's INFO/DUMP handle + the RESTORE probe's client (both `**_bounded_server_socket_kwargs()`)
     "tools/text_gate_13099.py": 2,              # #13107's seed client + the arms' measurement client (both `**_bounded_server_socket_kwargs()`)
-    "tools/cypher_diff_harness.py": 3,         # #13098's seed / verdict / bench clients, bounded by #13211 (the issue that governs this fix; #13140 is the defect's origin — ⛔ NOT #13163, which is `tools/text_gate_13099.py`'s pair and never mentions this harness)
 }
 
 
@@ -816,6 +816,44 @@ def test_every_tool_surface_client_is_constructed_with_a_read_bound():
         "the tool-surface client inventory changed — a new raw client must be "
         "listed here (and carry a bound) rather than silently joining the tool "
         f"surfaces: found={found} expected={_EXPECTED_TOOL_SITES}")
+
+
+def test_the_expected_site_maps_carry_NO_duplicate_key():
+    """#13102 review round 8 (F1): a repeated key is a row NO mutation can redden.
+
+    ``_EXPECTED_TOOL_SITES`` briefly bound ``tools/cypher_diff_harness.py`` TWICE
+    — a merge resolution that kept both sides' provenance comments. Python keeps
+    the LAST binding, so the earlier row was unreachable data: the map still READ
+    as "both of these were verified" while one of them could not fail, which is
+    the one failure mode this inventory exists to prevent. Nothing else catches
+    it either: pyflakes reports a repeated dict key only when the VALUES differ,
+    and both literals were ``3`` — which is how it survived five review rounds.
+
+    Asserted over EVERY ``_EXPECTED*`` dict literal in this file, so the next
+    conflict resolution that keeps both sides reds here instead of quietly
+    widening a manifest. RED on the pre-fix tree (that literal carried the dup).
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    checked: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if not any(n.startswith("_EXPECTED") for n in names):
+            continue
+        checked.append(names[0])
+        keys = [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
+        duplicates = sorted({k for k in keys if keys.count(k) > 1})
+        assert not duplicates, (
+            f"{names[0]} binds {duplicates} more than once — Python keeps the LAST "
+            "binding, so every earlier row is dead data no edit to it can redden. "
+            "Merge the rows (one key, one count, one comment): a duplicate is what "
+            "a conflict resolution that keeps both sides produces, and a manifest "
+            "that reads as coverage without being able to fail is worse than no "
+            "manifest at all")
+    assert len(checked) >= 3, (
+        f"expected at least 3 _EXPECTED* maps in this file, parsed {checked} — a scan "
+        "that reads none of them guards nothing")
 
 
 def _graph_viz_connection_module(monkeypatch):

@@ -43,6 +43,7 @@ from typing import Any
 from tortoise.incident_kinds import (
     KIND_ABUSE_DECISION_FAULT,
     KIND_ABUSE_ENFORCEMENT_FAULT,
+    KIND_ALLOWANCE_CAP_UNENFORCEABLE,
     KIND_BILLING_NOTIFY_REFUSED,
     KIND_PROVIDER_BILLING_EXHAUSTED,
     KIND_UNMETERED_INCREMENT,
@@ -63,6 +64,14 @@ _logger = logging.getLogger("tortoise.operator_alert")
 #: (``ops/alerts/{kind}/{org}.json``), so there is one definition and the
 #: runbook row is pinned to it by ``tests/test_incident_kinds.py``.
 UNMETERED_INCREMENT_KIND = KIND_UNMETERED_INCREMENT
+
+#: The incident KIND for an ARMED allowance dimension that could not be read, so
+#: its cap was not enforced and the write was served (#13102). Same ruling as the
+#: constant above (``#3981`` PROCEED AND ALERT), one layer over: there it is a
+#: dropped increment, here it is a cap that cannot bind. Declared in the registry
+#: for the same reason — the kind string is durable storage, and the runbook row
+#: is pinned to it by ``tests/test_incident_kinds.py``.
+ALLOWANCE_CAP_UNENFORCEABLE_KIND = KIND_ALLOWANCE_CAP_UNENFORCEABLE
 
 #: The incident KINDS for a fault on the abuse ENFORCEMENT path (#4872).
 #: Declared in the registry beside every other kind and home to the runbook pin.
@@ -237,6 +246,27 @@ def alert_unmetered_increment(lane: str, org_id: str | None,
     with contextlib.suppress(Exception):  # the alert must never raise
         alert_operator(UNMETERED_INCREMENT_KIND, org_id,
                        {"lane": lane, "error_type": type(error).__name__})
+
+
+def alert_allowance_cap_unenforceable(dimension: str, org_id: str | None,
+                                     reason: str) -> None:
+    """Dispatch ``ALLOWANCE_CAP_UNENFORCEABLE`` — an armed cap that could not bind.
+
+    The entry point for the allowance gate (#13102 P0-1): the write was SERVED and
+    the cap was NOT enforced, because the dimension's meter had no usable reading.
+    The kind and the detail vocabulary are written here, once, so an operator
+    greps one string and the durable body cannot drift per call site.
+
+    ⛔ ``reason`` is a MESSAGE-FREE token from the gate's own closed vocabulary
+    (``read_error``, ``period_error``, ``unreported``, ``stale``, ``missing_figure``,
+    ``meter_error``, ``non_reading``, ``unknown_reason``) — the incident body is durable and
+    create-once, so a free-text sentence would freeze one call site's wording as
+    the permanent description of the incident. It never raises: an alert must not
+    turn an unenforced cap into a refused write.
+    """
+    with contextlib.suppress(Exception):
+        alert_operator(ALLOWANCE_CAP_UNENFORCEABLE_KIND, org_id,
+                       {"dimension": dimension, "reason": reason})
 
 
 def alert_abuse_fault(kind: str, lane: str, subject_org: str,

@@ -253,12 +253,86 @@ owns that decision and receives the figure on `RecordWrite.written_bytes`. The
 purpose (a migration is not usage), and `reconcile` discloses it.
 
 **What the meter does not do.** It measures rows written from the day it lands.
-It does not backfill, does not prune, and does **not** arm `allowance_gate` —
-arming `postgres_storage` needs the `free`/`anon` included amounts decided first,
-**and** a per-org gauge the gate can afford on a write path (neither the audit nor
-the ledger addend is one). Both are declared on the gate itself:
-`allowance_gate.RELEASE_CONDITIONS` (#12762/#9559 is measurement only;
-`product/pricing.json` and the tier boundaries are untouched).
+It does not backfill, does not prune, and does **not** arm `allowance_gate`.
+
+**The gauge the gate reads (`#9559`).** The audit above is a whole-table
+aggregation with a per-row TOAST lookup, so it can never run on a write path —
+which is why `postgres_storage` shipped blocked for want of a figure the gate
+could afford. `#9559` supplies it as a SNAPSHOT: `org_postgres_residency`
+(migration `20261117000002`) holds one row per org with the bytes the audit
+ATTRIBUTED to it and the instant it measured them, refreshed **offline** by
+
+```sql
+select * from public.postgres_residency_snapshot();
+```
+
+The write path does one primary-key lookup — `metering.get_postgres_residency` →
+the gate's `_postgres_stored_bytes` — which is O(1) in the database's size, and
+that affordability is what the block required. ⛔ **That is true on BOTH
+branches, and the second one needed an index to be true.** An org WITH a row is
+`org_id` → PRIMARY KEY. An org with **no** row — every fresh tenant, and every org
+the audit attributed nothing to — is answered by the table's NEWEST
+`measured_at` (the instant the zero-by-absence is aged by), so
+`org_postgres_residency_measured_at_idx` indexes that column; without it the
+probe was a sequential scan plus a sort over one row per org, i.e. O(orgs) on the
+gated write path, growing with the fleet's tenant count rather than with anything
+the writing tenant did (#9559 review finding 4). The claim is about the
+INSTRUMENT, not about an excuse: if a future change drops that index, the probe
+is again the whole table and this paragraph is false. **The residual is never
+apportioned**: only the measured per-org figure is stored.
+
+⛔ **The snapshot has an age, and the gate enforces a bound on it.** The dimension
+declares `stale_after_seconds` (24 h, the same evidence-age bound the graph gauge
+uses). A reading older than that, or one with no `measured_at` to age, is
+**refused** — never enforced.
+
+⛔ **"No row" is THREE answers, and the reader names which one it is**
+(`unmeasured_reason`, the vocabulary `get_capture_usage` already uses). Flattening
+them is either a fail-open or a deadlock, so they are separate:
+
+| `unmeasured_reason` | when | what it means | gate outcome |
+|---|---|---|---|
+| — (`measured: true`) | a row exists for the org | the audit's figure, aged by `measured_at` | compared against the cap |
+| `absent` | no row for this org, **but other orgs have rows** | the gauge has reported and this org's rows store nothing — a **true zero**, stamped with the gauge's NEWEST refresh | **served** as 0 bytes, and **refused as stale** once that refresh ages past the bound |
+| `unreported` | the snapshot table is **EMPTY** | nothing has been measured for **any** org | **refused** (a named no-reading error) |
+| `read_error` | the control plane failed | our fault | **refused** (named, logged at ERROR) |
+
+⛔ **The zero-by-absence is STAMPED, not unbounded** — and that is the difference
+between a deadlock fix and a silent permanent bypass. The snapshot table only ever
+GAINS rows (orgs are not deleted here), so "the gauge has reported at least once"
+becomes true forever after a single run. A zero carrying no instant would then
+serve every never-snapshotted org at 0 bytes for good, while an org WITH a row of
+the same age is refused — the operator's signal pointing the wrong way. So the
+reader returns the newest `measured_at` with the absence, the meter emits a
+`MeterReading(used=0.0, measured_at=<that>)`, and the dimension's existing
+`stale_after_seconds` ages it. That is also why the dimension does **not** declare
+`absent_is_zero`: that declaration routes the unageable `ABSENT` sentinel around
+the bound, which is right for a cumulative flow (a fresh window genuinely has no
+age) and wrong for a gauge.
+
+Why `absent` is served and not refused — and why that is not a fail-open: the
+snapshot row is **derived from the org's rows**, and rows only exist once a write
+is served. Refusing `absent` refuses the very write that would create the row, so
+a fresh tenant's **first** write would be refused forever. Measured on the sibling
+gauge in CI (`#13084`/`#13102`): a paid tenant's first `POST /v1/points` returned
+**HTTP 500** from exactly that collapse. `absent_is_zero` is declared on the
+dimension so the gate consumes the answer in one place, and it is safe **strictly
+because** the empty table is `unreported` and still refuses — otherwise every org
+would compare as 0 bytes and pass any cap.
+
+⛔ **Nothing schedules the refresh yet.** That is a deploy decision (no migration
+here declares `pg_cron`; an external caller is an operator's choice), and it is
+disclosed rather than assumed: while the table is empty the gate reads
+`unreported` and refuses a configured allowance, so an unscheduled snapshot
+**over-blocks** instead of billing from a guess. One successful refresh is what
+turns "nothing measured anywhere" into "this org stores nothing, served". Schedule
+it — and verify a real org's row exists — before arming.
+
+**What still blocks arming.** Exactly one thing, and it is the owner's: the
+`free`/`anon` included storage amounts are recorded as `DERIVED, NOT
+OWNER-CONFIRMED` in `product/pricing.json`. The gate declares the live state in
+`allowance_gate.RELEASE_CONDITIONS`; `#12762`/`#9559` are measurement and
+instrument only — `product/pricing.json` and the tier boundaries are untouched.
 
 **Retention.** `#3843`/`#3853` (“no retention window of any length”) bind
 `analytics_events` (migration 0004's immutable trigger). They say nothing about

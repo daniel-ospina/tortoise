@@ -4303,6 +4303,27 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_ram_window_census_tool_change_selects_core_not_tier1():
+    # #13102 review F1: `tools/ram_window_census.py` is ADDED by #13084 and owns
+    # tests/test_13084_ram_window_census.py — the 12 pins for the census's ONE
+    # destructive step (no `DEL`; `RESTORE … REPLACE` against the live key; a
+    # rejected payload leaving the key unchanged). The mechanism is the CORE_ALSO
+    # entry: `_selection_relevant()` consults it, so the `tools/` path survives the
+    # flat NON_PYTHON_PREFIXES filter and the match loop then adds `core`.
+    #
+    # Measured before the entry (this is the pre-fix state, not a guess):
+    # `select(["tools/ram_window_census.py"], "pull_request", load_manifest())`
+    # returned `surfaces: []` / `full: false` — the docs-only early return, i.e.
+    # tier-1 smoke — and `test_13084_ram_window_census.py` was ABSENT from
+    # `test_files`. Mutation check: removing the CORE_ALSO entry restores exactly
+    # that, failing asserts 2–5 below.
+    r = _sel(["tools/ram_window_census.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_13084_ram_window_census.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_cli_extraction_engine_change_selects_core_and_carve_out_leg():
     # #9929 review #2: the CORE_ALSO entry for
     # integrations/cli-extraction/extract_turns.py exists only to stop the
