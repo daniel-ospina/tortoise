@@ -148,3 +148,46 @@ until the number existed.
 ⚠️ M3's published tables were measured before this tail existed and were **not** re-run here — a
 re-measurement needs a live FalkorDB lane and a `pg_search` Postgres. Its brief §3.4 records that
 disclosure in place; the numbers there are a record of the pre-`#12368` emission, not of what ships.
+
+---
+
+## `#13099` — the nDCG gate re-measured: no Postgres option is behind the in-graph leg
+
+`#12298` closed M3 measuring **recall**, and its own note recorded what that left open: the qualifier
+asking *how far our leg sits from the 8–23-point BM25 baseline* is a **ranking-distance (nDCG)**
+question, and it stayed unmeasured. `#13099` measures it, on the corpus the earlier nDCG work used so
+the figures are comparable.
+
+**What was run.** The `#1144` committed deterministic corpus (seed 42, 2000 points, 24 topics) with its
+**100 committed oracle queries, byte-identical**, and the **committed grade function** — so no label is
+invented, human or LLM. Both backends live: a Docker **FalkorDB v4.20.6** lane (the environment the
+`#1144` baseline's own notes name authoritative — its embedded `fts nDCG@10 0.8143` is retracted there
+as an artifact, "FTS populated 40/100 queries", so the baseline was **re-measured at 0.8171** rather
+than quoted) and **PostgreSQL 16.15** with **`pg_search` 0.26.6** — the same Postgres major and the same
+`pg_search` version `#12298` used, so the BM25 arm is comparable to that record.
+
+**The numbers** (paired 90 % bootstrap CIs, 2000 resamples, against `in_graph_fulltext`; n=100 on the
+class carrying the committed qrels):
+
+| arm | nDCG@10 | Δ nDCG@10 | Δ nDCG@100 | Δ recall@100 |
+|---|---|---|---|---|
+| `in_graph_fulltext` (baseline) | 0.8171 | — | — | — |
+| `pg_ts_rank` / `ts_rank_cd` | 0.8403 | **+2.32** [−0.93, +5.46] | **+9.23** [+6.68, +11.85] | **+13.58** [+10.46, +16.78] |
+| `pg_search` BM25 | 0.8358 | +1.87 [−1.90, +5.98] | +10.12 [+7.10, +13.16] | +15.15 [+11.40, +18.88] |
+
+**No Postgres option loses significantly on any query class.** At the head, `ts_rank` is **inside the
+noise band**; at depth it is **significantly ahead**. On the exact-name surface (n=96) it is ahead by
+**+4.87 nDCG@10** [+2.44, +7.44] — and that deficit is explained rather than assumed: a document
+matching 2 of a query's 7 terms scores 9.0 while the document matching all 7 scores 4.14 and ranks
+99th, which is the `#8488`/`#12350` defect class and is **fixable in place**.
+
+**What changed in this document: nothing about the decision.** The `#6.2` decision to keep the text
+index **stands**, and the external 8–23 figure is **not refuted** — that compares Postgres to BM25 on
+foreign datasets, while this compares *our* leg to Postgres on *ours*. What changed is one factual
+claim: the qualifier §6.2 recorded as **unmeasured** is now measured, and `#6.2` says so with a pointer
+to the record. The reopen, if any, is argued on `#4051` / `#13082` phase 2 with these figures.
+
+**Adoption cost, measured from the artifacts** (no vendor page was reachable on the measuring box):
+`ts_rank` is built-in — no extension, no worker, no restart-level config, a **64 KB** GIN index.
+`pg_search` needs `shared_preload_libraries`, is **AGPL-3.0-or-later**, and its index is **3.13 MB**
+(48×) for no head-quality gain over `ts_rank`. Evidence: `docs/evidence/13099-text-gate/`.

@@ -281,7 +281,7 @@ opposite of the ordering in §5.
 > reproduces **inside the current index**. ⚠️ **What is still NOT measured**, so "resolved" is not read
 > as more than it is: the qualifier that asked *how far our leg sits from the 8–23-point BM25 baseline*
 > is a **ranking-distance (nDCG)** question, and M3 measured recall and score distributions, never
-> nDCG. That distance remains unmeasured. The leg's
+> nDCG. That distance is now measured — see the STATUS note below (`#13099`). The leg's
 > actual defect is a **tokenizer contract**, not a scorer or a ranking baseline, and it is filed as
 > `#12350`. Numbers, method and the artifacts: `docs/research/2026-11-13-12298-m3-fts-leg/`; the
 > changelog entry records what changed and what did not. ⛔ **This note does not decide `C3` (SPLADE)**
@@ -294,6 +294,28 @@ opposite of the ordering in §5.
 > facts — which issues carry the ruling and what state they are in — are recorded in
 > `SEARCH-ARCHITECTURE-CHANGELOG.md`, and no statement here turns on them. Correcting the closure
 > recorded in `SEARCH-ARCHITECTURE-CHANGELOG.md` is the owner's; it is not a lane's.
+>
+> **STATUS — the ranking-distance qualifier is now measured (2026-11-17, `#13099`).** The qualifier the
+> note above leaves open — *how far our leg sits from the 8–23-point BM25 baseline* — is a
+> **ranking-distance (nDCG)** question, and it has been measured on the repo's **committed deterministic
+> corpus** (`#1144`: seed 42, 2000 points, 24 topics, the 100 committed oracle queries and the committed
+> grade function) against the Postgres candidates that now exist, on a **Docker FalkorDB** lane (the
+> environment the `#1144` baseline's own notes name authoritative). On the class carrying the committed
+> qrels (n=100), `ts_rank`/`ts_rank_cd` land **+2.32 nDCG@10 pts (90 % CI −0.93 … +5.46)** — **inside the
+> noise band** — and are **significantly ahead at depth**: **+9.23 nDCG@100** [+6.68, +11.85] and
+> **+13.58 recall@100** [+10.46, +16.78]. `pg_search` BM25 has the same shape. **No Postgres option loses
+> significantly on any query class.** So **the reason this section gives for keeping the index does not
+> reproduce against the leg we actually run.** ⚠️ **The 8–23 figure itself is untouched:** it compares
+> Postgres FTS to BM25 on three foreign datasets, while this compares **our leg** to Postgres **on our
+> corpus** — a different claim, and the one a decision here can rest on. The one place the in-graph leg
+> genuinely trails is exact-name lookup (**+4.87 nDCG@10**, CI excluding 0, n=96), and the mechanism is
+> recorded with a worked example: a document matching 2 of a query's 7 terms scores 9.0 while the
+> document matching all 7 scores 4.14 and ranks 99th — the `#8488`/`#12350` defect class, fixable in
+> place rather than a reason the store is wrong. ⛔ **This note decides nothing and reverses nothing — the
+> decision above STANDS.** What it supplies is the **figures for the trigger this section names**, and the
+> reopen is argued on `#4051` / `#13082` phase 2 with them; adoption from a measurement lane is not a route.
+> Evidence, ops facts (index sizes, build times, licence, preload) and the limits:
+> `docs/evidence/13099-text-gate/`.
 
 ### 6.3 EP state — the carve-out stands, and the fix is not to store it
 
