@@ -192,12 +192,21 @@ capture prior's own `limit=3`. `:Object` is unindexed; `:Point` is the **indexed
 same volume with the same names and the same vectors** (the `:Point` mirror is written from the
 object's own stored embedding), so the two arms differ in exactly one thing.
 
-### 3.1 The mechanism — measured, not inferred
+### 3.1 The mechanism — measured for two labels, INFERRED for three
 
 | label | samples | `mechanism` |
 |---|---|---|
-| `:Object` (and `Event`, `Source`, `Subject`) | **all** of them | **`scan_fallback`** |
-| `:Point` | **all** of them | **`index`** |
+| `:Object` | **100 at rest / 60 under load** (`probe-1000-at-rest-and-concurrent.json`, `probe-1000-under-load.json` → `arms["object@c1"]`) | **`scan_fallback`** on every one |
+| `:Point` (indexed control, same names + vectors) | **100 at rest / 60 under load** (`arms["point@c1"]`) | **`index`** on every one |
+| `:Event`, `:Source`, `:Subject` | ⛔ **NONE — not sampled here** | **`scan_fallback`, INFERRED, not measured** |
+
+⛔ **The third row is an inference and says so** (`#13121` round 10). `--labels` defaults to
+`object,point` (`tools/dense_leg_probe_13108.py`) and `grep -c -E 'Event|Subject|Source'` over all
+ten artifacts returns 0, so those three labels were never measured. What IS measured about them is
+the census: `census.vector_indexes` lists **`Point` as the only VECTOR index**, so a read on any
+other served label cannot take the `index` branch — the same branch, reached by the same probe
+result. An earlier revision of this table listed all four unindexed labels together in the
+"measured" row, which is the claim class this document exists to refuse.
 
 A bare index probe explains the `scan_fallback`: on this engine **BOTH** argument-order signatures
 are refused for `:Object` while the same call answers on `:Point` (`signature B`), and —
