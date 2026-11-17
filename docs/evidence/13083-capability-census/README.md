@@ -45,16 +45,17 @@ lane is the population a `record_only` move would remove from.
 
 ## ⚠️ Limits — quoted, not discovered later
 
-1. **`sum(size(prop))` is a LOWER BOUND.** It excludes the per-property attribute-block entry. §5.1 of
-   the audit measures that gap: ~2,520 B/point of `used_memory` against 1,500 B/point of payload, i.e.
-   the block entry costs **~68 % more** than the payload it stores.
+1. **`sum(size(prop))` is a LOWER BOUND.** It excludes the per-property attribute-block entry, so a
+   payload figure is never a residency figure. This instrument **does not quantify that gap** — an earlier
+   draft quoted ~2,520 B/point from a `used_memory` difference that later proved to be baseline noise
+   (limit 3), and the claim was withdrawn rather than repaired.
 2. **`used_memory` includes block and index matrices**, so a small corpus over-states the marginal
    per-node cost (FalkorDB allocates in blocks). The corpus size is printed WITH the figure, so every
    number here is a per-shape marginal **at this corpus**, never a per-node constant.
-3. **The arms are not a calibrated A/B.** The prose arm varies the projection's declaration, but the
-   server's `used_memory` baseline differs between runs by ~95,296 B (5,235,632 vs 5,330,928). The
-   `story_arc` payload figure (90,000 → 0) is exact and deterministic; the `used_memory` delta
-   (151,216 B) is an order-of-magnitude witness, larger than the observed noise, not a measurement of it.
+3. **`used_memory` is not a calibrated A/B on this box.** Across the committed pair the baseline differs
+   by **847,688 B** (4,163,696 vs 5,011,384), which is larger than the 90,000 B payload delta — so
+   `used_memory` is **not used** for any figure in this record or the audit. Only the deterministic
+   `sum(size())` payload numbers are quoted.
 4. **Six shapes are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`, `:Tag`,
    `:CommitRecord`, `:DeliveryReceipt`, and the `:Batch`/`:PipelineStage`/`:PackInstall`/`:PackSelection`
    group. The corpus does not create them, so this document has no measurement of them — which is a gap
@@ -63,36 +64,43 @@ lane is the population a `record_only` move would remove from.
 ## The two arms
 
 `--legacy-prose` seeds each turn's `:Point` with §9.1's narrative in its row's **`props` tail** — the
-shape a pre-`#13083` record→cache projection produced — and the arm varies **only** whether the
-projection's `node_from_row` keeps the key (removed in process for `before`, so both arms run the same
-code and the same corpus).
+shape a pre-move record→cache projection produced. **Both arms run it**, and the arms vary **only** the
+declaration: `before` pops `CACHE_FORBIDDEN_COLUMNS["point"]`, `after` sets it. (⚠️ The first cut of this
+instrument ran the `after` arm without `--legacy-prose`, so the arms differed by whether the prose was
+SEEDED rather than by the declaration — a review caught it and the arm was rebuilt. The asserted
+invariant at the top of the arm is what stops that regressing.)
 
-| arm | `:Point` payload | `story_arc` bytes | `used_memory` delta | `:Point` nodes |
-|---|---|---|---|---|
-| `before` (prose kept) | 668,014 | **90,000** | 2,489,608 | 66 |
-| `after` (prose dropped) | 578,584 | absent (= 0) | 2,338,392 | 66 |
-| **Δ** | **−89,430** | **−90,000** | **−151,216** | 0 |
+| arm | `:Point` payload | `story_arc` bytes | `content` | `embedding` | `:Point` nodes |
+|---|---|---|---|---|---|
+| `before` (entry absent) | 668,014 | **90,000** | 93,287 | 474,348 | 66 |
+| `after` (entry present) | 578,014 | **0** | 93,287 | 474,348 | 66 |
+| **Δ** | **−90,000** | **−90,000** | 0 | 0 | 0 |
 
-60 seeded legacy turn points ⇒ `story_arc` **1,500 B/turn** exactly, payload **1,490.5 B/turn** (the
-570 B difference is `Point.content` moving between runs — reported rather than smoothed), and
-`used_memory` **≈2,520 B/turn**.
+60 seeded legacy turn points ⇒ **exactly 1,500 B/turn**. `content` and `embedding` are byte-identical
+between the arms, which is the check that this is one variable and not a corpus difference.
 
-**This arm measures the SIZE OF THE PRIZE, not a shipped change.** The move itself was withdrawn: the
-repo's own drift pin (`tests/test_cache_projection.py::test_a_primary_property_round_trips_through_a_record_row`)
-refuses a `CACHE_FORBIDDEN_COLUMNS` entry for a name `public.point` has no COLUMN for, because that dict is
-keyed by record column names. See the audit's §5.1/§5.3.
+⚠️ **`used_memory` is NOT quoted for this pair.** The two runs' baselines differ by **847,688 B**, larger
+than the payload delta, so any residency marginal here would be the instrument's noise dressed as a
+measurement. The payload figure is exact and deterministic; the residency figure is **unmeasured**.
+
+**This arm measures the SIZE OF THE PRIZE, not a shipped change.** The move was withdrawn: two policy pins
+in `tests/test_cache_projection.py` (`:185-190`, `:243-246`) refuse the declaration until it is widened
+with a tail-only category — a decision belonging to `#10429`, which owns this route. The MECHANISM does
+honour the entry (`_props_from_row`'s `tail_denied` is the plain forbidden set plus its spellings,
+`cache_projection.py:2710`). See the audit's §5.1.
 
 ## Per-shape census (single run, `before` arm)
 
 | shape | payload bytes | note |
 |---|---|---|
-| `:Point` | 668,014 | `story_arc` 90,000 · `content` ~93,000 · `embedding` ~401,000 · the rest < 3,000 |
-| `:GraphEvent` | 3,648 | 19 nodes × ~192 B payload; the §9.1 figure of 801 B/turn includes block overhead |
-| `:Source` | 916 | |
-| `:Event` | 680 | |
-| `:Object` | 198 | |
-| `:Session` | 177 | 5 sessions — the capture-telemetry family is ~20 B/session |
-| `:Subject` | 139 | |
+| `:Point` | 668,014 | 66 nodes · `embedding` 474,348 · `content` 93,287 · `story_arc` 90,000 (this arm) · the rest < 11,000 |
+| `:GraphEvent` | 12,768 | 67 nodes × ~190 B payload; the §9.1 figure of 801 B/turn includes block overhead |
+| `:Source` | 916 | 2 nodes |
+| `:Event` | 680 | 3 nodes |
+| `:Session` | 303 | 7 nodes — the capture-telemetry family is ~20 B/session |
+| `:Object` | 198 | 2 nodes |
+| `:Subject` | 139 | 2 nodes |
+| **total** | **683,022** | `:Point` is 97.8 % of payload |
 
 ## Re-running it
 
@@ -102,7 +110,7 @@ eval "$uri"
 uv run python docs/evidence/13083-capability-census/probe_shape_bytes.py \
     --arm before --sessions 6 --turns 10 --legacy-prose > measurement-before.json
 uv run python docs/evidence/13083-capability-census/probe_shape_bytes.py \
-    --arm after  --sessions 6 --turns 10              > measurement-after.json
+    --arm after  --sessions 6 --turns 10 --legacy-prose > measurement-after.json
 uv run python tools/test_lane.py down
 ```
 

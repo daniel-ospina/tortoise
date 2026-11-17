@@ -1,7 +1,7 @@
 {
   "arm": "before",
   "tree": {
-    "git_head": "8762578f8c70e817875f66876f8ecebe3f798206",
+    "git_head": "0b5a03c51dd75f96385bb12c1c5d656c033b922c",
     "module": "/home/cmux/tortoise/.worktrees/13083-capability-audit/tortoise/sdk.py"
   },
   "corpus": {
@@ -25,9 +25,9 @@
     }
   },
   "used_memory_bytes": {
-    "before": 5235632,
-    "after": 7725240,
-    "delta": 2489608
+    "before": 4163696,
+    "after": 7407872,
+    "delta": 3244176
   },
   "property_bytes_by_label": {
     "EpMeta": {
@@ -48,8 +48,8 @@
       "participants": 20,
       "format": 15,
       "note": 10,
-      "classification_level": 8,
       "is_episodic": 8,
+      "classification_level": 8,
       "subject": 0,
       "object": 0
     },
@@ -122,8 +122,8 @@
       "updatedAt": 64,
       "id": 45,
       "title": 39,
-      "validFrom": 32,
       "capturedAt": 32,
+      "validFrom": 32,
       "sourceKind": 20,
       "sessionId": 12,
       "domain": 8,

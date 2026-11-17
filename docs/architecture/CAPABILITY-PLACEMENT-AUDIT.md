@@ -65,10 +65,10 @@ record table** (relevant in §5.2).
 | 1 | `:Point` (claims, operators, turns) | `sdk.create_point`/`update_point`, `projection/entities._upsert_point_props`, `projection/propagation` | `public.point` | 66 (60 turn points + claims) |
 | 2 | `:Source` (documents, transcripts) | `sdk._create_source`, `_upsert_source`, `_upsert_document`, `sdk._materialize_session_source` | `public.source` | 2 |
 | 3 | `:Event` (lifecycle, AgentSession) | `sdk.create_event`, `_upsert_event`, `hosted_api` commit path | `public.event` | 3 |
-| 4 | `:Session` | `sdk._write_session_and_turns`, `projection/entities.py:3871`, `hosted_api:16304` | `public.session` | 5 |
+| 4 | `:Session` | `sdk._write_session_and_turns`, `projection/entities.py:3871`, `hosted_api:16304` | `public.session` | 7 |
 | 5 | `:Object` | `sdk.create_object`/`create_entity`, `_upsert_object` | `public.object` | 2 |
 | 6 | `:Subject` | `sdk.create_subject`, `_upsert_subject` | `public.subject` | 2 |
-| 7 | `:GraphEvent` (change feed) | `event_store.append_event` (`sdk._emit_event`) | **—** | 19 |
+| 7 | `:GraphEvent` (change feed) | `event_store.append_event` (`sdk._emit_event`) | **—** | 67 |
 | 8 | `:GraphEventMeta` (seq allocator) | `event_store.next_seq` | — | 1 |
 | 9 | `:EpMeta` (EP version) | `sdk._advance_ep_version` | — | 1 |
 | 10 | `:Meta` (residency declaration) | `residency.py:284` | — | 0 (arm not exercised) |
@@ -77,8 +77,9 @@ record table** (relevant in §5.2).
 | 13 | `:CommitRecord` (idempotency) | `commit_idempotency.py:45` | — | 0 (not exercised) |
 | 14 | `:DeliveryReceipt` (webhook) | `webhook_delivery.py:487` | — | 0 (not exercised) |
 | 15 | `:Batch`, `:PipelineStage`, `:PackInstall`, `:PackSelection` | `mining.py`, `pipeline.py`, `pack_state.py`, `hosted_api:32965` | — | 0 (not exercised) |
+| 16 | `:ContextSubscription` (webhook registration) | `webhook_delivery.py:406` (`CREATE (s:ContextSubscription {…})`) | — | 0 (not exercised) |
 
-Rows 10–15 are declared **not exercised by the instrument** rather than counted as zero-cost — a shape
+Rows 10–16 are declared **not exercised by the instrument** rather than counted as zero-cost — a shape
 the corpus does not create is a shape this document has *not* measured, and saying so is the difference
 between a census and a guess.
 
@@ -130,7 +131,7 @@ Phase 2 and its stop condition).
 | `tortoise/sdk.py:38818` | `MATCH (s:Source)-[:references]->(o:Source)` — source-to-source provenance | **traversal** |
 | `tortoise/sdk.py:52878` | `MATCH (s:Source {url:$url})-[:references]->(n)` | **traversal**. |
 | `tortoise/sdk.py:15659` (target side) | `(p:Point)-[:extractedFrom]->(s:Source)` — every claim must reach its source (§9.4 ①) | **traversal** |
-| `tortoise/search_engine.py:3011` | the fulltext index is on **`Source._searchText` for every Source** | **fulltext index** |
+| `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('<label>', $query)` — the index `:3011`'s note says is built on **`Source._searchText` for every Source** | **fulltext index** |
 
 **Verdict: `graph`.** The link is load-bearing: §9.4 makes "every claim walks up to its Source" a
 mechanism, not a citation nicety.
@@ -175,11 +176,16 @@ a **property-level** question and is listed in §6, not silently folded into thi
 
 | reader (`file:line`) | what it does | capability |
 |---|---|---|
-| `tortoise/event_store.py:922` `read_after` | `seq > $after` **ordered range scan**, optional type filter, `LIMIT`/dedupe | **none** |
+| `tortoise/event_store.py:922` `read_after` | `e.seq > $after` **ordered range scan**, optional type filter, `LIMIT`/dedupe (the query text is `:991-993`) | **none** |
 | `tortoise/event_store.py:557`, `:657` | `MATCH (m:GraphEventMeta) RETURN max(m.last_seq)` — aggregate | **none** |
+| `tortoise/event_store.py:645`, `:1103` | `min(e.seq)` / `max(e.seq)` over `:GraphEvent` — aggregates | **none** |
+| `tortoise/event_store.py:801`, `:879`, `:1043` | per-page key existences and predicate deletes inside the emit/purge paths | **none** |
 | `tortoise/event_store.py:1014` `purge_expired`, `:1038` `purge_overflow` | predicate deletes | **none** |
-| `tortoise/hosted_backup.py:842` | `max(last_seq), max(first_seq)` — aggregate | **none** |
-| `tortoise/sdk.py:13587` (`poll_events`), `tortoise/webhook_delivery.py:1300`, `tortoise/why_snapshot.py:526`, `tortoise/change_feed.py:73` | all page through `read_after` | **none** |
+| `tortoise/hosted_backup.py:842`, `:890` | `max(last_seq), max(first_seq)` — aggregates | **none** |
+| `tortoise/sdk.py:13766` (the `read_after` call inside `poll_events`, `:13642`) | pages the feed | **none** |
+| `tortoise/webhook_delivery.py:1041`, `:1300` | page the feed / cursor read for delivery | **none** |
+| `tortoise/why_snapshot.py:526` | pages the feed to rebuild a why-snapshot | **none** |
+| `tortoise/hosted_api.py:4091`, `:4104` | subscriber poll | **none** |
 
 **Verdict: `record_only`.** Not one traversal, not one adjacency, not the fulltext index, not EP state,
 not a vector. This is the single largest remaining graph resident on the record-armed lane: §9.1's own
@@ -200,12 +206,13 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:WhySnapshot` | `why_snapshot.py:237`, `:303`, `:350`, `:484` | **none** |
 | `:Tag` | `sdk.py:21865`, `:22209`, `:28051`, `:28069`; `mcp_server.py:10730` | **none** (the `TAGGED` edges are the traversal; the node is the endpoint label) |
 | `:CommitRecord` | `commit_idempotency.py:45`, `:57`, `:65`, `:194` | **none** |
-| `:DeliveryReceipt` | `webhook_delivery.py:465`, `:475`, `:487`, `:502` | **none** |
+| `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`), `:502` (page) — `:487` is the CREATE, not a reader | **none** |
 | `:Batch` | `mining.py:94`, `:150`, `:178`; `projection/__init__.py:14295` | **none** |
 | `:PipelineStage` | `pipeline.py:349`, `:482`, `:685`, `:731` | **none** |
 | `:PackInstall` / `:PackSelection` | `export.py:126`; `hosted_api.py:32965`; `projection/__init__.py:1563`, `:2310`, `:14424` | **none** |
+| `:ContextSubscription` | `webhook_delivery.py:406` (CREATE), `:425`, `:435`, `:444`, `:452`, `:461`, `:1113`; `why_snapshot.py:557` | **none** |
 
-**Verdict `record_only` for all ten**, with the §5.2 blocker recorded — none has a record table, so none
+**Verdict `record_only` for all eleven**, with the §5.2 blocker recorded — none has a record table, so none
 can be expressed as a tier today. They are cheap *individually* (1–2 nodes per graph) and this document
 does not pretend otherwise: they are listed because the census is complete, not because they are a lever.
 
@@ -226,7 +233,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 6 | `:Session` core (`id`, `harness`, counters) | §2.4 | **yes** — `CONTAINS` | **graph** | the session→turn/claim walk is the read path |
 | 7 | `:Session` capture telemetry family | whole-node reads only | **no** | **`record_only`** (property-level; §6.2) | a write stamp, not an edge — but see the blocker |
 | 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject`, supersession, degree | **graph** | supersession is a chain, not a column |
-| 9 | `story_arc` (on **any** label) | **none** — zero Cypher readers | **no** | **`record_only`** ⛔ **move blocked** (§5.1) | its one reader is `public.session_narrative`; no declaration can name a tail-only key (§5.1) |
+| 9 | `story_arc` (on **any** label) | **none** — zero Cypher readers | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one reader is `public.session_narrative`; the mechanism CAN deny it, two policy pins currently refuse the entry |
 | 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no record table (§5.2) |
 | 11 | bookkeeping labels (§2.7) | §2.7 | **no** | **`record_only`** ⛔ blocked | key lookups; no record table (§5.2) |
 | 12 | `_searchText` on a **non**-episodic `:Source` | FTS | **yes** | **graph** | the fulltext index's field set |
@@ -239,84 +246,106 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 
 Corpus: `--sessions 6 --turns 10`, `--turn-chars 1500`, 384-dim vectors, record **unarmed** (so turns are
 nodes — the population a `record_only` move removes from). Payload = `sum(size(prop))`, a **lower bound**
-(see §1.1). Full output: `docs/evidence/13083-capability-census/measurement-*.json`.
+(§1.1). Full output: `docs/evidence/13083-capability-census/measurement-*.json`; every figure below is
+re-derived from those files.
 
-| shape | payload bytes | share | note |
+| shape | nodes | payload bytes | share of payload |
 |---|---|---|---|
-| `:Point` | 668,014 | 96.5 % | of which `embedding` 401,000-ish and `content` ~ 90,000; `story_arc` 90,000 in the `before` arm only |
-| `:GraphEvent` | 3,648 | 0.5 % | 19 nodes × ~192 B payload; the §9.1 figure of **801 B/turn** includes block overhead |
-| `:Event` | 680 | 0.1 % | |
-| `:Source` | 916 | 0.1 % | |
-| `:Object` | 198 | 0.03 % | |
-| `:Subject` | 139 | 0.02 % | |
-| `:Session` | 177 | 0.03 % | 5 sessions — the capture telemetry family is ~20 B/session |
+| `:Point` | 66 | **668,014** | **97.8 %** |
+| … of which `embedding` | | 474,348 | 69.4 % |
+| … of which `content` | | 93,287 | 13.7 % |
+| … of which `story_arc` (this arm only) | | 90,000 | 13.2 % |
+| `:GraphEvent` | 67 | **12,768** | **1.87 %** |
+| `:Source` | 2 | 916 | 0.13 % |
+| `:Event` | 3 | 680 | 0.10 % |
+| `:Session` | 7 | 303 | 0.04 % |
+| `:Object` | 2 | 198 | 0.03 % |
+| `:Subject` | 2 | 139 | 0.02 % |
+| `:GraphEventMeta` / `:EpMeta` | 2 | 4 | 0.001 % |
+| **total** | | **683,022** | |
 
-**Read this table carefully.** The payload census says the graph is **`:Point`-shaped**, and inside
-`:Point` it is **vector- and content-shaped** — both of which are `graph` verdicts (§3 rows 1–3). The
-audit's honest conclusion is therefore *not* "most of the graph can leave": it is **"the shapes that can
-leave are small in payload but not in block overhead, and `:GraphEvent` is the one that repays a move."**
+**Read this table carefully.** The payload census says the graph is **`:Point`-shaped (97.8 %)** and that
+inside `:Point` it is **vector- and content-shaped** — both of which are `graph` verdicts (§3 rows 1–3).
+`:GraphEvent` is **1.87 %** of payload but is the **largest non-Point resident** and the only label with no
+capability reader at all; its ~190 B/node payload understates it, because §9.1's own measurement puts it at
+**801 B/turn** once block overhead is counted.
 
----
+**The audit's honest conclusion is therefore not "most of the graph can leave":** it is *"the shapes that
+can leave are small in payload, `:GraphEvent` is the one that repays a move, and the rest of the graph is
+vector and text that a graph operation genuinely reads."*
 
 ## 5. The moves
 
-### 5.1 ⛔ `story_arc` on a `:Point` — verdict `record_only`, move BLOCKED by the mechanism's own invariant
+**The census found the verdicts; two PRECONDITIONS decide which of them can move today, and the census names
+both precisely.** One move was built and then withdrawn — not because the mechanism cannot express it, but
+because two policy pins in `tests/test_cache_projection.py` refuse the declaration until someone deliberately
+widens them, and that decision belongs to the issue that owns the route.
+
+### 5.1 ⛔ `story_arc` on a `:Point` — verdict `record_only`; the mechanism CAN deny it, two pins gate it
 
 **The shape.** §9.1/D1's S1 narrative. `cache_projection.CACHE_FORBIDDEN_COLUMNS` declares it for `source`
 and `event` (`#10394`); the **`:Point`** route is named as open in §9.1's own residual text ("the `point`
 table is a SEPARATE route … a legacy turn snapshot whose `props` tail carried the prose can still land it on a
 `:Point` (`#10429`'s label)").
 
-**The census entitlement is solid.** `story_arc` has **zero Cypher readers on any label**:
-`rg -n 'story_arc' tortoise/ -g '*.py' | grep -E 'MATCH|RETURN|WHERE'` returns **nothing**, and the key's one
-reader is `public.session_narrative` (`record_text.serve_from_record`). The live write door already refuses it
-(`sdk._refuse_unpaired_narrative`). Under the issue's rule the shape is `record_only`.
+**The census entitlement.** `story_arc` has **zero Cypher readers on any label**: `rg -n 'story_arc' tortoise/
+-g '*.py'` returns 147 hits and **not one** is inside a `MATCH`/`RETURN`/`WHERE`. Its one reader is
+`public.session_narrative` (`record_text.serve_from_record`). The live write door already refuses it
+(`sdk._refuse_unpaired_narrative`).
 
-**The move was built, and the repo's own pin refused it — correctly.** Adding
-`CACHE_FORBIDDEN_COLUMNS["point"] = {"story_arc"}` is a **category error**, and two pre-existing tests say so:
+**The mechanism reaches it — measured, not assumed.** `_props_from_row`'s tail filter is
+`tail_denied = forbidden | {placement spellings}`, i.e. it denies the **plain** forbidden set as well as its
+column-spelling widening (`cache_projection.py:2710`). So `CACHE_FORBIDDEN_COLUMNS["point"] = {"story_arc"}`
+**does** drop the key from a point row's `props` tail. ⚠️ An earlier draft of this document claimed the
+opposite ("no declaration in the tree can name a tail-only key") — that was **wrong**, and it was wrong in the
+direction that matters: it told `#10429` the closure was impossible when it is one declaration plus a test
+edit. Verified in-process: without the entry `node_from_row("Point", row)` keeps `story_arc`; with it, the key
+is dropped.
 
-- `tests/test_cache_projection.py::test_a_primary_property_round_trips_through_a_record_row` fails with
-  *"a declared not-projectable column was never exercised: [('point', 'story_arc')]"* —
-  `CACHE_FORBIDDEN_COLUMNS` is keyed by **RECORD COLUMN NAME**, and `public.point` **has no `story_arc`
-  column** (`placement_columns()["point"]` does not contain it). An entry naming a non-column would guard a
-  name forever while the real route stayed open — exactly the stale-entry failure that pin exists to catch.
-- `tests/test_cache_projection.py::test_every_primary_property_has_a_canonical_spelling_that_is_projected`
-  pins the dict **exactly** (`{source, event}`), and its own comment says an added entry is *"a decision that
-  belongs in this test and in §9.1's placement rows, not in a one-line dict edit"*.
+**What actually refuses it is a TEST POLICY, and both pins are deliberate:**
 
-**So the gap is stated, not worked around.** The `:Point` prose arrives through the row's **`props` TAIL**,
-and no declaration in the tree can name a tail-only key for a table that lacks the column. The tail's
-point-side deny is the FOLD's skip set (`projection/entities.py:_POINT_DENY`), and §9.1 records why that lever
-is **destructive** on this key: a `rebuild_all` over a journal whose creation carried the prose would
-**DELETE** the property from every legacy `:Point` — a graph-side `REMOVE n.story_arc` that no instrument
-ships, on a population where (for pre-`#9555` rows) the graph copy may be the **only** copy.
+- `tests/test_cache_projection.py:185-190` pins the dict **exactly** (`{source, event}`) so that adding an
+  entry cannot slip in as "a one-line dict edit" — its own comment says the decision *"belongs in this test
+  and in §9.1's placement rows"*.
+- `tests/test_cache_projection.py:243-246` asserts every declared not-projectable name is a **real, exercised
+  COLUMN** of that table. `public.point` has no `story_arc` column, so a tail-only entry reddens it — the pin
+  cannot distinguish "a stale entry guarding a name that projects freely" from "a tail-only key, which has no
+  column to exercise".
 
-**What it would be worth, measured** — so the follow-up has a number, not an adjective. Corpus
-`--sessions 6 --turns 10`: 60 legacy turn points whose tail carries 1,500 B of prose each. The only thing
-varied between arms is whether the projection's `node_from_row` keeps the key.
+**So the decision is real and it is `#10429`'s:** either the completeness pin learns a **tail-only category**
+(a declared name with no column, exercised through the `props` tail), or this route stays open. This document
+records the finding and the number; it does not widen another issue's pin.
 
-| arm | `:Point` payload | `story_arc` bytes | `used_memory` delta |
+⛔ **And the fix must be a projection-only deny, not a fold deny.** A `_POINT_DENY` entry (`projection/`)
+would make a `rebuild_all` **DELETE** `story_arc` from every legacy `:Point` — a graph-side `REMOVE` that no
+instrument ships, on a population where for pre-`#9555` rows the graph copy may be the **only** copy (§9.1
+residual (a)). The projection deny stops the WRITE and deletes nothing.
+
+**What it would be worth, measured.** Same corpus both arms (`--legacy-prose` on BOTH), and the ONLY thing
+varied is the declaration: `before` pops the entry, `after` sets it. No prose-less arm is compared against a
+prose-bearing one.
+
+| arm | `:Point` payload | `story_arc` bytes | `:Point` nodes |
 |---|---|---|---|
-| **with** the prose | 668,014 | **90,000** | 2,489,608 |
-| **without** it | 578,584 | **absent** (= 0) | 2,338,392 |
-| **Δ** | **−89,430** | **−90,000** | **−151,216** |
+| **before** (entry absent) | 668,014 | **90,000** | 66 |
+| **after** (entry present) | 578,014 | **0** | 66 |
+| **Δ** | **−90,000** | **−90,000** | 0 |
 
-⚠️ **Read the arithmetic honestly, and the instrument's limits with it.** The payload delta is
-**1,490.5 B/turn**, not 1,500 — `Point.content` also moved (+570 B) between the runs, so 1,500 B/turn is true
-of `story_arc` alone. The arms are **not** a perfectly clean single-variable A/B: the `used_memory`
-*benchmark* also differs between them by 95,296 B (5,235,632 vs 5,330,928), because the server is not a
-calibrated instrument. But the `story_arc` **payload** measure is exact and deterministic, and the
-`used_memory` delta (151,216 B over 60 points ≈ **2,520 B/point**) is larger than the observed noise. Treat
-~2,520 B/point as an order-of-magnitude witness that **the block entry costs ~68 % more than `sum(size())`
-reports** — which is why every payload number in §4 under-reads true residency.
+That is **exactly 1,500 B/turn** over 60 seeded legacy turn points, and the whole delta is `story_arc` —
+`Point.content` and `Point.embedding` are byte-identical between the arms (93,287 and 474,348 in both), which
+is the check that the arms are one variable. Total `:Point` payload falls **13.5 %**.
 
-**The measurement is kept** (`docs/evidence/13083-capability-census/`) because the follow-up needs it: it is
-the size of the prize, **not** evidence of a shipped change. **No code from this lane changes projection
-behaviour.**
+⚠️ **`used_memory` is NOT quoted for this pair.** The two runs' baselines differ by **847,688 B** — larger
+than the payload delta — so the residency marginal is inside the instrument's noise and would be a fabricated
+precision. The payload figure is exact and deterministic; the residency figure is unmeasured, and saying so
+is the difference between a measurement and a decoration.
+
+**The instrument and both JSON arms are committed** (`docs/evidence/13083-capability-census/`) so `#10429` can
+re-run the closure the moment the pin decision lands.
 
 ### 5.2 ⛔ NOT SHIPPABLE under this mechanism, and exactly why
 
-The census's largest verdict (`:GraphEvent`, §2.6) and ten bookkeeping labels cannot be moved by
+The census's largest non-Point verdict (`:GraphEvent`, §2.6) and eleven bookkeeping labels cannot be moved by
 `cache_tier`, and the reason is a **precondition of the mechanism**, not an oversight:
 
 > `cache_tier` is a column on **`public.point`**. `read_record_view` applies the tier predicate **only**
@@ -324,7 +353,7 @@ The census's largest verdict (`:GraphEvent`, §2.6) and ten bookkeeping labels c
 > meaning because a **record table holds it**. A shape with **no record table** has nowhere for the row to
 > live once the graph refuses it.
 
-So for `:GraphEvent` and the ten bookkeeping labels the sequence must be: **give it a record home**
+So for `:GraphEvent` and the eleven bookkeeping labels the sequence must be: **give it a record home**
 (a `journal_event`-backed feed for `:GraphEvent`; a table for the others) → **then** tier it. That is
 `#13082` Phase 1 territory ("a migrated query must be *deleted* from the graph path in the same PR, and
 the graph-side data it needed becomes a candidate for `record_only` in the next capability audit").
@@ -333,14 +362,15 @@ the graph-side data it needed becomes a candidate for `record_only` in the next 
 and the `:GraphEvent` record home is **`#13094`**. ⛔ Nothing here arms a cap, a retention rule or an
 eviction policy — that is `#13084` and P0-c.
 
-### 5.3 The third gap, found by building the first move and watching the repo refuse it
+### 5.3 The two preconditions, side by side
 
-`cache_tier` is **row**-granular; `CACHE_FORBIDDEN_COLUMNS` is **column**-granular. A property the record
-stores in its **`props` TAIL** — a key the table has no column for — can be named by neither. That class is
-not hypothetical: `public.point`'s `props` tail is the open-set surface every legacy point property arrived
-through, and §5.1 is that class's first worked example.
+| precondition | shapes it blocks | what unblocks it |
+|---|---|---|
+| **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the nine other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
+| **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` | `#10429`: widen the completeness pin with a tail-only category (§5.1) |
 
----
+Neither is a census failure. Both are the mechanism's **precondition**, named so the next slice is executable
+instead of another audit.
 
 ## 6. Arguable shapes — listed with the question that would settle each
 

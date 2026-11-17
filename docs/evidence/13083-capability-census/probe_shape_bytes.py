@@ -185,8 +185,17 @@ def main() -> int:
             # PROCESS here rather than by checking out an older commit, so the
             # two arms run the same code and the same corpus and the declared
             # placement is the single difference between them.
+            # ⛔ `after` INJECTS the entry — it does not rely on the shipped
+            # tree carrying it. The move is not landed (#10429 owns it), so a
+            # probe that read the shipped declaration would produce two arms
+            # that differ by whether the prose was SEEDED AT ALL rather than by
+            # the declaration — the defect a review caught in the first cut of
+            # this instrument. Both arms are therefore never-prose-less: `before`
+            # REMOVES the entry, `after` SETS it, and the corpus is identical.
             if args.arm == "before":
                 cp.CACHE_FORBIDDEN_COLUMNS.pop("point", None)
+            else:
+                cp.CACHE_FORBIDDEN_COLUMNS["point"] = frozenset({"story_arc"})
             assert ("point" in cp.CACHE_FORBIDDEN_COLUMNS) == (args.arm == "after"), (
                 "the arm did not set up the declaration it names")
 
