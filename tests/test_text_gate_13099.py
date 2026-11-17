@@ -159,6 +159,27 @@ def test_question_class_is_measurably_degenerate():
     ev = oov_evidence(points, classes)
     assert ev["added_scaffold_tokens"] > 500
     assert ev["oov_fraction"] > 0.90
+    # ⛔ AND THE PUBLISHED NUMBER IS PINNED, NOT ONLY THE COMPUTED ONE. §4 states
+    # these as "measured, not merely asserted (`question_class_evidence` in the
+    # artifact)" — a pointer nothing dereferenced. Measured: changing the
+    # artifact's `question_class_evidence` AND §4's matching sentence together left
+    # this file GREEN, because the asserts above look only at what the code
+    # computes. That is the defect class this file fixes for §5's tables, §0/§6's
+    # savings and §6's prose facts, one surface over: an assertion on the code
+    # protects the code, not the record.
+    art = _artifact()
+    assert art["question_class_evidence"] == ev, (
+        "artifact.json's question_class_evidence is stale relative to "
+        "oov_evidence() — §4's figure would describe a corpus this code no "
+        "longer builds")
+    sec4 = _readme_section(
+        "4. The three query classes, and the one that cannot be read as evidence")
+    assert f"{ev['oov_fraction'] * 100:.2f} %" in sec4, (
+        f"§4 does not carry the measured OOV fraction "
+        f"({ev['oov_fraction'] * 100:.2f} %)")
+    assert f"{ev['added_scaffold_tokens']} scaffold tokens" in sec4, (
+        "§4 does not carry the measured scaffold-token count "
+        f"({ev['added_scaffold_tokens']})")
 
 
 # ── the decision rule — the invariant that protects the decision itself ─────
