@@ -1645,10 +1645,10 @@ def test_the_restore_verb_still_exists():
 
 
 # --------------------------------------------------------------------------- #
-# ── the live definition: newest by VERSION, and the function's OWN body ───────
+# ── the live definition: LAST BY FILENAME, and the function's OWN body ────────
 #
-# Two rules, each measured against what a REPLAY does rather than against what a
-# filename happens to look like. Both are #1095's own premise: every migration
+# Three rules, each measured against what a REPLAY does rather than against what a
+# filename happens to look like. The first two rest on #1095's own premise: every migration
 # basename matches `^([0-9]+)_` (ANY digit count — `.github/scripts/
 # check-migration-append-only:131`), and a correction to an applied migration
 # arrives as a NEW file, never an edit.
