@@ -370,6 +370,19 @@ _NO_JOURNAL = {
 #: `MATCH … RETURN` read with no write keyword in it.
 _UNRESOLVED = {
     "_assert_lifecycle_guard",
+    # #13035: the goal-ending guard's STORED half. `_stored_goal_ending_view`
+    # issues ONE statement — `MATCH (n:<label> {id:$id}) OPTIONAL MATCH
+    # (s)-[:CORRECTS]->(n) RETURN n.status, n.goalState, coalesce(...),
+    # collect(s.id)` — with no SET/CREATE/MERGE/DELETE/REMOVE and no write
+    # procedure, and it appends no record: it exists to grade the state a caller's
+    # write LEAVES, one read at most once per write, and it returns a dict. It
+    # belongs HERE rather than in the resolvable register or `_NO_JOURNAL`: the
+    # `{label}` fragment is interpolated, so the enumerator cannot PROVE the
+    # statement read-only — the same shape, and the same home, as
+    # `_stored_value_shapes`. Both doors that nest it (`update_point`,
+    # `_update_entity`) are accounted for by the per-function census, so this row
+    # declares a read and blesses no undeclared write.
+    "_stored_goal_ending_view",
     # #9962: the ONLY handle reach in this function is its redelivery read (the
     # prior-mitigation census: id/content/strength plus
     # `live._terminal_excluded('m.status')` as `is_current`). The unresolvable

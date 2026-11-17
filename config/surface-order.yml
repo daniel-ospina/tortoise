@@ -209,14 +209,23 @@ family_rank:
 # `manage_source_trust`, `check_connection` and `register_source` each take the slot of a member
 # that derived the same keyword. Measured with `tools/surface_manifest.py check`, which reds on
 # any disagreement — the ten rows below are its printed output.
+# #11609 DOOR RETIREMENT (lane E): 55 -> 48 advertised, and FOUR keyword counts moved with
+# the seven doors that left: `create` 14 -> 10 (`create_subject`/`create_object`/
+# `create_event`/`create_document`, all absorbed by `create_entity`),
+# `fetch` 11 -> 10 (`get_session` -> `get_entity(type="session")`), `list` 5 -> 4
+# (`list_batch` -> `list_knowledge(kind="batch")`), `find` 4 -> 3
+# (`find_cross_lens_candidates` -> `review_link_candidates(kind="cross_lens")`). The other
+# six keywords are unmoved because NO container row arrived here — this wave removes doors
+# only. Recorded deliberately, per the note above: the ten rows are the check's own output
+# against the merged registry, not a hand-arithmetic guess.
 baseline_counts:
-  fetch: 11
-  create: 14
-  list: 5
+  fetch: 10
+  create: 10
+  list: 4
   check: 6
   operate: 2
   update: 5
-  find: 4
+  find: 3
   delete: 4
   link: 2
   trace: 2

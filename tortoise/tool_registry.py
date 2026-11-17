@@ -1392,9 +1392,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_get_entity",
         id="surface.get_entity",
         description="Get any entity by ID, eventId, or url. `type` selects the node kind "
-                    "(point | entity | operator | events | governance), dispatching exactly as "
-                    "the retired per-type getters did; omit it to look the entity up by id. "
-                    "The canonical fetch-by-id tool.",
+                    "(point | entity | operator | event | session | events | governance), "
+                    "dispatching exactly as the retired per-type getters did; omit it to "
+                    "look the entity up by id. The canonical fetch-by-id tool.",
         risk="read",
         http_policy=True,
         sdk_method="get_entity",
@@ -2775,6 +2775,83 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_file_decision": 'tortoise_write_question(options, evidence, choice)',
     "tortoise_file_human_approval":
         'tortoise_record_decision(approver_id, artifact_id, point_ids, decision_content=...)',
+
+    # ── #11609 lane E — the doors no recorded decision protects ──────────────
+    # #11609's three Phase 2 container waves landed the containers (#12951
+    # READ/QUERY, #12915 WRITE/MUTATE, #12948 SOURCES/MINE). This is the wave that
+    # takes the doors they absorb off the ADVERTISED surface — but ONLY the ones
+    # that are safe to take, which is a much smaller set than "every live name
+    # absent from the 27-target":
+    #
+    # ⛔ EVERY other read door this wave could have retired is protected by a
+    # RECORDED DECISION above, and none of them is retired here:
+    #
+    #   · `search_sessions`, `suggest_entry_points`, `list_batches`,
+    #     `list_namespaces`, `diary_read`, `expand_relationships` — the SIX the
+    #     READ batch left live on purpose. Each declares `-> list[dict]`, the array
+    #     envelope that carries the #8482 `_safe` failure repair; their containers
+    #     return `Any`, so retiring the door moves that repair off the advertised
+    #     path. Pinned by
+    #     `tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`.
+    #     They retire in the batch that gives the container a declared envelope.
+    #   · `check_structure` and `calibrate_summary` — the same envelope reason
+    #     (`list[dict]`, no `rest_spec`), stated at #10914 and #12951.
+    #   · `issue_insight` and `session_context` — each carries a `rest_spec`
+    #     (`GET /v1/issue-insight`, `GET /v1/context`), so retiring the registry
+    #     entry deletes the REST route with it: a public API removal, and not this
+    #     batch's mandate.
+    #   · `search` — both reasons at once (`list[dict]` AND `GET /v1/search`).
+    #   · `query` — the paged destination two ALREADY-retired pointers name
+    #     (`paginated_query`, `query_points_by_tag`), and one of the two UNION
+    #     envelopes the #8482 sweep's shrinkage floor measures. Retiring it is a
+    #     re-pointing decision, not a door removal, so it is not this wave's.
+    #   · `create_point`, `diary_write` — `create_entity` has NO `point`/`diary`
+    #     arm (its types are subject|object|event|document), so retiring either
+    #     would remove the WRITE, not the name. `compute_confidence` is the same
+    #     shape at `check_confidence`, whose own docstring says so. `recall` is the
+    #     same shape one step further out: the canonical target (row 3) names
+    #     `recall_beliefs` as its absorber, that container is not live yet, and its
+    #     bridge-table destination `check_confidence` has no `recall` arm — so
+    #     retiring it today would delete the read, not fold it.
+    #   · `delete`/`delete_point`/`delete_entity`, `create_edge`/`create_operator`,
+    #     `events_poll`, `org_create`, `ingest`, `list_graphs` — their destinations
+    #     (`delete_knowledge`, `link_entities`, `poll_events`, the tenancy pair and
+    #     the builder-only `write_knowledge_batch`) are NOT live on `main` yet, so
+    #     there is no container to answer through.
+    #
+    # The seven below are the residue: `-> dict`, no `rest_spec`, no envelope
+    # repair, and a destination arm that exists and delegates to the very method
+    # the door calls. The names above are 25 of the 25 live names off the 27-target —
+    # if you find a live name that is not on the target and not in that list, the
+    # list is incomplete and that name is NOT safe to retire.
+    # ⛔ ONE HOP to a live name in every pointer (GitHub's own
+    # `DeprecatedToolAliases` states the limit: aliases are not transitive).
+    # Arguments are named where dropping one changes the operation — `type=` and
+    # `kind=` are the targets' OWN discriminators (bridge table Part A), the rule
+    # the WRITE block above states for `transfer_edges`.
+    "tortoise_get_session": 'tortoise_get_entity(id, type="session")',
+    "tortoise_find_cross_lens_candidates":
+        'tortoise_review_link_candidates(kind="cross_lens", limit=..., threshold=...)',
+    "tortoise_list_batch": 'tortoise_list_knowledge(kind="batch", id=...)',
+    # ⛔ THE KIND RIDES INSIDE `props`, because that is the only place the container
+    # accepts it: `tortoise_create_entity(type, name, props=None)` has no
+    # `subjectKind`/`objectKind`/`eventKind`/`documentKind` PARAMETER — the SDK pops
+    # each from `props` and REFUSES the write without one ("create_entity(type='event')
+    # requires eventKind"). A pointer naming it as a top-level kwarg is a `TypeError`
+    # for the migrating caller, and one naming it nowhere silently files the entity as
+    # `'other'` (`entities.py`'s `coalesce($sk, 'other')`), so both are written out.
+    # `create_entity`'s document arm also materialises the `:Source` a declared
+    # `extractedFrom` names (#8171), so the pointer carries `documentKind` too rather
+    # than leaving it to be guessed.
+    "tortoise_create_subject":
+        'tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})',
+    "tortoise_create_object":
+        'tortoise_create_entity(type="object", name=..., props={"objectKind": ...})',
+    "tortoise_create_event":
+        'tortoise_create_entity(type="event", name=..., props={"eventKind": ...})',
+    "tortoise_create_document":
+        'tortoise_create_entity(type="document", name=<title>, '
+        'props={"documentKind": ..., ...})',
 }
 
 

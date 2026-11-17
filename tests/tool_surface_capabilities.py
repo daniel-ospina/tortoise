@@ -371,15 +371,16 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # #3883 shim still resolves — so the binding stays checked rather than dropped.
     "_create_source": "tortoise_create_source",
     "_assess_source": "tortoise_assess_source",
-    # ⛔ `update_entity` LEFT this map in #12901 (wave 2), for the same reason
-    # `update` left it in #12915 review F1: the surface RETIRED the public
-    # `sdk.update_entity` (body kept as the private `_update_entity`), and the
-    # still-served `tortoise_update_entity` door now wraps
-    # `sdk.update_knowledge` — the same `_update_entity_any` relay
-    # `tortoise_update_point` calls. So the door's wrap site is ALREADY the
-    # declared `update_knowledge` key above, and keeping `update_entity` here
-    # reds the inverse arm ("declared write methods with no wrap site") on a
-    # method nothing writes through.
+    # ⛔ `update_entity` LEFT this map for TWO compounding reasons. #12901 (wave 2)
+    # retired the public `sdk.update_entity` (body kept as the private `_update_entity`),
+    # and before that #11609 lane B had already re-pointed `tortoise_update_entity` at
+    # `sdk.update_knowledge` — the same `_update_entity_any` relay `tortoise_update_point`
+    # calls — so no wrap site for `update_entity` survived in `mcp_server.py`.
+    # Either one alone reds the inverse arm ("declared write methods with no wrap site")
+    # on a method nothing writes through, and the stale key had in fact gone red on `main`
+    # in lane B's wake with nothing repairing it — a permanently red gate enforces nothing.
+    # The entity write is still mapped, under the method its door actually wraps:
+    # `update_knowledge` above.
 
     "create_edge": "tortoise_create_edge",
     "ingest": "tortoise_ingest",
