@@ -727,6 +727,38 @@ def _assert_the_artifact_pins_hold(art: dict) -> None:
                 f"arm {arm!r} reports an unmeasured identity with no note saying so")
 
 
+def _assert_the_evidence_shape_the_brief_leans_on(art: dict) -> None:
+    """The F5 claim on EITHER artifact shape — a tool-produced one included.
+
+    ⛔ `#13267` F2: this block indexed `art["construction_unrecorded"]["fields"]`
+    unconditionally, three lines under a comment saying regeneration cannot red
+    the suite — and the committed tool emits NO such key (it records
+    `construction.query_chars` instead), so a correct re-generation raised
+    `KeyError` at the one line that stayed legacy-shaped (measured). The three
+    committed files are hand-annotated and DO carry the block, which is why the
+    defect was invisible here.
+
+    So the legacy-only claim is gated on the shape that carries it, and the FACT
+    both shapes must satisfy — the knob the brief publishes as prose
+    (`--query-chars 200`, above) is visible in exactly one of the two places —
+    lives in `_assert_the_artifact_pins_hold`, which is called for both.
+    """
+    _assert_the_artifact_pins_hold(art)
+    construction = art["construction"]
+    unrecorded = (art.get("construction_unrecorded") or {}).get("fields", [])
+    assert ("query_chars" in construction) != ("query_chars" in unrecorded), (
+        "`query_chars` is the robustness arm's treatment knob, so it is visible "
+        f"in exactly ONE of the two places: construction="
+        f"{'query_chars' in construction}, "
+        f"construction_unrecorded={'query_chars' in unrecorded}")
+    if unrecorded:
+        # the committed runs predate the tool recording the knobs; where an
+        # artifact says a knob was NOT recorded, the treatment knob must be one
+        # of them — otherwise the brief's prose carries a value the artifact
+        # claims to hold, and a reader cannot tell which is evidence
+        assert "query_chars" in unrecorded
+
+
 def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
     """The four evidence defects of `#13267` F1/F3/F5/F6, pinned as a doc drift.
 
@@ -792,10 +824,7 @@ def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
     assert "--query-chars 200" in brief
     assert short["construction"]["read_limit"] != head["construction"]["read_limit"]
     for art in (head, short, ctrl):
-        _assert_the_artifact_pins_hold(art)
-        # the committed runs predate the tool recording the knobs — the artifacts
-        # name them as unrecorded, and the brief carries their values as prose
-        assert "query_chars" in art["construction_unrecorded"]["fields"]
+        _assert_the_evidence_shape_the_brief_leans_on(art)
 
     # F4: `git_head` never stands alone as the code identity again
     for art in (head, short, ctrl):
@@ -1039,6 +1068,13 @@ def test_the_briefs_result_tables_repeat_their_artifacts_cell_by_cell():
     → `1 of 300`, and `seed lost from window` `3` → `0` in the short-query table.
     Each cell below is compared against the artifact it claims to quote, in the
     cell position a reader reads it in — not against a substring of the file.
+
+    ⛔ F1 (this round): a table's ROW SET is part of the record too. Comparing the
+    rows the brief happens to carry cannot show an omission, and three omissions
+    measured GREEN on the pre-fix pins — the short-query k=15 row (the only cell
+    publishing `seed lost from window = 3` / `seed demoted = 2`) and either §5
+    tail. A dropped row is an omission, not a shorter table, so the published k
+    sets are declared and asserted here.
     """
     brief = (_DOCS / "research-brief.md").read_text()
     head = _artifact("paired-point-300.json")
@@ -1073,6 +1109,14 @@ def test_the_briefs_result_tables_repeat_their_artifacts_cell_by_cell():
     # ── §5, the falsifier that repeats the tails in prose ──────────────────
     tails = re.findall(r"([0-9.]+)\*\* \(@([0-9]+)\)", brief)
     assert tails, "the falsifier table is where the exact tails are published"
+    # ⛔ F1: the set of ks a table PUBLISHES is part of the record, so it is
+    # declared and asserted — iterating whatever rows the brief happens to carry
+    # left the harm-side tables unable to show an omission. Measured on the
+    # pre-fix pins: deleting the §5 `(@15)` tail stayed GREEN
+    shown_ks = sorted({int(k) for _, k in tails})
+    assert shown_ks == [3, 5, 10, 15], (
+        "the falsifier publishes a p at k = 3/5/10/15; the brief now carries "
+        f"{shown_ks} — a dropped tail is an omission, not a shorter table")
     for shown, k in tails:
         cell = head["arms"]["point"]["per_k"][f"k={k}"]
         _assert_prints(shown, cell["mcnemar_exact_p"], f"brief §5 p @{k}")
@@ -1104,6 +1148,14 @@ def test_the_briefs_result_tables_repeat_their_artifacts_cell_by_cell():
     n_short = short["population"]["sample"]
     header, rows = _table(brief, "seed lost from window", "seed demoted")
     assert rows, "the short-query arm is where the harm side is measurable"
+    # ⛔ F1: this table publishes k = 3/10/15 of the artifact's four, and it is
+    # the only place two of the harm figures appear — deleting its k=15 row (the
+    # `seed lost from window = 3` / `seed demoted = 2` cells) stayed GREEN before
+    # this pin, on a docs-only diff, which is the change class `tier1` exists for
+    published_ks = [int(_plain(row[0])) for row in rows]
+    assert published_ks == [3, 10, 15], (
+        "the short-query table publishes k = 3/10/15; the brief now carries "
+        f"{published_ks} — a dropped row is an omission, not a shorter table")
     for row in rows:
         k = int(_plain(row[0]))
         where = f"brief §4.1 short-query k={k}"
@@ -1168,7 +1220,10 @@ def test_a_regenerated_artifact_satisfies_the_same_doc_pins(_no_embedder_probe):
     same = {"item-000000": ["a"], "item-000001": ["b"]}
     art, _ = _build_fake_artifact(point_off=same, point_on=same,
                                   object_off=same, object_on=same)
-    _assert_the_artifact_pins_hold(art)
+    # ⛔ the SAME helper the three committed artifacts go through — this is the
+    # assertion that reds on a correct re-generation if the doc pins ever spell
+    # the legacy shape out as a requirement again (`#13267` F2/F5)
+    _assert_the_evidence_shape_the_brief_leans_on(art)
     # the pre-fix pins, verbatim in shape, against the tool's own output: each one
     # is what made a regeneration red, and each is REVERSED here so the defect
     # cannot return quietly
