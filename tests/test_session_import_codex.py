@@ -526,6 +526,34 @@ def _http_error(code: int, body: str) -> HTTPError:
     )
 
 
+def _typed_capacity_body() -> str:
+    """The `#12992` capacity refusal, built from the SERVER's own constants.
+
+    ⛔ A fixture that re-spells the wire shape is a second definition of it, and
+    that is exactly how this file came to model the REMOVED shape
+    (`{"detail": "capture capacity saturated …"}`) for two commits after the
+    server stopped emitting it: the two drifted and nothing compared them. So the
+    body is assembled from `hosted_api`'s constants here — if the server renames
+    a field, this fixture moves with it instead of going quietly stale.
+
+    Imported lazily on purpose: `tortoise.hosted_api` is a large module and this
+    file's collection should not pay for it.
+    """
+    from tortoise.hosted_api import (
+        _CAPTURE_CAPACITY_CODE,
+        _CAPTURE_CAPACITY_MESSAGE,
+        _CAPTURE_CAPACITY_RETRY_AFTER_S,
+        _CAPTURE_MAX_IN_FLIGHT,
+    )
+    return json.dumps({"detail": {
+        "code": _CAPTURE_CAPACITY_CODE,
+        "message": _CAPTURE_CAPACITY_MESSAGE,
+        "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+        "in_flight": _CAPTURE_MAX_IN_FLIGHT,
+        "limit": _CAPTURE_MAX_IN_FLIGHT,
+    }})
+
+
 def _import_env(tmp_path, monkeypatch):
     """Hermetic import environment: no network, no HOME, a tmp spool+receipts."""
     from tortoise.capture_spool import spool_dir
@@ -916,8 +944,13 @@ def test_a_503_whose_session_landed_writes_no_receipt_but_keeps_the_spool(
 
 
 @pytest.mark.parametrize("code,body", [
-    (429, '{"detail":"capture capacity saturated — too many captures in '
-          'flight; retry shortly"}'),
+    # ⛔ THE TYPED BODY THE SERVER ACTUALLY EMITS (#12992 review P2). This row used
+    # to carry the PRE-fix prose shape `{"detail": "capture capacity saturated …"}`
+    # — a body the server can no longer produce — so the fixture modelled a wire
+    # contract that had been removed underneath it. `None` means "build it from the
+    # server's own constants", which keeps the fixture from being a second
+    # definition of the shape it is meant to model (see `_typed_capacity_body`).
+    (429, None),
     (504, '{"detail":"The server\'s wait budget for this request was '
           'exceeded"}'),
 ])
@@ -934,6 +967,8 @@ def test_retryable_import_failure_is_spooled_for_the_next_drain(
     spool = _import_env(tmp_path, monkeypatch)
     args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
                            session_id="sid-retry")
+
+    body = _typed_capacity_body() if body is None else body
 
     def _raise(req, timeout=None):
         raise _http_error(code, body)
@@ -969,6 +1004,66 @@ def test_retryable_import_failure_is_spooled_for_the_next_drain(
     assert filed[0]["conversation"] == _EXPECTED_TURNS
     assert filed[0]["harness"] == "codex"
     assert filed[0]["session_id"] == "sid-retry"
+
+
+def test_the_typed_capacity_body_survives_the_client_path(monkeypatch):
+    """The server's ACTUAL `#12992` refusal, driven through the client's own seam.
+
+    The fixture this file carried modelled the PRE-fix body
+    (`{"detail": "capture capacity saturated …"}`), so nothing on the client side
+    had ever been run against the typed shape the server emits — the two could
+    drift and no test compared them (#12992 review P2). This drives the typed
+    body through `_session_post` (the ONE transport the spool replays through)
+    and asserts the two things a client-side reader needs:
+
+    * the OUTCOME CLASS does not move: `capture_outcome` still calls a capacity
+      `429` retryable, so `may_keep_entry` keeps the bytes. Typing the body must
+      not change a client's decision about the entry.
+    * the TYPED FIELDS survive the transport intact: `code` and `retry_after`
+      reach the client, which is what lets it honour the advertised delay
+      instead of prose-matching (#11225). `capture_outcome` deliberately does NOT
+      read them (it is a status→class table, and keying on server prose would
+      couple the client to a wording it ships independently of), so that half is
+      asserted HERE rather than there.
+
+    Mutations that RED this: (1) leave `_typed_capacity_body` alone and raise the
+    pre-fix prose string instead — the `code`/shape assertions RED; (2) add `429`
+    to a terminal arm in `capture_outcome` — the retryable pair REDs.
+    """
+    from tortoise.__main__ import _session_post
+    from tortoise.capture_receipts import capture_outcome, may_keep_entry
+    from tortoise.session_confirm import UNKNOWN
+
+    wire = _typed_capacity_body()
+
+    def _open(req, timeout=None):
+        assert req.get_method() == "POST"
+        raise _http_error(429, wire)
+
+    # The confirm-on-refusal GET (#4675) is a SEPARATE contract with its own
+    # tests; UNKNOWN is its pass-through verdict, so stubbing it keeps this test
+    # measuring the body→class path instead of re-testing that read.
+    monkeypatch.setattr("tortoise.session_confirm.confirm_capture",
+                        lambda *a, **k: UNKNOWN)
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+
+    outcome = _session_post("T.test-key", "https://api.tortoise.test")(
+        {"session_id": "sid-typed", "conversation": _EXPECTED_TURNS})
+
+    assert outcome.ok is False
+    assert outcome.status == 429
+    assert capture_outcome(outcome.status, outcome.detail) == "retryable"
+    assert may_keep_entry(outcome.status, outcome.detail) is True
+
+    detail = json.loads(outcome.detail)["detail"]
+    # The wire code is a CLIENT contract, so it is pinned as a literal here on
+    # purpose — a client branches on this string, not on the server's constant.
+    assert detail["code"] == "capture_capacity_saturated"
+    assert detail["retry_after"] == 30
+    assert set(detail) == {"code", "message", "retry_after", "in_flight", "limit"}
+    # The pre-fix sentence is still INSIDE `message`, so a legacy client that
+    # prose-matches a body which is now an object keeps matching it.
+    assert "capture capacity saturated" in detail["message"]
 
 
 @pytest.mark.parametrize("code", [400, 422])
