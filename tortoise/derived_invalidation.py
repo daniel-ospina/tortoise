@@ -351,11 +351,16 @@ def _retirement(node: Any, *, goal: bool = False) -> str | None:
     # a state derived from an input carrying it is exactly the stale conclusion
     # #11926 exists to retire (re-derivation mints a fresh claim, so nothing is
     # lost). MEASURED red before this arm existed:
-    # `update_entity(<goal>, status='outdated')` is an accepted public write and
+    # `update_entity(<goal>, status='outdated')` was an accepted public write and
     # the verdict came back ``None`` — HEALTHY, not `goal-retired`.
-    # `TERMINAL_EXCLUDED_STATUSES` = {retracted, superseded, outdated, archived} ∪
-    # {deprecated}: the first four are all writable on an Object and the last is
-    # legacy-only, so this is not over-broad (`draft`/`live` are not members).
+    # ⚠️ #11824 S0 closed that WRITE (the word is refused at the door now), which
+    # makes this arm's population the STORED rows only — which is what it always
+    # answered for. `TERMINAL_EXCLUDED_STATUSES` = {retracted, superseded,
+    # outdated, archived} ∪ {deprecated}: the first four are READ words whose
+    # writers are gone (``outdated`` refused; ``archived``/``retracted`` stored as
+    # ``deprecated``), and ``deprecated``/``superseded`` are the two a door still
+    # mints. The set stays as-is because it names what a ROW may hold, not what a
+    # writer may say, and `draft`/`live` are correctly not members.
     if isinstance(status, str) and status in TERMINAL_EXCLUDED_STATUSES:
         return f"its status is {status!r}"
     # The OTHER legacy spelling: `outdated=true` with a live status. No Object

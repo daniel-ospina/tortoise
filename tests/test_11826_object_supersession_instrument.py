@@ -2261,21 +2261,50 @@ def test_the_source_stripped_claim_names_its_idx_precondition(sdk):
 def test_a_non_canonical_live_spelling_is_still_live(sdk):
     """EP's liveness is ``_live_only``, NOT the literal ``status = 'live'``.
 
-    ``create_entity(obj, status='Live')`` is a door (so are 'LIVE' and 'active'),
-    and EP's deny-list treats every one of them as LIVE — it builds the factor. A
-    hand-spelled ``(status IS NULL OR status = 'live')`` filter dropped the row
-    instead: a false CLEAN over the exact defect this check exists for (measured on
-    the shipped ``_live_only`` filter, the row is reported; re-spelled as the
+    A row holding a non-canonical spelling (``'Live'``) is treated as LIVE by
+    EP's deny-list — it builds the factor. A hand-spelled
+    ``(status IS NULL OR status = 'live')`` filter dropped the row instead: a
+    false CLEAN over the exact defect this check exists for (measured on the
+    shipped ``_live_only`` filter, the row is reported; re-spelled as the
     literal, ``rows: []`` and ``count: 0``).
+
+    ⚠️ #11824 S0 split this test's premise in two: the WRITE DOOR no longer
+    mints a re-spelling (it stores the canonical word — asserted below), while
+    the READER must still read one that is already on a row. The row is therefore
+    written out of band; see the comment on the fixture.
     """
     o = _obj(sdk, "PolicyV1")
     # ``create_entity(status='Live')`` is the DOOR (``create_point`` validates the
     # same value, so the spelling reaches the store only through this one).
     p = sdk.create_entity("object", "AcmeGateway", objectKind="other",
                           status="Live")["node"]
+    # ⚠️ #11824 S0 — TWO different questions live in this test now, because S0
+    # moved the DOOR and deliberately left the READER alone.
+    #
+    # (1) The door NORMALISES a re-spelling: `status='Live'` is a declared word
+    #     in another case, so `lifecycle_vocabulary.read_caller_status` stores
+    #     the canonical `live` — silently (AX §1: a re-spelling supplies no
+    #     meaning we did not already have, so there is nothing to echo back).
+    #     This assertion used to read `[["Live"]]`, pinning the verbatim store
+    #     that S0 removes; it is now the opposite pin, and it still fails if the
+    #     normalisation is lost.
+    assert _q(sdk, "MATCH (n:Object {id:$i}) RETURN n.status", {"i": p["id"]}) == \
+        [["live"]], ("#11824 S0: the door stores the canonical word for a "
+                     "re-spelling of a declared status")
+    # (2) The READER is what this test is actually about, and it is UNCHANGED: a
+    #     row that ALREADY holds a non-canonical spelling must be read as LIVE
+    #     by EP's `_live_only`, not dropped by a literal ``status = 'live'``
+    #     filter. No door can mint that spelling any more, so the row is written
+    #     OUT OF BAND — which is also the population that matters, since stored
+    #     rows keep whatever they hold (no backfill, #11824 §1) and a raw Cypher
+    #     producer can still mint one.
+    sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$i}) SET n.status = 'Live'",
+        params={"i": p["id"]},
+    )
     sdk.create_direct_edge("IMPL", p["id"], o["id"])
     assert _q(sdk, "MATCH (n:Object {id:$i}) RETURN n.status", {"i": p["id"]}) == \
-        [["Live"]], "fixture drifted: the door must store the spelling verbatim"
+        [["Live"]], "fixture drifted: the legacy spelling is not on the row"
     _obj(sdk, "PolicyV2")
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     issues = [i for i in _issues(sdk, "superseded_object_active_edges")

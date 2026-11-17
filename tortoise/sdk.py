@@ -6349,19 +6349,44 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
               and len(named_kinds) == 1 else None)
     moved = named[0][2]
     if target is not None and target != t:
-        # ⛔ ROUTING MUST NEVER TURN A LEGAL WRITE INTO A REFUSAL (#1934). The
-        # Subject door validates `status` against ONTOLOGY §4.2; the Object door
-        # validates nothing. So routing object→subject with an Object-only status
-        # (`status='active'`) would RAISE where the caller's write previously
-        # succeeded — a refusal invented by this fix. When that would happen the
-        # write keeps the layer the caller asked for and is REPORTED instead: no
-        # write is ever refused, and no prop is ever rewritten to fit.
-        # ⚠️ `isinstance` FIRST, exactly as the Subject door's own validation does
-        # (`_subj_status` below): `_SUBJECT_STATUS_VALUES` is a frozenset, so
-        # membership HASHES the operand and an unhashable `status` (a list/dict)
-        # raised `TypeError: unhashable type` HERE — a crash invented by a guard.
-        # A non-str status is not routable (the Subject door would refuse it), and
-        # it is not a crash either.
+        # ⛔ ROUTING MUST NEVER TURN A LEGAL WRITE INTO A REFUSAL (#1934). This
+        # guard was written when the Subject door validated `status` and the
+        # Object door validated nothing, so routing object→subject with an
+        # Object-only status (`status='active'`) raised where the caller's write
+        # previously succeeded — a refusal invented by this fix. When that would
+        # happen the write keeps the layer the caller asked for and is REPORTED
+        # instead: no write is ever refused, and no prop is ever rewritten.
+        #
+        # ⚠️ #11824 S0 RETIRED THE ASYMMETRY THAT MOTIVATED THIS BRANCH:
+        # `_SUBJECT_STATUS_VALUES` is now the same four lifecycle words every
+        # knowledge kind takes, so there is no longer a status that is legal on an
+        # Object and illegal on a Subject.
+        #
+        # ⛔ BUT THIS TEST IS RAW SET MEMBERSHIP AND THE DOOR NORMALISES, so the
+        # two do NOT agree on every legal spelling. `blocked` is false for exactly
+        # the four canonical words, and TRUE for a re-spelling (`'Live'`,
+        # `' live '`) and for a declared synonym (`archived`, `retracted`) — all of
+        # which the lifecycle door ACCEPTS and stores canonically. Measured
+        # consequence, recorded on #11824 rather than fixed here because it is a
+        # ROUTING decision and not a vocabulary one: an Object write naming a
+        # Subject-layer kind lands as `:Object` with `status='archived'` and as
+        # `:Subject` with `status='deprecated'`, although both store `deprecated`.
+        # Deriving `blocked` from the door's own verdict — and then asking whether
+        # the branch has any reachable case left — is the follow-up.
+        #
+        # What the branch still does is keep the ROUTER from being the thing that
+        # decides a refusal, and from attributing the error to the wrong subsystem
+        # when the door refuses the write a moment later (`active` reaches it as a
+        # POSITION word). It no longer turns a landing write into a refusal, which
+        # is what the `why` text below now says.
+        # ⚠️ A TYPE TEST FIRST, which is the same ORDER the lifecycle door uses
+        # (`read_caller_status` tests the type before it consults any set — with
+        # `issubclass(type(value), str)` there, deliberately, so a value claiming
+        # `__class__ = str` cannot pass): `_SUBJECT_STATUS_VALUES` is a frozenset,
+        # so membership HASHES the operand and an unhashable `status` (a
+        # list/dict) raised `TypeError: unhashable type` HERE — a crash invented by
+        # a guard. A non-str status is not routable (the lifecycle door refuses it
+        # as its first arm), and it is not a crash either.
         _status = props.get("status", "live")
         blocked = (target == "subject"
                    and not (isinstance(_status, str)
@@ -6375,10 +6400,10 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
         return t, {"code": "kind_other_layer", "kind": moved,
                    "layer": t, "actual": (target,),
                    "why": (f"the write's status {props.get('status')!r} is not one "
-                           f"of the {target.capitalize()} lifecycle's "
-                           f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))} values, "
-                           f"and re-routing would refuse a write that is legal "
-                           f"at this door")}
+                           f"of the {target.capitalize()} lifecycle's canonical "
+                           f"words ({', '.join(sorted(_SUBJECT_STATUS_VALUES))}) as "
+                           f"spelled, so the write keeps the layer the caller "
+                           f"asked for")}
     # 2. A kind declared only on other layer(s) cannot be re-routed here: report
     #    it (warn-not-block) and let the write land as asked.
     return t, _first_layer_mismatch(named, t)
@@ -49428,15 +49453,22 @@ class TortoiseSDK:
         #
         # ⚠️ RESIDUAL, on the STORED side, and NARROWED BY THIS PR (#12896 review,
         # P2) rather than left as it was: this fix guards the TARGET's type and
-        # hashability. A row whose stored `status` is a list is reachable at all
-        # only because a LIVE row accepts `status=['live']` (#10371's vocabulary
-        # hole). Before the P2 above, that stored shape made the dead-set build
-        # raise `TypeError: unhashable type: 'list'` on the NEXT lifecycle write;
-        # the dead set now takes `str` stored values only, so NO traceback escapes
-        # here (measured: stored `['live']`, then `'live'`/`['live']`/`123`/`None`
-        # all ACCEPTED, row intact). What is left is the VOCABULARY hole, not a
-        # traceback — #12869's wording predates this narrowing and should be
-        # re-measured there before it is restated.
+        # hashability. A row whose stored `status` is a list was reachable at all
+        # only because a LIVE row USED TO accept `status=['live']` — the
+        # vocabulary hole #11824 S0 closed at the write door (a non-string is now
+        # refused as the door's FIRST arm, shape before vocabulary, the ordering
+        # #12869/#12910 gives the Object doors). Rows written before that still
+        # hold the shape, which is the population this arm answers for. Before the
+        # P2 above, that stored shape made the dead-set build raise
+        # `TypeError: unhashable type: 'list'` on the NEXT lifecycle write; the
+        # dead set now takes `str` stored values only, so NO traceback escapes
+        # here (measured BEFORE S0's door: stored `['live']`, then
+        # `'live'`/`['live']`/`123`/`None` all were ACCEPTED, row intact; today
+        # only `'live'` lands — the other three are refused with the door's
+        # `ValueError`, which is the narrowing this work was for). What is left
+        # is the STORED-side question, not
+        # a traceback and no longer a write-side hole — #12869's wording predates
+        # both narrowings and should be re-measured there before it is restated.
         #
         # The remedy is deliberately NOT `supersede()`: that door routes to
         # `supersede_point`/`invalidate_point`, which are `:Point`-only and raise

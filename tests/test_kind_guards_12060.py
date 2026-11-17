@@ -1110,24 +1110,42 @@ class TestReviewFindingsClosed:
         r2 = sdk.create_object("acme thing", props={"intent": "measured"})
         assert _node_props(sdk, r2["id"])["intent"] == "measured"
 
-    def test_an_object_to_subject_redirect_cannot_turn_a_legal_write_into_a_refusal(
+    def test_the_redirect_still_abstains_for_a_word_that_is_no_longer_a_status(
             self, sdk, monkeypatch):
-        """#12060 review P1. The Subject door validates `status` against ONTOLOGY
-        §4.2 and the Object door validates nothing, so a redirect that moves an
-        Object write onto the subject layer with an Object-only status raised
-        `ValueError: Invalid status 'active' for a :Subject` — a refusal INVENTED
-        by a guard, the exact thing `_kind_layer_note` refuses to do three lines
-        later. MEASURED before the fix with this same pack guard."""
+        """#12060 review P1 — RESTATED BY #11824 S0, arm preserved.
+
+        The original defect: the Subject door validated `status` against ONTOLOGY
+        §4.2 and the Object door validated nothing, so a redirect that moved an
+        Object write onto the subject layer carrying an Object-only status
+        (`active`) raised `ValueError: Invalid status 'active' for a :Subject` —
+        a refusal INVENTED by a guard, the exact thing `_kind_layer_note` refuses
+        to do three lines later. MEASURED before the fix with this same pack
+        guard.
+
+        ⚠️ S0 retires the PREMISE and keeps the ARM. There is no longer a status
+        legal on an Object and illegal on a Subject — every knowledge kind takes
+        the same four words (`tortoise/lifecycle_vocabulary.py`), and `active` is
+        a POSITION word refused at EVERY door. So the abstention can no longer
+        turn a refusal into a legal write (the write is refused either way), but
+        it still FIRES, and that is what is asserted: the guard does not move the
+        write, and the caller gets ONE refusal naming a performable repair rather
+        than a guard-invented status error. The `roleHolder` half of the same arm
+        is unaffected and still load-bearing — it is pinned separately.
+        """
         guard = Confusion(
             rule="acme:org", when="nameMatches", pattern=r"^acme-org-[0-9]+$",
             redirect="core:organization", fallback="core:Project",
             reason="an org name", declaring_pack="acme")
         monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: (guard,))
-        r = sdk.create_object("acme-org-7", status="active")
-        assert r.get("id"), "the write was refused by a guard"
-        assert r["kind_redirect_skipped"]["reason"] == \
-            kg.SKIP_STATUS_NOT_LEGAL_ON_SUBJECT
-        assert _labels_kinds(sdk, r["id"])[0] == ["Object"], "the write was moved"
+        with pytest.raises(ValueError) as exc:
+            sdk.create_object("acme-org-7", status="active")
+        message = str(exc.value)
+        assert "status 'active' was refused" in message
+        assert "advance_stage" in message, \
+            "the refusal must name the stage move that replaces the position word"
+        assert sdk._get_proj().g.query(
+            "MATCH (n) WHERE n.name = 'acme-org-7' RETURN count(n)",
+        ).result_set == [[0]], "a refused write must land nothing"
         # …and the tally was CORRECTED, not left claiming an accepted redirect.
         assert {x["outcome"] for x in kind_guard_counts()} == {"skipped"}
 

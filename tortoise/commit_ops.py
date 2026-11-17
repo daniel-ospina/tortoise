@@ -49,20 +49,32 @@ _logger = logging.getLogger(__name__)
 # recall/read-surface tuple and it is deliberately narrower than
 # ``live.TERMINAL_EXCLUDED_STATUSES`` (which adds ``outdated``). A
 # retracted/superseded/deprecated/archived Object is a dead Object — no current
-# state to report. (§4.3 is where a family's declared words live: it accepts
+# state to report. (§4.3 is where a family's declared words live: it still lists
 # ``draft``, ``live``, ``superseded``, ``deprecated``, ``archived``,
-# ``in_progress``, ``completed``. An earlier cut of this comment claimed the
-# Object family had "no ``draft`` state", which is false — `create_object(
-# status='draft')` is accepted, and the object fold seeds `draft` for a
-# birth-record carrier — so the claim was deleted rather than reworded.)
+# ``in_progress`` and ``completed``. ⚠️ The last two are read as POSITIONS by
+# #11824 S0 — the write door REFUSES them on every knowledge kind (they are
+# pipeline stages, design §3.2/§4) — so §4.3's row is the legacy shape that
+# #11824 S4 reverses; it is quoted here as the document says it, not as a list
+# of writable words. An earlier cut of this comment claimed the Object family
+# had "no ``draft`` state", which was false — `create_object(status='draft')` is
+# accepted, and the object fold seeds `draft` for a birth-record carrier — so the
+# claim was deleted rather than reworded.)
 #
-# ⛔ "No ``outdated`` concept" is NOT "nothing writes it": ``update_entity``
-# accepts ``status='outdated'`` on an Object today, and
-# ``tests/test_11926_derived_invalidation.py`` pins it — the test BODY writes
-# ``update_entity(<Object>, status='outdated')`` and reads it back, not its
-# ``_world`` fixture (which creates three status-less Objects). This paragraph
-# used to claim *"no writer sets ``outdated`` on an Object"*, which is false; the
-# exclusion above is a READ decision, and it is stated as one now.
+# ⛔ "No ``outdated`` concept" is NOT "nothing holds it". It used to read
+# *"``update_entity`` accepts ``status='outdated'`` on an Object today, and
+# ``tests/test_11926_derived_invalidation.py`` pins it"* — and **#11824 S0 closed
+# that door**: every knowledge kind's ``status`` is read through
+# ``tortoise/lifecycle_vocabulary.py``, which REFUSES ``outdated`` (it names two
+# different words without saying which) and stores ``archived``/``retracted`` as
+# ``deprecated``. So no in-tree writer mints the word now — but STORED rows keep
+# whatever they hold (no backfill, #11824 §1), and a legacy graph, a raw Cypher
+# producer or a JSONL replay can still carry one. That is the population this
+# read decision serves, and
+# ``tests/test_11926_derived_invalidation.py`` now writes it OUT OF BAND to
+# prove exactly that. This paragraph used to claim *"no writer sets ``outdated``
+# on an Object"*, which was false when it was written; it is now true of the
+# DOOR and still false of the STORED population, which is the distinction the
+# exclusion above rests on.
 #
 # DELIBERATELY NOT the whole story: the render-time successor-existence probe
 # in assembly.py keeps its OWN wider set (``assembly._RECALL_OBJECT_EXCLUDED_STATUSES``
