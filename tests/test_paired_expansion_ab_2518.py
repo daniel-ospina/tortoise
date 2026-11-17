@@ -1866,6 +1866,50 @@ def test_the_snapshot_digest_and_every_load_trace_are_pinned_where_quoted():
         "not evidence")
 
 
+def test_every_published_sample_size_and_load_delta_recomputes():
+    """`#13267` review 5: the sample sizes and load DELTAS were quoted but unpinned.
+
+    Mutation-verified by the reviewer at 680c469e83a7: `7.82 pp` → `7.92 pp`, and
+    the 5 pp / 3 pp per-arm sizes → `~755`/`~2,100`, each left the suite GREEN, and
+    so did `(Δ −0.54)` → `(Δ −0.44)` at BOTH sites. The suite pinned the TOOL's
+    `independent_effect` and its own re-derivation inside a wide band, but never
+    re-read the digits the brief prints — the same class as the digest gap F5
+    closed one paragraph over.
+
+    It also settles a rounding the brief had wrong for three review rounds: the
+    tool's `independent_effect(300, 0.865)` is 0.07816874616…, so
+    300·(mde/0.05)² = 733.24 → **733**, not 734.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    mde = P.independent_effect(300, 0.865)
+    assert f"{mde * 100:.2f} pp" in brief, (
+        f"the brief must print the independent-design MDE as {mde * 100:.2f} pp")
+    sizes = {}
+    for delta in (0.05, 0.03):
+        n = round(300 * (mde / delta) ** 2)
+        sizes[delta] = n
+        forms = (f"~{n} per arm", f"~{n}/arm", f"~{n:,} per arm", f"~{n:,}/arm")
+        assert any(f in brief for f in forms), (
+            f"the brief must print the {delta * 100:.0f} pp per-arm size as ~{n} "
+            "derived as 300·(mde/delta)²")
+    assert (sizes[0.05], sizes[0.03]) == (733, 2037), sizes
+    # both sites (§0 and §5) must carry each figure — one site is a drop/re-stale
+    assert brief.count(f"~{sizes[0.05]}") == 2, (
+        "the 5 pp per-arm size is quoted at two sites (§0 and §5)")
+    assert brief.count(f"~{sizes[0.03]:,}") == 2, (
+        "the 3 pp per-arm size is quoted at two sites (§0 and §5)")
+
+    # ⛔ every load DELTA printed must be an artifact's own `load_delta_1m`
+    recorded = {f"{abs(_artifact(n)['environment']['load_delta_1m']):.2f}"
+                for n in _ARTIFACTS}
+    shown = re.findall(r"Δ\s*[−-]\s*(\d+\.\d+)", brief)
+    assert shown, "the brief prints at least one load delta"
+    for d in shown:
+        assert d in recorded, (
+            f"the brief prints a load delta of -{d}, which NO committed artifact "
+            f"recorded — the recorded deltas are {sorted(recorded)}")
+
+
 def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     """F6 — the cell claimed a set pin that did not exist.
 
