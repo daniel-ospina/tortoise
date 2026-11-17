@@ -227,6 +227,7 @@ class _Cursor:
 class _Conn:
     def __init__(self, tier_rowcount: int | None = None) -> None:
         self.commits = 0
+        self.rollbacks = 0
         self.closed = False
         #: Every statement executed on this connection, in order.
         self.executed: list[tuple[str, list]] = []
@@ -243,6 +244,10 @@ class _Conn:
     def commit(self) -> None:
         self.commits += 1
         self.sequence.append("commit")
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+        self.sequence.append("rollback")
 
     def close(self) -> None:
         self.closed = True
@@ -304,7 +309,8 @@ def test_a_commit_failure_refuses_and_still_closes_the_connection() -> None:
 
 # ── the journal position ───────────────────────────────────────────────────
 
-def _patch_journal(monkeypatch, positions, tmp_path=None, *, tier_rowcount=None):
+def _patch_journal(monkeypatch, positions, tmp_path=None, *, tier_rowcount=None,
+                   cutover_state=None, allocate=False):
     import tortoise.log as log_mod
     import tortoise.record_writer as rw
 
@@ -329,6 +335,14 @@ def _patch_journal(monkeypatch, positions, tmp_path=None, *, tier_rowcount=None)
 
     monkeypatch.setattr(log_mod, "EventLog", _Log)
     monkeypatch.setattr(rw, "write_records", _write)
+    # ⛔ THE CUTOVER PRE-FLIGHT IS ANSWERED, NOT CONNECTED TO (#13043 P1-4).
+    # `_journal_emit` reads the graph's counter row before its first append; a
+    # fake DSN would otherwise turn every test in this file into a driver error.
+    # The default (`None` + flag off) is the UNCUT graph every pre-#12894 test
+    # describes, so the pre-flight stays silent for them.
+    monkeypatch.setattr(copy_mod, "_cutover_state",
+                        lambda *_a, **_k: cutover_state)
+    monkeypatch.setattr(rw, "record_live_allocate", lambda: allocate)
     built: list[dict] = []
 
     def _writer(**kwargs):
@@ -346,7 +360,365 @@ def _journal(tmp_path) -> str:
     return str(path)
 
 
-def test_contiguous_positions_anchor_the_rows_at_the_first_one(monkeypatch, tmp_path) -> None:
+# ── the cutover arm: the fourth position-row writer (#13043 P1-4) ──────────
+
+class _AllocatedWrite(_Write):
+    """A write whose seam reported the number it issued (the allocated arm)."""
+
+    def __init__(self, outcome, statements, conn=None, first_seq: int = 0):
+        super().__init__(outcome, statements, conn)
+        self.first_seq = first_seq
+
+
+def test_the_cutover_arm_passes_allocate_and_never_a_caller_watermark(
+        monkeypatch, tmp_path) -> None:
+    """⛔ THE DEFECT THE REVIEW NAMED (#13043 review P1-4).
+
+    This lane passed `position=True, first_seq=first` and **no** `allocate=`, so
+    on any graph an operator cut over the enumerated arm was REFUSED for EVERY
+    session batch. Before this PR no graph could be armed at all (the seed was
+    unreachable), so this PR is what made the state reachable — and nothing in
+    the CLI or the evidence named it.
+
+    Two halves, both asserted: the flag reaches the seam, AND the caller
+    watermark is NOT forwarded — `replay_plan` REFUSES `allocate=True`
+    `start_seq != 1`, so forwarding `first` would have replaced one refusal with
+    another (measured on the live door, review cycle 1).
+    """
+    calls, _built = _patch_journal(monkeypatch, [7, 8],
+                                   cutover_state=(6, "active"), allocate=True)
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
+    assert emit("s1", [{"a": 1}, {"b": 2}]) == 7
+    kwargs = calls[0][1]
+    assert kwargs["allocate"] is True, (
+        "the backfill did not pass allocate — on a cut-over graph every session "
+        "batch is refused")
+    assert kwargs["first_seq"] == 1, (
+        f"the caller's watermark {kwargs['first_seq']} was forwarded onto the "
+        "allocated arm, which the plan refuses")
+
+
+def test_an_allocated_batch_whose_number_disagrees_with_the_journal_is_refused(
+        monkeypatch, tmp_path) -> None:
+    """The cross-check this lane must make ITSELF — it calls the seam directly.
+
+    The counter issued 5 while the journal reported 7. Writing it puts the lines
+    at 7.. and their rows at 5.. — the two-coordinate split no replay can repair
+    — so it is a REFUSAL, and the rollback is what keeps the allocation from
+    being burned or reused.
+    """
+    import tortoise.record_writer as rw
+
+    _calls, _built = _patch_journal(monkeypatch, [7],
+                                    cutover_state=(4, "active"), allocate=True)
+    conn = _Conn()
+    monkeypatch.setattr(
+        rw, "write_records",
+        lambda events, **kw: _AllocatedWrite(_outcome().APPLIED, len(events),
+                                             conn, first_seq=5))
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
+    with pytest.raises(copy_mod.CopyRefused, match="issued position 5"):
+        emit("s1", [{"a": 1}])
+    assert conn.rollbacks == 1, (
+        "the divergent allocation was not rolled back — the position is burned")
+    assert conn.closed is True
+
+
+def test_a_rollback_that_FAILS_is_reported_and_not_claimed_as_done(
+        monkeypatch, tmp_path, capsys) -> None:
+    """⛔ ROUND-3 BLOCKING: the refusal asserted a rollback it had suppressed.
+
+    `contextlib.suppress(Exception)` around `rollback()` let a FAILED rollback
+    reach a refusal whose message says, as a FACT, *"The allocation was rolled
+    BACK (nothing burned, nothing renumbered)"*. If the rollback raised, the
+    counter could be one ahead of the rows — the state `write_live_record`'s own
+    warning calls "the state that EATS rows" — and nothing anywhere recorded it.
+
+    The mutant this reds: the `try/except`+`print` back to
+    `contextlib.suppress(Exception)`. Then the warning never appears on stderr
+    AND the refusal claims the rollback happened (second and third assertions).
+    """
+    import tortoise.record_writer as rw
+
+    class _RollbackFailsConn(_Conn):
+        def rollback(self) -> None:
+            self.rollbacks += 1
+            raise RuntimeError("server closed the connection\nunexpectedly")
+
+    _calls, _built = _patch_journal(monkeypatch, [7],
+                                    cutover_state=(4, "active"), allocate=True)
+    conn = _RollbackFailsConn()
+    monkeypatch.setattr(
+        rw, "write_records",
+        lambda events, **kw: _AllocatedWrite(_outcome().APPLIED, len(events),
+                                             conn, first_seq=5))
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
+    with pytest.raises(copy_mod.CopyRefused) as excinfo:
+        emit("s1", [{"a": 1}])
+
+    # The divergence is still the refusal — this leg changes only the rollback.
+    assert "issued position 5" in str(excinfo.value)
+    err = capsys.readouterr().err
+    assert "could NOT roll" in err and "RuntimeError" in err, (
+        f"a failed rollback was swallowed — nothing recorded it: {err!r}")
+    assert "EATS rows" in err, (
+        "the warning names no consequence, so it cannot tell an operator what "
+        f"state to check: {err!r}")
+    assert "closed the connection\\nunexpectedly" in err, (
+        f"the cause's own newline was not escaped, so the warning is two lines: {err!r}")
+    # …and the operator-facing refusal must not assert a rollback that did not
+    # reach a verdict.
+    message = str(excinfo.value)
+    assert "was rolled BACK" not in message, (
+        "the refusal claims the allocation was rolled back, and the rollback "
+        f"raised: {message}")
+    assert "could NOT be confirmed rolled back" in message
+    assert conn.closed is True, "the connection was left open on the failure arm"
+
+
+def test_a_refusal_with_no_connection_does_not_claim_it_rolled_back(
+        monkeypatch, tmp_path) -> None:
+    """⛔ #13043 review P3: the `connection is None` branch asserted a rollback.
+
+    `rollback_failed` stays `None` when the write carries no connection, and the
+    refusal's `None` arm said, as a FACT, "The allocation was rolled BACK
+    (nothing burned, nothing renumbered)" — a rollback that was never attempted,
+    in the one message an operator reads to decide whether to write again.
+
+    Unreachable through `_journal_emit` today (it passes `conn=None`, so the seam
+    opens and returns its own connection), which is why it is closed here rather
+    than left for a future `conn=` caller to trip over.
+
+    The mutant this reds: the `None` arm of `allocation_sentence` back to
+    "was rolled BACK" for every non-failed rollback, attempted or not.
+    """
+    import tortoise.record_writer as rw
+
+    _calls, _built = _patch_journal(monkeypatch, [7],
+                                    cutover_state=(4, "active"), allocate=True)
+    monkeypatch.setattr(
+        rw, "write_records",
+        lambda events, **kw: _AllocatedWrite(_outcome().APPLIED, len(events),
+                                             None, first_seq=5))
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
+    with pytest.raises(copy_mod.CopyRefused) as excinfo:
+        emit("s1", [{"a": 1}])
+
+    message = str(excinfo.value)
+    assert "issued position 5" in message, "this leg changes only the rollback"
+    assert "was rolled BACK" not in message, (
+        "the refusal claims an allocation was rolled back, and no rollback was "
+        f"even attempted (the write carried no connection): {message}")
+    assert "No rollback was attempted" in message, (
+        f"the refusal does not say what actually happened: {message}")
+
+
+def test_a_cut_over_graph_with_the_flag_off_is_refused_BEFORE_any_append(
+        monkeypatch) -> None:
+    """The mis-set pair whose cost is a journal that grows while no row lands.
+
+    Enumerated arm on a cut-over graph ⇒ `_refuse_an_enumerated_replay` refuses
+    every batch. The refusal must therefore happen at CONSTRUCTION: after the
+    first `emit` it is too late to be cheap, because the events are already
+    appended and the counter falls further behind with every one.
+
+    ⛔ AND THE REMEDY MUST BE ONE THAT CAN RUN (#13043 review finding E). It used
+    to end "or `halt` the graph and re-seed it if this backfill must run on the
+    enumerated arm" — which CANNOT restore the enumerated arm: the refusal fires
+    on the ROW, `halt` keeps the counter and `seed` only overwrites its number,
+    so the row survives and the operator lands back on the same refusal.
+    """
+    monkeypatch.setattr(copy_mod, "_cutover_state",
+                        lambda *_a, **_k: (11, "active"))
+    with pytest.raises(copy_mod.CopyRefused,
+                       match="TORTOISE_RECORD_ALLOCATE is OFF") as excinfo:
+        copy_mod._refuse_a_miscalibrated_cutover(
+            "dsn", "org", "graph", allocate=False)
+    message = str(excinfo.value)
+    assert "TORTOISE_RECORD_ALLOCATE=1" in message, (
+        f"the refusal does not name the switch that fixes it: {message}")
+    assert "verb in this tree removes a counter row" in message, (
+        "the refusal offers a remedy without saying there is none for the "
+        f"enumerated arm: {message}")
+    assert not ("halt" in message and "re-seed" in message), (
+        "the refusal still offers `halt` + re-seed as a way back to the "
+        "enumerated arm, which the ROW-gated refusal makes impossible")
+
+
+def test_the_flag_on_with_no_counter_row_is_refused_before_any_append(
+        monkeypatch) -> None:
+    """`allocate` on an UNCUT graph raises CursorNotActive for every batch."""
+    monkeypatch.setattr(copy_mod, "_cutover_state", lambda *_a, **_k: None)
+    with pytest.raises(copy_mod.CopyRefused, match="NO record_cursor row") as excinfo:
+        copy_mod._refuse_a_miscalibrated_cutover(
+            "dsn", "org", "graph", allocate=True)
+    assert "seed" in str(excinfo.value) and "arm" in str(excinfo.value), (
+        f"the refusal does not name the cutover order: {excinfo.value}")
+
+
+def test_a_halted_counter_is_refused_by_name_not_by_a_batch_full_of_40001s(
+        monkeypatch) -> None:
+    """`halted` KEEPS the counter, so the remedy is `reopen`/`arm`, and the
+    refusal must not send an operator to `seed` (which is refused from
+    `active` and does not change the mode at all)."""
+    monkeypatch.setattr(copy_mod, "_cutover_state",
+                        lambda *_a, **_k: (11, "halted"))
+    with pytest.raises(copy_mod.CopyRefused, match="not 'active'") as excinfo:
+        copy_mod._refuse_a_miscalibrated_cutover(
+            "dsn", "org", "graph", allocate=True)
+    assert "reopen" in str(excinfo.value), (
+        f"a halted counter's remedy is reopen then arm: {excinfo.value}")
+
+
+def test_the_preflight_asks_the_graph_and_answers_from_it(monkeypatch) -> None:
+    """The three states are read from ONE reading, and each gets its own verdict.
+
+    Pinned because the refusal is only as good as the fact it reads: a helper
+    that always said "uncut" would pass the flag-off cases and wave through the
+    flag-on one.
+    """
+    seen: list[tuple] = []
+
+    def _state(dsn, org, graph):
+        seen.append((dsn, org, graph))
+        return (11, "active")
+
+    monkeypatch.setattr(copy_mod, "_cutover_state", _state)
+    copy_mod._refuse_a_miscalibrated_cutover("dsn", "org", "graph",
+                                             allocate=True)
+    assert seen == [("dsn", "org", "graph")]
+
+
+def test_an_unreadable_record_is_not_a_cutover_verdict(monkeypatch) -> None:
+    """A dead DSN must not be reported as "this graph is not cut over".
+
+    ⛔ AND THE LEG MUST ASSERT SOMETHING (#13043 review, P3): it used to call the
+    pre-flight and check nothing at all, so a wrong exception swallowed here — or
+    a refusal raised here — passed it.
+    """
+    def _boom(dsn, org, graph):
+        raise RuntimeError("could not connect")
+
+    monkeypatch.setattr(copy_mod, "_cutover_state", _boom)
+    assert copy_mod._refuse_a_miscalibrated_cutover(
+        "dsn", "org", "graph", allocate=True) is None, (
+        "an unreadable record was turned into a cutover VERDICT — the write "
+        "seam owns that failure and fails closed with a precise message")
+
+
+def test_a_missing_driver_is_UNKNOWN_not_a_not_cut_over_verdict(monkeypatch) -> None:
+    """⛔ FINDING 5: `_cutover_state` answered `None` with no `psycopg2`.
+
+    `None` is this module's verdict for "this graph is NOT cut over", so the
+    flag-on arm raised "this graph has NO record_cursor row" about a graph no
+    driver ever reached — a false statement about the graph, which is what the
+    function's own docstring promises not to produce.
+    """
+    assert copy_mod._cutover_state is not None
+    monkeypatch.setattr(copy_mod, "_cutover_state",
+                        lambda *_a, **_k: copy_mod.UNKNOWN_CUTOVER_STATE)
+    assert copy_mod._refuse_a_miscalibrated_cutover(
+        "dsn", "org", "graph", allocate=True) is None, (
+        "an UNKNOWN reading was reported as `not cut over`")
+    # …and the real function's no-driver branch returns that sentinel, not None:
+    import builtins
+    real_import = builtins.__import__
+
+    def _no_psycopg2(name, *a, **k):
+        if name == "psycopg2":
+            raise ImportError("no driver here")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_psycopg2)
+    assert copy_mod._cutover_state("dsn", "org", "graph") is copy_mod.UNKNOWN_CUTOVER_STATE
+
+
+def test_the_cutover_preflight_runs_BEFORE_the_first_append(
+        monkeypatch, tmp_path) -> None:
+    """⛔ THE CALL SITE, NOT THE HELPER (#13043 review finding C).
+
+    Deleting `_refuse_a_miscalibrated_cutover(...)` from `_journal_emit` left
+    EVERY test in this file green: the four refusal legs call the helper
+    directly, and the two `_journal_emit` legs both pass the (cut over, flag on)
+    pair the pre-flight waves through. So the docstring's claim — "checked before
+    the first journal append … with no journal lines written at all" — had no
+    test where it has to hold.
+
+    THE FALSIFIER IS `pytest.raises`, AND MEASURED IT IS THE ONLY ONE THIS ARM
+    HAS. With the call deleted `_journal_emit` RETURNS its `emit` closure and
+    raises nothing, so this row reds with `DID NOT RAISE`. A byte comparison of
+    the journal cannot distinguish those two trees: `EventLog.__init__` only
+    stores the path (`tortoise/log.py`) and every `log.append(...)` lives inside
+    the returned closure, which this arm never calls. That is why an earlier cut
+    of this test's byte assertion was unreachable — an assertion whose value
+    cannot vary under any mutation is not proof.
+
+    The byte assertion below is therefore a DIFFERENT, still-reachable claim —
+    the REFUSING path wrote nothing (a "log the refusal into the journal" mutant
+    reds it) — and the ordering claim's reachable byte evidence lives in
+    `test_the_returned_emit_is_where_the_first_journal_line_appears`.
+    """
+    import tortoise.record_writer as rw
+
+    path = _journal(tmp_path)
+    before = Path(path).read_bytes()
+    monkeypatch.setattr(copy_mod, "_cutover_state",
+                        lambda *_a, **_k: (11, "active"))
+    monkeypatch.setattr(rw, "record_live_allocate", lambda: False)
+    monkeypatch.setattr(rw, "RecordWriter", lambda **kwargs: "writer")
+    with pytest.raises(copy_mod.CopyRefused,
+                       match="TORTOISE_RECORD_ALLOCATE is OFF"):
+        copy_mod._journal_emit(path, "dsn", "org", "graph")
+    assert Path(path).read_bytes() == before, (
+        "the REFUSING path appended a journal line — a line written while "
+        "refusing is a counter left behind the journal, the exact consequence "
+        "the refusal's own message names")
+
+
+def test_the_returned_emit_is_where_the_first_journal_line_appears(
+        monkeypatch, tmp_path) -> None:
+    """⛔ WHERE THE ORDERING IS ACTUALLY OBSERVABLE (#13043 review finding 2).
+
+    `_journal_emit` opens the journal, runs the pre-flight, and RETURNS the
+    `emit` closure — so "the pre-flight runs BEFORE the first append" is
+    checkable as bytes on a real journal: the file is untouched when the
+    function returns, and exactly one line longer only after `emit` runs.
+
+    BOTH assertions vary. An append moved into `_journal_emit` before the
+    pre-flight reds the first; an `emit` that never appends reds the second.
+    """
+    import tortoise.record_writer as rw
+
+    path = _journal(tmp_path)
+    before = Path(path).read_bytes()
+    built: list[dict] = []
+    monkeypatch.setattr(rw, "write_records",
+                        lambda events, **kwargs: _Write(
+                            _outcome().APPLIED, len(events), _Conn()))
+    monkeypatch.setattr(rw, "RecordWriter",
+                        lambda **kwargs: built.append(kwargs) or "writer")
+    monkeypatch.setattr(rw, "record_live_allocate", lambda: False)
+    # The pair the pre-flight WAVES THROUGH: an UNCUT graph (no counter row) with
+    # the flag OFF. The other pair it waves through is cut-over + flag ON, and
+    # `test_the_cutover_arm_passes_allocate_and_never_a_caller_watermark` drives
+    # that one; this arm only needs to reach the returned closure.
+    monkeypatch.setattr(copy_mod, "_cutover_state",
+                        lambda *_a, **_k: None)
+
+    emit = copy_mod._journal_emit(path, "dsn", "org", "graph")
+    assert Path(path).read_bytes() == before, (
+        "_journal_emit appended a journal line BEFORE returning `emit` — the "
+        "pre-flight has to be the last thing that runs before the caller "
+        "appends, or a refusal leaves a line behind")
+    assert built == [{"dsn": "dsn"}]
+    assert emit("s1", [{"a": 1}]) == 2, (
+        "the journal already held one record, so the first append is position 2")
+    assert Path(path).read_bytes() != before, (
+        "the returned `emit` did not append to the journal at all")
+
+
+def test_contiguous_positions_anchor_the_rows_at_the_first_one(
+        monkeypatch, tmp_path) -> None:
     calls, built = _patch_journal(monkeypatch, [7, 8, 9])
     emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
     assert emit("s1", [{"a": 1}, {"b": 2}, {"c": 3}]) == 7
