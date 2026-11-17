@@ -335,9 +335,16 @@ def test_the_gate_sees_the_shapes_the_first_sweep_could_not():
 
     # (a) A refusal built into a NAME and returned by it (the seam cannot see
     #     a type it never saw, and the first gate only matched AST literals).
-    by_name = source.replace(
-        'out = _SafeError({"error": str(detail), "status": status})',
-        'out = {"error": str(detail), "status": status}', 1)
+    #     ⛔ Anchored on the CALL, never on its payload expression. This mutation
+    #     used to pin `{"error": str(detail), …}` verbatim, so #12992's review
+    #     fix — which renamed the payload expression to `error_text` while
+    #     keeping both the site and the `_SafeError` wrap — matched nothing and
+    #     red as "the capture site moved" on a tree this gate was green on
+    #     (measured: PR #13000, this file passing at origin/main 6c160da471d9 and
+    #     failing at the PR head in CI job `test (b)` for that reason alone). A
+    #     mutation proves the WALK sees a name-built refusal; the wording of the
+    #     payload is not what it is testing, so it must survive a payload edit.
+    by_name = source.replace('out = _SafeError(', 'out = (', 1)
     assert by_name != source, "the capture site moved — update this mutation"
     assert "tortoise_session_capture" in {t for t, _ in _gate_hits(by_name)}
 

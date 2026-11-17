@@ -441,6 +441,44 @@ _CAPTURE_SESSIONS: dict[str, int] = {}
 _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
     "a capture for this session_id is already in flight — retry shortly")
 
+# ── #12992: the capacity refusal is TYPED, and its refusals are COUNTED ────
+# The capacity 429 used to answer a bare detail STRING while its sibling on the
+# same route (`_ingest_rate_limited`, #4051 §3.1) already answers a dict carrying
+# `code` + `retry_after`. Consequence, measured in #12992: a client that wants to
+# branch on the refusal must prose-match the message, and the only machine-
+# readable form of the retry instruction was the `Retry-After` HEADER — which the
+# capture clients that produced the issue's log lines never read
+# (`reflect-hook.ts`, `.../tortoise-capture.ts`: neither parses the header — the
+# first does one POST and throws, the deployed one re-arms on 30 s × 2^(n-1)
+# (research §5, #11225). So the delay is published in the BODY as well: a JSON
+# client gets it for free; the header stays for HTTP clients that honour it.
+#
+# ⚠️ The `message` keeps the EXACT pre-#12992 wording. A body that is now an
+# object is a shape change for any reader that did `detail in text`; keeping the
+# sentence identical means those readers keep matching while the typed fields are
+# additive.
+_CAPTURE_CAPACITY_CODE = "capture_capacity_saturated"
+_CAPTURE_CAPACITY_RETRY_AFTER_S = 30
+_CAPTURE_CAPACITY_MESSAGE = (
+    "capture capacity saturated — too many captures in "
+    "flight; retry shortly")
+#: Refusals the capacity gate has ANSWERED, and when it last did.
+#:
+#: Two values, because they answer two different questions and only one of them
+#: is ever a rate: `_CAPTURE_CAPACITY_REFUSED_TOTAL` (= CAPACITY refusals only —
+#: the sibling ``409`` duplicate-in-flight is a different class and is deliberately
+#: uncounted here, so one label never answers two questions) is cumulative since
+#: process start (never reset), and `_CAPTURE_LAST_REFUSED_AT` is the wall clock of
+#: the most recent refusal — which is what lets `/health` answer "is this happening
+#: NOW" instead of "has this ever happened" (#10185's forever-red: `refusing` keys on the WINDOW).
+_CAPTURE_CAPACITY_REFUSED_TOTAL = 0
+_CAPTURE_LAST_REFUSED_AT: float | None = None
+#: How recently a refusal must have happened for `/health` to call the gate
+#: "refusing". 10x the advertised `Retry-After`: long enough that a client
+#: retrying exactly as instructed is still counted, short enough that one burst
+#: does not pin the reading for the life of the process.
+_CAPTURE_REFUSAL_WINDOW_S = 300.0
+
 # NOTE (merge of #2850 x #2988/#3060): the dedicated ``_HEALTH_PROBE_EXECUTOR``
 # and its ``_HEALTH_PROBE_BUDGET_S`` wall bound were REMOVED here. They existed
 # so ``/health`` could run ``_probe_db`` off the shared default pool with a
@@ -1244,16 +1282,31 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     caller passes a key already scoped by TENANT AND RESOLVED GRAPH
     (`_capture_session_key`, whose graph component is `_data_graph_name` —
     the graph the request will actually open, #3365).
+
+    #12992: a CAPACITY refusal is now a typed condition (``detail.code`` +
+    ``detail.retry_after``, with the ``Retry-After`` header retained) and every
+    one of them is counted for ``/health`` — see ``_CAPTURE_CAPACITY_CODE``.
     """
-    global _CAPTURE_IN_FLIGHT
+    global _CAPTURE_IN_FLIGHT, _CAPTURE_CAPACITY_REFUSED_TOTAL, _CAPTURE_LAST_REFUSED_AT
     session_key = session_key or None
     with _CAPTURE_IN_FLIGHT_LOCK:
         if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
+            # #12992: count BEFORE raising, under the same lock, so an ANSWERED
+            # refusal is always already COUNTED. ⛔ One direction only — nothing makes
+            # the increment and the raise atomic. Read INSIDE the lock and passed in
+            # the body, the value is LIVE: the gate raises on `>=`, so it EQUALS the limit.
+            _CAPTURE_CAPACITY_REFUSED_TOTAL += 1
+            _CAPTURE_LAST_REFUSED_AT = time.time()
             raise HTTPException(
                 status_code=429,
-                detail=("capture capacity saturated — too many captures in "
-                        "flight; retry shortly"),
-                headers={"Retry-After": "30"})
+                detail={
+                    "code": _CAPTURE_CAPACITY_CODE,
+                    "message": _CAPTURE_CAPACITY_MESSAGE,
+                    "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+                    "in_flight": _CAPTURE_IN_FLIGHT,
+                    "limit": _CAPTURE_MAX_IN_FLIGHT,
+                },
+                headers={"Retry-After": str(_CAPTURE_CAPACITY_RETRY_AFTER_S)})
         if session_key in _CAPTURE_SESSIONS:
             raise HTTPException(
                 status_code=409,
@@ -7365,6 +7418,78 @@ _READY_PROBE = HealthProbe(
     lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
+def _capture_health() -> dict:
+    """#12992: the capture gate's own state, as `/health` reports it.
+
+    The capacity 429 was a LOG LINE and nothing else, so "how often is the gate
+    refusing captures" was unanswerable: the two refusals that filed #12992 left
+    no datum anywhere, and the brief that investigated them could not measure the
+    concurrency at the moment they happened. This block is that read, on the
+    surface an operator already curls.
+
+    It publishes the CAPACITY facts (``in_flight`` / ``max_in_flight`` /
+    ``workers``) beside the REFUSAL facts, because the two together are what
+    distinguish the failure modes: a gate at 8/8 refusing steadily is a saturated
+    consumer, while ``capacity_refused_total`` climbing with ``in_flight`` low is a
+    burst of arrivals that each waited and left — neither is derivable from the other.
+
+    `workers` is on the block deliberately: `_CAPTURE_MAX_IN_FLIGHT` (8) is
+    ABOVE the pool size (4), so up to four ADMITTED captures hold their slots
+    while queued behind running extractions. Publishing only the ceiling made
+    "8 slots" read as "8 can run", which is not what the machine does
+    (``_CAPTURE_EXECUTOR``).
+
+    ⛔ It does NOT fold into `status`, the same rule as `change_feed` and
+    `wait_bound_breaches` — and UNLIKE `record`, whose `.ok` IS one of its three
+    terms: a saturated capture gate is not liveness (the process serves every
+    other route normally), and a cumulative counter must never pin it (#10185).
+    `refusing` is the WINDOWED reading (``_CAPTURE_REFUSAL_WINDOW_S``), so a
+    reader who wants "now" has it without re-deriving a rate from a total that
+    never resets.
+
+    Never raises, collects no I/O (#2850): one lock, three ints, one timestamp.
+    """
+    try:
+        with _CAPTURE_IN_FLIGHT_LOCK:
+            in_flight = _CAPTURE_IN_FLIGHT
+            refused = _CAPTURE_CAPACITY_REFUSED_TOTAL
+            last = _CAPTURE_LAST_REFUSED_AT
+            ceiling = _CAPTURE_MAX_IN_FLIGHT
+            # `_max_workers` survives a shut-down executor, so it needs no guard.
+            # ⛔ THE FORMATTING IS IN-GUARD: `fromtimestamp` can raise → a 500.
+            workers = _CAPTURE_EXECUTOR._max_workers
+            last_refused_at = None if last is None else datetime.fromtimestamp(
+                last, UTC).isoformat()
+    except Exception as exc:  # a health path must always answer
+        # ⛔ THE DEGRADED ARM PUBLISHES THE SAME KEYS AS THE HEALTHY ONE (#12992
+        # review P2). An ad-hoc short dict is the defect this file records in
+        # `health()`'s `refusals` arm — the "250 lines below" this used to say
+        # was head-bound and wrong; state the SYMBOL, not a distance. A
+        # 2-of-13-key dict gets a `KeyError` on `refusals["share"]`
+        # in exactly the degraded path the dashboard reads, measured twice. The operator
+        # contract in `docs/infra-runbook.md` §4.1.1b documents ten keys, so a
+        # jq `.capture.retry_after` on this arm must not raise.
+        return {"in_flight": None, "max_in_flight": None, "workers": None,
+                "capacity_refused_total": None, "last_refused_at": None,
+                "refusing": None, "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
+                "code": _CAPTURE_CAPACITY_CODE,
+                "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+                "error": str(exc)[:200]}
+    refusing = last is not None and (time.time() - last) <= _CAPTURE_REFUSAL_WINDOW_S
+    return {
+        "in_flight": in_flight,
+        "max_in_flight": ceiling,
+        "workers": workers,
+        "capacity_refused_total": refused,
+        "last_refused_at": last_refused_at,
+        "refusing": refusing,
+        "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
+        "code": _CAPTURE_CAPACITY_CODE,
+        "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+        "error": None,
+    }
+
+
 def _change_feed_health() -> dict:
     """#9208: degraded `:GraphEvent` feeds, as `/health` reports them.
 
@@ -8093,7 +8218,7 @@ async def health():
     VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
     "is this deployed?" was previously unanswerable from this endpoint: a stale
     build served ``status: ok`` and every other block happily. Like
-    ``change_feed`` and ``record`` it does NOT fold into ``status`` — a stale
+    ``change_feed`` and ``record``'s counters it does NOT fold into ``status`` — a stale
     deploy is up, and calling it degraded would make Fly restart a healthy
     process forever. Currency is a COMPARISON (``check-deploy-staleness.sh``
     against ``origin/main``); this block publishes the datum that comparison
@@ -8117,6 +8242,16 @@ async def health():
     a CODE, never `consent_token_secret_problem`'s message — that message names
     the byte length of a short key, which on an unauthenticated surface would
     narrow exactly the key space the `_MIN_SECRET_BYTES` floor exists to refuse.
+
+    Capture-gate check (#12992): ``capture`` publishes the capture admission
+    gate's capacity and its REFUSALS — ``in_flight``, ``max_in_flight``,
+    ``workers``, ``capacity_refused_total``, ``last_refused_at``, ``refusing`` (a window,
+    not the cumulative total). Same class as ``change_feed``: state that lives in
+    process memory and was previously visible only as a log line on the CLIENT
+    that was refused. It does NOT fold into ``status`` (see ``_capture_health``):
+    a saturated capture gate refuses `POST /v1/sessions` while every other route
+    — including this one — is healthy, and restarting the process would neither
+    drain the extractions holding the slots nor clear a burst of arrivals.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -8221,6 +8356,12 @@ async def health():
             # review, P3; measured: `AttributeError` out of `health()` on a partial module).
             "health_setup_clamped": _health_setup_clamped(),
             "record": record, "build": _build_identity(),
+            # #12992: the CAPTURE gate. A capacity refusal is a product-health
+            # signal (captures refused/min) that used to exist only as a log
+            # line on the refusing client, so a fleet could be refusing a live
+            # agent's capture and NOTHING on this surface said so. Reported,
+            # never folded into `status` — see `_capture_health`'s docstring.
+            "capture": _capture_health(),
             # #10488: the consent bridge's key, published as a truncated hash so
             # a split between this deployment and the Pages mint is one COMPARISON
             # instead of a diagnosis cycle. Reported, never folded into `status`
@@ -49897,7 +50038,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 189 tracked files (706 distinct
+# ABSOLUTE line number from 189 tracked files (707 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
