@@ -5462,7 +5462,7 @@ def internal_client():
 
         try:
             # C3 (#2112): seed the Team node the auth override bypasses — the
-            # registry mint path (sdk.apikey_create) validates the team exists
+            # registry mint path (sdk._apikey_create) validates the team exists
             # (mirror of the client fixture's seed; production teams always
             # exist — the override skips the resolution that would have found
             # them). Inside the `try` so a seed failure still restores the env.
@@ -9005,7 +9005,7 @@ class TestV2SessionFloodGate:
 # #2600 (Phase 1, Task 2) — Session.actor_user_id stamp via the REAL registry
 # auth face. POST /v1/sessions is key-only (get_current_org_gated) — on the
 # docker lane (registry CP) the two "members" are registry-seeded keys with
-# distinct UUID creators (sdk.apikey_create(created_by=<uuid>)), authenticated
+# distinct UUID creators (sdk._apikey_create(created_by=<uuid>)), authenticated
 # with the real tt_ keys (NO DI override — an override dict bypasses the
 # registry branch's created_by → actor_user_id alias + _data_sdk ContextVar
 # set, so a DI-seam capture would be actor-less for the wrong reason).
@@ -9261,7 +9261,7 @@ class TestSessionActorStamp2600:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyA = sdk._apikey_create(tid, _2600_UUID_A)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
             r = _post_capture_allowing_transport_retry(tc, headers=hA, payload={
                 "conversation": [{"role": "user", "content": "we should ship actor attribution first."},
@@ -9283,8 +9283,8 @@ class TestSessionActorStamp2600:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            keyA = sdk.apikey_create(tid, _2600_UUID_A)
-            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            keyA = sdk._apikey_create(tid, _2600_UUID_A)
+            keyB = sdk._apikey_create(tid, _2600_UUID_B)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             for h, sid, _expect in ((hA, "s-stamp-2600-ba", _2600_UUID_A),
@@ -9311,8 +9311,8 @@ class TestSessionActorStamp2600:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            keyA = sdk.apikey_create(tid, _2600_UUID_A)
-            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            keyA = sdk._apikey_create(tid, _2600_UUID_A)
+            keyB = sdk._apikey_create(tid, _2600_UUID_B)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             conv = [{"role": "user", "content": "we should open the beta."},
@@ -9350,7 +9350,7 @@ class TestSessionActorStamp2600:
                 params={"sid": "s-stamp-2600-legacy",
                         "now": datetime.now(UTC).isoformat(),
                         "tid": "s-stamp-2600-legacy_t0"})
-            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            keyB = sdk._apikey_create(tid, _2600_UUID_B)
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             r = _post_capture_allowing_transport_retry(tc, headers=hB, payload={
                 "conversation": [{"role": "user", "content": "true-retry legacy backfill."},
@@ -9377,8 +9377,8 @@ class TestSessionActorStamp2600:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            keyA = sdk.apikey_create(tid, _2600_UUID_A)
-            legacy = sdk.apikey_create(tid, "api")
+            keyA = sdk._apikey_create(tid, _2600_UUID_A)
+            legacy = sdk._apikey_create(tid, "api")
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
             hL = {"Authorization": f"Bearer {legacy['api_key']}"}
             conv = [{"role": "user", "content": "attribution contract."},
@@ -9443,8 +9443,8 @@ class TestSessionActorStamp2600:
             calls = {"n": 0}
             monkeypatch.setattr(ev2, "extract_session_v2",
                                 self._v2_fail_once_extractor(calls))
-            keyA = sdk.apikey_create(tid, _2600_UUID_A)
-            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            keyA = sdk._apikey_create(tid, _2600_UUID_A)
+            keyB = sdk._apikey_create(tid, _2600_UUID_B)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             conv = [{"role": "user", "content": "we decided to ship the retry contract."}]
@@ -9492,8 +9492,8 @@ class TestSessionActorStamp2600:
                 raise RuntimeError("provider exploded mid-run")
 
             monkeypatch.setattr(ev2, "extract_session_v2", _raising)
-            keyA = sdk.apikey_create(tid, _2600_UUID_A)
-            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            keyA = sdk._apikey_create(tid, _2600_UUID_A)
+            keyB = sdk._apikey_create(tid, _2600_UUID_B)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             conv = [{"role": "user", "content": "raise shape capture."}]
@@ -9533,7 +9533,7 @@ class TestSessionActorStamp2600:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            legacy = sdk.apikey_create(tid, "api")
+            legacy = sdk._apikey_create(tid, "api")
             hL = {"Authorization": f"Bearer {legacy['api_key']}"}
             r = _post_capture_allowing_transport_retry(tc, headers=hL, payload={
                 "conversation": [{"role": "user", "content": "legacy key capture."},
@@ -9801,7 +9801,7 @@ def _mint_caller_key(sdk, org_id: str, *, scopes: list | None,
                      deleg: int | None = None) -> dict:
     """Mint an OWNER-level caller key (deleg NULL) with the given scopes —
     the provisioning endpoint's caller credential."""
-    return sdk.apikey_create(org_id, "owner-test", scopes=scopes,
+    return sdk._apikey_create(org_id, "owner-test", scopes=scopes,
                              delegation_depth=deleg)
 
 
@@ -10283,7 +10283,7 @@ class TestProvisioningService:
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            sdk.apikey_revoke(key["id"])
+            sdk._apikey_revoke(key["id"])
             r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code in (401, 403), r.text
@@ -10310,7 +10310,7 @@ class TestProvisioningService:
             # BELONGS_TO edge query via a bad team lookup on the audit
             # path is fragile — instead monkeypatch apikey_create to do the
             # real write THEN raise.
-            orig = ha_mod.TortoiseSDK.apikey_create
+            orig = ha_mod.TortoiseSDK._apikey_create
 
             def _failing_mint(self, org_id, created_by, **kw):
                 # Do the REAL mint (node + edge land), then raise —
@@ -10319,7 +10319,10 @@ class TestProvisioningService:
                 orig(self, org_id, created_by, **kw)  # real mint lands first
                 raise RuntimeError("simulated post-write mint failure")
 
-            monkeypatch.setattr(ha_mod.TortoiseSDK, "apikey_create",
+            # #12901 wave 2: the public `apikey_create` door closed and the body
+            # survives as the PRIVATE seam `_apikey_create`, so the patch targets
+            # the seam the hosted route actually calls.
+            monkeypatch.setattr(ha_mod.TortoiseSDK, "_apikey_create",
                                 _failing_mint)
             try:
                 r = tc.post(f"/v1/organizations/{tid}/graphs",
@@ -10713,7 +10716,7 @@ class TestC3KeyLifecycle:
         sdk, tid, tc = next(gen)
         try:
             # Owner key WITH keys:manage (mint capability).
-            owner = sdk.apikey_create(
+            owner = sdk._apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"],
             )["api_key"]
             app.dependency_overrides.pop(get_current_org, None)  # real key auth
@@ -10742,7 +10745,7 @@ class TestC3KeyLifecycle:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            owner = sdk.apikey_create(
+            owner = sdk._apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"],
             )["api_key"]
             app.dependency_overrides.pop(get_current_org, None)
@@ -10759,7 +10762,7 @@ class TestC3KeyLifecycle:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            reader = sdk.apikey_create(
+            reader = sdk._apikey_create(
                 tid, "owner-test", scopes=["graphs:read"],
             )["api_key"]
             app.dependency_overrides.pop(get_current_org, None)
@@ -10916,7 +10919,7 @@ class TestC3KeyLifecycle:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            owner = sdk.apikey_create(
+            owner = sdk._apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"],
             )["api_key"]
             app.dependency_overrides.pop(get_current_org, None)
@@ -10929,7 +10932,7 @@ class TestC3KeyLifecycle:
                         json={"scopes": ["graphs:read"]})
             assert r.status_code == 403, r.text
             # Child revoke → 403.
-            other = sdk.apikey_create(tid, "owner-test")["api_key"]
+            other = sdk._apikey_create(tid, "owner-test")["api_key"]
             r = tc.delete(f"/v1/team/keys/{other}",
                           headers={"Authorization": f"Bearer {child}"})
             assert r.status_code == 403, r.text
@@ -10949,7 +10952,7 @@ class TestC3KeyCapAndEscalationBackstop:
         sdk, tid, tc = next(gen)
         try:
             # One key already exists (fills the cap of 1).
-            sdk.apikey_create(tid, "owner-test")
+            sdk._apikey_create(tid, "owner-test")
             org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
             org_dict.pop("key_id", None)
             app.dependency_overrides[get_current_org] = lambda: org_dict
@@ -10980,11 +10983,11 @@ class TestC3KeyCapAndEscalationBackstop:
         sdk, tid, _tc = next(gen)
         try:
             with pytest.raises(ControlPlaneError, match="escalation"):
-                sdk.apikey_create(tid, "owner-test",
+                sdk._apikey_create(tid, "owner-test",
                                   delegation_depth=0,
                                   scopes=["graphs:read", "keys:manage"])
             # deleg NULL + escalation scopes is the OWNER class — allowed.
-            ok = sdk.apikey_create(tid, "owner-test", scopes=["keys:manage"])
+            ok = sdk._apikey_create(tid, "owner-test", scopes=["keys:manage"])
             assert ok["api_key"].startswith("tt_")
         finally:
             gen.close()
@@ -11000,7 +11003,7 @@ class TestC3KeyCapAndEscalationBackstop:
         try:
             app.dependency_overrides.pop(get_current_org, None)  # key auth
             # Reader key (graphs:read only) → {} mint 403 (no mint capability).
-            reader = sdk.apikey_create(
+            reader = sdk._apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])["api_key"]
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {reader}"},
@@ -11009,7 +11012,7 @@ class TestC3KeyCapAndEscalationBackstop:
             assert "keys:manage" in r.text
             # keys:manage key → {} mint yields a deleg=0 child, NOT a
             # full-access owner key.
-            mgr = sdk.apikey_create(
+            mgr = sdk._apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"])
             mgr_id = mgr["id"]
             r = tc.post("/v1/team/keys",
@@ -11038,7 +11041,7 @@ class TestC3KeyCapAndEscalationBackstop:
         sdk, tid, tc = next(gen)
         try:
             app.dependency_overrides.pop(get_current_org, None)  # key auth
-            legacy = sdk.apikey_create(tid, "owner-test")  # {} default = legacy
+            legacy = sdk._apikey_create(tid, "owner-test")  # {} default = legacy
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {legacy['api_key']}"},
                         json={})
@@ -11058,7 +11061,7 @@ class TestC3KeyCapAndEscalationBackstop:
         sdk, tid, tc = next(gen)
         try:
             app.dependency_overrides.pop(get_current_org, None)  # key auth
-            legacy = sdk.apikey_create(tid, "owner-test")
+            legacy = sdk._apikey_create(tid, "owner-test")
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {legacy['api_key']}"},
                         json={"scopes": ["graphs:create", "graphs:write"]})
@@ -11087,7 +11090,7 @@ class TestC3KeyCapAndEscalationBackstop:
         try:
             app.dependency_overrides.pop(get_current_org, None)  # key auth
             # deleg-NULL scoped owner key.
-            scoped = sdk.apikey_create(
+            scoped = sdk._apikey_create(
                 tid, "owner-test", scopes=["graphs:read", "graphs:write"])
             # shrink to [] via session face (owner admin).
             org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
@@ -11119,7 +11122,7 @@ class TestC3KeyCapAndEscalationBackstop:
         gen = TestC3KeyLifecycle()._setup(tmp_path, max_api_keys=1)
         sdk, tid, tc = next(gen)
         try:
-            sdk.apikey_create(tid, "owner-test")  # fill cap
+            sdk._apikey_create(tid, "owner-test")  # fill cap
             org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
             app.dependency_overrides[get_current_org] = lambda: org_dict
@@ -11151,12 +11154,12 @@ class TestC3ReviewGatePins:
         sdk, tid, tc = next(gen)
         try:
             app.dependency_overrides.pop(get_current_org, None)  # key auth
-            owner = sdk.apikey_create(tid, "owner-test")  # legacy full-access
-            reader = sdk.apikey_create(
+            owner = sdk._apikey_create(tid, "owner-test")  # legacy full-access
+            reader = sdk._apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])["api_key"]
-            mgr = sdk.apikey_create(
+            mgr = sdk._apikey_create(
                 tid, "owner-test", scopes=["keys:manage"])["api_key"]
-            victim = sdk.apikey_create(tid, "owner-test")
+            victim = sdk._apikey_create(tid, "owner-test")
             # Reader cannot revoke the victim key.
             r = tc.delete(f"/v1/team/keys/{victim['id']}",
                           headers={"Authorization": f"Bearer {reader}"})
@@ -11195,7 +11198,7 @@ class TestC3ReviewGatePins:
         sdk, tid, tc = next(gen)
         try:
             app.dependency_overrides.pop(get_current_org, None)
-            scoped = sdk.apikey_create(
+            scoped = sdk._apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])
             # session face owner
             org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
@@ -12353,7 +12356,7 @@ class TestSessionActorReadPath2600:
         sdk, tid, tc, proj = next(gen)
         try:
             now = "2026-09-09T12:00:00.000000+00:00"
-            key = sdk.apikey_create(tid, _2600_UUID_A)
+            key = sdk._apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             self._seed_session(proj, "s-rd-vreg-a", actor=_2600_UUID_A,
                                created_at=now, turn_count=2,
@@ -12385,7 +12388,7 @@ class TestSessionActorReadPath2600:
         gen = self._setup(tmp_path, "filt")
         sdk, tid, tc, proj = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2600_UUID_A)
+            key = sdk._apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             self._seed_session(proj, "s-rd-fil-a", actor=_2600_UUID_A,
                                created_at="2026-09-09T12:00:00.000000+00:00")
@@ -12412,7 +12415,7 @@ class TestSessionActorReadPath2600:
         gen = self._setup(tmp_path, "badf")
         sdk, tid, tc, _proj = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2600_UUID_A)
+            key = sdk._apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             for bad in ("email@example.com", "api", "garbage",
                         "urn:uuid:11111111-1111-4111-8111-111111111111"):
@@ -12431,7 +12434,7 @@ class TestSessionActorReadPath2600:
         gen = self._setup(tmp_path, "once")
         sdk, tid, tc, proj = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2600_UUID_A)
+            key = sdk._apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             third = "33333333-3333-4333-8333-333333333333"
             calls: list[list[str]] = []
@@ -12461,7 +12464,7 @@ class TestSessionActorReadPath2600:
         gen = self._setup(tmp_path, "legall")
         sdk, tid, tc, proj = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2600_UUID_A)
+            key = sdk._apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             calls = []
             _orig = ha_mod._actor_display_map
@@ -12491,7 +12494,7 @@ class TestSessionActorReadPath2600:
         gen = self._setup(tmp_path, "det")
         sdk, tid, tc, proj = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2600_UUID_A)
+            key = sdk._apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             now = "2026-09-09T12:00:00.000000+00:00"
             self._seed_session(proj, "s-rd-det-a", actor=_2600_UUID_A,
@@ -12611,7 +12614,7 @@ class TestSessionActorReadPath2600:
             assert row["actor_display"] == _2600_UUID_A, row  # raw-id fallback
             assert calls == [], f"graph-bound key must NOT resolve emails: {calls}"
             # team-wide key (same team graph) → the email lookup fires once
-            key = sdk.apikey_create(tid, _2600_UUID_A)
+            key = sdk._apikey_create(tid, _2600_UUID_A)
             ht = {"Authorization": f"Bearer {key['api_key']}"}
             rt = tc.get("/v1/sessions", headers=ht)
             assert rt.status_code == 200, rt.text[:300]
@@ -12730,7 +12733,7 @@ class TestRestAttributionE2E2600:
         tid = "team-2600-e24b2"
         _seed_team_graphs(sdk, tid, "pro", None)
         try:
-            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyA = sdk._apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {keyA['api_key']}"}
             with _verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:
@@ -12837,7 +12840,7 @@ class TestRestAttributionE2E2600:
         tid = "team-2600-e26"
         _seed_team_graphs(sdk, tid, "pro", None)
         try:
-            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyA = sdk._apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {keyA['api_key']}"}
             with _verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:
@@ -12848,7 +12851,7 @@ class TestRestAttributionE2E2600:
                 # revoke keyA via a SECOND owner key (session lane is
                 # unavailable on the registry CP docker face — key-auth
                 # revoke requires keys:manage, owner class passes)
-                keyB = sdk.apikey_create(tid, _2600_UUID_B)
+                keyB = sdk._apikey_create(tid, _2600_UUID_B)
                 hB = {"Authorization": f"Bearer {keyB['api_key']}"}
                 kid = keyA["id"]
                 rr = tc.delete(f"/v1/team/keys/{kid}", headers=hB)
@@ -12871,7 +12874,7 @@ class TestRestAttributionE2E2600:
 # #2600 (Phase 1, Task 6, Step 2) — E2E-5 dedup keeps BOTH actors (REAL
 # hosted auth faces). POST /v1/sessions is key-only; two members =
 # registry-seeded keys with distinct UUID creators authenticated through the
-# REAL registry auth face (sdk.apikey_create — NOT the DI override seam).
+# REAL registry auth face (sdk._apikey_create — NOT the DI override seam).
 # A FRESH PRIVATE team per test (final-verification P1: the mock v2 seam
 # mints a suite-wide constant claim, so a shared team namespace would make
 # A's own capture dedup-hit a pre-existing canonical — red for the wrong
@@ -12926,8 +12929,8 @@ class TestE2E5TwoActorDedup2600:
             proj = self._data_sdk(tid)._get_proj()
             pre = proj.g.query("MATCH (p:Point) RETURN count(p)").result_set
             assert pre and pre[0][0] == 0, pre
-            keyA = sdk.apikey_create(tid, _2600_UUID_A)
-            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            keyA = sdk._apikey_create(tid, _2600_UUID_A)
+            keyB = sdk._apikey_create(tid, _2600_UUID_B)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             # the conversation the mock v2 seam deterministically turns into

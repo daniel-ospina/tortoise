@@ -177,7 +177,7 @@ class TestTeamCreateTierLimits:
     def test_team_create_stores_tier_limits(self):
         sdk = sdk_fixture()
         result = sdk.org_create("alice-team")
-        team = sdk.org_get(result["id"])
+        team = sdk._org_get(result["id"])
         assert team["tier"] == "free"
         assert team.get("max_graphs") == 1
         assert team.get("max_users") == 1

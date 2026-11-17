@@ -155,7 +155,7 @@ def two_tenant_lane(tmp_path, monkeypatch):
         # line is dropped rather than re-aimed at the registry graph: a cap
         # nothing reads makes a test look configured while proving nothing.
         graph = reg._graph_create(org["id"], f"graph-{name}", kind="custom")
-        key = reg.apikey_create(
+        key = reg._apikey_create(
             org["id"], f"probe-{name}", graph_id=graph["graph_id"],
             scopes=["graphs:read", "graphs:write"], prefix="tk_",
         )
@@ -791,7 +791,7 @@ class TestTheSuiteCannotBeArmedByTheDeveloperMachine:
         """
         reg, tenants = two_tenant_lane
         _clear_record_env(monkeypatch)
-        org_wide = reg.apikey_create(
+        org_wide = reg._apikey_create(
             tenants["b"]["org_id"], "probe-org-wide",
             scopes=["graphs:read", "graphs:write"])
 

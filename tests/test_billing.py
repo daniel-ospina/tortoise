@@ -369,7 +369,7 @@ class TestApplyLimitsAndReconcile:
             "MATCH (t:Team {id:$id}) SET t.max_sessions = 1000",
             params={"id": team["id"]},
         )
-        assert sdk.org_get(team["id"])["max_sessions"] == 1000
+        assert sdk._org_get(team["id"])["max_sessions"] == 1000
         queries: list[str] = []
         orig_query = sdk._get_registry().query
 
@@ -380,7 +380,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(sdk._get_registry(), "query", counting_query)
         apply_limits(sdk, team["id"], "pro")
         assert len(queries) == 1  # single atomic Cypher SET
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "pro"
         assert t["max_points"] == 100000   # == max_graph_nodes (GAP-B mapping)
         assert t["max_api_keys"] == 10
@@ -401,7 +401,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: dict(FIXTURE_SUB))
         reconcile_org(sdk, team["id"])
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "pro"
         assert t["max_points"] == 100000
         assert t["subscription_status"] == "active"
@@ -424,7 +424,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [inactive, active])
         reconcile_org(sdk, team["id"])
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "team"
         assert t["subscription_status"] == "active"
 
@@ -456,7 +456,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [stale, active])
         out = reconcile_org(sdk, team["id"])
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert out["action"] == "mirror_customer_first_active"
         assert t["tier"] == "team"           # the ACTIVE sub wins, not the stale id
         assert t["subscription_id"] == "sub_new"   # stale pointer repaired
@@ -496,7 +496,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [ending, newer])
         out = reconcile_org(sdk, team["id"])
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert out["action"] == "mirror_customer_first_active", (
             "an ENDING subscription is not a current pointer, so the customer "
             f"must be consulted — got {out}")
@@ -542,7 +542,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [ending, cheaper])
         out = reconcile_org(sdk, team["id"])
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert out["action"] == "mirror_customer_first_active", (
             f"the customer must still be consulted about the ending sub — {out}")
         assert t["tier"] == "team", (
@@ -592,7 +592,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [cheaper, ending])
         summary = billing.reconcile_subscriptions(sdk, notifier=False)
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "team", (
             "Team is paid through current_period_end and the ending sub could "
             "not be PRICED, so the newer cheaper Solo one must not revoke it "
@@ -659,7 +659,7 @@ class TestApplyLimitsAndReconcile:
 
         monkeypatch.setattr(pricing, "tier_limits", _unreadable_ladder)
         summary = billing.reconcile_subscriptions(sdk, notifier=False)
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "pro", (
             "the ladder could not be read, so no tier may be written — the "
             "raise must precede the control-plane write; a pre-write would "
@@ -726,7 +726,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [cheaper, ending_solo, ending_team])
         summary = billing.reconcile_subscriptions(sdk, notifier=False)
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "team", (
             "Team is paid through current_period_end and the ending set holds "
             "a sub nobody can price, so a newer Solo must not revoke it "
@@ -768,7 +768,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [cheaper, ending])
         reconcile_org(sdk, team["id"])
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "team", (
             "the ending Team sub is paid through the period, so it outranks "
             f"the newer Solo one — got {t['tier']!r}")
@@ -794,7 +794,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [stale])
         reconcile_org(sdk, team["id"])
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "free"
         assert t["subscription_status"] == "canceled"
 
@@ -833,7 +833,7 @@ class TestApplyLimitsAndReconcile:
         assert outcome["action"] == "noop", (
             "an unanswerable LIST must leave the org alone rather than mirror a "
             f"subscription it cannot prove is current — got {outcome}")
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "pro", (
             "the org is PAYING; one failed provider call in the sweep must not "
             f"re-cap it — got {t['tier']!r}")
@@ -937,7 +937,7 @@ class TestApplyLimitsAndReconcile:
         assert summary["failed"] == [] and summary["repaired"] == 0
         assert summary["drift"] == [], (
             "a failed lookup must never be reported as a repair/drift")
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "pro", (
             "a provider error is not a licence to downgrade a paying org")
         text = "\n".join(r.getMessage() for r in caplog.records)
@@ -980,7 +980,7 @@ class TestApplyLimitsAndReconcile:
             f"org has nothing to verify — got {summary}")
         assert summary["unverified"] == 1, summary
         assert summary["failed"] == [] and summary["repaired"] == 0
-        assert sdk.org_get(team["id"])["tier"] == "pro", (
+        assert sdk._org_get(team["id"])["tier"] == "pro", (
             "an unread config file is not a licence to downgrade")
         text = "\n".join(r.getMessage() for r in caplog.records)
         assert "unpaid tier" not in text, (
@@ -1037,7 +1037,7 @@ class TestApplyLimitsAndReconcile:
             summary = bl.reconcile_subscriptions(sdk, notifier=False)  # no raise
             assert summary["unverified"] == 1, (type(fault).__name__, summary)
             assert summary["failed"] == [], (type(fault).__name__, summary)
-            assert sdk.org_get(team["id"])["tier"] == "pro", (
+            assert sdk._org_get(team["id"])["tier"] == "pro", (
                 "an unread file is not a licence to downgrade")
 
     def test_reconcile_past_due_pointer_still_follows_the_newer_active_sub(
@@ -1067,7 +1067,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [past_due, active])
         out = reconcile_org(sdk, team["id"])
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert out["action"] == "mirror_customer_first_active"
         assert t["tier"] == "team"
         assert t["subscription_id"] == "sub_new"
@@ -1076,7 +1076,7 @@ class TestApplyLimitsAndReconcile:
         sdk = billing_sdk
         team = sdk.org_create("noop-team")
         reconcile_org(sdk, team["id"])  # no subscription_id / customer_id → no-op
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "free"
 
     def test_reconcile_unknown_price_keeps_tier(self, monkeypatch, stripe_env, billing_sdk):
@@ -1094,7 +1094,7 @@ class TestApplyLimitsAndReconcile:
                             lambda self, sid: sub)
         with pytest.raises(BillingError, match="unknown price"):
             reconcile_org(sdk, team["id"])
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["tier"] == "pro"  # preserved — never downgraded on unparseable price
         assert t["subscription_status"] == "active"
 
@@ -1117,7 +1117,7 @@ class TestApplyLimitsAndReconcile:
         sub = {"id": "sub_cf", "status": "active", "cancel_at_period_end": True,
                "items": {"data": [{"price": {"id": "price_200proMM"}}]}}
         billing.mirror_subscription(sdk, team["id"], sub)
-        t = sdk.org_get(team["id"])
+        t = sdk._org_get(team["id"])
         assert t["cancel_at_period_end"] is True
         assert t["subscription_status"] == "active"
         assert t["subscription_id"] == "sub_cf"
@@ -1194,7 +1194,7 @@ class TestCheckoutPortal:
         assert r.status_code == 200, r.text
         assert r.json()["checkout_url"] == "https://checkout.stripe.com/pay/session1"
         # Customer binding persisted on the Team node before the redirect.
-        t = billing_client["sdk"].org_get(billing_client["org_id"])
+        t = billing_client["sdk"]._org_get(billing_client["org_id"])
         assert t["stripe_customer_id"] == "cus_checkout1"
         assert t["customer_email"] == "billing-owner@example.com"
 
@@ -1272,7 +1272,7 @@ class TestCheckoutPortal:
         assert r.status_code == 200, r.text
         assert r.json()["checkout_url"] == "https://checkout.stripe.com/pay/sess1"
         assert captured == ["session-user@example.com"]
-        t = billing_client["sdk"].org_get(billing_client["org_id"])
+        t = billing_client["sdk"]._org_get(billing_client["org_id"])
         assert t["customer_email"] == "session-user@example.com"
         assert t["stripe_customer_id"] == "cus_sess1"
 
@@ -1413,7 +1413,7 @@ class TestCheckoutPortal:
         assert r.status_code == 200, r.text
         # the UUID creator id is NOT a customer email — the session email wins
         assert captured == ["session-user@example.com"]
-        t = billing_client["sdk"].org_get(billing_client["org_id"])
+        t = billing_client["sdk"]._org_get(billing_client["org_id"])
         assert t["customer_email"] == "session-user@example.com"
 
     def test_checkout_api_sentinel_created_by_falls_through_to_session_email(
@@ -1474,7 +1474,7 @@ class TestCheckoutPortal:
             app.dependency_overrides.pop(get_current_org, None)
         assert r.status_code == 200, r.text
         assert captured == ["provision@example.com"]  # trimmed, not padded
-        t = sdk.org_get(billing_client["org_id"])
+        t = sdk._org_get(billing_client["org_id"])
         assert t["customer_email"] == "provision@example.com"
 
     def test_checkout_reuse_keeps_stored_customer_email(self, monkeypatch, billing_client):
@@ -1507,7 +1507,7 @@ class TestCheckoutPortal:
             app.dependency_overrides.pop(get_current_org, None)
         assert r.status_code == 200, r.text
         assert created == []  # reused the stored customer, not recreated
-        t = sdk.org_get(billing_client["org_id"])
+        t = sdk._org_get(billing_client["org_id"])
         assert t["customer_email"] == "first@example.com"  # unchanged
         assert t["stripe_customer_id"] == "cus_existing"
 

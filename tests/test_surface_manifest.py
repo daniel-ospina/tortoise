@@ -660,7 +660,10 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   re-keys carry both columns again. The number is re-derived from the MERGED manifest,
 #:   never carried from either side — 38 was main's own measured count and was two short
 #:   here, which is exactly the allowance this floor exists to forbid.
-COMPARABLE_CALLER_ROWS_FLOOR = 40
+#:   40 -> 25 on 2026-11-16 (#12901 wave 2): fifteen of the sixteen retired rows carried a
+#:   caller list in both columns (`org_create`'s N1 neighbours are the exception), so they
+#:   left the comparison with the row. Re-derived from THIS manifest, never carried.
+COMPARABLE_CALLER_ROWS_FLOOR = 25
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -1291,13 +1294,8 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     # The pin is set ONE BELOW the live count so the run must red: the property
 
     # under test is "growth past the pin reds", not any particular number — so it is
-    # READ from the live count instead of being re-typed on every surface move. The count
-    # moved five times: #4282's container (81 -> 77), #4282 Phase 3.2's `run_onboarding`
-    # retirement (77 -> 72), #11609 batch 1's four archived no-destination tools
-    # (72 -> 68), #11609 Phase 2's READ/QUERY wave of nine retired members (68 -> 64) and
-    # its WRITE/MUTATE wave of fourteen retired doors into six containers (64 -> 56) — so
-    # the pin follows to 56 - 1. Derived from the manifest rather than typed, so the next
-    # movement does not need this comment edited to stay honest.
+    # READ from the live count instead of being re-typed on every surface move (#11609
+    # lane B moved it 68 -> 60 and found this literal had been hand-carried twice).
     doc["high_water_counts"] = {"tools": doc["counts"]["tools"] - 1,
                                 "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
@@ -4869,10 +4867,10 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #11609 lane C composes with lane B on this tree: 60 -> 59 (six SOURCES/MINE/SESSION
     # containers in, seven advertised members retired into them; the 68 the branch started
     # from is lane B's pre-wave number, so the merged arithmetic is 68 + 6 + 6 - 7 - 14).
-    # #11609 Phase 2 READ/QUERY (this PR, MERGED): 59 -> 55 — nine READ doors retired into
-    # five arriving containers (the sixth, `graph_overview`, was already live via #10914),
-    # so 59 - 9 + 5 = 55. The retired names keep their #3883 shims, which is why the SERVED
-    # population rises to 108 while the ADVERTISED one falls.
+    # #11609 family A's READ/QUERY containers (#12951, merged after this pin was last cut)
+    # then retired nine advertised doors into six containers: 59 - 9 + 5 = 55. The pin had
+    # gone stale on `main` by exactly that wave — this corrects it to the derived count
+    # rather than to any prose, and `surface-target-check.py` reads the same 55.
     assert live["mcp"] == manifest["counts"]["tools"] == 55
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
@@ -4896,13 +4894,15 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # (`supersede` -> `supersede_knowledge`, `update_entity` -> `update_knowledge`,
     # `file_decision` -> `write_question`, `file_human_approval` -> `record_decision`).
     # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
-    # approved targets still ABSENT from the live class (see the 11 the declaration gate
+    # approved targets still ABSENT from the live class (see the 23 the declaration gate
     # prints), so naming them as delivered here was false.
-    # #11609 Phase 2 READ/QUERY (this PR, MERGED): 118 -> 110 — the six READ containers
-    # arrive (+6) and fourteen doors are re-privatised (-14). Measured on the merged tree:
-    # AST 110 / reflection 110 / frozen 110, and `sdk_surface_declaration.py check` prints
-    # 82 live-off-surface + 11 approved-but-absent against the approved 40.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 110
+    # 110 -> 94 on 2026-11-16 (#12901 wave 2): the canonical control-plane partition
+    # (`N1`–`N6`) left the PUBLIC surface — sixteen members, every body privatised as the
+    # seam its hosted caller now uses — so the live set shrank again without touching the
+    # approved 40 (none of the sixteen was an approved row). 110 is this tree's BEFORE:
+    # the wave branched before #12951's READ/QUERY containers, so its own "118 -> 102"
+    # never saw that wave's -8. The manifest under test is the one re-cut HERE.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 94
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

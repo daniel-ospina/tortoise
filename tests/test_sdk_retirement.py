@@ -441,12 +441,14 @@ def test_every_surplus_destination_is_the_one_the_record_records() -> None:
     from tortoise.sdk_retired import (
         SURPLUS_DELETION_DESTINATIONS,
         WAVE1_DELETION_DESTINATIONS,
+        WAVE2_DELETION_DESTINATIONS,
     )
 
     inventory = _inventory_destinations()
     for cell_name, cell in (
         ("SURPLUS_DELETION_DESTINATIONS", SURPLUS_DELETION_DESTINATIONS),
         ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
+        ("WAVE2_DELETION_DESTINATIONS", WAVE2_DELETION_DESTINATIONS),
     ):
         missing = sorted(n for n in cell if n not in inventory)
         assert not missing, (
@@ -485,12 +487,14 @@ def test_every_deletion_reason_states_only_its_recorded_destination() -> None:
         REMOVED_SDK_METHODS,
         SURPLUS_DELETION_DESTINATIONS,
         WAVE1_DELETION_DESTINATIONS,
+        WAVE2_DELETION_DESTINATIONS,
     )
 
     wrong: dict[str, tuple] = {}
     for cell_name, cell in (
         ("SURPLUS_DELETION_DESTINATIONS", SURPLUS_DELETION_DESTINATIONS),
         ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
+        ("WAVE2_DELETION_DESTINATIONS", WAVE2_DELETION_DESTINATIONS),
     ):
         for name, dests in cell.items():
             if name not in REMOVED_SDK_METHODS:
@@ -509,20 +513,26 @@ def test_every_deletion_reason_states_only_its_recorded_destination() -> None:
         f"{ {k: v[:3] for k, v in wrong.items()} }"
     )
 
-    # NON-VACUITY for the wave-1 cell: the loop above is only a pin if the reasons it
-    # reads actually STATE their claim. A reason that names its destination in some other
-    # phrasing parses as `()` and would only red when the cell is non-empty — so this arm
-    # says the two sides match exactly: claim present iff a destination is recorded.
-    claiming = {
-        name for name in WAVE1_DELETION_DESTINATIONS
-        if _DESTINATION_CLAIM.search(REMOVED_SDK_METHODS.get(name, ""))
-    }
-    recorded = {n for n, dests in WAVE1_DELETION_DESTINATIONS.items() if dests}
-    assert claiming == recorded, (
-        "the wave-1 claim pin does not read what it claims to read — a name whose reason "
-        "lacks the `Recorded destination `x`` sentence is outside the pin "
-        f"(claims, records a destination): {sorted(claiming)}, {sorted(recorded)}"
-    )
+    # NON-VACUITY for the two `#12901` cells: the loop above is only a pin if the
+    # reasons it reads actually STATE their claim. A reason that names its destination in
+    # some other phrasing parses as `()` and would only red when the cell is non-empty —
+    # so this arm says the two sides match exactly, per cell: claim present iff a
+    # destination is recorded. (Wave 1 was the only cell until wave 2 landed; the loop is
+    # what keeps the NEXT wave from arriving outside the pin.)
+    for cell_name, cell in (
+        ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
+        ("WAVE2_DELETION_DESTINATIONS", WAVE2_DELETION_DESTINATIONS),
+    ):
+        claiming = {
+            name for name in cell
+            if _DESTINATION_CLAIM.search(REMOVED_SDK_METHODS.get(name, ""))
+        }
+        recorded = {n for n, dests in cell.items() if dests}
+        assert claiming == recorded, (
+            f"the {cell_name} claim pin does not read what it claims to read — a name "
+            "whose reason lacks the `Recorded destination `x`` sentence is outside the "
+            f"pin (claims, records a destination): {sorted(claiming)}, {sorted(recorded)}"
+        )
 
 
 def test_a_live_recorded_destination_is_hinted_or_declared() -> None:
@@ -543,10 +553,15 @@ def test_a_live_recorded_destination_is_hinted_or_declared() -> None:
         SURPLUS_DELETION_DESTINATIONS,
         UNHINTED_LIVE_DESTINATIONS,
         WAVE1_DELETION_DESTINATIONS,
+        WAVE2_DELETION_DESTINATIONS,
     )
 
     public = _public_methods()
-    destinations = {**SURPLUS_DELETION_DESTINATIONS, **WAVE1_DELETION_DESTINATIONS}
+    destinations = {
+        **SURPLUS_DELETION_DESTINATIONS,
+        **WAVE1_DELETION_DESTINATIONS,
+        **WAVE2_DELETION_DESTINATIONS,
+    }
     live_unhinted = {
         name: dest
         for name, dests in destinations.items()
