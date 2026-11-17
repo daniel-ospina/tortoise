@@ -240,8 +240,8 @@ class TestDeprovisionOnDelete:
         assert ha._org_graph_names("o1", "team_o1") == ["team_o1", "org_o1"]
     def test_a_truncated_graphs_walk_REFUSES_rather_than_dropping_the_tail(self, monkeypatch):
         """⛔ A single page is silently capped at the deployment's `max_rows`, so
-        an org owning more graphs than one page (reachable: `max_graphs` is None
-        on every tier, #10743) would lose the TAIL of its custom graphs from the
+        an org owning more graphs than one page (reachable: `max_graphs_per_team`
+        is `null` — unlimited — on pro and team, #10743) would lose the TAIL of its custom graphs from the
         deprovision list — and `purge_org_control_plane` would then delete the
         rows that named them, making them unnameable and unreapable forever
         (#13205 review round 6). The walk is `query_all`, and an uncertified one
@@ -262,8 +262,8 @@ class TestDeprovisionOnDelete:
         """⛔ Review round 7: `_drop_org_acl_users` read ONE PostgREST page.
 
         `query` is capped at the deployment's `max_rows` (1000) and cannot report
-        its own truncation, so an org past one page (reachable: `max_graphs` is
-        None on every tier, #10743) keeps the TAIL of its gids — and a gid names
+        its own truncation, so an org past one page (reachable:
+        `max_graphs_per_team` is `null` on pro and team, #10743) keeps the TAIL of its gids — and a gid names
         a GLOBAL `tenant_<gid>` ACL user, i.e. a LIVE CREDENTIAL, in the very
         purge that then deletes the graphs and the rows naming them. The walk is
         `query_all` (cursor in `select`), which is what drops the second page's

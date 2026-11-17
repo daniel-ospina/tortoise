@@ -34593,8 +34593,11 @@ def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
             # ⛔ `query_all`, not `query` (review round 6). A single page is
             # silently capped at the deployment's `max_rows` (1000) and cannot
             # report its own truncation, so an org owning more graphs than one
-            # page — which is reachable, `max_graphs` is `None` on every tier
-            # (#10743) — would have its tail of custom graphs dropped from the
+            # page — which is reachable: `max_graphs_per_team` is `null`, i.e.
+            # UNLIMITED, on pro and team (free/solo/anon cap at 1/2/1 — #10743
+            # states exactly that table, and its title is "`max_graphs` is None
+            # … for 3 tiers of 5") — would have its tail of custom graphs
+            # dropped from the
             # deprovision list, and `purge_org_control_plane` would then delete
             # the rows that named them: unnameable, unreapable, permanently
             # resident. Exactly the partial erasure this function's raise exists
@@ -34706,27 +34709,33 @@ def _drop_org_acl_users(org_id: str) -> None:
     round 7). `_org_graph_names` refuses a subset of this same table one
     function up, but this SECOND read was still a single `cp.query` — capped at
     the deployment's `max_rows` with no truncation signal. An org past one page
-    (reachable: `max_graphs` is `None` on every tier, #10743) then lost the TAIL
-    graphs' `tenant_<gid>` users, while `_drop_org_graphs_strict` deleted those
-    graphs and `purge_org_control_plane` cascaded away the rows that carried the
-    gids: orphaned GLOBAL credentials nothing can name or reap — what this
+    (reachable: `max_graphs_per_team` is `null` — unlimited — on pro and team,
+    and only on those two tiers; free/solo/anon cap at 1/2/1, which is what
+    #10743 measures) then lost the TAIL of its graphs' `tenant_<gid>` users,
+    while `_drop_org_graphs_strict` deleted those graphs and
+    `purge_org_control_plane` cascaded away the rows that carried the gids: orphaned GLOBAL credentials nothing can name or reap — what this
     docstring calls orphaning "the live credentials forever". So the read is a
     certified `query_all` walk (cursor `id`, which must ride in `select`).
 
-    ⛔ AN UNCERTIFIED WALK IS NOT PROMOTED TO A FAILURE HERE, and it does not
-    need to be. C4/#2113 is a RECORDED DECISION — "Best-effort per graph (a
-    committed purge never fails on a drop)" — and this function's job is to drop
-    users, not to adjudicate the purge. The ONE site that reaches this read (the
-    supabase lane of `_purge_deleted_orgs_locked`) calls `_drop_org_graphs_
-    strict` immediately after, whose `_org_graph_names` walk certifies the SAME
-    table with the SAME filter, cursor and page bounds and RAISES when it cannot
-    — so the graph drops and the row cascade never run, and the org row stays as
-    the #926 retry anchor. ⛔ Do NOT read the warning below as "this purge
-    deletes graphs whose users it could not name": on this path it cannot. The
-    warning exists so the lower bound is never SILENT if the two walks ever
-    diverge (different bounds, or that sibling's raise removed) — silence is the
-    failure mode, because the operator can only drop an orphaned credential by
-    hand if it is announced.
+    ⛔ AN UNCERTIFIED WALK IS NOT PROMOTED TO A FAILURE HERE. C4/#2113 is a
+    RECORDED DECISION — "Best-effort per graph (a committed purge never fails on
+    a drop)" — and this function's job is to drop users, not to adjudicate the
+    purge. The ONE site that reaches this read (the supabase lane of
+    `_purge_deleted_orgs_locked`) calls `_drop_org_graphs_strict` immediately
+    after, whose `_org_graph_names` walk certifies the SAME table with the SAME
+    filter, cursor and page bounds and RAISES when it cannot — so when the two
+    walks refuse TOGETHER, the graph drops and the row cascade never run and the
+    org row stays as the #926 retry anchor.
+
+    ⛔ THEY ARE TWO INDEPENDENT WALKS OVER CHANGING STATE, so "refuse together"
+    is not a guarantee: a transient anomaly the client detects (a page that is
+    not strictly ascending, or a filter the server did not apply — both of which
+    make `query_all` refuse to certify) can leave `complete=False` HERE while the
+    sibling, re-reading a moment later, certifies. That purge DOES drop graphs
+    whose gids were never enumerated, and the credential is orphaned with no #926
+    retry — the residual #13287 owns. This warning therefore does not claim the
+    tail is safe; it announces the bound so the credential can be found and
+    dropped by hand, which is the one thing silence would prevent.
     """
     from tortoise.supabase_control import (
         get_control_plane,
@@ -34761,10 +34770,11 @@ def _drop_org_acl_users(org_id: str) -> None:
         _logger.warning(
             "team ACL-user enumeration for %s is a LOWER BOUND (%d gid(s), walk "
             "UNCERTIFIED): only the enumerated graphs' `tenant_<gid>` users are "
-            "dropped. `_org_graph_names` walks the same table with the same "
+            "dropped here. `_org_graph_names` walks the same table with the same "
             "bounds and refuses this purge on the same condition, so this stays "
-            "best-effort (#2113) — if the two walks ever diverge, drop that "
-            "credential by hand",
+            "best-effort (#2113) — but that is a SECOND walk, not a derivation, "
+            "so a transient anomaly visible only here still orphans credentials "
+            "(#13287): check this org's `tenant_*` users by hand",
             org_id, len(ids))
     for gid in ids:
         try:  # noqa: SIM105
