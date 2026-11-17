@@ -10286,12 +10286,12 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
                                     lands=None) -> None:
     """#12869 — refuse a PERSISTABLE NON-STRING Object ``status`` at a write door.
 
-    ⛔ THIS IS NOT A VOCABULARY. ONTOLOGY §4.3 declares the property's TYPE as
-    ``string`` and leaves the WORD SET open per kind ("pack-declared kinds
-    validate against their own declared words"), which ``#10371`` records as a
-    constraint rather than a to-do — ``packs/venture`` stores ``active`` /
-    ``invested`` / ``paused``. A non-string is therefore the ONE value undeclared
-    for EVERY Object kind, and arbitrary STRINGS must keep being accepted.
+    ⛔ THIS IS NOT A VOCABULARY — but the vocabulary IS CLOSED. `#11824` S0
+    retired the per-kind reading this paragraph used to carry (ONTOLOGY §4.3
+    still shows the pre-S0 model: ``in_progress``/``completed`` accepted, pack
+    words validated per kind — MEASURED false at this head, so THE CODE IS
+    AUTHORITATIVE and that row owes its own correction). The word set is ONE
+    four-word set for every knowledge kind; a pack's own words are STAGES.
 
     ⛔ AND IT IS SCOPED BY "WOULD THIS LAND?", not by "is it a string?". A
     value FalkorDB cannot store (a dict/set/bytes) is DROPPED by the writers —
@@ -54849,8 +54849,8 @@ class TortoiseSDK:
             # ⛔ `type` IS A PARAMETER HERE (`type: str`), so `type(x)` would call
             # the string; `_refusal_type_name(x)` is shadow-free AND hostile-safe.
             # ⚠️ AND THE HELPER'S OWN AMBIGUITY RAISE IS UNREACHABLE FROM ALL THREE
-            # CALLERS, though not by one shared arm — the create doors' INLINE arm
-            # answers, `add_object` is stopped earlier, `update` by its own guards.
+            # CALLERS — by three different arms, not one: `create_entity`'s own,
+            # `_refuse_non_str_keys` (add_object), `_sanitize_props` (update, `:6464`).
             # ⛔ WHERE THIS GUARD SITS, MEASURED — do not restate the ladder from
             # memory. `#11824` S0's TYPE check runs INLINE in `create_entity` (its
             # `_read_caller_status` call), NOT in `_validate_bundle` (which returns
@@ -54865,13 +54865,13 @@ class TortoiseSDK:
             # is ALL this comment may claim. The exemption is NOT dead at this
             # door: it is LIVE for the one shape S0 does not answer first, a plain
             # `str` word, pinned at `tests/test_status_projection.py:2262`
-            # (`test_the_CREATE_guard_is_a_LANDING_test_not_a_presence_test`: a
-            # re-create of a held name leaves the merged row byte-identical — MERGE
-            # and id-less ADOPT alike). `tortoise/api.py:2927` still relies on it.
-            # The same helper also refuses a two-key AMBIGUITY write; here S0's
-            # inline check answers first (measured: the `{status: None,
-            # KHash('status'): …}` spelling returns `refused a CONFLICTING status
-            # write` from `create_entity`'s own ambiguity arm, not from here).
+            # (`test_the_CREATE_guard_is_a_LANDING_test_not_a_presence_test`: the MERGE
+            # arm leaves the row byte-identical, and the id-less ADOPT arm leaves it
+            # unchanged EXCEPT the id stamp the adopt itself writes). The helper's
+            # `lands` scoping still governs `EventAPI.add_object` (`api.py:2927`).
+            # Its two-key AMBIGUITY raise is answered first too, by a DIFFERENT arm:
+            # `create_entity`'s own `_status_write_is_ambiguous` (`sdk.py:54695`)
+            # raises `refused a CONFLICTING status write` (measured), not this helper.
             #
             # ⛔ ONLY THE NON-PERSISTABLE ARM WAS INVERTED — not the landing one.
             # `…_NON_PERSISTABLE_status_is_still_DROPPED_not_refused` is now
