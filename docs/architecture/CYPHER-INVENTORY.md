@@ -98,7 +98,7 @@ door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
 1,624 occurrences of the door predicate across 108 files
-2,342 occurrences of the verb predicate across 142 files   (upper-bound shape, see below)
+2,343 occurrences of the verb predicate across 143 files   (upper-bound shape, see below)
 
 1,624  regex door-pattern occurrences
   −53  occurrences on a line carrying NO door call (comments and docstrings)
@@ -118,18 +118,18 @@ tool's number. A bare `rg … tortoise/` gives 1,630 / 109, the 6 extra occurren
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,624 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,329** across **141** files, while the tool
-reports 2,342 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **142** files, while the tool
+reports 2,343 / 143. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — a wrapped English sentence in ten (e.g. `oauth.py:1600`'s “limits match” / “(#329): preserve
 None”) and a wrapped Cypher example in three (`projection/__init__.py:1204`,
-`record_projection.py:4777`, `vector_write.py:495`). Enumerated, not inferred: that TWO-LINE predicate
+`record_projection.py:4830`, `vector_write.py:495`). Enumerated, not inferred: that TWO-LINE predicate
 over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone finds 175, which is why
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
 which is why the tool's verb total is an upper bound.
-(A bare case-sensitive `rg` gives 2,063, and `-i` without the exclusion 2,401 — which is why the
+(A bare case-sensitive `rg` gives 2,064, and `-i` without the exclusion 2,402 — which is why the
 number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
@@ -406,8 +406,15 @@ reads) and **no** Cypher statement site, so `ast_door_calls` **1569→1571** and
 `non_cypher_door_calls` **258→260** while `sites`/`plain`/`candidates` are unchanged (1311 / 859 /
 578 — the 578 is the `plain` READ half, which is also the migration-candidate count). `files_scanned`
 stays 297 and `files_with_sites` 99: the reader lives in a file that already carries sites. The
-`rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,329 / 1,630 bare / 2,063 / 2,401),
+`rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,330 / 1,630 bare / 2,064 / 2,402),
 Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts match`**.
+⚠️ Those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
+below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
+`MERGE (s:Source {url:$id})`, and this census counts LINES — so the tool reads 2,343 / 143 where it
+read 2,342 / 142, and `rg` reads 2,330 / 142, 2,064 and 2,402 where it read 2,329 / 141, 2,063 and
+2,401. The 13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED
+(the added match is single-line, not cross-line), and §1's `record_projection.py:4777` citation is
+corrected to `:4830` because that same commit moved it.
 ⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
 inside files that already carried sites, so re-cutting the appendix moves ROWS while every SCALAR
 stays put. Measured on THIS cut against `origin/main` **`34bd33d22a`**: exactly **one row** differs
