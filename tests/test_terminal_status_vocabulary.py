@@ -114,8 +114,11 @@ def test_terminal_set_is_the_vocabularys_terminal_half() -> None:
         "a status a writer may set is served as current: "
         f"{sorted(writable_terminal - TERMINAL_EXCLUDED_STATUSES)}"
     )
-    # ...and the READ set is the WIDER one (design §8), never narrower
-    assert TERMINAL_STATUS_VALUES <= TERMINAL_EXCLUDED_STATUSES
+    # ...and the set a reader HIDES is never narrower than the endings a writer
+    # may set (design §8) — the relation S0's split preserves. Its ABSOLUTE width
+    # cannot be checked by derivation in this file: EXCLUDED is BUILT from
+    # TERMINAL_STATUS_VALUES, so a shrinking READ set moves both and the equality
+    # above stays true — that literal pin is `tests/test_lifecycle_guards.py:80-82`.
     assert not (CURRENT_POINT_STATUS_VALUES & TERMINAL_EXCLUDED_STATUSES)
 
 

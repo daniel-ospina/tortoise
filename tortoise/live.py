@@ -69,10 +69,10 @@ import json
 # cannot import the full vocabulary (``POINT_STATUS_VALUES``, canonical in
 # ``tortoise/sdk.py``) at import time. The partition below is therefore held
 # to that vocabulary by ``tests/test_terminal_status_vocabulary.py``, which
-# proves every WRITE word is current-or-hidden and that this READ set is never
-# NARROWER than the write set (#11824 S0 split the two — design §8), so adding
-# a status to that vocabulary without classifying it here REDs that test instead
-# of silently defaulting to "current" on every read surface.
+# proves every WRITE word is current-or-hidden and that no ending a writer may
+# set is served as current (#11824 S0 split the two sets — design §8); the READ
+# set's absolute width is a literal pin in ``tests/test_lifecycle_guards.py``.
+# Adding a status to the vocabulary without classifying it REDs that test.
 # (A parity test, not import-time coercion, is the guard: the alternative —
 # declaring POINT_STATUS_VALUES here — would need sdk.py to stop declaring it,
 # and a circular import makes the reverse direction impossible.)
@@ -91,33 +91,20 @@ DRAFT_STATUS = "draft"
 #: is CURRENT (draft is not-yet-published, not dead).
 CURRENT_POINT_STATUS_VALUES = frozenset({DRAFT_STATUS, "live"})
 
-#: The vocabulary's READ-side terminal members (ontology §5: retracted/superseded
-#: are terminal; ``outdated`` is the legacy supersede/invalidate status;
-#: ``archived`` is a declared synonym of ``deprecated`` at the write door).
-#: ⚠️ This is the READER's set, not the WRITER's: since `#11824` S0 the write
-#: vocabulary is the four words in ``lifecycle_vocabulary.LIFECYCLE_STATUS_VALUES``
-#: (``sdk.POINT_STATUS_VALUES``), which does NOT contain ``retracted``,
-#: ``outdated`` or ``archived``. Rows written before S0 still hold those words and
-#: nothing is backfilled (#11824 §1), so a reader must keep hiding them — design
-#: §8, "what a reader hides is wider than what a writer may create". Do not
-#: derive the write set from this one, and do not narrow it to match.
+#: The READ-side terminal members (ontology §5). ⚠️ The READER's set, not the
+#: writer's: `#11824` S0 narrowed the write vocabulary to four words and nothing
+#: is backfilled, so a reader must still hide these (design §8).
 TERMINAL_STATUS_VALUES = frozenset(
     {"retracted", "superseded", "outdated", "archived"})
 
-#: ``deprecated`` is in ``LEGACY_NON_CURRENT_STATUS_VALUES`` because it must be
-#: HIDDEN as current, NOT because it is unwritable. ⚠️ `#11824` S0 made it a WRITE
-#: word too: the four-word lifecycle is ``draft``/``live``/``deprecated``/
-#: ``superseded`` (``lifecycle_vocabulary.LIFECYCLE_STATUS_VALUES``, re-exported
-#: as ``sdk.POINT_STATUS_VALUES``), and ``tests/test_lifecycle_guards.py:85-97``
-#: records that reversal on the record — the pre-S0 note here claimed the
-#: opposite and asserted the guards pinned an ABSENCE that they no longer do.
-#: The word is unbounded on both sides for one reason: ``superseded`` NAMES ITS
-#: SUCCESSOR, so a row where nothing replaced the statement needs
-#: ``deprecated`` to say "this ended and nothing replaced it".
-#: #2901 inverse-shape ruling stands: it joins the EXCLUSION set below but not
-#: ``TERMINAL_STATUS_VALUES``, and the recall_state test that sets
-#: ``n.status = 'deprecated'`` directly remains a legitimate simulation of legacy
-#: graph data.
+#: ``deprecated`` is here because it must be HIDDEN, not because it is
+#: unwritable: `#11824` S0 made it a WRITE word too (``lifecycle_vocabulary``),
+#: and ``tests/test_lifecycle_guards.py:85-97`` records that reversal — the
+#: pre-S0 note here claimed the opposite. ``superseded`` NAMES ITS SUCCESSOR,
+#: so a row where nothing replaced the statement needs ``deprecated`` to say
+#: "this ended and nothing was put in its place". #2901 inverse-shape ruling
+#: stands: the EXCLUSION set below, not ``TERMINAL_STATUS_VALUES`` — the
+#: recall_state test setting ``n.status = 'deprecated'`` is legacy data.
 LEGACY_NON_CURRENT_STATUS_VALUES = frozenset({"deprecated"})
 
 #: Every status a read surface (FTS/vector/structural, EP factor extraction,
