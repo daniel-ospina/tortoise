@@ -1337,3 +1337,79 @@ def test_the_record_quotes_the_current_wording_of_the_honesty_item():
             "the README still asserts the retired absolute 'unmeasured anywhere' "
             "without marking it as retired — §9 is that measurement"
         )
+
+
+def test_every_published_arrow_is_bound_to_the_cell_it_reports(artifact):
+    """Every published `A % -> B %` must equal the pair at ITS OWN arm and metric.
+
+    `test_no_doc_states_a_percentage_the_artifact_does_not_hold` is a MEMBERSHIP
+    test, and its docstring names the stale-heading case it is meant to catch — but
+    membership is satisfied by any artifact figure from any arm or metric, so every
+    arrow the README publishes was unpinned while §9.1's identical arrows were pinned
+    (the one-of-two-siblings shape this PR has already fixed twice). Measured on the
+    previous revision, each of these stayed GREEN at 46 passed:
+
+        README heading      `88.3 % -> 46.0 %`  ->  `88.3 % -> 47.0 %`
+        README              `71.3 % -> 41.0 %`  ->  `71.3 % -> 40.0 %`
+        README              `27.7 % -> 41.0 %`  ->  `27.7 % -> 43.0 %`
+        README     `87.1 % vs 100.0 %`  ->  `87.1 % vs 95.0 %`  (only operand 1 bound)
+        §9.1        `nine of the ten`  ->  `eight of the ten`
+        §1.5            `~11.7` / `0.410`  ->  `~12.7` / `0.420`
+
+    The sibling mutation in §9.1 DID red, which is why the README half looked
+    covered. This binds each fragment to a derivation, so the figure cannot drift
+    without the derivation drifting with it.
+    """
+    def _ws(s: str) -> str:
+        return " ".join(s.split())
+
+    def pct(arms, arm, metric):
+        return f"{arms[arm][metric] * 100:.1f}"
+
+    obj = _arms(artifact, "object")
+    pt = _arms(artifact, "point")
+    readme = _ws(README.read_text())
+    arch = _ws((ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md").read_text())
+
+    # `:Object` recall@3, complete -> tail@0.5, and the misbind ladder.
+    # the document uses a U+2212 MINUS SIGN, not a hyphen
+    r3_drop = ("(\u2212"
+               f"{obj['complete']['recall@3'] * 100 - obj['tail@0.5']['recall@3'] * 100:.1f}"
+               " points)")
+    fragments = [
+        (readme, f"**{pct(obj,'complete','recall@3')} % → {pct(obj,'tail@0.5','recall@3')} %** and "
+                 f"the wrong-answer rate at rank 1 rises "
+                 f"**{pct(obj,'complete','misbind_at_1')} % → {pct(obj,'tail@0.5','misbind_at_1')} %**"),
+        (readme, f"falls {pct(obj,'complete','recall@3')} % → {pct(obj,'tail@0.5','recall@3')} %"),
+        (readme, f"recall@3 **{pct(obj,'complete','recall@3')} % → {pct(obj,'tail@0.5','recall@3')} %** "
+                 f"{r3_drop}, recall@15 "
+                 f"{pct(obj,'complete','recall@15')} % → {pct(obj,'tail@0.5','recall@15')} %"),
+        (readme, f"`found@deep` falls **{pct(pt,'complete','found_deep')} % → "
+                 f"{pct(pt,'tail@0.5','found_deep')} %**, and recall@3 "
+                 f"{pct(pt,'complete','recall@3')} % → {pct(pt,'tail@0.5','recall@3')} %"),
+        (readme, f"**{pct(obj,'complete','misbind_at_1')} % → {pct(obj,'tail@0.5','misbind_at_1')} %** "
+                 f"(tail@0.50) → {pct(obj,'tail@0.25','misbind_at_1')} % (tail@0.25)"),
+        (readme, f"{obj['tail@0.25']['recall@3'] / obj['tail@0.25']['resident_share'] * 100:.1f} % vs "
+                 f"{obj['random@0.25']['recall@3'] / obj['random@0.25']['resident_share'] * 100:.1f} % "
+                 f"at 0.25"),
+    ]
+    for doc, frag in fragments:
+        assert frag in doc, f"published figure not bound to its cell: {frag!r}"
+
+    # §9.1's "nine of the ten" is a COUNT over the windowed `:Point` arms, derived.
+    windowed = [k for k in pt if k != "complete"]
+    below = [k for k in windowed if pt[k]["found_deep"] < pt[k]["resident_share"]]
+    coincident = [k for k in windowed if pt[k]["found_deep"] == pt[k]["resident_share"]]
+    assert len(windowed) == 10, windowed
+    assert len(below) == 9 and len(coincident) == 1, (len(below), coincident)
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+             6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+    assert f"**{words[len(below)]} of the ten** windowed arms fall short" in arch
+    assert coincident == ["random@0.1"], coincident
+
+    # §1.5/§7's `:Point` ceiling term, derived from the same arm.
+    headroom = (pt["tail@0.5"]["resident_share"] - pt["tail@0.5"]["found_deep"]) * 100
+    frag = (f"~{headroom:.1f} points of it at `tail@0.5`, where `found@deep` is "
+            f"{pt['tail@0.5']['found_deep']:.3f} against a resident share of "
+            f"{pt['tail@0.5']['resident_share']:.4f}")
+    assert frag in arch, f"§1.5/§7's ceiling term not bound: {frag!r}"
