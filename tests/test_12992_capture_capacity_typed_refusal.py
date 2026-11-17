@@ -99,10 +99,26 @@ def test_the_duplicate_in_flight_refusal_is_UNCHANGED(
     re-typing it alongside the capacity 429 would silently stop both from
     exempting it — a concurrency condition would be painted on the dashboard as
     an org capture failure.
+
+    ⛔ AND THE CARVE-OUT IS COUNTER-FREE, which is the half a status+detail
+    assertion cannot see (#13000 review, P3 — measured): the counter increment
+    added to the CAPACITY arm would, if copied into this one, leave
+    `refusing: true` on `/health` for a duplicate-in-flight collision — a
+    refusal `_capture_health` does not claim to count ("Refusals the capacity
+    gate has ANSWERED") and `docs/infra-runbook.md` §4.1.1b does not document.
+    Mutating `_CAPTURE_REFUSED_TOTAL += 1` into this arm kept the whole file
+    green before the two asserts below existed.
     """
     monkeypatch.setattr(ha, "_CAPTURE_MAX_IN_FLIGHT", 4)
     monkeypatch.setattr(ha, "_CAPTURE_IN_FLIGHT", 0)
     monkeypatch.setattr(ha, "_CAPTURE_SESSIONS", {})
+    # ⛔ SEEDED, not assumed zero: an earlier case in THIS file drives a real
+    # capacity refusal, so the module counters are non-zero on entry and a bare
+    # `== 0` assertion would fail for ORDER, not for the defect it is pinning
+    # (measured: passes alone, reds in the file). Seeding also makes the
+    # mutation visible in either order.
+    monkeypatch.setattr(ha, "_CAPTURE_REFUSED_TOTAL", 0)
+    monkeypatch.setattr(ha, "_CAPTURE_LAST_REFUSED_AT", None)
     slot = ha._reserve_capture_slot("same-session")
     try:
         with pytest.raises(ha.HTTPException) as excinfo:
@@ -111,6 +127,12 @@ def test_the_duplicate_in_flight_refusal_is_UNCHANGED(
         slot.release()
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail == ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL
+    assert ha._CAPTURE_REFUSED_TOTAL == 0, (
+        "a 409 duplicate-in-flight collision was COUNTED — `/health` would then "
+        "report `refusing: true` for a refusal the capacity gate never issued")
+    assert ha._CAPTURE_LAST_REFUSED_AT is None, (
+        "a 409 stamped the refusal clock — `refusing` is the CAPACITY gate's "
+        "window, and this arm must not move it")
 
 
 def test_a_refusal_is_counted_and_surfaces_on_health(

@@ -1291,10 +1291,10 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     session_key = session_key or None
     with _CAPTURE_IN_FLIGHT_LOCK:
         if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
-            # #12992: count BEFORE raising, under the same lock, so the health
-            # block can never read a refusal that was answered but not counted
-            # (or vice versa). Read INSIDE the lock and passed in the body, the value is
-            # a LIVE read: the gate raises on `>=`, so it EQUALS the limit by construction.
+            # #12992: count BEFORE raising, under the same lock, so an ANSWERED
+            # refusal is always already COUNTED. ⛔ One direction only — nothing makes
+            # the increment and the raise atomic. Read INSIDE the lock and passed in
+            # the body, the value is LIVE: the gate raises on `>=`, so it EQUALS the limit.
             _CAPTURE_REFUSED_TOTAL += 1
             _CAPTURE_LAST_REFUSED_AT = time.time()
             raise HTTPException(
