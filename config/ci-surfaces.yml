@@ -350,22 +350,6 @@ surfaces:
   # half is `test_record_serve_live.py`.
   - test_record_serve.py
   - test_12941_read_your_writes.py    # #12941: dual: core
-  # #13034: the `api` arm of the dual registration, and it is not optional. The
-  # file's §5 census AST-walks `tortoise/hosted_api.py` (`_CENSUS_MODULES`) and
-  # its endpoint pin drives `hosted_api.list_points`
-  # (`test_the_hosted_list_route_drops_it`), so a `tortoise/hosted_api.py`-only
-  # diff is exactly the change it guards. `hosted_api.py` is an EXACT `api`
-  # SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()`, so
-  # without this arm such a diff selects `api`+`onboarding` and never runs the
-  # guard — the #1349/#2938/#3154 silent-drop class. The `core` arm (lower in
-  # this file, the row #13141 registered) covers a `tortoise/live.py`-only
-  # diff, where the rule itself changes. ⛔ WHICH pin actually runs here: the
-  # §5 CENSUS pin is DB-free and is the one that guards a `hosted_api.py`-only
-  # PR — measured on the URI-less tier-2 leg, the whole file is `23 passed,
-  # 90 skipped`. The endpoint pin does NOT run there: `_fresh_sdk()` sets
-  # `sdk._db_uri = _live_utils.docker_uri(GRAPH)` with `db_path=None`, so it
-  # needs a live Docker FalkorDB and SKIPS without one.
-  - test_13034_currency_rule_reads_position.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -1056,6 +1040,73 @@ surfaces:
   # resolves `['api','onboarding']`, and a `core`-only registration drops this file
   # from that selection — the #1349/#3332 silent-drop class.
   - test_10749_health_tail_under_transport_bound.py
+  # #13034 (PR #13075, merged at a09a0b3840): the `api` half of the dual registration —
+  # the `core` row is further DOWN this file, and both exist for the #1349/#3332 reason. The
+  # file pins `tortoise/hosted_api.py` behaviour directly:
+  # `test_the_hosted_list_route_drops_it` drives `hosted_api.list_points` to prove the
+  # public list route asks the shared `live._terminal_excluded` predicate (#432/#689 arm).
+  # `hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match that REPLACES the `core`
+  # fallback, so a `core`-only registration drops this file from every `hosted_api.py`-only
+  # diff — MEASURED with the `core` row alone, `select(['tortoise/hosted_api.py'])`
+  # resolves `['api','onboarding']` with this file ABSENT, which no `core` entry can fix.
+  # ⛔ This row covers TWO `api` pins, not one — do not read the audit's silence as the pin
+  # going away. `hosted_api.py` is the pin that MOTIVATED the dual registration: its hosted
+  # list-route arm `test_the_hosted_list_route_drops_it` is a method of
+  # `TestAClosedObjectIsNeverCurrent`, one of the FOUR `@_needs_db` classes, so this row
+  # guarantees SELECTION, not EXECUTION — the arm EXECUTES wherever a FalkorDB is reachable
+  # through the `TORTOISE_TEST_DOCKER_PORT` seam. The jobs that provision one are `test`,
+  # `test-slow`, `test-concurrency-falkor` and `test-track-b` — the workflow's ONLY
+  # `.github/actions/falkordb-provision` uses — and the tier-2 shape of `test` runs it too;
+  # where that seam has no server behind it the arm SKIPS (measured with the seam unset:
+  # `TORTOISE_TEST_CARVE_OUT=1` -> 23 passed, 90 skipped).
+  # ⛔ NOT "every test job": `test-carve-out`, `test-d14-hosted-api`, `test-record-postgres`
+  # and `canary-streak` have no provision step and no port, by design (the first three set
+  # job-level `TORTOISE_TEST_CARVE_OUT=1`) — they never run this file, so their shape does not
+  # bear on it, but a universal would invite the wrong conclusion if one ever did.
+  # ⛔ NOT on "any URI-less leg": the two URI conditions part company here. With NO
+  # `TORTOISE_DB_URI` the P4 session gate REFUSES the run before a test starts UNLESS
+  # `TORTOISE_TEST_CARVE_OUT` is set — and the tier-2 legs and the carve-out job BOTH set it
+  # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`;
+  # its docstring names "carve-out job, tier-2 legs, e2e surfaces"). MEASURED on the default
+  # lane with no opt-in: 113 errors, `Failed: default pytest requires TORTOISE_DB_URI`.
+  # ⛔ With a SET-BUT-UNREACHABLE URI it refuses REGARDLESS of the flag: the gate that fails
+  # there is `_assert_configured_db_answers`, which returns early only on
+  # `not _uri_set_supported() or not will_connect` and never consults the opt-in (its own
+  # message offers "unset `TORTOISE_DB_URI`" as the carve-out route). ⛔ The skip is the
+  # NO-DOCKER shape, NOT the tier-2 leg's: those legs set the flag AND provision the passworded
+  # FalkorDB, whose assigned port lands in `$GITHUB_ENV` (the provision step carries no `if:`)
+  # and becomes the probe URI — measured against a container built as `provision.sh` builds it:
+  # 113 passed, zero skipped. The 23-passed/90-skipped reading belongs to the shape with that
+  # seam UNSET (#1436's skip half,
+  # whose container half is #5084 — the pair this file already uses for
+  # `test_live_storage_fail_closed.py` below; ⛔ NOT #1349, which is this file's silent-DROP
+  # citation, not its skip one).
+  # The SECOND pin is `tortoise/mcp_auth.py`: the tag-arm fixture binds `_current_org_id` /
+  # `_current_org_limits` / `_transport_mode` from it, and it is an EXACT `api`
+  # SOURCE_PATTERNS match too — MEASURED: `--changed-files tortoise/mcp_auth.py` -> surfaces
+  # `['api']` with this file SELECTED, which it is only because of THIS `api` row (the one
+  # this PR adds) — NOT the `core` row below: with the `core` row alone that same diff
+  # resolves `['api']` with this file ABSENT. (`core` is what selects it on a `live.py` /
+  # `pipeline.py` diff; the two halves are why the registration is dual.)
+  # ⛔ `--surface-audit`'s candidate line lists UNCOVERED pins only, so the "`mcp_auth.py`"
+  # text appears there while the file is `core`-only and the line vanishes once the row
+  # exists because the file is no longer a CANDIDATE — not because the pin disappeared. An
+  # earlier cut of this note read that disappearance as evidence the co-import was noise; it
+  # is the opposite, and the audit never said otherwise. ⛔ Reproduce it from a FULL checkout,
+  # not a tree with `tortoise/` removed: the audit resolves an import pin only where the
+  # referenced file exists on disk, so the source tree is what decides — MEASURED at this
+  # head, the `api` summary reads `177 additions` from the repo root, `4` from the repo with
+  # `tortoise/` removed (those four pin `api` through `tools/sdk_surface_declaration.py` or
+  # `docs/client-server-split.md`, so the extraction must keep `tools/` and `docs/` for the
+  # reading to match), and `0` from a `tests/` + `config/`-only tree — and it is on THAT last
+  # reading that this file's candidate line turns into
+  # `(shared: tests/_live_utils.py)  ⚠ no api pin resolved — … confirm before removing`. A
+  # removal candidate in such a run is the ABSENT SOURCE TREE, not an unregistered arm.
+  # ⛔ `test_12592_supersede_door.py` is NOT noise either: it is a PRE-EXISTING gap of the
+  # same class on main — registered `core` only, imports the same `mcp_auth` names, and NOT
+  # selected on a `mcp_auth.py`-only diff (measured: `selected: False`). Reported as a
+  # follow-up in its own right (filed: #13150), not fixed here; this row's job is #13034.
+  - test_13034_currency_rule_reads_position.py
   # #12477/#2876: the health surfaces must not read green over a failing data plane. Added
   # to `main` by `ea5d476e9b` (#12488) WITHOUT a manifest row, so `--integrity` reported it
   # as drift on every head carrying that file and red `manifest-integrity` (a `needs` of the
@@ -2521,7 +2572,6 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
-  - test_13034_currency_rule_reads_position.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
@@ -5123,6 +5173,124 @@ surfaces:
   # CI has no safety suite.
   - test_container_reaper.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
+  # #13034 (PR #13075, merged at a09a0b3840): the currency rule reads BOTH axes and five
+  # readers stop answering it themselves. ⛔ REGISTERED LATE, and this row is the main-red
+  # repair: the file landed on main with NO manifest row, so `ci_selection.py --integrity`
+  # went red ('manifest drift') and `python-ci`'s manifest-integrity leg went with it —
+  # an unlisted file is a #1262 red AND runs in no leg (#1349/#2938). ⛔ FIVE legs, not one:
+  # `manifest-integrity`; the FAST shard `test (c)` (run 44025094904, job 133859918441), where
+  # `tests/test_ci_manifest.py::test_integrity_notices_unknown_and_still_fails_red` drives
+  # `--integrity` over a copy of the committed manifest and reds `assert 1 == 0` (that job's
+  # ONLY failure: 1 failed, 5160 passed); and the slow leg below, because
+  # `tests/test_ci_selection.py` makes the same assertion and is a gating-slow file
+  # (`slow_files`, not `carve_out`, not on-demand) — job `test-slow (c)` 133859918151, the
+  # shard that carries it, reds SIX of its tests from this one cause:
+  # `test_integrity_covers_all_test_files`,
+  # `test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it` and
+  # `test_the_blank_session_id_guard_keeps_its_core_arm_too` assert the integrity result
+  # carrying this filename; `test_the_lane_is_a_classification_for_integrity_too` asserts the
+  # lane's file must not read as drift; and
+  # `test_integrity_still_notices_an_absent_stamp_and_exits_zero` plus
+  # `test_null_or_non_mapping_durations_reports_instead_of_tracebacking` are exit-code arms
+  # (`_integrity_with_stamp(...) == 0`, `main() == 0`) that this row's absence reds at exit 1
+  # without ever naming the file. ⛔ TWO MORE fast shards carry the same assertion, and both
+  # went red in that run: `test (g)` (job 133859918249, its ONLY failure — 1 failed of 4414) is
+  # `tests/test_registry_integrity.py::test_the_integrity_entry_point_names_a_duplicate_durations_key`,
+  # whose `--integrity` call prints `❌ manifest drift: ['test_13034_currency_rule_reads_position.py']`;
+  # and `test (h)` (job 133859918343, 5 failed of 3773) is five `tests/test_ci_timing.py` arms —
+  # `test_integrity_problems_agrees_with_the_integrity_cli`,
+  # `…_catches_a_duplicate_durations_key`, `…_promotes_a_present_but_unparseable_stamp`,
+  # `test_refresh_durations_on_the_real_manifest_adds_a_pending_file` and `…_of_record` — each
+  # asserting `['test_13034_currency_rule_reads_position.py'] == []`. So the blast radius is
+  # FIVE lights across four shards plus the required job, not the one the PR title implies.
+  # ⛔ NOT `test-slow (a)` from that same run: it is red for an
+  # UNRELATED class — every one of its failures is `tests/test_surface_manifest.py` (a
+  # shallow clone that cannot resolve `cut_at_commit`, plus the `tortoise_query` digest) —
+  # and NOT `test (e)` either (job 133859918292, 3 failed: a `hosted_api.py` cite census in
+  # `test_demo_session_read_exclusion_8290.py` plus two `test_extractor_v4_citation_rot.py`
+  # arms) — both are red for causes outside this row (the digest is the `surface-guard`
+  # paragraph's subject below; the cite census and the citation-rot arms are nobody's row
+  # here, and need their own tracker).
+  # ⛔ AND a SIXTH leg that this row does NOT repair, on the same run: `test (j)` 133859918399
+  # (`1 failed, 4006 passed`) is red on `tests/test_uri_env_mutations_declared.py` because
+  # THIS FILE mutates `TORTOISE_DB_URI` in six undeclared places (66, 75, 77, 86, 89, 91), and
+  # that guard scans the FILES, not this manifest — so registering the file neither causes nor
+  # cures it, and no row here can. It needs a `DELIBERATE_URI_MUTATIONS` entry of its own;
+  # filed as #13158. Named so the next lane does not read this leg as another symptom of the
+  # missing row.
+  # Reproduced locally too: `integrity()` over this manifest is `[]`, and over the same
+  # manifest with this file's rows removed from BOTH lists (the state `main` was in) it
+  # returns `['test_13034_currency_rule_reads_position.py']`. ⛔ Removing only the `core`
+  # row still yields `[]`: integrity asks that a file is classified SOMEWHERE, never that
+  # it is registered on the surface its subjects select — the exact gap that made the first
+  # attempt (an `api:`-only row) green here and useless, and the reason this PR's second
+  # commit moved it.
+  # ⛔ NOT `surface-guard`: that gate grades `config/surface-manifest.yml` (`tools/surface_manifest.py:232`)
+  # and never reads this file (`grep -c ci-surfaces tools/surface-guard.py
+  # tools/surface_manifest.py` -> 0, 0), and its job carries no `needs:` on
+  # manifest-integrity — so `surface-guard` is red on main for an UNRELATED reason
+  # (`tortoise_query`'s `served_from` digest drifted from its recorded
+  # '5864fd98a914f746' to '59f8f7e5957d81d8'; tracked on #13139, and which commit did it
+  # is NOT established here — `git log -1 -- tortoise/mcp_server.py` names the last
+  # commit to touch the file, not the one that moved the digest) and this row cannot
+  # fix it.
+  # `core` because its subjects are `tortoise/live.py` (the predicate) and
+  # `tortoise/pipeline.py` (the position axis) — neither matches a `SOURCE_PATTERNS` entry,
+  # so both reach `core` through the unmatched-path FALLBACK, not an exact `core` pattern
+  # (`SOURCE_PATTERNS` has no `core` key — measured: `list(SOURCE_PATTERNS)` ->
+  # ['battery','onboarding','ep','sdk','api','eval']); measured `--changed-files
+  # tortoise/live.py` -> surfaces: ['core'], and the same for `tortoise/pipeline.py`. Its
+  # `tortoise/sdk.py` / `tortoise/mcp_server.py` imports select the FULL matrix, so no arm
+  # is dropped there.
+  # ⛔ BUT one arm IS dropped by a `core`-only row, so this file is DUAL-REGISTERED
+  # `core` + `api` (the `api` row is further UP this file): the hosted list-route arm
+  # (`test_the_hosted_list_route_drops_it`) drives `tortoise/hosted_api.py::list_points`,
+  # and `hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match that REPLACES the `core`
+  # fallback — MEASURED with this `core` row alone, `--changed-files tortoise/hosted_api.py`
+  # resolves `['api','onboarding']` with this file ABSENT, so the #432/#689 arm carried no
+  # guard on its own module's diff (the #1349/#3332 silent-drop class). `--surface-audit`
+  # reported it as an api addition candidate FOR THAT REASON, before the `api` row existed.
+  # ⛔ `--surface-audit` now reports it under `onboarding` instead, and that one is NOT noise:
+  # `tortoise/hosted_api.py` is an EXACT `onboarding` SOURCE_PATTERNS entry as well as an
+  # `api` one, the file's `from tortoise import hosted_api` is a STRONG pin (the audit's
+  # `strong: true` half, not its string-only list), and MEASURED `--changed-files
+  # website/product.html` resolves `['onboarding']` with this file ABSENT. That is a real
+  # unregistered arm of the same #1349/#3332 class — pre-existing rather than introduced
+  # here (the audit lists 233 such files on that surface), and deliberately NOT closed by
+  # this PR, whose scope is the `manifest-integrity` red. Named rather than left to be read
+  # as covered. (Both `--surface-audit` readings here assume the full-checkout precondition
+  # stated on the `api` row above: an extraction without `tortoise/` resolves no import pins
+  # and prints none of this — measured, that run lists the file ONLY as an `api` no-pin
+  # removal candidate, in neither additions list.)
+  # ⛔ NOT hermetic, contrary to a first reading of it: its own header says "Lane: needs a
+  # live FalkorDB" and the four live classes are `skipif(not FALKORDB_AVAILABLE)` — they SKIP
+  # where the `TORTOISE_TEST_DOCKER_PORT` seam has no server behind it (measured with the seam
+  # unset: 23 passed, 90 skipped), and a `durations` row is exactly what a verifier reads
+  # INSTEAD of the test (the reason `test_consent_key_runbook_10488.py`'s row documents
+  # itself). ⛔ The SEAM decides execution, and the jobs that provision it set it: `test`,
+  # `test-slow`, `test-concurrency-falkor` and `test-track-b` are the workflow's only
+  # `.github/actions/falkordb-provision` uses, their provision step carries no `if:`, it
+  # writes the assigned port into `$GITHUB_ENV`, and the module probe builds its URI from it
+  # — so the TIER-2 shape of `test` runs these four classes too (measured against a
+  # passworded container built as `provision.sh` builds it: 113 passed, 0 skipped). The
+  # 23-skipped reading is the NO-DOCKER shape, not the tier-2 leg's. ⛔ NOT every pytest job
+  # in this workflow provisions one: `test-carve-out` and `test-d14-hosted-api` (both URI
+  # DELIBERATELY unset) and `test-record-postgres` (Postgres, not FalkorDB) have no FalkorDB
+  # provision step, so a DB-armed file registered in `carve_out` would skip silently there —
+  # this file is in neither `carve_out` nor `slow_files`, so it never runs in them.
+  # ⛔ NOT on "any URI-less leg" — the URI-gate split is the SAME for this row and is
+  # documented once, on the `api` row above: with no `TORTOISE_DB_URI` the P4 session gate
+  # refuses unless `TORTOISE_TEST_CARVE_OUT` is set, while a SET-BUT-UNREACHABLE URI is refused
+  # regardless of the flag (`_assert_configured_db_answers` never consults the opt-in, it
+  # returns early only on `not _uri_set_supported() or not will_connect`). Restated here it was
+  # a paraphrase that could drift, so this row POINTS at that paragraph rather than duplicating
+  # it — and the last four commits on this branch are what a duplicated paragraph costs.
+  # The predicate-matrix and census classes are pure Python. The weight below is still the
+  # flat default, and the reading shows COST, never the skip.
+  # ⛔ Both registrations buy SELECTION, not EXECUTION: the `api` row's motivating arm is a
+  # method of the `@_needs_db` `TestAClosedObjectIsNeverCurrent`, so neither row makes it run
+  # — the docker seam above does.
+  - test_13034_currency_rule_reads_position.py
   - test_10893_read_stage_attribution.py  # #10893: the stage attribution a breach publishes — `read_stages.py` matches no SOURCE_PATTERN (→ `core`), the seams are in `hosted_api.py`/`mcp_server.py` (→ `api`) and the marks are in `sdk.py` (dual: api)
   - test_10602_wait_bound_breach_visible.py  # #10602: the breach channel itself — `wait_bound_breaches` on `/health`, the counter family in `tortoise/monitoring.py` (which selects `core`) plus the two emit sites in `hosted_api.py`/`mcp_server.py` (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
@@ -11169,14 +11337,6 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
-  test_13034_currency_rule_reads_position.py: 2.0  # new in #13034 (#13075's merge) — the #3400/#4348 trap: a file a PR ADDS
-  # cannot carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat
-  # `DEFAULT_FAST_WEIGHT` and NOT a local reading. The row must EXIST, not merely default ("a default is not a
-  # reading"): without it the `core` registration is what puts the file in `fast_pool()` while no weight records it, and
-  # `--integrity` stays green either way (measured: deleting only this row leaves it rc=0, so only this row records the
-  # weight). ⛔ Added in #13141 as main's repair —
-  # the file reached `main` unregistered, so `--integrity` redded and `manifest-integrity` (a `python-ci-gate` need)
-  # blocked every merge.
   test_12592_supersede_door.py: 2.0  # new in #12592 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()` unless the `slow_files` entry takes it out, and `--integrity` stays green either way, so only this row records the weight. ⛔ No local timing is quoted beside this weight, on purpose — a seconds figure copied next to a shard-layout input re-stales against the run it came from. What the weight covers: BOTH halves of the asymmetry — the write-door refusal (every label, the fan-out rule, the snake/blank/stamp shapes that name nobody, and the Point's CORRECTS-edge arm) and the replay tolerance (a journalled successorless supersession still restores under `rebuild_all`) — plus the `supersede_knowledge` label dispatch, its family guards, and #12825's untouched un-supersede allowance. No model call, no network, no `gh`; embedded engines on the URI-less lane, the configured server on a URI-set one. ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_11609_write_containers.py: 2.0  # new in #12915 (repair of the #11609 lane-B review): the #3400/#4348 trap — a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` row above puts the file in `fast_pool()`, and `--integrity`'s 0.90 coverage ratio stays green either way, so only this row records the weight. What the weight covers: the #11609 WRITE/MUTATE container contract, hermetically — each container observed FORWARDING to its member handler (a recorder stands in for the member, so a re-implementation or a mis-routed arm reds), the one-arm-per-call refusals (`action='mitigate'` with an annotation dimension, `action='annotate'` with reason/strength/credibility), `credibility` reaching `mitigate_operator` on BOTH spellings, the `goalState` cache writing through a LIVE SDK name, a retired SDK name raising with its replacement (#3836(c)), a retired MCP name still served by the #3883 shim, and an AST walk asserting no module under `tortoise/` reaches a retired SDK name (a docstring mention is not a call site, which is why the walk is AST and not a grep); plus the SDK container's POINT arm, which is where the absorbed door's BEHAVIOUR is pinned (the `restatus` journal record, and a refused transition that NAMES the target word — the two halves the retired `update_entity` carried and `update_point` does not). ⛔ The SAME two halves are pinned at the MCP level as well (#12915 review F1): the ADVERTISED door — not a recorder standing in for it — is driven end to end through `tortoise_update_knowledge(id, props={…})` against a real embedded engine, because a delegation stub cannot see the routing behind it (measured at the reviewed head: the container refused with `update_point only promotes draft→live` and appended 0 records while the door it absorbs wrote 1). One further case covers the routing itself (`tortoise_update` must reach `sdk.update_knowledge`, never `sdk.update`), and `dry_run` is pinned PER ARM (#12915 review F2): the annotation arm REFUSES a preview instead of writing one while the harness records "writes nothing", the property arm already refused, and the two temporal arms still preview. ⛔ NOT uniformly hermetic, and this row says which half is which: the two Point-arm cases AND the two MCP end-to-end cases open a per-test EMBEDDED engine (`TortoiseSDK(str(tmp_path / "t11609_containers.db"), event_log_path=…)`) and do real graph writes — the same distinction the `test_percent_value_11915.py` row records for its own mixture — while every other case in the file stays hermetic (no graph, no docker, no network, no model call). ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_12894_record_cursor.py: 2.0  # new in #12894 stage C — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local timing and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count is `tools/ci_selection.py --integrity`'s business. What the weight covers, on the DB-free lane: the cursor table's declared shape and its membership in `THE_RECORD_TABLES` / both `RECORD_MIGRATIONS` directions / `RECORD_REAPPLY_STEPS`; the corrected `seq >= 0` signature and why `journal_event` keeps `> 0`; the seed's `GREATEST(row_max, enumerated_floor)` arithmetic and case 2's unrepresentability asserted against the RAW statement; the tenant GUC the seed sets itself; every allocator statement surviving `to_dollar_placeholders`; `unnest … WITH ORDINALITY` pairing and the ABSENCE of `ON CONFLICT DO NOTHING` on the allocated insert; `replay()`'s allocated watermark and the byte meter reading it; the isolation/retry vocabulary with its counters; the absence of a global `statement_timeout`; and the #9318 collision question never being asked of the allocation — driven through `replay()` on recording fakes. Hermetic: no docker, no graph, no network, no model call.
@@ -11189,6 +11349,7 @@ durations:
   test_consent_key_fingerprint_10488.py: 0.1  # new in #10488; DUAL-REGISTERED (`api` + `core`), and both registrations are what put it in `fast_pool()`. What the weight covers: the two implementations must agree BYTE-FOR-BYTE — the Python `consent_key_fingerprint` against the shape the TS twin computes, the `\Z` anchor (a trailing newline must not pass), the whitespace/padding arms, and the rule that a fingerprint is derived from the same bytes the HMAC signs and never from a normalised value. ⛔ The CASE COUNT is deliberately not quoted (`tools/ci_selection.py --integrity` is the authority) — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
   test_consent_key_runbook_10488.py: 2.0  # new in #10488 — same #3400/#4348 basis: PR-added, flat `DEFAULT_FAST_WEIGHT`, no local reading. What the weight covers: the OPERATOR table in `docs/infra-runbook.md` §4.4 — its heading, the three field names (`key_fingerprint`/`configured`/`reason`), the closed six-code `reason` vocabulary, the `null`-is-not-`false` misread, `MISMATCH`-during-a-rotation reading as the rotation, the `fly secrets set`-alone-is-reverted warning, the `sha256sum | cut -c1-12` reproduce one-liner, and the `gh workflow disable consent-key-drift` off-switch. ⛔ NOT the `\Z` anchor and NOT a `gh secret set` invocation: those are §2.5 pins, they live in `test_consent_key_fingerprint_10488.py`, and the row above already describes them — THIS row used to copy that description verbatim, so it claimed coverage that did not exist and a rewrite of §4.4's shape to `sha256(key)[:12]` in uppercase stayed green. The clause is now enumerated from the file it annotates. Documentation pins only: no docker, no graph, no network, no model call. ⛔ The CASE COUNT is deliberately not quoted (`tools/ci_selection.py --integrity` is the authority). — ci-timing junit-census+top-15 2026-11-16 (run 43792641690): a single-test file cannot prove full coverage from a partial reading; the reading (0.1s) is a LOWER bound; kept 2.0
   test_text_gate_13099.py: 2.0  # new in #13099 (PR #13107) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local timing and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count is `tools/ci_selection.py --integrity`'s business. ⛔ What this row describes is what the FILE asserts, enumerated rather than summarised, because a `durations` row is read by a verifier INSTEAD of the test — the defect the `test_consent_key_runbook_10488.py` row records, and one this row has been corrected for twice. It asserts: (1) two `build_corpus()` builds produce the same SHA-256 digest over ids/content/status/topic and the live-by-topic map; (2) the corpus SHAPE — `len(points) == N_POINTS`, all 24 topics populated, every id `p-`-prefixed (⛔ it does NOT assert a token-pool size or a round-robin order: those live in `benchmarks/synthetic_corpus` and nothing here pins them); (3) the committed query set reused verbatim through `build_query_classes` (text/target/qid, in order) AND the SHA-256 of the committed query FILE pinned as a constant — the builder-vs-its-own-input comparison alone stays green under an edited query file, and a drifted query set is the likeliest way this measurement produces a wrong answer; (4) the grade function's full label PARTITION on a 3-topic sample: grade 2 == the target's live set, grade 1 == EXACTLY the NEAR topics' live points, disjoint, and grade 2|1|0 exhausting every live point (grade 1 is pinned because IDCG is built from `n_part` as well as `n_rel`); (5) the three classes' populations (100 / 100 / 96) and the out-of-vocabulary evidence that makes the question class degenerate — ⛔ INCLUDING THE PUBLISHED NUMBER: `question_class_evidence` in the artifact must EQUAL what `oov_evidence()` computes, and §4 must carry **`96.46 %` of the 650 scaffold tokens it adds are absent from the corpus token pool** as ONE CONTIGUOUS PHRASE — ⛔ the figures alone left the POLARITY unguarded (`absent` → `present in` kept both figures and stayed green, measured), which would publish the inverse of the fact that makes the class degenerate; and mutating the artifact's figures and §4's sentence TOGETHER left the file green before the artifact-equality arm existed, because the pre-existing asserts read only what the code computes — the same defect class this row's siblings record; (6) the corpus and query classes building with `falkordb` replaced by a module that raises on attribute access, so "needs no DB" is asserted rather than assumed; (7) `verdict()`'s rule in BOTH failure directions and its happy path — a significant gain is not a disqualification, a significant loss is, a CI spanning zero qualifies, a depth-only loss disqualifies (the rule reads EVERY published metric, not the head alone), the `raw` diagnostic is never a candidate, the FUSION CONTROL (`hybrid_baseline`) is never offered as a "Postgres option" (it contains no Postgres lexical leg — it stays in `qualifying_arms` and is named separately), an arm that RAISED reads `disqualified` and never as a score, a hybrid INHERITS its dead leg's disqualification (`rrf_fusion([[], vlist])` succeeds, so without inheritance a half-dead hybrid still qualifies), and a DISQUALIFIED BASELINE produces NO VERDICT at all (every delta is measured against it); (8) the published record itself — §5's three metrics, all three Δ cells per non-baseline row and the `returned` column recomputed from `artifact.json` per arm per class, §5's ARM COMPLETENESS (a deleted row is drift), each committed artifact's `verdict` required to EQUAL what `verdict()` produces from THAT file's own `results` (never a copy of the other's), and §6's build/size/memory figures — INCLUDING the repeat run's four — required to appear in the row of the BACKEND that produced them (a whole-section presence check passes a table whose labels have been swapped, the shape §6's figures were wrong in); (9) §0's OWN adoption-cost figures (checked in §0 SPECIFICALLY — §6's prose repeats every one of them, and a whole-document presence check was blind to §0 going entirely wrong) and the table-size derivation they rest on — `sizes_bytes.tg_docs` is `pg_total_relation_size` (heap + EVERY index), so quoting it as the `ts_rank` store charges the 3.13 MB BM25 index to an option that does not use it; the 4.23 MB table figure is derived from the artifact's own per-relation figures (`tg_docs` − every index = `pg_table_size`: heap + TOAST + FSM/VM, NOT the bare main fork, which is what the harness used to record under a name that would silently diverge once content TOASTs) and the ts_rank / pg_search / graph store figures must all be quoted. §6's PROSE facts are pinned BY ROW: the licence cell, the `pg_search` version, the `requires = 'vector'` / `not relocatable` cell and the exact `shared_preload_libraries` list must each appear in the row of the BACKEND that produced them, so a label swap reds even though both strings remain in §6 (measured: nine mutations, including the swap, all red; each restores green). ⛔ An earlier cut of this clause said that prose was "presence-checked only" when NOTHING checked it — the "claimed coverage that did not exist" class this row's siblings record, corrected here rather than softened. ⛔ STILL NOT pinned, and stated rather than hidden: `copy_s` (no §6 cell prints it — it lives in the artifact and is guarded by nothing) and `tokenizer_fallbacks` (a TOP-LEVEL key — the record's own §8 list says so) (recorded by the harness, not asserted here: the record's `[]` is the measurement over the committed query set). The no-graph pin has TWO arms: the corpus module BODY is re-executed under the `falkordb` shim, and BOTH files (`benchmarks/synthetic_corpus.py` and the harness `tools/text_gate_13099.py`) are scanned at MODULE SCOPE by an `ast` walk for a `falkordb` import — an attribute-only shim installed after the import could not see such a binding (measured), and the harness is SCANNED rather than reloaded because reloading it rebinds `TOKENIZER_FALLBACKS` and reds an unrelated pin (measured). A function-local import stays green by design; the call-time shim catches it. Hermetic: no docker, no graph, no network, no model call (the README/artifact pins read committed files).
+  test_13034_currency_rule_reads_position.py: 2.0  # REGISTERED LATE in the main-red repair tracked on #13139 — ⛔ NOT #13107, which is the merged #13099 measurement PR and never concerned this file — the file merged (#13075) with no manifest row, so no CI junit reading exists for it yet; this takes the header's flat `DEFAULT_FAST_WEIGHT` rather than a local reading, which this map forbids as a shard-layout input (#2818/#3419/#4348). `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main sweep that includes the file. ⛔ No case count is quoted: the count is `tools/ci_selection.py --integrity`'s business.
   test_m3_fts_leg_recall_12298.py: 1.3  # new in #12298 (PR #12349), registered in the repair that followed it; The row must EXIST, not merely default ("a default is not a reading"): the `core`/`tier1` registrations above put it in `fast_pool()`, and the coverage check is a 0.90 RATIO — it cannot police one missing row, which is why `tests/test_ci_selection.py` carries the entry rule as a note beside `ROWED_BY_THIS_FOLD`. ⛔ **No local timing is quoted beside this weight, on purpose** — a seconds figure copied next to a shard-layout input re-stales against the run it came from, and only a CI junit reading may move the value. What the weight covers: hermetic — no DB, no graph, no network, no model call — though ⛔ NOT "stdlib-only": the file imports `pytest` and the DB-free `tortoise.sparse` / `tortoise.search_engine` at call time (round-14 finding 2; the same row already half-admitted it in its defect-claim clause). The harness `tools/m3_fts_leg_recall.py` is `importlib`-loaded by path (its own heavy imports are function-local), the committed `artifact.json`/`population.json` are read, the brief's published tables that the artifact can DERIVE are recomputed from it CELL BY CELL — §0, §3.1, §3.2, §3.3, §3.5, §2's census and §3.3's decomposition — plus its derived PROSE figures, each scoped to the section that carries it (§0's Reading-2 bullets and §4's Result line, §4.1's rule clauses, §4.2's decomposition, §2's corpus provenance, §3.3's path-gap and ident-recall sentences, §3.4's empty-result count, ident `recall@3` and its miss count, §3.5's mechanism sentence, §4.4's "at any k" count with its rows-zero-uniformity assertion, §4.3's derived prose (its share column compared as a fixed, non-re-derivable value), §2's write-order claim, §2's reuse-guard claims, `SEARCH-ARCHITECTURE.md` §6.2's status note, §5's stricter-leg direction and its `understate` clause, §6's `#11901` `rows_zero` pair and its `21.1 %` share); §4.3's share column is compared as a FIXED value — its 62.3 %/2.2 %/9.0 % come from the committed `#2730` attachment audit's brief, so they are not re-derived from `artifact.json`, but the three cells ARE asserted (review cycle 4's finding was that they were not) — and the changelog's four pinned claims — its recall@3 table, fixture-count sentence, k=5 direction and `snake_case` finding; NOT its paired-p/Δ columns, which nothing pins — ⛔ backed by a recomputation from the arms' per-query `ranks` — `recall_by_k` and every paired statistic are re-derived from the ranks that produced them, so the summary cells and the prose cannot agree with each other while disagreeing with the run, and `tokens_controlled_subset` is checked against its own `n` because it is computed over 174 rows, not 300 — and the DEFECT claim is asserted against the real functions (`sparse.tokenize_sparse_query` splits on `_` where RediSearch's index does not), so the tokenizer repair the brief recommends (#12350) reds this file instead of silently dating the prose. The measurement itself is deliberately NOT run: it needs a live FalkorDB, a `pg_search` Postgres and a real capture corpus, and a test that needed those would skip on CI and guard nothing (#11901's convention). No DB, no graph, no docker, no network, no model call. ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
   test_10749_health_tail_under_transport_bound.py: 8.2  # new in #10749; The row must EXIST, not merely default ("a default is not a reading"): the `core` + `api` registrations above put the file in `fast_pool()`, and `--integrity` exits 0 either way (the 0.90 coverage ratio has headroom), so only this row records the weight. What the weight covers: hermetic by construction — every case drives `mcp_server`'s health tail in process (the REAL `_await_under_mcp_wait_bound` called directly with a stand-in inner handler, the `_WAIT_BOUND_DEADLINE` ContextVar set and read directly, the handler's allowance clamped and asserted by monkeypatching `monitoring.metrics`), plus one case that runs `monitoring.metrics` FOR REAL with a `0.0` allowance against a scripted slow-cold-start handle (no connect, the probe gives up on its own deadline), and one that asserts the served `hosted_api.health()` body — so the clamp arithmetic, the counter, the `/health` publish and the stdio/no-arrival-stamp arms cost no DB, no graph, no network, no model call and no spawned server. ⚠️ Its cost is FOUR real blocking waits, measured with `--durations` on this head: 2.00 s + 2.00 s + 1.50 s + 1.50 s ≈ 7.0 s in a 10.8 s file (the two 2.00 s cases hold the seam and spend the budget; the two 1.50 s ones drive a slow cold start through the REAL `metrics()` at the full per-attempt budget). ⛔ An earlier cut of this row said "ONE real blocking wait, `time.sleep(2.0)`" and then explained the 0.4 s handle away as non-blocking — the measurement falsifies both halves: there are four, and in the two 1.50 s cases the CALLER does block for its whole budget while that same handle sleeps. What is true of the 0.4 s handle is narrower: its `time.sleep(0.4)` runs on the probe's daemon worker AFTER `metrics()` has returned (measured: `metrics(...)` returns in ~4 ms while `_get_proj` is still sleeping), so it is not itself the caller's cost. No total is quoted as a weight input, because a seconds figure beside a shard-layout input re-stales against the run it came from. ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin — exactly how a hand-written count re-stales. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
   test_11892_health_quota.py: 5.5  # new in #11892 option (3); The row must EXIST, not merely default ("a default is not a reading"), and the `tests/` fallback in `select()` is what puts it in `fast_pool()` as `core`. ⛔ No case count and no local timing are quoted on purpose: a hand-written count re-stales on every round a reviewer adds a case (this file gained cases inside its own PR), and a reading taken on a contended lane box is not a shard-layout input. What the weight covers: the `health.quota` boundary report end to end — `quota.org_quota_state`'s four states (open/closed/unknown/not_applicable), the truth-table that drives `enforce_org_limit` itself and asserts the report is `closed` exactly when the gate refuses, the UNLIMITED present-but-`None` limit (#683), the fail-closed arms (a missing `max_points` key, an unreadable limit, a count that raises, a count that overruns its budget), and the `mcp_server.tortoise_health` attach path (the block is present, a closed quota does NOT degrade `status`, and a quota read that explodes still leaves health answering). GRAPH-TOUCHING but not server-backed: most cases take a throwaway EMBEDDED engine per test under `tmp_path` (no docker, no Postgres, no network, no model), and the boundary table patches `_count_resource` instead of materialising 31,248 points, so no case writes more than a couple of rows. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
