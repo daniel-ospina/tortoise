@@ -26,12 +26,14 @@ than report agreement.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -1181,3 +1183,168 @@ def test_the_store_targets_are_named_never_inherited_from_the_environment(monkey
     }.get(axis, [])
     assert harness.main(["--candidate", "point-by-id", *other]) == 2
     assert "could not run" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# the installing step must PROVE the client RUNS (PR #13314 review)
+# --------------------------------------------------------------------------- #
+# ⛔ WHY THIS SUITE PINS A WORKFLOW AND NOT THE HARNESS. The harness already
+# refuses correctly when `psql` is missing (2 = "could not run"), and
+# `test_a_missing_psql_is_could_not_run_not_a_difference` pins that. The gap was
+# one level up: the CI step that INSTALLS the client claimed to prove the binary
+# exists, and proved only that the name resolves. Measured on run 44158572832 at
+# `aff4eaef81`: `apt-get install postgresql-client` exited 0 having unpacked just
+# the metapackage, and the very next step died with
+# `FileNotFoundError: [Errno 2] … 'psql'`.
+#
+# Mutation attribution, as the review asked: `git grep -ln "cypher-diff"` over
+# tests/ found nothing asserting this step, so every one of these properties was
+# unpinned — deleting the refusal, the probe or the `$GITHUB_PATH` repair left
+# the suite GREEN. They are pinned here because the fail-closed branch IS the
+# change, and a one-line edit that removes it would otherwise be invisible.
+
+WORKFLOW_PATH = ROOT / ".github" / "workflows" / "cypher-diff.yml"
+
+
+def _psql_install_run() -> str:
+    """The `run:` block of the step that installs the client — the artifact under test."""
+    doc = yaml.safe_load(WORKFLOW_PATH.read_text())
+    steps = doc["jobs"]["differential"]["steps"]
+    match = [s for s in steps if "install postgresql-client" in (s.get("name") or "")]
+    assert len(match) == 1, f"expected exactly one client-install step, got {len(match)}"
+    return match[0]["run"]
+
+
+def _run_install_step(tmp_path, psql_body: str | None):
+    """Execute that step hermetically: `sudo`/`dpkg` are stubs, the client is the variable.
+
+    `psql_body=None` puts NO `psql` on PATH. Nothing here touches the network or a
+    database — the step's own shell is the code under test.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("sudo", "dpkg"):
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    if psql_body is not None:
+        fake = bin_dir / "psql"
+        fake.write_text(psql_body)
+        fake.chmod(0o755)
+
+    github_path = tmp_path / "github_path"
+    github_path.write_text("")
+    script = tmp_path / "step.sh"
+    script.write_text(_psql_install_run())
+
+    env = {
+        **os.environ,
+        # The fake client comes FIRST, so `command -v psql` finds it and the
+        # `/usr/lib/postgresql/*/bin` fallback is never consulted — which is what keeps
+        # this assertion independent of whether the host has a real client installed.
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "GITHUB_PATH": str(github_path),
+    }
+    return (
+        subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env),
+        github_path,
+    )
+
+
+# `postgresql-client-common`'s pg_wrapper: present, executable, and UNABLE to run —
+# exactly the state the apt evidence points at (`command -v` and `-x` both pass).
+BROKEN_PSQL = (
+    "#!/bin/sh\n"
+    'echo "Error: You must install at least one postgresql-client-<version> package" >&2\n'
+    "exit 1\n"
+)
+WORKING_PSQL = '#!/bin/sh\necho "psql (PostgreSQL) 16.1 (Ubuntu 16.1-1)"\n'
+
+
+def test_a_resolvable_but_broken_psql_fails_the_install_step(tmp_path):
+    """The step's claim is that the client RUNS; a resolvable-but-broken one must red it.
+
+    Pre-fix the probe was `echo "psql: $psql_bin ($("$psql_bin" --version))"`: the
+    substitution's status is discarded (the simple command's status is `echo`'s, so
+    `set -e` never fires), and the step exited **0** printing `psql: … ()`. The
+    harness then reported the same exit 2 one step later, misattributed to the
+    DSN/migrations — the outcome the step exists to prevent.
+    """
+    proc, github_path = _run_install_step(tmp_path, BROKEN_PSQL)
+
+    assert proc.returncode == 1, (
+        "a client that resolves but cannot run must FAIL the step, not pass it:\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "but cannot run" in proc.stdout
+    assert "You must install at least one postgresql-client" in proc.stdout, (
+        "the refusal must quote the client's own error — that is the remedy text"
+    )
+    # The pre-fix signature: an empty `()` where the version should be.
+    assert "()" not in proc.stdout
+    # And it must NOT have repaired PATH for the later steps on a failed probe.
+    assert github_path.read_text() == ""
+
+
+def test_a_working_client_still_passes_and_repairs_path(tmp_path):
+    """The mirror arm: the fix must not over-block, and the repair must still happen.
+
+    `$GITHUB_PATH` is what makes the versioned client visible to the two harness
+    steps, so it is as load-bearing as the refusal — deleting it was invisible too.
+    """
+    proc, github_path = _run_install_step(tmp_path, WORKING_PSQL)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "psql (PostgreSQL) 16.1" in proc.stdout
+    assert github_path.read_text().strip().endswith("bin"), (
+        "the client's directory must be appended to $GITHUB_PATH for the harness steps"
+    )
+
+
+def test_the_version_probe_is_a_statement_a_failing_step_can_observe():
+    """Structural pin, independent of the exact spelling the behavioural tests exercise.
+
+    A probe nested in `$( … )` inside `echo` cannot fail the step no matter what it
+    prints, which is why this asserts POSITION: the `--version` invocation must sit
+    on an `if` line (a condition `set -e` observes), and that arm must `exit 1`.
+    """
+    run = _psql_install_run()
+    probe_lines = [ln.strip() for ln in run.splitlines()
+                   if "--version" in ln and not ln.strip().startswith("#")]
+    assert probe_lines, "the step must actually invoke `--version` — the probe is the point"
+    for line in probe_lines:
+        assert line.startswith("if "), (
+            f"the probe must be a statement position (`if …`), not a discarded "
+            f"command substitution: {line!r}"
+        )
+    first_probe = run.index(probe_lines[0])
+    assert "exit 1" in run[first_probe:], "the failed-probe arm must exit non-zero"
+
+
+def test_no_error_line_command_substitutes_a_backticked_word():
+    """`echo "::error::… `psql` …"` executes `psql` and drops the word from the message.
+
+    Repo-wide sweep over every workflow, not just this step: the hazard is the
+    shape (a backtick inside a double-quoted `echo`), and the only path that
+    reaches the line is the one where the word does not resolve — so bash's own
+    "command not found" lands mid-diagnostic and the remedy text reads
+    "no  binary resolves" (#13314 review P2).
+    """
+    offenders = []
+    for wf in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+        doc = yaml.safe_load(wf.read_text())
+        for job in (doc.get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                run = step.get("run") or ""
+                for lineno, line in enumerate(run.splitlines(), 1):
+                    if "echo \"" not in line or "::error::" not in line:
+                        continue
+                    # A BACKSLASH-ESCAPED backtick is literal prose (`ci-timing.yml` uses
+                    # that spelling throughout), so strike those before looking for a live
+                    # one — otherwise this guard reds on correct code.
+                    if "`" in line.replace("\\`", ""):
+                        offenders.append(f"{wf.name}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "a double-quoted echo with a backtick COMMAND-SUBSTITUTES it; single-quote the "
+        "message instead:\n" + "\n".join(offenders)
+    )
