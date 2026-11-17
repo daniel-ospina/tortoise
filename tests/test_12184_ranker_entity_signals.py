@@ -355,6 +355,27 @@ def test_a_read_that_answers_no_rows_is_relevance_only_not_not_applicable(sdk):
     assert r3.signals_informative is None
 
 
+def test_a_read_that_RAISED_is_not_reported_as_an_empty_answer(sdk):
+    """``None`` from the fetch is "we do not know", never "the graph answered nothing".
+
+    The THIRD boundary, and the one the zero-row fix could have swallowed:
+    ``_fetch_signals`` answers ``None`` when the read RAISED (its defensive
+    ``except``). Reporting that as ``signals_informative=False`` states "the
+    entity signal read answered NO rows" about a query that never completed —
+    a claim about the graph minted from an infrastructure failure — while
+    ``signals_read`` (also ``False``) says the read did NOT answer. The two
+    fields must not contradict each other, and #10137 is the rule that a failed
+    read never becomes a claim.
+    """
+    r = GraphRanker(sdk._get_proj())
+    r._fetch_signals = lambda ids, et: None       # the defensive `except` path
+    r.rerank([{"id": "no-such-object-id-12184", "scores": {"rrf": 0.5}}],
+             entity_type="object")
+    assert r.signals_read is False
+    assert r.signals_informative is None, (
+        "a read we could not complete makes no claim about the graph")
+
+
 # ── 4. The identity term applies to entity rows only ─────────────────────
 
 def test_identity_floors_relevance_for_an_entity_row():

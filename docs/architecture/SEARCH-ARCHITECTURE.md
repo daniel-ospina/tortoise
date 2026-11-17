@@ -421,7 +421,7 @@ answered; `signals_informative` says the answer DISTINGUISHED the rows. An entit
 relevance-only, and the caller can say so instead of presenting a constant as a graph judgement. A read
 that answers **no rows at all** is the SAME verdict (`false`): the gate is the request, not the row
 count, because "no answer" distinguishes the rows even less than a flat one. `null` is reserved for the
-cases where the field has no subject — a label with no entity signal set, or no projection to read.
+cases with no subject: a label with no entity signal set, no projection to read, or a read that RAISED.
 
 **What this does NOT decide.** It does not put the entity signals on the DEFAULT noun path: they reach
 `order_by="graph"` and any caller that constructs `GraphRanker(..., entity_type=...)`; the capture prior

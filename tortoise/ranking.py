@@ -1002,12 +1002,14 @@ class GraphRanker:
         # produced from the neutral fallbacks (every confidence 0.5, every
         # graph_boost 0.0) — a false claim minted by the very field that exists
         # to prevent false claims.
-        signals = self._fetch_signals(ids, entity_type) if self.projection is not None else {}
-        self.signals_read = bool(signals)
-        signals = signals or {}
+        read_attempted = self.projection is not None
+        raw_signals = self._fetch_signals(ids, entity_type) if read_attempted else {}
+        self.signals_read = bool(raw_signals)
+        signals = raw_signals or {}
         self.signals_answered = frozenset(
             pid for pid, sig in signals.items() if sig.get("has_prior"))
-        if entity_type in ENTITY_SIGNAL_SPECS and self.projection is not None:
+        if (entity_type in ENTITY_SIGNAL_SPECS
+                and read_attempted and raw_signals is not None):
             # #12184: an entity read that answered all-`(0, None)` measured
             # NOTHING that could order the rows. Say so rather than letting a
             # constant graph term pass as a graph judgement (the shape the
@@ -1026,6 +1028,16 @@ class GraphRanker:
             # hold, a stale id). `None` keeps its own meaning: no entity
             # signal set to be informative about (a non-entity label) or no
             # projection to read at all.
+            #
+            # ⛔ And `None` from the FETCH is a THIRD case that must not be
+            # folded into the zero-row verdict: `_fetch_signals` answers
+            # `None` when the read RAISED. Stamping `False` there reports
+            # "answered NO rows" about a query that never completed — a claim
+            # about the graph minted from an infrastructure failure, and one
+            # that CONTRADICTS `signals_read` (also `False`, i.e. "did not
+            # answer"). That is the #10137 false-claim class on the sibling
+            # field, and it is the distinction Elasticsearch/OpenSearch draw
+            # between an empty `hits` array and `timed_out: true`.
             self.signals_informative = bool(signals) and any(
                 (sig.get("degree") or 0) > 0 or sig.get("confidence") is not None
                 for sig in signals.values())
