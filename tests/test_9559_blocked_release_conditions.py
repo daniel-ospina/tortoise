@@ -197,11 +197,65 @@ def _vector_index_measurable() -> tuple[bool, str]:
         f"VECTOR_INDEX_EXCLUDED still declared as excluded overhead={excluded}")
 
 
+def _per_graph_overhead_attributed() -> tuple[bool, str]:
+    """Per-graph OVERHEAD is charged to the graph, so a cap cannot be evaded.
+
+    ⛔ THE SECOND BLINDNESS, and the reason it is its own token rather than a
+    footnote on the index one. Measured on production 2026-11-16: the instance
+    holds **841 MB** while the sum of per-graph readings over **182** graphs is
+    **419 MB** — the meter sees about HALF — and deleting **148 EMPTY** tenant
+    graphs freed **216 MB**, i.e. **~1.46 MB** of rent per graph that
+    ``GRAPH.MEMORY USAGE`` attributes to **NO** graph (a newly-created graph
+    reads ~**346 KiB**).
+
+    That is not a rounding error; it is an EVASION. A tenant that spreads its
+    storage over many near-empty graphs pays ~1.46 MB of real rent each while the
+    reading sees a few hundred KiB, so a cap summed from these readings never
+    fires for the tenant who grows that way — the ``#1178`` "a cap that can be
+    evaded" class. Clearing the INDEX condition does nothing about it: the two
+    numbers have different causes.
+
+    ⛔ BEHAVIOURAL, NOT TEXTUAL. A source/docstring probe would be satisfied by a
+    sentence, and ``EXCLUDED_OVERHEAD`` alone by deleting an entry. So this asks
+    the module to DO it: remove the exclusion AND charge overhead when readings
+    are combined. Two synthetic zero-byte graphs must come back with a positive
+    total, because two empty graphs are 2 x 1.46 MB of rent, not zero.
+    """
+    excluded = any(
+        str(entry).startswith("per-graph overhead")
+        for entry in graph_storage.EXCLUDED_OVERHEAD)
+    note_excludes = "EXCLUDES per-graph" in str(graph_storage.PRECISION_NOTE)
+    charged = False
+    try:
+        stamps = "2026-11-16T00:00:00+00:00"
+        synthetic = [
+            graph_storage.GraphStorageReading(
+                graph_name=f"probe-{i}", ok=True, total_mb=0.0,
+                indices_mb=0.0, samples=graph_storage.SAMPLES_DEFAULT,
+                repeats=1, readings_mb=(0.0,), min_mb=0.0, max_mb=0.0,
+                spread_mb=0.0, measured_at=stamps)
+            for i in range(2)
+        ]
+        combined = graph_storage.combine_graph_storage_readings(synthetic)
+        charged = bool(combined and combined.ok
+                       and float(combined.total_mb or 0.0) > 0.0)
+    except Exception as e:
+        return False, (
+            f"the combined-reading probe could not be built ({type(e).__name__}: "
+            f"{e}), so overhead attribution is UNPROVEN — failing closed")
+    return (not excluded and not note_excludes and charged), (
+        f"EXCLUDED_OVERHEAD still declares per-graph overhead={excluded}; "
+        f"PRECISION_NOTE still says it EXCLUDES per-graph={note_excludes}; "
+        f"two EMPTY graphs combine to a positive total (overhead charged)="
+        f"{charged}")
+
+
 _PREDICATES = {
     "per_org_postgres_attribution": _per_org_postgres_attribution,
     "postgres_residency_gauge": _postgres_residency_gauge,
     "storage_included_amounts_confirmed": _storage_included_amounts_confirmed,
     "vector_index_measurable": _vector_index_measurable,
+    "per_graph_overhead_attributed": _per_graph_overhead_attributed,
 }
 
 #: Phrases a SATISFIED condition must NOT appear as, in a live ``blocked_reason``.
@@ -246,6 +300,13 @@ _RELEASED_PHRASES = {
     "vector_index_measurable": (
         "cap MUST NOT be wired",
         "until the vector index is measurable",
+    ),
+    "per_graph_overhead_attributed": (
+        # ⛔ The LIVE wording of the SECOND ground, not a summary of it. The
+        # measured shape a stale reason would quote is the per-graph rent being
+        # invisible; both phrasings below occur in the block today.
+        "attributes to NO graph",
+        "~1.46 MB of rent per graph",
     ),
 }
 
@@ -729,6 +790,41 @@ def test_the_residency_refusal_still_fires():
             _dim("postgres_storage").meter is allowance_gate._postgres_stored_bytes), (
         "postgres_storage's meter is not the residency reader — the gauge this "
         "condition reports SATISFIED for is not the one the gate calls")
+
+
+def test_the_graph_block_names_BOTH_grounds_the_meter_is_blind_to():
+    """★ The graph block has TWO obstacles, and lifting one does not lift the block.
+
+    Measured on production 2026-11-16: **841 MB** resident vs **419 MB** summed
+    over **182** graphs — the meter sees about HALF. Two causes, and they are
+    independent:
+
+    * the **vector index** share is under-reported 8.5x-21.7x (its own token);
+    * **per-graph overhead** (~1.46 MB each) is attributed to **NO** graph —
+      deleting 148 EMPTY graphs freed 216 MB, while a newly-created graph reads
+      ~346 KiB. That is the EVASION: spread storage over near-empty graphs and a
+      cap summed from these readings never fires.
+
+    So a lane that makes the index measurable and lifts the block on that alone
+    would arm a cap the tenant can step around at ~1.46 MB a graph. The release
+    MUST name both, which is why this asserts the pair rather than membership of
+    one.
+
+    Mutation this REDs: drop either token from ``release`` (measured).
+    """
+    dim = _dim("graph_storage")
+    assert set(dim.release) >= {
+        "vector_index_measurable", "per_graph_overhead_attributed"}, (
+        "the graph block must name BOTH blindnesses — the vector index AND the "
+        f"per-graph overhead a tenant can multiply (got {dim.release!r})")
+    reason = dim.blocked_reason or ""
+    assert "1.46 MB" in reason and "841 MB" in reason, (
+        "the reason must carry the PRODUCTION measurement the second ground "
+        "rests on: a paraphrase is what let the first ground go stale (" +
+        reason[:200] + ")")
+    assert "BOTH" in reason.upper(), (
+        "the reason must say the block waits on both conditions, or a lane "
+        "reads it as a checklist and lifts on the cheaper one")
 
 
 @pytest.mark.parametrize("dim", [d for d in DIMENSIONS if d.blocked],
@@ -1480,3 +1576,6 @@ def test_the_restore_verb_still_exists():
         "or its branch no longer CALLS the handler, so the G5 pin's premise (a "
         "door a tenant reaches) is false. Re-derive which file now holds the "
         "restore door and add it to the G5 scan set")
+
+
+
