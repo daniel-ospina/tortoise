@@ -673,6 +673,12 @@ _WARNED_MULTITENANT = False
 _WARNED_UNMEASURABLE: set[str] = set()
 
 
+#: A FOURTH absence: the journal was COUNTED, and the count contradicts the
+#: record (it enumerates no records while the record holds rows). Keyed by path
+#: like `_WARNED_UNMEASURABLE`, and reported for the same reason.
+_WARNED_CONTRADICTORY: set[str] = set()
+
+
 def _warn_readiness_unmeasurable(path: str | None) -> None:
     """Say ONCE PER PATH that a declared journal could not be counted.
 
@@ -697,6 +703,34 @@ def _warn_readiness_unmeasurable(path: str | None) -> None:
         "journal is NOT an empty one, so every tenant keeps the graph branch "
         "until the path is fixed (#13331, #5090 Q2). Reported once per path.",
         RECORD_JOURNAL_ENV, key)
+
+
+def _warn_readiness_contradictory(path: str | None, cov) -> None:
+    """Say ONCE PER PATH that a counted journal CONTRADICTS the record.
+
+    ⛔ A LEG THAT IS CORRECTLY OFF MUST NOT BE SILENTLY OFF — the same rule
+    `_warn_readiness_unmeasurable` states, for the shape one branch over
+    (#13345 review P2). Here the journal WAS counted and the count cannot be the
+    one behind this tenant's rows: it enumerates no records while the record
+    holds some, so `JournalCoverage.unprojected` refuses to answer and the gate
+    keeps the graph branch. Without this, declaring a rotated, replaced or
+    freshly-truncated path would disable the dense leg for ever with nothing in
+    the default log — the failure an operator caused THEMSELVES being the
+    quietest one, which review F2 point 3 already priced.
+    """
+    key = path or ""
+    with _WARN_LOCK:
+        if key in _WARNED_CONTRADICTORY:
+            return
+        _WARNED_CONTRADICTORY.add(key)
+    logging.getLogger(LOG_NAME).warning(
+        "record dense leg: %s declares %r, which enumerates NO records while "
+        "this tenant's record holds %d of its positions — that file cannot be "
+        "the journal that fed the record, so its lag cannot be measured and "
+        "every tenant keeps the graph branch (a correct answer, #11642 P1) "
+        "until the declaration names the right file (#13371, #13345). "
+        "Reported once per path.",
+        RECORD_JOURNAL_ENV, key, int(cov.present))
 
 
 def _warn_readiness_multitenant() -> None:
@@ -805,7 +839,12 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
     # journal enumerating NO records cannot have fed a record holding rows, so
     # `max(0 - 0, 0)` there is a detectable contradiction, and `== 0` below
     # would arm the dense leg on the strength of it (JournalCoverage
-    # .unprojected_unknown_reason, #13371/#13345 P2).
+    # .unprojected_unknown_reason, #13371/#13345 P2). The `None` cannot come
+    # from an uncountable journal here — that arm returned above — so it is
+    # exactly that contradiction, and it is REPORTED rather than silently off.
+    if cov.unprojected is None:
+        _warn_readiness_contradictory(path, cov)
+        return False
     return cov.unprojected == 0 and cov.present > 0
 
 

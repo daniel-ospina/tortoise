@@ -581,6 +581,7 @@ def vector(monkeypatch):
     monkeypatch.setattr(record_vector, "_WARNED_UNDECLARED", False)
     monkeypatch.setattr(record_vector, "_WARNED_MULTITENANT", False)
     monkeypatch.setattr(record_vector, "_WARNED_UNMEASURABLE", set())
+    monkeypatch.setattr(record_vector, "_WARNED_CONTRADICTORY", set())
     yield record_vector
     record_vector.reset_readiness_cache()
 
@@ -752,7 +753,7 @@ def test_an_unreadable_journal_is_not_ready(vector, single_tenant, monkeypatch, 
 
 
 def test_an_empty_journal_never_arms_the_dense_leg(
-        vector, single_tenant, monkeypatch, tmp_path):
+        vector, single_tenant, monkeypatch, tmp_path, caplog):
     """A journal enumerating nothing cannot be the one that fed the record.
 
     ⛔ The SAME contradiction as `JournalCoverage.unprojected_unknown_reason`,
@@ -788,6 +789,21 @@ def test_an_empty_journal_never_arms_the_dense_leg(
         "an empty journal over a five-row record read as READY — the dense leg "
         "served a tenant whose record cannot have come from that journal")
     assert vector.journal_ready(scope) is False
+
+    # ⛔ AND IT IS NOT SILENT: a leg that is correctly off must not be quietly
+    # off for ever on a box whose operator declared the wrong file. Once per
+    # path, like the uncountable case (#13331 review F2 point 3).
+    named = [rec for rec in caplog.records
+             if vector.RECORD_JOURNAL_ENV in rec.message
+             and "enumerates NO records" in rec.message]
+    assert named and named[0].levelname == "WARNING", (
+        "the contradiction disabled the dense leg with nothing in the default "
+        "log — the operator who declared a rotated/replaced path is never told")
+    caplog.clear()
+    assert vector._measure_readiness(scope, record_dsn=None) is False
+    assert not [rec for rec in caplog.records
+                if "enumerates NO records" in rec.message], (
+        "the warning repeats on every read; a request path must log once")
 
 
 def test_the_gate_refuses_a_process_global_journal_it_cannot_apply_to_every_tenant(
