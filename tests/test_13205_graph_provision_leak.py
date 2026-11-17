@@ -533,6 +533,64 @@ class TestDeprovisionOnDelete:
         assert dropped == ["team_o1", "org_o1"]
 
 
+# ── 2c. the SHARED double derives its certificate — pinned here, because nothing else did ──
+
+
+class TestTheSharedDoubleDerivesItsCertificate:
+    """``FakeControlPlane.query_all`` must DERIVE ``complete``, never assert it.
+
+    ⛔ This is the one arm of the shared double that no test exercised: replacing
+    ``_certifiable``'s body with ``return True`` reddened **nothing** — 566 tests
+    passed across the six suites that use this fake — while the same edit on the
+    test-local ``_CP`` reds three deprovision rows. A double that certifies
+    unconditionally is the exact shape of wrongness this PR removes:
+    ``_org_graph_names`` REFUSES an uncertified walk, so a fake that always
+    certifies makes a walk production would refuse look green.
+
+    The three arms are the three edges of the real rule (``supabase_control``:
+    ``advanceable = [c for c in cursors if c]; if not advanceable: break``) — a
+    page with NO cursor cannot advance; a page with one can, and keeping its
+    uncursored rows is what production does; and an ordinary page certifies.
+    """
+
+    @staticmethod
+    def _cp(rows):
+        from tests.fake_control_plane import FakeControlPlane
+        return FakeControlPlane({"graphs": rows})
+
+    def test_a_page_with_NO_cursor_value_anywhere_is_REFUSED_the_certificate(self):
+        cp = self._cp([{"namespace": "org_1"}, {"namespace": "org_2"}])
+        rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert len(rows) == 2, "the rows are still RETURNED — only the certificate is withheld"
+        assert complete is False, (
+            "the shared double CERTIFIED a page carrying no cursor value at "
+            "all: production's walk cannot advance from it (`advanceable` is "
+            "empty), so `_org_graph_names` refuses. This certificate must be "
+            "derived from the rows, not asserted")
+
+    def test_a_page_with_AT_LEAST_ONE_cursor_value_still_advances_and_certifies(self):
+        cp = self._cp([{"id": "g1", "namespace": "org_1"},
+                       {"namespace": "org_2"}])
+        rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert len(rows) == 2, "production KEEPS the uncursored rows it saw"
+        assert complete is True, (
+            "a MIXED page is not refused by production — it advances from its "
+            "cursored rows. Certifying only wholly-cursored pages would be "
+            "STRICTER than the real store and would refuse walks it completes")
+
+    def test_an_ordinary_walk_is_certified(self):
+        cp = self._cp([{"id": "g1", "namespace": "org_1"},
+                       {"id": "g2", "namespace": "org_2"}])
+        rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert len(rows) == 2
+        assert complete is True, (
+            "the derivation must certify an ordinary walk — otherwise the "
+            "refusal arms would be satisfied by a double that refuses everything")
+
+
 # ── 3. the reaper: safe by construction ──────────────────────────────────────
 
 def _org(org_id, name="acme", email=None):
