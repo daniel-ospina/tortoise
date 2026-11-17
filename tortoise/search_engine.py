@@ -4141,6 +4141,40 @@ def run_vector_query(
                     or "unknown procedure" in msg
                 )
 
+            def _index_yields_any_node() -> bool:
+                """Did the ENGINE yield anything, before this read's own predicate?
+
+                Asked only on the zero-row path (one k=1 index query, no status /
+                `documentKind` clause), because a zero-row POST-filter answer is
+                indistinguishable from an empty cohort without it (#8429 review
+                F2). Both signatures are tried in the caller's preferred order,
+                for the same reason `_sig_cypher` has two: the engine that
+                created the index accepts exactly one.
+
+                UNMEASURABLE ANSWERS `False` — i.e. fall through to the scan. A
+                redundant scan is the cheap failure; a node the index cannot hold
+                staying silently unreachable is the expensive one, and this
+                function exists because it stayed silent.
+                """
+                probes = {
+                    "A": (f"CALL db.idx.vector.queryNodes('{label}', "
+                          "'embedding', $query_vec, $limit) YIELD node "
+                          f"RETURN node.{id_field} LIMIT 1"),
+                    "B": (f"CALL db.idx.vector.queryNodes('{label}', "
+                          "'embedding', $limit, vecf32($query_vec)) YIELD node "
+                          f"RETURN node.{id_field} LIMIT 1"),
+                }
+                for sig in (preferred, fallback):
+                    try:
+                        return bool(graph.query(
+                            probes[sig],
+                            params={"query_vec": query_vec, "limit": 1},
+                            timeout=timeout_ms,
+                        ).result_set)
+                    except Exception:  # noqa: BLE001, RUF100 — wrong signature, or no index
+                        continue
+                return False
+
             # #1359: `queryNodes` argument order varies by engine version.
             # The projection records which API succeeded at index-creation
             # time (FalkorProjection._vector_index_api, threaded in by the
@@ -4186,7 +4220,37 @@ def run_vector_query(
             # cohort at the WRITE boundary — which reverses PR #3018 and
             # belongs to the #5046/#5048 reopen, never a quiet re-route. Pinned
             # by ``tests/test_verbatim_index_cohort_8429.py``.
+            #
+            # ⛔ AN EMPTY *POST-FILTER* ROW SET IS NOT AN EMPTY COHORT (review F2).
+            # The status/`documentKind` predicate rides INSIDE the index query
+            # (`_sig_cypher` puts it between `YIELD` and `RETURN`, so `LIMIT`
+            # counts POST-filter rows and the exclusion is server-side on purpose).
+            # A populated, working index whose `$limit` rows are ALL excluded
+            # therefore also returns zero rows — and falling through on that would
+            # (a) report `scan_fallback` ("the index did not answer") for an index
+            # that DID answer, to the `#4999`/`#4997` surfaces that read it, and
+            # (b) pay a FULL LABEL SCAN on every such read — the exact cost
+            # `#13108` removed, on the regime where it was measured (p99 634 ms
+            # against a 500 ms budget). So the zero-row path ASKS THE ENGINE
+            # whether it yielded anything before the predicate, and only a
+            # genuinely empty cohort falls through. One k=1 index query, on this
+            # path only.
+            if not rows and vec_status_filter and _index_yields_any_node():
+                logger.debug(
+                    "vector index yielded rows for %s that the label's own "
+                    "predicate excluded — the cohort is POPULATED, so this is "
+                    "not the #8429 gap (no scan)", label)
+                _record(ran=True, degraded=False, reason="ok", count=0,
+                        mechanism=MECHANISM_INDEX)
+                return []
             if not rows:
+                # ⛔ ...AND THE SCAN GETS WHAT IS LEFT OF THE READ, not a second
+                # full budget (#11691's rule, which the record leg already
+                # obeys): an index attempt that spent most of `timeout_ms` must
+                # not hand the recovery a fresh one, or the collector's deadline
+                # discards the recovered rows and the trace records `timeout` —
+                # the fix's recovery lost precisely when the index is slow.
+                _graph_timeout_ms = remaining_read_ms(_leg_started_at, timeout_ms)
                 logger.info(
                     "vector index returned no rows for %s — the index cohort "
                     "holds Vectorf32 values only, so scanning for the shapes it "

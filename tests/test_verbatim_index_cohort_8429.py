@@ -57,17 +57,38 @@ from tortoise.search_engine import (
     run_vector_query,
 )
 
-# ── FalkorDB availability check (mirrors tests/test_search_engine.py) ──
+# ── FalkorDB availability check ─────────────────────────────────────────────
+# ⛔ THE PROBE AND THE COHORT MUST USE THE SAME SEAM (review F5). The docker and
+# legacy lanes publish on DIFFERENT ports (#6673: `TORTOISE_TEST_DOCKER_PORT` vs
+# `TORTOISE_TEST_LEGACY_PORT`), so a probe that succeeds on one seam while the
+# cohort URI is built from the other produces a hard
+# `ConnectionError: ... 6379` red on a lane that has no server there — reading
+# as a #8429 regression, and falsifying this file's own "skips loudly" premise.
+# The candidates are tried in order and the URI that ANSWERED is the base every
+# cohort graph is derived from.
 FALKORDB_AVAILABLE = False
+_PROBE_URI: str | None = None
+_old_uri = os.environ.get("TORTOISE_DB_URI")
 try:
     from tortoise.projection import FalkorProjection as _FP
-    _old_uri = os.environ.get("TORTOISE_DB_URI")
-    os.environ["TORTOISE_DB_URI"] = _live_utils.legacy_uri("tortoise_test_sdk125")
-    _probe = _FP.from_uri(os.environ["TORTOISE_DB_URI"])
-    _probe.close()
-    FALKORDB_AVAILABLE = True
-except Exception:
-    FALKORDB_AVAILABLE = False
+    for _uri in (
+        _old_uri,
+        _live_utils.docker_uri("tortoise_probe_8429", password=None),
+        _live_utils.legacy_uri("tortoise_probe_8429", password=None),
+    ):
+        if not _uri:
+            continue
+        try:
+            _probe = _FP.from_uri(_uri)
+            try:
+                _probe.g.query("RETURN 1")
+            finally:
+                _probe.close()
+        except Exception:  # noqa: BLE001, RUF100 — this seam has no server
+            continue
+        _PROBE_URI = _uri
+        FALKORDB_AVAILABLE = True
+        break
 finally:
     if _old_uri is not None:
         os.environ["TORTOISE_DB_URI"] = _old_uri
@@ -151,18 +172,15 @@ def test_a_non_empty_index_answer_does_not_scan():
 
 
 def _cohort_uri() -> str:
-    """A DEDICATED graph, derived from whatever URI the lane provisioned.
+    """A DEDICATED graph on the seam the PROBE proved (never a second guess).
 
     The population must be exactly this test's: an indexed neighbour left in a
     shared graph would fill the index cohort and hide the very case measured,
     and the fixture deletes every ``:Point`` it finds.
     """
-    base = os.environ.get("TORTOISE_DB_URI")
-    if base:
-        head, _sep, _tail = base.rpartition("/")
-        if head:
-            return f"{head}/tortoise_cohort_8429"
-    return _live_utils.docker_uri("tortoise_cohort_8429", password=None)
+    assert _PROBE_URI, "no live FalkorDB seam was probed — the tests skip"
+    head, _sep, _tail = _PROBE_URI.rpartition("/")
+    return f"{head}/tortoise_cohort_8429" if head else _PROBE_URI
 
 
 @contextlib.contextmanager

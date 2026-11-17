@@ -157,6 +157,40 @@ def test_a_non_numeric_list_no_longer_costs_the_healthy_neighbour(tmp_path):
             sdk.close()
 
 
+def test_a_boolean_element_list_no_longer_costs_the_healthy_neighbour(tmp_path):
+    """#8430 review F1: the element check must be TOTAL, not a ``toFloat`` negative.
+
+    ``toFloat(true)`` RAISES (``Type mismatch: expected String, Integer, Float,
+    or Null but was Boolean``, measured on both engines) while
+    ``toFloat("x")`` merely returns NULL — so a ``[True] * DIM`` stored value,
+    which IS storable (``typeof`` is ``List`` and the width matches), passed the
+    string-shaped pin above and still took the WHOLE ``MATCH`` down. A RED
+    against a ``toFloat(_e) IS NULL`` guard; GREEN with the positive
+    ``typeof(_e) IN ['Integer','Float']`` test.
+    """
+    with mock.patch(_EMBED_PATCH, _StubEmbedder()):
+        sdk = TortoiseSDK(str(tmp_path / "booleans.db"))
+        try:
+            healthy = sdk.create_point("statement", "healthy neighbour")["id"]
+            boolvec = sdk.create_point("statement", "bool vector")["id"]
+            _overwrite_embedding(sdk, boolvec, [True] * DIM)
+            assert _typeof(sdk, boolvec) == "List", "premise: a plain List"
+
+            hits, reason = _dense(sdk, _vector(0.0))
+            assert reason == "ok", (
+                f"the dense leg recorded {reason!r} — a BOOLEAN-element stored "
+                "List still aborts the whole MATCH, so the element check is not "
+                "total (#8430 review F1)")
+            assert healthy in hits, (
+                "the healthy Point vanished because a neighbour holds a "
+                "boolean-element embedding (#8430)")
+            assert boolvec not in hits, (
+                "a boolean-element embedding reached the result set — vecf32 "
+                "raises on it, so it must be dropped")
+        finally:
+            sdk.close()
+
+
 def test_a_readable_verbatim_list_is_still_read_and_value_preserving(tmp_path):
     """The narrowing must not cost a RIGHT-width numeric List its read.
 

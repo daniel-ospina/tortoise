@@ -1595,11 +1595,23 @@ def stored_embedding_vector_expr(alias: str, query_dim: int | None = None) -> st
     * a ``List`` whose WIDTH does not match the query vector — it casts
       fine and then ``vec.euclideanDistance`` raises a dimension mismatch.
 
-    Both are dropped by narrowing the SAME lazy filter: an element check
-    (``toFloat(_e) IS NULL``) and, when ``query_dim`` is supplied, a width test
-    against the QUERY vector's own width. A row that fails is absent from the
-    expression → NULL → the caller's ``WHERE distance IS NOT NULL`` drops
-    it, and every OTHER row keeps its leg.
+    Both are dropped by narrowing the SAME lazy filter: an element check and,
+    when ``query_dim`` is supplied, a width test against the QUERY vector's own
+    width. A row that fails is absent from the expression → NULL → the
+    caller's ``WHERE distance IS NOT NULL`` drops it, and every OTHER row keeps
+    its leg.
+
+    ⛔ THE ELEMENT CHECK MUST BE TOTAL — one POSITIVE type test, never a
+    ``toFloat(...) IS NULL`` negative. ``toFloat`` RAISES on a Boolean
+    (``Type mismatch: expected String, Integer, Float, or Null but was
+    Boolean``, measured on BOTH engines), so the negative form reintroduced the
+    exact whole-``MATCH`` abort it exists to prevent for a caller-supplied
+    BOOLEAN vector (``update_point`` given ``[True] * 384``) — a STORABLE value
+    (``typeof`` is ``List`` and the width matches). The positive test admits exactly the element
+    types ``vecf32`` accepts and drops the rest: ``[1, 2]`` casts and is kept, a
+    ``null`` element and a Boolean both RAISE inside ``vecf32`` (measured) and are
+    dropped, and a string is dropped. Pinned by the Boolean case in
+    ``tests/test_embedding_boundary_8419_8430.py``.
 
     ⛔ THE WIDTH TEST CANNOT BE APPLIED TO A ``Vectorf32``: ``size()`` raises
     ``Type mismatch: expected List, String, or Null but was Vectorf32`` on BOTH
@@ -1622,6 +1634,17 @@ def stored_embedding_vector_expr(alias: str, query_dim: int | None = None) -> st
     fallback (#8430): falling back to the raw property would hand a plain
     ``List`` straight back to the caller whenever the list arm declined it —
     exactly the unreadable value this function now filters out.
+
+    ⚠️ MEASURED COST of the element check, and why it is paid anyway. It runs
+    per scanned PLAIN-``List`` row only (a typed row never reaches it), and on a
+    1,000-row all-verbatim store it adds ~29–31 ms per 1,000 rows on both
+    engines against a 14.7–15.1 ms in-query baseline — the NEGATIVE
+    ``toFloat`` form measured ~17 ms and is not total, and the ``<>``/``OR``
+    spellings measured slower still (embedded 32.5 / 47.8 / 43.8 / 50.9 ms for
+    the negative / ``NOT(OR)`` / ``IN`` / ``<>AND`` forms). The durable removal
+    is to vet the value at the WRITE boundary — #8430's option 3 — which is a
+    store-contract decision (refuse or clear a caller vector whose elements are
+    not numbers) and not part of this read-seam change.
     """
     prop = f"{alias}.{EMBEDDING_PROPERTY}"
     #: The width test, spelled only where it cannot meet a ``Vectorf32``.
@@ -1630,7 +1653,8 @@ def stored_embedding_vector_expr(alias: str, query_dim: int | None = None) -> st
         f"coalesce([_v IN [{prop}] WHERE typeof(_v) = 'List' "
         f"| [_w IN [_v] WHERE "
         f"{_width}"
-        f"size([_e IN _w WHERE toFloat(_e) IS NULL]) = 0 "
+        f"size([_e IN _w WHERE typeof(_e) IN ['Integer', 'Float']]) "
+        f"= size(_w) "
         f"| vecf32(_w)][0]][0], "
         f"[_t IN [{prop}] WHERE typeof(_t) = 'Vectorf32' | _t][0])"
     )
