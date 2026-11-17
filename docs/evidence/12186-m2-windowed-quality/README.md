@@ -95,6 +95,20 @@ arms compare graph states and not populations. Every query makes **one** read at
 is a slice of it and `found@deep` is the whole of it, which separates *"the leg cannot rank it"* from
 *"the window does not hold it"*.
 
+⛔ **How the queries are built — and the `:Point` set is SELF-RETRIEVAL, which bounds every claim
+about it.** The corpus carries no labelled query set, so:
+
+- **`:Object` queries** are entity-name queries sampled from the same names the population is built
+  from (`#11901`'s construction, imported rather than re-invented).
+- **`:Point` queries are a contiguous span of that Point's own content** — i.e. *self-retrieval*. That
+  measures the retrieval question *"can the claim containing this phrase be found"*, and it is
+  **NOT a measure of answer quality**: a real user query is not a verbatim span of the document it
+  should match, so the `:Point` rates here (`recall@3` 15.7 %, `found@deep` 71.3 % complete) are an
+  UPPER bound on this leg's usefulness and must not be read as end-to-end search quality.
+
+The instrument declares this under its "what is real and what is not" header; neither record said it,
+which left the single caveat a reader needs to interpret the `:Point` table unstated.
+
 ### Three invariants, all enforced — and two of them fired during development
 
 (Below them, a fourth bullet records a *property* the control depends on rather than a refusal — it is
@@ -178,8 +192,10 @@ For `:Object`, `found@deep` equals `resident_share` in **every** windowed arm, t
 - **every resident canonical is still findable at depth 50** — on `:Object` the window does no
   collateral damage to what it keeps. The `random` arms read 91.7 / 76.3 / 49.7 / 25.3 / 12.0, which are
   *their own* resident shares (not the tail series above — 77.3 vs 76.3, 51.7 vs 49.7, 8.7 vs 12.0);
-- **no demoted canonical is ever returned** — `found_deep_of_demoted` is **0.0** in every arm of both
-  populations. No record repair rescues a demoted candidate (`record_serve` cannot serve the set read
+- **no demoted canonical is ever returned** — `found_deep_of_demoted` is **0.0** in every **windowed**
+  arm of both populations. ⛔ Scoped to the windowed arms deliberately: `summarise._rate` returns 0.0
+  on a zero denominator, and the `complete` arm has no demoted queries, so its 0.0 is arithmetic, not
+  an observation — 20 arms measured this, not 22. No record repair rescues a demoted candidate (`record_serve` cannot serve the set read
   it would need), and no leg in this run returns one. ⛔ **The single qualifier is the degraded
   snapshot**, and what it qualifies is *how* the zero is obtained. `fallback_snapshot` keeps a 60 s
   in-memory corpus, so it can serve a node the graph no longer holds for up to 60 s after a delete
@@ -323,7 +339,8 @@ so part of this ceiling is the **query set**, not the leg, and the leg's share i
 
 **The window must not be armed on the strength of these numbers.** The decision §7 asks for is
 *"does a windowed graph lose retrieval quality beyond an accepted bound"*, and the measured answer is
-that the loss is **equal to the eviction and unlabelled** — so any bound below "the whole evicted
+that the loss is **equal to the eviction on `:Object`, and on `:Point` the eviction plus the claim leg's
+own ceiling** — and in both it is **unlabelled** — so any bound below "the whole evicted
 share" is exceeded, and the bound cannot be met by choosing a better eviction policy (Finding 4).
 
 There are three ways forward, and they are **architecture decisions, not tuning** (§10: *"M2 showing
@@ -392,7 +409,8 @@ costs **~3 points** of ceiling against the adopted one (Finding 7 — a supersed
 artifact). The band is larger than either of those, which is exactly why neither is quoted as a number
 to act on. **The verdict does not depend on any of them** — `found_deep_of_demoted == 0` and
 `recall@k <= resident_share` are *not* tie-counting quantities, they held in every arm of every run, and
-they are what make the loss equal to the eviction. A reader comparing two runs of their own should
+they are what make the loss equal to the eviction **on `:Object`** (on `:Point` the loss
+is the eviction plus the claim leg's own ceiling — Finding 2). A reader comparing two runs of their own should
 expect the same split — the bound is a property of the instrument, and the artifact records it rather
 than assuming it. And a reproducer should get the artifact's own block back: `tools/window_quality_m2.py`
 emits it from `REPRODUCIBILITY_BOUND`, and `tests/test_window_quality_m2.py` pins the committed

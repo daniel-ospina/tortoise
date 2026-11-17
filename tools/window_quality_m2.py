@@ -88,30 +88,41 @@ METRICS, AND WHAT EACH ONE WOULD MAKE US DO
                       wires a signal moves this field instead of leaving the doc
                       claiming silence forever.
 
-FOUR INVARIANTS, ASSERTED — because they falsify the INSTRUMENT
------------------------------------------------------------------
+THREE INVARIANTS, ASSERTED IN `run()` — because they falsify the INSTRUMENT
+--------------------------------------------------------------------------
+(and one further property held as a CONSTANT, which is number 4 below)
  1. A demoted node cannot be returned, so
     ``recall@k(windowed) <= resident_share`` for every k and every arm.
  2. The graph must hold EXACTLY the intended resident set after eviction.
     Checks 1 and 2 catch different failures: over-eviction lowers recall AND the
     share, so it satisfies (1) and violates (2); a delete that did not take
     effect violates (1).
- 3. No demoted node is returned at ANY rank — ``found_deep_of_demoted == 0``.
+ 3. No demoted node is returned at any rank OF THE DEPTH-50 READ —
+    ``found_deep_of_demoted == 0``. ⛔ Not "any rank" unbounded: the read is one
+    call at ``DEEP_LIMIT`` (50), so a demoted node appearing at rank 51+ would be
+    invisible to this check. The raise message says "at depth" for that reason.
     This is the STRONG form of (1) and the one the record's verdict rests on.
     It is not redundant: ``found_deep`` is a rate over ALL queries, so on a
     population whose COMPLETE-graph ceiling is below 1.0 (``:Point`` on this
-    corpus: 0.7133 — 28.7 % of claim canonicals are unreachable with the whole
+    corpus: **0.7133** — 28.7 % of claim canonicals are unreachable with the whole
     graph resident) a leak of demoted queries sits UNDER (1)'s bound and passes
     it. (3) has no ceiling to hide behind. NOTE: the windowed ``tail@0.5`` arm's
     own 0.410 against a 0.5267 resident share is a DIFFERENT quantity (11.7 pp of
     headroom within that arm); quoting it as the complete-graph ceiling was the
     error this note replaces.
- 4. The query-sample seed and the ``random`` eviction seed must not collide
+ 4. ⛔ CONSTANT, NOT ASSERTED IN `run()`. The query-sample seed and the ``random`` eviction seed must not collide
     (``EVICT_SEED_OFFSET``). They are permutations of the SAME list, so one shared
     seed makes the retained suffix and the sampled prefix DISJOINT by
     construction — measured on this instrument's first run, which reported
     ``resident_share`` 0.667 / 0.167 / 0.000 at coverage 0.90 / 0.75 / 0.50: true
     about the graph, useless as a control.
+
+    Nothing in ``run()`` compares the two seeds — it applies ``EVICT_SEED_OFFSET``
+    as an offset and records it in the artifact, which is not an assertion that they
+    cannot collide. This one is a CONSTANT, and the record says so ("a constant in
+    the instrument, and it is not counted among the invariants"). An earlier header
+    claimed all four were ASSERTED, which nothing enforced;
+    ``tests/test_window_quality_m2.py`` pins the distinction.
 
  An instrument that cannot fail its own arithmetic is not evidence. These are the
  checks that caught the #8919 ``_upsert_object`` ON-CREATE gap in the sibling
@@ -272,7 +283,8 @@ REPRODUCIBILITY_BOUND: dict[str, object] = {
     "conclusions_rest_on_gap_pp": "13.3 to 48.3",
     "invariants_held_in_every_run": [
         "found_deep == resident_share in every :Object arm",
-        "found_deep_of_demoted == 0.0 in every arm of both populations",
+        "found_deep_of_demoted == 0.0 in every windowed arm of both populations "
+        "(the complete arm has no demoted queries, so its 0.0 is a zero denominator)",
     ],
     "why": "Near-ties in the lexical leg break on engine-internal document "
            "ids. Each arm is measured on its own fresh graph so an arm is a "
@@ -735,7 +747,10 @@ def run(args: argparse.Namespace) -> int:
     # reloaded graph carries the engine's internal document ids forward, and the
     # lexical leg breaks near-ties on them: measured across two runs of identical
     # input, every `:Object` arm was bit-identical while the `:Point` arm's
-    # `recall@3` moved by up to 2 points at random@0.50 (0.120 vs 0.117). A fresh
+    # `recall@3` moves on a `:Point` arm. The MAGNITUDE is not restated here: the
+    # only bound the instrument may quote is `REPRODUCIBILITY_BOUND`, and an earlier
+    # cut of this comment said "up to 2 points at random@0.50 (0.120 vs 0.117)" —
+    # 0.120 vs 0.117 is 0.3 pp, and it contradicted that very block. A fresh
     # graph per arm makes each arm an independently reproducible graph state, which
     # is what the artifact claims to record.
     graph_name = args.graph or f"m2win_{int(time.time())}_{os.getpid()}"
@@ -925,12 +940,15 @@ def run(args: argparse.Namespace) -> int:
                             f"{arm['resident_share']:.4f} — a demoted node was "
                             f"returned, so the eviction did not take effect")
 
-                # ⛔ INVARIANT 3 — no demoted node is returned at any rank. This
-                # is the strong form and the one the verdict turns on, so it is
-                # asserted unconditionally on EVERY arm of BOTH populations: it
-                # does not depend on the ceiling, and an `:Object`-only or
-                # single-arm check would let the one claim the record makes
-                # about `:Point` go unverified.
+                # ⛔ INVARIANT 3 — no demoted node is returned at any rank OF THE
+                # DEPTH-50 READ (not "any rank" unbounded: a node at rank 51+
+                # would be invisible to this call). It is asserted on every
+                # WINDOWED arm of both populations — 20 of the 22 graphs, because
+                # `complete` has no demoted queries and its 0.0 is a zero
+                # denominator, not an observation. It is the strong form and the
+                # one the verdict turns on: it does not depend on the ceiling, and
+                # an `:Object`-only or single-arm check would let the one claim
+                # the record makes about `:Point` go unverified.
                 if arm["found_deep_of_demoted"] != 0.0:
                     raise RuntimeError(
                         f"{kind}/{policy}@{coverage:g}: "
@@ -1008,11 +1026,22 @@ def run(args: argparse.Namespace) -> int:
         "cleanup": {
             "graphs_created": len(graphs),
             "graphs_dropped": 0,
-            "note": "each arm is measured on its own graph (params.graph_prefix); "
-                    "nodes are cleared after each population, but the graphs "
-                    "themselves are left behind. On a lane container "
-                    "`test_lane.py down` disposes of them, which is the "
-                    "intended path — a shared server accumulates one set per run",
+            #: ⛔ `reset()` runs ONCE PER POPULATION and acts on `cur["proj"]`, which the
+            #: last arm rebound — so only the FINAL arm's graph per population is
+            #: emptied. An earlier version said "nodes are cleared after each
+            #: population, but the graphs themselves are left behind", which reads as
+            #: 22 empty graphs; it is 20 POPULATED ones, and a reader sizing the lane's
+            #: footprint needs that number.
+            "note": "each arm is measured on its own graph (params.graph_prefix) "
+                    "and NO graph is dropped. reset() runs once per population and "
+                    "acts on the graph the last arm left current, so only the final "
+                    "arm's graph per population is emptied: a run leaves "
+                    "graphs_created - <populations> graphs still POPULATED "
+                    "(20 of 22 at the committed parameters: 2 populations x "
+                    "(1 complete + 2 policies x 5 windowed coverages) = 22 created, "
+                    "one emptied per population), not 20 empty ones. On a "
+                    "lane container `test_lane.py down` disposes of them, which is the "
+                    "intended path — a shared server accumulates one full set per run",
         },
         "populations": result,
     }

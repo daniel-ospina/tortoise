@@ -2,7 +2,7 @@
   "cleanup": {
     "graphs_created": 22,
     "graphs_dropped": 0,
-    "note": "each arm is measured on its own graph (params.graph_prefix); nodes are cleared after each population, but the graphs themselves are left behind. On a lane container `test_lane.py down` disposes of them, which is the intended path \u2014 a shared server accumulates one set per run"
+    "note": "each arm is measured on its own graph (params.graph_prefix) and NO graph is dropped. reset() runs once per population and acts on the graph the last arm left current, so only the final arm's graph per population is emptied: a run leaves graphs_created - <populations> graphs still POPULATED \u2014 20 of 22 at the committed parameters (2 populations x (1 complete + 2 policies x 5 windowed coverages) = 22 created, one emptied per population), not 20 empty ones. On a lane container `test_lane.py down` disposes of them, which is the intended path \u2014 a shared server accumulates one full set per run"
   },
   "corpus": {
     "corpus": {
@@ -583,14 +583,14 @@
     }
   },
   "provenance": {
-    "tool_sha256": "72496c7d112a7d73fefb9921185b673e4a5fbce171dd8555c3726bbc66eca80e"
+    "tool_sha256": "4f7e0d89d6ffd80304b706ce043ba001cc34dfe568fa9e2a0c6c1c2157f9b7c4"
   },
   "reproducibility": {
     "conclusions_rest_on_gap_pp": "13.3 to 48.3",
     "found_deep_max_delta_pp": 0.33,
     "invariants_held_in_every_run": [
       "found_deep == resident_share in every :Object arm",
-      "found_deep_of_demoted == 0.0 in every arm of both populations"
+      "found_deep_of_demoted == 0.0 in every windowed arm of both populations (the complete arm has no demoted queries, so its 0.0 is a zero denominator)"
     ],
     "recall_at_k_max_delta_pp": 1.0,
     "runs_compared": 3,

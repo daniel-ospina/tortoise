@@ -585,7 +585,8 @@ The record is `docs/evidence/12186-m2-windowed-quality/` (README + artifact + th
 (`:Object`, 1000 nodes, 300 fixed queries, lexical leg) `found@deep` **equals** the resident share in
 **every windowed arm of both policies** — so on that population a node the window keeps is always still
 findable at depth 50, and a demoted node is never
-returned at any rank (`found_deep_of_demoted` is 0.0 in every arm of both populations). ⚠️ The five
+returned at any rank (`found_deep_of_demoted` is 0.0 in every **windowed** arm of both populations — the
+`complete` arm has no demoted queries, so its 0.0 is a zero denominator and not an observation). ⚠️ The five
 `tail` arms read 91.3 / 77.3 / 51.7 / 23.3 / 8.7 at coverage 0.90 / 0.75 / 0.50 / 0.25 / 0.10; the
 `random` arms equal **their own** resident shares 91.7 / 76.3 / 49.7 / 25.3 / 12.0, so quote a figure
 with the policy that produced it — they are not one series.
@@ -656,16 +657,24 @@ above the arm's own resident share. Any operator that demotes must invalidate it
 
 ⚠️ **What §9.1 does NOT settle.** The **vector** leg is not bounded once it moves to Postgres, and this
 run did not exercise it — `record_vector.ARMING_ENV` is unarmed and the artifact records
-`retrieval.mode = "keyword_only"`, so every figure is the **lexical** leg's. Coverage here is a NODE
-share, while §8 budgets BYTES. And the lexical leg's own ceiling is low on claims even complete
+`retrieval.mode = "keyword_only"`, so every figure is the **lexical** leg's. ⛔ **The `:Point` queries
+are SELF-RETRIEVAL** — the corpus carries no labelled query set, so each claim query is a contiguous
+span of that claim's own content. That measures *"can the claim containing this phrase be found"*,
+which is the retrieval question, and it is **NOT a measure of answer quality**: the `:Point` rates
+(15.7 % / 71.3 % complete) are an UPPER bound on this leg, not end-to-end search quality. Coverage here
+is a NODE share, while §8 budgets BYTES — so reading 0.50 as §8's target is an ASSUMPTION, not an
+identity. And the lexical leg's own ceiling is low on claims even complete
 (recall@3 15.7 %, `found@deep` 71.3 %) — the ranking matter **M3** owns, not a window effect. And the
 record carries its own reproducibility bound, in the artifact: across three runs of identical input
 `found@deep` moved by at most 0.33 points, `recall@k` by at most 1.0, and the tie-counting rates by at
 most 9.9 — the gaps the verdict rests on run 13.3 to 48.3 points, and the two quantities the verdict turns
 on (`found@deep == resident_share`, and `found_deep_of_demoted == 0`) held in every arm of every run.
 
-**Consequence for §7.** Arming needs a decision this measurement cannot make on its own, and §10 names
-its shape: if the window is to be armed, one of three things must be true — the text index moves with the
+**Consequence for §7 — and §10's reopen trigger has FIRED.** Arming needs a decision this measurement
+cannot make on its own. §10 lists *"M2 showing a windowed graph loses retrieval quality beyond an
+accepted bound"* among what reopens the §7 decision, and on this record that trigger is MET: the bound
+is the whole evicted share, so any bound below it is exceeded. §7 is therefore **reopened**, and if the
+window is to be armed one of three things must be true — the text index moves with the
 vectors, which **contradicts §6.2's decision item 2** and is therefore a **reopen** in that item's own
 home argued with this evidence, never a silent adoption; or the window excludes the search-indexed labels
 and is sized against §8's target on that basis; or every demoted answer is labelled with a reason and
