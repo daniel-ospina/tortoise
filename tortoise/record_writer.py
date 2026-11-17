@@ -1238,8 +1238,16 @@ def _verify_pending_input(conn: Any) -> bool:
     driver words it — returns ``False`` and the caller DISCARDS the handle: the
     next record gets a fresh connect instead of inheriting a corpse.
 
-    ⚠️ The rollback is the same round trip, not a second one: psycopg2's
-    `rollback()` on a connection with no open transaction sends nothing.
+    ⚠️ THE PAIR COSTS **TWO** ROUND TRIPS, and the honest price is stated rather than
+    hidden: the probe's own statement, then the `rollback()` that clears the
+    transaction it opened (measured on the shipped driver: 427–461 µs for the
+    pair, against 0.9 µs for a `rollback()` on an already-IDLE handle). It is
+    paid ONCE PER EVENT — a death or a notification — never per record, which is
+    what makes certainty affordable here; the common borrow (quiet socket) pays
+    no round trip at all. ⛔ The rollback is NOT dropped to make this read as one
+    round trip: `_reset_parked_transaction` would clear the same transaction a
+    line later in today's only caller, and depending on the caller's next line is
+    how a helper becomes a landmine for the next one.
     """
     try:
         cursor = conn.cursor()
@@ -1323,10 +1331,11 @@ def _take_idle_connection(dsn: str) -> Any | None:
     ⛔ THE IDLE CASE IS THE ONE THAT LOST RECORDS (#12822). `closed` and
     `transaction_status` cannot see a peer that hung up while the handle was
     parked, so the borrow also reads the SOCKET (:func:`_socket_has_pending_input`,
-    1.7 µs, no I/O) and, only when something is pending, asks the SERVER once
-    (:func:`_verify_pending_input`). Quiet socket ⇒ no round trip; pending input
-    ⇒ one round trip, which is either a death found or a notification delivered
-    to a handle that then stays in service. Paying the round trip on EVERY borrow
+    1.7 µs, no I/O) and, only when something is pending, asks the SERVER
+    (:func:`_verify_pending_input`: one `SELECT 1` and its rollback, i.e. two
+    round trips, measured 427–461 µs). Quiet socket ⇒ NO round trip; pending
+    input ⇒ that verification, which is either a death found or a notification
+    delivered to a handle that then stays in service. Paying it on EVERY borrow
     instead would be the "health query per acquire" this module rejected, and
     skipping it is what let a corpse through.
 

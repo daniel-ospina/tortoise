@@ -343,8 +343,12 @@ LOCAL and stale once the peer is gone, so a handle parked INTRANS whose server
 died while idle is caught by the borrow-time rollback, discarded, and replaced
 by a fresh connect — instead of reaching the read door as a spurious
 `RecordUnavailable` for a request a reconnect would have served. A handle the
-WRITE door parked IDLE has no such probe; there the death is found at use and
-costs one `write_failed`, healed by replay.
+WRITE door parked IDLE is caught at the SAME place since #12822, by a
+socket-readiness read plus, only when that read finds pending input, one
+verification round trip (`_socket_has_pending_input` → `_verify_pending_input`);
+before that, the death was found at USE and cost one `write_failed` per dead
+handle, healed by replay — measured at ~0.6 % of a hosted deployment's writes
+and the counter behind its `record.degraded` flip.
 
 **Two silent-failure shapes are closed on the wrapper.** `close()` is now a fence
 (`cursor`/`commit`/`rollback` raise the driver's `InterfaceError` once returned,
