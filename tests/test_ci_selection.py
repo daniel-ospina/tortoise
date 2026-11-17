@@ -22995,11 +22995,17 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
 
     `tests/test_13034_currency_rule_reads_position.py` was UNLISTED on `main`
     when #13075 landed it (both rows registered later, by #13144); `core` ALONE
-    missed it. Its cross-cutting guard is a census over `_CENSUS_MODULES`
-    (`:606-611`), which names `tortoise/hosted_api.py` as one of its six
-    consumers — the file #13034 converted — and whose presence arm (`:708-722`,
-    literal at `:714`) asserts `"tortoise/hosted_api.py": "_terminal_excluded"`
-    is still true.
+    missed it. Its cross-cutting guard is a census over `_CENSUS_MODULES`, the
+    six-module tuple at the top of that module, which names
+    `tortoise/hosted_api.py` as one of its six
+    consumers — the file #13034 converted — and whose presence arm,
+    `test_the_predicate_is_what_the_converted_consumers_import`, asserts the
+    literal `"tortoise/hosted_api.py": "_terminal_excluded"` is still true.
+    ⛔ Cite those by NAME, not by `:<line>`: this docstring carried
+    `:606-611`/`:708-722`, and both had already drifted off the symbols they
+    name (the tuple opens at `:605` and closes at `:612`; the literal sits three
+    lines below the `expected = {` the old range pointed at). A symbol survives an
+    edit above it; a line does not.
 
     `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match, and a named
     match REPLACES the `core` fallback in `select()` (`core` is added only when
@@ -23014,9 +23020,14 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     `main`" and what commit `a36581fd` retired by name — so do not re-read this
     clause as "main had a `core` row". ⛔ That parenthetical is bound to the
     pre-#13144 main it was measured at: the SAME `grep -c` against `origin/main`
-    reads **6** at this head, because `origin/main` IS `3d437429e9`. Re-running it
-    against today's `origin/main` does not falsify the clause — it measures a
-    different commit, and #13144 is the one that landed the rows.
+    reads **6** at this head too, and that is NOT the same commit — `origin/main`
+    has moved past `3d437429e9` (it was `745c71c265` when this merge was cut) and
+    the count is unchanged because nothing since #13144 has touched those rows.
+    Re-running the grep against today's `origin/main` does not falsify the
+    "UNLISTED" clause — it measures a different commit, and #13144 is the one
+    that landed the rows. ⛔ Read the COUNT and the ROWS, never "origin/main is
+    <sha>": the identity clause this line used to carry aged into a falsehood in
+    one merge, which is the whole reason the row cites above are name-keyed.
     On that `core`-only manifest: `select(['tortoise/hosted_api.py'],
     'pull_request', manifest)` -> `surfaces=['api', 'onboarding']`, `full: False`,
     and this file ABSENT from `test_files`. (⛔ On the manifest WITH the `api` row
@@ -23029,15 +23040,20 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
 
     That is the #1349/#2938/#3154 silent-drop class in its harmful direction. It is
     the same defect `test_record_serve.py` and `test_12941_read_your_writes.py`
-    each record for themselves (`config/ci-surfaces.yml:351` and `:352` — earlier
-    rows in the SAME `surfaces.api` list; ⛔ NOT the two rows adjacent to this
-    one: the registration `main` landed is at `:1109`, 757 lines below `:352`,
-    because `main`'s cut carries its own comment block above the row). The
-    `['api', 'core']`
-    siblings, each at its OWN rows: `test_12941_read_your_writes.py` at `:352` /
-    `:2574`, and `test_11892_health_quota.py` at `:1849` / `:2565` (both
-    re-derived on the merged tree: taking `main`'s `ci-surfaces.yml` moved them
-    from the `:1816` / `:2532` / `:2541` this docstring previously carried).
+    each record for themselves: their rows sit, like this one, in
+    `surfaces.api`, and they are cited here by ROW TEXT rather than by `:<line>`.
+    The `['api', 'core']`
+    siblings, each dual-registered at its own row in each list:
+    `test_12941_read_your_writes.py` (its `surfaces.api` row carries the
+    `# #12941: dual: core` trailer) and `test_11892_health_quota.py`.
+    ⛔ WHY NO NUMBER: `config/ci-surfaces.yml` is `merge=union` and re-anchors
+    under every landing, so a `:<line>` into it is a falsehood waiting for the
+    next merge. This docstring has already carried `:1816`/`:2532`/`:2541`, then
+    `:351`/`:352`/`:1109`/`:2574`/`:2565` — and on the merged tree the last set's
+    `surfaces.core` pair is WRONG (those lines are now a comment and a different
+    test's row; the `surfaces.api` pair still resolves). A row is greppable as
+    its own verbatim text, `- <test_file>`, which is what makes the claim
+    checkable without a number to rot.
     ⛔ NOT "the only hosted-door guard registered
     single-surface": `main` registered this file on **zero** surfaces when
     #13075 landed it (both rows were added later, by #13144),
