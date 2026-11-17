@@ -219,3 +219,64 @@ def test_sweep_finds_a_born_uncut_graph_and_not_the_cut_over_one() -> None:
     assert "cannot_see" in payload, (
         "the sweep does not state what it cannot see — a graph with no journal "
         "row is invisible, and silence reads as coverage")
+
+
+# ── P2-12: the wiring gate must SEE the flag read ─────────────────────────
+
+@pytest.fixture(scope="module")
+def wiring_mod():
+    spec = importlib.util.spec_from_file_location(
+        "record_wiring_check", _TOOLS / "record_wiring_check.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_real_tree_reads_the_flag_on_the_door_path(wiring_mod) -> None:
+    assert wiring_mod.the_door_reads_the_allocate_flag() == [], (
+        "the wiring gate reports the flag as unread on this tree")
+
+
+_MUTATIONS = {
+    # name: (old, new) — each is a way the flag's plumbing has been (or could
+    # be) deleted while every OTHER claim of the gate still holds.
+    "helper-deleted": (
+        "def record_live_allocate() -> bool:",
+        "def _renamed_record_live_allocate() -> bool:"),
+    "helper-answers-without-the-env": (
+        "    return env_flag(RECORD_ALLOCATE_ENV, False)",
+        "    return False"),
+    "door-never-binds-it": (
+        "    allocate = allocate or record_live_allocate()",
+        "    allocate = allocate"),
+    "constant-deleted": (
+        'RECORD_ALLOCATE_ENV = "TORTOISE_RECORD_ALLOCATE"',
+        'DEFAULT_ALLOCATE_ENV = "TORTOISE_RECORD_ALLOCATE"'),
+    "not-exported": (
+        '    "RECORD_ALLOCATE_ENV",\n',
+        ""),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_MUTATIONS))
+def test_the_wiring_gate_reds_when_the_flag_plumbing_is_deleted(
+        wiring_mod, tmp_path, name) -> None:
+    """⛔ THE MEASURED DEFECT: the gate certified WIRED over exactly this.
+
+    Each mutation is applied to a COPY of the real module and handed to the rule,
+    so the tree under test is never touched. Every one of these leaves the
+    position-provenance claims intact — which is why nothing caught it.
+    """
+    old, new = _MUTATIONS[name]
+    source = (Path(wiring_mod.__file__).resolve().parent.parent
+              / "tortoise" / "record_writer.py").read_text()
+    assert old in source, (
+        f"the mutation {name!r} no longer matches the tree — it has drifted and "
+        "must be re-pointed at the code it describes")
+    mutated = tmp_path / "record_writer.py"
+    mutated.write_text(source.replace(old, new, 1))
+    problems = wiring_mod.the_door_reads_the_allocate_flag(mutated)
+    assert problems, (
+        f"{name}: the wiring gate passed a tree whose allocate flag is not read "
+        "on the door's path — this is the P2-12 defect restored")

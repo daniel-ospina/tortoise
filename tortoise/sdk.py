@@ -14196,6 +14196,17 @@ class TortoiseSDK:
             event["point"] = clean
         if id is not None:
             event["id"] = id
+        # ⛔ THE RESERVED POSITION NAME IS STRIPPED AT THE CHOKEPOINT TOO (#13043
+        # review P2-1). `_sanitize_props` refuses `seq` at prop INTAKE, but this
+        # function is reachable from doors that build their own payload
+        # (`_skip_sanitize=True`) or splat props straight into `**extra` — and the
+        # reservation was enforced at each of those intakes, which is how it took
+        # several review cycles and still missed one. One strip here covers a
+        # caller `seq` regardless of which door it came through, and
+        # `EventLog.append` covers the journal itself; the two are the only paths
+        # a record can ride to a position row.
+        if "seq" in extra:
+            extra = {k: v for k, v in extra.items() if k != "seq"}
         event.update(extra)
         # #11835 review F1 (P1): EVERY journalled vector declares its width —
         # including the ones that arrive through `extra` on this (`id=`) branch,

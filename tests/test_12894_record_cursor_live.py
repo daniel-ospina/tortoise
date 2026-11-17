@@ -1643,6 +1643,32 @@ def test_the_armed_door_refuses_a_record_whose_position_is_unproven(
 
 # ── (3a) concurrency: allocation order IS commit order ─────────────────────
 
+def _blocked_lock_waiters(conn) -> int:
+    """How many backends are WAITING for a lock right now.
+
+    ⛔ THIS IS THE HANDSHAKE (#13043 review P2-5). The leg used to assert
+    `result.empty()` after a fixed `sleep(1.0)`, which measures "B has had time to
+    block" — and the review MEASURED that the leg passes with the counter's row
+    lock removed: no block, no result, an empty queue. `pg_locks` with `granted =
+    false` is evidence that a backend is ACTUALLY WAITING, which is the fact the
+    assertion is about, so a lock-free allocator reds here instead of passing.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM pg_locks WHERE NOT granted")
+        row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def _wait_for_a_blocked_writer(conn, timeout: float = 30.0) -> bool:
+    """Poll until ANOTHER backend is waiting on a lock (B is blocked)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _blocked_lock_waiters(conn):
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def test_two_writers_allocate_in_commit_order(schema, tenant, app):
     """The property a bare `nextval()` cannot give (module docstring: a sequence is
     not transactional and its order is not the commit order).
@@ -1660,10 +1686,12 @@ def test_two_writers_allocate_in_commit_order(schema, tenant, app):
     first = ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
 
     result: queue.Queue = queue.Queue()
+    started = threading.Event()
 
     def writer_b() -> None:
         conn = _app_conn()
         try:
+            started.set()
             block = ra.execute_allocation(conn, statement, org_id=org,
                                           graph_id=graph)
             result.put(("ok", block.first_seq, time.monotonic()))
@@ -1673,11 +1701,22 @@ def test_two_writers_allocate_in_commit_order(schema, tenant, app):
         finally:
             conn.close()
 
+    # ⛔ NON-VACUITY OF THE HANDHSHAKE ITSELF: nothing is waiting yet, so the
+    # detector must answer "no". A predicate that always returned True would
+    # make the assertion below meaningless.
+    assert _blocked_lock_waiters(app) == 0, (
+        "a lock waiter exists before writer B started — this connection cannot "
+        "be used to observe B's block")
+
     thread = threading.Thread(target=writer_b, daemon=True)
     thread.start()
-    # B must be BLOCKED here: it cannot take the counter's row lock until A
-    # commits. A fixed sleep is a measurement of "B has had time to block".
-    time.sleep(1.0)
+    assert started.wait(timeout=30), "writer B never started"
+    # B is BLOCKED: it cannot take the counter's row lock until A commits. This
+    # waits for EVIDENCE of the wait, not for a duration.
+    assert _wait_for_a_blocked_writer(app), (
+        "no backend ever waited on the counter's row lock — the second writer "
+        "was not blocked, so allocation order is not commit order (this is what "
+        "a fixed sleep could not see: with the row lock removed B simply runs)")
     assert result.empty(), (
         "the second writer allocated while the first still held the counter — "
         "allocation order is not commit order")
@@ -1695,6 +1734,39 @@ def test_two_writers_allocate_in_commit_order(schema, tenant, app):
 
 
 # ── (3b) a rollback burns nothing ──────────────────────────────────────────
+
+def test_the_blocked_writer_detector_does_not_fire_without_contention(
+        schema, tenant, app):
+    """NON-VACUITY FOR P2-5's HANDSHAKE: the detector measures a WAIT, not a thread.
+
+    The old leg could not tell "B is blocked" from "B has had a second" — and the
+    review measured that it passed with the counter's row lock REMOVED. A
+    `pg_locks` waiter check cannot: a writer that does not contend leaves nothing
+    ungranted, which is exactly the shape a lock-free allocator produces. Proven
+    here by letting a second writer run to COMPLETION with no contention at all
+    and requiring the detector to stay silent while it does.
+    """
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 0)
+    statement = ra.allocation_statement(org_id=org, graph_id=graph,
+                                        records=[RECORD])
+    first = ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
+    # A DIFFERENT graph: nothing to contend over, so no backends wait.
+    with schema.cursor() as cur:
+        other = f"{graph}-free"
+        cur.execute("INSERT INTO public.graphs (id, org_id, name) VALUES (%s, %s, %s)",
+                    (other, org, other))
+    _seed_and_arm(app, org, other, 0)
+    free = ra.allocation_statement(org_id=org, graph_id=other,
+                                   records=[RECORD])
+    block = ra.execute_allocation(app, free, org_id=org, graph_id=other)
+    # The counter is PER GRAPH, so the free graph's first allocation is 1 — the
+    # point is that it ran to completion with nothing waiting.
+    assert block.first_seq == 1
+    assert _wait_for_a_blocked_writer(app, timeout=0.5) is False, (
+        "the detector reported a waiter with no contention — it would make "
+        "P2-5's handshake pass on a lock-free allocator")
+
 
 def test_a_rolled_back_allocation_is_reissued_exactly_once(schema, tenant, app):
     """A position is issued inside the caller's transaction, so a rollback returns

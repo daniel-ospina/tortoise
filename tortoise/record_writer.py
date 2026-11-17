@@ -224,6 +224,7 @@ __all__ = [
     "NON_DURABLE_JOURNAL_REFUSAL",
     "POSITION_ORDINAL_SOURCE",
     "POSITION_UNPROVEN_WARN_SECONDS",
+    "RECORD_ALLOCATE_ENV",
     "RECORD_DSN_ENV",
     "RECORD_GRAPH_ENV",
     "RECORD_ORG_ENV",
@@ -240,6 +241,7 @@ __all__ = [
     "live_write_refusal",
     "record_dsn",
     "record_holds_turns",
+    "record_live_allocate",
     "record_tenant",
     "record_tenant_effective",
     "record_tenant_for",
@@ -2539,7 +2541,9 @@ def write_live_record(record: Mapping[str, Any], *,
     (its docstring is explicit: "the row — not the mode — is the fact"), so an
     enumerated replay heals nothing on any graph that has one, WHATEVER
     ``allocate`` was on the write that failed. There the repair is an allocating
-    replay (``replay(allocate=True)``) or the allocator's operator path (see the
+    replay (``replay(allocate=True)`` — ⛔ a CODE CALL, not a CLI verb: nothing
+    outside `tests/` invokes it, so an operator cannot run it from this tree's
+    tools; #13043 review P2-9) or the allocator's operator path (see the
     ``position_unverifiable`` arm below). That
     contract is enforced, not just intended: every counter call goes through
     :func:`_count_write_failure`, which suppresses its own failures.
@@ -2756,9 +2760,18 @@ def write_live_record(record: Mapping[str, Any], *,
         return _refused(refusal, seq)
     assert tenant is not None  # the verdict only clears with a resolved pair
     # ⛔ THE SWITCH (#12894). Read AFTER the refusals above, so an unarmed or
-    # refused write is byte-identical whatever the flag says. An explicit
-    # `allocate=True` from a caller still means what it said — the flag can only
-    # turn the arm ON, never override a caller's decision.
+    # refused write is byte-identical whatever the flag says.
+    #
+    # ⚠️ AND IT **CAN** OVERRIDE A CALLER'S `allocate=False` (#13043 review P2-6).
+    # The sentence here used to say the flag "can only turn the arm ON, never
+    # override a caller's decision", which is false of the line below it: `or`
+    # short-circuits on TRUTHY, so `allocate=False` falls through to the flag and
+    # an ON deployment allocates whatever the caller passed. That is deliberate —
+    # the flag describes the DEPLOYMENT (one graph cut over ⇒ every writer on it
+    # allocates) and a per-call veto would let one caller write an enumerated row
+    # onto a counter-issued graph, which is the split the cutover invariant exists
+    # to prevent. A caller that must stay enumerated halts the GRAPH, it does not
+    # pass `False` here.
     allocate = allocate or record_live_allocate()
     org_id, graph_id = tenant
     connection: Any | None = None
@@ -2792,7 +2805,9 @@ def write_live_record(record: Mapping[str, Any], *,
             "the journal consumed a position the counter did not — so EVERY "
             "later armed write refuses for the same reason until the gap is "
             "closed (an ARMED replay of the missing record closes it one record "
-            "at a time, once the caller commits). For the whole gap the remedy "
+            "at a time, once the caller commits — but that is a CODE call "
+            "(`record_projection.replay(..., allocate=True)`); there is no CLI "
+            "verb for it in this tree). For the whole gap the remedy "
             "is the allocator's operator path: `halt` -> "
             "`seed --journal` -> `reopen` -> `arm`; record=%s %s",
             RECORD_ALLOCATE_ENV, record.get("type"), _record_identity(record),
@@ -2895,8 +2910,26 @@ def write_live_record(record: Mapping[str, Any], *,
             allocated_first = write.first_seq
             if allocated_first != seq:
                 if connection is not None:
-                    with contextlib.suppress(Exception):
+                    # ⛔ LOG THE SUPPRESSED EXCEPTION (#13043 review P2-7). The
+                    # WARNING below asserts, as a FACT, that the allocation was
+                    # rolled back — and a `suppress(Exception)` around the
+                    # rollback could make that sentence false with nothing
+                    # anywhere recording it. The rollback is the half that keeps
+                    # the position from being BURNED, so a failure here is the
+                    # one thing this branch must not swallow silently.
+                    try:
                         connection.rollback()
+                    except Exception as rollback_exc:  # noqa: BLE001
+                        _logger.warning(
+                            "the divergence guard could NOT roll the allocation "
+                            "back (%s: %s) — the counter may be one ahead of "
+                            "the rows. `record_allocator_cli.py status` reads "
+                            "both sides; a counter that is ahead is the state "
+                            "that EATS rows, so halt the graph before "
+                            "continuing",
+                            type(rollback_exc).__name__,
+                            _bounded_cause(rollback_exc),
+                        )
                 _count_write_failure("write_failed")
                 _logger.warning(
                     "the record write was REFUSED (position_divergence) — the "
@@ -3041,10 +3074,12 @@ def write_live_record(record: Mapping[str, Any], *,
             "row (cut over), in which case an enumerated replay is refused — "
             "and the remedy is the one the refusal below names for the row's "
             "MODE, not a chain that assumes `active`: `replay(allocate=True)` "
-            "needs mode='active', `halt` is scoped to 'active', `reopen` to "
+            "needs mode='active' (and is a CODE call — no CLI verb ships), "
+            "`halt` is scoped to 'active', `reopen` to "
             "'halted'. Run `record_allocator_cli.py status` for the mode"
             if not allocate else
-            "repair it with an ALLOCATING replay (`replay(allocate=True)`), not "
+            "repair it with an ALLOCATING replay (`replay(allocate=True)`, a "
+            "CODE call — no CLI verb ships), not "
             "a plain one, which a cut-over graph refuses",
             record.get("type"), _record_identity(record), exc,
         )
