@@ -1,11 +1,32 @@
 # #9556 (#9189 follow-on) — S2 wiring census: production call sites of the two-store chain
 #   (reconciliation.reconcile / record_projection.replay /
 #   cache_projection.read_record_view / FalkorProjection.rebuild_from_record).
-# Measured at: fix/9556-record-restore@b5768749e on 2026-10-22 (re-cut for R8: the
-#   record-sourced restore verb. `FalkorProjection.rebuild_from_record` moves 0 -> 1
-#   and `read_record_view` 1 -> 2, because `python -m tortoise record-restore` is now
-#   a production caller of both. The #9189 verdict this log feeds stays NOT-GREEN for
-#   `reconcile` (0 call sites) and for the lack of a SCHEDULED sweep.)
+# Measured at: feat/13220-vectors-postgres@63cc6314e2 on 2026-11-17, re-cut for #13220 (the code
+#   measured is that commit's; this paste is ONE live run at it). ⛔ FIFTH cut: the branch was
+#   rebased onto a newer `origin/main` (`54682177bc`, carrying #13277's
+#   `20261117000002_postgres_residency_gauge.sql`), and that rebase inserted 8 lines above
+#   `tools/record_runner.py`'s import — its ordinal moved 738 -> 746. Every COUNT is unchanged.
+#   The previous cut's provenance sha `0353484f32` is NOT an ancestor of this head after that
+#   rebase, so the sha above is the one a reader can actually check out.
+#   ⛔ FOURTH cut, kept as history: `09b34b4f17` re-cut the
+#   `record_writer` ordinal to 2076 attributing the move to "the F9
+#   prose fix", but that fix had NOT landed (`record_writer.py:1778` still said "merges it
+#   over the snapshot") — the move it recorded did not exist. `0353484f32` is the (pre-rebase)
+#   commit that actually applies the F9 prose fix, and it moved the call 2076 -> 2081.
+#   HISTORY of the earlier cuts: TWO things
+#   moved since the cut before them (fix/9556-record-restore@b5768749e, 2026-10-22, R8):
+#   #13210 added `tools/record_runner.py`, a SECOND production caller of
+#   `record_projection.replay` (1 -> 2), and #13220 moved the `record_writer` call line
+#   (the ordinal is not pinned, see below — the FILE is). The ordinals were taken a
+#   THIRD time here: `origin/main` was merged in at `181bcca146`, which re-moved lines
+#   above both calls — and #13220's own later fix commits moved `record_writer.py` after
+#   the previous cut (2038 -> 2070 at `973d11ab3e`) — so the previous paste no longer
+#   described a real run. The COUNTS
+#   did not change. `FalkorProjection.
+#   rebuild_from_record` stays 0 -> 1 and `read_record_view` 1 -> 2 from the R8 cut,
+#   because `python -m tortoise record-restore` is a production caller of both.
+#   The #9189 verdict this log feeds stays NOT-GREEN for `reconcile` (0 call sites) and
+#   for the lack of a SCHEDULED sweep.
 # Command: uv run python docs/evidence/7950-capstone/probes/s2_wiring_census.py
 # Paste of the run as printed, BOTH populations. No expectation block: an expected-value
 #   header above a run's own transcript makes measured-vs-expected unverifiable.
@@ -25,18 +46,19 @@ production population: ['tortoise', 'tools', 'scripts']/**/*.py
 
 == reconciliation.reconcile: 0 production call site(s) ==
 
-== record_projection.replay: 1 production call site(s) ==
-  tortoise/record_writer.py:777: report = record_projection.replay(
+== record_projection.replay: 2 production call site(s) ==
+  tortoise/record_writer.py:2081: report = record_projection.replay(
+  tools/record_runner.py:746: from tortoise.record_projection import replay
 
 == cache_projection.read_record_view: 2 production call site(s) ==
-  tortoise/__main__.py:731: view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
-  tortoise/__main__.py:898: view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+  tortoise/__main__.py:817: view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+  tortoise/__main__.py:1290: view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
 
 == FalkorProjection.rebuild_from_record: 1 production call site(s) ==
-  tortoise/record_restore.py:354: result = project.rebuild_from_record(
+  tortoise/record_restore.py:614: result = project.rebuild_from_record(
 
 test population: tests/*.py
-  reconciliation.reconcile: 12 test-file hit line(s)
-  record_projection.replay: 4 test-file hit line(s)
-  cache_projection.read_record_view: 7 test-file hit line(s)
-  FalkorProjection.rebuild_from_record: 11 test-file hit line(s)
+  reconciliation.reconcile: 21 test-file hit line(s)
+  record_projection.replay: 56 test-file hit line(s)
+  cache_projection.read_record_view: 25 test-file hit line(s)
+  FalkorProjection.rebuild_from_record: 27 test-file hit line(s)

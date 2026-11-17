@@ -709,12 +709,18 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     it is WRITER AGREEMENT rather than over-rejection. Asserting the old shape
     would pin a divergence the slice exists to remove.
 
-    The `:Event` half proves the other direction, and it CHANGED with this diff:
-    since `#13100` an Event has no lifecycle at ALL (#11825), so a declared
-    `status` is REFUSED there rather than dropped, and the bundle must NOT stay
-    accepted. The arm is therefore not "reject every non-`str`" — it is "an
-    `:Event` carries no lifecycle, whatever the value or its type"; the
-    documented clear route stays `status: None`.
+    ⛔ The `:Event` half is a REFUSAL now too (#13100), which is why the merge
+    resolution of this file is a COMPOSITE and neither side's whole body
+    survives: `:Event` carries no lifecycle at all, so
+    `live.refuse_event_lifecycle_state` refuses ANY `status` declaration —
+    whatever its value or type — and Phase 1 must mirror that or the bundle is
+    called clean and then half-commits (the #2422/#7925 class). The old
+    "accepted, value DROPPED" Event direction this test pinned is therefore
+    false of the merged code. The arm is therefore not "reject every non-`str`"
+    — it is "an `:Event` carries no lifecycle, whatever the value or its type";
+    the documented clear route stays `status: None`, and the accepted direction
+    that survives is an Event that declares NO `status` at all — pinned by the
+    positive control below.
     """
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
@@ -725,7 +731,7 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
                       "status": {"a": 1}},
                      {"ref": "o2", "type": "object", "name": "Beta"},
                      # The `:Event` half of the contrast — since #13100 an Event
-                     # has no lifecycle at ALL, so any declaration is refused,
+                     # has no lifecycle at ALL, so ANY declaration is refused,
                      # a non-persistable one included.
                      {"ref": "e1", "type": "event", "name": "Happened",
                       "eventKind": "sessionCaptured", "status": {"a": 1}}],
@@ -733,11 +739,23 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     }
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("declares status" in m and ":Object" in m for m in msgs), msgs
+    assert any("declares status" in m and ":Event" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(bundle)
     # ZERO mutation: the predecessor object and the Event never land.
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 0
+
+    # The POSITIVE CONTROL, so the arm is pinned as "refuse the declaration",
+    # not as "reject any bundle that carries an Event": an Event that declares
+    # no `status` at all still validates and still ingests.
+    event_no_status = {"entities": [
+        {"ref": "e2", "type": "event", "name": "Plain",
+         "eventKind": "sessionCaptured"},
+    ]}
+    assert sdk._validate_bundle(event_no_status) == []
+    sdk.ingest(event_no_status)
+    assert _count(sdk, "MATCH (n:Event {name:'Plain'}) RETURN count(n)") == 1
 
     # …and the Event's declaration ALONE is refused too, so this isolates the
     # Event arm from the :Object one above (S0's version of this test asserted
@@ -752,7 +770,44 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     assert any("declares status" in m and ":Event" in m for m in ev_msgs), ev_msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(event_only)
+    # ⛔ ZERO mutation on BOTH halves of this bundle, not only the Event: the
+    # Object PRECEDES the refused Event in this bundle's entity list, so a Phase 1
+    # that refused LATE — validation moved behind the first write — leaves
+    # `Object 'Solo'` behind (count 1) and then dies mid-write on the Event door's
+    # refusal (`tortoise/live.py::refuse_event_lifecycle_state`, whose message is
+    # `Refused: `status={…}` is not writable on an :Event (<door>). …`). That is the
+    # #2422/#7925 partial-mutation class.
+    # ⚠️ Why THIS arm and not the mixed bundle above: under a LATE mutant the mixed
+    # bundle is stopped earlier and for a different reason — its first write is
+    # `Alpha`, whose dict status the WRITER refuses (`a status must be a plain
+    # string`), so its `'Alpha'` count is never reached. This arm is the one that
+    # pins the partial write when the `:Event` refusal is the bundle's ONLY
+    # violation.
+    assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 0
+
+    # …and the arm is NOT "refuse every entity that declares a status". The
+    # status-less `:Event` half is already pinned in this file, in the Event-only
+    # sibling `test_direct_route_live_event_status_is_refused`; what nothing pinned
+    # is this COMBINATION end-to-end — the documented clear route (a status-less
+    # `:Event`) beside a VALID lifecycle word on an `:Object` in ONE bundle is
+    # ACCEPTED and BOTH nodes land. An over-rejecting Phase 1 reds this without
+    # touching either refusal arm above.
+    # ⚠️ Scope, so this arm cannot be read wider than it is: the contrast is
+    # VALUE-scoped for the `:Object` arm only. The `:Event` refusal is a **KEY**
+    # refusal — `tortoise/live.py::refuse_event_lifecycle_state` says so outright
+    # ("any non-`None` status is refused, whatever its type") — so a VALID word on
+    # an `:Event` is still refused; that is pinned by
+    # `test_direct_route_live_event_status_is_refused`, not by this arm.
+    ok = {"entities": [
+        {"ref": "o", "type": "object", "name": "Solo", "status": "live"},
+        {"ref": "e1", "type": "event", "name": "OnlyEvent",
+         "eventKind": "sessionCaptured"},
+    ]}
+    assert sdk._validate_bundle(ok) == []
+    sdk.ingest(ok)
+    assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 1
+    assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 1
 
 
 @pytest.mark.parametrize("spelling", ["top", "nested"])
@@ -1834,9 +1889,14 @@ def test_bundle_declared_array_status_is_refused_in_phase1(sdk):
     which also stops the bundle minting a node no later direct-route ingest can
     connect to.
 
-    The refusal is scoped to PERSISTABLE unhashable values: a dict status is
-    dropped by the writer, so it must stay accepted (the sibling
-    `..._not_over_rejected` test pins that direction).
+    The refusal is scoped to PERSISTABLE unhashable values: a non-persistable
+    one never lands on the node, so this arm does not report it a second time.
+    ⛔ #11824 S0 moved the ACCEPTANCE half of that sentence: the `:Subject` and
+    `:Object` writers now run the four-word lifecycle door, which refuses every
+    non-`str` (`dict` included), so a dict status is REFUSED rather than
+    accepted-and-dropped — see
+    `test_direct_route_object_status_values_are_refused_in_phase_1_like_the_writer`
+    (the renamed sibling; it no longer pins an "accepted" direction).
     """
     bundle = {
         "points": [{"kind": "statement", "content": "must-not-commit",

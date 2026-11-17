@@ -8,14 +8,16 @@ and the overage arithmetic:
     stored data $0.30/GB-month, hot capacity $85/GB-month
 
 What it deliberately does NOT claim: that a free tenant is REFUSED at the
-included amount. The refusal is `tortoise/allowance_gate.py`, and BOTH storage
-dimensions are BLOCKED there on instrument defects (no per-org Postgres byte
-meter; the graph meter under-reports the HNSW index 8.5x-21.7x, and its own
-contract forbids capping on the ledger figure). No shipped path can refuse on a
-storage dimension yet, so a test asserting that would be asserting a fiction.
-What IS pinned here is the *billing* semantics the artifact and #4815 already
-state: a tier that is not overage-eligible cannot be billed for overage, and
-every paid tier can — plus the invariant that keeps the blocked gate blocked.
+included amount. The refusal is `tortoise/allowance_gate.py`, and since
+`#13084` the two storage dimensions are in DIFFERENT states there:
+`postgres_storage` is BLOCKED (no per-org Postgres byte meter exists), while
+`graph_storage` is ARMED at the tier's hot window (77/102/615 MB) and
+hard-refuses a WRITE at 1.5x it. That refusal rests on a LOWER BOUND estimate,
+not on this file's arithmetic, so a test here asserting a refusal would be
+asserting a different module's rule. What IS pinned here is the *billing*
+semantics the artifact and #4815 already state: a tier that is not
+overage-eligible cannot be billed for overage, and every paid tier can — plus
+the invariant that keeps the one arming seam the only seam.
 
 Two properties of this file are load-bearing and easy to lose in a refactor:
 
@@ -553,16 +555,15 @@ class TestTheLoaderContract:
             "max_postgres_storage_bytes": None, "max_graph_storage_mb": 0}
 
     def test_the_storage_keys_are_NOT_in_tier_limits(self):
-        """⛔ THE ANTI-ARMING INVARIANT. `allowance_gate.enforce_allowances`
-        arms on key PRESENCE (`if dim.limit_key not in limits: continue`), and
-        BOTH storage dimensions are BLOCKED there — `postgres_storage` has a
-        per-org ATTRIBUTION but no per-org GAUGE the gate can read on a write
-        path (and its included amounts are unconfirmed), while `graph_storage`'s
-        own contract forbids capping on a figure that under-reports the HNSW
-        index 8.5x-21.7x. The
+        """⛔ THE ANTI-SECOND-SEAM INVARIANT. `allowance_gate.enforce_allowances`
+        arms on key PRESENCE (`if dim.limit_key not in limits: continue`), so
+        ANY limits dict that carries a storage key arms that dimension. The
         `tier_limits()` dict is what callers hand around as "the org's limits",
-        so a storage key in it is one `{**tier_limits(t), ...}` away from
-        arming a blocked dimension and answering HTTP 500 on every gated write.
+        so a storage key in it would arm `graph_storage` on a path that never
+        passed `quota._arm_graph_storage` — the ONE seam `#13084` built, which
+        carries the tier number from the artifact AND the estimate rule with it —
+        and would arm `postgres_storage`, still BLOCKED for want of a per-org
+        byte meter, answering HTTP 500 on every gated write.
 
         Mutation this REDs: moving either storage key into `tier_limits()`'s
         return dict "for symmetry" with the other limits.

@@ -116,8 +116,8 @@ def test_a_meter_fault_is_a_refusal_not_an_unhandled_exception():
 def test_a_stale_reading_is_refused():
     """The staleness bound, pinned where it is enforceable.
 
-    ``graph_storage`` is the only dimension with a bound, and it is BLOCKED (see
-    ``test_ruled_dimension_two_graph_storage_mb``), so the bound is exercised on
+    ``graph_storage`` is the only dimension with a bound (it is ARMED since
+    #13084), so the bound is exercised on
     a synthetic entry through the SAME ``_reading`` seam the real dimensions use.
     """
     from tortoise.allowance_gate import _reading
@@ -176,24 +176,30 @@ def test_a_broken_meter_does_not_refuse_an_unlimited_dimension():
 # ── one test per RULED dimension ───────────────────────────────────────────
 
 
-def test_ruled_dimension_two_graph_storage_mb_is_BLOCKED_and_refuses():
-    """Unit 2 of #5331 — the graph, in MB — is BLOCKED by our own instrument.
+def test_ruled_dimension_two_graph_storage_mb_is_ARMED_at_the_tier_number():
+    """Unit 2 of #5331 — the graph, in MB — is ARMED as of #13084.
 
-    ``graph_storage``'s module docstring: *"Until they are corrected, a cap MUST
-    NOT be wired to the ledger figure for vector-bearing tenants"* (the HNSW index
-    share under-reports by 8.5x-21.7x, and the ledger returns the uncorrected
-    numerics). So the dimension is declared BLOCKED: a configured allowance
-    REFUSES and names what is missing, rather than enforcing a figure that would
-    not fire for the tenants who grow biggest.
+    It was BLOCKED while no allowance reached the gate; it is now armed at the
+    tier's 30 %-of-price hot window (77 MB solo), with the estimate rule: the
+    reading is a LOWER BOUND (the meter is blind to the HNSW index), so it
+    WARNS at the cap and hard-refuses only at 1.5x it. The full behavioural
+    pin (arming, deadband, stale, zero-unarmed) is
+    ``tests/test_13084_ram_cap.py``; this test keeps the declaration honest.
     """
     entry = {d.dimension: d for d in DIMENSIONS}["graph_storage"]
-    assert entry.blocked is True
-    with pytest.raises(QuotaCheckError) as caught:
-        # a `meters=` override must NOT un-block a declared block
-        enforce_allowances(_limits(max_graph_storage_mb=100),
-                           meters={"graph_storage": _meter(143.0)})
-    assert "BLOCKED" in str(caught.value)
-    assert "MUST NOT be wired" in str(caught.value)
+    assert entry.blocked is False
+    assert entry.cap_band.refuse_at == 1.5
+    assert entry.zero_means_unarmed is True
+    # At/over the cap but short of the hard stop: WARN and allow (an estimate
+    # may not be the sole cause of a refusal).
+    enforce_allowances(_limits(max_graph_storage_mb=77, tier="solo"),
+                       meters={"graph_storage": _meter(100.0)})
+    with pytest.raises(QuotaExceededError) as caught:
+        enforce_allowances(_limits(max_graph_storage_mb=77, tier="solo"),
+                           meters={"graph_storage": _meter(116.0)})
+    message = str(caught.value)
+    assert "77 MB" in message and "solo" in message
+    assert "LOWER BOUND" in message
 
 
 def test_ruled_dimension_three_extraction_tokens():
@@ -210,16 +216,21 @@ def test_ruled_dimension_three_extraction_tokens():
 
 
 def test_ruled_dimension_one_postgres_bytes_is_BLOCKED_and_refuses():
-    """Unit 1 of #5331 — Postgres bytes — has no per-org RESIDENCY gauge.
+    """Unit 1 of #5331 — Postgres bytes — is BLOCKED, now on ONE ground.
 
-    ⚠️ This test used to assert the refusal said *"no per-org byte meter"* and
-    justified it with *"a per-org split would be an ALLOCATION, not a
-    measurement"*. #12762 landed a per-org byte attribution that IS a
-    measurement (``postgres_bytes.PerOrgPostgresBytes.for_org``), and
-    ``cost_dimensions`` carries an explicit ``OVERRIDES:`` of that sentence — so
-    the block now rests on the two grounds that are still true: there is no
-    per-org RESIDENCY GAUGE (the audit is a whole-table pass; the ledger reader
-    is the window ADDEND), and the free/anon included amounts are unconfirmed.
+    ⚠️ Two sentences in this docstring were true when written and are not now,
+    and both are recorded here rather than deleted:
+      * it used to assert the refusal said *"no per-org byte meter"*, justified by
+        *"a per-org split would be an ALLOCATION, not a measurement"* — #12762
+        landed a per-org attribution that IS a measurement
+        (``postgres_bytes.PerOrgPostgresBytes.for_org``);
+      * it then said the block rested on TWO grounds, the second being that no
+        per-org RESIDENCY gauge existed — #9559 wired one
+        (``metering.get_postgres_residency`` over ``org_postgres_residency``,
+        snapshotted offline, aged by ``stale_after_seconds``).
+    What remains is the owner's decision alone: the free/anon included amounts
+    are unconfirmed. ⛔ Read ``postgres_storage.blocked_reason`` for the live
+    state; this docstring is the history of why the assertion below changed.
 
     The behaviour under test is unchanged and is the important half: configuring
     the key REFUSES (fail closed, naming the block) rather than passing on a
@@ -426,11 +437,34 @@ def test_a_non_numeric_reading_is_refused_not_a_bare_typeerror(bad):
 
 
 def test_the_absent_is_zero_semantics_are_declared_on_the_dimension():
-    """A FLOW's absence is a zero; a GAUGE's is not. It is a DECLARATION, so a
-    future flow dimension gets it without a meter-specific branch."""
+    """Absence-is-zero is a DECLARATION, and each one states its case.
+
+    ``capture_extraction`` is a FLOW: a window that has just begun has captured
+    nothing, so an absent row is a real zero.
+
+    ``graph_storage`` is a GAUGE and declares it for ONE state only — the
+    reader's CERTAIN "no row in this window" (#13102 F1). Its row is written by
+    a separate, default-OFF sweep (``BACKUP_SWEEP_ENABLED=False``), so refusing
+    there refuses every tenant's every write, including the very write that
+    would let the row exist. The fail-closed direction is NOT relaxed: an
+    unageable row (``unreported``), a stale row, and every failed read still
+    refuse — pinned in ``test_13084_ram_cap.py``.
+
+    ``postgres_storage`` declares nothing, so it keeps the strict reading.
+    """
     by_dim = {d.dimension: d for d in DIMENSIONS}
     assert by_dim["capture_extraction"].absent_is_zero is True
-    assert by_dim["graph_storage"].absent_is_zero is False
+    assert by_dim["graph_storage"].absent_is_zero is True  # ABSENT only
+    assert by_dim["postgres_storage"].absent_is_zero is False
+    assert {d.dimension: d.absent_is_zero for d in DIMENSIONS} == {
+        # a FLOW: a window with no ledger row captured NOTHING (a real zero)
+        "capture_extraction": True,
+        # a GAUGE, ABSENT only — the reader's CERTAIN "no row" (#13102)
+        "graph_storage": True,
+        # a GAUGE with no per-org attribution at all (BLOCKED, so this can
+        # never be consumed as a zero into a refusal that over-charges a tenant)
+        "postgres_storage": False,
+    }
 
 
 @pytest.mark.parametrize("reason", ["degraded", "schema_error", None])
@@ -512,10 +546,11 @@ def test_the_rest_gate_carries_an_allowance_resolved_by_the_resolver(monkeypatch
     ABSENT key, reads it as UNLIMITED, and the operation is served instead of
     refused (the exact MCP-refuses/REST-serves asymmetry this closes).
 
-    ``graph_storage`` is armed because it is BLOCKED: a configured BLOCKED
-    dimension refuses without reading a meter, so this is a pure unit assertion
-    with no store and no instrument (the enforcement paths themselves are
-    covered above).
+    ``postgres_storage`` is armed below because it is BLOCKED: a configured
+    BLOCKED dimension refuses without reading a meter, so this is a pure unit
+    assertion with no store and no instrument. (``graph_storage`` served this
+    role until #13084 armed it; it now needs a meter, so a seam test that wants
+    "a configured dimension that refuses" uses the one still blocked.)
     """
     from fastapi import HTTPException
 
@@ -525,14 +560,14 @@ def test_the_rest_gate_carries_an_allowance_resolved_by_the_resolver(monkeypatch
     monkeypatch.setattr(
         quota, "resolve_org_limits",
         lambda org_id: {"org_id": org_id, "tier": "free",
-                        "max_graph_storage_mb": 100})
+                        "max_postgres_storage_bytes": 100})
     with pytest.raises(HTTPException) as exc:
         _check_org_limit(_rest_org(), "points")
     # The documented fail-closed shape, naming the dimension — a dropped key
     # would have returned normally (max_points is None: nothing else refuses).
     assert exc.value.status_code == 500
     detail = str(exc.value.detail)
-    assert "graph_storage" in detail, detail
+    assert "postgres_storage" in detail, detail
     assert "blocked" in detail.lower(), detail
 
 
@@ -1036,9 +1071,10 @@ def test_a_numeric_string_reading_is_COERCED_and_the_record_says_so():
 # SERVED WITHOUT LIMIT on every MCP points/documents tool — the same fail-open
 # the capture bridge closed, one surface short.
 #
-# `graph_storage` is the armed dimension below because it is BLOCKED: a
+# The armed dimension below is still-blocked ``postgres_storage``: a
 # configured BLOCKED dimension refuses without reading a meter, so this is a pure
-# unit assertion with no store and no instrument.
+# unit assertion with no store and no instrument. (``graph_storage`` served this
+# role until #13084 armed it.)
 
 _UNSET = object()
 
@@ -1085,12 +1121,12 @@ def test_the_mcp_write_lane_carries_an_allowance_resolved_by_the_resolver(
     monkeypatch.setattr(
         quota, "resolve_org_limits",
         lambda org_id: {"org_id": org_id, "tier": "free",
-                        "max_graph_storage_mb": 100})
+                        "max_postgres_storage_bytes": 100})
 
     with pytest.raises(QuotaCheckError) as exc:
         mcp_server._enforce_quota("points")
     detail = str(exc.value)
-    assert "graph_storage" in detail, detail
+    assert "postgres_storage" in detail, detail
     assert "blocked" in detail.lower(), detail
 
 

@@ -141,7 +141,21 @@ MIGRATIONS = [
     # forever once `record_cursor` exists). Listed here for the same reason every
     # entry is: this list is `record_projection.RECORD_MIGRATIONS` in EQUALITY.
     "20261116000002_record_cursor_meter_grant.sql",
+    # #13220 — `object`/`subject` gain `embedding` + a GENERATED `embedding_vec`
+    # + an HNSW index each (owner ruling 2026-11-17). Listed for the reason every
+    # entry here is: this list is `record_projection.RECORD_MIGRATIONS` in
+    # EQUALITY. ⚠️ The probe's own replay is unaffected by the columns being new —
+    # it applies the schema and then a synthetic journal — but OMITTING the file
+    # would leave the probe's Postgres without a column the reader in
+    # `record_vector`/`record_writer` names, i.e. the exact divergence ("the probe
+    # applies a different record schema than the projection writes against") the
+    # equality pin exists to catch. ⛔ POSITION IS PART OF THE PIN: it follows
+    # `20261109000001_record_embedding_vector.sql` here and in
+    # `RECORD_MIGRATIONS`, so a mis-ordered edit reds rather than reordering the
+    # applied schema — this entry was first placed ABOVE that file and the pin
+    # caught it ("At index 18 diff").
     "20261109000001_record_embedding_vector.sql",
+    "20261117000001_record_object_subject_embedding.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

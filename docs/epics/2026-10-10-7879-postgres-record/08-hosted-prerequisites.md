@@ -199,8 +199,8 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). ⛔ **THIS PARAGRAPH WAS TRUE UNTIL `#11642` AND IS KEPT AS THE MEASURED RECORD OF WHAT THE MOVE REPLACED — do not read it as the state of this head.** At the census point **no migration and no module used `pgvector`**. **At this head** the same census is: `grep -riE 'pgvector|vector\('` over all 85
-migrations returns **30** (it returned **0** at that pin; the denominator is **85** at this head — `#11827`'s `20261110000001_record_point_retire_as_of_11827.sql` added no vector, and neither does the 83rd, #12764's `20261114000001_per_org_postgres_bytes.sql`, the per-org byte meter's migration, nor the 84th, #12894's `20261116000001_record_cursor_allocator.sql`, the ordinal allocator's counter, nor the 85th, #12894's `20261116000002_record_cursor_meter_grant.sql`, the byte meter's EXECUTE grant split out of the allocator file — so the count moved WITH each of them and never ahead of one), all 30 in ONE file — `20261109000001_record_embedding_vector.sql` (the `CREATE EXTENSION`, the `record_embedding_vector` converter, three `vector(384)` GENERATED columns and three HNSW indexes) — and `git grep -il pgvector -- 'tortoise/*'` is **4**, in `record_projection.py`, `projection/__init__.py`, `record_vector.py` and `search_engine.py` (it was **0**). `#11642` implemented V1. The word itself
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). ⛔ **THIS PARAGRAPH WAS TRUE UNTIL `#11642` AND IS KEPT AS THE MEASURED RECORD OF WHAT THE MOVE REPLACED — do not read it as the state of this head.** At the census point **no migration and no module used `pgvector`**. **At this head** the same census is: `grep -riE 'pgvector|vector\('` over all 87
+migrations returns **41** (it returned **0** at that pin; the denominator is **87** at this head — `#11827`'s `20261110000001_record_point_retire_as_of_11827.sql` added no vector, and neither does the 83rd, #12764's `20261114000001_per_org_postgres_bytes.sql`, the per-org byte meter's migration, nor the 84th, #12894's `20261116000001_record_cursor_allocator.sql`, the ordinal allocator's counter, nor the 85th, #12894's `20261116000002_record_cursor_meter_grant.sql`, the byte meter's EXECUTE grant split out of the allocator file, nor the 86th, #13220's `20261117000001_record_object_subject_embedding.sql` — which IS one, so the occurrence count rose WITH the denominator rather than the denominator alone — and the 87th, #13277's `20261117000002_postgres_residency_gauge.sql`, adds none, so the count moved WITH each of them and never ahead of one). ⚠️ Of those 41, **25** are comment prose rather than statements — **19** in `20261109000001` and **6** in `20261117000001`'s header block, which declares that file's own pgvector dependency so the PGlite drill's `CREATE EXTENSION`-based skip predicate covers it too (the drill APPLIED the file and skipped the one defining the type, which reddened `schema-drill`; see #13265) — and **16** are statement lines. Counted because this census counts LINES, and stated here so `41` is not read as 41 SQL statements. The count re-derives at this head with `grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l`, in TWO files now — `20261109000001_record_embedding_vector.sql` (the `CREATE EXTENSION`, the `record_embedding_vector` converter, three `vector(384)` GENERATED columns and three HNSW indexes) and #13220's `20261117000001_record_object_subject_embedding.sql` (the `object`/`subject` `embedding` columns, their GENERATED `embedding_vec vector(384)` and their two HNSW indexes — owner ruling 2026-11-17) — and `git grep -il pgvector -- 'tortoise/*'` is **4**, in `record_projection.py`, `projection/__init__.py`, `record_vector.py` and `search_engine.py` (it was **0**). `#11642` implemented V1. The word itself
 appears in prose only — e.g. this document, §12.1c's decided record, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which was
 exactly right while §2.0 kept the cache fully populated, and **V1 is now DECIDED** (§12.1c/§14.3, 2026-11-07):
@@ -740,7 +740,7 @@ R1 keeps is the rotation hazard, not a pending arming.
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 85 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
+65 migrations returned **0** (at this head, 87 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
 tenant policy for that very table), 36 in `20261023000001_record_session_narrative.sql` and 19 in
 `20261024000001_record_session_narrative_carrier.sql` — the table this
 item's DECIDED block adds);
@@ -1222,13 +1222,16 @@ The block's `grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/ → 0
 pre-R6 reading. R6's tenancy boundary now ships the GUC, so the same grep returns
 **2 lines at `ff6379eb2`** — `tortoise/record_projection.py:227` (`TENANT_GUC =
 "app.current_org_id"`) and its docstring at `:3269`, the offsets `c5cbcbb4f` (R6's tenancy boundary)
-introduced — and **16 lines at this head** (#11642's `tortoise/record_vector.py` added the thirteenth:
+introduced — and **19 lines at this head** (#11642's `tortoise/record_vector.py` added the thirteenth:
 its module docstring names the GUC when it explains why the searcher can never invent a tenant — the
 tripwire doing its job; and #12894 stage C's new `tortoise/record_allocator.py` added the last three,
 13 → 16 — its `seed()` and `read_cursor()` docstrings and a comment inside `execute_allocation` each
 name the GUC, because the counter's policy filters on it and the refusal they explain is an UPDATE
 that matches zero rows rather than an error, which is exactly the shape this tripwire exists to make
-visible): `54a3e7abe` (R9's backup role must BYPASS RLS) added three
+visible), and **16 → 19** since (#13043's `tools/record_allocator_cli.py` names the GUC twice — the
+`scope_tenant` `set_config` comment and the `current_setting` policy comment it pairs with, explaining
+why no rollback may sit between them — and `tortoise/record_allocator.py`'s `seed()` docstring carries
+one more, INSISTING that an unset GUC there is a REFUSAL by the policy rather than a divergence): `54a3e7abe` (R9's backup role must BYPASS RLS) added three
 `tortoise/record_backup.py` mentions, #9555 (R7's narrative fetch) added three more —
 `tortoise/record_text.py` ×2 and `tortoise/__main__.py` ×1 — and #10017's copy added the ninth,
 in `tools/backfill_copy_turns.py`: the comment on its floor read that states why the read must go

@@ -3569,7 +3569,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `archive/` is a PREFIX entry so a batch's archived code is admitted past that same
              # filter and selects `core` (the archive is a surface-wide artifact, not an sdk one).
              "tools/archive_surface.py",
-             "archive/")
+             "archive/",
+             # #13102 review F1: `tools/ram_window_census.py` is ADDED by #13084 and owns
+             # `tests/test_13084_ram_window_census.py` (registered `core` in
+             # `config/ci-surfaces.yml`) — the 12 pins for the destructive step of the
+             # cold-restore probe: NO `DEL`, `RESTORE … REPLACE` against the LIVE key, a
+             # rejected payload leaving the graph's key unchanged, and the refusal of a
+             # non-bytes payload. `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches this file, so a tool-only diff filtered to
+             # `changed == []` and `select()` took the docs-only early return
+             # (`surfaces: []`, tier-1 smoke) — measured with
+             # `--changed-files tools/ram_window_census.py` before this entry — i.e. the one
+             # diff able to put the `DEL` back was the one diff its proof never ran on.
+             # Same #1349/#3332/#3616 silent-drop class as the `tools/` entries above.
+             # Pinned by
+             # tests/test_ci_selection.py::test_ram_window_census_tool_change_selects_core_not_tier1.
+             "tools/ram_window_census.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

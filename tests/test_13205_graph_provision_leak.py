@@ -346,6 +346,13 @@ def _org(org_id, name="acme", email=None):
 class _FakeCP:
     """A control plane that answers by table, so the REAL index runs.
 
+    It also HONOURS ``select`` on both read paths, but only the ``query_all`` half
+    is LOAD-BEARING: that is where the ``graphs`` walk happens, and a fake that
+    returned whole rows whatever columns were asked for could not tell a read that
+    forgot ``status``/``kind`` from one that did not. ``query`` serves the
+    ``organizations`` read, which never asks for those columns — it is projected
+    for fidelity, and reverting it leaves the suite green.
+
     ``graphs_complete=False`` models a walk the server could not certify (a
     deployment `max_rows` cap), which is now a REFUSAL rather than a shorter
     index.
@@ -358,12 +365,20 @@ class _FakeCP:
         self._raise = graphs_raise
 
     def query(self, table, **kw):
-        return self._orgs if table == "organizations" else self._graphs
+        rows = self._orgs if table == "organizations" else self._graphs
+        select = kw.get("select")
+        if not select:
+            return rows
+        return [{k: r[k] for k in select if k in r} for r in rows]
 
     def query_all(self, table, **kw):
         if self._raise is not None:
             raise self._raise
-        return self._graphs, self._complete
+        rows = self._orgs if table == "organizations" else self._graphs
+        select = kw.get("select")
+        if select:
+            rows = [{k: r[k] for k in select if k in r} for r in rows]
+        return rows, self._complete
 
 
 def _owned(org, gid=None):
@@ -474,11 +489,17 @@ class TestReaperRefusesRatherThanGuesses:
         malformed or hostile row ``{org_id: <test org>, namespace: "org_<a
         customer>_g_x"}`` would attribute the CUSTOMER's graph to a test org —
         and an empty customer graph would be deleted. Ownership is decided by
-        `_owns_namespace`, not by the row."""
+        `_owns_namespace`, not by the row.
+
+        The row carries `status: active` because `graphs.status` is `NOT NULL`: a
+        row with NO status is a shape production cannot produce (a tombstone is
+        still a status — `'deleted'`). Ownership is consulted BEFORE the status
+        gate, so this fixture's status is inert either way; it is here for shape
+        fidelity, not to pin a gate."""
         cp = _FakeCP(
             orgs=[_org("agent-1", "agent-signup"), _org("cust-1", "Daylight")],
             graphs=[{"id": "g_x", "org_id": "agent-1",
-                     "namespace": "org_cust-1_g_x"}])
+                     "namespace": "org_cust-1_g_x", "status": "active"}])
         index = reaper._namespace_index(cp)
         assert "org_cust-1_g_x" not in index, index
         bucket, _ = reaper.classify_graph(
@@ -507,7 +528,7 @@ class TestReaperRefusesRatherThanGuesses:
         cp = _FakeCP(
             orgs=[_org("agent-1", "agent-signup")],
             graphs=[{"id": "g_abc", "org_id": "agent-1",
-                     "namespace": "org_agent-1_g_abc"}])
+                     "namespace": "org_agent-1_g_abc", "status": "active"}])
         index = reaper._namespace_index(cp)
         assert index["org_agent-1_g_abc"]["gid"] == "g_abc"
         assert index["org_agent-1"]["gid"] is None
@@ -533,6 +554,83 @@ class TestReaperRefusesRatherThanGuesses:
                      graphs_complete=False)
         with pytest.raises(reaper.Refusal, match="could not be certified"):
             reaper._namespace_index(cp)
+
+    def test_a_tombstoned_DEFAULT_row_is_still_reclaimable(self):
+        """⛔ A `kind='default'` tombstone must not be REFUSED: no per-graph ACL user
+        is minted for a default, `restore_graph` refuses the kind, and the purge
+        sweep enumerates CUSTOM tombstones only — so refusing it strands an empty
+        leaked graph for ever (#13262's neighbour). It is reaped, and if a graph
+        demoted from custom still has `tenant_<id>` that user is dropped first.
+        """
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": "g_old", "org_id": "agent-1", "kind": "default",
+                     "namespace": "org_agent-1", "status": "deleted"}])
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1"]["gid"] == "g_old", index
+        bucket, reason = reaper.classify_graph(
+            "org_agent-1", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REAPABLE, reason
+
+    def test_a_drift_default_tombstone_cannot_lend_its_id_to_a_custom_namespace(self):
+        """⛔ The deferred pass lends a gid too, so it makes the SAME agreement check
+        the live pass does. A non-live `kind='default'` row on a CUSTOM-shaped
+        namespace (`id` != the embedded gid) must not hand `reap()` its own id —
+        that would DELUSER `tenant_<id>` and delete the graph whose real credential
+        `tenant_{gid}` stays live (measured: a real fail-open before this check).
+        """
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": "g_def", "org_id": "agent-1", "kind": "default",
+                     "namespace": "org_agent-1_g_abc", "status": "deleted"}])
+        index = reaper._namespace_index(cp)
+        bucket, reason = reaper.classify_graph(
+            "org_agent-1_g_abc", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, (index, bucket)
+        assert "disagrees" in reason, reason
+
+    def test_a_coexisting_default_tombstone_does_not_reap_a_custom_tombstone(self):
+        """A `kind='custom'` tombstone is refused even when a `kind='default'`
+        tombstone shares its namespace, in BOTH drift directions: a DEFERRED gid
+        came from a non-live row, so it may not be treated as the live verdict that
+        suppresses a refusal — otherwise a restorable custom graph is destroyed."""
+        for default_id, custom_id in (("g_def", "g_abc"), ("g_abc", "g_def")):
+            cp = _FakeCP(
+                orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                       "graph_name": "org_agent-1"}],
+                graphs=[{"id": custom_id, "org_id": "agent-1", "kind": "custom",
+                         "namespace": "org_agent-1_g_abc", "status": "deleted"},
+                        {"id": default_id, "org_id": "agent-1", "kind": "default",
+                         "namespace": "org_agent-1_g_abc", "status": "deleted"}])
+            for reversed_rows in (cp, _FakeCP(orgs=cp._orgs,
+                                             graphs=list(reversed(cp._graphs)))):
+                index = reaper._namespace_index(reversed_rows)
+                bucket, _ = reaper.classify_graph(
+                    "org_agent-1_g_abc", org_index=index, node_count=0)
+                assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, (
+                    default_id, custom_id, index, bucket)
+
+    def test_two_non_live_default_rows_are_not_resolved_by_row_order(self):
+        """Two NON-LIVE default rows with different ids share one bare namespace in
+        a drift estate; whichever id is dropped decides whose `tenant_<id>` dies, so
+        the name is refused as ambiguous rather than resolved by query order."""
+        for rows in ([{"id": "g_a", "org_id": "agent-1", "kind": "default",
+                       "namespace": "org_agent-1", "status": "deleted"},
+                      {"id": "g_b", "org_id": "agent-1", "kind": "default",
+                       "namespace": "org_agent-1", "status": "deleted"}],
+                     [{"id": "g_b", "org_id": "agent-1", "kind": "default",
+                       "namespace": "org_agent-1", "status": "deleted"},
+                      {"id": "g_a", "org_id": "agent-1", "kind": "default",
+                       "namespace": "org_agent-1", "status": "deleted"}]):
+            cp = _FakeCP(
+                orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                       "graph_name": "org_agent-1"}], graphs=rows)
+            index = reaper._namespace_index(cp)
+            bucket, _ = reaper.classify_graph(
+                "org_agent-1", org_index=index, node_count=0)
+            assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, (rows, index)
 
     def test_a_custom_shaped_graph_with_no_gid_is_refused(self):
         """⛔ THE GATE MUST FIRE ON INPUT THE REAL INDEX PRODUCES (round-5 review).
@@ -574,10 +672,258 @@ class TestReaperRefusesRatherThanGuesses:
             orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
                    "graph_name": "org_agent-1_g_9"}],
             graphs=[{"id": "g_9", "org_id": "agent-1",
-                     "namespace": "org_agent-1_g_9"}])
+                     "namespace": "org_agent-1_g_9", "status": "active"}])
         index = reaper._namespace_index(cp)
         assert index["org_agent-1_g_9"]["gid"] == "g_9", index
         assert index["org_agent-1_g_9"]["org"]["id"] == "agent-1"
+
+    def test_a_tombstoned_default_cannot_lend_its_gid(self):
+        """⛔ The gid must come from the LIVE row, never from row order (round-4).
+
+        `uq_graphs_org_default_active` is
+        ``UNIQUE (org_id) WHERE kind='default' AND status <> 'deleted'``, so a
+        tombstoned default row coexists with the live one and BOTH carry the same
+        bare namespace. A default graph has no MINTED per-graph ACL user, so the
+        harm here is not a wrong credential — it is that which row wins was decided
+        by row ORDER, and the same estate could resolve differently run to run.
+        The fix makes it deterministic: the LIVE row always speaks for the
+        namespace, and the graph stays reapable.
+        """
+        tombstone = {"id": "g_old", "org_id": "agent-1",
+                     "namespace": "org_agent-1", "status": "deleted"}
+        live = {"id": "g_new", "org_id": "agent-1",
+                "namespace": "org_agent-1", "status": "active"}
+        orgs = [{"id": "agent-1", "name": "agent-signup", "email": None,
+                 "graph_name": "org_agent-1"}]
+        for order in ([tombstone, live], [live, tombstone]):
+            index = reaper._namespace_index(_FakeCP(orgs=orgs, graphs=order))
+            assert index["org_agent-1"]["gid"] == "g_new", (order, index)
+            # A live row DID attribute the credential, so the tombstone's presence
+            # must not turn the graph into a refusal with a reason claiming no gid
+            # could be attributed (round-6 review).
+            bucket, reason = reaper.classify_graph(
+                "org_agent-1", org_index=index, node_count=0)
+            assert bucket == reaper.BUCKET_REAPABLE, (order, reason)
+            assert "gid" not in reason or "no gid" not in reason, reason
+
+    def test_a_sibling_name_under_an_org_prefix_gets_no_gid(self):
+        """`org_{org_id}_backup` matches the org's own prefix but embeds no gid, so
+        nothing may INVENT one for it — and because it reads as a per-graph
+        namespace, `classify_graph`'s independent gate refuses it rather than
+        reaping a graph whose credential nobody can name. Both halves matter: a
+        derived gid here would be a DELUSER of a credential that never existed.
+        """
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1_backup"}],
+            graphs=[])
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1_backup"]["gid"] is None, index
+        bucket, reason = reaper.classify_graph(
+            "org_agent-1_backup", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, bucket
+        assert "cannot be dropped" in reason, reason
+
+    def test_a_g_less_tail_is_not_mistaken_for_a_per_graph_namespace(self):
+        """The `g_` SHAPE is load-bearing in the other direction too: a live row on
+        `org_{id}_backup` must not be REFUSED as a per-graph namespace whose id
+        disagrees — its tail is not a gid, so no per-graph credential is claimed
+        and nothing is compared against one (round-6 review)."""
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1_backup"}],
+            graphs=[{"id": "g_row", "org_id": "agent-1",
+                     "namespace": "org_agent-1_backup", "status": "active"}])
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1_backup"]["gid"] == "g_row", index
+
+    def test_two_live_gids_for_one_namespace_are_refused(self):
+        """Two LIVE credentials on one namespace: dropping either would be a
+        guess, so the namespace leaves the index and the graph reads as
+        unresolved (never reaped, never DELUSERed)."""
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": "g_one", "org_id": "agent-1",
+                     "namespace": "org_agent-1", "status": "active"},
+                    {"id": "g_two", "org_id": "agent-1",
+                     "namespace": "org_agent-1", "status": "active"}])
+        index = reaper._namespace_index(cp)
+        assert "org_agent-1" not in index, index
+        bucket, _ = reaper.classify_graph(
+            "org_agent-1", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED
+
+    def test_a_row_without_a_status_is_not_live(self):
+        """`graphs.status` is `text NOT NULL DEFAULT 'active'` and the read always
+        selects it, so a row that arrives WITHOUT one came from a control plane we
+        cannot vouch for. Unknown liveness must never lend the gid that decides a
+        DELUSER, and a namespace whose only rows are unknown is refused rather than
+        reaped gid-less (round-5 review)."""
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": "g_old", "org_id": "agent-1",
+                     "namespace": "org_agent-1"}])
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1"]["gid"] is None, index
+        bucket, reason = reaper.classify_graph(
+            "org_agent-1", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, reason
+
+    def test_a_gid_less_claim_with_only_tombstoned_rows_is_refused(self):
+        """A namespace whose only rows are non-live is refused WITH its reason, and
+        never reaped gid-less. These rows carry no `kind`, so they are read as the
+        conservative case (custom): unknown liveness must not authorise a deletion
+        of a graph that may still be restorable.
+        """
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": "g_old", "org_id": "agent-1",
+                     "namespace": "org_agent-1", "status": "deleted"}])
+        index = reaper._namespace_index(cp)
+        bucket, reason = reaper.classify_graph(
+            "org_agent-1", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, bucket
+        assert "not live" in reason and "gid" in reason, reason
+
+    def test_an_unrecognised_status_is_not_live(self):
+        """`graphs.status` is FREE TEXT (no CHECK), so the gate must be
+        "anything but 'active'", not a vocabulary of the two values we know:
+        narrowing it to `status == 'deleted'` would re-open the gid lend for
+        'archived'/'pending' rows (round-5 review)."""
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": "g_one", "org_id": "agent-1",
+                     "namespace": "org_agent-1", "status": "archived"}])
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1"]["gid"] is None, index
+        bucket, _ = reaper.classify_graph(
+            "org_agent-1", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED
+
+    def test_a_tombstoned_custom_graph_is_never_reaped(self):
+        """A trashed graph's namespace is REFUSED (with a reason), not reaped and
+        not silently unowned: its gid is nameable off the namespace, but a tombstone
+        is restorable within grace, so destroying it is the purge sweep's call — and
+        the report must say that instead of "no organizations row owns this graph
+        name", which would send an operator hunting a nonexistent org.
+        """
+        cp = _FakeCP(
+            orgs=[_org("agent-1", "agent-signup")],
+            graphs=[{"id": "g_gone", "org_id": "agent-1",
+                     "namespace": "org_agent-1_g_gone", "status": "deleted"}])
+        index = reaper._namespace_index(cp)
+        bucket, reason = reaper.classify_graph(
+            "org_agent-1_g_gone", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, bucket
+        assert "TOMBSTONE" in reason and "purge" in reason, reason
+
+    def test_a_live_custom_row_without_an_id_is_refused_not_reconstructed(self):
+        """A live CUSTOM row with no primary key must NOT have its gid
+        reconstructed from the namespace name: a missing gid never authorises a
+        deletion, and here the gid IS the credential (`tenant_{gid}`). Refusing is
+        the only safe answer (round-6 review)."""
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": None, "org_id": "agent-1",
+                     "namespace": "org_agent-1_g_1", "status": "active"}])
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1_g_1"]["gid"] is None, index
+        bucket, reason = reaper.classify_graph(
+            "org_agent-1_g_1", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, bucket
+        assert "carried no id" in reason, reason
+
+    def test_the_two_refusal_messages_are_chosen_by_namespace_shape(self):
+        """The refusal message must match the situation: a namespace that names NO
+        gid reports that no credential can be attributed, while a per-graph
+        namespace reports that the credential IS spelled by the name and the
+        refusal is about destroying the graph. Both are reachable (round-6)."""
+        bare = reaper._namespace_index(_FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": "g_old", "org_id": "agent-1",
+                     "namespace": "org_agent-1", "status": "deleted"}]))
+        _, bare_reason = reaper.classify_graph(
+            "org_agent-1", org_index=bare, node_count=0)
+        assert "no gid can be attributed" in bare_reason, bare_reason
+
+        custom = reaper._namespace_index(_FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": "g_1", "org_id": "agent-1",
+                     "namespace": "org_agent-1_g_1", "status": "deleted"}]))
+        _, custom_reason = reaper.classify_graph(
+            "org_agent-1_g_1", org_index=custom, node_count=0)
+        assert "does spell the credential" in custom_reason, custom_reason
+        assert "no gid can be attributed" not in custom_reason, custom_reason
+
+    def test_a_row_whose_id_disagrees_with_its_namespace_gid_is_refused(self):
+        """⛔ A malformed (or hostile) row must never lend an arbitrary gid.
+
+        The namespace is the authority on which credential belongs to the graph; a
+        row claiming `id = g_victim` for the namespace `org_agent-1_g_1` would make
+        `reap()` DELUSER `tenant_g_victim` and leave `tenant_g_1` behind — a
+        wrong-credential drop on the tool's most dangerous axis (round-5 review).
+        """
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": "g_victim", "org_id": "agent-1",
+                     "namespace": "org_agent-1_g_1", "status": "active"}])
+        index = reaper._namespace_index(cp)
+        bucket, reason = reaper.classify_graph(
+            "org_agent-1_g_1", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, bucket
+        assert "disagrees" in reason, reason
+
+    def test_a_registry_lane_graph_name_is_not_over_refused(self):
+        """`organizations.graph_name` is authoritative VERBATIM, and for an SDK-lane
+        org it is `org_{name}` with name != id (#2023). That namespace embeds no
+        gid, so it must stay a normal gid-less default graph — not be refused with
+        a reason about a gid it never had (round-5 review)."""
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_acme"}],
+            graphs=[])
+        index = reaper._namespace_index(cp)
+        assert index["org_acme"]["gid"] is None, index
+        bucket, _ = reaper.classify_graph(
+            "org_acme", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REAPABLE, bucket
+
+    def test_a_live_row_without_an_id_is_refused(self):
+        """The gid decides a DELUSER, so an unreadable one is a refusal — the
+        same ruling the status gate makes, applied to the other read that can come
+        back empty (round-5 review)."""
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1"}],
+            graphs=[{"id": None, "org_id": "agent-1",
+                     "namespace": "org_agent-1", "status": "active"}])
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1"]["gid"] is None, index
+        bucket, _ = reaper.classify_graph(
+            "org_agent-1", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED
+
+    def test_a_customer_graph_is_judged_by_its_owner_not_its_credential(self):
+        """A customer org is ruled out by the test marker, so its gid-less claim
+        must read `kept-not-test-org` — not as an unattributable orphan. The
+        credential verdict is moot for a graph this tool would never touch."""
+        cp = _FakeCP(
+            orgs=[{"id": "cust-1", "name": "Daylight Computer Co",
+                   "email": None, "graph_name": "org_cust-1"}],
+            graphs=[{"id": "g_old", "org_id": "cust-1",
+                     "namespace": "org_cust-1", "status": "deleted"}])
+        index = reaper._namespace_index(cp)
+        bucket, _ = reaper.classify_graph(
+            "org_cust-1", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_KEPT_NOT_TEST_ORG, index
 
     def test_dry_run_is_the_default_and_deletes_nothing(self, monkeypatch, capsys):
         """The flag changes ONLY the last step: without ``--execute`` the same

@@ -362,6 +362,21 @@ surfaces:
   # URI-LESS lane's engine only: under an ambient `TORTOISE_DB_URI` the same fixture
   # harness gives that server's session+path HASHED graph instead (`tests/_http_fixtures.py`).
   - test_13110_goalstate_doors.py    # #13110: dual: core
+  # #13084/#13102 review F5: the RAM cap's assertions. DUAL-REGISTERED with `core`
+  # (where the file appears further down this file) for the reason the two rows above
+  # give, measured here: the file exercises `quota._arm_graph_storage` (`:40`, `:84`,
+  # `:778`) and pins `metering.get_graph_storage_reading`'s `unmeasured_reason`
+  # vocabulary (`_ledger_reading`, `:378`), and BOTH `tortoise/quota.py` and
+  # `tortoise/metering.py` are EXACT `api` SOURCE_PATTERNS matches that REPLACE the
+  # `core` fallback in `select()` — so `--changed-files tortoise/metering.py` (and
+  # `tortoise/quota.py`) selected `api` with this file ABSENT, i.e. someone changing
+  # the reader's reason vocabulary — the exact seam the served-unmeasured arm turns
+  # on — would not run these P0 assertions. The `core` arm covers the subjects no
+  # SOURCE_PATTERN claims (the gate itself and the census). Hermetic apart from the
+  # throwaway EMBEDDED engine under `tmp_path` those ledger cases build, like
+  # `test_11892_health_quota.py` above. No `durations:` row is required: the file is
+  # already in a fast surface, which is what the ENTRY RULE keys on.
+  - test_13084_ram_cap.py            # #13084: dual: core
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -1688,6 +1703,20 @@ surfaces:
   # `api` SOURCE_PATTERN match — the same #2938 silent-drop reasoning as the
   # `__main__.py` pair above.
   - test_13205_graph_provision_leak.py
+  # #13224: the create-path write bound (`encode_for_row`'s bounded wait for a COLD
+  # embedder), measured from OUTSIDE the handler — `POST /v1/subjects` answers 200 and stays
+  # under the cold load, which is the customer-visible door #13224 was filed on. This row is
+  # the `api` OWNERSHIP record: one case drives the hosted app through
+  # `tests.test_hosted_api.client`, and `tortoise/hosted_api.py` is an EXACT `api`
+  # SOURCE_PATTERNS match that REPLACES the `core` fallback, so a `hosted_api.py`-only diff is
+  # an `api`-surface change and its end-to-end pin should be read as `api`'s. ⛔ It does NOT
+  # decide the leg: the file is a `carve_out:` member, so `select()` subtracts it from
+  # `test_files` on every non-full selection and the carve-out job runs it whenever a matched
+  # surface owns ANY carve-out file (`api` owns 15) — the same correction the #5140 row
+  # records. The `core` (projection fold) and `eval` (`tortoise/embeddings.py`) rows are the
+  # other two arms of the same ownership; cross-surface registration is deliberate, while a
+  # SECOND row within one surface is what `--integrity` reds.
+  - test_13224_cold_embedder_write_bound.py
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
   # #2446 (phase 2 of #2427): the member OWN-KEY slice — atomic session-key
   # replace (POST /v1/session/key replace_key_id) + enable/disable-own, and the
@@ -2631,6 +2660,9 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
+  - test_13084_demand_census.py
+  - test_13084_ram_cap.py
+  - test_13084_ram_window_census.py
   # #13110: the `goalState` doors (REST `/v1/objects` + `/v1/points`, MCP
   # `tortoise_create_{object,entity,point}`, and the one SDK guard behind them).
   # DUAL-REGISTERED with `api` for the reason the two rows above give: the REST
@@ -2667,6 +2699,7 @@ surfaces:
   # After the deletion the file keeps main's two rows; `--integrity` and
   # `duplicate_entries()` are both green here.
   - test_13100_planned_occurrences.py
+  - test_13220_record_label_embeddings.py
   # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
   # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
   # added with its own rationale. This branch registered it here first; the
@@ -3388,6 +3421,15 @@ surfaces:
   # `7ec7e65be5`, the head that added the file unregistered), and `fast_pool()` is
   # manifest-derived, so the nine pins would run in NO leg.
   - test_13108_dense_leg_index_skip.py
+  # #13224: the COLD-embedder write bound (`EmbeddingModel.await_write_ready` with its
+  # opt-out / negative-cache / once-per-process arms) and the `bounded=True` opt-in the four
+  # DERIVED-entity folds pass. `core` is the `projection/entities.py` arm: that file matches no
+  # named SOURCE_PATTERN and therefore selects `core` by fallback, and it carries three of the
+  # four `bounded=True` call sites — so this row is the ownership record for a fold-only diff.
+  # It is not the leg trigger (see the `api` row above: `carve_out:` is what runs the file); a
+  # `core` row is what makes `--integrity` classify the file at all. The `eval` row is the
+  # `tortoise/embeddings.py` arm and the `api` row the hosted-door arm.
+  - test_13224_cold_embedder_write_bound.py
   # #10687: `tools/attest_census.py` owns its own suite — the hermetic arms pin the
   # RESTORE/RE-REVIEW partition (repair separated from fabrication), the 0/2-never-1
   # exit contract, and the report shape the REQUIRED `docs` check lints whole. `core`
@@ -10039,6 +10081,15 @@ surfaces:
   # they guard. Pinned by
   # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
   - test_dod_5090_probe.py
+  # #13224: the cold-embedder WRITE BOUND. `tortoise/embeddings.py` is an EXACT `eval`
+  # SOURCE_PATTERNS match (the #3359 row in `tools/ci_selection.py`), so an
+  # `embeddings.py`-only diff resolves to `eval` and REPLACES the `core` fallback — this row
+  # is what records that the bound's own module is an `eval`-surface subject. It is NOT what
+  # runs the file (the `carve_out:` row below is, and `eval` owns one carve-out member of its
+  # own, so an `eval`-only diff triggers that job either way) — the same #9077/#10538
+  # classification-vs-selection distinction those rows record. Same module as
+  # `test_dod_5090_probe.py` directly above, which pins its `encode_for_row` seam census.
+  - test_13224_cold_embedder_write_bound.py
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
   # `tortoise/**`, and `tortoise/cross_lens.py` / `embeddings.py` select `eval`,
@@ -11249,6 +11300,17 @@ carve_out:
 # behaviour), so a `core`-only registration would make the manifest green and
 # run NOTHING on a docker leg. Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS.
 - test_context_enrich_8488.py
+# #13224: the cold-embedder write bound — `encode_for_row(bounded=True)`'s ceiling on the
+# WAIT (not on the vector), the replay-scope exemption that keeps `derived = replay(journal)`
+# deterministic across a cold rebuild, and the once-per-process cold-write report.
+# Embedded-lane by design: the end-to-end arm drives `tests.test_hosted_api.client` (itself a
+# `carve_out:` member above) and every store is a `TortoiseSDK(<tmpdir>)` path construction, so
+# a URI-set lane would redirect the construction and grade a graph the test never seeded.
+# Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS and DECLARED in
+# tests/test_markers.py::test_no_redirect_stems_registry_exact — the three-way mirror the
+# #8488/#10122 rows above document (a `core`-only registration would make the manifest green
+# and run NOTHING on a docker leg).
+- test_13224_cold_embedder_write_bound.py
 - test_precision_leak_4028.py  # #4028: the surface half asserts embedded brute-force floor semantics
 - test_graph_integrity_gate.py
 - test_per_session_census.py
@@ -14038,7 +14100,7 @@ durations:
   test_rebuild_team_meta_marker_5353.py: 1.4  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.5
   test_reconciliation.py: 0.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.5
   test_record_projection.py: 2.6  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 3.2
-  test_record_runner.py: 2.0  # #7879: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the flat 2.0s default — an unregistered new test file reds `integrity_problems` on the DURATIONS map too. DB-free. ⛔ No local timing and no CASE COUNT are quoted on purpose — the same rule the rows below state: a figure beside a weight re-stales against the run it came from, and the count was already wrong (47 quoted, 48 measured) on the day it landed. Refresh from the first post-merge run that includes it (`tools/ci_timing.py --refresh-durations`).
+  test_record_runner.py: 2.0  # #7879: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the flat 2.0s default — an unregistered new test file reds `integrity_problems` on the DURATIONS map too. DB-free. ⛔ No local timing and no CASE COUNT are quoted on purpose — the same rule the rows below state: any figure beside a weight re-stales against the run it came from. Refresh from the first post-merge run that includes it (`tools/ci_timing.py --refresh-durations`).
   test_record_reconcile_trigger.py: 2.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.5
   test_record_schema_placement.py: 0.2
   test_12901_wave2_control_plane.py: 2.0  # new in #12901 (PR wave 2) — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ('a default is not a reading'): the `core` registration above is what puts the file in `fast_pool()`. ⚠️ MEASURED LOCALLY as context, NOT as the weight: whole-file through `tools/test_lane.py run` measured **50 passed in 8.57 s** on a private lane container at head `b4ca3f2849`, so the flat 2.0 UNDERSTATES it until a sweep re-bases it. `--integrity` is the authority and the refresher replaces this row from junit.

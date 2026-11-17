@@ -317,6 +317,18 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # ALWAYS — and no refusal. It is listed for the registry reason above:
     # `tests/test_9231_record_migrations_trigger.py` reds on an unlisted file.
     "20261109000001_record_embedding_vector.sql",
+    # #13220 — `object`/`subject` get the SAME shape (`embedding jsonb`,
+    # `embedding_vec` GENERATED, an HNSW index), which is what makes their
+    # fingerprints durable in the record and pgvector-indexable at all
+    # (owner ruling 2026-11-17; standard `STORAGE-ARCHITECTURE.md` §14.3 V3's
+    # remaining half, and the §17.5 override that file states). It contributes FOUR
+    # columns under TWO names — two bindable (`embedding`, one per table, which the
+    # record writer derives) and two GENERATED (`embedding_vec`, one per table) —
+    # counted per COLUMN, the way the entry above counts its three — and it
+    # relaxes NO props refusal: `chk_object_props_no_derived` /
+    # `chk_subject_props_no_derived` still refuse `embedding` (and `status`) in the
+    # props tail.
+    "20261117000001_record_object_subject_embedding.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -3034,6 +3046,34 @@ GENERATED_COLUMNS: frozenset[str] = frozenset({
     "embedding_vec",
 })
 
+#: DERIVED names that now HAVE a column, and may still never be carried by a
+#: payload — the record's own derivation writes them (#13220).
+#:
+#: This is the half of §17.5 the 2026-11-17 owner ruling did NOT spend, and it
+#: needs its own declaration because the two rules now overlap: `embedding` on
+#: `object`/`subject` is a DERIVED value (recomputed from the carried `name`, §2.4)
+#: that the ruling requires INDEXED in Postgres, so the column exists — but if the
+#: ordinary payload path could write it, a journal line could land an arbitrary
+#: vector as record AUTHORITY, which is the thing the carve-out exists to prevent.
+#: The graph fold makes the same choice for the same reason: `_upsert_object` /
+#: `_upsert_subject` call `encode_for_row(name)` and IGNORE a carried `embedding`.
+#:
+#: ⇒ a payload naming one is DROPPED (the DERIVED carve-out's mutation), and the
+#: only writer is the `derived` argument :func:`_declared_mutations` binds straight
+#: into `col_values`. `tests/test_record_projection.py::test_no_derived_or_
+#: volatile_property_is_ever_stored` is the capstone that demanded this: without
+#: it the column alone made a carried `embedding` storable as authority.
+#:
+#: ⚠️ `event`/`source` are NOT here, and that is not an oversight: their
+#: `embedding` is a PRIMARY property the journal DOES carry (`#5004`'s stamp, a
+#: caller's vector through `add_event(**extra)`), so a carried value is a value
+#: the graph also honours — refusing it there would make the record poorer than
+#: the history (Interface A's failure).
+DERIVED_COLUMNS: dict[str, frozenset[str]] = {
+    "object": frozenset({"embedding"}),
+    "subject": frozenset({"embedding"}),
+}
+
 
 def _split_properties(
     table: str,
@@ -3047,8 +3087,16 @@ def _split_properties(
 
     Three destinations, and no fourth:
       * a property with a column is written to that column — UNLESS the
-        column is the record's own bookkeeping (`_BOOKKEEPING_COLUMNS`),
-        which a payload may never write;
+        column is the record's own bookkeeping (`_BOOKKEEPING_COLUMNS`) or a
+        declared `DERIVED_COLUMNS` name for this table, neither of which a
+        payload may ever write. ⛔ THE SECOND EXCEPTION IS THE ONE TO READ
+        FIRST (#13220): once `object`/`subject` gained an `embedding` COLUMN,
+        a carried `embedding` is met by the `DERIVED_COLUMNS` arm BELOW and
+        `continue`s — it is DROPPED, never resolved to the column, because the
+        record's own derivation is that column's only writer (see
+        `mutations_for`'s `derived` paragraph, which bypasses the split for
+        exactly that reason). The carve-out is stated in the migration's
+        `⛔ AND THE ORDERING IS THE OTHER WAY ROUND` block too;
       * a property the schema refuses as a props key is **dropped** (it is
         DERIVED/VOLATILE — recomputed from the structure, never authority);
       * everything else lands in the declared `props` tail.
@@ -3086,6 +3134,11 @@ def _split_properties(
             # would make the record poorer than the graph, which is the
             # failure Interface A forbids.
             tail[prop] = value
+        elif column in DERIVED_COLUMNS.get(table, frozenset()):
+            # A DERIVED name whose column now exists (#13220). The column is the
+            # record's own derivation's to write and NEVER a payload's: storing a
+            # carried one would make a recomputed value authority (§2.4/§17.5).
+            continue
         elif column in cols:
             resolved = _record_column_value(table, column, value)
             if resolved is _OMIT:
@@ -5816,6 +5869,7 @@ def mutations_for(
     graph_id: str,
     columns: Mapping[str, frozenset[str]] | None = None,
     refused: Mapping[str, frozenset[str]] | None = None,
+    derived: Mapping[str, Any] | None = None,
 ) -> list[Statement]:
     """The Postgres mutations for ONE journal record. **Total by construction.**
 
@@ -5827,12 +5881,51 @@ def mutations_for(
     (:func:`_narrative_statements`, #9555) is appended when THIS record
     carries the narrative or the capture counts that home is keyed on. The
     append is per-record and idempotent, so a replay in journal order builds
-    the same row the live path built.
+    the same row the live path built — **CONDITIONAL since #13220, and the
+    condition is ``derived``**: a column this module can only receive from the
+    caller (`object`/`subject` `embedding` today) is `NULL` on a replay that
+    passes no ``derived``, so "the same row" holds only when the replayer
+    supplies what the live writer supplied. `tools/record_runner.py`'s fold does
+    NOT today (see #13220's migration header, "THE COLUMN ARRIVES EMPTY"), which
+    is a stated gap rather than a property of this function.
+
+    ``derived`` (#13220) — column values the RECORD computes that the JOURNAL
+    does not carry, bound into the column **after** the ONE split
+    (:func:`_split_properties`) has run — which is what lets it bypass the
+    `DERIVED_COLUMNS` refusal a CARRIED value meets (`_split_properties`
+    `continue`s on that arm, so a carried `object`/`subject` `embedding` is
+    DROPPED, not resolved to the column), and what keeps it out of the `props`
+    tail. Merging these values into the payload instead would send them through
+    that same refusal arm and the feature would write nothing at all. The two
+    column guards the split applies are re-checked on the derived path below, so
+    a derived name cannot reach a `GENERATED` or a bookkeeping column; their
+    OUTCOMES are not the split's in both cases — for `GENERATED_COLUMNS` it is
+    the same (`continue` on both arms), for `_BOOKKEEPING_COLUMNS` it is
+    STRICTER (the split preserves the value as data in the `props` tail, this
+    path drops it, because `derived`'s only producer is the record itself and it
+    never supplies a bookkeeping name). The merge is gated on `column in
+    columns[node.table]` the same way. It is a
+    PARAMETER
+    and not something this module computes, for two reasons that are both
+    structural rather than stylistic:
+
+    * a derived value's PRODUCER is ambient (it needs the embedder), and this
+      module's statement set is pinned DB-FREE and deterministically
+      (`tests/test_11075_record_declared_type_contract.py` closes over every
+      declared column and reds if a column is bound in one environment and not
+      another). Computing it here would make those pins depend on whether a
+      model happened to load;
+    * it must never reach `public.journal_event.payload` — that row is the
+      record's copy of the JOURNAL line, and a value it invented would make a
+      record-sourced rebuild and a JSONL rebuild disagree. The caller that owns
+      the write seam (`record_writer.RecordWriter.write`) passes it here, and
+      :func:`replay_plan` threads it per record, so the journal insert stays
+      verbatim.
     """
     return [
         *_declared_mutations(
             record, org_id=org_id, graph_id=graph_id,
-            columns=columns, refused=refused,
+            columns=columns, refused=refused, derived=derived,
         ),
         *_narrative_statements(record, org_id, graph_id),
         # #10017 step 7: the raw-turn carrier's HOME home — one `public.point`
@@ -5848,6 +5941,7 @@ def _declared_mutations(
     graph_id: str,
     columns: Mapping[str, frozenset[str]] | None = None,
     refused: Mapping[str, frozenset[str]] | None = None,
+    derived: Mapping[str, Any] | None = None,
 ) -> list[Statement]:
     """The mutation :data:`RECORD_MUTATIONS` declares for ONE record."""
     columns = columns if columns is not None else table_columns()
@@ -5931,6 +6025,24 @@ def _declared_mutations(
                 props[effect.key_from] = key
         col_values, tail = _split_properties(node.table, props, columns=columns,
                                             refused=refused, drop=effect.drop)
+        if derived:
+            # #13220 — the values the RECORD computes that the JOURNAL does not
+            # carry (`object`/`subject` fingerprints, an event's composed vector,
+            # a document's title+content vector). Bound AFTER the split and not
+            # merged into `props`, because these are the ONE class the payload may
+            # not write through the ordinary path (`DERIVED_COLUMNS`):
+            # a carried `embedding` is refused as DERIVED-authority while the
+            # record's own derivation is the column's legitimate writer. Merging
+            # them would have made one name behave differently depending on who
+            # supplied it in the same dict, which is a rule nobody could read.
+            for column, value in derived.items():
+                if column in GENERATED_COLUMNS or column in _BOOKKEEPING_COLUMNS:
+                    # Postgres computes it / the payload may not write it: the
+                    # same two arms the split applies, restated here so a derived
+                    # name cannot reach a column the schema refuses.
+                    continue
+                if column in columns.get(node.table, frozenset()):
+                    col_values[column] = value
         if node.key_column not in col_values:
             col_values[node.key_column] = key
         # ⛔ THE `:Source` ROW KEY IS A RESOLUTION, NOT THE RECORD'S RAW SPELLING
@@ -7512,7 +7624,9 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
            position: bool = True,
            allocate: bool = False,
-           carried_positions: bool = False) -> ReplayReport:
+           carried_positions: bool = False,
+           derived: Mapping[int, Mapping[str, Any]] | None = None,
+           ) -> ReplayReport:
     """Replay a journal into the record, on the CALLER's transaction.
 
     `§3`: *"One transaction covers the journal and its projection — no dual
@@ -7659,7 +7773,8 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
                        start_seq=start_seq, position=position,
                        allocate=allocate,
-                       carried_positions=carried_positions)
+                       carried_positions=carried_positions,
+                       derived=derived)
     # ⛔ THE ISOLATION GUARD RUNS INSIDE THE CALLER'S TRANSACTION, before any
     # statement: the allocator's "allocation order = commit order" is a READ
     # COMMITTED property, and under REPEATABLE READ/SERIALIZABLE the counter's
@@ -7760,7 +7875,9 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
                 graph_id: str, start_seq: int = 1,
                 position: bool = True,
                 allocate: bool = False,
-                carried_positions: bool = False) -> list[Statement]:
+                carried_positions: bool = False,
+                derived: Mapping[int, Mapping[str, Any]] | None = None,
+                ) -> list[Statement]:
     """Every statement a full replay emits, in order, WITHOUT executing any.
 
     The totality gate lives here: an undeclared record type raises before a
@@ -7794,6 +7911,14 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
     for why key PRESENCE alone must not decide it — #13043 review P1-3). A record
     that carries ``seq`` while the flag is off does not disagree with anything:
     it is a journal line, and the enumeration is its position.
+
+    ``derived`` (#13220) — ``{record index: {column: value}}`` for the values the
+    RECORD computes and the JOURNAL does not carry, threaded straight into
+    :func:`mutations_for`. Keyed by INDEX because a batch is a contiguous
+    segment: the caller that built the values holds the same list it passes
+    here, and a key/type-based join would be a second rule for identifying a
+    record. It is defaulted and additive, so every existing caller (and every
+    DB-free pin that reads this function's statement set) is unchanged.
     """
     if start_seq < 1:
         raise RecordProjectionError(
@@ -7823,9 +7948,11 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
         # writers from deadlocking on (layer rows, counter) vs (counter, layer
         # rows). The positions the allocation then writes are not contended —
         # each writer holds its own freshly issued seq.
-        for record in records:
-            plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
-                                      columns=columns, refused=refused))
+        for index, record in enumerate(records):
+            plan.extend(mutations_for(
+                record, org_id=org_id, graph_id=graph_id,
+                columns=columns, refused=refused,
+                derived=(derived or {}).get(index)))
         if records:
             plan.append(allocation_statement(
                 org_id=org_id, graph_id=graph_id, records=records))
@@ -7849,8 +7976,10 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
         # that must not be able to refuse the write (see `replay`'s docstring).
         # On means a RECORD-sourced batch (rows from `public.journal_event`) and
         # the carried column is the reading.
-        plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
-                                  columns=columns, refused=refused))
+        plan.extend(mutations_for(
+            record, org_id=org_id, graph_id=graph_id,
+            columns=columns, refused=refused,
+            derived=(derived or {}).get(index)))
         if position:
             seq = (_carried_position(record, start_seq + index, index)
                    if carried_positions else start_seq + index)

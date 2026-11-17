@@ -108,6 +108,11 @@ STAGE_RETRIEVAL = "retrieval"
 #: retrieval work that ran late, never "the CPU fusion is stuck" (#10893 F1).
 STAGE_FUSION = "fusion"
 #: ``annotate_ep_batch`` — the EP breakdown decoration read.
+#: ⛔ BRACKETS ONLY THE ANNOTATION READ (#13294). The step-7 batch content fetch
+#: and the epistemic-state read that follow it reopen ``retrieval``: they are
+#: graph round trips, and a breach inside one is retrieval work that ran late,
+#: never "the annotation took ¬". Same rule as ``fusion`` (#10893 F1), and the
+#: reason this stage closes at its own read rather than at the ordering pass.
 STAGE_EP_ANNOTATION = "ep_annotation"
 #: The post-retrieval ordering pass. On ``order_by="graph"`` this is
 #: ``GraphRanker.rerank`` plus the W4 enrichment — real graph round trips, not
