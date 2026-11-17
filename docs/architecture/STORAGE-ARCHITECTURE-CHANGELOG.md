@@ -2473,8 +2473,8 @@ corrects is the result, and one of the corrections below is **content, not wordi
   and no other label. A label-scoped authorisation never narrowed the sequencing rule, and the general rule never
   widened the prohibition.
 - **The ruling's release separation is restored at every site.** The sequencing has two halves — the order *and* the
-  release boundary — and the merged `origin/main` stated only the *precondition*: `git grep -c "in a later release"
-  origin/main -- docs/architecture/STORAGE-ARCHITECTURE.md` → **0 hits** (and `"record first"` → 0), against **2** in
+  release boundary — and the merged result `d392ac79aa` stated only the *precondition*: `git grep -c "in a later release"
+  d392ac79aa -- docs/architecture/STORAGE-ARCHITECTURE.md` → **0 hits** (and `"record first"` → 0), against **2** in
   `#13350`'s base (`… d392ac79aa^ -- …` → 2, at `:1584` and `:1594`, each carrying the order *and* the separation).
   A precondition — *"only once the record holds AND indexes that label"* — is satisfiable **within one release**, so
   on its own it never states the separation. `#11395` comment `6956793300` states both in one line — *"Sequencing:
