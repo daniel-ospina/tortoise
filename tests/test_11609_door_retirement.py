@@ -186,11 +186,16 @@ class TestThePointerIsCallableAtTheContainer:
     and refuses the write without one). `tortoise_create_subject`/`_object` named the
     kind NOWHERE, which is quieter and worse: `entities.py` defaults it to `'other'`.
 
-    ⛔ Scoped to THIS WAVE's seven on purpose. The same scan over all 60 pointers
-    finds one PRE-EXISTING stray that this change did not introduce and must not
-    silently "fix" (`tortoise_mine_conversations` names `conversation`/`source_id`; its
-    target takes `directory`/`extract_entities`), reported as a follow-up issue. A
-    global assertion here would fail on main too — that is a different change's work.
+    ⛔ Scoped to THIS WAVE's seven — and NOT because a global scan finds a defect, because it
+    does not. The reason is mechanical: this assertion attributes every `name=` kwarg to ONE
+    target (`_POINTER_TARGET.match`), and a pointer may be COMPOUND. There is exactly one such
+    pointer — `tortoise_mine_conversations` names BOTH arms (*"…from_directory(directory=…,
+    extract_entities=…) for a corpus — the single-transcript arm is …from_session(conversation=
+    <transcript>, source_id=…)"*) — and every named argument is accepted by ITS OWN target
+    (`from_directory(directory, extract_entities=True)`, `from_session(conversation=None, …,
+    source_id=None, …)`), so the pointer is correct and was adjudicated so at #12984's P2-1.
+    Scoping to the seven keeps this assertion's reading of the pointer unambiguous instead of
+    teaching it to parse prose; a one-target scan over all 60 pointers is a different change.
     """
 
     #: The kind each retired `create_*` door REQUIRED, and the container takes inside
