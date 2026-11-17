@@ -2344,8 +2344,25 @@ def _strip_sql_comments(sql: str) -> str:
                 i += len(dollar)
                 continue
         if sql.startswith("/*", i):
-            close = sql.find("*/", i + 2)
-            i = n if close == -1 else close + 2
+            # ⛔ POSTGRESQL NESTS BLOCK COMMENTS (`/* a /* b */ c */` is ONE
+            # comment), so a first `*/` is NOT the end. `find()` was the whole
+            # implementation and it measured a real misread: a commented-out
+            # `ADD CONSTRAINT … props_no_derived` inside an outer comment stayed
+            # in the text as CODE once the inner `*/` closed it, so a downstream
+            # reader could take a disabled declaration for an executed one
+            # (measured on `tests/test_record_schema_placement.py`'s props-ban
+            # read, review of #13265 round 5).
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if sql.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                elif sql.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            i = j
             continue
         if sql.startswith("--", i):
             while i < n and sql[i] != "\n":
