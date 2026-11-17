@@ -1502,8 +1502,21 @@ def test_sc4_deprecation_markers_present():
         assert "index_sources_from_directory" in doc, \
             (f"{method_name} marker must name the LIVE replacement "
              "(index_directory is itself retired)")
-        assert "``index_directory``" not in doc, \
-            f"{method_name} marker names the retired index_directory"
+        # ⛔ The negative arm is scoped to the DEPRECATED LINE, not the whole
+        # docstring (round-3 review of #13085). A docstring may RECORD what it
+        # absorbed — `tortoise/sdk.py`'s own `_index_process_unit` says
+        # "``index_file``/``index_directory`` (both DELETED by #4282 …)", and
+        # `index_sources_from_directory` says it "Absorbs `index_directory`" — so
+        # banning the NAME outright reds on honest history. What must not survive
+        # is the DIRECTIVE that OFFERS the retired name. Narrowing costs no
+        # discriminating power: the pre-fix defect is caught by the positive arm
+        # above, and this arm still reds when the retired name is offered
+        # alongside the live one.
+        directive = next(
+            (line for line in doc.splitlines() if "DEPRECATED" in line), "")
+        assert "index_directory" not in directive, (
+            f"{method_name}'s DEPRECATED line offers the retired index_directory: "
+            f"{directive.strip()!r}")
 
     # the retired PUBLIC name is gone, and its frozen private path is still served
     assert not hasattr(TortoiseSDK, "index_sessions"), \
