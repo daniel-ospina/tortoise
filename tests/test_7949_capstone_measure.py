@@ -6546,7 +6546,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:14849`,
         # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14737` (inside the span),
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:14888` (inside it), and `:14926` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:14786`.
+        # the blank line immediately before `return OrgInfoResponse(` at `:14927`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14849", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
@@ -6696,14 +6696,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
         assert sum(_needle in _l for _l in _span) == 1, (
-            f"04-plan.md I7 says `:14708-14785` publishes `nodes_used` / `max_nodes`, but "
+            f"04-plan.md I7 says `:14849-14926` publishes `nodes_used` / `max_nodes`, but "
             f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
             "range has moved, so re-derive it (start AND end) rather than bumping one end")
     # …and the END by structure, because membership inside a window cannot see it move.
     _i7_end_ok = _org_info[14926 - 1].strip() == "" and bool(
         _org_info[14926].lstrip().startswith("return OrgInfoResponse("))
     assert _i7_end_ok, (
-        "04-plan.md I7's range end (`:14785`) is no longer the blank line before "
+        "04-plan.md I7's range end (`:14926`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
 
