@@ -351,14 +351,8 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     COUNT is the floor, and the two are NOT interchangeable: a refused seq leaves
     a GAP, so `COUNT(*) < MAX(seq)`, and the counter numbers POSITIONS — so a
     floor read off `MAX(seq)` would allocate positions this journal never
-    enumerated. `seed` never lets that happen silently: it refuses any floor
-    below the graph's `row_max` as a divergence (``ra.SeedRefused``,
-    ``reason="divergence"``, which leaves the graph UN-cut-over and working) and
-    otherwise writes ``GREATEST(row_max, floor)`` — so on a gapped journal the
-    COUNT floor ENDS in that refusal rather than seeding behind or ahead of the
-    journal. (The reverse ordering, `COUNT(*) > MAX(seq)`, is unrepresentable and
-    must not be reasoned
-    from: `journal_event` carries `PRIMARY KEY (org_id, graph_id, seq)` +
+    enumerated. (The reverse ordering, `COUNT(*) > MAX(seq)`, is unrepresentable
+    and must not be reasoned from: `journal_event` carries `PRIMARY KEY (org_id, graph_id, seq)` +
     `CHECK (seq > 0)`, so N distinct positive seqs with maximum M always satisfy
     N <= M — see :data:`ra.JOURNAL_COUNT_SQL`.) So each entry carries
     `journal_max_seq`,
