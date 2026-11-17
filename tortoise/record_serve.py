@@ -174,6 +174,7 @@ from typing import Any
 
 __all__ = [
     "ANCHORED_READS",
+    "ENTITY_UNION_ADDRESS_RESIDUALS",
     "ENTITY_UNION_JURISDICTION",
     "ENTITY_UNION_LABELS",
     "MODES",
@@ -392,6 +393,36 @@ ENTITY_UNION_LABELS: tuple[str, ...] = ("Point", "Subject", "Object")
 ENTITY_UNION_JURISDICTION: tuple[str, ...] = (
     "Point", "Subject", "Object", "Source", "Event")
 
+#: The jurisdiction labels this READ cannot address by the SAME bare value the
+#: cache resolved them from — the second, independent reason an absence cannot be
+#: claimed, and the one no amount of parity work removes.
+#:
+#: ``Source`` — the cache resolves a Source by its ``id`` AND by its ``url``
+#: (``_RESOLVE_BRANCHES``), while the record's primary key for the label is
+#: ``node_key = url`` (``chk_source_node_key_is_contract_key``; ``id`` is a
+#: COLUMN, not the anchor, and #5012 records ``url`` as a Source's canonical
+#: identity). So a bare value that IS a url addresses a Source in the record and
+#: a bare value that is a Source *id* does not — and this read cannot tell which
+#: it was handed. A `no row` therefore cannot settle a Source while the cache can
+#: still produce one, and presenting that as an absence is exactly the #7952
+#: conflation this module exists to remove.
+#:
+#: ⛔ NOT A PARITY GAP, AND MUST NOT BE FOLDED INTO #9721. Parity asks whether a
+#: record ROW reproduces the cache NODE (#9721's fold-defaults list); this asks
+#: whether the bare value ADDRESSES the row. #13322's second review put the
+#: difference on the record, and it is why ``Event`` is NOT in here: a bare id
+#: DOES address an Event (``Event.id == eventId`` for all current writes, and the
+#: record's ``node_key`` for an Event IS the eventId), so ``Event``'s only gap is
+#: parity. Retiring this entry means giving the read a Source-by-``id`` probe —
+#: the column exists — which is a read-path decision on its own issue, **#13351**
+#: (filed for exactly this residual; #13347 owns the addressability half being
+#: unobserved, and the ``Event`` mis-classification that preceded this split).
+ENTITY_UNION_ADDRESS_RESIDUALS: dict[str, str] = {
+    "Source": "the cache resolves a Source by `id` and by `url`; the record's "
+              "key for it is `node_key = url`, so a bare Source id names a node "
+              "this read would miss",
+}
+
 ANCHORED_READS: dict[str, AnchoredRead] = {
     READ_POINT_BY_ID: AnchoredRead(
         name=READ_POINT_BY_ID,
@@ -430,11 +461,19 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         status=SERVED,
         cypher="the BARE by-id entity union — label-scoped indexed lookups by "
                "each label's interface-E key, first hit wins",
-        coordinate=("Label", "interface-E key"),
+        # ⛔ `None` BECAUSE THERE IS NO ONE COORDINATE, and any tuple here is a
+        # pair of placeholders that `declared_key(*coordinate)` would turn into a
+        # coordinate no store can resolve (`("Label", …)` names a label that does
+        # not exist; `("union", …)` is not a label either). The field admits
+        # `None` for exactly this case; the SHAPE is stated in `cypher`/`reason`
+        # — one member per label, each by its OWN contract key.
+        coordinate=None,
         parity="tortoise.record_serve.parity_difference",
         reason="the read behind the LIVE bare door `tortoise_get_entity(<id>)` "
-               "-> `TortoiseSDK.get_entity` -> `_get_entity`, which resolves "
-               "across FIVE labels and answered a bare `{}` for a node the "
+               "-> `TortoiseSDK.get_entity` (the seam) -> "
+               "`record_serve.read_entity`, whose CACHE side is `_get_entity` — "
+               "the index-backed `_resolve_entity` union over FIVE labels, "
+               "which answered a bare `{}` for a node the "
                "record held (#13093's production measurement: 8 objects / 39 "
                "events in the record, `tortoise_get_entity(id=<goal id>)` -> "
                "`{}`). Served for the labels whose row reproduces the cache "
@@ -443,8 +482,10 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "(`residency: \"not-hot\"`) for the rest rather than answering "
                "an absence it cannot establish: `Event` and `Source` carry the "
                "OPEN parity gap in #9721 (a served `:Event` would lose `id` and "
-               "six other fold-written keys; a `:Source`'s record coordinate is "
-               "`url`, not the `id` the cache resolver also matches). ⚠️ THE "
+               "six other fold-written keys), and `Source` ALSO sits in "
+               ":data:`ENTITY_UNION_ADDRESS_RESIDUALS` (its record key is `url`, "
+               "while the cache resolves one by `id` too — so a bare Source id "
+               "names a node this read would miss). ⚠️ THE "
                "ABSTENTION IS THE POINT, not a shortfall: a union read that "
                "served only what it covers and answered `{}` for the rest "
                "would invent an absence for a whole label class — the "
@@ -534,31 +575,30 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
     "entity-accessor": AnchoredRead(
         name="entity-accessor",
         status=NOT_SERVED,
-        cypher="TortoiseSDK.get_entity(id) -> tortoise_get_entity(id)",
+        cypher="TortoiseSDK._get_entity(id) — the SDK's INTERNAL entity accessor",
         reason="a SECOND internal accessor, and the same mid-write hazard: the "
                "write paths call it to echo a written entity back "
                "(`sdk._get_entity` at two write sites — a write echo and a "
                "post-write read-back — plus the read accessor's own delegation), "
                "so a record-served answer "
                "would read a store the same write has not finished projecting. "
-               "Its caller-facing surface is `tortoise_get_entity`, EXCLUDED for "
-               "the same MID-WRITE reason as the point accessor. ⛔ NOT because it "
+               "⛔ THIS ENTRY IS ABOUT THE ACCESSOR ONLY, WHICH IS WHY IT IS STILL "
+               "HERE AFTER #13093 SERVED THE DOOR. The CALLER-FACING read of the "
+               "same shape — `tortoise_get_entity(<id>)` -> "
+               "`TortoiseSDK.get_entity` — is served by `entity-union-by-id` "
+               "above; the accessor that the write echoes and that the internal "
+               "read paths (`derived_invalidation`, `goal_judgement`, which pass "
+               "`cache_only=True`) call stays cache-only. Same split "
+               "`get_point`'s opt-in `served_out` sink makes — and here it is "
+               "declared at the CALL SITE rather than by a second method name, "
+               "because the internal-reader arms are pinned by intercepting "
+               "`get_entity` by name, a contract that says the interception "
+               "must hold regardless of spelling. ⛔ NOT because it "
                "lacks a coordinate (#12941 review P2-1): `sdk._get_entity` resolves "
                "through `_resolve_entity(by_id=True, by_eventId=True, "
                "by_url=True)` — an index-backed, per-label UNION and therefore a "
                "real by-id coordinate, the SAME union `auto-detect-by-id` "
-               "describes below. What it is not is ONE label's coordinate, which "
-               "is exactly why serving it needs per-label parity measured "
-               "(#9721) before a `not-hot` verdict means here what it means for "
-               "Points. ⛔ SINCE #13093 THIS ENTRY STILL EXCLUDES THE ACCESSOR AND "
-               "NO LONGER EXCLUDES THE DOOR: the caller-facing read lives on "
-               "`TortoiseSDK.get_entity` (the seam, "
-               "`entity-union-by-id` below), while `sdk._get_entity` stays the "
-               "cache-only accessor the "
-               "write echoes and the internal read paths (`derived_invalidation`, "
-               "`goal_judgement`) call — the same split `get_point`'s opt-in "
-               "`served_out` sink makes, chosen here because a bare `get_entity` "
-               "caller cannot be told apart from a mid-write one by any parameter. "
+               "describes below. What it is not is ONE label's coordinate. "
                "⚠️ `tortoise_get` is NOT a "
                "separate escape from the exclusion — it is a by-id dispatcher, and "
                "`tortoise_get(id, type=\"point\")` lands on the SAME accessor this "
@@ -1157,43 +1197,63 @@ def read_point(conn: Any, *, org_id: str, graph_id: str,
 
 
 def entity_coverage_complete() -> bool:
-    """Does the by-id entity union settle EVERY label a bare id can name?
+    """Can a `no row` from this read be presented as an ABSENCE?
 
     The one question :func:`entity_absent_wire` asks before it calls a miss an
     absence, and the one :func:`serve_entity`'s ``_miss_reason`` asks before it
-    names that miss — answered over :data:`ENTITY_UNION_JURISDICTION` (the
-    labels the cache resolver can hand this door), NOT over the record's table
-    list.
+    names that miss. TWO declared facts, and BOTH must hold:
 
-    A label counts as covered only when BOTH hold:
+    1. COMPLETENESS — every label a bare value can name in the cache
+       (:data:`ENTITY_UNION_JURISDICTION`, the resolver's own branch labels) is
+       served at parity (:data:`ENTITY_UNION_LABELS`); and
+    2. ADDRESSABILITY — no such label sits in
+       :data:`ENTITY_UNION_ADDRESS_RESIDUALS`, i.e. the record can address each
+       of them by the SAME bare value the cache resolved it from.
 
-    1. it is in :data:`ENTITY_UNION_LABELS` — declared served at parity, and
-    2. its record CONTRACT KEY is the ``id`` this door is handed
-       (``cache_projection.KEY_PROPERTY``).
+    ⛔ `False` TODAY, AND SAYING SO PLAINLY IS PART OF THE FIX. #13322's second
+    review measured that the previous spelling (``… and KEY_PROPERTY[label] ==
+    "id"``) is `False` for EVERY reachable configuration: `KEY_PROPERTY['Event']`
+    is ``eventId`` and `KEY_PROPERTY['Source']` is ``url``, both fixed by the
+    record's identity contract (a generated ``public.node_identity`` CASE, movable
+    only by a migration) — so no code change could flip it, while the docstring
+    claimed it *"becomes True exactly when the union genuinely covers the
+    addressable labels"*. It never did, and **#9721 landing does not make it**:
+    adding ``Event``/``Source`` to :data:`ENTITY_UNION_LABELS` leaves the
+    jurisdiction at five labels and the name test still reads ``eventId``/``url``.
 
-    ⛔ CONDITION 2 IS NOT REDUNDANT, and dropping it re-opens #13093 behind a
-    green suite: :func:`read_entity` ``continue``s past any label whose contract
-    key is not ``id`` (``Source`` → ``url``, ``Event`` → ``eventId``), so a
-    future lane that added ``"Event"`` to the tuple on the belief that #9721
-    had landed would flip this predicate to ``True`` while the read still served
-    nothing for an Event — and the door would then answer ``{}`` for an Event
-    the record holds. Covered means *served*, not merely *named*.
+    Its consequences, stated here rather than left to be discovered in
+    production:
 
-    ``False`` today, and honestly so: ``Source`` and ``Event`` are the open
-    #9721 list. ⚠️ The difference from the previous spelling is that this one is
-    REACHABLE — it becomes ``True`` exactly when the union genuinely covers the
-    addressable labels, instead of never, which is what made the falsy ``{}``
-    arm of :func:`entity_absent_wire` dead code and ``_miss_reason``
-    unconditionally ``record-label-not-served``.
+      * the falsy ``{}`` arm of :func:`entity_absent_wire` is UNREACHABLE today,
+        so every absent id on an armed deployment answers a TRUTHY
+        ``{"residency": "not-hot", …}``. A verifier written ``if out:`` reads that
+        as success — the exposure #12941 P0-1 exists to prevent — so
+        ``TortoiseSDK.get_entity``'s own docstring states it at the door;
+      * ``FALLBACK_RECORD_MISS`` is not emitted by this door; every miss is
+        ``record-label-not-served``;
+      * ``{}`` becomes reachable when BOTH facts hold — #9721 lands ``Event``
+        parity AND the Source addressing residual is retired.
 
-    ⚠️ Not the cache's branch set, and deliberately not imported from it: this
-    module imports no graph driver, and ``_RESOLVE_BRANCHES`` is a class
-    attribute of the projection.
+    What changed from the F2 head, and why it is a fix rather than a rewording:
+    the two facts are now separately DECLARED, because "fixable by parity" and
+    "fixable only by re-addressing" are different blockers that a single
+    conjunction hid; :func:`read_entity` now addresses every label by its OWN
+    contract key (so "served" and "readable" cannot disagree — the accident the
+    review flagged for ``Event``); and the state that satisfies this predicate is
+    produced by the edit the fix direction names, not by narrowing the
+    jurisdiction to whatever the union happens to serve.
+
+    ⚠️ Not the cache's branch set AS IMPORTED, and deliberately so: this module
+    imports no graph driver, and ``_RESOLVE_BRANCHES`` is a class attribute of the
+    projection. The literal is pinned to it in the tests.
     """
-    from .cache_projection import KEY_PROPERTY
-
-    return all(label in ENTITY_UNION_LABELS and KEY_PROPERTY.get(label) == "id"
-               for label in ENTITY_UNION_JURISDICTION)
+    # ⛔ SCOPED TO THE JURISDICTION — a residual entry for a label this read can
+    # never be handed must not hold the predicate False (#13353 review, finding
+    # 2): that is the same "False for every reachable configuration" trap this
+    # predicate was rewritten to remove, arriving through the residual map.
+    return (set(ENTITY_UNION_JURISDICTION) <= set(ENTITY_UNION_LABELS)
+            and not (set(ENTITY_UNION_JURISDICTION)
+                     & set(ENTITY_UNION_ADDRESS_RESIDUALS)))
 
 
 def read_entity(conn: Any, *, org_id: str, graph_id: str, id_val: str,
@@ -1201,18 +1261,46 @@ def read_entity(conn: Any, *, org_id: str, graph_id: str, id_val: str,
                 ) -> dict[str, Any] | None:
     """The BARE by-id entity union, read from the record.
 
-    One labelled, primary-key lookup per served label, in the cache resolver's
-    own precedence order (``projection._RESOLVE_BRANCHES``), first hit wins —
-    the same answer shape `_resolve_entity` gives, restricted to the labels
-    this read can serve at parity (:data:`ENTITY_UNION_LABELS`).
+    One labelled, primary-key lookup per label, in the cache resolver's own
+    precedence order (``projection._RESOLVE_BRANCHES``), first hit wins — the
+    same answer shape `_resolve_entity` gives.
 
-    ⛔ THE KEY IS READ, NEVER HARD-CODED. ``cache_projection.KEY_PROPERTY`` is
-    the label→key-property reader (#9881 moved ``Object``/``Subject`` from
-    ``name`` to ``id``; ``Source`` stayed on ``url``), and :func:`read_node`
+    ⛔ **PARITY IS NOT ENFORCED HERE, AND THIS FUNCTION MUST NOT BE READ AS
+    IMPLYING IT IS.** With ``labels=None`` it reads exactly
+    :data:`ENTITY_UNION_LABELS` (the labels the DOOR serves, chosen because their
+    record row reproduces the cache node). The ``labels=`` argument exists so a
+    caller can read ONE label's row — the tests use it, and it is how the
+    per-label addressing is measured — and it deliberately does NOT re-check
+    parity: a caller that names ``Event`` gets the Event ROW, which is missing the
+    seven fold-written keys (#9721, ``id`` among them) that a served ``:Event``
+    must not lose. Only :func:`serve_entity` decides what may be SERVED, and it
+    reads through this function with no ``labels`` argument. State this rather
+    than let a future caller infer a parity guarantee from proximity.
+
+    ⛔ THE KEY IS THE LABEL'S OWN, READ FROM THE CONTRACT — never a hard-coded
+    ``id`` and never a skip list. ``cache_projection.KEY_PROPERTY`` is the
+    label→key-property reader (#9881 moved ``Object``/``Subject`` from ``name`` to
+    ``id``; ``Source`` is ``url``, ``Event`` is ``eventId``), and :func:`read_node`
     anchors on the record's ``node_key`` column, which the schema pins to that
-    property by CHECK. A label whose contract key is not the ``id`` this door is
-    handed therefore cannot be addressed here at all — which is the second,
-    independent reason ``Source`` is outside :data:`ENTITY_UNION_LABELS`.
+    property by CHECK. So the bare value is handed to each label exactly as the
+    cache resolver's branch WHOSE PROPERTY IS THAT CONTRACT KEY is handed it —
+    ``Event {eventId:$v}`` for an id, ``{id:$v}`` for Point/Subject/Object, a
+    ``Source {url:$v}`` for a url. ⛔ A label with a SECOND cache branch the record
+    cannot reproduce (``Source {id:$v}``) is what
+    :data:`ENTITY_UNION_ADDRESS_RESIDUALS` exists to keep honest — this sentence
+    must not be quoted to retire that entry.
+
+    ⛔ THE PREVIOUS SPELLING SKIPPED ANY LABEL WHOSE KEY WAS NOT THE LITERAL
+    ``"id"``, AND THAT WAS TWO DEFECTS IN ONE LINE (#13322 review, F2): it threw
+    away ``Event``, whose record ``node_key`` IS the eventId a bare id names, and
+    it made the coverage predicate and this reader agree only BY ACCIDENT, so
+    "served" and "readable" were two different questions. A label with no
+    declared key now RAISES instead of being skipped, because a declaration this
+    reader cannot honour is a broken declaration, not a quiet exclusion.
+    ⚠️ The residual that remains is ``Source``: its contract key is ``url``, so a
+    bare value that is a Source *id* is addressed to the wrong column — named in
+    :data:`ENTITY_UNION_ADDRESS_RESIDUALS`, which is what keeps the absence
+    verdict conservative, not a skip in here.
 
     ``None`` is an ANSWER about THESE labels only, and it is reachable only
     after the record was successfully read; a failure to read raises. What that
@@ -1230,12 +1318,11 @@ def read_entity(conn: Any, *, org_id: str, graph_id: str, id_val: str,
 
     for label in (labels if labels is not None else ENTITY_UNION_LABELS):
         key = KEY_PROPERTY.get(label)
-        if key != "id":
-            # This door is handed a BARE id. A label keyed by anything else
-            # (Source → url, Event → eventId) is not addressable from it; the
-            # cache resolver reaches those with its own branches, which is
-            # precisely the part excluded from ENTITY_UNION_LABELS.
-            continue
+        if not key:
+            raise RecordServeError(
+                f"{label!r} declares no contract key in "
+                f"cache_projection.KEY_PROPERTY — a record read cannot address "
+                f"it, so the coverage declaration (and this call) is wrong")
         props = read_node(conn, org_id=org_id, graph_id=graph_id,
                           label=label, key=id_val)
         if props is not None:
@@ -1475,9 +1562,35 @@ def entity_absent_wire(answer: ServedAnswer) -> dict[str, Any]:
     that off as an absence would answer `{}` for every Event and Source — the
     "we cannot see it" / "it does not exist" conflation this whole module
     exists to remove, re-introduced by the door that was supposed to close it.
+
+    ⛔ THIS IS THE **UNION** RULE, AND IT IS NOT THE SINGLE-LABEL RULE — do not
+    generalise it (or drop it) by analogy (#13353 review, finding 1):
+    ``ServedAnswer.absent_wire``'s ``absence_established`` is ``served_from ==
+    "record"`` OR ``record-miss``, with NO coverage clause, and that is correct for
+    a read whose coordinate names ONE label (``serve_point``: the record either
+    holds that Point or it does not). A bare id is not such a coordinate — it can
+    name any of five labels — so on this door ``absent_wire`` alone would answer
+    `{}` for an Event the record cannot reproduce. Hence:
+    ``absent_wire`` decides whether a store SETTLED the coordinate; this function
+    adds *"…and every label that coordinate can name is covered"*. Both halves are
+    required here, and neither is required of a single-label read.
+
+    ⚠️ A FOUND ANSWER IS NOT THIS FUNCTION'S INPUT — ``answer.props`` is checked
+    first, so a caller that routes a hit through it gets the hit and not a marker.
+    Without that guard this name quietly discards every property (``id``
+    included) and reports "nobody could see it" for a read that saw it: a
+    reachability bug waiting for the first caller that does not guard, in the
+    module's published home for the rule.
     """
     from .residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
 
+    if answer.props is not None:
+        # ⛔ THE ATTRIBUTION RIDES A HIT TOO. The seam's own contract is that
+        # `servedFrom`/`fallbackReason` appear on EVERY armed response; returning
+        # bare props here would mint an unattributable hit — an answer whose store
+        # no operator can name — the invisible-answer class #12941 exists to
+        # eliminate. This is the same merge the door's found arm performs.
+        return {**answer.props, **answer.as_wire()}
     if answer.absence_established and entity_coverage_complete():
         return {}
     return {**answer.as_wire(), RESIDENCY_FIELD: RESIDENCY_NOT_HOT}
@@ -1735,14 +1848,17 @@ def serve_entity(*, tenant: tuple[str, str], id_val: str,
         if mode == MODE_PREFER:
             return _fell_back(_miss_reason())
         # `record`: the record answered `no row` for the served labels. That is
-        # an answer about THOSE labels only, so it is named as the coverage gap
-        # it is rather than handed back as an absence (`entity_absent_wire`
-        # reads both the reason and the coverage).
-        return ServedAnswer(
-            read=READ_ENTITY_UNION_BY_ID, coordinate=coordinate,
-            served_from="record", props=None,
-            fallback_reason=None if entity_coverage_complete()
-            else FALLBACK_RECORD_LABEL_NOT_SERVED)
+        # an answer about THOSE labels only — the coverage gap is a FACT about
+        # what this read covers, not a fallback: nothing fell back, no cache was
+        # consulted, and NOTHING WAS COUNTED. So this answer carries NO
+        # `fallbackReason` (#13353 review, finding 2, measured: the wire carried
+        # `record-label-not-served` while `fallback_counts()` stayed `{}` and the
+        # graph handle was never opened, so an operator reconciling the wire
+        # against the counter saw two different stories for one read). The gap is
+        # expressed where it is decided: `entity_absent_wire` reads
+        # `entity_coverage_complete()` and answers `residency: "not-hot"`.
+        return ServedAnswer(read=READ_ENTITY_UNION_BY_ID, coordinate=coordinate,
+                            served_from="record", props=None)
     return ServedAnswer(read=READ_ENTITY_UNION_BY_ID, coordinate=coordinate,
                         served_from="record", props=props)
 
