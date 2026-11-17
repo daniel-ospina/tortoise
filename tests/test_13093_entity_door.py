@@ -684,6 +684,12 @@ _EVENT_KEY_NAME_RE = r"[\"']?" + _EVENT_KEY_CONSTRAINT + r"[\"']?(?![A-Za-z0-9_$
 #: `DO $$ … EXECUTE 'ALTER TABLE …' … $$`
 #: (`20261025000001_record_tenancy_role_and_guc.sql:113,142`), where the literal
 #: ends `'` before the `;`.
+#: ⚠️ The corpus's `EXECUTE '…'` bodies are `CREATE ROLE` / `ALTER ROLE`
+#: (`20261025000001_record_tenancy_role_and_guc.sql:113,142`) and
+#: `ALTER TABLE … DISABLE/ENABLE TRIGGER`
+#: (`20261023000002_blog_author_backfill_atomic.sql:91,109`) — no migration has
+#: declared a CHECK through `EXECUTE` yet, so the arm that covers it is
+#: forward-robustness rather than a spelling the tree already contains.
 _EVENT_KEY_DROP_RE = re.compile(
     r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?" + _EVENT_KEY_NAME_RE,
     re.IGNORECASE)
@@ -695,6 +701,59 @@ _EVENT_KEY_RENAME_RE = re.compile(
     r"RENAME\s+CONSTRAINT\s+(?P<old>[\"']?[A-Za-z0-9_]+[\"']?)\s+TO\s+"
     r"(?P<new>[\"']?[A-Za-z0-9_]+[\"']?)",
     re.IGNORECASE)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Drop `--` line and `/* … */` block comments, WITHOUT touching literals.
+
+    ⛔ A SIMPLE `re.sub(r"--[^\n]*", …)` WOULD EAT THE STRINGS THIS READER MUST
+    SEE: the house style for conditional DDL carries the statement inside an
+    `EXECUTE '…'` literal, and the reader has to read THAT text. So the scanner
+    tracks single-quoted literals (including the `''` escape) and leaves their
+    contents alone, which means a commented-out statement is dropped while an
+    `EXECUTE`d one survives.
+
+    ⚠️ A plain `'`-toggle is SUFFICIENT for that, with no special case for SQL's
+    `''` escape: an escaped pair is PARITY-PRESERVING (two toggles), so the
+    scanner leaves the pair in the same state it would reach by skipping it — and
+    the only instant it could be wrong is BETWEEN the two quotes of a pair, where
+    no `--` can appear. An escape branch here would be logic no input can
+    distinguish (measured: deleting one changed no output for any arm below), so
+    there is none to go stale.
+
+    ⚠️ Dollar-quoted bodies are treated as CODE on purpose — that is where the
+    `EXECUTE` carries real DDL — so a `--` comment inside one IS stripped, which
+    is what the database does too. ⚠️ DOUBLE-quoted identifiers are not tracked
+    (a `--` inside one would be stripped); the corpus has no such identifier, and
+    the reader only ever looks at the constraint name and a CHECK expression.
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    in_literal = False
+    while i < n:
+        ch = sql[i]
+        if in_literal:
+            out.append(ch)
+            if ch == "'":
+                in_literal = False
+            i += 1
+            continue
+        if ch == "'":
+            in_literal = True
+            out.append(ch)
+            i += 1
+            continue
+        if sql[i:i + 2] == "--":
+            newline = sql.find("\n", i)
+            i = n if newline == -1 else newline
+            continue
+        if sql[i:i + 2] == "/*":
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _effective_event_node_key_check(sql: str) -> str | None:
@@ -743,12 +802,33 @@ def _effective_event_node_key_check(sql: str) -> str | None:
 
     ⚠️ SEEN, NOT OMNISCIENT: it reads LITERAL statements, so the re-key spellings
     this repo's house style produces are covered — a plain `ALTER TABLE`, a
-    double-quoted identifier, and an `EXECUTE '…'` inside `DO $$ … $$`. A re-key
-    assembled at RUNTIME from parts (`format()` into a variable, a name built
-    from a catalog query) is invisible here and is NOT claimed to be covered; a
-    migration written that way must update this reader deliberately.
+    double-quoted identifier, and an `EXECUTE '…'` inside `DO $$ … $$`. ⚠️ The
+    shape itself has NO corpus precedent for a CHECK: no migration declares one
+    through `EXECUTE`, so that arm is forward-robustness, not a spelling the tree
+    already contains (the corpus's `EXECUTE 'ALTER TABLE …'` uses are
+    `20261023000002_blog_author_backfill_atomic.sql:91,109`, DISABLE/ENABLE
+    TRIGGER). A re-key assembled at RUNTIME from parts (`format()` into a
+    variable, a name built from a catalog query) is invisible here and is NOT
+    claimed to be covered; a migration written that way must update this reader
+    deliberately.
+
+    ⚠️ A RENAME raises CONSERVATIVELY: a rename FROM this name, a rename TO it,
+    and a rename away-and-back all raise, and the last two leave the premise
+    where it was. That is accepted rather than followed — a reader that tracks
+    renames properly is more machinery than this one premise needs, and a raise
+    cannot be mistaken for a fact, which the silence it replaced could.
     """
     events: list[tuple[int, str, str | None]] = []
+    # ⛔ COMMENTS ARE NOT DDL, and this corpus WRITES DDL IN COMMENTS: a
+    # commented `ALTER TABLE` is house style
+    # (`20261023000002_blog_author_backfill_atomic.sql:7,10`), and
+    # `20261014000001_record_subject_props_no_derived.sql:41` names a
+    # `DROP CONSTRAINT`/`ADD CONSTRAINT` pair in prose. Measured before this
+    # strip: a commented `DROP CONSTRAINT <name>` returned `None` (a FALSE RED on
+    # a premise that never moved) and a commented `ADD CONSTRAINT … CHECK (…)`
+    # after a real drop returned the unenforced expression (a FALSE GREEN on
+    # exactly the class this reader exists for).
+    sql = _strip_sql_comments(sql)
     for match in _EVENT_KEY_DROP_RE.finditer(sql):
         events.append((match.start(), "drop", None))
     for match in _EVENT_KEY_DECL_RE.finditer(sql):
@@ -770,11 +850,12 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     expr: str | None = None
     for _pos, kind, body in events:
         assert kind != "rename", (
-            f"a migration RENAMEs `{_EVENT_KEY_CONSTRAINT}` ({body}) — the "
-            "constraint this premise reads no longer exists under this name, "
-            "and the expression the record enforces can no longer be read from "
-            "the statements that carry this name: re-derive "
-            "ENTITY_UNION_ADDRESS_RESIDUALS against the renamed constraint")
+            f"a migration RENAMEs `{_EVENT_KEY_CONSTRAINT}` ({body}) — this "
+            "reader does not follow renames, so the expression enforced under "
+            "this name can no longer be read from the statements carrying it. "
+            "If the constraint was renamed BACK, teach this reader to follow the "
+            "rename; otherwise re-derive ENTITY_UNION_ADDRESS_RESIDUALS against "
+            "the renamed constraint")
         if kind == "drop":
             expr = None
             continue
@@ -783,6 +864,36 @@ def _effective_event_node_key_check(sql: str) -> str | None:
         normalised = re.sub(r"\(\s+", "(", normalised)
         expr = re.sub(r"\s+\)", ")", normalised)
     return expr
+
+
+def test_the_comment_stripper_keeps_literals_and_drops_comments():
+    """The scanner's OWN contract, arm by arm — a guard that cannot fail is not one.
+
+    The premise reader strips comments so a commented-out `ALTER TABLE` cannot
+    move the premise (this corpus writes DDL in comments). Two properties make
+    that safe, and both are measured here rather than assumed:
+
+      * a `--` INSIDE a single-quoted literal is DATA, not a comment — including
+        one that follows SQL's `''` escape, or the reader would truncate the
+        `EXECUTE '…'` body it exists to read (measured against a naive strip:
+        `'it''s -- fine'` loses everything after `--`);
+      * a `--` comment OUTSIDE a literal, and a `/* … */` block, are removed.
+    """
+    assert _strip_sql_comments("SELECT 'a -- b', 1; -- tail\nSELECT 2;") == (
+        "SELECT 'a -- b', 1; \nSELECT 2;"), (
+        "a `--` inside a literal was eaten, or a real trailing comment survived")
+    assert _strip_sql_comments(
+        "DO $$ BEGIN EXECUTE 'ALTER TABLE t ADD CONSTRAINT c "
+        "CHECK (x = ''v'')'; END $$;") == (
+        "DO $$ BEGIN EXECUTE 'ALTER TABLE t ADD CONSTRAINT c "
+        "CHECK (x = ''v'')'; END $$;"), (
+        "the `EXECUTE '…'` body carrying the DDL was altered by the stripper")
+    assert _strip_sql_comments("SELECT 'it''s -- fine';") == (
+        "SELECT 'it''s -- fine';"), (
+        "the `''` escape was not honoured: everything after `--` inside the "
+        "literal was dropped, which would truncate a re-key expression")
+    assert _strip_sql_comments("/* block -- x */ SELECT 3;") == " SELECT 3;", (
+        "a block comment survived (or its contents were not dropped)")
 
 
 def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
@@ -839,9 +950,13 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
         "reach the expression the record now enforces")
 
     # 1c. The house style for CONDITIONAL DDL: the statement inside
-    #     `DO $$ … EXECUTE '…' … $$`
-    #     (`20261025000001_record_tenancy_role_and_guc.sql:113,142`). The literal
-    #     ends `'` before the `;`, and the first reader could not see past it.
+    #     `DO $$ … EXECUTE '…' … $$` — that corpus writes `EXECUTE 'CREATE ROLE …'` /
+    #     `'ALTER ROLE …'` (`20261025000001_record_tenancy_role_and_guc.sql:113,142`)
+    #     and `EXECUTE 'ALTER TABLE … DISABLE/ENABLE TRIGGER'`
+    #     (`20261023000002_blog_author_backfill_atomic.sql:91,109`), and no
+    #     migration has declared a CHECK this way, so this arm is
+    #     FORWARD-ROBUSTNESS. The literal ends `'` before the `;`, and the first
+    #     reader could not see past it.
     dynamic = landed + (
         "\nDO $$ BEGIN\n"
         f"  EXECUTE 'ALTER TABLE public.event DROP CONSTRAINT "
@@ -878,6 +993,27 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
         f"{_EVENT_KEY_CONSTRAINT}_v2;\n")
     with pytest.raises(AssertionError, match="RENAMEs"):
         _effective_event_node_key_check(renamed)
+
+    # 1f. COMMENTS ARE NOT DDL. This corpus writes DDL in comments (a commented
+    #     `ALTER TABLE` is house style:
+    #     `20261023000002_blog_author_backfill_atomic.sql:7,10`), so the reader
+    #     strips comments — outside literals only, because an `EXECUTE`d statement
+    #     must stay visible. Measured before the strip, both directions were wrong:
+    #     a commented `DROP CONSTRAINT <name>` returned `None` (false RED) and a
+    #     commented re-key after a real drop returned the unenforced expression
+    #     (false GREEN).
+    commented_drop = landed + (
+        f"\n-- we deliberately do NOT run: DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n")
+    assert _effective_event_node_key_check(commented_drop) == _EVENT_KEY_CHECK, (
+        "a COMMENTED-OUT `DROP CONSTRAINT` cleared the premise — a false red "
+        "that would send a lane to re-derive an invariant that never moved")
+    commented_key = landed + (
+        f"\nALTER TABLE public.event DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        f"-- rejected re-key: ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT} "
+        "CHECK (node_key = payload ->> 'ref');\n")
+    assert _effective_event_node_key_check(commented_key) is None, (
+        "a COMMENTED-OUT re-key was read as the enforced expression — the premise "
+        "would be pinned to DDL the record never ran")
 
     # 2. A forward DROP with no re-declaration. The constraint is GONE, so no
     #    expression is enforced and the premise is not merely different — it is
@@ -923,10 +1059,14 @@ def test_an_EVENT_is_addressable_by_the_bare_id_that_IS_its_eventId():
     then the REAL reader, asserting the query was bound to `node_key` with the
     bare value handed in.
 
-    ⛔ `Event.id` is NOT that identity and nothing here rests on it (#13347
-    review P2): `projection/entities.py::_event_guarded_merge`'s SUFFIX branch
+    ⛔ `Event.id` is NOT that identity and nothing here rests on it (PR #13358 review §3.2, the
+    comment cited above): `projection/entities.py::_event_guarded_merge`'s SUFFIX branch
     MERGEs on a suffixed `eventId` while `id` keeps the candidate, so two Events
-    can share one `id` — `live.py::EPISTEMIC_ID_KEYS` forbids using it as one.
+    can share one `id` — and `live.py:1194-1197` says exactly that about that
+    shared value: *"The coalesced value is NOT a unique identity, and must not be
+    used as one"* (`EPISTEMIC_ID_KEYS` at `live.py:1204` still lists `id` FIRST,
+    deliberately, for DISPLAY and hand-back — the prohibition is on COMPARISON
+    and DEDUPE, not on mentioning the value).
     The value this door is handed for an Event is the one the cache RESOLVER
     matched (`FalkorProjection._RESOLVE_BRANCHES` → `("Event", "eventId")`).
 
