@@ -47,6 +47,7 @@ from tortoise.derived_invalidation import (
     verdicts,
 )
 from tortoise.goal_judgement import GOAL_STATE_CACHE, Target, judge_and_record
+from tortoise.ids import ulid
 from tortoise.sdk import (
     GOAL_ENDING_STATES,
     GOAL_LIVE_STATES,
@@ -150,6 +151,103 @@ def test_the_two_endings_are_not_interchangeable(sdk):
     assert "not interchangeable" in msg
     assert "status='deprecated'" in msg
     assert "goalState='abandoned'" in msg
+
+
+def test_an_EMPTY_successor_name_does_not_discharge_the_obligation(sdk):
+    """#13065 review P2 — the write side and the read side of ONE field must apply
+    ONE predicate.
+
+    ``_lifecycle_carrier_keys`` deliberately keeps ``\"\"`` as a carrier ("an
+    empty string IS one — the record view reads it with ``IS NOT NULL``"), while
+    ``_stored_goal_ending_view`` reads ``\"\"`` as NO successor
+    (``carrier if carrier not in (None, \"\") else None``). ``_goal_successor_named``
+    asked only whether the column was PRESENT, so ``supersededBy=\"\"`` satisfied
+    "names no successor" while naming nobody — and a later
+    ``goalState='superseded'`` on the same node WAS refused for missing the very
+    name the earlier write claimed to provide.
+    """
+    for spelling in ("supersededBy", "superseded_by"):
+        goal = _goal(sdk, tag=f"empty-successor-{spelling}")
+        with pytest.raises(ValueError) as exc:
+            sdk.update_knowledge(goal["id"], goalState="superseded",
+                                 status="superseded", **{spelling: ""})
+        msg = str(exc.value)
+        assert "REFUSED" in msg and "successor" in msg, msg
+        assert "supersededBy" in msg and "CORRECTS" in msg
+        # nothing landed: the empty carrier did not discharge the obligation
+        node = sdk.get_entity(goal["id"])
+        assert node["goalState"] == "active"
+        assert not live.is_terminal_status(node.get("status"))
+
+    # ...and a NAME in the same position is accepted, so the fix is "name
+    # somebody", never "refuse the carrier"
+    goal = _goal(sdk, tag="empty-successor-named")
+    sdk.update_knowledge(goal["id"], goalState="superseded",
+                         status="superseded", supersededBy="goal-v2")
+    assert sdk.get_entity(goal["id"])["supersededBy"] == "goal-v2"
+
+
+def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
+    """#13065 review P1 — ``create_point`` with an explicit ``id`` is an ON-MATCH
+    create, so it must read the node's STORED half before it writes.
+
+    The door's own statement is a plain ``CREATE``, but a colliding ``id`` mints a
+    duplicate whose ``PointAdded`` replay folds back onto the ORIGINAL node
+    (``_upsert_point_props`` MERGEs on ``id``), so
+    ``create_point(..., id=<goal>, status="archived")`` used to leave
+    ``status="archived"`` beside a stored ``goalState="met"``: the pair both
+    update doors refuse, in the direction that silences ``derived_invalidation``
+    while every other reader serves the goal as ended.
+    """
+    # a `:Point` goal — the label `_upsert_point_props` MERGEs on, i.e. the node
+    # this door's own journal fold can reach
+    goal = sdk.create_point("goal", "GOAL - CI is fast [create-door]",
+                            goalState="met")
+    assert goal["status"] == "live" and goal["goalState"] == "met"
+    with pytest.raises(ValueError) as exc:
+        sdk.create_point("goal", "GOAL - duplicate [create-door]",
+                         id=goal["id"], status="archived")
+    msg = str(exc.value)
+    assert "REFUSED" in msg and "create_point" in msg, msg
+    assert "goalState='abandoned'" in msg       # repair 1: add the ending
+    assert "status='live'" in msg               # repair 2: drop the ending
+    # nothing landed: the stored pair is untouched
+    node = sdk.get_point(goal["id"])
+    assert node["goalState"] == "met"
+    assert not live.is_terminal_status(node.get("status"))
+
+    # the stored half is what decided it — on a GENUINELY fresh explicit id the
+    # node does not exist, the probe answers `{}`, and the same write lands
+    fresh = sdk.create_point("goal", "GOAL - fresh [create-door]",
+                             id=ulid(), status="archived")
+    assert fresh["status"] == "archived"
+
+    # ⛔ THE FALSE-REFUSAL ARM: this write LANDS ``status="live"`` (the create
+    # default, which the caller never names), so the pair it leaves is
+    # (live, active) — coherent, even though the node it addresses is ended on
+    # ``goalState``. Grading the BAG alone would read the stored status and
+    # refuse a write whose result is fine; the helper is handed BOTH endpoints
+    # instead, so it never even pays for the read. Proven by handing the probe a
+    # view that WOULD refuse (stored deprecated/abandoned): if the door graded
+    # the bag, this call raises.
+    import tortoise.sdk as sdk_mod
+    calls = []
+    real = sdk_mod._stored_goal_ending_view
+
+    def refusing_probe(*args, **kwargs):
+        calls.append(args)
+        return {"status": "deprecated", "goalState": "abandoned",
+                "successor": None}
+
+    sdk_mod._stored_goal_ending_view = refusing_probe
+    try:
+        sdk.create_point("goal", "GOAL - revived [create-door]",
+                         id=goal["id"], goalState="active")
+    finally:
+        sdk_mod._stored_goal_ending_view = real
+    assert calls == [], (
+        "both endpoints are named by the write, so the stored half must not be "
+        f"read — read {len(calls)} time(s)")
 
 
 # ── 2. the ordinary verb: one write, and the two surfaces AGREE ────────────

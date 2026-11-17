@@ -5905,9 +5905,17 @@ def _goal_successor_named(props: dict, stored_view) -> bool:
     carrier on an Object/Subject goal (whose record derives ``status`` from those
     columns) or the ``CORRECTS`` edge on a Point goal. ``supersededAt`` ALONE is
     bookkeeping, not a name, so it does not satisfy this.
+
+    ⛔ A PRESENT carrier is not a NAMED successor: an empty string carries no
+    name, so it must not discharge the obligation. That is the SAME test the
+    stored half applies (``_stored_goal_ending_view``: ``named = carrier if
+    carrier not in (None, "") else None``) — since #13065 review P2 the write
+    side and the read side of one field agree. ``""`` stays a carrier for the
+    record's ``IS NOT NULL`` fold (#10192); it just does not name anybody.
     """
-    if "superseded_by" in _lifecycle_carrier_keys(props).values():
-        return True
+    for spelling, column in _lifecycle_carrier_keys(props).items():
+        if column == "superseded_by" and props.get(spelling) not in (None, ""):
+            return True
     view = stored_view() or {}
     return bool(view.get("successor"))
 
@@ -16141,6 +16149,50 @@ class TortoiseSDK:
                          (self._terminal_fold_refused_advisory(pid)
                           if _terminal_fold_refused else {}))},
                     _end_receipt)
+
+        # #13035 (review P1, PR #13065): THIS door can be an UPDATE in disguise
+        # when the caller supplies an `id`, so it grades the state it LEAVES the
+        # node in — the #2782 posture the sibling gates already apply.
+        #
+        # `create_point` preserves a caller-supplied `id` for operators
+        # (`explicit_id` above) and the statement it issues is a plain `CREATE`,
+        # so a colliding id mints a SECOND `:Point` and the journal's
+        # `PointAdded` is folded back onto the ORIGINAL node by replay's
+        # `_upsert_point_props` MERGE (`projection/entities.py:3128`) — the
+        # defect class this repo already recorded for the entity fold
+        # (`_update_entity`'s #9649/#10192 note: "the fold behind it MERGEs, so
+        # an ON-MATCH re-create reaches an EXISTING node too — a guard on
+        # `update_entity` alone is bypassable in one call"). Without the probe,
+        # `create_point(..., id=<goal>, status="archived")` leaves
+        # `status="archived"` beside a stored `goalState="met"`: exactly the
+        # pair BOTH update doors refuse, in the one direction that silences
+        # `derived_invalidation`'s retirement arm while every other reader serves
+        # the goal as ended.
+        #
+        # ⛔ Graded on `{**props, "status": status}`, not on the bag, because the
+        # CREATE always LANDS a `status` (the default is `"live"`, popped above).
+        # A bag naming only `goalState` therefore leaves a pair the bag never
+        # spelled, and asking the stored side about the ABSENT status would
+        # refuse a write whose RESULT is coherent —
+        # `create_point(id=<ended goal>, goalState="active")` writes
+        # `status="live"`, i.e. (live, active), and must stay admitted. With the
+        # resolved status in the bag the probe is not even read for it (the
+        # helper only reads the stored half when one endpoint is missing).
+        # A genuinely fresh explicit id costs one read that answers `{}`, and an
+        # id-less create pays nothing (there is no node it could reach).
+        #
+        # ⛔ PLACED AFTER the dedup block, and that placement is load-bearing: a
+        # dedup HIT does not land `status` (it is popped before the fold, #1905)
+        # and forwards `props` to `update_point`, whose own guard grades THAT
+        # merged state — so grading the resolved `status` there would refuse a
+        # write that never writes it. Past the block, a status provably lands.
+        if explicit_id is not None:
+            _refuse_inconsistent_goal_ending(
+                {**props, "status": status},
+                surface="create_point",
+                goal_ending=lambda: _stored_goal_ending_view(
+                    proj, explicit_id, label="Point"),
+            )
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
         if explicit_id is not None:
@@ -48785,11 +48837,24 @@ class TortoiseSDK:
                                     keys=_entity_identity_probes()),
                                 # #13035: the stored half of the goal-ending
                                 # pair — read ONLY if this write names one
-                                # endpoint and not the other. Every goal shape
-                                # (`goal`/`target`/`strategy`/`plan`, on a
-                                # Point, an Object or a Subject) is keyed by
-                                # `id`, so the identity probe's primary key is
-                                # the whole key space this question needs.
+                                # endpoint and not the other. ⛔ The probe matches
+                                # `id` ONLY, while this door ALSO binds a node by
+                                # its secondary keys (`eventId`, `url` — see the
+                                # `#9649` block below), so a goal-carrying hybrid
+                                # (`:Point:Event`/`:Point:Source`) addressed by
+                                # one of those reads the stored side as ABSENT.
+                                # That is fixture-reachable, not
+                                # customer-reachable (no production writer mints
+                                # those hybrid labels), and it fails in the benign
+                                # direction: an absent stored value is the
+                                # ordinary LIVE reading, so the write is admitted
+                                # rather than over-refused. Every goal shape
+                                # (`goal`/`target`/`strategy`/`plan`, on a Point,
+                                # an Object or a Subject) is keyed by `id`, which
+                                # is why the question is answerable on the primary
+                                # key alone (#13065 review, note on the earlier
+                                # wording, which claimed `id` was the whole key
+                                # space THIS DOOR uses).
                                 goal_ending=lambda: _stored_goal_ending_view(
                                     self._get_proj(), id_val))
         # ── #5475 (residual): the UPDATE door onto every label ──
