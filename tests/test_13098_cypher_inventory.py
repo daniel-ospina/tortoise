@@ -26,12 +26,15 @@ than report agreement.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -1181,3 +1184,279 @@ def test_the_store_targets_are_named_never_inherited_from_the_environment(monkey
     }.get(axis, [])
     assert harness.main(["--candidate", "point-by-id", *other]) == 2
     assert "could not run" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# the installing step must PROVE the client RUNS (PR #13314 review)
+# --------------------------------------------------------------------------- #
+# ⛔ WHY THIS SUITE PINS A WORKFLOW AND NOT THE HARNESS. The harness already
+# refuses correctly when `psql` is missing (2 = "could not run"), and
+# `test_a_missing_psql_is_could_not_run_not_a_difference` pins that. The gap was
+# one level up: the CI step that INSTALLS the client claimed to prove the binary
+# exists, and proved only that the name resolves. Measured on run 44158572832 at
+# `aff4eaef81`: `apt-get install postgresql-client` exited 0 having unpacked just
+# the metapackage, and the very next step died with
+# `FileNotFoundError: [Errno 2] … 'psql'`.
+#
+# Mutation attribution, as the review asked: `git grep -ln "cypher-diff"` over
+# tests/ found nothing asserting this step, so every one of these properties was
+# unpinned — deleting the refusal, the probe or the `$GITHUB_PATH` repair left
+# the suite GREEN. They are pinned here because the fail-closed branch IS the
+# change, and a one-line edit that removes it would otherwise be invisible.
+
+WORKFLOW_PATH = ROOT / ".github" / "workflows" / "cypher-diff.yml"
+
+
+def _psql_install_run() -> str:
+    """The `run:` block of the step that installs the client — the artifact under test."""
+    doc = yaml.safe_load(WORKFLOW_PATH.read_text())
+    steps = doc["jobs"]["differential"]["steps"]
+    match = [s for s in steps if "install postgresql-client" in (s.get("name") or "")]
+    assert len(match) == 1, f"expected exactly one client-install step, got {len(match)}"
+    return match[0]["run"]
+
+
+def _run_install_step(tmp_path, psql_body: str | None, versioned_psql: str | None = None):
+    """Execute that step hermetically: `sudo`/`dpkg`/`ls` are stubs, the client is the variable.
+
+    `psql_body=None` puts NO `psql` on PATH, and PATH carries **nothing from the host**
+    but the shell plumbing the step itself invokes. That hermeticity is load-bearing:
+    with `PATH=f"{bin_dir}:/usr/bin:/bin"` — the previous spelling — `command -v psql`
+    searched `/usr/bin`, so on any box carrying a real client the MISSING-client arm
+    resolved the HOST's binary and never reached the refusal it exists to pin (measured
+    on this host before the fix: `psql: /usr/bin/psql (psql (PostgreSQL) 16.15 …)`,
+    exit 0, `$GITHUB_PATH`=/usr/bin — #13314 review, P1). Nothing here touches the
+    network or a database — the step's own shell is the code under test.
+
+    `versioned_psql=<script>` installs that client at `<tmp>/vendor/bin/psql` and makes
+    `ls` report `<tmp>/vendor/bin` as the `/usr/lib/postgresql/*/bin` hit, so the
+    step's FALLBACK arm is reachable without consulting the host either. It defaults to
+    `None`, where `ls` exits 1 and nothing resolves. That arm pins the fallback
+    RESOLUTION and the probe/reach-`$GITHUB_PATH` behaviour, not the `sort -V` version
+    SELECTION — `sort` is stubbed to a pass-through for exactly that reason.
+
+    ⛔ `ls` IS A STUB, NOT A HOST SYMLINK, AND THAT IS A MEASUREMENT. This host carries
+    `/usr/lib/postgresql/16/bin/psql`, so a real `ls` on a hermetic PATH would let the
+    step's fallback resolve a working client, the refusal would never be reached, and
+    the MISSING-client arm would be host-dependent again — the very defect being fixed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("sudo", "dpkg"):
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    # `ls` NEVER sees the host's `/usr/lib/postgresql`: the arms under test are "nothing
+    # resolves", "the client on PATH is the one we supplied" and (via `versioned_psql`)
+    # "only a versioned client outside PATH resolves".
+    ls_stub = bin_dir / "ls"
+    if versioned_psql is None:
+        ls_stub.write_text("#!/bin/sh\nexit 1\n")
+    else:
+        vendor_bin = tmp_path / "vendor" / "bin"
+        vendor_bin.mkdir(parents=True)
+        fake = vendor_bin / "psql"
+        fake.write_text(versioned_psql)
+        fake.chmod(0o755)
+        ls_stub.write_text(f"#!/bin/sh\necho '{vendor_bin}'\n")
+    ls_stub.chmod(0o755)
+    # Shell plumbing, not the subject under test: `bash` (which `subprocess` must resolve
+    # THROUGH this PATH, since `env` is passed), and the utilities the step's own lines
+    # invoke. Omitting them would turn this into an assertion about which coreutils a
+    # runner ships instead of about the step's logic — so a host missing one is a LOUD
+    # failure here, not a silently wrong verdict three assertions later.
+    for name in ("bash", "dirname", "tail"):
+        real = shutil.which(name)
+        assert real is not None, f"this suite needs `{name}` on the host to drive the step"
+        (bin_dir / name).symlink_to(real)
+    # ⛔ `sort` IS STUBBED, NOT SYMLINKED. The step resolves the fallback with `sort -V`,
+    # and `-V` is a GNU coreutils extension — symlinking the host's `sort` would make this
+    # arm's verdict depend on the host being GNU (measured: a non-GNU `sort` reds it, and
+    # it reds with a message that blames the STEP, because the pipeline's failure is
+    # swallowed by the step's own `|| true`). The version SELECTION is not what this arm
+    # claims to pin; one candidate line makes `sort -V | tail -1` a pass-through, so a
+    # pass-through stub is the honest stand-in (#13314 review, P2). It must IGNORE argv:
+    # the step passes `-V`, and `exec cat` inherits it and dies on it.
+    sort_stub = bin_dir / "sort"
+    sort_stub.write_text(
+        "#!/bin/sh\n"
+        "# pass-through: ignore argv (the step passes -V) and echo stdin unchanged\n"
+        'while IFS= read -r line; do printf \'%s\\n\' "$line"; done\n'
+    )
+    sort_stub.chmod(0o755)
+    if psql_body is not None:
+        fake = bin_dir / "psql"
+        fake.write_text(psql_body)
+        fake.chmod(0o755)
+
+    github_path = tmp_path / "github_path"
+    github_path.write_text("")
+    script = tmp_path / "step.sh"
+    script.write_text(_psql_install_run())
+
+    env = {
+        **os.environ,
+        # ⛔ `bin_dir` ALONE, with no `/usr/bin` suffix. That suffix was the whole defect:
+        # the host's `psql` lives there and `command -v psql` searches PATH, so a
+        # missing-client arm silently inherited a working client.
+        "PATH": str(bin_dir),
+        "GITHUB_PATH": str(github_path),
+    }
+    return (
+        subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env),
+        github_path,
+    )
+
+
+# `postgresql-client-common`'s pg_wrapper: present, executable, and UNABLE to run —
+# exactly the state the apt evidence points at (`command -v` and `-x` both pass).
+BROKEN_PSQL = (
+    "#!/bin/sh\n"
+    'echo "Error: You must install at least one postgresql-client-<version> package" >&2\n'
+    "exit 1\n"
+)
+WORKING_PSQL = '#!/bin/sh\necho "psql (PostgreSQL) 16.1 (Ubuntu 16.1-1)"\n'
+
+
+def test_a_resolvable_but_broken_psql_fails_the_install_step(tmp_path):
+    """The step's claim is that the client RUNS; a resolvable-but-broken one must red it.
+
+    Pre-fix the probe was `echo "psql: $psql_bin ($("$psql_bin" --version))"`: the
+    substitution's status is discarded (the simple command's status is `echo`'s, so
+    `set -e` never fires), and the step exited **0** printing `psql: … ()`. The
+    harness then reported the same exit 2 one step later, misattributed to the
+    DSN/migrations — the outcome the step exists to prevent.
+    """
+    proc, github_path = _run_install_step(tmp_path, BROKEN_PSQL)
+
+    assert proc.returncode == 1, (
+        "a client that resolves but cannot run must FAIL the step, not pass it:\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "but cannot run" in proc.stdout
+    assert "You must install at least one postgresql-client" in proc.stdout, (
+        "the refusal must quote the client's own error — that is the remedy text"
+    )
+    # The pre-fix signature: an empty `()` where the version should be.
+    assert "()" not in proc.stdout
+    # And it must NOT have repaired PATH for the later steps on a failed probe.
+    assert github_path.read_text() == ""
+
+
+def test_a_missing_client_fails_with_the_word_psql_in_the_remedy(tmp_path):
+    """The MISSING-client arm: the refusal must still print the word `psql`.
+
+    This is the other half of the review's finding 1, and it is the arm a static
+    backtick sweep cannot reach: the sweep proves no line DOUBLE-quotes a backtick,
+    while this proves what the operator actually reads on the only path that reaches
+    the line. Pre-fix the message was `echo "::error::… no `psql` binary resolves …"`,
+    so bash ran `psql` (absent here), printed `command not found` into the middle of
+    the diagnostic, and the remedy read `no  binary resolves` — losing the one word a
+    human repairing the runner needs. Measured on that spelling: stdout
+    `::error::postgresql-client is installed but no  binary resolves …` plus two
+    `bash: line N: psql: command not found` lines.
+    """
+    proc, github_path = _run_install_step(tmp_path, None)
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, (
+        f"no resolvable `psql` must red the step; stdout={proc.stdout} stderr={proc.stderr}"
+    )
+    assert "no `psql` binary resolves" in proc.stdout, (
+        "the `::error::` message must keep its backticks LITERAL — double-quoted they "
+        f"command-substitute the word away; stdout={proc.stdout}"
+    )
+    assert "command not found" not in combined, (
+        "bash's own error leaked into the diagnostic, which is the signature of a "
+        f"command-substituted `::error::` message; stdout={proc.stdout} stderr={proc.stderr}"
+    )
+    assert github_path.read_text() == "", (
+        "nothing resolved, so nothing may be appended to $GITHUB_PATH"
+    )
+
+
+def test_a_working_client_still_passes_and_repairs_path(tmp_path):
+    """The mirror arm: the fix must not over-block, and the repair must still happen.
+
+    `$GITHUB_PATH` is what makes the versioned client visible to the two harness
+    steps, so it is as load-bearing as the refusal — deleting it was invisible too.
+    """
+    proc, github_path = _run_install_step(tmp_path, WORKING_PSQL)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "psql (PostgreSQL) 16.1" in proc.stdout
+    assert github_path.read_text().strip().endswith("bin"), (
+        "the client's directory must be appended to $GITHUB_PATH for the harness steps"
+    )
+
+
+def test_a_versioned_client_outside_path_is_resolved_by_the_fallback(tmp_path):
+    """The `/usr/lib/postgresql/*/bin` fallback arm — the reason `ls` is stubbed at all.
+
+    Its sibling tests shadow the fallback (so no host client can satisfy them), which
+    would leave this branch unpinned: deleting the `ls -d … | sort -V | tail -1`
+    resolution would red nothing. Here the fallback is the ONLY client that exists, so
+    the step must find it, probe it, and put its directory on `$GITHUB_PATH` — the
+    trimmed-image case the step's comment describes.
+    """
+    proc, github_path = _run_install_step(tmp_path, None, versioned_psql=WORKING_PSQL)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "psql (PostgreSQL) 16.1" in proc.stdout, (
+        "the fallback client must be probed, not merely found: "
+        f"stdout={proc.stdout} stderr={proc.stderr}"
+    )
+    repaired = github_path.read_text().strip()
+    assert repaired.endswith("vendor/bin"), (
+        "the RESOLVED client's directory — not /usr/bin — must reach $GITHUB_PATH: "
+        f"got {repaired!r}"
+    )
+
+
+def test_the_version_probe_is_a_statement_a_failing_step_can_observe():
+    """Structural pin, independent of the exact spelling the behavioural tests exercise.
+
+    A probe nested in `$( … )` inside `echo` cannot fail the step no matter what it
+    prints, which is why this asserts POSITION: the `--version` invocation must sit
+    on an `if` line (a condition `set -e` observes), and that arm must `exit 1`.
+    """
+    run = _psql_install_run()
+    probe_lines = [ln.strip() for ln in run.splitlines()
+                   if "--version" in ln and not ln.strip().startswith("#")]
+    assert probe_lines, "the step must actually invoke `--version` — the probe is the point"
+    for line in probe_lines:
+        assert line.startswith("if "), (
+            f"the probe must be a statement position (`if …`), not a discarded "
+            f"command substitution: {line!r}"
+        )
+    first_probe = run.index(probe_lines[0])
+    assert "exit 1" in run[first_probe:], "the failed-probe arm must exit non-zero"
+
+
+def test_no_error_line_command_substitutes_a_backticked_word():
+    """`echo "::error::… `psql` …"` executes `psql` and drops the word from the message.
+
+    Repo-wide sweep over every workflow, not just this step: the hazard is the
+    shape (a backtick inside a double-quoted `echo`), and the only path that
+    reaches the line is the one where the word does not resolve — so bash's own
+    "command not found" lands mid-diagnostic and the remedy text reads
+    "no  binary resolves" (#13314 review P2).
+    """
+    offenders = []
+    for wf in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+        doc = yaml.safe_load(wf.read_text())
+        for job in (doc.get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                run = step.get("run") or ""
+                for lineno, line in enumerate(run.splitlines(), 1):
+                    if "echo \"" not in line or "::error::" not in line:
+                        continue
+                    # A BACKSLASH-ESCAPED backtick is literal prose (`ci-timing.yml` uses
+                    # that spelling throughout), so strike those before looking for a live
+                    # one — otherwise this guard reds on correct code.
+                    if "`" in line.replace("\\`", ""):
+                        offenders.append(f"{wf.name}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "a double-quoted echo with a backtick COMMAND-SUBSTITUTES it; single-quote the "
+        "message instead:\n" + "\n".join(offenders)
+    )
