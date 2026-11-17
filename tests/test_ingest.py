@@ -1502,21 +1502,33 @@ def test_sc4_deprecation_markers_present():
         assert "index_sources_from_directory" in doc, \
             (f"{method_name} marker must name the LIVE replacement "
              "(index_directory is itself retired)")
-        # ⛔ The negative arm is scoped to the DEPRECATED LINE, not the whole
-        # docstring (round-3 review of #13085). A docstring may RECORD what it
-        # absorbed — `tortoise/sdk.py`'s own `_index_process_unit` says
+        # ⛔ The negative arm is scoped to the DEPRECATED PARAGRAPH(S) — not the whole
+        # docstring, and not a single physical line (round-2 and round-3 review of
+        # #13085). Banning the NAME outright reds on honest history:
+        # `tortoise/sdk.py`'s own `_index_process_unit` says
         # "``index_file``/``index_directory`` (both DELETED by #4282 …)", and
-        # `index_sources_from_directory` says it "Absorbs `index_directory`" — so
-        # banning the NAME outright reds on honest history. What must not survive
-        # is the DIRECTIVE that OFFERS the retired name. Narrowing costs no
-        # discriminating power: the pre-fix defect is caught by the positive arm
-        # above, and this arm still reds when the retired name is offered
-        # alongside the live one.
-        directive = next(
-            (line for line in doc.splitlines() if "DEPRECATED" in line), "")
-        assert "index_directory" not in directive, (
-            f"{method_name}'s DEPRECATED line offers the retired index_directory: "
-            f"{directive.strip()!r}")
+        # `index_sources_from_directory` says it "Absorbs `index_directory`". Reading
+        # only the FIRST line carrying DEPRECATED is too narrow the other way: both
+        # directives WRAP (`sdk.py:41302-41303`, `:55250-55251`), so an offer that
+        # continues onto the next line slipped past. Every DEPRECATED paragraph is
+        # therefore read, and the retired name must not appear in any of them.
+        # What must not survive is the DIRECTIVE that OFFERS the retired name; a
+        # docstring elsewhere may still record what it absorbed. Residual: a
+        # parenthetical history written INSIDE the directive paragraph (e.g.
+        # "use X (renamed from index_directory)") is honest prose this arm reds on —
+        # keep such history in its own paragraph.
+        offending: list[str] = []
+        in_paragraph = False
+        for line in doc.splitlines():
+            if "DEPRECATED" in line:
+                in_paragraph = True
+            elif in_paragraph and not line.strip():
+                in_paragraph = False
+            if in_paragraph and "index_directory" in line:
+                offending.append(line.strip())
+        assert not offending, (
+            f"{method_name}'s DEPRECATED text offers the retired index_directory: "
+            f"{offending!r}")
 
     # the retired PUBLIC name is gone, and its frozen private path is still served
     assert not hasattr(TortoiseSDK, "index_sessions"), \
