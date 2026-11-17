@@ -589,6 +589,17 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         # byte, on a tier that still grants a graph. An unset amount is UNARMED:
         # it refuses nothing, and the dimension keeps being metered by its writer.
         zero_means_unarmed=True,
+        # ⚠️ DISCLOSED COST OF ARMING (follow-up filed from #13084): an armed
+        # dimension READS its meter on every gated write (`_reading`), so a
+        # paying tenant's points/documents door now performs one extra ledger
+        # read per request — a graph query in registry/self-host mode, a
+        # PostgREST read in Supabase mode. Before this the dimension was BLOCKED
+        # and no read was taken. That is acceptable for correctness (a cap that
+        # does not read its meter is not a cap) but it is a latency cost on the
+        # hot write path; the fix is a short-TTL memo on the gauge read (60 s is
+        # far inside the 24 h staleness bound and the 1.5x deadband), NOT a
+        # silent "unlimited". Same shape as this module's own note about the
+        # resolver read.
     ),
     _dimension(
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],
