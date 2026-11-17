@@ -798,6 +798,37 @@ def _assert_the_evidence_shape_the_brief_leans_on(art: dict) -> None:
         # claims to hold, and a reader cannot tell which is evidence
         assert "query_chars" in unrecorded
 
+    # ⛔ `#13267` review 8: the NOTE's content is a truth-claim about another file,
+    # and nothing read it. Restoring the pre-round-7 false pointer ("The values it
+    # used are prose in §3 and §8 … key-tokens 4, min-query-tokens 3") left the
+    # whole suite GREEN, while the brief carries no such values anywhere.
+    # Only when the block EXISTS: a tool-produced artifact records the knobs and
+    # carries no `construction_unrecorded` at all.
+    cu = art.get("construction_unrecorded")
+    if cu:
+        note = cu.get("note", "")
+        assert note, (
+            "an unrecorded block must say what it means — the tool does not emit "
+            "this block, so its presence implies a hand-written note")
+        assert "argparse DEFAULT" in note, (
+            "the note must name `key_tokens`/`min_query_tokens` as the tool's "
+            "argparse DEFAULTS — they are not recorded run values, so they must "
+            "not be presented as what the run used")
+        for bogus in ("key-tokens 4,", "min-query-tokens 3)"):
+            assert bogus not in note, (
+                f"the note still presents {bogus!r} as a value the run used, but "
+                "nothing in these artifacts records it")
+        # every flag/value the note attributes to the brief must literally resolve there
+        brief_txt = (_DOCS / "research-brief.md").read_text()
+        quoted = set(re.findall(r"--[a-z-]+ \d+", note))
+        assert quoted, "the note cites the flags each arm ran with"
+        for flag in quoted:
+            assert flag in brief_txt, (
+                f"the note points at the brief for {flag!r}, which the brief lacks "
+                "— a pointer that does not resolve is the defect this pin closes")
+        assert "(500)" in note and "(500)" in brief_txt, (
+            "the note cites the headline's query cap and the brief prints it")
+
 
 def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
     """The four evidence defects of `#13267` F1/F3/F5/F6, pinned as a doc drift.
@@ -1072,6 +1103,13 @@ def _same_cell(recorded, recomputed) -> bool:
         if math.isnan(recorded) and math.isnan(recomputed):
             return True
         return math.isclose(recorded, recomputed, rel_tol=0, abs_tol=1e-12)
+    if isinstance(recorded, dict) and isinstance(recomputed, dict):
+        # ⛔ `dict == dict` delegates to `==` per value and `nan != nan`, so two
+        # IDENTICAL `correlation: {rho: nan, se_reduction: nan}` blocks compare
+        # UNEQUAL. Recurse so the NaN rule reaches inside the block (measured:
+        # adding `correlation` to `_RESULT_CELLS` reds here for that reason alone).
+        return (recorded.keys() == recomputed.keys()
+                and all(_same_cell(recorded[k], recomputed[k]) for k in recorded))
     return recorded == recomputed
 
 
@@ -1096,7 +1134,13 @@ def _recomputed_entry(block: dict, k: int) -> dict:
 
 _RESULT_CELLS = ("n", "off_hits", "on_hits", "discordant_miss_to_hit",
                  "discordant_hit_to_miss", "mcnemar_exact_p", "mde_paired",
-                 "mde_independent", "off_recall", "on_recall")
+                 "mde_independent", "off_recall", "on_recall",
+                 # ⛔ `#13267` review 8: these three are emitted by `analyze` and were
+                 # in NO pin and in neither derived list — measured free parameters.
+                 # The brief's §2 design claim ("the reduction is measured,
+                 # `correlation.rho`") and §8's `mde_note: ""` provenance evidence
+                 # both rest on cells a re-stale could contradict with the suite green.
+                 "discordance", "correlation", "mde_note")
 
 
 def test_every_published_result_cell_recomputes_from_the_artifacts_own_rows():
@@ -2339,6 +2383,20 @@ def test_a_tool_produced_artifact_recomputes_its_derived_figures(
     block["expansion_fired_items"] = 1
     with pytest.raises(AssertionError):
         _assert_derived_figures_recompute(art, "mutant")
+
+    # ⛔ `#13267` review 8: `_has_seed_ranks` was a key-PRESENCE test, so reverting
+    # it declared `seed_effect` recomputable over a figure that is a CONSTANT ZERO
+    # (keys present, every rank `None`) and the whole suite stayed GREEN. The datum
+    # is a real rank, not a key.
+    null_ranks, _ = _build_fake_artifact(
+        point_off=off, point_on=on, object_off=off, object_on=off,
+        arms={"point": {"off": _fake_arm(off, seed_ranks={}),
+                         "on": _fake_arm(on, seed_ranks={})}})
+    pblock = null_ranks["arms"]["point"]
+    assert "seed_effect" in pblock["derived_unpinned"], (
+        "an arm whose ranks are all `None` must declare `seed_effect` UNPINNED — "
+        "a constant zero is not a re-derivable figure")
+    assert "seed_effect" not in pblock["derived_recomputable"]
 
 
 def test_the_refusal_producers_fire_not_only_the_exit_code(

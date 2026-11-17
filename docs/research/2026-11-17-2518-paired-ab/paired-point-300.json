@@ -2031,7 +2031,7 @@
       "key_tokens",
       "min_query_tokens"
     ],
-    "note": "this run predates the tool recording these knobs, so they are NOT evidence here. What the brief DOES carry is the two knobs each arm ran with (\u00a73 and \u00a78): query-chars 500 / read window 30 for the headline, query-chars 200 / read window 60 for the robustness arm. \u26d4 `key_tokens` 4 and `min_query_tokens` 3 are the TOOL'S argparse DEFAULTS, not recorded run values \u2014 this run could have overridden either and the artifact would not show it, so they are NOT cited as what it ran with. \u26d4 The two point arms differ in BOTH `query_chars` and `read_limit`, so the robustness arm's difference cannot be attributed to the query cap alone (#13267 F5). The tool records `construction.query_chars`/`key_tokens`/`min_query_tokens` from this version onward."
+    "note": "this run predates the tool recording these knobs, so they are NOT evidence here. The two knobs each arm ran with ARE in the brief: the robustness arm's `--query-chars 200` and `--read-limit 60`, against the headline's `--read-limit 30` and default query cap (500) (\u00a73 and \u00a78). \u26d4 `key_tokens` 4 and `min_query_tokens` 3 are the TOOL'S argparse DEFAULTS, not recorded run values \u2014 this run could have overridden either and the artifact would not show it, so they are NOT cited as what it ran with. \u26d4 The two point arms differ in BOTH `query_chars` and `read_limit`, so the robustness arm's difference cannot be attributed to the query cap alone (#13267 F5). The tool records `construction.query_chars`/`key_tokens`/`min_query_tokens` from this version onward."
   },
   "environment": {
     "db_uri_scheme": "docker",
