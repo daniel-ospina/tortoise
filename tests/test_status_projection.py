@@ -3289,6 +3289,33 @@ class TestNonScalarStatus12869:
             assert "name-boom" not in str(ei.value)
             assert _carrier_row(sdk, "Object", "rr-name") is None, (
                 "a refused non-string create left a node behind")
+
+            # (h) the RECORD-side probe, not just the message (#12910 review
+            #     round 9, P3). `_refuse_unencodable_object_status` asks
+            #     "does this value have a JSON form?" by CALLING `json.dumps`,
+            #     and `dumps` runs the operand's own `__iter__`/`items()` — so a
+            #     hostile one raised THROUGH the `except (TypeError, ValueError)`
+            #     and replaced the promised `ValueError` (MEASURED:
+            #     `RuntimeError: iter-boom`). Any failure to serialise is "no
+            #     JSON form", whatever its class, which is why the probe now
+            #     catches every exception and refuses. ⛔ ENTERED THROUGH
+            #     `add_object`: the encoder is the journal door's, not the
+            #     create door's, so a `create_object` arm would never reach it.
+            class _BoomIter(list):
+                def __iter__(self):
+                    raise RuntimeError("iter-boom")
+
+            with pytest.raises(ValueError) as ei:
+                api.add_object("rr-iter", "core:strategy",
+                               status=_BoomIter([1]))
+            assert "iter-boom" not in str(ei.value), (
+                "the encoder refusal let the operand's own exception out: "
+                + str(ei.value))
+            assert "which has no" in str(ei.value), (
+                "the encoder refusal did not answer as a refusal: "
+                + str(ei.value))
+            assert _carrier_row(sdk, "Object", "rr-iter") is None, (
+                "a refused encoder write left a node behind")
         finally:
             sdk.close()
 

@@ -8987,7 +8987,7 @@ def _refuse_unencodable_object_status(props, *, door: str, target: object) -> No
     import json as _json
     try:
         _json.dumps(word)
-    except (TypeError, ValueError):
+    except Exception:  # noqa: BLE001, RUF100 — a hostile __iter__/keys() is not a JSON form
         raise ValueError(
             f"{door} refused a non-string status for {_refusal_repr(target)}: "
             f"{_refusal_repr(word)} is {_refusal_type_name(word)}, which has no "
