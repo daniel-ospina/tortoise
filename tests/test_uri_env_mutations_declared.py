@@ -134,6 +134,14 @@ def _scan_key(path: Path) -> str:
 # one declared regex. The regexes are site-CLASS patterns (robust to line
 # drift); the lane intent is documented per entry.
 DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
+    # #12855: the stored-rows rewrite drives `main` against a TEMP embedded DB and
+    # a TEMP journal — a URI redirect would fold the run onto the shared server
+    # graph and the tool would rewrite somebody else's data. The delenv IS the
+    # fixture (the tool refuses a journal-less target, so the target must be the
+    # local one); every site uses `monkeypatch`, so no lane state leaks.
+    "test_12855_outdated_rewrite.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+    ],
     # ── DELIBERATE_EMBEDDED_LANE: SDK-level tests force the embedded lane so
     #    the constructions never ride the URI (the delenv IS the point) ──────
     # #2944: the two embedded allow-path tests force the embedded lane so the
