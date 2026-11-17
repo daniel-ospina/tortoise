@@ -1246,8 +1246,9 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # here, so this gate reds on `main` (run 44025094904, `test (j)`
     # 133859918399: the only failure in 4007 tests). It is the same "module
     # landed without its entry" shape as #9664 and #12275 above, on the very
-    # file #13144/#13146 register in ci-surfaces — a manifest row cannot fix
-    # it, because this guard scans the FILES, not the manifest.
+    # file #13144 register(s) in ci-surfaces (the row #13146 proposed, and
+    # which this line first named, was closed in #13144's favour) — a manifest
+    # row cannot fix it, because this guard scans the FILES, not the manifest.
     #
     # All six are DELIBERATE_URI, and none is this guard's vacuity vector (a
     # docker-half test silently constructing embedded): the module's SUBJECT is
@@ -1310,21 +1311,41 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # neither mistakes it for this declaration's doing nor reads this row as
     # covering it.
     #
-    # ⛔ COLLISION, to be handled at merge: #13146 (open) adds a SECOND row for
-    # this SAME key, with ONE broad unanchored arm
-    # (`os\.environ(?:\[…\]\s*=|\.pop\(…)`) that authorizes every `=`/`pop(…)`
-    # form in the file at once — measured against the same eleven census-visible
-    # spellings, 8 of them. It is not unlimited: a future
-    # `monkeypatch.setenv`/`monkeypatch.delenv`/`del` site still reds there, the
-    # `del` because that alternative is nested inside `os\.environ(?:…` and so
-    # cannot match `del os.environ[…`. Two rows for one key is a duplicate dict
-    # literal —
-    # `ruff` reds it (measured: `Found 1 error` on a two-key sample under this
-    # repo's config) and `test_dod_5090_probe.py`'s duplicate-key scan reds it
-    # in the pytest shard, while at RUNTIME the later key silently shadows the
-    # earlier anyway. So whichever PR lands SECOND must drop the duplicate row
-    # — not add a third — and if #13146 lands first, its broad arm is replaced
-    # by these three.
+    # ⛔ COLLISION, to be handled at merge — and the carrier is NOT the one
+    # first recorded here. Two rows for one key is a duplicate dict literal:
+    # `ruff` reds it (`F601 … Found 1 error`) and `test_dod_5090_probe.py`'s
+    # duplicate-key scan reds it in the pytest shard, while at RUNTIME the
+    # later key silently shadows the earlier anyway (#12631 is that class
+    # landing for real on this very file).
+    #   The row this entry originally named, #13146, is **CLOSED and was never
+    #   merged** — superseded by #13144 (`3d437429e98d`), which is what actually
+    #   registered `test_13034` in `ci-surfaces`. Measured at the entry's base:
+    #   `git show origin/main:tests/test_uri_env_mutations_declared.py` carries
+    #   NO row for this key, so #13146's broad arm can never land and cannot be
+    #   replaced by these three. Its measurement is kept only as history: ONE
+    #   unanchored arm (`os\.environ(?:\[…\]\s*=|\.pop\(…)`) authorized 8 of
+    #   the eleven census-visible spellings — not all: `monkeypatch.setenv`/
+    #   `monkeypatch.delenv`/`del` still red there, the `del` because that
+    #   alternative is nested inside `os\.environ(?:…` and so cannot match
+    #   `del os.environ[…`.
+    #   The LIVE duplicate carrier is **#13164** (open, `34f80298a2bf`), which
+    #   must land FIRST — it is the only carrier that clears `test (h)`'s
+    #   `_hydrate_evidence` and `test (i)`'s two raw `FalkorDB(...)` clients,
+    #   neither of which any row here can reach. It carries its OWN row for
+    #   this key at its `:482`, two loose arms
+    #   (`os\.environ\["TORTOISE_DB_URI"]\s*=` and
+    #   `os\.environ\.pop\(\s*"TORTOISE_DB_URI"`). Measured, not inferred,
+    #   at `d8790fd364f8` (the figures shift with any edit here, so they are
+    #   pinned to the head they were taken on):
+    #   `git merge-tree --write-tree --merge-base=3d437429e98d 34f80298a2bf
+    #   d8790fd364f8` → tree `4453be273594`, in which the key occurs TWICE
+    #   inside the one dict literal — `:482`, #13164's loose 2-arm row, and
+    #   `:1346`, this row's anchored 3 arms.
+    #   So the order is forced and the consequence is one-way: if this PR lands
+    #   after #13164 it MUST DROP this row (never add a third), which is why
+    #   the narrowing should instead be moved BEFORE that landing — #13164's
+    #   `:482` row takes these three `^`…`$` arms and this row is dropped, so
+    #   the tightening survives the merge instead of being lost with it.
     "test_13034_currency_rule_reads_position.py": [
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
