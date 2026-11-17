@@ -121,8 +121,8 @@ every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODU
 * `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,329** across **141** files, while the tool
 reports 2,342 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
 concatenation leaves `MATCH` and its `(` on two lines, one occurrence to the tool and none to `rg`.
-(A bare case-sensitive `rg` gives 2,060, and `-i` without the exclusion 2,401 — which is why the
-number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
+(A bare case-sensitive `rg` gives 2,060, and `-i` without the test-module exclusion 2,332 — which is
+why the number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
 the **= 1,571 on a door-call line** are both counts, not differences.⛔ The **residual** row is
@@ -398,12 +398,16 @@ reads) and **no** Cypher statement site, so `ast_door_calls` **1569→1571** and
 `non_cypher_door_calls` **258→260** while `sites`/`plain`/`candidates` are unchanged (1311 / 859 /
 578 — the 578 is the `plain` READ half, which is also the migration-candidate count). `files_scanned`
 stays 297 and `files_with_sites` 99: the reader lives in a file that already carries sites. The
-`rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,329 / 1,630 bare / 2,060 / 2,401),
-Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts match`**.
-⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
-inside files that already carried sites, so the re-cut moved **31 of Appendix A's 1,313 rows** while
-all 25 scalars stayed identical — the exact `file:line`-versus-SCALAR gap this section describes,
-caught by measuring rather than by trusting the pins.
+`rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,329 / 1,630 bare / 2,060 / 2,332
+`-i` with the test modules included), Appendix A is regenerated with `--markdown`, and `--check`
+reports **`25 pinned counts match`**.
+⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`, +18 lines in
+`tortoise/sdk.py`) and `#13224` (`5ada665aa9`, +13 lines in `tortoise/projection/entities.py`) moved
+code inside files that already carried sites, so the re-cut moved **404 of Appendix A's 1,311 rows**
+(373 in `tortoise/sdk.py`, 31 in `tortoise/projection/entities.py`) while all 25 scalars stayed
+identical. A single insertion shifts every site below it, which is why a 31-line change moves 404
+rows — the exact `file:line`-versus-SCALAR gap this section describes, caught by measuring rather
+than by trusting the pins.
 
 The paragraph below is `main`'s cut, kept as the record of it.
 
