@@ -136,6 +136,82 @@ _DEAD_SPELLINGS = {
 }
 
 
+# ── the CREATE door applies the same ONE vocabulary door, and it may not be
+#    disarmed by a second `status`-rendering key (#13143 review, P1) ─────────
+
+class _K(str):
+    """A key that RENDERS as ``status`` while being a different object.
+
+    The renderer union is what the doors read (`live.py`'s two-renderer
+    contract), and the live map write applies ``str(key)`` — so one call can
+    carry TWO keys that both mean ``status``. ``__eq__``/``__hash__`` are
+    delegated to the CONTENT so the dict keeps both entries instead of
+    collapsing them (a plain ``{"status": …, "status": …}`` cannot exist).
+    """
+
+    def __str__(self):
+        return "status"
+
+    def __hash__(self):
+        return hash(str.__str__(self))
+
+    def __eq__(self, other):
+        return str.__eq__(str.__str__(self), other)
+
+
+def test_a_two_status_bag_cannot_smuggle_a_word_past_the_CREATE_door(sdk):
+    """⛔ FAIL-OPEN MEASURED BEFORE THIS PIN (#13143 review, P1).
+
+    The create door exempts an explicit ``None`` — the DELETE sentinel
+    ``_sanitize_props`` documents — from the vocabulary. It read that value
+    FIRST-WINS over the renderer union, so a bag whose first rendered value was
+    ``None`` skipped validation for the WHOLE bag and left the second key's word
+    ungraded AND unrewritten:
+
+        create_object(props={K("zzz"): None, "status": "in_progress"})
+            -> STORED status='in_progress'   (measured, 199c16c164)
+
+    ``in_progress`` is a POSITION word: no read family excludes it, so the row
+    reads as CURRENT — the exact #10371/#11824 defect class this work closes,
+    reachable through the door that installs the vocabulary. The identical bag
+    through ``update_knowledge`` was already refused (CONFLICTING status write),
+    so create and update disagreed about which bags they accept.
+
+    A bag naming ``status`` twice has no knowable landing word, so it is refused
+    — ``_status_write_is_ambiguous``, the same helper and the same rule the write
+    door uses. Deleting the refusal reds this pin.
+    """
+    for t, make in (("object", sdk.create_object), ("subject", sdk.create_subject)):
+        name = f"f1-{t}"
+        with pytest.raises(ValueError, match="CONFLICTING status write"):
+            make(name, props={_K("zzz"): None, "status": "in_progress"})
+        with pytest.raises(ValueError, match="CONFLICTING status write"):
+            make(name + "-junk", props={_K("zzz"): None, "status": "garbage"})
+        # non-vacuity: nothing was minted, so the refusals above did not
+        # half-write a row carrying the word they refused
+        rows = sdk._get_proj().g.query(
+            "MATCH (n {name:$n}) RETURN n.status",
+            params={"n": name}).result_set
+        assert rows == [], f"a refused create must mint nothing: {rows!r}"
+        assert t  # the parametrisation is explicit, not incidental
+
+
+def test_the_delete_sentinel_still_works_on_the_CREATE_door(sdk):
+    """The control the refusal above must NOT eat: ``status=None`` alone.
+
+    A single-key ``None`` is the caller's WHOLE intent — the property delete
+    ``_sanitize_props`` documents, and the #13143 finding-1 shape — so the bag
+    stays a legal create. Without this pin, "refuse every bag with a ``None``"
+    would pass the test above while breaking a documented write.
+    """
+    for make in (sdk.create_object, sdk.create_subject):
+        node = make("f1-delete-sentinel", props={"status": None})
+        node_id = node.get("id") or node["node"]["id"]
+        assert _stored(sdk, node_id).get("status") in (None, ""), (
+            "an explicit `status=None` must not store a word: "
+            + repr(_stored(sdk, node_id)))
+
+
 # ── the dead set is the family's RECORDED one, not a literal in the guard ──
 
 def test_the_guard_uses_the_family_terminal_sets_that_already_exist():
