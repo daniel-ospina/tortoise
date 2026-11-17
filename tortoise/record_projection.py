@@ -321,11 +321,11 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # `embedding_vec` GENERATED, an HNSW index), which is what makes their
     # fingerprints durable in the record and pgvector-indexable at all
     # (owner ruling 2026-11-17; standard `STORAGE-ARCHITECTURE.md` §14.3 V3's
-    # remaining half, and the §17.5 override that file states). It contributes TWO
-    # bindable columns (`embedding`, one per table — the record writer derives
-    # them) plus TWO GENERATED ones (`embedding_vec`, one per table) — i.e. two
-    # column NAMES, counted the way the entry above counts — and it relaxes NO
-    # props refusal: `chk_object_props_no
+    # remaining half, and the §17.5 override that file states). It contributes FOUR
+    # columns under TWO names — two bindable (`embedding`, one per table, which the
+    # record writer derives) and two GENERATED (`embedding_vec`, one per table) —
+    # counted per COLUMN, the way the entry above counts its three — and it
+    # relaxes NO props refusal: `chk_object_props_no
     # _derived`/`chk_subject_props_no_derived` still refuse `embedding` (and
     # `status`) in the props tail.
     "20261117000001_record_object_subject_embedding.sql",

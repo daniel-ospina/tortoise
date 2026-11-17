@@ -77,10 +77,21 @@
 --     embedder and no second text composition — the writer's text expression is
 --     per-label and is pinned against the graph fold's own
 --     (`tests/test_13220_record_label_embeddings.py`);
---   * therefore a record-based rebuild can RESTORE it by recomputing, which is
---     the durability gap #13220 names as gap 1 ("their fingerprints exist only
---     in FalkorDB today … a record-based rebuild cannot restore them") — the
---     column is what closes that gap, not what re-opens it;
+--   * therefore the value is RECOMPUTABLE rather than authority — but a
+--     record-based rebuild does NOT yet recompute it. `cache_projection`
+--     drops a DERIVED column on the way back to the node (`_props_from_row`'s
+--     `refused` arm: `refused_props_names()` still lists `embedding` for both
+--     labels), so `python -m tortoise record-restore` lands these two nodes
+--     WITHOUT a vector, and nothing on that path encodes — `record_restore` →
+--     `rebuild_from_record` → `cache_projection.record_plan` contains no
+--     `encode_for_row` call at all (the only recomputers are
+--     `_upsert_object`/`_upsert_subject`, which run on the JOURNAL fold).
+--     ⛔ SO STATE THE SPLIT PLAINLY: the column closes gap 1's INDEXABILITY half
+--     (the vector is in Postgres and HNSW-indexed) and NOT its RESTORE half;
+--     teaching `rebuild_from_record` to re-encode a dropped DERIVED vector is a
+--     FOLLOW-UP, and an earlier cut of this header claimed it was already done
+--     (review, P2 — measured: `node_from_row(Object, {…, embedding})` returns no
+--     `embedding` prop);
 --   * `embedding_vec` stays GENERATED, so "the indexed vector disagrees with the
 --     stored payload" is not a reachable state (the same property
 --     `20261109000001` took for point/source/event).
@@ -202,7 +213,7 @@ CREATE INDEX IF NOT EXISTS idx_subject_embedding_vec_hnsw
     ON public.subject USING hnsw (embedding_vec public.vector_cosine_ops);
 
 COMMENT ON COLUMN public.object.embedding IS
-    'The Object fingerprint, in the record (#13220, owner ruling 2026-11-17). DERIVED — a pure function of the carried `name` through the SAME seam the graph fold uses (embeddings.encode_for_row), so a record-based rebuild restores it by recomputing; it is not authority and carries no independent write path. The graph copy (`o.embedding`) is NOT retired: the 2026-11-10 KEEP ruling (#11395) forbids that.';
+    'The Object fingerprint, in the record (#13220, owner ruling 2026-11-17). DERIVED — a pure function of the carried `name` through the SAME seam the graph fold uses (embeddings.encode_for_row), so it is RECOMPUTABLE and not authority, and it carries no independent write path. ⛔ It is not yet RE-computed by a record-sourced rebuild: cache_projection drops a DERIVED column on the way back to the node, so record-restore lands this node without a vector until that path learns to re-encode. The graph copy (`o.embedding`) is NOT retired: the 2026-11-10 KEEP ruling (#11395) forbids that.';
 COMMENT ON COLUMN public.object.embedding_vec IS
     'The ANN-indexed projection of public.object.embedding (#13220). GENERATED ALWAYS — never written by the record projection or a caller; NULL when the payload is not a 384-long all-numeric JSON array. idx_object_embedding_vec_hnsw is what makes the label pgvector-served (V3''s remaining half, §14.3).';
 COMMENT ON COLUMN public.subject.embedding IS
