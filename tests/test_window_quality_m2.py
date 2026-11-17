@@ -1037,12 +1037,25 @@ def test_no_record_counts_the_degenerate_complete_arm_as_an_observation():
         # read the artifact too.
         for m in re.finditer(r"found_deep_of_demoted", text):
             claim = text[m.start(): m.start() + 260]
-            if not re.search(r"(?:==|is)\s*\**\s*0(?:\.0)?\b", claim):
+            # ⛔ Both halves are required. A bare `= 0` used ALGEBRAICALLY — e.g.
+            # "all 11 arms, `complete` included, so `silent_zero` ≡ 0 and — given
+            # `found_deep_of_demoted = 0` — `wrong_not_miss` ≡ 1" — is a correct
+            # derivation, not an unscoped observation claim. Only a zero attached
+            # to "in every" is the defect (an arm COUNT asserted as evidence).
+            if "in every" not in claim:
                 continue
+            if not re.search(r"found_deep_of_demoted\D{0,12}?(?:(?:==?)|is|was)\s*\**\s*0(?:\.0)?\b", claim):
+                continue
+            # ⛔ `==`, `=` and `is` must ALL count: a single `=` is the most
+            # natural prose spelling, and a two-token matcher would silently
+            # skip it — measured: re-introducing
+            # "`found_deep_of_demoted` = 0.0 in every arm of both populations"
+            # left the suite green under `(?:==|is)`. `test_the_zero_scope_scan_`
+            # `recognises_every_spelling` pins the matcher on its own.
             scoped = re.search(r"in every\s+\**windowed", claim)
             assert scoped, (
-                f"{name} claims found_deep_of_demoted is zero without scoping it "
-                f"to the windowed arms — the complete arm has no demoted "
+                f"{name} claims found_deep_of_demoted is zero in every arm without "
+                f"scoping it to the windowed arms — the complete arm has no demoted "
                 f"queries, so its zero is a degenerate denominator")
 
 
@@ -1173,8 +1186,42 @@ def test_the_tool_refuses_without_a_live_graph():
 # ---------------------------------------------------------------------------
 
 
+def test_the_zero_scope_scan_recognises_every_spelling():
+    """The de-scope scan must see `=`, `==` and `is` — a self-test on the guard.
+
+    ⛔ Guards that cannot fail on their own defect are this PR's recurring failure.
+    The scan's matcher was `(?:==|is)`, so the most natural prose spelling — a
+    single `=` — was skipped entirely: re-introducing "`found_deep_of_demoted` =
+    0.0 in every arm of both populations" left the suite GREEN. This asserts the
+    matcher itself, on the strings the documents actually use.
+    """
+    pat = re.compile(r"(?:(?:==?)|is|was)\s*\**\s*0(?:\.0)?\b")
+    unscoped = [
+        "`found_deep_of_demoted` is 0.0 in every arm of both populations",
+        "`found_deep_of_demoted` == 0 in every arm of both populations",
+        "`found_deep_of_demoted` = 0.0 in every arm of both populations",
+        "found_deep_of_demoted == 0.0 in every arm of both populations",
+        "found_deep_of_demoted was 0 in every arm",
+    ]
+    for s in unscoped:
+        assert pat.search(s), f"the scan would MISS this spelling: {s!r}"
+        assert not re.search(r"in every\s+\**windowed", s), s
+    # …and the correctly-scoped spellings still pass both halves
+    for s in ("`found_deep_of_demoted` == 0 in every **windowed** arm",
+              "found_deep_of_demoted is 0.0 in every **windowed** arm"):
+        assert pat.search(s), s
+        assert re.search(r"in every\s+\**windowed", s), s
+
+
 def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
-    """Each published `A vs B at COV` pair must be the real `:Object` recall@3 pair."""
+    """Each published `A vs B at COV` pair must be the real cell — in EVERY record.
+
+    ⛔ Parameterised over both documents. The first revision read ONLY the README,
+    so §9.1 carried the same operands guarded by nothing but the membership set:
+    measured green at 44 passed while `46.0 vs 46.3 at 0.50` was inverted to
+    `46.3 vs 46.0` in §9.1 (the identical README mutation reds). A one-of-two-
+    siblings guard is the defect class this suite exists to catch.
+    """
     raw = README.read_text()
     obj = _arms(artifact, "object")
 
@@ -1182,19 +1229,42 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
     start = raw.index("`tail` (evict the least-referenced/most-boilerplate first)")
     body = raw[start:raw.index("---", start)]
 
+    arch = ARCH.read_text(encoding="utf-8")
+    a_start = arch.index("### 9.1 M2")
+    body_91 = arch[a_start:arch.index("\n---", a_start)]
+
     # Every "A vs B **at COV**" — the pair bound to its OWN trailing coverage, so a
     # coverage token from a later clause cannot be borrowed by an earlier pair.
     bound = re.findall(r"(\d+\.\d)\s+vs\s+(\d+\.\d)\**\s+at\s+(0\.\d\d)", body)
+    bound_91 = re.findall(r"(\d+\.\d)\s+vs\s+(\d+\.\d)\**\s+at\s+(0\.\d\d)", body_91)
     assert len(bound) == 4, bound
+    assert bound_91, "§9.1 publishes no `A vs B at COV` pair — did the sentence move?"
 
-    for a, b, cov in bound:
+    present = list(bound) + list(bound_91)
+    assert present, "no `A vs B at COV` pair found in either record"
+
+    # ⛔ Bind each pair to a REAL cell of a gated metric, in the RIGHT direction.
+    # §9.1's pairs are not all `recall@3` — `51.7 vs 49.7 at 0.50` is `found_deep`
+    # — and the reviewer measured that applying the recall@3 binding uniformly
+    # false-reds. Matching against the metric SET keeps value and direction bound
+    # (a swap matches no metric with the right direction) without forcing the test
+    # to parse prose labels the section does not consistently carry.
+    metrics = ("recall@3", "found_deep", "recall@5", "recall@10", "recall@15")
+    for a, b, cov in present:
         k = str(float(cov))          # "0.50" -> "0.5"; arm keys are un-padded
-        tail = obj[f"tail@{k}"]["recall@3"] * 100
-        rnd = obj[f"random@{k}"]["recall@3"] * 100
-        assert float(a) == pytest.approx(tail, abs=0.05), (cov, a, tail)
-        assert float(b) == pytest.approx(rnd, abs=0.05), (cov, b, rnd)
+        hits = [
+            m for m in metrics
+            if abs(float(a) - obj[f"tail@{k}"][m] * 100) < 0.05
+            and abs(float(b) - obj[f"random@{k}"][m] * 100) < 0.05
+        ]
+        assert hits, (
+            f"{a} vs {b} at {cov} is no real (tail, random) cell of any gated "
+            f"metric — a swap or a cross-metric figure")
         # direction is part of the claim, not just the magnitudes
-        assert (float(a) > float(b)) == (tail > rnd), (cov, a, b, tail, rnd)
+        for m in hits:
+            tail = obj[f"tail@{k}"][m]
+            rnd = obj[f"random@{k}"][m]
+            assert (float(a) > float(b)) == (tail > rnd), (cov, m, a, b, tail, rnd)
 
     # The two "buys back" cells, each bound to its own population/arm/metric.
     assert "up to **2.00 pp on `found_deep` at 0.50**" in body
