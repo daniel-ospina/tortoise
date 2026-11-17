@@ -1597,6 +1597,8 @@ class R2Storage:
                 aws_access_key_id=self._ak,
                 aws_secret_access_key=self._sk,
                 region_name="auto",
+                # #13097: pinned explicitly — see `_STORAGE_MAX_POOL_CONNECTIONS`.
+                config=_s3_client_config(),
             )
         return self._client
 
@@ -2299,23 +2301,47 @@ def create_backup(
 # ≈ 420 sequential GETs at 100-150 ms ≈ 42-63 s.
 #
 # ⛔ 8, and the number is COUPLED to the S3 client's connection pool, not chosen
-# for roundness. `botocore`'s default `MAX_POOL_CONNECTIONS` is 10 and
-# `R2Storage._s3()` passes no `Config`, so an in-flight count above 10 makes
-# urllib3 close and discard the overflow connection on every wave — each dropped
-# connection re-pays TCP+TLS, i.e. the exact latency this fixes, plus a
-# "Connection pool is full" warning per dropped connection. Staying under the
-# pool keeps every GET of THIS invocation on a reused connection. ⚠️ That budget
-# is shared, not per call: `_backup_storage()` caches ONE `R2Storage` with ONE
-# client, so concurrent listings and the sweep's writes draw on the same pool —
-# two simultaneous `/v1/backups` requests can still saturate it. The bound is
-# therefore per invocation by design: a process-wide semaphore would let one slow
-# listing starve a peer request.
-# `test_the_manifest_concurrency_bound_stays_under_the_client_pool` pins the
-# coupling, so raising this number requires touching that test.
+# for roundness. An in-flight count above the pool size makes urllib3 close and
+# discard the overflow connection on every wave — each dropped connection re-pays
+# TCP+TLS, i.e. the exact latency this fixes, plus a "Connection pool is full"
+# warning per dropped connection. Staying under the pool keeps every GET of THIS
+# invocation on a reused connection.
+#
+# The pool is therefore pinned EXPLICITLY (`_STORAGE_MAX_POOL_CONNECTIONS`,
+# passed to the client as `config=_s3_client_config()`), not inherited from
+# botocore's default of 10. Two reasons, and the second is why this is not a
+# constant-to-constant comparison:
+#   1. that budget is shared, not per call: `_backup_storage()` caches ONE
+#      `R2Storage` with ONE client, so concurrent listings and the sweep's writes
+#      draw on the same pool — two simultaneous `/v1/backups` requests would
+#      saturate a 10-connection default between them;
+#   2. a test that compares this constant to a HAND-WRITTEN copy of the library
+#      default cannot fail when the real ceiling moves (a botocore change, or a
+#      future `Config(...)` added to `_s3()`), so it would report a coupling it
+#      does not measure. `test_the_manifest_concurrency_bound_stays_under_the_
+#      client_pool` asserts the number the CLIENT IS BUILT WITH instead.
+#
+# The per-invocation bound stays per invocation on purpose: a process-wide
+# semaphore would let one slow listing starve a peer request.
 _LIST_MANIFEST_MAX_INFLIGHT = 8
 
-# The botocore default this constant is coupled to (`_LIST_MANIFEST_MAX_INFLIGHT`).
-_BOTOCORE_DEFAULT_MAX_POOL_CONNECTIONS = 10
+# The connection budget the storage client is BUILT with. Must stay at or above
+# `_LIST_MANIFEST_MAX_INFLIGHT` (pinned by the test named above); the headroom
+# covers concurrent listings plus the sweep's writes sharing one cached client.
+_STORAGE_MAX_POOL_CONNECTIONS = 32
+
+
+def _s3_client_config():
+    """The botocore config every storage client is built with.
+
+    `max_pool_connections` is pinned here rather than left to the library
+    default, so the ceiling the manifest pool is coupled to is a property of
+    THIS code and is measurable from it. One definition: the client construction
+    below and the coupling test both read it.
+    """
+    from botocore.config import Config
+
+    return Config(max_pool_connections=_STORAGE_MAX_POOL_CONNECTIONS)
 
 
 def list_backups(storage: BackupStorage, org_id: str,

@@ -16,13 +16,14 @@ import sys
 import tempfile
 import threading
 import time
+import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tortoise.hosted_backup import (
-    _BOTOCORE_DEFAULT_MAX_POOL_CONNECTIONS,
     _LIST_MANIFEST_MAX_INFLIGHT,
+    _STORAGE_MAX_POOL_CONNECTIONS,
     DUMP_FORMAT,
     LockVerificationError,
     MemoryStorage,
@@ -1388,7 +1389,7 @@ def test_r2storage_env_construction(monkeypatch):
     monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk_env")
     monkeypatch.setenv("R2_BUCKET", "bkt_env")
     fake = _FakeS3()
-    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    _install_fake_boto3(monkeypatch, _FakeBoto3(fake))
 
     store = R2Storage()  # no kwargs — the hosted API path
     store.upload("k", b"d")
@@ -1647,9 +1648,35 @@ class _FakeBoto3:
         return self._fake
 
 
+class _CapturingConfig:
+    """Stand-in for `botocore.config.Config` — records the kwargs `_s3()` passes."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.__dict__.update(kwargs)
+
+
+def _install_fake_boto3(monkeypatch, fake_boto3):
+    """Install a boto3 double TOGETHER with the botocore modules the real one ships.
+
+    ⛔ A boto3 double on its own fakes a shape that cannot exist: every real boto3
+    install carries `botocore`, and `R2Storage._s3()` builds its client with an
+    explicit `botocore.config.Config(max_pool_connections=...)` so the manifest
+    fan-out is coupled to a pool THIS code owns. Stubbing only `boto3` would test
+    a construction path production never takes.
+    """
+    stub_botocore = types.ModuleType("botocore")
+    stub_config = types.ModuleType("botocore.config")
+    stub_config.Config = _CapturingConfig
+    stub_botocore.config = stub_config
+    monkeypatch.setitem(sys.modules, "botocore", stub_botocore)
+    monkeypatch.setitem(sys.modules, "botocore.config", stub_config)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+
 def _r2_with_fake_boto3(monkeypatch) -> tuple[R2Storage, _FakeS3]:
     fake = _FakeS3()
-    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    _install_fake_boto3(monkeypatch, _FakeBoto3(fake))
     store = R2Storage(
         endpoint_url="https://acct.r2.cloudflarestorage.com",
         access_key_id="ak",
@@ -2053,18 +2080,85 @@ def test_list_backups_bounds_manifest_concurrency():
     assert 1 < store.max_inflight <= _LIST_MANIFEST_MAX_INFLIGHT
 
 
-def test_the_manifest_concurrency_bound_stays_under_the_client_pool():
-    """#13097: the bound is COUPLED to botocore's connection pool, not cosmetic.
+def test_the_manifest_concurrency_bound_stays_under_the_client_pool(monkeypatch):
+    """#13097: the bound is COUPLED to the pool the client is ACTUALLY BUILT WITH.
 
-    `R2Storage._s3()` builds its client with no `Config`, so botocore's default
-    `MAX_POOL_CONNECTIONS` (10) is the real ceiling: an in-flight count above it
-    makes urllib3 close and discard the overflow connection on every wave — each
-    dropped connection re-pays TCP+TLS (the latency this change removes) and logs
-    a "Connection pool is full" warning. This test exists so raising the constant
-    requires either a matching client config or a deliberate edit here.
+    ⛔ This test reads the ceiling from the built client, not from a hand-written
+    copy of a library default. The earlier version compared
+    `_LIST_MANIFEST_MAX_INFLIGHT` to a module-level literal that mirrored
+    botocore's default — two constants in the same file, so it stayed green if
+    botocore changed its default OR if `_s3()` grew a `Config(...)` that lowered
+    the pool. That is a coupling test that cannot detect the failure it documents.
+
+    Here the client construction is exercised against stubs, so the assertion is
+    about the config THIS code passes: a `_s3()` that stops passing one, or that
+    passes a smaller pool than the manifest fan-out, fails here. No botocore in
+    the test environment is required (it is an optional extra) — which is also
+    why the check is not `importorskip`-ed into a permanent skip.
     """
-    assert _LIST_MANIFEST_MAX_INFLIGHT <= _BOTOCORE_DEFAULT_MAX_POOL_CONNECTIONS
-    assert 1 < _LIST_MANIFEST_MAX_INFLIGHT < 100  # still a bound, still a fan-out
+    captured: dict[str, object] = {}
+
+    class _StubBoto3:
+        def client(self, *args, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    _install_fake_boto3(monkeypatch, _StubBoto3())
+
+    store = R2Storage(
+        endpoint_url="https://acct.r2.cloudflarestorage.com",
+        access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
+    )
+    store._s3()
+
+    config = captured.get("config")
+    assert config is not None, "_s3() built the client WITHOUT a config — the pool is not ours to reason about"
+    pool = getattr(config, "max_pool_connections", None)
+    assert pool == _STORAGE_MAX_POOL_CONNECTIONS
+    assert pool >= _LIST_MANIFEST_MAX_INFLIGHT, (
+        "the manifest fan-out exceeds the client's connection pool: every wave "
+        "would drop its overflow connections and re-pay TCP+TLS")
+
+
+def test_list_backups_reports_the_input_order_failure_not_the_first_to_finish():
+    """#13097: `map` (not `as_completed`) is load-bearing for WHICH error a caller sees.
+
+    The pool exists to overlap GETs; `map` was chosen so the surfaced exception is
+    the FIRST FAILURE IN INPUT ORDER, exactly as the serial loop reported it.
+    `as_completed` (or submit-then-take-first-completed) would make it the first
+    to finish, i.e. network timing decides which error a restore procedure reads.
+
+    Constructed so the two differ: the first key fails after a delay, the last key
+    fails immediately. `map` surfaces the first key; an as-completed read surfaces
+    the last. A test that only asserted the exception TYPE (as the propagation test
+    above does) could not tell them apart.
+    """
+
+    class _OrderedFailureStorage(MemoryStorage):
+        def __init__(self, fail_at: dict[str, float]) -> None:
+            super().__init__()
+            self._fail_at = fail_at
+
+        def download(self, key: str) -> bytes:
+            delay = self._fail_at.get(key)
+            if delay is not None:
+                time.sleep(delay)
+                raise RuntimeError(f"boom {key}")
+            return super().download(key)
+
+    store = _OrderedFailureStorage({})
+    org_id = "team_order"
+    _seed_manifests(store, org_id, 6)
+    keys = [k for k in store.list(f"backups/{org_id}/") if k.endswith("/manifest.json")]
+    assert len(keys) == 6
+    # First in input order = slow failure; last = instant failure.
+    store._fail_at = {keys[0]: 0.05, keys[-1]: 0.0}
+
+    with pytest.raises(RuntimeError) as ei:
+        list_backups(store, org_id)
+
+    assert keys[0] in str(ei.value), f"expected the input-order failure {keys[0]!r}, got {ei.value}"
+    assert keys[-1] not in str(ei.value), "an as-completed read surfaced the FASTEST failure instead"
 
 
 def test_the_mirrored_botocore_pool_default_is_still_the_real_one():
@@ -2215,7 +2309,7 @@ def test_r2storage_builds_exactly_one_client_under_concurrent_first_callers(monk
                 constructed.append(client)
                 return client
 
-    monkeypatch.setitem(sys.modules, "boto3", _SlowCountingBoto3())
+    _install_fake_boto3(monkeypatch, _SlowCountingBoto3())
     store = R2Storage(
         endpoint_url="https://acct.r2.cloudflarestorage.com",
         access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
@@ -2340,7 +2434,7 @@ def test_r2_create_if_not_exists_412_race(monkeypatch):
             return {}
 
     fake = _ConditionalS3()
-    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    _install_fake_boto3(monkeypatch, _FakeBoto3(fake))
     store = R2Storage(
         endpoint_url="https://acct.r2.cloudflarestorage.com",
         access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
@@ -2370,7 +2464,7 @@ def test_r2_create_if_not_exists_fallback_head(monkeypatch):
             return {}
 
     fake = _NoConditionalS3()
-    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    _install_fake_boto3(monkeypatch, _FakeBoto3(fake))
     store = R2Storage(
         endpoint_url="https://acct.r2.cloudflarestorage.com",
         access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
