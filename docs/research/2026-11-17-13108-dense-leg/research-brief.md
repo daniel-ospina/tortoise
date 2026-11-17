@@ -56,7 +56,7 @@ reading of the box at the time, not a measurement; the probe's own `windows`/`ar
 
 ## 1. Pass 1 — the internal canon, in my own words
 
-**What the dense leg is.** `run_vector_query` (`search_engine.py:3525`) is the semantic half of a
+**What the dense leg is.** `run_vector_query` (`search_engine.py:3550`) is the semantic half of a
 fused read. It first tries the engine's ANN (`CALL db.idx.vector.queryNodes`, two argument-order
 signatures, `#1359`); if that is unavailable or fails it falls through to an exact brute-force
 scan (`vec.euclideanDistance` over the label, `WHERE n.embedding IS NOT NULL`); both paths hand

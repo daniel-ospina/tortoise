@@ -1370,27 +1370,41 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
         r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
-    # ⛔ #13140's `test_13098_cypher_inventory.py` landed on `main` (`6652917489`)
-    # with ONE raw URI mutation at `:1036` and no entry here — the same
-    # "module landed without its entry" shape as the #13158 pair above, on the next
-    # module main merged. It is INHERITED by this branch rather than introduced by
-    # it (`git show origin/main:tests/test_uri_env_mutations_declared.py` carries no
-    # such key, and the module is main's), but it reds THIS tree's `test (k)` all the
-    # same, and no open PR owns the row (`#13191` and `#13164` both edit this file for
-    # the `setdefault` and census arms, neither adds this key), so it is declared here
-    # rather than left for a fourth lane to re-derive.
+    # ── test_13098_cypher_inventory.py — DELIBERATE_URI, one SET site ──────
+    # The SET site in
+    # `test_the_store_targets_are_named_never_inherited_from_the_environment`:
+    #     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379")
+    # PERMITTED, and deliberately so: the ambient URI IS this test's input. The
+    # case is parametrised per axis (#13098 review F13) and its whole point is
+    # that the differential harness must REFUSE an inherited target — it returns
+    # 2 ("could not run") BEFORE either store is touched, with `seed_graph` and
+    # `seed_record` stubbed to fail loudly. An URI that is never read cannot flip
+    # a lane, which is the vacuity vector this register exists to catch; here the
+    # mutation is what makes the refusal observable at all. `monkeypatch.setenv`
+    # also RESTORES at teardown, and the restoration guard
+    # (`_restoration_violations`) skips fixture-param sites entirely because
+    # pytest undoes them, so nothing leaks here.
     #
-    # DELIBERATE_URI, and not a vacuity vector: the module's claim IS the refusal
-    # contract — two EXISTING guards (`--record-dsn \`--graph-uri` `both-omitted`) —
-    # and the setenv supplies the second target EXPLICITLY so each axis is tested with
-    # the other one present. The mutation is the test input, and the assertion is that
-    # the refusal fires BEFORE either target is dialled, so a docker lane that is not
-    # there cannot make this row read as a pass.
-    # ⛔ Arm kept UNANCHORED and literal (the table's convention for a one-site
-    # `monkeypatch.setenv` row): the value is a constant DSN, not a variable, so there
-    # is no name to bind the way the `test_13034` pair binds `DB_URI`/`_OLD_URI`.
+    # ⛔ ONE SITE, LITERAL-ANCHORED. #13140 (`6652917489`) landed with this site
+    # untriaged — while the six `test_13034` sites above were being triaged,
+    # 22 seconds earlier on the same day, which is #12631's class landing
+    # again: each PR green against the base it was reviewed on, the tip
+    # carrying both. Without this row the register reds on EXACTLY that one
+    # site and passes with it (no counts pinned here: they move with every
+    # merge to this file, and a stale number in a guard's own justification is
+    # the same defect the guard exists to catch). For the same reason the test
+    # and the guard helper above are named rather than numbered: a line citation
+    # rots on the next edit, and the hosted-run evidence lives on #13158 /
+    # #12631, not in this comment. The dict
+    # KEY is what scopes a declaration to one module
+    # (`_is_declared` looks up the `tests/`-relative key and there is deliberately
+    # no bare-name fallback — that was removed as cross-file laundering); WITHIN
+    # this module the `^`…`$` literal anchor is what narrows it to the one
+    # measured target, so a changed literal, a trailing-comma rewrite, or a
+    # COMMENTED-OUT copy of the spelling reds instead of riding along.
     "test_13098_cypher_inventory.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@127\.0\.0\.1:6379"'],
+        r'^monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"\s*,\s*'
+        r'"docker://:pw@127\.0\.0\.1:6379"\s*\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

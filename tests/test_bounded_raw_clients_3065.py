@@ -752,6 +752,7 @@ _EXPECTED_TOOL_SITES = {
     "tools/backfill_graph_turns.py": 1,          # #10017's read-only pre-delete census
     "tools/cache_eviction_census.py": 2,         # #10976's INFO client + the measurement handle
     "tools/dod_5090_probe.py": 1,                # #10465's GRAPH.LIST on the census handle
+    "tools/cypher_diff_harness.py": 3,          # #13140's corpus seed + query + arms handles (all `**_bounded_server_socket_kwargs()` — unbounded on `origin/main`, which is what redded this guard for the whole tree)
     "tools/edge_census.py": 2,                   # GRAPH.LIST + the measurement handle
     "tools/embedding_residual_scan.py": 1,      # #11642's read-only dense-leg scan (bound: `**_bounded_server_socket_kwargs()`)
     "tools/graph_write_repair.py": 2,            # per-DB scan client + the repair client

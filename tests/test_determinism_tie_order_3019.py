@@ -320,7 +320,7 @@ _QUERY_VERBS = frozenset({"query", "ro_query", "_query", "profile",
 #:   these returns an id-keyed dict/set and never reads a row POSITION). Note what
 #:   this does NOT claim: a ``LIMIT`` inside such a read still picks its MEMBERS in
 #:   engine order, so which peers survive a per-op cap is DB-order — pre-existing
-#:   and out of #10121's scope (search_engine.py:4204, a ``CALL { … LIMIT $per_op }``
+#:   and out of #10121's scope (search_engine.py:4257, a ``CALL { … LIMIT $per_op }``
 #:   with no ORDER BY, whose members are the Q2-crit-covered set), but it is not
 #:   "ordering is irrelevant", which this comment said before round 8.
 #: * ``RETURN count(`` — an aggregate: one row comes back, nothing to rank.
@@ -625,7 +625,7 @@ def test_every_leg_query_carries_a_secondary_sort_key():
         # by the nested `_sig_cypher(sig)` helper (two signatures, both wrapping
         # `recency_key_expr('node')` as a COLUMN), so the text the census can see
         # here is empty. The branch sorts in PYTHON, by the shared
-        # `recency_tie_key` (search_engine.py:2495), which is the two-branch
+        # `recency_tie_key` (search_engine.py:2520), which is the two-branch
         # agreement this PR exists for; the helper's own text is pinned by the
         # two `tests/test_search_engine_gaps.py::TestRunVectorQuery` cases that
         # read the COLUMN (`test_both_index_signatures_carry_the_recency_column`

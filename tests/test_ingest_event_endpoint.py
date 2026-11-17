@@ -709,12 +709,15 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     it is WRITER AGREEMENT rather than over-rejection. Asserting the old shape
     would pin a divergence the slice exists to remove.
 
-    ⛔ THE `:Event` HALF IS GONE TOO (#13100, whose ruling this integration
-    carries): an `:Event` now refuses ANY `status` declaration — a dict
-    included — so Phase 1 refuses that item as well and there is no "dropped
-    there, accepted here" contrast left to pin. The Event refusal lives in
-    `tests/test_11825_event_terminal_status_refused.py` and
-    `tests/test_13100_planned_occurrences.py`.
+    ⛔ The `:Event` half is no longer the "other direction" either (#13100): a
+    pre-#13100 Event had no lifecycle, so a non-persistable status was DROPPED
+    there and the bundle stayed accepted. #13100 retires the whole key —
+    `live.refuse_event_lifecycle_state` refuses ANY non-`None` `status` on an
+    `:Event`, whatever its value or type — so Phase 1 refuses it too, for the
+    same partial-mutation reason as the `:Object` arm. What this test still
+    proves is that BOTH labels refuse at Phase 1 with ZERO mutation, and each
+    refuses on the strength of its OWN writer/door rather than on a blanket
+    "reject every non-string" rule.
     """
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
@@ -723,15 +726,34 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     bundle = {
         "entities": [{"ref": "o1", "type": "object", "name": "Alpha",
                       "status": {"a": 1}},
-                     {"ref": "o2", "type": "object", "name": "Beta"}],
+                     {"ref": "o2", "type": "object", "name": "Beta"},
+                     # The `:Event` half — no lifecycle at all since #13100, so
+                     # the whole `status` key is refused, whatever its value.
+                     {"ref": "e1", "type": "event", "name": "Happened",
+                      "eventKind": "sessionCaptured", "status": {"a": 1}}],
         "connections": [{"from": "o1", "to": "o2", "operator": "IMPL"}],
     }
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("declares status" in m and ":Object" in m for m in msgs), msgs
+    assert any("declares status" in m and ":Event" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(bundle)
-    # ZERO mutation: the predecessor object never lands.
+    # ZERO mutation: neither the predecessor objects nor the Event land.
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 0
+
+    # …and the Event's shape alone is refused for the SAME reason, not by the
+    # `:Object` arm's presence: the `:Event` arm is discriminating on its own.
+    event_only = {"entities": [
+        {"ref": "o", "type": "object", "name": "Solo"},
+        {"ref": "e1", "type": "event", "name": "OnlyEvent",
+         "eventKind": "sessionCaptured", "status": {"a": 1}},
+    ]}
+    alone = [v["message"] for v in sdk._validate_bundle(event_only)]
+    assert alone and all(":Event" in m for m in alone), alone
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(event_only)
+    assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 0
 
 
 @pytest.mark.parametrize("spelling", ["top", "nested"])
