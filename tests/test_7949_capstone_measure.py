@@ -6284,7 +6284,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
         # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
         # pointer to a row that no longer exists). Measured at THIS head, not copied: `@app.post("/v1/sessions")` is
-        # `:18987` and `@app.post("/v1/sessions/install-probe")` is `:21542` — the pair the row
+        # `:19481` and `@app.post("/v1/sessions/install-probe")` is `:22036` — the pair the row
         # below pins, each the file's ONLY occurrence of its needle. (Prose here had `:18854`/`:21409`, `#12947`'s head.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("19481", ("exact", '@app.post("/v1/sessions")')),
@@ -6379,10 +6379,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
         # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
-        # form occurs at THREE lines (`:10576`, `:19473`, `:19535`) — and the bare
-        # call occurs once too (`:10158` is `return quota_refusal_payload(`), at four
-        # lines in all: a `(document, pin)` pair moved together onto `:19535` — the
-        # `CohortCostCapExceeded` arm (`except` at `:19515`), the WRONG refusal — would
+        # form occurs at THREE lines (`:11118`, `:20210`, `:20272`) — and the bare
+        # call occurs once too (`:10700` is `return quota_refusal_payload(`), at four
+        # lines in all: a `(document, pin)` pair moved together onto `:20272` — the
+        # `CohortCostCapExceeded` arm (`except` at `:20252`), the WRONG refusal — would
         # satisfy the bare anchor and stay green on it.
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
