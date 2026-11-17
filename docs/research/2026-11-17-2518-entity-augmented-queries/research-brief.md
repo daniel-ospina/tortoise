@@ -172,15 +172,29 @@ Convergence across the sources, with the numbers each one carries:
 
 **Harness:** `tools/candidate_recall_11901.py` (unchanged; the same tool that produced the `#11901`
 and `#12295` artifacts), `--population 1000 --sample 300 --captures 20`, corpus
-`/home/cmux/.tortoise/session-events` (**the artifacts record `corpus.files: 14`**, and on this box
-the directory globs exactly **14** `*.jsonl` (2026-11-04 … 2026-11-17) — its newest member was created
-at `00:02:44Z`, **before** the first run at `01:53:53Z`, so the file SET the runs read is the set the
-directory holds now; what moved between runs is the corpus's CONTENT, which the artifacts record
-(`corpus.input.lines` `10 746 → 10 761`) and §3's table states. This box's `HOME` is `/home/cmux`, so
-that path IS the harness's `--sessions-dir` default; §8 passes it explicitly so the corpus is part of
-the recipe rather than an accident of `HOME`. The corpus is live and cell-specific, so a reader
-re-running §8 reads a **different** corpus, and every number below is its own artifact's recorded
-input rather than a statement about the capture corpus in general.
+`/home/cmux/.tortoise/session-events`. This box's `HOME` is `/home/cmux`, so that path IS the
+harness's `--sessions-dir` default; §8 passes it explicitly so the corpus is part of the recipe rather
+than an accident of `HOME`.
+
+⚠️ **`corpus.files: 14` is the artifact's recorded input, and it is NOT a property of the directory a
+reader sees.** Two readings of the same path on this box, made in the same hour while this PR was being
+reviewed, disagree, and both are recorded here rather than silently resolved:
+
+| reading | `*.jsonl` | range | newest member's birth |
+|---|---|---|---|
+| the artifacts (`corpus.files`) | **14** | — | — |
+| re-measured for this brief, `03:10Z` and again `03:23Z` | **22** | 2026-10-27 … 2026-11-17 | `2026-11-17 00:07:44.424Z` |
+| a parallel lane on the same box, `~03:22Z` | **14** | 2026-11-04 … 2026-11-17 | `2026-11-17 00:02:44Z` |
+
+**The 22-reading is the reproducible one** (`ls -1 ~/.tortoise/session-events/*.jsonl | wc -l` → 22 at
+both timestamps, `stat -c '%w'` on the newest member → `00:07:44.424Z`, and the directory's own `mtime`
+is that same nanosecond), and a directory's `mtime` moves on every create, unlink and rename — so **no
+entry can have appeared after `00:07:44Z`**, which is *before* the first run (`01:53:53Z`). The
+14-readings are therefore not reachable from this directory at this path, and **this document does not
+claim to know which input the artifacts read**; that question is open, not settled in either direction.
+What follows for a reader: the corpus is live and per-box, so re-running §8 today reads a **different**
+corpus, and every number below is its own artifact's recorded input — never a statement about the
+capture corpus in general.
 ⚠️ The artifacts' own `issue` / `measured_for` fields
 read `11901` / `12295`: those are the harness's hardcoded provenance
 (`tools/candidate_recall_11901.py:2042-2045`), naming the runs it was written for, not this one.
@@ -424,10 +438,11 @@ not an expansion one.
 
 ## 7. What this document does NOT claim
 
-- **Not a production census.** The population is a stratified 300-name sample of **this box's** capture
-  corpus (the artifacts record `corpus.files: 14`, which is what the directory holds — 2026-11-04 …
-  2026-11-17), and `/home/cmux/.tortoise/session-events` is not the population a hosted graph
-  holds. Every number here measures the mechanism on a real name distribution, never production.
+- **Not a production census.** The population is a stratified 300-name sample of a live capture
+  corpus (the artifacts record `corpus.files: 14`; the same path is re-measured at **22** in §3, and
+  which input the artifacts read is **open**, not settled), and `/home/cmux/.tortoise/session-events`
+  is not the population a hosted graph holds. Every number here measures the mechanism on a real name
+  distribution, never production.
 - **Not a hybrid-vs-lexical comparison as an effect size, and NOT a paired ablation.** The five runs
 do **not** share a population: `corpus.population_digest` differs in every run (§3's table). The
 `index_stats` counts agree, which is a count identity and not a member identity — reading it as
