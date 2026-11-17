@@ -8347,12 +8347,18 @@ surfaces:
   # defect it was written for was a FALSE CORRECTION (a `:4549` cite re-pointed to
   # `:4552` by applying the `+3` twice; `:4552` is the `#7704` note under the loop),
   # and no delta, marker or offset can prove a number right. `core` is the home
-  # because the rotated evidence lives in `docs/` (a docs-only diff selects `core`
-  # by the tier-1 early return, and a `tortoise/search_engine.py` diff is a
-  # shared-module FULL selection), so this is the one surface reached by both the
-  # diffs that can rot a cite and the diffs that must not. Hermetic: six
+  # for the CODE half (a `tortoise/search_engine.py` diff is a shared-module FULL
+  # selection). ⛔ AND `core` ALONE IS NOT ENOUGH — the tier1 row below is the
+  # LOAD-BEARING one: the rotated evidence lives in `docs/`, which is in
+  # NON_PYTHON_PREFIXES and matches no SOURCE_PATTERNS entry, so a docs-only diff
+  # takes the tier1-only early return and selects NO surface (measured:
+  # `--changed-files docs/architecture/SUBSTRATE-REBUILD-MAP.md` ->
+  # `surfaces: []`, this file ABSENT from `test_files`). The comment here used to
+  # claim the opposite ("a docs-only diff selects `core` by the tier-1 early
+  # return"), which is exactly the false mechanism claim that let a docs-only cite
+  # re-point merge green — the #4309/#11739/#11810 silent-drop class. Hermetic: six
   # files read with `Path.read_text` (two calls per row), no DB, no graph, no
-  # network, no subprocess.
+  # network, no subprocess — dual-registered with `tier1`.
   - test_12184_shifted_cites.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
@@ -10535,6 +10541,22 @@ tier1:
 # no DB, no graph, no docker, no network, no model call — two committed
 # JSON/markdown reads plus the in-memory corpus.
 - test_text_gate_13099.py
+# #12184: the shifted-evidence-cite pin (`core` above). Every document it guards is
+# under `docs/` — `CAPABILITY-PLACEMENT-AUDIT.md`, `SUBSTRATE-REBUILD-MAP.md`, the
+# #12298 M3 recall brief and the #13083 census README — and `docs/` is in
+# NON_PYTHON_PREFIXES while none of them matches a SOURCE_PATTERNS entry, so a
+# docs-only diff takes the early return and selects NO surface: measured at this
+# head, `--changed-files docs/architecture/SUBSTRATE-REBUILD-MAP.md` ->
+# `surfaces: []` and this file ABSENT from `test_files`, while the sibling
+# `test_substrate_map.py` (dual-registered for the same map) WAS selected. Without
+# this row the pin runs zero times on the only edit class that can re-point a
+# citation — the #12184 defect itself WAS a docs-only re-point (`:4549` -> `:4552`,
+# the branch's `+3` applied twice), so the `core`-only registration it shipped with
+# missed the exact change it was written for. Hermetic: no DB, no graph, no
+# network, no model call — six committed-file reads and nothing else. ⛔ The
+# `tier1` size figures in `tests/test_ci_selection.py`'s sibling docstring are
+# MEASUREMENTS that move with this row; re-derive them, never read them as fixed.
+- test_12184_shifted_cites.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 slow_files:
