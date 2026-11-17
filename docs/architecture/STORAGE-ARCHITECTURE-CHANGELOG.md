@@ -2419,3 +2419,28 @@ reopened, or attributes the answer to `#11901`'s "not earned" verdict:*
 on"*). `search_engine.run_vector_query`'s docstring is **not** stale — it says the scan-fallback repair is
 *"NOT the index decision"*, which remains true. The record of these sites is a comment on `#13220` — `6956046832`, extended by `6956280005` for group 2 — rather
 than a peer issue, because the lane that implements the answer owns them.
+
+## 2026-11-17 — the KEEP ruling's status words restated: its PROHIBITION binds today, and the GRAPH-COPY reopen is named as the ruling that governs removal (`#13350`)
+
+Applies an owner instruction of 2026-11-17: the **INDEX** half stays *decided, implementation in flight — `#13220`*,
+and the 2026-11-10 KEEP ruling's prohibition is kept intact and is what binds **today**.
+
+Three status-word corrections, content unchanged:
+
+- **§12.1c's decided marker** called the KEEP half *"STANDS, unchanged"*. It now says the KEEP half's **prohibition**
+  is what binds today, and names the same day's **second** ruling (`#11395` comment `6956793300`, with its
+  `OVERRIDES:` line) as the one that governs removal — scoped, as that record scopes it, to the **GRAPH COPY only**.
+- **§14.3's V3 row** said the KEEP quotation *"is the ruling on removal TODAY"*. That is the exact negation of what
+  the entry above records: the quote is the 2026-11-10 ruling, and the ruling that governs removal today is the
+  reopen, whose condition is unmet while `#13220` is in flight. The row now says so, and keeps the prohibition as
+  today's operative effect.
+- **§14.3's lead** attributed the *"the record must hold a label's vectors before anything else about that label's
+  storage is decided"* constraint to the index answer. It is in the **second** ruling, not a corollary of the first,
+  and the attribution is corrected.
+
+⛔ **Why this entry exists.** The entry above states that a ⛔ marker sits **immediately after** the KEEP quotation
+saying *"that it is the 2026-11-10 ruling and not the current one"*. An intermediate revision of the wording removed
+that distinction while this changelog still asserted it, and left two sites saying the ruling was unchanged *and*
+unchallenged — a record contradicting its own record. The marker is restored; the operative rule is untouched:
+**while `#13220` is in flight, nothing may be removed and nothing may stop being written.** No measurement was
+re-read and no figure was retired.

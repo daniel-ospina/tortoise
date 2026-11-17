@@ -44,12 +44,13 @@ beside them. ⚠️ **It is a PLACEMENT ruling, and placement is what makes it c
 mechanism is an `embedding_vec` column plus a pgvector index on the table that owns the rows, the shape
 `public.point`/`public.source`/`public.event` already carry — **`#11901`'s *"not earned"* verdict answered
 the FalkorDB question** (four more HNSW structures, five total, on provisioned RAM with no eviction —
-`STORAGE-ARCHITECTURE.md` §12.1c) **and does not reach a pgvector index.** ✅ **The 2026-11-10 KEEP ruling is in force today** (owner, `#11395` comment `6781921075`): `:Object`/`:Subject`
+`STORAGE-ARCHITECTURE.md` §12.1c) **and does not reach a pgvector index.** ✅ **The 2026-11-10 KEEP ruling's prohibition is what binds today** (owner, `#11395` comment `6781921075`): `:Object`/`:Subject`
 keep their stored embedding and **no pass may remove it or stop writing it**. The 2026-11-17 ruling below decides the
-**INDEX** half — yes, in Postgres — and its state is **decided, implementation in flight — `#13220`**; removal becomes permissible only once the
-record holds **and** indexes that label (`#11395` comment `6956793300`) — a condition not met while implementation is
-in flight, so today nothing may be removed — and `:Event`/`:Source` are neither protected by the KEEP ruling nor
-retired by this one. **What it adds
+**INDEX** half — yes, in Postgres — and its state is **decided, implementation in flight — `#13220`**; ⚠️ **and the ruling that governs removal is the same day's SECOND one, which
+supersedes the KEEP ruling for the GRAPH COPY only** (`#11395` comment `6956793300`, `OVERRIDES:` recorded there): that graph copy's removal becomes permissible only once the
+record holds **and** indexes that label — a condition not met while implementation is
+in flight, so today nothing may be removed and nothing may stop being written — and `:Event`/`:Source` are neither protected by the KEEP ruling nor
+retired by this second one. **What it adds
 to this document is COVERAGE, not a new leg:** §3's mechanism, §6.1's filter guard and §6.2's
 text-index decision are unchanged, and the work it orders (the columns and the writer, the record-served
 dense leg, the arming) is not a question this document decides.
