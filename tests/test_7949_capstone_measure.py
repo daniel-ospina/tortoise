@@ -6082,9 +6082,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
         # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`, the
-        # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s, in
-        # `tortoise-capture.ts`, and re-derived no cite, so the pair is
-        # **`:1030`/`:1022`** here — measured at this head
+        # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s
+        # (`:1007` -> `:1023`), and `#13039`'s `7520c6dafd` added 7 more (`-> :1030`), neither
+        # re-deriving a cite, so the pair is **`:1030`/`:1022`** here — measured at this head
         # (`grep -nF 'export function postCapture(' …`) and re-measured at the head this
         # de-conflict merges at (`0449273b`), which still reads `:1023`/`:1015`; repaired
         # at this head rather than carried, because a red on `main` blocks every head.
@@ -6105,7 +6105,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `#12295`): `grep -n 'export function postCapture(\|export function postInstallProbe('
         # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart at `main`. The
         # `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
-        # and is RED here, measured: main's tortoise-capture.ts carries +16 lines above
+        # and is RED here, measured: main's tortoise-capture.ts carries +23 lines above
         # both `def`s that neither of that row's two sides moved.
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("1030", "export function postCapture("),
@@ -6136,9 +6136,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # insertion moves by +39 — this row's two, and the `19558`/`19583`/`19451`/`18991`
         # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
         # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
-        # pointer to a row that no longer exists). Measured at this head, not copied: `@app.post("/v1/sessions")` is
-        # `:18854` and `@app.post("/v1/sessions/install-probe")` is `:21409` (was `:18815`
-        # / `:21370`), each the file's ONLY occurrence of its needle.
+        # pointer to a row that no longer exists). Measured at THIS head, not copied: `@app.post("/v1/sessions")` is
+        # `:18885` and `@app.post("/v1/sessions/install-probe")` is `:21440` — the pair the row
+        # below pins, each the file's ONLY occurrence of its needle. (Prose here had `:18854`/`:21409`, `#12947`'s head.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("18885", ("exact", '@app.post("/v1/sessions")')),
             ("21440", '@app.post("/v1/sessions/install-probe")'),

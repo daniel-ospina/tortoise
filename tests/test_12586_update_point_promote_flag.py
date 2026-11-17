@@ -175,7 +175,7 @@ def test_the_refused_promote_journals_nothing(env):
 def test_the_two_point_doors_agree_on_the_flag_dead_row(env):
     """``update_point`` refuses exactly what ``update_knowledge`` refuses.
 
-    #12951 retired the public ``update_entity`` into ``update_knowledge`` (the same
+    #12915 retired the public ``update_entity`` into ``update_knowledge`` (the same
     ``_update_entity_any`` relay), so the second door a caller can reach is the
     container — the agreement this issue closed must hold through BOTH names that
     still resolve, not through the retired one.
