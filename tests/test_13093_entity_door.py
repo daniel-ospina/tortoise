@@ -667,17 +667,34 @@ _EVENT_KEY_CONSTRAINT = "chk_event_node_key_is_contract_key"
 #: reflow is not a change.
 _EVENT_KEY_CHECK = "(event_id is not null and node_key = event_id)"
 
-#: ONE statement that touches the constraint, in file order — either a
-#: re-declaration (`CONSTRAINT <name> CHECK (…)`, in the landed `CREATE TABLE` or
-#: behind a forward `ADD CONSTRAINT`) or a `DROP CONSTRAINT`. The `[^;]*?` body
-#: runs to the statement boundary, so a nested paren in a re-keyed expression
-#: still reaches the real closing paren, and the `$$`-quoted function bodies
-#: several record migrations carry cannot be mistaken for a statement split.
-_EVENT_KEY_STMT_RE = re.compile(
-    r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(?P<drop>" + _EVENT_KEY_CONSTRAINT
-    + r")|(?:ADD\s+)?CONSTRAINT\s+(?P<decl>" + _EVENT_KEY_CONSTRAINT
-    + r")\s+CHECK\s*(?P<expr>\([^;]*?\))\s*(?:NOT\s+VALID\s*)?[,;]",
+#: The name as it appears in DDL — optionally DOUBLE-QUOTED (a re-key written
+#: with a quoted identifier is the same constraint), and always followed by a
+#: non-identifier character so a SIBLING name (`…_v2`) is never read as ours.
+#: ⛔ Without the `(?![A-Za-z0-9_$])` boundary the `DROP` arm cleared the premise
+#: on `DROP CONSTRAINT chk_event_node_key_is_contract_key_v2` — a false RED on a
+#: constraint that is not this one.
+_EVENT_KEY_NAME_RE = r"[\"']?" + _EVENT_KEY_CONSTRAINT + r"[\"']?(?![A-Za-z0-9_$])"
+
+#: ONE statement that touches the constraint, in file order — a re-declaration
+#: (`CONSTRAINT <name> CHECK (…)`, in the landed `CREATE TABLE` or behind a
+#: forward `ADD CONSTRAINT`), a `DROP CONSTRAINT`, or a `RENAME CONSTRAINT`.
+#: The `[^;]*?` body runs to the statement boundary, so a nested paren in a
+#: re-keyed expression still reaches the real closing paren; a trailing quote is
+#: allowed before the terminator because the house style for conditional DDL is
+#: `DO $$ … EXECUTE 'ALTER TABLE …' … $$`
+#: (`20261025000001_record_tenancy_role_and_guc.sql:113,142`), where the literal
+#: ends `'` before the `;`.
+_EVENT_KEY_DROP_RE = re.compile(
+    r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?" + _EVENT_KEY_NAME_RE,
+    re.IGNORECASE)
+_EVENT_KEY_DECL_RE = re.compile(
+    r"(?:ADD\s+)?CONSTRAINT\s+(?P<name>" + _EVENT_KEY_NAME_RE
+    + r")\s+CHECK\s*(?P<expr>\([^;]*?\))\s*(?:NOT\s+VALID\s*)?[\"']*[,;]",
     re.IGNORECASE | re.DOTALL)
+_EVENT_KEY_RENAME_RE = re.compile(
+    r"RENAME\s+CONSTRAINT\s+(?P<old>[\"']?[A-Za-z0-9_]+[\"']?)\s+TO\s+"
+    r"(?P<new>[\"']?[A-Za-z0-9_]+[\"']?)",
+    re.IGNORECASE)
 
 
 def _effective_event_node_key_check(sql: str) -> str | None:
@@ -688,47 +705,97 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     edit of the landed `CREATE TABLE`. That is the rule
     `record_projection.key_properties` already applies to `node_identity`
     (`#9881`: a key move arrives as a forward `ALTER`, and the last declaration
-    is the enforced one), and it is the external convention too: Alembic's
-    autogenerate diffs the EFFECTIVE schema, and its own docs warn that a named
-    `CHECK` cannot be compared by substring.
+    is the enforced one), and it is simply what the database enforces: a `CHECK`
+    is the expression of its LAST declaration.
+
+    ⛔ It is NOT an external Alembic convention, and must not be cited as one:
+    alembic's autogenerate compares a named `CHECK` **by name only** and never
+    detects an expression change at all
+    (https://alembic.sqlalchemy.org/en/latest/autogenerate.html — "the detection
+    is name-based only … always presumed to be equivalent, regardless of any
+    difference in their expression text"). What that documentation does support
+    is narrow: a REFLECTED expression cannot be compared textually, because
+    dialects normalize and rewrite the DDL — which is why the premise is read
+    from the migrations' effective statement, not from a reflection.
 
     ⛔ A substring search over the corpus finds the HISTORICAL expression for
     ever, so it stays GREEN on the one mutation this premise exists to catch —
-    the false green #13347's review (P1) measured, where a forward re-key left
-    the `Event` row green with its justification gone.
+    the false green measured in this PR's first review
+    (https://github.com/daniel-ospina/tortoise/pull/13358#issuecomment-6963029739,
+    §3.1 P1): a forward re-key left the `Event` row green with its justification
+    gone. #13347's own body carries F-A/F-B from #13322's review; the
+    forward-re-key false green is this PR's, not that issue's.
 
     Returns the normalised expression (whitespace collapsed, spaces inside the
     parentheses trimmed, lowercased), or `None` when a later statement drops the
-    constraint so nothing is enforced. Raises via `assert` if no migration names
-    the constraint at all: a rename is a change of premise, not a silent `None`.
+    constraint so nothing is enforced.
+
+    ⛔ TWO STATES RAISE, because in both the premise's OWNER moved and a silent
+    answer would be read as a fact:
+
+      * no migration names the constraint at all (the landed `CREATE TABLE`
+        edited away or the migration set replaced);
+      * a `RENAME CONSTRAINT` either FROM or TO this name. ⛔ A rename is NOT
+        caught by the first `assert`: the landed `CREATE TABLE` keeps the
+        original name for ever in append-only history, so `stated` stays `True`
+        through a rename and a returned historical expression would be a false
+        green (measured before this arm existed).
+
+    ⚠️ SEEN, NOT OMNISCIENT: it reads LITERAL statements, so the re-key spellings
+    this repo's house style produces are covered — a plain `ALTER TABLE`, a
+    double-quoted identifier, and an `EXECUTE '…'` inside `DO $$ … $$`. A re-key
+    assembled at RUNTIME from parts (`format()` into a variable, a name built
+    from a catalog query) is invisible here and is NOT claimed to be covered; a
+    migration written that way must update this reader deliberately.
     """
-    stated = False
+    events: list[tuple[int, str, str | None]] = []
+    for match in _EVENT_KEY_DROP_RE.finditer(sql):
+        events.append((match.start(), "drop", None))
+    for match in _EVENT_KEY_DECL_RE.finditer(sql):
+        events.append((match.start(), "decl", match.group("expr")))
+    for match in _EVENT_KEY_RENAME_RE.finditer(sql):
+        old = match.group("old").strip('"').lower()
+        new = match.group("new").strip('"').lower()
+        if _EVENT_KEY_CONSTRAINT in (old, new):
+            events.append((match.start(), "rename", f"{old} -> {new}"))
+    events.sort(key=lambda event: event[0])
+
+    assert events, (
+        f"no migration names `{_EVENT_KEY_CONSTRAINT}` at all — the landed "
+        "`CREATE TABLE` no longer declares it, so the premise that makes "
+        "`Event` addressable by a bare id has been removed: re-derive "
+        "ENTITY_UNION_ADDRESS_RESIDUALS. (A RENAME is a different state and is "
+        "reported by its own assertion below.)")
+
     expr: str | None = None
-    for match in _EVENT_KEY_STMT_RE.finditer(sql):
-        stated = True
-        body = match.group("expr")
-        if body is None:
+    for _pos, kind, body in events:
+        assert kind != "rename", (
+            f"a migration RENAMEs `{_EVENT_KEY_CONSTRAINT}` ({body}) — the "
+            "constraint this premise reads no longer exists under this name, "
+            "and the expression the record enforces can no longer be read from "
+            "the statements that carry this name: re-derive "
+            "ENTITY_UNION_ADDRESS_RESIDUALS against the renamed constraint")
+        if kind == "drop":
             expr = None
             continue
+        assert body is not None  # `decl` always captures its expression
         normalised = " ".join(body.split()).lower()
         normalised = re.sub(r"\(\s+", "(", normalised)
         expr = re.sub(r"\s+\)", ")", normalised)
-    assert stated, (
-        f"no migration declares `{_EVENT_KEY_CONSTRAINT}` at all — the premise "
-        "that makes `Event` addressable by a bare id has been renamed or "
-        "removed, so re-derive ENTITY_UNION_ADDRESS_RESIDUALS")
     return expr
 
 
 def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
-    """The premise row must red on the SANCTIONED way a re-key arrives (#13347 P1).
+    """The premise row must red on the SANCTIONED way a re-key arrives.
 
-    The review measured the previous assertion as a FALSE GREEN: it regex-searched
-    the concatenation of all record migrations, so a forward `ALTER TABLE …
-    DROP/ADD CONSTRAINT` — how a re-key is actually allowed to arrive — left it
-    green while an edit of the already-landed `CREATE TABLE` (which this repo
-    forbids) was the only shape it caught. Two arms here measure that the reader
-    sees the forward shapes; a third keeps it off the cosmetic-reflow trigger.
+    This PR's first review measured the original assertion as a FALSE GREEN: it
+    regex-searched the concatenation of all record migrations, so a forward
+    `ALTER TABLE … DROP/ADD CONSTRAINT` — how a re-key is actually allowed to
+    arrive — left it green while an edit of the already-landed `CREATE TABLE`
+    (which this repo forbids) was the only shape it caught
+    (PR #13358 review §3.1). The arms below measure the forward shapes the repo's
+    house style produces, the sibling name that must NOT move it, and the
+    formatting that must not be mistaken for one.
     """
     from tortoise import record_projection as _rp
 
@@ -737,6 +804,12 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
         "the landed corpus does not read back as the expected premise, so the "
         "arms below would prove nothing")
 
+    re_keyed_sql = "CHECK (event_id IS NOT NULL AND node_key = payload ->> 'ref')"
+    #: The expression the record ENFORCES after that re-key. Asserted EXACTLY, not
+    #: as `!= _EVENT_KEY_CHECK`: a reader that mis-read the re-key as a plain DROP
+    #: returns `None`, which satisfies inequality while being just as wrong.
+    re_keyed_expr = "(event_id is not null and node_key = payload ->> 'ref')"
+
     # 1. A forward re-key, the way the repo allows one. The last declaration
     #    moved, so the premise reader must move with it.
     re_keyed = landed + (
@@ -744,11 +817,67 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
         f"    DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
         "ALTER TABLE public.event\n"
         f"    ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT}\n"
-        "    CHECK (event_id IS NOT NULL AND node_key = payload ->> 'ref');\n")
-    assert _effective_event_node_key_check(re_keyed) != _EVENT_KEY_CHECK, (
+        f"    {re_keyed_sql};\n")
+    assert _effective_event_node_key_check(re_keyed) == re_keyed_expr, (
         "a forward `ALTER TABLE … DROP/ADD CONSTRAINT` re-key did not move the "
-        "premise reader — the `Event` row would stay green with its "
-        "justification gone (the false green #13347's review caught)")
+        "premise reader to the expression the record now enforces — the `Event` "
+        "row would stay green with its justification gone (the false green this "
+        "PR's first review caught)")
+
+    # 1b. The SAME re-key with the constraint name DOUBLE-QUOTED — a legal
+    #     spelling of the same DDL, and one the first reader missed entirely
+    #     (measured: it returned the HISTORICAL expression, i.e. the row stayed
+    #     green through a real re-key).
+    quoted = landed + (
+        "\nALTER TABLE public.event\n"
+        f"    DROP CONSTRAINT \"{_EVENT_KEY_CONSTRAINT}\";\n"
+        "ALTER TABLE public.event\n"
+        f"    ADD CONSTRAINT \"{_EVENT_KEY_CONSTRAINT}\"\n"
+        f"    {re_keyed_sql};\n")
+    assert _effective_event_node_key_check(quoted) == re_keyed_expr, (
+        "a double-quoted identifier hid a forward re-key — the reader did not "
+        "reach the expression the record now enforces")
+
+    # 1c. The house style for CONDITIONAL DDL: the statement inside
+    #     `DO $$ … EXECUTE '…' … $$`
+    #     (`20261025000001_record_tenancy_role_and_guc.sql:113,142`). The literal
+    #     ends `'` before the `;`, and the first reader could not see past it.
+    dynamic = landed + (
+        "\nDO $$ BEGIN\n"
+        f"  EXECUTE 'ALTER TABLE public.event DROP CONSTRAINT "
+        f"{_EVENT_KEY_CONSTRAINT}';\n"
+        "  EXECUTE 'ALTER TABLE public.event ADD CONSTRAINT "
+        f"{_EVENT_KEY_CONSTRAINT} "
+        "CHECK (event_id IS NOT NULL AND node_key = payload ->> ''ref'')';\n"
+        "END $$;\n")
+    #: The doubled single quotes are the SQL-literal escaping INSIDE the
+    #: `EXECUTE '…'` string; the reader reports the statement's own text.
+    assert _effective_event_node_key_check(dynamic) == (
+        "(event_id is not null and node_key = payload ->> ''ref'')"), (
+        "an `EXECUTE '…'` re-key inside a `DO $$` block was invisible — the "
+        "reader did not reach the expression the record now enforces")
+
+    # 1d. A SIBLING name is not this constraint: `…_v2` must NOT move the reader.
+    #     Without an identifier boundary the `DROP` arm cleared the premise and
+    #     the row reddened with a message sending a lane to re-derive an
+    #     invariant that had not moved (measured on the first reader).
+    sibling = landed + (
+        "\nALTER TABLE public.event\n"
+        f"    DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT}_v2;\n")
+    assert _effective_event_node_key_check(sibling) == _EVENT_KEY_CHECK, (
+        "a `DROP CONSTRAINT " + _EVENT_KEY_CONSTRAINT + "_v2` cleared OUR "
+        "premise — a sibling name is not this constraint")
+
+    # 1e. A RENAME moves the premise's owner, and append-only history keeps the
+    #     landed name for ever, so it can be neither `None` nor the historical
+    #     expression: it must RAISE (measured before this arm existed: the first
+    #     reader returned the HISTORICAL expression, a false green).
+    renamed = landed + (
+        "\nALTER TABLE public.event\n"
+        f"    RENAME CONSTRAINT {_EVENT_KEY_CONSTRAINT} TO "
+        f"{_EVENT_KEY_CONSTRAINT}_v2;\n")
+    with pytest.raises(AssertionError, match="RENAMEs"):
+        _effective_event_node_key_check(renamed)
 
     # 2. A forward DROP with no re-declaration. The constraint is GONE, so no
     #    expression is enforced and the premise is not merely different — it is
@@ -800,14 +929,25 @@ def test_an_EVENT_is_addressable_by_the_bare_id_that_IS_its_eventId():
     can share one `id` — `live.py::EPISTEMIC_ID_KEYS` forbids using it as one.
     The value this door is handed for an Event is the one the cache RESOLVER
     matched (`FalkorProjection._RESOLVE_BRANCHES` → `("Event", "eventId")`).
+
+    ⚠️ `record_serve.py`'s own docstring for this map still justifies `Event`'s
+    absence from it with *"`Event.id == eventId` for all current writes"* — the
+    universal this docstring disowns. That is the same defect tracked in #13377
+    (the `Event.id == eventId` invariant stated as truth); it is on `main` and
+    deliberately not touched here, because this PR changes no production code.
     """
     assert "Event" not in rs.ENTITY_UNION_ADDRESS_RESIDUALS, (
         "Event's record coordinate is the eventId, and the bare id handed to "
         "this door IS that value — putting it in the residual map tells the "
         "next lane the wrong repair (parity, #9721, not re-addressing)")
+    # ⚠️ TODAY's state, not a rule: when #13351 lands (a Source-by-id read, or a
+    # decision that a bare Source id should never have resolved) this residual is
+    # deleted and this arm goes with it. `Event`'s addressability is unaffected
+    # by that change — which is the point of separating the two facts at all.
     assert "Source" in rs.ENTITY_UNION_ADDRESS_RESIDUALS, (
         "a Source's record coordinate is `url` — a bare Source id names nothing "
-        "in the record, which is why that residual stands")
+        "in the record, which is why that residual stands TODAY (#13351 closes "
+        "it; delete this arm then)")
 
     from tortoise import record_projection as _rp
 
