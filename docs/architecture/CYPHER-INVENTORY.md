@@ -35,8 +35,8 @@ this document classifies **statements**.
 | `fulltext` | 2 |
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 106 |
-| non-Cypher door calls (excluded from every shape total) | 260 |
-| **AST door calls** = census + non-Cypher | **1571** |
+| non-Cypher door calls (excluded from every shape total) | 258 |
+| **AST door calls** = census + non-Cypher | **1569** |
 
 > **The finding, with its count: 578 of 1311 product statements (44.1 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
@@ -102,10 +102,10 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
 1,622  regex door-pattern occurrences
   −53  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,571  occurrences on a line carrying a door CALL          [measured]
+= 1,569  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,571  AST door calls
-= 1311  classified Cypher statements + 260 non-Cypher door calls
+= 1,569  AST door calls
+= 1311  classified Cypher statements + 258 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
