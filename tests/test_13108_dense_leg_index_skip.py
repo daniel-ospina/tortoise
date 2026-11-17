@@ -16,7 +16,8 @@ argument order alike — measured on ``falkordb/falkordb-server:v4.20.6`` (the p
 ``tools/dense_leg_probe_13108.py``, where the two refused round trips cost
 **20.17 ms of a 34.78 ms ``:Object`` dense read at 1,000 nodes** (58.0 %). ⛔ **Both figures come
 from the SAME artifact** — ``fix-1000-paired-at-rest.json``: 20.17 is ``index_attempt[0].elapsed_ms``
-(10.18 + 9.97) and 34.78 is that artifact's own ``arms["object[nohint]@c1"].latency_ms.p50``.
+(the pair's measured total; its two attempts read 10.18 and 9.97 ms, which **sum to 20.15** — the
+artifact reports its own total, so quote 20.17 and never the sum) and 34.78 is that artifact's own ``arms["object[nohint]@c1"].latency_ms.p50``.
 ``34.45 ms`` is the *un-paired probe* run's ``:Object`` p50 (``probe-1000-at-rest-and-concurrent.json``,
 a different run at a different ``code_head``); round 14 removed the pairing that quoted it here.
 ⛔ ``#13121`` rounds 4/5/8 corrected an earlier ``≈23 ms of 36.5 ms (63 %)`` here. ``23.45 ms`` is
