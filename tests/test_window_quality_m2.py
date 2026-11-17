@@ -27,6 +27,7 @@ nothing. What is pinned is the reasoning surface and the committed artifact.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from fractions import Fraction
@@ -1531,6 +1532,36 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
     bundle = (f"{corpus['files']}/{corpus['files_contributed']} files, "
               f"{corpus['lines']} lines, {corpus['parse_errors']} parse error{plural}")
 
+    # ⛔ The MODE bounds the whole record: every figure here is the lexical leg's,
+    # and §7's arming decision covers both legs. Mutating it to `hybrid` in the
+    # README AND §9.1 left 51 green (#13126 round 3) — a reader of §7 then believes
+    # the fused production read was measured and the vector leg cleared.
+    mode = artifact["retrieval"]["mode"]
+    assert artifact["retrieval"]["has_embedder"] is False, artifact["retrieval"]
+    assert artifact["retrieval"]["legs_seen"]["vector"] is False, artifact["retrieval"]
+
+    # the three tail-vs-random cells the README contrasts, in ITS order (tail first)
+    trio = ", ".join(
+        f"{obj[f'tail@{c}']['found_deep'] * 100:.1f} vs "
+        f"{obj[f'random@{c}']['found_deep'] * 100:.1f}" for c in ("0.75", "0.5", "0.1"))
+    # Finding 4's own magnitude at 0.25, which is NOT the published tie-band bound
+    sep = abs(obj["tail@0.25"]["recall@3"] - obj["random@0.25"]["recall@3"]) * 100
+    # the silent-loss pair — swapping the two policies stated the larger loss as
+    # the cold-tail order's, contradicting the cell-bound `:Object` table
+    sil_t = f"{obj['tail@0.5']['silent_zero'] * 100:.1f}"
+    sil_r = f"{obj['random@0.5']['silent_zero'] * 100:.1f}"
+    unreachable = f"{(1 - pt['complete']['found_deep']) * 100:.1f}"
+    # the reproducibility restatements: a WORD for the run count, and §9.1's own
+    # ceiling for the tie band (a manual round, not `f"{...:.1f}"` = 9.8)
+    words = {2: "Two", 3: "Three", 4: "Four", 5: "Five"}
+    runs_word = words[rep["runs_compared"]]
+    tie_ceiling = math.ceil(rep["tie_counting_max_delta_pp"] * 10) / 10
+    pt_arms, obj_arms = _arms(artifact, "point"), _arms(artifact, "object")
+    windowed_total = 2 * (len(pt_arms) - 1)                  # 20 windowed arms
+    total_arms = len(pt_arms) + len(obj_arms)                 # 22 with `complete`
+    gap_low, gap_high = _gap_endpoints(artifact)
+    params = artifact["params"]
+
     rows = [
         # (document, fragment as the document states it, what it must derive from)
         (readme, tail, "the `:Object` tail series (found@deep, coverage 0.9→0.1)"),
@@ -1554,13 +1585,79 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
         (readme, f"**git head:** `{artifact['git_head'][:12]}`", "artifact.git_head"),
         (readme, f"**Corpus:** `~/.tortoise/session-events/*.jsonl` — {bundle}",
          "artifact.corpus.corpus counts"),
+        # ── round 3 ────────────────────────────────────────────────────────
+        (readme, f"**Retrieval mode:** `{mode}`", "artifact.retrieval.mode"),
+        (arch, f'`retrieval.mode = "{mode}"`', "artifact.retrieval.mode"),
+        (readme, f"(not the tail series above — {trio})",
+         "object found_deep pair at 0.75/0.5/0.1"),
+        (readme, f"separates by **{sep:.1f} points** at coverage 0.25",
+         "object tail@0.25 minus random@0.25 recall@3"),
+        (readme, f"the {sil_t} % of demoted entity queries",
+         "object/tail@0.5 silent_zero"),
+        (readme, f"({sil_r} % under `random@0.5`)", "object/random@0.5 silent_zero"),
+        (readme, f"{unreachable} % of claim canonicals are unreachable",
+         "1 - point/complete found_deep"),
+        (readme, f"**{runs_word}** runs of identical input were compared",
+         "artifact.reproducibility.runs_compared"),
+        (arch, f"across {runs_word.lower()} runs of identical input",
+         "artifact.reproducibility.runs_compared"),
+        (arch, f"`recall@k` by at most {rep['recall_at_k_max_delta_pp']:g}",
+         "artifact.reproducibility.recall_at_k_max_delta_pp"),
+        (arch, f"the tie-counting rates by at most {tie_ceiling:g}",
+         "artifact.reproducibility.tie_counting_max_delta_pp (ceiling, not a rounding)"),
+        (arch, f"the gaps the verdict rests on run {gap_low} to {gap_high} points",
+         "_gap_endpoints(artifact)"),
+        (readme, f"all {len(pt_arms)} arms, `complete` included",
+         "the `:Point` arm count"),
+        (readme, f"{windowed_total} arms measured this, not {total_arms}",
+         "windowed arms across both populations vs total"),
+        (arch, f"`:Point` `empty` is {pt['complete']['empty']:.1f} in every arm",
+         "point/complete empty"),
+        (readme,
+         f"--points {params['points']} --objects {params['objects']} "
+         f"--sample {params['sample']}",
+         "artifact.params (the reproduction recipe)"),
     ]
+    # the README quotes `signal` verbatim, and it is the evidence for half the
+    # verdict ("— and it is SILENT"). Nothing compared the quote to the artifact,
+    # so `"residency_marker_armed": true` in the fence left 51 green (#13126
+    # round 3): a record whose own block says the marker IS armed tells a reader
+    # the loss is already labelled.
+    assert json.dumps(artifact["signal"]) in README.read_text(encoding="utf-8"), (
+        "the README's quoted `signal` block no longer matches artifact['signal'] — "
+        "the 'and it is silent' half of the verdict rests on it")
+
     missing = [f"{what}: {frag!r}" for doc, frag, what in rows if frag not in doc]
     assert not missing, (
         "these quoted figures no longer match the arm they report — either the "
         "artifact moved and the prose did not, or the figure was taken from a "
         "DIFFERENT arm (membership cannot tell the two apart):\n  "
         + "\n  ".join(missing))
+
+
+def test_the_evictor_still_does_not_invalidate_the_degraded_snapshot():
+    """The record's `#13123` claim is about CODE THIS PR DOES NOT CHANGE.
+
+    ⛔ Measured: `grep -c 'fallback_snapshot\\|cache_evictor\\|record_serve'` on this
+    module was **0** (#13126 round 3), so the claim was true at this head purely
+    by luck of the tree. The verdict paragraph tells a reader the loss is silent
+    TODAY because `cache_evictor._delete_nodes` issues a bare `DETACH DELETE` and
+    never invalidates `fallback_snapshot` — the day `#13123` lands, that callout
+    is false and nothing reds. This pin makes the record red in that PR instead of
+    letting it rot green, the same binding `test_the_record_quotes_the_current_
+    wording_of_the_honesty_item` already does for §7's prose.
+    """
+    src = (ROOT / "tortoise" / "cache_evictor.py").read_text(encoding="utf-8")
+    assert "_delete_nodes" in src, (
+        "the evictor's delete path was renamed — re-derive the record's #13123 "
+        "claim rather than editing this pin")
+    delete_path = src[src.index("def _delete_nodes"):]
+    delete_path = delete_path[:delete_path.find("\ndef ", 10) if "\ndef " in delete_path[10:] else len(delete_path)]
+    for token in ("fallback_snapshot", "_mark_dirty", "invalidate"):
+        assert token not in delete_path, (
+            f"`cache_evictor._delete_nodes` now mentions {token!r} — #13123 may have "
+            f"landed, which makes the record's 'the loss is silent' callout stale; "
+            f"correct the record in that PR and then relax this pin")
 
 
 def test_every_published_arrow_is_bound_to_the_cell_it_reports(artifact):
