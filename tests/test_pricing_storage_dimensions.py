@@ -555,9 +555,13 @@ class TestTheLoaderContract:
             "max_postgres_storage_bytes": None, "max_graph_storage_mb": 0}
 
     def test_the_storage_keys_are_NOT_in_tier_limits(self):
-        """⛔ THE ANTI-SECOND-SEAM INVARIANT. `allowance_gate.enforce_allowances`
-        arms on key PRESENCE (`if dim.limit_key not in limits: continue`), so
-        ANY limits dict that carries a storage key arms that dimension. The
+        """⛔ THE ANTI-ARMING INVARIANT. `allowance_gate.enforce_allowances`
+        arms on key PRESENCE (`if dim.limit_key not in limits: continue`), and
+        BOTH storage dimensions are BLOCKED there — `postgres_storage` has a
+        per-org ATTRIBUTION but no per-org GAUGE the gate can read on a write
+        path (and its included amounts are unconfirmed), while `graph_storage`'s
+        own contract forbids capping on a figure that under-reports the HNSW
+        index 8.5x-21.7x. The
         `tier_limits()` dict is what callers hand around as "the org's limits",
         so a storage key in it would arm `graph_storage` on a path that never
         passed `quota._arm_graph_storage` — the ONE seam `#13084` built, which

@@ -155,33 +155,28 @@ def storage_limits(tier: str) -> dict:
     ⛔ **DELIBERATELY NOT part of :func:`tier_limits`.** That dict is handed
     around as "the org's limits" and reaches ``quota.enforce_org_limit``; the
     allowance gate arms on *presence* — ``allowance_gate.enforce_allowances``
-    does ``if dim.limit_key not in limits: continue`` in its dimension loop
-    (no line citation on purpose: it drifted once already). Neither storage key
-    may ride in the dict every caller treats as "the limits": that dict is one
-    ``{**tier_limits(t), ...}`` away from arming a dimension on a path nobody
-    reviewed — a silent second arming seam for ``graph_storage`` (which must
-    have exactly one, here), and an HTTP 500 on every gated write for
-    ``postgres_storage`` (BLOCKED, so a configured allowance refuses). This
-    accessor is the ONLY route, and the arming goes through
-    ``quota._arm_graph_storage``.
+    skips any dimension whose ``limit_key`` is absent from the limits dict.
+    ``postgres_storage`` is still **BLOCKED** there, so putting its key into the
+    dict every caller treats as "the limits" is one ``{**tier_limits(t), ...}``
+    away from arming a blocked dimension and answering HTTP 500 on every gated
+    write — this accessor is the sanctioned route for BOTH dimensions.
 
-    ⛔ **``graph_storage`` IS ARMED FROM HERE**, since ``#13084`` — this is the
-    accessor that arms it. ``quota._arm_graph_storage`` reads it and
-    ``quota.resolve_org_limits`` emits ``max_graph_storage_mb`` on BOTH arms
-    (Supabase and registry), so the gate compares the meter against the tier's
-    hot-window number on every gated write: **solo 77 / pro 102 / team 615**
-    decimal MB, with the exact 1.5x hard stop at 115.5 / 153 / 922.5. ``free``/``anon``
-    carry ``0`` — a STATED amount, by decision
-    (``_included_amounts_status``: *"hot capacity 0 is stated by the decision
-    record"*; ``SEARCH-ARCHITECTURE.md`` §8's window target is 0) — and are
-    deliberately left UNARMED, departing from that recorded 0 because the gate
-    refuses at ``used >= allowance``: a 0 cap would refuse the first byte on a
-    tier that still grants a graph. ``zero_means_unarmed`` is that departure, and
-    it covers an EXACT zero only (a negative is a fault).
-    ``postgres_storage`` is the ONE dimension that
-    is still **BLOCKED** — it has no per-org byte meter, and a per-org split
-    would be an ALLOCATION, not a measurement — so its key is carried here for
-    the money arithmetic and refuses (fail closed) if it is ever configured.
+    ⛔ **``graph_storage`` IS ARMED FROM HERE**, since ``#13084``: it is
+    deliberately not blocked, because the meter's error is ONE-DIRECTIONAL
+    (``GRAPH.MEMORY USAGE`` under-reports the HNSW index, so a reading is a
+    LOWER BOUND) and the gate therefore refuses only when the true bytes are
+    already over the cap — ``allowance_gate``'s ``cap_band`` is what carries that
+    reasoning. So for ``graph_storage`` this is not a dormant accessor: its key
+    IS emitted on both resolver arms and the gate DOES gate on it.
+
+    ⛔ **WHY a dimension is blocked is stated in ONE place, and it is not here.**
+    ``allowance_gate.DIMENSIONS[*].blocked_reason`` carries the reason AND its
+    ``release`` conditions; restating it in this docstring is how the same
+    sentence came to be quoted in two files long after #12762 falsified it (the
+    per-org Postgres attribution it called missing had landed). Read
+    ``RELEASE_CONDITIONS``' description for what each condition needs, and
+    ``tests/test_9559_blocked_release_conditions.py`` for the evidence that is
+    re-checked on every PR.
 
     Returns ``{<allowance_key>: value | None}`` for every STORAGE dimension —
     ``None`` meaning UNCONFIGURED (the gate's own reading of it), never 0-by-0.
