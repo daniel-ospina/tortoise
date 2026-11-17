@@ -75,14 +75,101 @@ SELECT tests.assert(
                          'last_dreamed_at','content_hash','inherited_at','version',
                          '_nid','_graph_id','reason'))
                   OR (table_name = 'event' AND column_name = 'confidence')
-                  OR (table_name = 'object' AND column_name IN ('status','embedding'))
-                  OR (table_name = 'subject' AND column_name = 'embedding')
+                  -- ⛔ `embedding` LEFT THIS BAN FOR `object`/`subject` (#13220,
+                  -- owner ruling 2026-11-17) and `status` did NOT: the owner
+                  -- requires those two fingerprints INDEXED IN POSTGRES, which
+                  -- is impossible without storing them, while `status` stays a
+                  -- projection-owned cache with no column. The carve-out this
+                  -- assertion encodes is "a RECOMPUTED value never becomes
+                  -- record AUTHORITY"; `20261117000001_record_object_subject_
+                  -- embedding.sql` keeps that purpose (the column is derivable
+                  -- from the carried `name` through the ONE seam, the props
+                  -- refusal is untouched, `embedding_vec` stays GENERATED) and
+                  -- states the override in full. Pinned below.
+                  OR (table_name = 'object' AND column_name IN ('status'))
+                  OR (table_name = 'subject' AND column_name IN ('status'))
                   OR (table_name = 'source' AND column_name IN
                         ('reliability','reliability_components','reliability_derived_at',
                          'previous_content_hash','__run_id'))
                   OR (table_name = 'relation' AND column_name IN
                         ('msg_alpha','msg_beta','back_msg_alpha','back_msg_beta')))),
   '7968: no DERIVED/VOLATILE property has a column (§17.5 carve-out)');
+
+-- ── 2b. #13220: the two fingerprints ARE columns, and only the fingerprints ──
+-- The positive half of the override above: it is not enough that the ban was
+-- narrowed, the columns the ruling requires have to EXIST and be INDEXABLE.
+--
+-- ⛔ GUARDED ON THE CONVERTER, because this suite has exactly ONE runner and it
+-- cannot provide pgvector: `supabase/tests/pglite/validate.mjs` (the only place
+-- this file is executed — `grep -rn 20261012000001_record_schema` confirms it)
+-- SKIPS `20261109000001_record_embedding_vector.sql`, which is what creates
+-- `public.vector` and `public.record_embedding_vector(jsonb)`; `20261117000001`
+-- declares the same dependency so it is skipped too. ⚠️ TWO of 2b's three
+-- assertions need pgvector (the column/index existence pair) and are the two
+-- inside the guard; the third — the props-CHECK refusal — needs none and is
+-- deliberately OUTSIDE it, which is why it is green in this drill regardless.
+-- WITHOUT the guard those two are RED here and absent everywhere else — a false
+-- RED, and no coverage gained anywhere. (WITH it they do not execute on this
+-- harness at all: the `DO` block returns at the `to_regprocedure` test below.
+-- Neither state is a pass — which is why the coverage statement two paragraphs
+-- down names where the real proof lives.)
+--
+-- ⛔ THE GUARD IS SILENT ON PGlite, AND SAYING OTHERWISE WOULD BE FALSE. An
+-- earlier cut of this comment claimed the `NOTICE` below makes the absence
+-- "DISCLOSED … the same shape as the drill's own `⊘ … SKIPPED` line". It does
+-- not: PGlite's `db.exec` DISCARDS `RAISE NOTICE` (measured on
+-- `@electric-sql/pglite` 0.5.4 — a minimal `DO $$ BEGIN RAISE NOTICE 'x'; END $$`
+-- prints nothing around the call), whereas the drill's `⊘ migration … SKIPPED`
+-- IS visible because `validate.mjs` writes it with `console.log`. So the two are
+-- NOT the same shape, and the ONE real disclosure is the drill's own two lines
+-- (`⊘ 20261117000001_… SKIPPED` and the `⚠ 2 migration(s) NOT applied` summary),
+-- which is where a reader learns this harness did not apply the file. The
+-- `NOTICE` is kept because it costs nothing and announces the skip on a runner
+-- that DOES surface notices — it is not the disclosure.
+--
+-- The guard keeps the assertions live on any pgvector-capable runner. Their real
+-- coverage today is the probe-backed evidence, not this file:
+-- `tests/test_13220_record_label_embeddings.py` pins the DECLARED schema through
+-- `record_projection.table_columns()`/`column_types()` — which PARSE
+-- `supabase/migrations/` rather than reading a database (that is their own
+-- docstring's contract) — and the applied side is carried by the separate fact
+-- that the migration was applied for real (all 20 `RECORD_MIGRATIONS`,
+-- `applied=20 rc=0`) against a `pgvector/pgvector:pg16` container as recorded on
+-- #13265 — see also `test-record-postgres` (`tests/test_11642_vector_move_live.py`),
+-- the job that owns pgvector coverage. Those two guarded assertions were
+-- additionally executed green against a real `pgvector/pgvector:pg16` in review
+-- (stubbing `tests.assert`), so the block is live wherever the objects exist.
+DO $$
+BEGIN
+  IF to_regprocedure('public.record_embedding_vector(jsonb)') IS NULL THEN
+    RAISE NOTICE '13220: SKIPPED — public.record_embedding_vector(jsonb) is absent on this harness (PGlite cannot provide pgvector; the migration that creates it is skipped here). Coverage of these columns is test-record-postgres plus #13265''s applied-migration evidence.';
+    RETURN;
+  END IF;
+
+  PERFORM tests.assert(
+    (SELECT count(*) FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND ((table_name = 'object' AND column_name IN ('embedding','embedding_vec'))
+         OR (table_name = 'subject' AND column_name IN ('embedding','embedding_vec')))) = 4,
+    '13220: object/subject carry `embedding` + `embedding_vec` (owner ruling 2026-11-17)');
+
+  PERFORM tests.assert(
+    (SELECT count(*) FROM pg_indexes
+     WHERE schemaname = 'public'
+       AND indexname IN ('idx_object_embedding_vec_hnsw','idx_subject_embedding_vec_hnsw')) = 2,
+    '13220: both labels carry their HNSW index — an unindexed column is the §14.3 V3 defect again');
+END $$;
+
+-- ⛔ The `props` refusal is NOT relaxed by the column: the fingerprint's home is
+-- the COLUMN, and a payload still cannot smuggle the name into the open tail.
+SELECT tests.assert(
+  EXISTS (SELECT 1 FROM pg_constraint
+          WHERE conname = 'chk_object_props_no_derived'
+            AND pg_get_constraintdef(oid) LIKE '%embedding%')
+  AND EXISTS (SELECT 1 FROM pg_constraint
+              WHERE conname = 'chk_subject_props_no_derived'
+                AND pg_get_constraintdef(oid) LIKE '%embedding%'),
+  '13220: `props` still refuses `embedding` on object/subject — splitting the home from the tail');
 
 SELECT tests.assert(
   EXISTS (SELECT 1 FROM information_schema.columns
@@ -240,8 +327,11 @@ END $$;
 
 -- 4a(ii). The forward migration REPLACES the constraint wholesale, so the OTHER
 -- name it refuses must be pinned on the LIVE constraint (not just via the Python
--- union parse, which cannot see a shrinking re-declaration). `embedding` is not
--- a column on `subject`, so this is a props-tail refusal and nothing else.
+-- union parse, which cannot see a shrinking re-declaration). ⚠️ `embedding` IS a
+-- column on `subject` since `#13220` (`20261117000001`), so this asserts the
+-- props-TAIL refusal specifically: the column exists AND a payload naming the
+-- name in the open `props` bag is still refused (`chk_subject_props_no_derived`'s
+-- `?|` test), which is what keeps the projection the only writer.
 DO $$
 BEGIN
   BEGIN
