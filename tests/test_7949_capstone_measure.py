@@ -6188,10 +6188,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row carried (`:26452`) had drifted 102 lines behind the tree it names — a red
         # this branch introduced itself, found by running this file over the merge.
         # Measured: `grep -nF 'declared = declared_relation_predicates()'
-        # tortoise/sdk.py` -> **26554**, the file's only occurrence (on `origin/main` the
+        # tortoise/sdk.py` -> **26568**, the file's only occurrence (on `origin/main` the
         # same grep reads 25928, which is that side's number and NOT this tree's).
+        # ⛔ RE-DERIVED A SECOND TIME, and this row's own history is why it is pinned:
+        # the first re-derivation read `:26554`, which was correct at `24edb9032e` and
+        # WRONG one commit later — `c7923850ae` (round 4) inserted net +14 lines above
+        # this anchor (`@@ -23007` / `@@ -23417`), and a repair that nothing re-reads is
+        # a repair the next edit above it undoes silently. Measured at `15ca35f939`:
+        # `:26554` is a COMMENT line (`# covers the relation leg only; the kind-pair leg
+        # is an epic-level`), so the `anchor not in got` arm fires; the symbol is at
+        # `:26568` (`git show <c>:tortoise/sdk.py | grep -nF …` -> 26568 at
+        # `c7923850ae`, `3251db5f5b` and `15ca35f939` alike). This file is registered on
+        # the `core` surface, so that red is a required leg, not a note.
         ("04-plan.md", "operator / label path", (
-            ("26554", "declared = declared_relation_predicates()"),
+            ("26568", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # ⛔ THE RECONCILE APPENDIX'S OWN REPRODUCTION BLOCK (#12462 review round 2).
         # `RECONCILE-A1-A2-A5.md` is in NEITHER `_BUNDLE_DOCS` nor any sweep, so the
