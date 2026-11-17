@@ -111,7 +111,7 @@ made**; no MCP/SDK surface is touched.
 
 **⛔ What the code says that the dispatch's premise does not: the mechanism is POINT-only by design.**
 `_entity_key_alias_harvest` harvests **`:Point`** `search_keys`, and the caller arms both halves only
-under `entity_type == "point"` (`sdk.search_graph`: `if (entity_key_expansion and entity_type ==
+under `entity_type == "point"` (`sdk.tortoise_fts_query`: `if (entity_key_expansion and entity_type ==
 "point" …)`). The reason is in that call site's own comment: expanding an `object`/`event`/`operator`
 arm would merge **point** ids into an object top-k. The eval instrument's arm 1 asks
 `sdk.tortoise_fts_query(..., entity_type="object")` — the **object** leg. **So the shipped expansion
@@ -123,7 +123,8 @@ cannot move the metric the dispatch names, by construction, not by degree.**
   vector store.
 - **§14.3 V3 / `#11901` / `#13108`** (no vector index) — untouched: **no index is created**, and the
   harness's own `#4997` note fires on every hybrid run (`vector search … is unindexed for
-  label(s) ['Event','Object','Source','Subject']`) which this lane records and does not act on.
+  label(s) ['Event','Object','Source','Subject']`, `tortoise/projection/__init__.py:20091`) which this
+  lane notes and does not act on; it is emitted to the run's log, not carried into the artifact.
 - **Owner ruling 2026-11-10** (`:Object`/`:Subject` keep their embeddings; removal refused) —
   untouched: no pass stops writing or removes an embedding, and the ruling is **not stretched** to
   `:Event`/`:Source`/`:Document`.
@@ -171,8 +172,12 @@ Convergence across the sources, with the numbers each one carries:
 
 **Harness:** `tools/candidate_recall_11901.py` (unchanged; the same tool that produced the `#11901`
 and `#12295` artifacts), `--population 1000 --sample 300 --captures 20`, corpus
-`/home/cmux/.tortoise/session-events` (**14 daily files**; the default `~/.tortoise/session-events`
-is empty on this cell because `HOME=/tmp/cell-home`). ⚠️ **Reading files outside the repo** — this is
+`/home/cmux/.tortoise/session-events` (**14 daily files** — this box's `HOME` is `/home/cmux`, so
+that path IS the harness's `--sessions-dir` default; §8 passes it explicitly so the corpus is part of
+the recipe rather than an accident of `HOME`). ⚠️ The artifacts' own `issue` / `measured_for` fields
+read `11901` / `12295`: those are the harness's hardcoded provenance
+(`tools/candidate_recall_11901.py:2042-2045`), naming the runs it was written for, not this one.
+⚠️ **Reading files outside the repo** — this is
 the declared corpus the instrument exists to measure; nothing else outside the checkout was read.
 
 **Pairing — stated as the artifacts show it, because the obvious inference is WRONG.** The corpus is
@@ -354,7 +359,7 @@ Three independent reasons, each checkable without a new measurement:
    therefore **unsatisfiable**, and any report of a fall would be a fabricated baseline.
 2. **Structural (this is the decisive one).** The `#2518` mechanism harvests **`:Point`**
    `search_keys` over the **`aboutObject`** spine and is armed **only for `entity_type == "point"`**
-   (`sdk.search_graph`'s own gate). The instrument's arm 1 is the **`object`** leg
+   (`sdk.tortoise_fts_query`'s own gate, `tortoise/sdk.py:43269`). The instrument's arm 1 is the **`object`** leg
    (`_fts_rows(entity_type="object")`). The expansion cannot touch the leg this metric measures —
    not "has little effect", **cannot reach it**.
 3. **External convergence.** Expansion recovers *vocabulary mismatch inside a pool that already holds
@@ -380,8 +385,8 @@ inventing a point corpus (declared, not done).
 | **`absent_at_any_k` falls** | **UNSATISFIABLE — no change attempted** | At this head: **0** (hybrid, 4372 uniform hybrid windows; **0** lexical with the shipped composite), and the pre-`#12360` controls read **20** (hybrid) / **82** (lexical). There is no non-zero baseline at this head to fall from, so the falsifier is reported as not applicable rather than gamed. |
 | **`past_k` does not rise** | **MET trivially — no change** | HEAD: hybrid `past_k` **2 → 1 → 0 → 0** (k=3/5/10/15); lexical-on **38 → 22 → 7 → 0**; lexical-off **34 → 22 → 9 → 0**. Nothing shipped, so nothing moved. |
 | **extra embeds/queries counted and bounded** | **MET as a code bound; NOT exercised** | Per read, at most: **1** anchor FTS (≤ 20 fetched / ≤ 3 kept) + **1** batched `aboutObject` harvest (≤ 200 aliases, ≤ 64/anchor) + **1** extra fts pass + **1** extra embed (≤ 240 chars from ≤ 32 terms) + **1** extra vector-leg query. Fail-open on every path. **The eval counts 0 of them** because its arm never reaches the mechanism — stated rather than quoted as a measured cost. |
-| **recall reported with its `window_modes` split, on a load-stated box** | **MET** | §3.1: hybrid **4372/0** (`uniform_windows: true`), lexical **0/4372** (twice). Box: 16 cores / 31 GB, load **33.2 → 4.4**; the hybrid arm's `#4997` unindexed-label warning is recorded in the run log and the artifact. |
-| **`uv run pytest tests/test_candidate_recall_11901.py -q` green** | **MET** | run through the lane seam (`tools/test_lane.py run -- tests/test_candidate_recall_11901.py -q`); result in `WORKTREE-REPORT.md`. |
+| **recall reported with its `window_modes` split, on a load-stated box** | **MET** | §3.1: hybrid **4372/0** (`uniform_windows: true`), lexical **0/4372** (twice). Box: 16 cores / 31 GB, load **33.2 → 4.4**; the hybrid arm's `#4997` unindexed-label warning is emitted by the read path on every hybrid run (`tortoise/projection/__init__.py:20091`) — it goes to the run's log and is **not** a field in the JSON artifact, which records the retrieval mode instead (`retrieval.note`). |
+| **`uv run pytest tests/test_candidate_recall_11901.py -q` green** | **MET** | run through the lane seam — `uv run python tools/test_lane.py run -- tests/test_candidate_recall_11901.py -q` → **`56 passed in 8.91s`**, exit 0. The suite is hermetic (no graph, no corpus), so this pins the harness's reasoning surface, not the measured numbers. Lane-local log: `WORKTREE-REPORT.md` (gitignored, so the result is restated here rather than left only there). |
 | **no new index, no surface change** | **MET** | No `CREATE INDEX`, no vector index, no change to `TOOL_REGISTRY` or to a public `TortoiseSDK` method. `git diff` for this lane is **docs + artifacts only**. |
 
 ---
@@ -447,8 +452,10 @@ eval "$uri"
 # 2. the embeddings extra — WITHOUT it the fused read degrades to keyword-only
 uv sync --extra embeddings --extra parity
 # 3. the measurement (NOT via `test_lane.py run`, which executes pytest).
-#    `--sessions-dir` is explicit: this cell's HOME is /tmp/cell-home, so the
-#    default path is empty and the harness would exit "no session events".
+#    `--sessions-dir` is explicit so the corpus is part of the recipe: on this box it
+#    happens to equal the default (`$HOME/.tortoise/session-events`); on a box whose
+#    HOME is not the capture user's, the default is empty and the harness exits
+#    "no session events".
 export HF_HUB_OFFLINE=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2
 uv run python tools/candidate_recall_11901.py \
     --sessions-dir /home/cmux/.tortoise/session-events \
