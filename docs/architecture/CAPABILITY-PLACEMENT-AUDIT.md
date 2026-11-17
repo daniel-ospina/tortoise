@@ -79,8 +79,9 @@ file — `search_engine.py` FTS
 `:6830`; `sdk.py`'s second `capture_redactions` writer `:2705`; `audit.py`'s carrier probe `:2445`/`:2456`;
 and `mcp_server.py`'s `entity_type` passthrough `:5475` — and the drift figure
 above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so this revision moved it**:
-it contributes **14** resolved pairs, **9** of which drift — 97 (the `main` copy) + 9 = **106** — and every one of
-the 14 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
+this branch contributes **14** resolved pairs, **9** of which drift, and `main`'s own `#13312` added **3** more, **1** of
+which drifts — 97 (the 195-pair base) + 1 + 9 = **107 of 212** — and every one of
+this branch's 14 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of §0) instead of enumerated here.
