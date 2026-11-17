@@ -35,16 +35,25 @@ sentence is carried verbatim on every IN-PROCESS reading (:data:`PRECISION_NOTE`
 ``GraphStorageReading.precision_note``, and ``as_dict()``), so a reader of a
 reading cannot consume the number without it.
 
-⚠️ **BUT ITS ERROR HAS ONE DIRECTION, AND THAT IS WHAT MAKES A LOWER-BOUND CAP
-POSSIBLE (#13084).** Every exclusion above REMOVES bytes, so the reading is a
+⚠️ **BUT ITS ERROR HAS ONE DIRECTION *UP TO THE SAMPLING ERROR*, AND THAT IS WHAT
+MAKES A LOWER-BOUND CAP POSSIBLE (#13084).** Every exclusion above REMOVES bytes,
+so the reading is a
 **lower bound** on what the tenant actually holds resident: refusing at
 ``reading >= X`` is a refusal only when the true figure is already ``>= X``.
-That is the one use of this number that survives the blind spot, and it is the
-use the allowance gate makes: it WARNS at the tier's cap, and hard-refuses only
-at **1.5x** it (a gap sampling noise cannot explain), with the refusal labelled
-an ESTIMATE and a LOWER BOUND. The cost of the direction is UNDER-enforcement —
+⛔ **THE SAMPLING HALF DOES NOT HAVE THAT DIRECTION** (#13102 P1-3): the figure is
+the MEDIAN of ``SAMPLES``-based estimates, which wobble in both directions — this
+repo says so of this same instrument (``SEARCH-ARCHITECTURE.md`` §8) — so the
+lower-bound property holds **up to the sampling error, and no further**. That is
+the one use of this number that survives the blind spot, and it is
+the use the allowance gate makes: it WARNS at the tier's cap, and hard-refuses only
+at **1.5x** it (a gap sampling noise should not explain), with the refusal
+labelled an ESTIMATE and a LOWER BOUND **whose error is stated** — the gate reads
+this reading's own ``min_mb``/``spread_mb``/``repeats``, refuses only once the
+OBSERVED MINIMUM is over the cap where several repeats exist, and says the error
+is UNMEASURED where only one repeat was taken. The cost of the direction is UNDER-enforcement —
 a vector-heavy graph can hold more than the cap before its measured share
-crosses — so this bounds residency late, never falsely. **It still must not be
+crosses — so this bounds residency late, never on the wrong side of what it can
+prove. **It still must not be
 read as the tenant's exact bytes.**
 
 ⚠️ **WHERE THIS CAVEAT DOES *NOT* REACH (open, #5331).** The durable ledger does
@@ -148,8 +157,10 @@ REPEATS_MAX = 32
 #: ⇒ For a VECTOR-BEARING graph the reported figure omits the single largest and
 #: most expensive resident component. Measured, not theorised: this is why the
 #: reading does not claim to be an EXACT cap input. #13084 makes the one use that
-#: survives it: the error is one-directional (under-report), so the reading is a
-#: LOWER BOUND and the allowance gate refuses only at 1.5x the cap, labelled an
+#: survives it: the error is one-directional (under-report) **up to the sampling
+#: error** (#13102 P1-3 — a SAMPLES-based average also wobbles upward), so the
+#: reading is a LOWER BOUND up to that error and the allowance gate refuses only
+#: at 1.5x the cap or past a MEASURED spread, labelled an
 #: estimate. The durable fix is still a vendor answer (is there a supported way
 #: to size a tenant's vectors?), which is asked on `#5331` / the FalkorDB thread.
 VECTOR_INDEX_EXCLUDED = (

@@ -182,6 +182,34 @@ def test_the_restore_probe_NEVER_deletes_the_graph(monkeypatch, capsys):
     assert client.closed, "the probe must still close its client"
 
 
+def test_a_CRASH_between_DUMP_and_RESTORE_leaves_the_graph(monkeypatch):
+    """THE REVIEWER'S FALSIFIER (#13102 P1-5): a kill in the window is survivable.
+
+    The pre-fix shape was `DUMP` → `DEL` → `RESTORE`, all in memory: a kill, an
+    OOM or a dropped connection after the `DEL` left the graph **deleted with no
+    on-disk copy** — irrecoverable, and `--confirm-graph` guards a typo, not a
+    crash. The probe now issues **no `DEL` at all** (`RESTORE … REPLACE` against
+    the live key, checksum validated before the key is touched), so the crash
+    this test simulates — the process dying at the restore call, as a
+    `BaseException` (what a SIGINT/OOM-kill looks like to Python, and what
+    ``except Exception`` would not swallow) — leaves the graph exactly as it was.
+
+    Asserted on the CLIENT, not on the report: a crash produces no report, and the
+    property that matters is that no command in the recorded trace mutates or
+    removes the key before the engine has validated the payload.
+    """
+    client = _RestoreProbeClient(restore_error=KeyboardInterrupt())
+    _install_probe(monkeypatch, client)
+
+    with pytest.raises(KeyboardInterrupt):
+        census._restore_probe("docker://h:1/g", "g", "g")
+
+    verbs = [c[0] for c in client.calls]
+    assert "DEL" not in verbs, client.calls            # nothing was destroyed
+    assert "DUMP" in verbs and "RESTORE" in verbs      # …and the crash is where we say
+    assert client.closed, "the client is closed even on a hard exit"
+
+
 def test_the_human_render_says_why_there_is_no_del_figure(monkeypatch, capsys):
     """A bare `del None` would read as a broken measurement, not as a REPLACE."""
     client = _RestoreProbeClient()
