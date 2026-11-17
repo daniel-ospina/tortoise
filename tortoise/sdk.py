@@ -12366,6 +12366,23 @@ def canonical_org_graph_name(tenant: str) -> str:
     return f"org_{bare_tenant_id(tenant)}"
 
 
+def _uri_graph_name(db_uri: str | None) -> str | None:
+    """The URI's own graph name, or ``None`` for an embedded construction.
+
+    The `urlparse(...).path.lstrip("/") or "tortoise"` step had THREE verbatim
+    copies in this module (`_get_proj`, `_graph_census`'s read, and
+    `_cache_graph_name`) — and `_derive_graph_name`'s own docstring exists
+    because a caller that names a graph outside a projection must derive it
+    IDENTICALLY. A drift in this step makes a caller compare against a name the
+    projection never opens (a false mismatch, or a missed one), so it is one
+    function now, used by all three.
+    """
+    if db_uri is None:
+        return None
+    from urllib.parse import urlparse
+    return urlparse(db_uri).path.lstrip("/") or "tortoise"
+
+
 def _derive_graph_name(*, namespace: str | None,
                        graph_name: str | None,
                        uri_graph: str | None = None) -> str:
@@ -15183,10 +15200,7 @@ class TortoiseSDK:
             # Resolve the URI's own graph name first (used as the fallback
             # when no namespace is set — preserves the conftest per-session
             # test graph, #221).
-            uri_graph: str | None = None
-            if self._db_uri is not None:
-                from urllib.parse import urlparse
-                uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
+            uri_graph = _uri_graph_name(self._db_uri)
 
             graph_name = _derive_graph_name(
                 namespace=self._namespace, graph_name=self._graph_name,
@@ -16221,13 +16235,9 @@ class TortoiseSDK:
         name the graph without paying a connect, a version probe or an index
         check. Used by `_bind_record_tenant`'s tenant/cache grading (#12943).
         """
-        uri_graph: str | None = None
-        if self._db_uri is not None:
-            from urllib.parse import urlparse
-            uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
         return _derive_graph_name(namespace=self._namespace,
                                   graph_name=self._graph_name,
-                                  uri_graph=uri_graph)
+                                  uri_graph=_uri_graph_name(self._db_uri))
 
     def _record_write_failure(self, reason: str, exc: BaseException) -> None:
         """Count and report one armed record write that did not happen (#9188).
@@ -59706,10 +59716,7 @@ class TortoiseSDK:
         """
         from .record_writer import is_usable_tenant, record_tenant_effective
 
-        uri_graph: str | None = None
-        if self._db_uri is not None:
-            from urllib.parse import urlparse
-            uri_graph = urlparse(self._db_uri).path.lstrip("/") or "tortoise"
+        uri_graph = _uri_graph_name(self._db_uri)
         graph_name = _derive_graph_name(
             namespace=self._namespace, graph_name=self._graph_name,
             uri_graph=uri_graph)

@@ -12674,16 +12674,28 @@ class FalkorProjection(
         # the environment's: the whole #12943 class is "two variables chose two
         # stores", so a fingerprint derived from the variable would agree with
         # itself while the write went somewhere else.
+        # ⛔ THE WHOLE HOOK IS GUARDED, not only the counting call. This runs
+        # AFTER the journal append — the record's commit point — so anything
+        # that raises here produces exactly the record-written / cache-not-folded
+        # split the hook exists to instrument. `_stable_endpoint` is NOT
+        # exception-free by design (`_falkordb_version_cache_key` leaves
+        # `OverflowError` uncaught on a non-finite port, a deliberate
+        # construction-time loudness that this call site would turn into a
+        # half-written live write). Same rule as the sibling call site at
+        # `_probe_store`: everything that can throw is inside the try.
         if not replay_window_open():
-            from tortoise.cache_leg import note_cache_write_target
-            endpoint = getattr(self, "_cache_target_endpoint", None)
-            if endpoint is None:
-                endpoint = self._stable_endpoint() or ()
-                # Memoised: the endpoint cannot change for a live projection
-                # (the client is built once), and this fold is on the write
-                # path.
-                self._cache_target_endpoint = endpoint
-            note_cache_write_target(endpoint, self.graph_name)
+            try:
+                from tortoise.cache_leg import note_cache_write_target
+                endpoint = getattr(self, "_cache_target_endpoint", None)
+                if endpoint is None:
+                    endpoint = self._stable_endpoint() or ()
+                    # Memoised: the endpoint cannot change for a live
+                    # projection (the client is built once), and this fold is
+                    # on the write path.
+                    self._cache_target_endpoint = endpoint
+                note_cache_write_target(endpoint, self.graph_name)
+            except Exception:  # noqa: BLE001, RUF100 — never break a live fold
+                pass
         # #3585 re-review (cycle 2, FIX A): `journal_object_surviving` is
         # ``(ids, names)`` of every Object the WHOLE journal leaves in place,
         # and `journal_object_deleted` the ids it hard-deletes. They are

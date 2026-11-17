@@ -877,6 +877,19 @@ def test_a_live_fold_records_the_target_it_landed_in():
     assert matching[0].startswith("server://"), (
         f"the target must name the STORE, not only the graph: {matching[0]!r}")
     assert targets[matching[0]] == 1, targets
+    # ⛔ THE PUBLICATION IS ASSERTED TOO (review cycle 1, finding 1). A registry
+    # nobody can read is not observability, and both surfaces are the ones an
+    # operator uses: `metrics()` for a scrape, `_record_health()` for the hosted
+    # app (which has no `/metrics` route). Without these two lines either
+    # publication can be deleted with the suite fully green — the same gap the
+    # sibling `cache_leg_failures` key closes at `test_the_counter_is_on_the_
+    # metrics_surface` / `test_the_health_block_carries_it_too`.
+    from tortoise import hosted_api
+
+    published = monitoring.metrics()["cache_write_targets"]
+    assert published.get(matching[0]) == 1, published
+    block = hosted_api._record_health()
+    assert block["cache_write_targets"] == published
 
 
 def test_a_replay_is_NOT_recorded_as_a_live_write(monkeypatch, tmp_path):

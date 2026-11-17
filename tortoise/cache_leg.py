@@ -113,8 +113,15 @@ CACHE_TARGET_OVERFLOW = "(other targets)"
 #: How many distinct ``store|graph`` pairs the process remembers. Sixteen covers
 #: every deployment shape this repo runs (one shared cache, one embedded file,
 #: the registry graph) with room for the handful of graphs one process writes on
-#: a healthy day; a process past it is either a big multi-tenant worker — where
-#: the OVERFLOW count is the answer — or split, which the first target shows.
+#: a healthy day.
+#:
+#: ⚠️ WHAT THE CAP COSTS, stated so it is not over-read: past sixteen distinct
+#: targets a further one is folded into :data:`CACHE_TARGET_OVERFLOW`, so a
+#: tenant's own target is only visible when it was among the first sixteen this
+#: process wrote. The failing direction is therefore "a big multi-tenant worker
+#: reports `(other targets): N` instead of N graph names" — it never hides a
+#: target for a process small enough to read, and the overflow count itself is
+#: the signal that this process is past the registry's resolution.
 _TARGETS_CAP = 16
 
 #: ``{"<store>|<graph>": live writes}`` for THIS process, and its lock. Written
@@ -279,7 +286,7 @@ def reset_cache_write_targets() -> None:
         _TARGETS.clear()
 
 
-def tenant_graph_reason(*, cache_graph: str | None, org_id: str,
+def tenant_graph_reason(*, cache_graph: str | None,
                         graph_id: str) -> str | None:
     """Does the cache graph name DISAGREE with the record tenant? Pure.
 
@@ -307,6 +314,13 @@ def tenant_graph_reason(*, cache_graph: str | None, org_id: str,
     ``org_<org>_g_A`` and whose cache node is in ``org_<org>_g_B``. That is not a
     lag, not a residency miss, and not repairable by a replay into the graph the
     reconciler reads.
+
+    ⚠️ It takes NO ``org_id``, and that is deliberate rather than an omission: the
+    ``<org>`` half of ``org_<org>_<gid>`` is not unambiguously parseable (org ids
+    may themselves contain underscores and a ``g_``-shaped segment is not
+    excluded), and a predicate that advertises an org comparison it cannot make
+    would be read as checking one. Graph ids are unique across orgs, so the
+    graph-id half is the whole decidable question.
     """
     if not cache_graph:
         return None
@@ -332,7 +346,7 @@ def note_tenant_graph(*, cache_graph: str | None, org_id: str,
     refuse a request that can still be served.
     """
     try:
-        reason = tenant_graph_reason(cache_graph=cache_graph, org_id=org_id,
+        reason = tenant_graph_reason(cache_graph=cache_graph,
                                      graph_id=graph_id)
         if reason is None:
             return None
