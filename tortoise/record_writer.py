@@ -1774,8 +1774,12 @@ def derived_embedding_columns(
       vector keeps it and none is computed;
     * a carried vector is IGNORED where the graph ignores one —
       `_upsert_object`/`_upsert_subject` call `encode_for_row(name)`
-      unconditionally, so the record derives from `name` and the derived value
-      wins (`_declared_mutations` merges it over the snapshot);
+      unconditionally, so the record derives from `name`; the split REFUSES a
+      carried `embedding` (`DERIVED_COLUMNS`) and `_declared_mutations` BINDS the
+      derived value into its column after the split (`record_projection.py:6031-6032`:
+      "Bound AFTER the split and not merged into `props`") — the derived value is
+      what the row holds, and it gets there by binding, never by overriding the
+      snapshot;
     * nothing is derived where the graph suppresses the write — an `EventRecorded`
       whose `eventKind` is `meeting` (cycle-16: no subject/object ⇒ a junk vector
       and an unbounded network call on every meeting write/repair/replay) and a
@@ -1825,7 +1829,8 @@ def derived_embedding_columns(
     derives nothing, so every row it CREATES lands `embedding` NULL. ⚠️ NOT
     "every row it folds", which an earlier cut said: `embedding` is absent from
     the node UPSERT's column list AND from `ON CONFLICT … DO UPDATE SET` (both
-    name only the BOUND columns), so a row that already HAS a vector keeps it
+    name only the BOUND columns — the SET list is built from `col_values`,
+    `record_projection.py:3447`), so a row that already HAS a vector keeps it
     through a no-derived re-fold (measured: `payload_SURVIVED=t vec_SURVIVED=t`).
     The scope matters — it is the difference between "the backfill mints blank
     rows" and "the backfill wipes the population". The long form, with the

@@ -192,11 +192,19 @@ def test_a_document_derives_from_title_and_content(encoder):
 
 
 def test_a_plain_source_derives_nothing_because_the_graph_holds_none(encoder):
-    """`:Source` carries 0 embeddings in the graph (#13220, measured 2026-11-17).
+    """A `SourceCreated` `:Source` carries no vector, because `_upsert_source` holds none.
 
     Deriving one would make the record's dense leg return sources the graph leg
     never had — the divergence in the other direction, on a label whose
     `document_kind IS NULL` filter is exactly the non-document population.
+
+    ⛔ SCOPED TO THIS EVENT, not to the `:Source` label (#13265 review cycle-7 F2):
+    a DOCUMENT-backed `:Source` DOES carry a vector — `_upsert_document` computes
+    one (`projection/entities.py:5398-5409`) and writes it (`:5616`,
+    `set_embedding_clause("s")`). What holds 0 vectors is the source the
+    `SourceCreated` fold writes, because `_upsert_source` has no embedding write
+    at all (`:6988`+). Asserting "`:Source` carries 0 embeddings" flatly was the
+    over-claim; this docstring is the label claim's corrected form.
     """
     out = rw.derived_embedding_columns(
         {"type": "SourceCreated", "url": "https://example.com/a",
@@ -533,8 +541,43 @@ def test_the_graph_still_writes_object_and_subject_embeddings():
             "not a refactor")
 
 
+def test_a_document_backed_source_DOES_carry_a_vector_while_a_plain_one_does_not():
+    """The `:Source` label is written by TWO writers that disagree on embedding.
+
+    `#13265` review cycle-7 F2: the writer's docstrings said "`:Source` carries 0
+    embeddings", which is true only of the `SourceCreated` fold. `_upsert_document`
+    is a `:Source` writer too (ONTOLOGY §4.4 / D10: a document IS a `:Source`) and
+    it computes a vector and writes it with `set_embedding_clause("s")`, so a
+    document-backed source carries one. Pinned against the graph fold's SOURCE for
+    the same reason the KEEP-ruling test above is: the distinct claim is about
+    which writer emits the write, and a behaviour test would need a store.
+    """
+    entities = (Path(__file__).resolve().parent.parent
+                / "tortoise" / "projection" / "entities.py").read_text()
+    doc = entities[entities.index("def _upsert_document"):]
+    doc_body = doc[:doc.index("\n    def ", 1)] if "\n    def " in doc[1:] else doc
+    assert "set_embedding_clause(\"s\")" in doc_body, (
+        "_upsert_document no longer writes `s.embedding` — if that write is gone, "
+        "a document-backed `:Source` no longer carries a vector and the scoped "
+        "docstrings in this file (and the writer's) must be re-measured, not "
+        "left claiming the opposite")
+    source = entities[entities.index("def _upsert_source"):]
+    source_body = source[:source.index("\n    def ", 1)] if "\n    def " in source[1:] else source
+    # The WRITE form only, never the bare word: `_upsert_source`'s own comment says
+    # "Identity is a canonicalised URL — NEVER an embedding (STORAGE §9.4)", and a
+    # substring check on "embedding" read that PROSE as a write (measured while
+    # writing this test — the assertion failed on its own comment).
+    assert not re.search(r'set_embedding_clause\(|s\.embedding\s*=', source_body), (
+        "_upsert_source now writes an embedding — then the `SourceCreated` parity "
+        "assertions in this file (and `derived_embedding_columns`'s 'no vector "
+        "for a source' arm) are stale and this needs a re-measure, not a quiet pass")
+
+
 def test_the_record_still_binds_a_plain_source_without_a_vector():
-    """Parity for the label the graph holds 0 vectors for, at the plan level."""
+    """Parity for the `SourceCreated` source, which the graph holds 0 vectors for,
+    at the plan level. (A document-backed `:Source` is a different writer and
+    DOES carry one — `_upsert_document`, see the docstring above.)
+    """
     record = {"type": "SourceCreated", "url": "https://example.com/a",
               "name": "a source"}
     derived = rw.derived_embedding_columns(record)

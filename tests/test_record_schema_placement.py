@@ -1862,6 +1862,38 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
     assert col not in columns.get(table, set()), f"{table}.{col} must not be a record column"
 
 
+#: `chk_<table>_props_no_derived CHECK (…)` bodies in DECLARATION ORDER. Same
+#: shape as `contract_key_pins` above: `CHECK` must follow the constraint name,
+#: so a `DROP CONSTRAINT IF EXISTS chk_…` and the prose that names the
+#: constraint (migration headers do) both miss — only a real declaration is
+#: captured.
+_PROPS_BAN_PIN_RE = re.compile(
+    r"(ADD\s+)?CONSTRAINT\s+chk_(\w+)_props_no_derived\s+CHECK\b(.{0,400})",
+    re.S | re.I,
+)
+
+
+def props_ban_pins(text: str) -> dict[str, list[tuple[bool, str]]]:
+    """Every `props_no_derived` CHECK body, per table, in declaration order.
+
+    Each entry is `(is_redeclaration, body)`: `is_redeclaration` is True when the
+    DDL form was `ADD CONSTRAINT …` (a FORWARD re-declaration, which under
+    append-only history SUPERSEDES the in-`CREATE TABLE` one) and False for a
+    bare `CONSTRAINT … CHECK` inside a `CREATE TABLE` body.
+    """
+    pins: dict[str, list[tuple[bool, str]]] = {}
+    for m in _PROPS_BAN_PIN_RE.finditer(text):
+        pins.setdefault(m.group(2), []).append((bool(m.group(1)), m.group(3)))
+    return pins
+
+
+def all_migration_text() -> str:
+    """Every `supabase/migrations/*.sql` on disk, in filename (= chronological) order."""
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted(_MIGRATIONS_DIR.glob("*.sql"))
+    )
+
+
 @pytest.mark.parametrize("table,col", [("object", "embedding"), ("subject", "embedding")])
 def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col):
     """The ONE declared exception to the carve-out — asserted, not exempted.
@@ -1888,7 +1920,6 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
     # (this PR's own header does), so the name's last textual occurrence is not a
     # definition. Match the DDL form only — `ADD CONSTRAINT <name> CHECK` or a
     # bare `CONSTRAINT <name> CHECK` — and read the LAST one.
-    #
     # ⛔ AND READ IT FROM THE WHOLE MIGRATIONS DIRECTORY, not this file's
     # `MIGRATIONS` tuple. That tuple is the read set `parse_sql_columns()` uses for
     # its COLUMN census, and it is hand-maintained — it does NOT list
@@ -1900,11 +1931,13 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
     # exists to catch, since append-only history means every future re-declaration
     # is a NEW FILE too. The directory read is the same rule the sibling
     # `test_relation_is_never_a_bare_id` documents for the same reason.
-    definitions: list[str] = []
-    for path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
-        definitions.extend(re.findall(
-            rf"(?:ADD\s+)?CONSTRAINT\s+chk_{table}_props_no_derived\s+CHECK\b(.{{0,400}})",
-            path.read_text(encoding="utf-8"), re.S | re.I))
+    #
+    # The read is `props_ban_pins(all_migration_text())` — ONE helper, shared with
+    # `test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one`
+    # below, so the regex that defines "a declaration" has a single home rather
+    # than a second copy that can drift from this one.
+    definitions = [body for _is_redecl, body in
+                   props_ban_pins(all_migration_text()).get(table, [])]
     assert definitions, (
         f"chk_{table}_props_no_derived has no DDL definition anywhere under "
         f"{_MIGRATIONS_DIR.relative_to(REPO_ROOT)} — the props ban has no home")
@@ -1912,6 +1945,40 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
         f"the LAST re-declaration of chk_{table}_props_no_derived no longer names "
         f"'{col}' — a later migration re-opened the name even though the column now "
         f"exists. Definition read: {definitions[-1]!r}")
+
+
+def test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one():
+    """F8's own non-vacuity pin: the LAST declaration read is the one in force.
+
+    `chk_subject_props_no_derived` is declared TWICE — inside
+    `20261012000002_record_semantic.sql`'s `CREATE TABLE` (`ARRAY['embedding']`)
+    and again, RE-DECLARED to add `status`, by
+    `20261014000001_record_subject_props_no_derived.sql`'s
+    `DROP CONSTRAINT IF EXISTS … ADD CONSTRAINT …` (`ARRAY['embedding',
+    'status']`). Under append-only history the Oct-14 one is in force, so a pin
+    that reads the Oct-12 one is certifying a constraint the database no longer
+    has — which is precisely F8. TWO independent discriminators, because either
+    alone is defeatable: the DDL FORM (`ADD CONSTRAINT` = a forward re-declaration;
+    the Oct-12 one is a bare `CONSTRAINT … CHECK` inside `CREATE TABLE`) reddens on
+    the pre-fix read set, and the NAME SET (the in-force body refuses BOTH
+    `embedding` and `status`) reddens on the review's mutant, which shrinks the ban
+    to `ARRAY['status']` — a body that still contains the string `'status'` and so
+    would pass a status-only check.
+    """
+    pins = props_ban_pins(all_migration_text())
+    is_redecl, body = pins["subject"][-1]
+    assert is_redecl, (
+        "the LAST chk_subject_props_no_derived is an in-`CREATE TABLE` declaration "
+        "— the Oct-14 FORWARD re-declaration is the one in force, so the pin is "
+        f"reading the wrong definition again: {body!r}")
+    assert "'embedding'" in body and "'status'" in body, (
+        "the LAST chk_subject_props_no_derived does not refuse BOTH names — the "
+        "in-force Oct-14 re-declaration refuses `embedding` and `status`, and the "
+        "Oct-12 one it superseded refused only `embedding`. Either the pin is "
+        f"reading the superseded definition again or the ban was shrunk: {body!r}")
+    # …and the subject ban has TWO declarations to choose between, which is why
+    # `[-1]` had to stop meaning "the Oct-12 one". Object stays single-declared.
+    assert len(pins["subject"]) >= 2 and len(pins["object"]) >= 1
 
 
 def test_props_checks_refuse_the_derived_names():
