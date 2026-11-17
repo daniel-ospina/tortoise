@@ -103,10 +103,11 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -288,7 +289,7 @@ def _mutated(candidate: Candidate, mutation: str | None) -> str:
             return f"{head}{extra} ORDER BY {tail}"
         return candidate.sql + extra
     raise KeyError(f"{candidate.name} has no mutation {mutation!r}; "
-                   f"declared: {sorted(candidate.mutations) + ['null-order']}")
+                   f"declared: {[*sorted(candidate.mutations), 'null-order']}")
 
 
 # --------------------------------------------------------------------------- #
@@ -411,7 +412,7 @@ def seed_record(dsn: str) -> dict[str, Any]:
                 marks = ", ".join(f"%({k})s" for k in keys)
                 cur.execute(
                     f"INSERT INTO public.point ({cols}) VALUES ({marks})",
-                    dict(zip(keys, values)),
+                    dict(zip(keys, values, strict=True)),
                 )
             cur.execute("SELECT count(*) FROM public.point WHERE org_id = %s",
                         (TENANT["org_id"],))
@@ -583,7 +584,10 @@ def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
     if len(cypher_cols) != len(sql_cols):
         differences.append({"kind": "shape", "detail": "column count",
                             "cypher": cypher_cols, "sql": sql_cols})
-    for index, (c_col, s_col) in enumerate(zip(cypher_cols, sql_cols)):
+    # `strict=False` is DELIBERATE: a column-count mismatch is already recorded as a
+    # `shape` difference above, and zipping the common prefix is what lets the
+    # per-column NAME check still run and report which names disagree.
+    for index, (c_col, s_col) in enumerate(zip(cypher_cols, sql_cols, strict=False)):
         # the Cypher alias and the SQL output name must agree case-insensitively;
         # a different name is a shape difference a caller reads.
         if c_col.lower() != s_col.lower():
@@ -605,7 +609,10 @@ def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
     c_sorted = sorted(cypher_rows, key=_canon)
     s_sorted = sorted(sql_rows, key=_canon)
     value_diffs: list[dict] = []
-    for row_index, (c_row, s_row) in enumerate(zip(c_sorted, s_sorted)):
+    # `strict=False` for the same reason as the column pass: a row-count mismatch is
+    # its own finding (step 2), and the per-value pass must still compare what both
+    # sides actually returned.
+    for row_index, (c_row, s_row) in enumerate(zip(c_sorted, s_sorted, strict=False)):
         for col_index in range(width):
             c_val = c_row[col_index] if col_index < len(c_row) else "<absent>"
             s_val = s_row[col_index] if col_index < len(s_row) else "<absent>"
@@ -624,14 +631,14 @@ def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
 
     # 4. ORDER — only when the statement declares it, and only on a row set that
     # already matches (an order claim over different rows is a value finding).
-    if candidate.ordered and not value_diffs and len(cypher_rows) == len(sql_rows):
-        if [_canon(r) for r in cypher_rows] != [_canon(r) for r in sql_rows]:
-            differences.append({"kind": "order", "detail": "row sequence differs "
-                                "although the row set matches — the NULL-placement "
-                                "class (a graph DESC puts NULLs FIRST; a hand-port "
-                                "that adds `NULLS LAST` reverses it)",
-                                "cypher": [_canon(r) for r in cypher_rows][:10],
-                                "sql": [_canon(r) for r in sql_rows][:10]})
+    if (candidate.ordered and not value_diffs and len(cypher_rows) == len(sql_rows)
+            and [_canon(r) for r in cypher_rows] != [_canon(r) for r in sql_rows]):
+        differences.append({"kind": "order", "detail": "row sequence differs "
+                            "although the row set matches — the NULL-placement "
+                            "class (a graph DESC puts NULLs FIRST; a hand-port "
+                            "that adds `NULLS LAST` reverses it)",
+                            "cypher": [_canon(r) for r in cypher_rows][:10],
+                            "sql": [_canon(r) for r in sql_rows][:10]})
 
     # The fingerprint covers the CYPHER answer's row set (sorted), so two runs over
     # the same data are recognisably the same measurement even when the row order
@@ -822,7 +829,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="a real record Postgres DSN — REQUIRED and never taken from the "
                              "environment (the seed deletes and rewrites its tenant's "
                              "public.point rows)")
-    parser.add_argument("--candidate", default="point-by-id", choices=sorted(CANDIDATES) + ["all"])
+    parser.add_argument("--candidate", default="point-by-id", choices=[*sorted(CANDIDATES), "all"])
     parser.add_argument("--mutate", default=None,
                         help="inject a deliberate porting defect (null-order / drop-row / drop-null)")
     parser.add_argument("--json", action="store_true")
@@ -865,7 +872,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         graph_seed = seed_graph(args.graph_uri, args.graph_name)
         record_seed = seed_record(args.record_dsn)
-    except Exception as exc:  # noqa: BLE001 — exit 2, never a fake verdict
+    except Exception as exc:  # a store that cannot answer is "could not run" (2)
         print(f"cypher-diff: could not seed — {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
@@ -880,7 +887,7 @@ def main(argv: list[str] | None = None) -> int:
             args.record_dsn,
             "SELECT id FROM public.point WHERE org_id = %(org_id)s AND graph_id = %(graph_id)s",
             _scoped_params({}))[0]}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # a read-back that cannot run is 2, never a verdict
         print(f"cypher-diff: could not read back the seeded corpus — "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -904,7 +911,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             disarmed = _disarmed_properties(args.graph_uri, args.graph_name,
                                             args.record_dsn, CANDIDATES[name])
-        except Exception as exc:  # noqa: BLE001 — a store that cannot answer is "could not run"
+        except Exception as exc:  # a store that cannot answer is "could not run" (2)
             print(f"cypher-diff: could not verify the corpus edge properties — "
                   f"{type(exc).__name__}: {exc}", file=sys.stderr)
             return 2
@@ -939,7 +946,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             sql_rows, sql_cols = run_sql(args.record_dsn, sql,
                                          _scoped_params(candidate.params))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # a store that cannot answer is "could not run" (2)
             print(f"cypher-diff: could not run {name} — {type(exc).__name__}: {exc}",
                   file=sys.stderr)
             return 2

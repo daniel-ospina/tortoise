@@ -12,6 +12,22 @@
 # own `supabase/migrations/*.sql` — not a stub schema.
 name: cypher-diff
 
+# Per-PR cancel only, the same key `python-ci.yml` uses and for the same reason:
+# `github.ref` is `refs/pull/N/merge` on `pull_request`, so a new commit on PR N
+# replaces PR N's stale run and only PR N's. `github.event_name` in the key keeps
+# the PR and `workflow_dispatch` arms apart, so a manual dispatch can never cancel
+# a PR run or the reverse.
+#
+# ⛔ WHY THE DISPATCH ARM IS NOT `cancel-in-progress: true`. A dispatch is a PERSON
+# asking for one measurement of one tree; superseding it silently is the opposite
+# of what they asked for, and cancelling mid-run would leave the job's own
+# "the harness ran" evidence absent — the vacuous-pass shape this job exists to
+# refuse. The PR arm is where the flood risk lives (#9115), and that is the arm
+# that is bounded.
+concurrency:
+  group: cypher-diff-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 on:
   pull_request:
     paths:

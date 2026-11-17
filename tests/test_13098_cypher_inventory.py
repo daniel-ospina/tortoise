@@ -301,7 +301,7 @@ def test_the_benchmark_reports_no_verdict_and_still_checks_the_corpus(monkeypatc
             "--bench", "10"]
 
     # (a) the corpus edge is present -> the bench runs, and it does NOT report equal
-    assert harness.main(argv + ["--candidate", "point-listing"]) == harness.EXIT_NO_VERDICT
+    assert harness.main([*argv, "--candidate", "point-listing"]) == harness.EXIT_NO_VERDICT
     assert harness.EXIT_NO_VERDICT != 0
 
     # (b) the corpus edge is ABSENT -> refused with 2, and `bench` never ran
@@ -309,7 +309,7 @@ def test_the_benchmark_reports_no_verdict_and_still_checks_the_corpus(monkeypatc
     monkeypatch.setattr(harness, "run_sql", lambda *_a, **_k: ([], ["id"]))
     ran = []
     monkeypatch.setattr(harness, "bench", lambda *_a, **_k: ran.append(1) or {})
-    assert harness.main(argv + ["--candidate", "point-listing"]) == 2
+    assert harness.main([*argv, "--candidate", "point-listing"]) == 2
     assert ran == [], "a corpus missing a declared edge must be refused BEFORE it is measured"
 
 
