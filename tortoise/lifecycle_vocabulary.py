@@ -203,9 +203,16 @@ def _render_type(value: object) -> str:
     lookup runs unguarded on the way to the message.
     """
     try:
-        return type(value).__name__
+        name = type(value).__name__
     except Exception:
         return "<unreadable class name>"
+    # ⛔ The READ surviving is not enough. A `__name__` property may ANSWER with
+    # something that is not a `str`, and the f-string in `_refusal` then renders
+    # it with the CALLER's own `__format__` — the same escape, one step later
+    # (measured on the sibling helper in `sdk.py`: `RuntimeError: fmt-boom`).
+    # Rendering the unreadable answer as the same placeholder keeps the message
+    # a plain `str` on every path.
+    return name if type(name) is str else "<unreadable class name>"
 
 
 def _refusal(value: object, fault: str, repair: str, *,
