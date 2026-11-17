@@ -462,6 +462,24 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # arms skip), never to a silently-embedded green, and nothing leaks into a
     # later docker-lane test.
     "test_12360_underscore_or_terms.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # #13139 root 2, the SAME file the `ci-surfaces.yml` registration in this PR
+    # registers — and a SECOND table it has to be triaged into, which is why the
+    # registration alone did not un-red the board.
+    # `test_13034_currency_rule_reads_position.py` merged (#13075) with neither its
+    # manifest row NOR this entry, so `test (i)` (and every shard that carries
+    # this module) reds with "undeclared TORTOISE_DB_URI mutation(s)" naming all
+    # SIX raw sites: the module-level live probe's set (`:66`), restore (`:75`)
+    # and pop-when-unset (`:77`), plus the autouse `_isolated_db_uri` fixture's
+    # set (`:86`), restore (`:89`) and pop (`:91`). DELIBERATE_URI is the point on
+    # both halves: the probe decides whether the live arms run AT ALL (an
+    # unreachable lane sets `FALKORDB_AVAILABLE = False` and the live classes SKIP
+    # — `_needs_db` at `:79` — never a silently-embedded green), and the autouse
+    # fixture pins every test in the module to the module's OWN graph so the
+    # position/currency assertions cannot see a neighbour's residue. Nothing leaks
+    # into a later docker-lane test: the probe restores in a `finally` at import
+    # and the fixture restores after its `yield`. Raw `os.environ` sites only —
+    # this file has no `monkeypatch` mutation to declare.
+    "test_13034_currency_rule_reads_position.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
