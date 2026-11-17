@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 
@@ -249,29 +250,103 @@ class TestDeprovisionOnDelete:
         with pytest.raises(RuntimeError, match="could not be certified complete"):
             ha._org_graph_names("o1", "org_o1")
 
-    def test_a_truncated_ACL_enumeration_REFUSES_rather_than_orphaning_users(self, monkeypatch):
-        """⛔ The ACL drop is the SECOND `graphs` read in the same purge
-        (review round 7). It was a single page too, so a >`max_rows` org lost the
-        tail graphs' `tenant_<gid>` users AND the rows that named them — orphaned
-        global credentials nothing can reap, the outcome this function's own
-        docstring calls "orphans the live credentials forever". The enumeration
-        must be certified; the per-graph drops stay best-effort."""
+    def test_the_acl_user_walk_reads_EVERY_page_of_graphs(self, monkeypatch):
+        """⛔ Review round 7: `_drop_org_acl_users` read ONE PostgREST page.
+
+        `query` is capped at the deployment's `max_rows` (1000) and cannot report
+        its own truncation, so an org past one page (reachable: `max_graphs` is
+        None on every tier, #10743) keeps the TAIL of its gids — and a gid names
+        a GLOBAL `tenant_<gid>` ACL user, i.e. a LIVE CREDENTIAL, in the very
+        purge that then deletes the graphs and the rows naming them. The walk is
+        `query_all` (cursor in `select`), which is what drops the second page's
+        user here — the class `_org_graph_names` refuses one function up, one step
+        earlier in the same purge.
+
+        Mutant: restore `rows = cp.query("graphs", select=["id"], ...)` — `g_2`
+        is never enumerated and this reds on `dropped`.
+        """
         from tortoise import hosted_api as ha
 
         dropped: list[str] = []
+        monkeypatch.setattr(ha, "_acl_user_drop_hook", dropped.append)
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                             lambda: True)
+
+        class _CP:
+            """Page 1 only through `query`; the WHOLE set through `query_all`."""
+
+            def query(self, table, **kw):
+                return [{"id": "g_1"}] if table == "graphs" else []
+
+            def query_all(self, table, **kw):
+                assert kw.get("cursor") == "id", "the walk must key on `id`"
+                assert "id" in (kw.get("select") or []), kw.get("select")
+                return [{"id": "g_1"}, {"id": "g_2"}], True
+
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
-                            lambda: self._fake_cp(
-                                [{"id": "o1"}],
-                                graphs=[{"id": "g_1"}], complete=False))
-        monkeypatch.setattr(ha, "_acl_user_drop_hook",
-                            lambda gid: dropped.append(gid))
-        with pytest.raises(RuntimeError, match="ACL users"):
-            ha._drop_org_acl_users("o1")
-        assert dropped == [], (
-            "a partial enumeration is not a licence to drop a subset and then "
-            "delete the rows that name the rest")
+                            lambda: _CP())
+        ha._drop_org_acl_users("o1")
+        assert dropped == ["g_1", "g_2"], (
+            "the tail of the org's gids was never enumerated — their live ACL "
+            "users outlive the purge that deletes the graphs")
+
+    def test_an_uncertified_acl_walk_DROPS_what_it_saw_and_says_SO(self, monkeypatch, caplog):
+        """The recorded decision is best-effort — C4/#2113, "Best-effort per
+        graph (a committed purge never fails on a drop)" — so an uncertified walk
+        must NOT raise. It must be LOUD instead: the ids it saw are a LOWER
+        BOUND, and the credential on any graph past it outlives every way to name
+        it (the operator can only drop it by hand if the bound is announced).
+
+        Mutant: delete the `if not complete:` block — the drop still happens, so
+        this reds on the LOG assertion, which is why the assertion is the log and
+        not the exception: making this raise would reverse #2113.
+        """
+        from tortoise import hosted_api as ha
+
+        dropped: list[str] = []
+        monkeypatch.setattr(ha, "_acl_user_drop_hook", dropped.append)
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+
+        class _CP:
+            def query(self, table, **kw):
+                return []
+
+            def query_all(self, table, **kw):
+                return [{"id": "g_1"}], False
+
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: _CP())
+        caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
+        ha._drop_org_acl_users("o1")           # must NOT raise (#2113)
+        assert dropped == ["g_1"], dropped     # best-effort still drops what it saw
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "LOWER BOUND" in text and "o1" in text, text
+
+    def test_a_seam_double_without_query_all_still_enumerates(self, monkeypatch, caplog):
+        """A control-plane double that predates `query_all` must still DROP the
+        page it can read — the seam-tolerant `getattr` shape (the activation
+        scorecard's analytics read uses the same one). ⛔ The failure this pins is
+        silent: a bare `cp.query_all(...)` call on such a double raises
+        `AttributeError`, the surrounding best-effort `except` swallows it, and
+        EVERY acl user is skipped with no signal at all."""
+        from tortoise import hosted_api as ha
+
+        dropped: list[str] = []
+        monkeypatch.setattr(ha, "_acl_user_drop_hook", dropped.append)
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+
+        class _CP:
+            def query(self, table, **kw):
+                return [{"id": "g_1"}] if table == "graphs" else []
+
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: _CP())
+        caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
+        ha._drop_org_acl_users("o1")
+        assert dropped == ["g_1"], dropped
+        assert "LOWER BOUND" in " ".join(r.getMessage() for r in caplog.records)
 
     def test_an_unreadable_enumeration_REFUSES_rather_than_erasing_a_subset(self, monkeypatch):
         """⛔ A failure to ask is not an answer (review round 4, P1).
