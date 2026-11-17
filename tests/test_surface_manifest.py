@@ -2997,6 +2997,45 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
     )
 
 
+def test_no_per_row_comment_quotes_a_stale_surface_count():
+    """A rationale block that COUNTS the surface must count THIS tree's (#13141).
+
+    Each per-row provenance block states what the file's cells mean, and one of them quoted
+    `55 MCP tools / 94 public SDK methods` while `counts.tools` was already 48: main's
+    `#13052` (`4a5ffa0a14`) retired seven doors underneath it. Nothing reads a comment, so
+    `check --provenance-strict` stayed green and the number could only rot — which is the
+    same class `MANIFEST_HEADER` has been guarded against since the `26 MCP tools`
+    regression (`test_a_re_cut_re_emits_the_OVERRIDES_header`), applied to the rows, which
+    had no arm at all. A later lane that hand-edits a block (the re-cut cannot, it emits
+    only the header) is exactly who writes the next stale one.
+
+    Fails on the pre-fix head, where the `tortoise_query` block read `55 MCP tools / 94
+    public SDK methods`: 55 is neither `counts.tools` (48) nor `counts.retired` (60).
+    """
+    doc = _manifest()
+    # Everything AFTER the header: the header is exempt BY DESIGN, because it quotes the
+    # owner's approved TARGET (27 MCP tools / 40 methods, read from
+    # `docs/product/canonical-mcp-tools.md`), which is deliberately not this tree's count.
+    body = MANIFEST.read_text(encoding="utf-8").split("manifest_version:", 1)[1]
+    live = {
+        "tools": doc["counts"]["tools"],
+        "sdk_methods": doc["counts"]["sdk_public_methods"],
+    }
+    for kind, pattern in (
+        ("tools", r"(\d+) MCP tools"),
+        ("sdk_methods", r"(\d+) (?:public )?SDK methods"),
+    ):
+        for match in re.finditer(pattern, body):
+            quoted = int(match.group(1))
+            assert quoted == live[kind], (
+                f"a comment below the header quotes `{match.group(0)}`, but "
+                f"`counts.{'tools' if kind == 'tools' else 'sdk_public_methods'}` is "
+                f"{live[kind]} in this tree — a surface count in prose re-stales silently "
+                "because no gate parses comments; state the count from `counts:` or say "
+                "which tree's count it was and why it was that number"
+            )
+
+
 # The `OVERRIDES:` marker's homes, across the tool TRIO that enforce/consume the target.
 # `surface_manifest.py` holds the artifact copy (`MANIFEST_HEADER`) plus its two durable
 # homes; the BASE-REF-pinned `surface-guard.py` holds two more; `surface-target-check.py`
