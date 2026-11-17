@@ -53,6 +53,7 @@ _AUDIT = "docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md"
 _SUBSTRATE = "docs/architecture/SUBSTRATE-REBUILD-MAP.md"
 _M3_BRIEF = "docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md"
 _CENSUS = "docs/evidence/13083-capability-census/README.md"
+_EVIDENCE = "docs/architecture/ENTITY-VERDICT-BANDS.md"
 _SE = "tortoise/search_engine.py"
 _CP = "tortoise/cache_projection.py"
 
@@ -91,6 +92,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_M3_BRIEF, "search_engine.py:2672", _SE, 2672, "def recency_tie_clause"),
     (_M3_BRIEF, "tortoise/search_engine.py:4549", _SE, 4549, "for rank, (pid, _score) in enumerate(ranked)"),
     (_M3_BRIEF, "`search_engine.py:4549`", _SE, 4549, "for rank, (pid, _score) in enumerate(ranked)"),
+    # --- docs/architecture/ENTITY-VERDICT-BANDS.md — the D-1 row "the retrieval filter is status-only"
+    # ⚠️ This row is a SECOND false correction, of the same class this file exists for. The document
+    # cited `search_engine.py:2973-2997`; other PRs' inserts had already moved the status filter to
+    # `:3020` on `origin/main`, so the cite was ~44 lines stale BEFORE this branch's `+3`. Adding the
+    # `+3` (`2973-2997` -> `2976-3000`) therefore preserved the staleness while reading as a correction,
+    # and `2976-3000` is the `build_or_query` byte-identity comment block, not the filter. The pin below
+    # is anchored on the line that IS the filter, so the next offset-only edit reds instead of shipping.
+    (_EVIDENCE, "search_engine.py:3023-3038", _SE, 3023, "if label in _STATUS_FILTERED_LABELS"),
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2712", _CP, 2712, "tail_denied = forbidden | {"),
 )
@@ -160,5 +169,5 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     count both move together only when a row is added on purpose.
     """
     docs = {row[0] for row in _PINS}
-    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS}
-    assert len(_PINS) == 23
+    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
+    assert len(_PINS) == 24
