@@ -288,10 +288,12 @@ def test_SDK_a_cache_hit_still_answers_when_the_record_misses(armed):
 def test_SDK_an_EVENT_is_not_hot_and_never_an_empty_answer(armed):
     """#9721 is the named dependency, and it is NOT silently widened here.
 
-    A record-sourced `:Event` loses SEVEN fold-written `ON CREATE` properties
-    (`id`, `subject`, `object`, `startedAt`, `classificationLevel`, `format`,
-    `participants` — #9721's measured set) plus an eighth, `eventKind`, when the
-    producer omitted it, and `FOLD_ON_CREATE_DEFAULTS` has no `Event` row —
+    A record-sourced `:Event` loses the fold-written `ON CREATE` properties its
+    row does not carry, PER COLUMN: #9721's measured set is seven (`id`, `subject`,
+    `object`, `startedAt`, `classificationLevel`, `format`, `participants`) for the
+    shape it probed (a producer that supplied `event_kind`), `eventKind` is an
+    eighth when that column is NULL, and all eight are carried — and none lost —
+    when the row has them. `FOLD_ON_CREATE_DEFAULTS` has no `Event` row —
     so `parity_difference(label='Event')` reports them UNEXPLAINED. Serving it
     would ship a silent parity gap (a lost `id`) through the door whose whole
     purpose is honest reads; answering `{}` would claim it does not exist. The

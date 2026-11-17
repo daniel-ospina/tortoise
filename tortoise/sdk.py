@@ -59281,8 +59281,11 @@ class TortoiseSDK:
         this method BY NAME, and their contract says that interception must hold
         regardless of how the call is spelled (``test_11926_derived_invalidation``).
         ⚠️ The flag is a DEFAULT, not a structural guarantee: a new internal caller
-        that forgets it gets the seam (a bounded record round trip on the caller's
-        thread, and in ``record`` mode a raise inside the write).
+        that forgets it gets the seam — a bounded record round trip on the caller's
+        thread, and then, mid-write, EITHER a raise (record unavailable, or no
+        tenant to scope the read) OR — the likelier arm, a projection miss —
+        the TRUTHY ``{"residency": "not-hot"}`` this docstring warns about two
+        paragraphs up, where an ``or MISSING`` test reads it as a found node.
         """
         if cache_only:
             return self._get_entity(id_val)

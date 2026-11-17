@@ -72,10 +72,17 @@ in the same artifact is indistinguishable from an omission:
   finished projecting. The caller-facing reads are the hosted endpoint served
   here and the MCP route that reaches the same accessor —
   ``tortoise_get_entity(id, type="point")`` (``tortoise_get_point`` is its
-  RETIRED alias, ``tool_registry.RETIRED_USE_INSTEAD``) — neither is wired,
-  because an MCP call carries no hosted org credential to resolve a record
-  tenant from. (#8877 names the same internal/caller-facing
-  separation.) ⚠️ The TYPED form ``tortoise_get_entity(id, type="point")`` is
+  RETIRED alias, ``tool_registry.RETIRED_USE_INSTEAD``) — the point route WAS
+  not wired when this exclusion was written, because an MCP call carried no
+  hosted org credential to resolve a record tenant from (#8877 names the same
+  internal/caller-facing separation). ⛔ THAT REASON IS RETIRED: since #12941 the
+  MCP lane installs the tenant ambiently (``mcp_auth._record_tenant_scope``,
+  ``OrgResolutionMiddleware`` since #9192/#10025/#10046) and the point door
+  honours this seam through ``get_point``'s opt-in ``served_out`` sink —
+  ``mcp_server.py``'s own note says so. What stays excluded is the ACCESSOR, for
+  the mid-write reason in its own bullet below; do not read this paragraph as
+  "the MCP point route cannot consult the record".
+  ⚠️ The TYPED form ``tortoise_get_entity(id, type="point")`` is
   that route and DOES reach this accessor. ⛔ The BARE
   ``tortoise_get_entity(id)`` is a DIFFERENT read and it IS served, under
   ``entity-union-by-id`` above (since #13093). What #13093 retired is THE BARE
@@ -356,14 +363,20 @@ READ_ENTITY_UNION_BY_ID = "entity-union-by-id"
 #:
 #: WHY THE OTHER TWO ARE NOT — measured, and still open as #9721:
 #:
-#: * ``Event`` — a record-sourced ``:Event`` loses SEVEN fold-written ``ON
-#:   CREATE`` properties (``id``, ``subject``, ``object``, ``startedAt``,
-#:   ``classificationLevel``, ``format``, ``participants`` — #9721's own measured
-#:   `only in fold` set) and, EIGHTH, ``eventKind`` whenever the producer omitted
-#:   it (the record stores the absence, the fold writes ``''``). ``eventKind`` is
-#:   not in the measured seven because the record DOES carry it as a column when a
-#:   producer sets it — which is why the count and the enumeration must agree
-#:   (#13353 review cycle 4, finding 5). And
+#: * ``Event`` — a record-sourced ``:Event`` loses the fold-written ``ON CREATE``
+#:   properties its record row does not carry, and ⛔ THE LOSS IS PER COLUMN, not
+#:   a fixed count: each of ``id``, ``eventKind``, ``subject``, ``object``,
+#:   ``startedAt``, ``classificationLevel``, ``format`` and ``participants`` is
+#:   lost only when ITS OWN column is NULL (measured: row all-NULL → 8,
+#:   ``event_kind`` set and the rest NULL → 7, every column set → 0). #9721's
+#:   measured `only in fold` set is the SEVEN — ``id``, ``subject``, ``object``,
+#:   ``startedAt``, ``classificationLevel``, ``format``, ``participants`` — for
+#:   the shape it probed, a producer that SUPPLIED ``event_kind``; ``eventKind``
+#:   joins them as an eighth when that column is NULL, and it matters most
+#:   because the fold writes the ONTOLOGY §4.5-required ``''`` where the record
+#:   stores the absence. State the count WITH the shape, never as a property of
+#:   every ``:Event`` (#13392 review cycle 2 — a count quoted without its shape is
+#:   what made an earlier revision name eight defaults as "seven"). And
 #:   ``FOLD_ON_CREATE_DEFAULTS`` has no ``Event`` row, so
 #:   ``parity_difference(label='Event')`` reports them as UNEXPLAINED. ``id``
 #:   matters most: it is the fold's copy of ``eventId`` and id-keyed MATCHes in
