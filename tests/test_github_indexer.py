@@ -496,6 +496,144 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
             f"{why}: the control did not mint exactly one close then stop ({mints})")
 
 
+def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
+    """#13289 review F1 (P1, regression): the reader's predicate became a SUPERSET.
+
+    `test_a_row_the_fold_will_refuse_is_never_read_as_open` above pins only the
+    CLOSED direction, and every shape in it fixes GitHub's state to `closed`. The
+    mirror — GitHub says `open` for a row the projection refuses to move — is
+    where the fix started looping: the read answered `"closed"` from a LIFECYCLE
+    term NO WRITER CAN CLEAR (`_upsert_object` writes `o.status` ON CREATE only,
+    `entities.py:5087`), so each poll minted another `-reopened`
+    (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
+    plus one journal record, for an event the projection then refused
+    (`entities.py:6204`).
+
+    A frozen row now answers `None` — this module's "no opinion" — so no
+    transition is minted in EITHER direction, the only stable answer while the
+    projection refuses to move the row.
+    """
+    oid = "github-issue-acme/repo1-1"
+    frozen = {
+        "a terminal LIFECYCLE word (what the `archived` door stores)": (
+            "SET o.status='deprecated', o.pipelineStageId='in_progress', "
+            "o.pipelineSlot='active', o.isClosed=false"),
+        "a terminal STATUS word the fold does NOT latch on": (
+            "SET o.status='outdated', o.pipelineStageId='in_progress', "
+            "o.pipelineSlot='active', o.isClosed=false"),
+        "a legacy `outdated` flag": (
+            "SET o.outdated=true, o.pipelineStageId='in_progress', "
+            "o.pipelineSlot='active', o.isClosed=false"),
+    }
+    for why, mutate in frozen.items():
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        proj.g.query("MATCH (e:Event) DETACH DELETE e")
+        t = MockGitHubTransport(issues=[gh_issue(1)])
+        _run(_indexer(t), sdk)
+        proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) {mutate}")
+        assert GitHubIndexer._object_state_to_issue_state(proj, oid) is None, (
+            f"{why}: a FROZEN row must answer 'no opinion', not a state — any "
+            "state it answers is one no writer can ever change")
+        # GitHub reports the issue OPEN: the direction that used to loop.
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="open", closed_at=None,
+            updated_at="2026-07-24T08:00:00Z")]
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+        assert mints == [0, 0, 0], (
+            f"{why}: the frozen row was diffed against a state it can never "
+            f"reach, so every poll minted another `-reopened` ({mints}) for an "
+            "event the projection refuses to fold")
+        assert proj.g.query(
+            "MATCH (e:Event) WHERE e.eventId CONTAINS '-reopened' "
+            "RETURN e.eventId").result_set == [], (
+            f"{why}: a `-reopened` was minted against a frozen row")
+    # …and the CONTROL, on the same fixture with the frozen terms cleared: the
+    # read has a REAL opinion again and the transition mints exactly once. Without
+    # this, a reader that answered `None` for everything would pass the loop above.
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (o:Object) DETACH DELETE o")
+    proj.g.query("MATCH (e:Event) DETACH DELETE e")
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    assert GitHubIndexer._object_state_to_issue_state(proj, oid) == "open"
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-25T08:00:00Z",
+        updated_at="2026-07-25T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)]
+    assert mints == [1, 0], (
+        f"the control did not mint exactly one close then stop ({mints})")
+
+
+def test_a_stale_pipelineSlot_prop_does_not_outvote_the_declaration(sdk):
+    """#13289 review F1, second instance: the fold NEVER reads `pipelineSlot`.
+
+    `apply_stage_fold` resolves the row's current stage by ID through the
+    pipeline's own declaration (`pipeline.py:496`: `pipe.by_id(cur_id)`), so a
+    stale or partially-written `pipelineSlot` PROP describes a different object
+    than the one the fold acts on. OR-ing the prop unconditionally into the
+    ended-ness answer called a row closed that the fold would happily move — the
+    same mint-per-poll loop, in the reopen direction.
+    """
+    oid = "github-issue-acme/repo1-1"
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) SET o.pipelineStageId='in_progress', "
+        "o.pipelineSlot='terminal', o.isClosed=false")
+    assert GitHubIndexer._object_state_to_issue_state(proj, oid) == "open", (
+        "the stale `pipelineSlot` prop outvoted the DECLARATION the fold uses")
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", updated_at="2026-07-24T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+    assert mints == [0, 0, 0], (
+        f"an OPEN issue on an OPEN row minted a transition ({mints})")
+
+
+def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
+    """#13289 review F2 (P2): absent key and unrecognised key are DIFFERENT questions.
+
+    `_declared_stage_slot`'s own docstring promises a pack key is *"stated at the
+    call site rather than guessed"*, but its `or` fallback fired for ANY key it
+    could not resolve — so a row folded against a PACK declaration was read
+    against CORE. A pack stage whose id collides with a core id of a different
+    slot (`done`, `cancelled`, …) then resolved to CORE's slot, and because this
+    arm only ever ADDS "closed" answers the failure mode is F1's loop.
+
+    Absent key → core (the fold resolves core too, `cur_key` falsy).
+    Present-but-unrecognised key → no opinion on this arm; the caller falls back
+    to the stored `pipelineSlot` prop, which the pack's OWN fold writes.
+    """
+    from tortoise.indexer.github_indexer import _declared_stage_slot
+    from tortoise.pipeline import CORE_WORK_ITEM_PIPELINE_KEY
+
+    # ABSENT key: the connector's own declaration, exactly as the fold resolves it.
+    assert _declared_stage_slot(None, "done") == "terminal"
+    assert _declared_stage_slot("", "done") == "terminal"
+    assert _declared_stage_slot(CORE_WORK_ITEM_PIPELINE_KEY, "done") == "terminal"
+    # PRESENT but UNRECOGNISED: no guessing. `done` collides with a CORE id whose
+    # slot is `terminal`; a pack may declare it in any other slot.
+    assert _declared_stage_slot("venture:deal", "done") is None, (
+        "an unrecognised pipeline key was resolved against CORE — the guess the "
+        "docstring forbids")
+    # …and end-to-end: that row is not called ended, so an OPEN issue on it mints
+    # nothing. Pre-fix CORE's `terminal` slot was used, the row read "closed",
+    # and every poll minted another `-reopened`.
+    oid = "github-issue-acme/repo1-1"
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) SET o.pipelineStageKey='venture:deal', "
+        "o.pipelineStageId='done', o.pipelineSlot=null, o.isClosed=false")
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", updated_at="2026-07-24T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+    assert mints == [0, 0, 0], (
+        f"a pack-keyed row was read against CORE's declaration and looped ({mints})")
+
+
 def test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
     """#13143 review F1: the state diff must read `isClosed` the way the FOLD does.
 
