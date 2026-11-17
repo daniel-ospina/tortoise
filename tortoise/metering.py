@@ -2310,9 +2310,10 @@ def storage_overage_cost_usd(tier: str, dimension: str, used, *,
 
     ⛔ HOW the account total is obtained DIFFERS by dimension, and only one of
     them can be summed today: ``graph_storage`` is metered per graph, so summing
-    an account's graphs IS the account total; ``postgres_storage`` has no
-    per-org figure at all (see the ``used`` note below). "Sum your graphs" is
-    therefore correct for exactly one of the two.
+    an account's graphs IS the account total; ``postgres_storage``'s per-org
+    figure exists but is not a gauge this function may take from (see the
+    ``used`` note below). "Sum your graphs" is therefore correct for exactly one
+    of the two.
 
     Args:
         tier: the org's tier. Decides whether overage is PURCHASABLE at all
@@ -2322,21 +2323,27 @@ def storage_overage_cost_usd(tier: str, dimension: str, used, *,
             ONE declared registry, not a second spelling: an undeclared name
             raises ``KeyError``.
         used: the account total in the dimension's OWN unit.
-            ⛔ ``postgres_storage`` HAS NO PER-ORG BYTE METER, and this is a trap
-            for a caller, not a docstring nicety: ``cost_dimensions`` declares
-            its attribution as *"DATABASE grain — no per-org figure exists, and
-            none is invented. Per-org BYTES would be an ALLOCATION, not a
-            measurement"*, and the only shipped reader is
-            ``measure_postgres_storage()``, which returns the WHOLE database.
-            Passing that figure as ``used`` would bill every tenant for the
-            shared database's bytes — the over-charge the allowance gate
-            records as its own reason for blocking this dimension. So this
-            function can price ``postgres_storage`` only once a per-org
-            attribution exists; until then it is callable with a figure the
-            caller has some OTHER way to establish, never with the database
-            total. ``graph_storage`` has no such problem: the graph meter is
-            genuinely per-graph, and summing an account's graphs IS the account
-            total.
+            ⛔ ``postgres_storage`` HAS NO PER-ORG GAUGE THIS FUNCTION MAY USE,
+            and this is a trap for a caller, not a docstring nicety. The per-org
+            BYTE attribution DOES exist — ``postgres_bytes``,
+            ``PerOrgPostgresBytes.for_org`` (#12762), which measures the rows an
+            org wrote — and ``cost_dimensions`` records that as ``MEASURED``,
+            carrying an ``OVERRIDES:`` of the older #4492 position ("no per-org
+            figure exists … Per-org BYTES would be an ALLOCATION, not a
+            measurement") that this paragraph used to quote as current. What is
+            missing is a figure that is BOTH per-org and affordable here: the
+            audit is a whole-table aggregation per call (with a per-row TOAST
+            lookup), and the ledger reader is the window addend, not the org's
+            stored footprint. And the only database-grain reader,
+            ``measure_postgres_storage()``, returns the WHOLE database — passing
+            that as ``used`` would bill every tenant for the shared database's
+            bytes, the over-charge the allowance gate records as one reason for
+            blocking this dimension. So this function can price
+            ``postgres_storage`` only once a per-org gauge exists; until then it
+            is callable with a figure the caller has some OTHER way to
+            establish, never with the database total. ``graph_storage`` has no
+            such problem: the graph meter is genuinely per-graph, and summing an
+            account's graphs IS the account total.
         included: the tier's allowance in the same unit. Defaults to
             ``pricing.storage_limits(tier)[allowance_key]``. ``None`` means
             UNCONFIGURED, which the allowance gate reads as unlimited — so no
@@ -2853,8 +2860,10 @@ def get_graph_storage_reading(org_id: str) -> dict:
 # ⛔ MEASUREMENT ONLY. Nothing here prices, caps, throttles or refuses, and
 # ``get_cohort_spend_usd`` reads only ``ask_cost_usd``/``capture_cost_usd``, so a
 # spend ceiling cannot see these columns by construction. Arming the dimension
-# needs the ``free``/``anon`` included amounts decided first — a separate,
-# owner-gated change (#12762).
+# also needs a per-org figure the gate can afford on a write path — this ledger
+# column is the window ADDEND, not the org's stored footprint — and the
+# ``free``/``anon`` included amounts decided. Both are declared on the gate
+# (``allowance_gate.RELEASE_CONDITIONS``, #12762/#9559).
 #
 # ⛔ A NEGATIVE INCREMENT IS REFUSED, not clamped: a counter that can go
 # backwards is corruption (the ``measure_write_ops`` rule), and the SQL RPC

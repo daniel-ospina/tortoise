@@ -473,8 +473,13 @@ DIMENSIONS: tuple[Dimension, ...] = (
         note=(
             "#4492 sized the Supabase tier on the database total. #12762 adds "
             "the per-org half the storage dimension needed to be armable, "
-            "measured from what we WRITE — and deliberately does NOT arm it: "
-            "the free/anon included amounts are still undecided."),
+            "measured from what we WRITE — and deliberately does NOT arm it. "
+            "Arming waits on TWO things, both recorded on the gate itself "
+            "(``allowance_gate.RELEASE_CONDITIONS``): the free/anon included "
+            "amounts are still undecided (the owner's), and no per-org "
+            "RESIDENCY gauge exists that the gate can afford on a write path — "
+            "this module's audit is a whole-table aggregation per call, and "
+            "``metering.get_postgres_bytes_written`` is the window addend."),
         bindings=(
             Binding("tortoise.postgres_storage", "measure_postgres_storage", READER),
             # #12762 — the per-org half. The WRITER is reached from the record
