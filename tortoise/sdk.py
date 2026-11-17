@@ -5997,6 +5997,38 @@ def _status_words_for_goal_ending(ending: str) -> frozenset[str]:
     return frozenset(set(TERMINAL_EXCLUDED_STATUSES) - {_SUPERSEDED_STATUS})
 
 
+def _successor_name_of(value: object) -> str | None:
+    """The successor NAME this value spells, or ``None`` — the ONE rule.
+
+    #13065 review rounds 15/16, finding 1 (P2, fail-open + recorded-decision
+    noncompliance). ``#12914`` is MERGED and its helper ``_successor_named_by``
+    already owns the question *"does this write name a successor?"*.
+    ``tortoise/sdk.py`` answered it a SECOND time on the achievement axis with a
+    LOOSER rule — ``value not in (None, "")`` — which admits ``"   "``, ``0``,
+    ``False`` and ``[]`` (all of which name nobody and all of which the merged
+    helper refuses, each for a MEASURED reason recorded in its docstring:
+    ``0``/``False``/``[]`` resolve to nothing in every ``_as_str``-style reader,
+    and a ``str`` subclass can answer ``strip()`` while storing ``''``), and it
+    accepted the ``superseded_by`` SNAKE spelling that is a SHADOW property no
+    camel-keyed reader of the successor resolves (#12782).
+
+    The owner's coordination brief on #13035 (2026-11-16) is a RECORDED
+    DECISION and it is explicit: *"Do **not** re-derive the successor
+    requirement. If #12914 has landed or is close, **reuse its helper** … so the
+    two axes cannot drift apart in what they demand"*. So this module now has
+    exactly ONE spelling of the rule, and both callers read it:
+    ``_successor_named_by`` (the merged write-side predicate) and the stored
+    half (:func:`_stored_goal_ending_view`'s ``successor``) — which had the
+    identical looser test (``carrier not in (None, "")``), so a stored
+    ``supersededBy="   "`` discharged the obligation too.
+
+    An exact ``str`` is required, not ``issubclass(type(value), str)``: the LIVE
+    WIRE is rendered by METHOD LOOKUPS on the caller's object, so a subclass can
+    render ``'""'`` while the journal keeps the content (#12592 cycle-7 P2).
+    """
+    return value if (type(value) is str and value.strip()) else None
+
+
 def _goal_successor_named(props: dict, stored_view) -> bool:
     """Does this write — or the node — NAME the goal's successor?
 
@@ -6032,22 +6064,24 @@ def _goal_successor_named(props: dict, stored_view) -> bool:
         if snake(key) != "superseded_by" and live_name != "supersededBy":
             continue
         named_in_write = True
-        if value not in (None, ""):
-            return True
     if named_in_write:
-        # ⛔ #13065 review finding 2: the write NAMES this carrier and names
-        # nobody (`supersededBy=None`/`""`). Falling back to the stored view
-        # here let a write discharge the obligation with the very value it
-        # CLEARS — measured: a superseded goal with `supersededBy='succ-1'`
-        # admitted `update_knowledge(g, goalState='superseded',
-        # supersededBy=None)` and left `supersededBy=None`. The guard grades the
-        # state the write LEAVES, so the write's own value decides this column
-        # and the stored half is not consulted for it.
+        # ⛔ #13065 review rounds 15/16, finding 1 (P2): the NAMING question is
+        # NOT answered here — ``#12914``'s merged ``_successor_named_by`` is the
+        # one authority for it, and this scan only decides WHETHER the write
+        # touches the carrier column at all (which is what selects between "the
+        # write's own value decides" and "read the stored half"). Answering it
+        # twice is how the achievement axis grew a looser rule than the one the
+        # update door applies: this loop used to accept ``"   "``, ``0``,
+        # ``False``, ``[]`` and the ``superseded_by`` shadow spelling, all of
+        # which name nobody, and ``create_object``/``create_subject`` have NO
+        # second check (the merged door's own SCOPE note says the create door is
+        # a disclosed residual) — so those rows were born ``superseded`` naming
+        # nobody.
         #
-        # The scan is over the RAW keys (not `_lifecycle_carrier_keys`, which
-        # drops a present `None` as "not a carrier") because a CLEAR is exactly
-        # the shape this finding is about.
-        return False
+        # ⛔ NOT falling back to the stored view when the write names the
+        # carrier is load-bearing (#13065 review finding 2): a write that CLEARS
+        # the column must not discharge the obligation with the value it clears.
+        return _successor_named_by(props)
     view = stored_view() or {}
     return bool(view.get("successor"))
 
@@ -6212,15 +6246,7 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 # `rows[0]` would make the verdict PLAN-ORDER dependent — refuse
                 # rather than answer from one row. Raised from the view so a
                 # write that never needs the stored half never pays for it.
-                raise ValueError(
-                    f"REFUSED: more than one node carries this id and they "
-                    f"disagree about the goal's ending (through {surface}). "
-                    f"#13035: the write lands on EVERY node carrying the id, so "
-                    f"the state it leaves cannot be named from one row."
-                    f"\nOne way to fix it: resolve the duplicate ids first (the "
-                    f"shape is mintable through `create_point(..., id=…)`), then "
-                    f"re-issue the write."
-                )
+                raise _duplicate_id_conflict_error(surface)
         return _stored
 
     def _status_restated_by_an_echo() -> bool:
@@ -6510,6 +6536,26 @@ def _ending_key(value: object) -> str:
             getattr(kind, "__qualname__", "?"))
 
 
+def _duplicate_id_conflict_error(surface: str) -> ValueError:
+    """The ONE wording for "more than one node carries this id, and they
+    disagree about the goal's ending" (#13065 review finding 5).
+
+    Two callers raise it, and they must say the same thing: the guard's
+    `_stored_view` (an UPDATE door, which is handed the stored-side probe) and
+    :func:`_refuse_ending_dropped_by_a_re_mention` (a CREATE door, where the
+    probe does not exist — round 16, finding 2).
+    """
+    return ValueError(
+        f"REFUSED: more than one node carries this id and they "
+        f"disagree about the goal's ending (through {surface}). "
+        f"#13035: the write lands on EVERY node carrying the id, so "
+        f"the state it leaves cannot be named from one row."
+        f"\nOne way to fix it: resolve the duplicate ids first (the "
+        f"shape is mintable through `create_point(..., id=…)`), then "
+        f"re-issue the write."
+    )
+
+
 def _refuse_ending_dropped_by_a_re_mention(proj, id_val: str, props: dict, *,
                                            label: str, surface: str) -> None:
     """Refuse a re-mention CREATE that would land HALF an ending.
@@ -6556,10 +6602,25 @@ def _refuse_ending_dropped_by_a_re_mention(proj, id_val: str, props: dict, *,
     if not _is_lifecycle_word(goal_state, GOAL_ENDING_STATES):
         return
     view = _stored_goal_ending_view(proj, id_val, label=label) or {}
-    if not view or view.get("conflict"):
-        # A fresh id writes both fields; a duplicate-id disagreement is the
-        # guard's own `conflict` arm, which is where that verdict belongs.
+    if not view:
+        # A fresh id writes both fields.
         return
+    if view.get("conflict"):
+        # ⛔ #13065 review round 16, finding 2 (P2): this arm used to RETURN here,
+        # deferring to the guard's own `conflict` arm — where the verdict belongs.
+        # But that arm is UNREACHABLE on this call path: it reads the conflict
+        # from the caller's zero-arg probe (`goal_ending`), and the entity create
+        # funnel calls `_sanitize_props(props, reject_id=True,
+        # reject_belief_props=True)` with NO probe, so `_stored` stays `{}` and
+        # `.get("conflict")` is always falsy there. The stated reason for
+        # returning was false on the door that calls this function, so the shape
+        # was unguarded: on the duplicate-id fixture this file's own tests mint,
+        # `create_object(<name>, objectKind='goal', status='archived',
+        # goalState='abandoned')` landed `goalState` through the generic prop SET
+        # while the fold wrote `status` ON CREATE only — the #13065 headline pair.
+        # The right answer is the conflict arm's own ("resolve the duplicate ids
+        # first"), raised from HERE, where it can actually arrive.
+        raise _duplicate_id_conflict_error(surface)
     if _is_lifecycle_word(view.get("status"), TERMINAL_EXCLUDED_STATUSES):
         return
     raise ValueError(
@@ -6647,9 +6708,15 @@ def _stored_goal_ending_view(proj, id_val: str, *,
         _carrier = row[2] if len(row) > 2 else None
         _corrects = row[3] if len(row) > 3 else []
         _flag = row[4] if len(row) > 4 else None
-        _row_named = _carrier if _carrier not in (None, "") else None
+        # ⛔ ONE rule for "is this a NAME" (:func:`_successor_name_of`, rounds
+        # 15/16 finding 1): the stored half used `not in (None, "")`, so a row
+        # carrying `supersededBy="   "` looked like it named somebody here and
+        # nowhere else.
+        _row_named = _successor_name_of(_carrier)
         if _row_named is None and _corrects:
-            _row_named = next((c for c in _corrects if c), None)
+            _row_named = next(
+                (n for n in (_successor_name_of(c) for c in _corrects) if n),
+                None)
         return "\x00".join((
             _ending_key(row[0]),
             _ending_key(row[1]),
@@ -6660,9 +6727,10 @@ def _stored_goal_ending_view(proj, id_val: str, *,
     endings = {_row_ending_key(row) for row in rows}
     status, goal_state, carrier, corrects = rows[0][:4]
     legacy_outdated = rows[0][4] if len(rows[0]) > 4 else None
-    named = carrier if carrier not in (None, "") else None
+    named = _successor_name_of(carrier)
     if named is None and corrects:
-        named = next((c for c in corrects if c), None)
+        named = next((n for n in (_successor_name_of(c) for c in corrects) if n),
+                     None)
     view = {"status": status, "goalState": goal_state, "successor": named,
             # ⛔ #13065 review ROUND 10, finding 1 (P2): the LEGACY retirement
             # flag is part of the stored ending, because the two read
@@ -6774,7 +6842,13 @@ def _successor_named_by(props: dict) -> bool:
         # ``'v2'`` and this predicate answered True — a graph naming nobody with
         # the record disagreeing. With an exact ``str`` no override can exist, so
         # the guard, the journal and the wire agree by construction.
-        return type(value) is str and bool(value.strip())
+        # ⛔ #13065 review rounds 15/16, finding 1: the TEST now lives in
+        # :func:`_successor_name_of`, so the achievement axis and this door
+        # cannot answer "is this a name" differently (the owner's #13035 brief:
+        # *"reuse its helper … so the two axes cannot drift apart"*). The rule is
+        # unchanged — exact `str`, non-blank.
+        return _successor_name_of(value) is not None
+
     return False
 
 
@@ -8814,7 +8888,14 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
         "goalState")
     if _vocab_goal is not None:
         _goal_state = _vocab_goal
-        if not isinstance(_goal_state, str) or _goal_state not in GOAL_STATE_VALUES:
+        # ⛔ #13065 review round 16, finding 4 (P3): this membership test HASHED
+        # the value, so a `goalState` that is an unhashable `str` SUBCLASS raised
+        # `TypeError: unhashable type` where the doors document `ValueError` —
+        # and it runs BEFORE the guard, so the type-safe helper the module
+        # already has never got the chance. `_is_lifecycle_word` is type-first
+        # for exactly this class; a non-`str` and a subclass that cannot hash
+        # both answer `False` here and get the documented refusal.
+        if not _is_lifecycle_word(_goal_state, GOAL_STATE_VALUES):
             _hint = ""
             if _goal_state == "guideline":
                 _hint = (

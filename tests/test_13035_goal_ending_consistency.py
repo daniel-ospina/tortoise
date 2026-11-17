@@ -1305,3 +1305,122 @@ def test_the_conflict_arm_is_scoped_to_the_GOAL_axis(sdk):
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(goal, status="superseded", goalState="superseded")
     assert "more than one node" in str(exc.value), str(exc.value)
+
+    # (c) the OTHER disjunct — the rows carry a `goalState` while the BAG names
+    # none (`#13065 review round 16, finding 3`: this half had no discriminating
+    # row, so deleting `or _stored.get("anyGoalState")` reddened nothing). The
+    # write is `status`-only, so the bag cannot put the goal axis in play; only
+    # the ROWS can. With the disjunct the conflict arm answers; without it the
+    # verdict falls through to the stored `goalState` from `rows[0]` — the
+    # plan-order dependence this arm exists to prevent.
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal, status="archived")
+    assert "more than one node" in str(exc.value), str(exc.value)
+
+
+# ── 14. review rounds 15/16 ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("value", ["   ", 0, False, [], ""])
+def test_a_NON_NAME_does_not_discharge_the_successor_obligation_on_a_CREATE(sdk, value):
+    """F1 (P2) of rounds 15/16 — ONE authority for "does this name a successor".
+
+    `#12914` is merged and its `_successor_named_by` owns that question (exact
+    `str`, non-blank, camel spelling). The achievement axis answered it a second
+    time with `value not in (None, "")`, which admits every one of these — and
+    `create_object`/`create_subject` have NO second check (the merged door's own
+    SCOPE note calls the create door a disclosed residual), so a goal was born
+    `superseded` naming nobody. The owner's #13035 brief is a recorded decision:
+    *"Do not re-derive the successor requirement … reuse its helper … so the two
+    axes cannot drift apart in what they demand."*
+    """
+    with pytest.raises(ValueError) as exc:
+        sdk.create_object(f"GOAL - non-name successor {value!r}",
+                          objectKind="goal", goalState="superseded",
+                          status="superseded", supersededBy=value)
+    msg = str(exc.value)
+    assert "REFUSED" in msg and "successor" in msg, msg
+
+
+def test_the_SNAKE_successor_spelling_does_not_name_anybody(sdk):
+    """F1 (P2), the spelling half — `superseded_by` is a SHADOW property.
+
+    The live write applies `SET n += $props` literally, so the snake key stores a
+    property that every camel-keyed reader of the successor ignores (#12782); the
+    merged `#12914` helper rejects it for that measured reason, and this axis must
+    not accept it either. The read side is asserted too: a stored blank does not
+    name anybody.
+    """
+    with pytest.raises(ValueError) as exc:
+        sdk.create_object("GOAL - snake successor", objectKind="goal",
+                          goalState="superseded", status="superseded",
+                          superseded_by="v2")
+    assert "successor" in str(exc.value), str(exc.value)
+
+    # the STORED half applies the same rule (`_stored_goal_ending_view`)
+    goal = _goal(sdk, tag="stored-blank-successor")
+    sdk._get_proj().g.query(
+        "MATCH (n {id:$id}) SET n.supersededBy = '   '", params={"id": goal["id"]})
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="superseded",
+                             status="superseded")
+    assert "successor" in str(exc.value), str(exc.value)
+
+
+def test_a_RE_MENTION_create_on_DUPLICATE_disagreeing_ids_refuses(sdk):
+    """F2 (P2) of round 16 — the deferral named an arm that cannot run here.
+
+    The re-mention arm returned on `view["conflict"]`, deferring to the guard's
+    conflict arm. That arm reads the conflict from the caller's stored-side
+    PROBE, and the entity create funnel calls `_sanitize_props` with no probe —
+    so `_stored` stays `{}`, `.get("conflict")` is falsy, and the arm never fires
+    on any create door. The stated reason for returning was false on the one door
+    that calls this function, so the shape landed half the pair.
+    """
+    g = sdk._get_proj().g
+    twin = "re-mention-conflict-13035"
+    g.query("CREATE (:Object {id:$id, name:'rm-a', objectKind:'goal', "
+            "status:'live', goalState:'active'})", params={"id": twin})
+    g.query("CREATE (:Object {id:$id, name:'rm-b', objectKind:'goal', "
+            "status:'archived', goalState:'abandoned'})", params={"id": twin})
+    with pytest.raises(ValueError) as exc:
+        # The arm is called directly: its only production caller is the entity
+        # CREATE funnel, whose id is NAME-DERIVED, so the duplicate-id fixture it
+        # must be given cannot be reached by naming the create. This is the shape
+        # the reviewer measured through the arm itself.
+        from tortoise.sdk import _refuse_ending_dropped_by_a_re_mention
+        _refuse_ending_dropped_by_a_re_mention(
+            sdk._get_proj(), twin,
+            {"goalState": "abandoned"}, label="Object",
+            surface="create_object")
+    msg = str(exc.value)
+    assert "more than one node" in msg, msg
+    assert "resolve the duplicate ids first" in msg, msg
+
+
+def test_an_UNHASHABLE_goalState_reaches_the_documented_ValueError(sdk):
+    """F4 (P3) of round 16 — PRE-EXISTING, and cheap here.
+
+    The vocabulary gate hashed the value (`not in GOAL_STATE_VALUES`), so an
+    unhashable `str` SUBCLASS raised `TypeError` where the doors document
+    `ValueError` — and that gate runs BEFORE the guard, so the type-first helper
+    the module already has never got the chance. `_is_lifecycle_word` is the
+    module's rule for this class.
+    """
+    class _UnhashableWord(str):
+        __hash__ = None
+
+    # An unhashable value whose CONTENT is not a legal word: the gate must refuse
+    # it with the documented `ValueError`. Before the fix the raw membership test
+    # hashed it and raised `TypeError: unhashable type`.
+    with pytest.raises(ValueError) as exc:
+        sdk.create_object("GOAL - unhashable goalState", objectKind="goal",
+                          goalState=_UnhashableWord("nonsense"))
+    assert "Invalid goalState" in str(exc.value), str(exc.value)
+
+    # ...and one whose content IS a legal word is graded by that content (the
+    # module's type-first rule), never by hashing the object: no `TypeError`
+    # escapes and the write lands.
+    goal = sdk.create_object("GOAL - unhashable legal goalState",
+                             objectKind="goal",
+                             goalState=_UnhashableWord("met"))
+    assert sdk.get_entity(goal["id"])["goalState"] == "met"
