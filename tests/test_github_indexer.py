@@ -675,6 +675,82 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
         "the row was not READ as closed: a reopen after it minted nothing")
 
 
+def test_a_row_whose_position_the_fold_cannot_place_is_never_read_as_closed_either(sdk):
+    """#13288 review round 3, finding 1 — the one refusal family the round-3 fix left.
+
+    `apply_stage_fold` refuses a row it cannot PLACE before it ever consults the
+    position guard: `cross-pipeline` when the stored `pipelineStageKey` names
+    another pipeline, `unresolvable-current-stage` when the id is absent from its
+    declaration. Both fire BEFORE `stage_move_refusal`, so on a row whose position
+    is ENDED the reopen arm never runs, `isClosed` is never cleared, and the row
+    stays "closed" for ever — the same permanent disagreement with GitHub as a
+    latched row, reached through a different guard.
+
+    The `None` answer for these two refusals already existed, but the arm sat BELOW
+    the position arms, so it was reachable only while the position was still LIVE —
+    the direction its own pin
+    (`test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open`)
+    measures. On an OPEN issue whose position is already ended it read "closed" and
+    minted `-reopened`, `-reopened-2`, … once per poll (measured `1/1/1` here), and
+    both shapes are one supported public write away on a closed issue:
+    `update_knowledge(id, pipelineStageId='nope')` /
+    `(id, pipelineStageKey='venture:deal')`.
+
+    The arm is now answered BEFORE the position arms: "the fold cannot place this
+    row" outranks "the position records an end", because a position is only
+    reconcilable when the fold can place it. ⚠️ The trade, unchanged in kind: such a
+    row records no `-closed` either. Bounded and inspectable; an unbounded mint loop
+    is neither.
+    """
+    oid = "github-issue-acme/repo1-1"
+    shapes = {
+        "a pipelineStageId the declaration does not contain, with an ENDED position": (
+            "SET o.pipelineStageId='nope', o.pipelineStageKey=null, "
+            "o.pipelineSlot='terminal', o.isClosed=true"),
+        "a foreign pipelineStageKey, with an ENDED position": (
+            "SET o.pipelineStageKey='venture:deal', o.pipelineStageId='in_progress', "
+            "o.pipelineSlot='active', o.isClosed=true"),
+    }
+    bad = {}
+    for why, mutate in shapes.items():
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        proj.g.query("MATCH (e:Event) DETACH DELETE e")
+        t = MockGitHubTransport(issues=[gh_issue(1)])   # the issue stays OPEN
+        _run(_indexer(t), sdk)
+        proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) {mutate}")
+        # The answer itself: `[0,0,0]` alone also holds for a reader that answered
+        # "open", which is `main`'s pre-PR behaviour, so the PARK has to be pinned.
+        if GitHubIndexer._object_state_to_issue_state(proj, oid) is not None:
+            bad[why] = "read as a definite state"
+            continue
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+        if mints != [0, 0, 0]:
+            bad[why] = mints
+    assert not bad, (
+        "the fold cannot place this row, so every poll minted another reopen on an "
+        f"OPEN issue, or the read asserted a state: {bad}")
+
+    # …and the CONTROL, on the same fixture: a row whose position is ENDED and
+    # PLACEABLE must still read "closed" and mint exactly one reopen (the fold
+    # applies it and clears `isClosed`), then stop. `None` for everything is not
+    # the fix, and neither is parking the position axis itself.
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (o:Object) DETACH DELETE o")
+    proj.g.query("MATCH (e:Event) DETACH DELETE e")
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) SET o.status=null, "
+                 "o.outdated=null, o.pipelineStageKey=null, o.isClosed=1, "
+                 "o.pipelineStageId='in_progress', o.pipelineSlot='active'")
+    assert GitHubIndexer._object_state_to_issue_state(proj, oid) == "closed", (
+        "a PLACEABLE position that records an end must still read closed")
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)]
+    assert mints == [1, 0], (
+        "the reconcilable control must mint exactly one reopen and then stop "
+        f"({mints})")
+
+
 def test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
     """#13143 review F1: the state diff must read `isClosed` the way the FOLD does.
 

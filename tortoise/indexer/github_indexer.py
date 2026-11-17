@@ -1200,30 +1200,41 @@ class GitHubIndexer:
         declared_slot = _declared_stage_slot(stage_key, stage_id)
         if is_terminal_status(status, outdated):
             return None                      # the fold's latch (see above)
-        if is_position_ended(is_closed=is_closed, stage_slot=slot):
-            return "closed"
-        if is_position_ended(is_closed=is_closed, stage_slot=declared_slot):
-            return "closed"
-        # ⛔ UNRESOLVABLE POSITION — the fold refuses these, so "open" here is a
-        # mint loop, not a read. `apply_stage_fold` answers `cross-pipeline` when
-        # the stored `pipelineStageKey` names ANOTHER pipeline than the fold's,
-        # and `unresolvable-current-stage` when the id is absent from its
-        # declaration; in both cases it writes NOTHING, so a reader calling the
-        # row open mints a `-closed` (then `-closed-2`, …) on every poll, for
-        # ever. BOTH are one supported public write away — measured on the merged
-        # head, three polls of a closed issue:
+        # ⛔ UNRESOLVABLE POSITION — the fold refuses these, so BOTH "open" and
+        # "closed" are mint loops, not reads. `apply_stage_fold` answers
+        # `cross-pipeline` when the stored `pipelineStageKey` names ANOTHER pipeline
+        # than the fold's, and `unresolvable-current-stage` when the id is absent
+        # from its declaration; in both cases it writes NOTHING, so a reader calling
+        # the row open mints a `-closed` (then `-closed-2`, …) on every poll of a
+        # closed issue, and a reader calling it closed mints `-reopened`, … on every
+        # poll of an open one. BOTH are one supported public write away — measured
+        # on the merged head, three polls of a closed issue:
         #   update_knowledge(id, pipelineStageId='nope')           1/1/1 mints
         #   update_knowledge(id, pipelineStageKey='venture:deal')  1/1/1 mints
+        # ⛔ AND IT IS ANSWERED BEFORE THE POSITION ARMS, which it used to sit under:
+        # both refusals fire inside `apply_stage_fold` BEFORE `stage_move_refusal`,
+        # so on a row whose position is ENDED the reopen arm never runs, `isClosed`
+        # is never cleared, and `"closed"` is just as permanent — measured, an open
+        # issue whose ended position carries an unplaceable stage minted `1/1/1`
+        # (pinned by `test_a_row_whose_position_the_fold_cannot_place_is_never_`
+        # `read_as_closed_either`). Only while the position was still LIVE did the
+        # position reach this arm at all, which is why that direction's pin passed.
         # `None` is the loop-free answer and the repo's own precedent for this
         # shape: `planned_occurrence.plan_position` treats the same two refusals
         # as unresolvable and explicitly refuses to call such a row open/upcoming
         # ("a pre-check must not attempt one either"). `prev_state is None` gates
         # the transition arm off, and the `-created` mint is guarded by
         # `_event_in_graph`, so nothing re-mints and the graph stops growing.
+        # ⚠️ The trade, stated: such a row records no `-closed` either. Bounded and
+        # inspectable; an unbounded mint loop is neither.
         if stage_id is not None:
             _key = str(stage_key or CORE_WORK_ITEM_PIPELINE_KEY)
             if _key not in _PIPELINE_DECLS or declared_slot is None:
                 return None                  # the fold refuses (see above)
+        if is_position_ended(is_closed=is_closed, stage_slot=slot):
+            return "closed"
+        if is_position_ended(is_closed=is_closed, stage_slot=declared_slot):
+            return "closed"
         if stage_id is not None or slot is not None:
             return "open"
         if status is None:
