@@ -45,3 +45,28 @@ def test_the_restore_probe_refuses_without_an_exact_confirm(tmp_path, capsys):
 def test_a_restore_probe_without_a_graph_uri_is_a_usage_error(capsys):
     assert census.main(["--restore-probe", "--graph", "g"]) == census.EXIT_USAGE
     assert "requires --graph-uri" in capsys.readouterr().err
+
+
+def test_the_human_render_prints_the_seed_holes_beside_n_a(tmp_path, capsys):
+    """`n/a` alone cannot be told from "no traversals recorded yet" (#13102 F).
+
+    On this tree `n/a` is the EXPECTED reading — no shipped door records a
+    start-key seed (see the tool's own limits) — so the operator running the
+    census must see WHY the rate is missing. The hole count used to be
+    json-only, while the docstring promised it beside the rate.
+
+    Mutation this REDs: drop the `seed holes` print from the human branch (it
+    was json-only until this fix) — the assertion below finds a bare `n/a`.
+    """
+    ledger = tmp_path / "l.jsonl"
+    ledger.write_text(
+        json.dumps({"event": "query", "kind": "traversal", "label": "Point",
+                    "returned": 2, "seed": None,
+                    "at": "2026-11-16T10:00:00+00:00", "tenant": "t1"}) + "\n",
+        encoding="utf-8")
+
+    assert census.main(["--ledger", str(ledger), "--tenant", "t1"]) == 0
+    out = capsys.readouterr().out
+    assert "seed hit rate   : n/a" in out
+    assert "seed holes" in out, out
+    assert "1 traversal(s) with no seed key" in out, out

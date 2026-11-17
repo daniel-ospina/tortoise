@@ -17,8 +17,10 @@ What is pinned here, in the order the issue asks for it:
 """
 from __future__ import annotations
 
+import ast
 import inspect
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -147,12 +149,165 @@ def test_the_refusal_names_the_dimension_and_the_meter_caveat():
     assert "HNSW vector index" in str(caught.value)
 
 
-def test_reads_are_never_gated_even_far_over_the_cap():
-    """Redis' ``noeviction`` posture: reads keep working, NEW work is refused."""
-    enforce_allowances(_limits(max_graph_storage_mb=77), resource="api_keys",
-                       meters={"graph_storage": _meter(10_000.0)})
-    enforce_allowances(_limits(max_graph_storage_mb=77), resource="sessions",
-                       meters={"graph_storage": _meter(10_000.0)})
+#: Every way a door reaches the allowance gate. A READ that called one of these
+#: could be refused by the armed cap, which is the one thing this cap must never
+#: do — so the set of call sites is pinned below, not left to inspection.
+_GATE_ENTRY_POINTS = frozenset({
+    "_check_org_limit", "_check_org_limit_off_loop", "_enforce_quota",
+    "enforce_allowances", "enforce_org_limit",
+})
+
+#: ⛔ THE DECLARED DOOR LIST — every allowance-gate call site in the package, as
+#: ``(module, enclosing function, resource it gates)``. ``None`` marks a SEAM that
+#: forwards a caller-supplied resource (``hosted_api._check_org_limit``,
+#: ``mcp_server._enforce_quota``, ``quota.enforce_org_limit``).
+#:
+#: Each entry is a claim that the enclosing function is a WRITE door. Adding one
+#: is a deliberate act with a reviewer looking at it — that is the whole point:
+#: an armed cap that a READ could reach would stop a tenant reading its own graph.
+_GATE_DOORS: frozenset[tuple[str, str, str | None]] = frozenset({
+    # the REST seams (both forward their caller's resource)
+    ("tortoise/hosted_api.py", "_check_org_limit", None),
+    ("tortoise/hosted_api.py", "_check_org_limit_off_loop", None),
+    # the REST write doors
+    ("tortoise/hosted_api.py", "create_object", "points"),
+    ("tortoise/hosted_api.py", "create_subject", "points"),
+    ("tortoise/hosted_api.py", "create_point", "points"),
+    ("tortoise/hosted_api.py", "create_api_key", "api_keys"),
+    ("tortoise/hosted_api.py", "rotate_api_key", "api_keys"),
+    ("tortoise/hosted_api.py", "_capture_session_impl", "sessions"),
+    ("tortoise/hosted_api.py", "_commit_region", "points"),
+    ("tortoise/hosted_api.py", "_seed_demo_sync", "points"),
+    ("tortoise/hosted_api.py", "_run_docs_indexing", "documents"),
+    ("tortoise/hosted_api.py", "_docs_quota_check", "documents"),
+    # the MCP seam and its two doors
+    ("tortoise/mcp_server.py", "_enforce_quota", None),
+    ("tortoise/mcp_server.py", "_gated", None),
+    ("tortoise/mcp_server.py", "tortoise_onboarding_demo_create", None),
+    # the gate itself: the one production call, plus the observed-only report
+    ("tortoise/quota.py", "enforce_org_limit", None),
+    ("tortoise/quota.py", "org_quota_state", None),
+})
+
+
+def _gate_call_sites(source: str, module: str = "<source>") -> set[tuple[str, str, str | None]]:
+    """Every ``(module, enclosing function, resource)`` gate call in *source*.
+
+    AST rather than a text search so a citation in prose (``enforce_org_limit``
+    is named in several docstrings) cannot redden the guarantee, and the ENCLOSING
+    FUNCTION is what distinguishes a write door from a read one. Aliases are
+    resolved too: ``from .allowance_gate import enforce_allowances as _ea``
+    followed by ``_ea(...)`` is the same capability under another name, and a
+    detector that only knows the canonical spelling is a detector a diff can walk
+    past.
+    """
+    tree = ast.parse(source, filename=module)
+    names = set(_GATE_ENTRY_POINTS)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in _GATE_ENTRY_POINTS and alias.asname:
+                    names.add(alias.asname)
+
+    sites: set[tuple[str, str, str | None]] = set()
+
+    def walk(node: ast.AST, enclosing: str) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            enclosing = node.name
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (func.attr if isinstance(func, ast.Attribute)
+                    else getattr(func, "id", None))
+            if name in names:
+                resource: str | None = None
+                for kw in node.keywords:
+                    if kw.arg == "resource" and isinstance(kw.value, ast.Constant):
+                        resource = kw.value.value
+                if (resource is None and len(node.args) >= 2
+                        and isinstance(node.args[1], ast.Constant)):
+                    resource = node.args[1].value
+                sites.add((module, enclosing, resource))
+        for child in ast.iter_child_nodes(node):
+            walk(child, enclosing)
+
+    walk(tree, "<module>")
+    return sites
+
+
+def test_no_read_path_can_reach_the_allowance_gate():
+    """⛔ THE SAFETY HALF OF THIS CHANGE: a READ is never gated.
+
+    An armed cap that a READ could reach would stop an over-cap tenant reading
+    its own graph — the ``noeviction`` guarantee the body states, and the one
+    thing a residency cap must never do.
+
+    Pinned as the package-wide SET of gate call sites, each declared in
+    ``_GATE_DOORS`` with the resource it gates. The earlier version of this test
+    scanned ``tortoise/sdk.py`` alone, where no gate call has ever lived — so a
+    gate added to a REST GET handler (``hosted_api", ``/v1/search``) left it
+    green (#13102 review round 2). Now a new call site — in a read handler, a new
+    module, anywhere in the package — reddens this until it is declared, which is
+    the moment someone can ask whether it is a WRITE door.
+    """
+    # 1. the detector: it must SEE a gate call, or an empty result below means
+    #    nothing (an alias included, since that is the bypass an alias exists for).
+    assert _gate_call_sites(
+        "from .allowance_gate import enforce_allowances as _ea\n"
+        "def _write_door():\n"
+        "    _ea({}, resource='points')\n"
+    ) == {("<source>", "_write_door", "points")}
+
+    # 2. every call site in the package, declared or not.
+    pkg = Path(__file__).resolve().parents[1] / "tortoise"
+    found: set[tuple[str, str, str | None]] = set()
+    for path in sorted(pkg.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        # Fast path: a file that never spells one of these cannot call one (an
+        # aliased import still spells the canonical name it is aliased FROM).
+        if not any(name in source for name in _GATE_ENTRY_POINTS):
+            continue
+        found |= _gate_call_sites(
+            source, str(path.relative_to(pkg.parent)))
+
+    added = sorted(found - _GATE_DOORS)
+    gone = sorted(_GATE_DOORS - found)
+    assert not added, (
+        "new allowance-gate call site(s) — a READ path reaching the gate would "
+        "make reads refusable by the armed cap. If the new one IS a write door, "
+        f"declare it in _GATE_DOORS with the resource it gates: {added}")
+    assert not gone, (
+        "a declared allowance-gate call site is gone (a renamed or removed door) "
+        f"— update _GATE_DOORS: {gone}")
+
+
+def test_the_armed_cap_refuses_only_its_own_WRITE_doors():
+    """The behavioural half: over-cap REFUSES on this dimension's doors, serves
+    elsewhere — with the over-cap meter proven to reach a comparison.
+
+    The earlier version of this test drove ``resource="api_keys"`` and
+    ``resource="sessions"`` only, and that passed for a SKIP reason rather than a
+    read reason: neither is a door of this dimension (``api_keys`` is not in
+    ``ALLOWANCE_GATED_RESOURCES`` at all, and ``graph_storage``'s doors are
+    ``{"points", "documents"}``), so both calls returned before any comparison
+    (#13102 review, finding 3). The positive control is what fixes that.
+
+    ⚠️ ``sessions`` serving here is NOT a virtue: the capture lane writes turn
+    Points into the tenant's graph and this dimension does not gate it, so the
+    armed cap can be walked past on that door — tracked on #13140. This line is
+    also what reddens the day the door set is widened to close it, so the change
+    is made deliberately rather than silently.
+    """
+    armed = _limits(max_graph_storage_mb=77)
+    over_cap = {"graph_storage": _meter(10_000.0)}
+
+    # 1. positive control: the WRITE doors refuse, far over the cap.
+    for door in ("points", "documents"):
+        with pytest.raises(QuotaExceededError):
+            enforce_allowances(armed, resource=door, meters=over_cap)
+
+    # 2. a resource this dimension does not gate still serves (see the caveat).
+    for door in ("api_keys", "sessions"):
+        enforce_allowances(armed, resource=door, meters=over_cap)
 
 
 # ── 3. the meter's honesty: a stale/absent reading is NOT zero ────────────

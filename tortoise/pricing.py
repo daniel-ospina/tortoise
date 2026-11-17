@@ -25,10 +25,14 @@ _cache: dict | None = None
 
 # Keys every tier must DECLARE. ⚠️ This does NOT mean `tier_limits` EXPOSES all
 # of them: it returns a SUBSET. The two storage allowances are declared-only on
-# purpose (see `storage_limits` — exposing them would arm a BLOCKED dimension in
-# the allowance gate and answer HTTP 500 on every gated write). A tier missing
-# any of these is a config drift bug and must fail loudly (KeyError), not
-# silently degrade to None/unlimited (#750.8).
+# purpose (see `storage_limits` — `tier_limits` is the dict every caller treats
+# as "the org's limits", so a storage key in it would arm the dimension on
+# whatever code path fills that dict, which for `postgres_storage` is a BLOCKED
+# dimension and would answer HTTP 500 on every gated write; `graph_storage` is
+# armed through `storage_limits` -> `quota._arm_graph_storage` instead, so that
+# exactly ONE seam decides). A tier missing any of these is a config drift bug
+# and must fail loudly (KeyError), not silently degrade to None/unlimited
+# (#750.8).
 _REQUIRED_LIMIT_KEYS = (
     "max_graphs_per_team",
     "max_users_per_team",
@@ -151,18 +155,27 @@ def storage_limits(tier: str) -> dict:
     ⛔ **DELIBERATELY NOT part of :func:`tier_limits`.** That dict is handed
     around as "the org's limits" and reaches ``quota.enforce_org_limit``; the
     allowance gate arms on *presence* — ``allowance_gate.enforce_allowances``
-    does ``if dim.limit_key not in limits: continue``
-    (``allowance_gate.py``:823). Both storage dimensions are currently
-    **BLOCKED** there (``postgres_storage`` has no per-org byte meter — a
-    per-org split would be an ALLOCATION, not a measurement; ``graph_storage``'s
-    own contract forbids capping on the ledger figure because the HNSW index is
-    under-reported 8.5x-21.7x). Putting either key into the dict every caller
-    treats as "the limits" is therefore one ``{**tier_limits(t), ...}`` away
-    from arming a blocked dimension and answering HTTP 500 on every gated
-    write. ``quota.py`` states the intended state: *"INERT BY DEFAULT: no
-    production resolver emits an ``ALLOWANCE_KEYS`` value"*. This accessor keeps
-    that true while letting the artifact carry the values a future resolver
-    will emit.
+    does ``if dim.limit_key not in limits: continue`` in its dimension loop
+    (no line citation on purpose: it drifted once already). Neither storage key
+    may ride in the dict every caller treats as "the limits": that dict is one
+    ``{**tier_limits(t), ...}`` away from arming a dimension on a path nobody
+    reviewed — a silent second arming seam for ``graph_storage`` (which must
+    have exactly one, here), and an HTTP 500 on every gated write for
+    ``postgres_storage`` (BLOCKED, so a configured allowance refuses). This
+    accessor is the ONLY route, and the arming goes through
+    ``quota._arm_graph_storage``.
+
+    ⛔ **``graph_storage`` IS ARMED FROM HERE**, since ``#13084`` — this is the
+    accessor that arms it. ``quota._arm_graph_storage`` reads it and
+    ``quota.resolve_org_limits`` emits ``max_graph_storage_mb`` on BOTH arms
+    (Supabase and registry), so the gate compares the meter against the tier's
+    hot-window number on every gated write: **solo 77 / pro 102 / team 615**
+    decimal MB, with the exact 1.5x hard stop at 115.5 / 153 / 922.5. ``free``/``anon``
+    carry ``0`` and are therefore UNARMED (``zero_means_unarmed``: an unset
+    amount is not a cap of zero). ``postgres_storage`` is the ONE dimension that
+    is still **BLOCKED** — it has no per-org byte meter, and a per-org split
+    would be an ALLOCATION, not a measurement — so its key is carried here for
+    the money arithmetic and refuses (fail closed) if it is ever configured.
 
     Returns ``{<allowance_key>: value | None}`` for every STORAGE dimension —
     ``None`` meaning UNCONFIGURED (the gate's own reading of it), never 0-by-0.

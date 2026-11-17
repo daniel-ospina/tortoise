@@ -600,6 +600,13 @@ def record_query(
     graph-derived projection is almost entirely stock, so it would report a ~100 %
     hit rate by construction.)
 
+    ⛔ A DOOR WITH NO START KEY RECORDS **NONE** — it never substitutes one. The
+    tempting substitute is the first RETURNED row, and it answers a different
+    question ("was the rank-0 result already read"; for a ranked-gap door, close
+    to the COMPLEMENT of this one), so a figure carrying this name would flatter
+    the very decision it sizes. ``None`` is COUNTED in
+    ``LedgerFold.traversals_unseeded`` — a named hole, never a miss.
+
     A kind outside :data:`QUERY_KINDS` RAISES: an instrument that silently
     invents a bucket produces a mix whose shares do not sum to 1 with nothing
     saying why.

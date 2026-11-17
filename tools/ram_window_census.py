@@ -15,8 +15,13 @@ sized from the graph's byte total alone. This tool reports, per tenant:
    `(label, key)` had an earlier read in the window.
    LIMITS: "resident" means *read earlier in this window*, which is a hotness
    proxy — the projection's own residency declaration (`tortoise/residency.py`)
-   is the other half and is not joined here. Traversals whose seed key could not
-   be addressed are reported as holes, never as misses.
+   is the other half and is not joined here. A door that has no start key
+   records NO seed (it never substitutes a returned row, which would answer a
+   different question), so an unseeded traversal is reported as a hole, never
+   as a miss: no shipped door supplies one yet (`recall_state` and `recall_gaps`
+   are ranked retrieval over a pool, not seeded walks — #8877 wires the seeded
+   legs), which makes the rate `n/a` beside a non-zero `unseeded` count rather
+   than a number nobody should act on.
 3. **Touched-node share** (`f`) — the fraction of resident nodes any traversal
    touched in the period. Instrument: `read_ledger.hot_fraction` (the same
    division `python -m tortoise.read_ledger` prints).
@@ -38,6 +43,7 @@ the measurement half. The cap half is `tortoise/allowance_gate.py`.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -153,10 +159,10 @@ def _restore_probe(uri: str, graph: str, confirm: str | None) -> dict:
             "bytes": len(payload) if isinstance(payload, (bytes, bytearray)) else None,
         }
     finally:
-        try:
+        # Best-effort close: a failed close must not mask the probe's reading
+        # (`SIM105` — the lint gate runs `ruff check .` over the whole tree).
+        with contextlib.suppress(Exception):
             client.close()
-        except Exception:  # pragma: no cover - best effort close
-            pass
 
 
 def _cold_section(args) -> dict:
@@ -216,6 +222,15 @@ def main(argv: list[str] | None = None) -> int:
             print("seed hit rate   : " + (f"{rate:.3f} ({seeds['hot']}/"
                                           f"{seeds['trials']})"
                                           if rate is not None else "n/a"))
+            if seeds["unseeded"] or seeds["unstocked"]:
+                # ⛔ PRINTED, not json-only: a bare `n/a` cannot be told apart
+                # from "no traversals recorded yet", and on this tree `n/a` is
+                # the EXPECTED reading (no shipped door records a start-key
+                # seed — see the limits above). Same wording as the ledger CLI.
+                print(f"⚠️ seed holes     : {seeds['unseeded']:,} traversal(s) "
+                      f"with no seed key, {seeds['unstocked']:,} whose seed was "
+                      f"never registered as stock — outside the rate, not "
+                      f"counted as misses")
             f = report["touched_node_share"]
             print(f"touched share f : keys={f['f_keys']} bytes={f['f_bytes']} "
                   f"— {f['stock_keys']:,} stock keys, {f['read_keys']:,} read")

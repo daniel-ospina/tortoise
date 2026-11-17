@@ -11588,7 +11588,8 @@ def _read_stored_number(value, default):
         return default
 
 
-def _ledger_record(label: str, rows: list[dict], *, kind: str | None = None) -> None:
+def _ledger_record(label: str, rows: list[dict], *, kind: str | None = None,
+                   seed: str | None = None) -> None:
     """#7983/#13084: feed the READ LEDGER (the instrument for `f` and the mix).
 
     Called from EVERY caller-facing row-returning read path that has a known
@@ -11618,9 +11619,19 @@ def _ledger_record(label: str, rows: list[dict], *, kind: str | None = None) -> 
     ``kind`` (#13084) names WHAT QUESTION the call asked — one of
     ``read_ledger.QUERY_KINDS`` — and makes this helper record a `query` event as
     well, INCLUDING when the call returned nothing (the mix counts calls; a hit
-    distribution is a different, flattering question). For a ``traversal`` the
-    seed is the rank-0 returned row, and the report tests whether THAT key was
-    already read earlier in the window.
+    distribution is a different, flattering question).
+
+    ⛔ ``seed`` IS THE DOOR'S OWN START KEY, passed by the caller that HAS one —
+    and NOTHING is synthesised when it does not. The two doors wired with
+    ``kind="traversal"`` today (``recall_state``, ``recall_gaps``) are filtered
+    and ranked retrieval over a pool, not seeded walks: they have no start key,
+    so they record none and land in the report's ``unseeded`` holes. Substituting
+    the rank-0 RETURNED row instead would answer a different question — "was the
+    first row I handed back already read", which for ``recall_gaps`` is close to
+    the COMPLEMENT of whether the traversal's origin was resident — and a hook
+    that answers a flattering question in the metric's own name is the failure
+    mode this instrument exists to avoid. A door with a real seed
+    (``recall_subgraph(seed=…)``) passes it once #8877 turns that leg on.
 
     OFF by default and never imported when off: one env lookup (the #4097 truthy
     contract), and a ledger failure is swallowed inside the module (a measurement
@@ -11639,8 +11650,6 @@ def _ledger_record(label: str, rows: list[dict], *, kind: str | None = None) -> 
     if rows:
         read_ledger.record_rows(label, rows)
     if kind is not None:
-        seed = read_ledger.row_key(label, rows[0]) if (
-            kind == "traversal" and rows) else None
         read_ledger.record_query(kind, label=label, returned=len(rows),
                                  seed=seed)
 

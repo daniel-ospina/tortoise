@@ -20,7 +20,8 @@ because the owner has not set their hot window and the artifact's ``0`` for them
 is an UNSET sentinel, not a cap of zero (see ``zero_means_unarmed``). An unarmed
 dimension refuses nothing and keeps being metered — the ordering the storage
 architecture requires (*"the meter must be wired into the gate before any
-allowance is configured"*)., ``docs/architecture/STORAGE-ARCHITECTURE.md``: §"The byte path").
+allowance is configured"*) — ``docs/architecture/STORAGE-ARCHITECTURE.md``,
+§"The byte path".
 
 **⚠️ "INERT" IS ABOUT WHAT IT REFUSES, NOT ABOUT WHAT IT READS (#9567 review
 round 10).** Arming nothing means no dimension can be over its allowance — it does
@@ -348,9 +349,12 @@ class AllowanceDimension:
         """True when this dimension MUST NOT be enforced, and why is recorded.
 
         ``blocked_reason`` is the whole state: a dimension can carry a working
-        meter and still be BLOCKED (``graph_storage`` is — its meter's own
-        contract forbids capping on the ledger figure). The reason is what the
-        refusal shows, so it cannot be a note beside the state.
+        meter and still be BLOCKED — ``postgres_storage`` is (no per-org byte
+        meter exists, and a per-org split would be an ALLOCATION, not a
+        measurement). ``graph_storage`` was in this state until #13084 and is
+        now ARMED at the tier number, with the estimate's one-directional error
+        handled by its ``cap_band`` rather than by a block. The reason is what
+        the refusal shows, so it cannot be a note beside the state.
         """
         return self.blocked_reason is not None
 
@@ -570,8 +574,9 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         # weaker ceiling, not an outage — and it is disclosed rather than hidden.
         #
         # THE BAND: at 1.0x the cap the gate only WARNS (an estimate must never be
-        # the sole cause of a hard refusal); the hard stop is 1.5x — 116 MB solo,
-        # 153 MB pro, 922 MB team. 50 % past the cap cannot be explained by the
+        # the sole cause of a hard refusal); the hard stop is 1.5x — 115.5 MB
+        # solo, 153 MB pro, 922.5 MB team (exact: the gate refuses at
+        # ``used >= allowance * 1.5``). 50 % past the cap cannot be explained by the
         # meter's own reported spread (a few percent), so that refusal rests on
         # MAGNITUDE rather than on the estimate's precision. Reads are never
         # refused: the gated doors are the WRITE doors, the posture Redis

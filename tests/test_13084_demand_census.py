@@ -142,3 +142,58 @@ def test_the_cli_reports_both_beside_f(tmp_path, capsys):
     assert out["query_mix"]["counts"]["vector"] == 1
     assert out["seed_hit_rate"]["rate"] == pytest.approx(1.0)
     assert out["f_keys"] == pytest.approx(1.0)
+
+
+# ── the WIRING: which door records which seed ──────────────────────────────
+
+
+def test_a_traversal_door_with_no_start_key_records_NO_seed(tmp_path, monkeypatch):
+    """A ranked door must not substitute a returned row for a seed (#13102 F4).
+
+    ``recall_state`` and ``recall_gaps`` are filtered/ranked retrieval over a
+    pool — neither walks from a start key — so ``_ledger_record`` supplies NO
+    seed and the call lands in the ``unseeded`` hole. The tempting alternative is
+    to record the rank-0 RETURNED row as "the seed"; that answers a different
+    question ("was the first row I handed back already read", and for
+    ``recall_gaps`` close to the complement of residency at the traversal's
+    origin), which is a flattering number wearing this metric's name.
+
+    Mutation this REDs: restore the ``row_key(label, rows[0])`` substitution in
+    ``tortoise/sdk._ledger_record`` — the recorded seed becomes ``p-returned-0``,
+    ``unseeded`` drops to 0 and ``trials`` rises to 1 with a fabricated key.
+    """
+    from tortoise import sdk as sdk_mod
+
+    monkeypatch.setenv("TORTOISE_READ_LEDGER", "1")
+    monkeypatch.setenv(read_ledger.LEDGER_PATH_ENV, str(tmp_path / "l.jsonl"))
+    sdk_mod._ledger_record("Point", [{"id": "p-returned-0"}], kind="traversal")
+
+    folded = read_ledger.fold(tmp_path / "l.jsonl")
+    seeds = read_ledger.seed_hit_rate(folded)
+    assert folded.query_counts["traversal"] == 1   # the CALL is still counted
+    assert seeds.unseeded == 1                      # a named hole ...
+    assert seeds.trials == 0                        # ... never a trial
+    assert seeds.rate is None
+
+
+def test_a_door_that_HAS_a_start_key_still_records_it(tmp_path, monkeypatch):
+    """The other half: the seam carries a real seed when the door passes one.
+
+    Without this, the test above would pass for a helper that dropped ``seed`` on
+    the floor entirely.
+
+    Mutation this REDs: drop ``seed=seed`` from ``_ledger_record``'s
+    ``record_query`` call — a seeded traversal becomes an ``unseeded`` hole and
+    the rate below reads ``None``.
+    """
+    from tortoise import sdk as sdk_mod
+
+    monkeypatch.setenv("TORTOISE_READ_LEDGER", "1")
+    monkeypatch.setenv(read_ledger.LEDGER_PATH_ENV, str(tmp_path / "l.jsonl"))
+    read_ledger.record_stock("Point", "p-start", nbytes=100)
+    read_ledger.record_read("Point", "p-start")
+    sdk_mod._ledger_record("Point", [{"id": "p-served"}], kind="traversal",
+                           seed="p-start")
+
+    seeds = read_ledger.seed_hit_rate(read_ledger.fold(tmp_path / "l.jsonl"))
+    assert (seeds.trials, seeds.hot, seeds.unseeded) == (1, 1, 0)

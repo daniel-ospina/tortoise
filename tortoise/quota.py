@@ -1463,10 +1463,20 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     # enforced HERE, ahead of the legacy node count, through the ONE declared
     # registry (``cost_dimensions``) — see ``tortoise/allowance_gate.py``.
     #
-    # ⛔ INERT BY DEFAULT: no production resolver emits an ``ALLOWANCE_KEYS``
-    # value, so every dimension is unconfigured and this call is a dict-miss per
-    # dimension. It REFUSES only once an allowance is configured — the ordering
-    # the storage architecture requires (wire the meter, then configure).
+    # ⛔ ONE DIMENSION IS ARMED — since #13084 this call is NOT a dict-miss for
+    # everything. ``resolve_org_limits`` emits ``max_graph_storage_mb`` for every
+    # PAID tier (solo 77 / pro 102 / team 615 decimal MB, from
+    # ``pricing.storage_limits``), so ``enforce_allowances`` below compares the
+    # tenant's measured graph residency against it on the ``points`` and
+    # ``documents`` doors and raises ``QuotaExceededError`` past the 1.5x hard
+    # stop (115.5 / 153 / 922.5 MB measured). That is the answer to "what can
+    # refuse a write": the graph cap can, and this is the call it refuses from.
+    # ``free``/``anon`` carry ``0`` and are UNARMED (an unset amount is not a cap
+    # of zero), and the other two dimensions stay unconfigured — a dict-miss
+    # each — because ``postgres_storage`` is BLOCKED on a per-org byte meter and
+    # ``capture_extraction`` has no resolved allowance. The ordering the storage
+    # architecture requires (wire the meter, then configure) is what #13084
+    # completed for the graph dimension.
     # The legacy ``points`` count below is deliberately RETAINED (it is a real
     # node cap with its own #4051 history); it is a LEGACY dimension whose unit
     # the owner has replaced, and it stays until an allowance is configured.
