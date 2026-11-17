@@ -704,7 +704,7 @@ def test_main_execute_rewrites_the_population_and_exits_zero(tmp_path, monkeypat
 
     argv = ["--db-path", str(db), "--event-log-path", str(journal)]
     assert tool.main(argv) == 0, "the preview is a success, population or not"
-    assert tool.main(argv + ["--execute", "--json"]) == 0
+    assert tool.main([*argv, "--execute", "--json"]) == 0
 
     sdk = TortoiseSDK(str(db), event_log_path=str(journal))
     try:

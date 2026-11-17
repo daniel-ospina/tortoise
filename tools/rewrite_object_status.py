@@ -118,9 +118,16 @@ binds on `id`, not on the row: a `:Point` node that merely SHARES the id is
 invisible in `labels(n)` of the `:Object`, and the Point arm would rewrite it
 (#12855 forbids touching Points; measured: a sibling Point went `live ->
 deprecated` while the Object stayed `outdated`, and the call still returned
-`deprecated`). So every node carrying the id is resolved first, and a row is
-refused unless it is the ONLY node with that id and its labels are `:Object`
-only. The post-write check re-reads THAT node, never the value
+`deprecated`). So every node the WRITE could bind is resolved first — not just
+`m.id`: the door binds by each label's primary key plus its SECONDARY key on a
+miss (`:Source`'s `url`), so a url-only `:Source` stub whose `url` equals the
+`:`Object`'s id is bound by the same call while carrying no `id` at all. The
+binding query is derived from the door's own key tables for that reason. A row is
+refused unless it is the ONLY node bound and carries no `:Point`/`:Subject`
+label; ⚠️ a further label that selects another arm (e.g. `[Object, Source]`) is
+ADMITTED — it takes the Source arm as well and journals two records for one set
+of values, which is why the batch gate's `delta < len(rewritten)` is a LOWER
+bound, never an equality. The post-write check re-reads THAT node, never the value
 `update_knowledge` returned — which resolves by label precedence and would
 report the Point. Measured on the canonical instance (2026-11-17):
 exactly one such row exists (`org_probe8884b_5d1a9fd5`, a probe graph), and it
@@ -293,10 +300,10 @@ def _binding_refusal(rid: str, nodes: list[list[str]]) -> str:
             "a dead claim (a claim is answered by minting a successor, never by "
             "re-stamping it — #2498). On the SUBJECT arm the caller's word IS "
             "written and stored (measured 2026-11-17) — the refusal there is "
-            "this tool's SCOPE, not a limitation: it rewrites a row that is an "
-            "`:Object` and nothing else, because a node that is also a "
-            "`:Subject` carries a lifecycle another family owns (#12855 keeps "
-            "their words). Either way the row is reported here instead of being "
+            "this tool's SCOPE, not a limitation: it refuses a row that carries "
+            "a `:Point`/`:Subject` label, because such a node carries a "
+            "lifecycle another family owns (#12855 keeps their words). Either "
+            "way the row is reported here instead of being "
             "counted as rewritten. Mint a successor, or correct the label, and "
             "re-run.")
     return (
