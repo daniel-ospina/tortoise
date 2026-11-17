@@ -671,6 +671,52 @@ def test_a_salvage_read_that_skipped_NOTHING_can_still_claim_completion(monkeypa
     assert "damage NOT REPORTED" not in out
 
 
+def test_a_TORN_TAIL_alone_withdraws_the_completion_claim(monkeypatch, capsys, tmp_path):
+    """⛔ P2 (PR #13275 review): the `torn` term was fenced by no fixture.
+
+    A SIGKILL mid-append leaves a truncated LAST line, which the reader tolerates
+    (S15) without raising and WITHOUT a mid-file damage count — so a journal of two
+    complete records plus a torn third line reads as `records=2, corrupt=0,
+    torn=1`. That is the commoner damage case, and it is the one where the `torn`
+    term is the ONLY thing that makes the read unaccountable: drop it
+    (`completeness_unknown = damage_unreported or bool(journal.corrupt)`) and the
+    suite stays at 55 passed while `status` reports `fully_consumed: true` over a
+    journal that may have lost its last record.
+
+    This uses a REAL journal through `read_journal`, not a constructed `Journal`, so
+    the counter's own plumbing is fenced too — a fixture that hand-set `torn=1`
+    would keep passing if the reader stopped counting.
+    """
+    journal = tmp_path / "events.jsonl"
+    good = json.dumps({"type": "IngestStarted"})
+    journal.write_text(good + "\n" + good + "\n" + '{"type":"PointAd',
+                       encoding="utf-8")
+    read = record_runner.read_journal(journal)      # the STRICT read tolerates it
+    assert len(read) == 2
+    assert read.corrupt == 0, "a torn tail is not a mid-file damage count"
+    assert read.torn == 1, f"the reader stopped counting torn tails: {read.torn}"
+
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(journal), "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["journal"]["torn_tails"] == 1, payload
+    assert payload["events_remaining"] == 0, payload
+    assert payload["completeness_unknown"] is True
+    assert payload["damage_unreported"] is False
+    assert payload["fully_consumed"] is None, (
+        "a torn tail may have truncated the LAST record, so the count reaching the "
+        "checkpoint is not proof that the record holds every mutation")
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(journal)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "damaged input: 0 mid-file line(s), 1 torn tail fragment(s)" in out
+    assert "complete: UNKNOWN — this read SKIPPED damaged input" in out
+
+
 def test_every_verb_discloses_the_damage_it_read(monkeypatch, capsys):
     """⛔ P3 (PR #13210 review): the helper's docstring claimed three verbs.
 
