@@ -417,8 +417,12 @@ def or_tokens(text: str) -> list[str]:
         toks = []
         reason = f"{type(exc).__name__}: {exc}"
     if not toks:
-        TOKENIZER_FALLBACKS.append(
-            {"text": text, "reason": reason or "tokenizer returned no tokens"})
+        if not any(e["text"] == text for e in TOKENIZER_FALLBACKS):
+            # `or_tokens` runs once per QUERY (three call sites), so a raw append
+            # would record one entry per call and make the published count a
+            # multiple of the texts. Keyed by text: one entry per affected query.
+            TOKENIZER_FALLBACKS.append(
+                {"text": text, "reason": reason or "tokenizer returned no tokens"})
         toks = [t for t in _TOKEN_RE.findall(text.lower()) if t]
     # dedupe, preserve order
     seen: set[str] = set()
@@ -927,20 +931,11 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
     candidates = [a for a in qualifying
                   if a not in not_candidates and a not in control_arms]
 
-    if baseline_disqualified:
-        decision = (
-            "NO VERDICT — the baseline arm (`in_graph_fulltext`) raised during the "
-            "run, so every candidate delta is measured against an empty result "
-            "list. Re-run before reading ANY number here, including the tables.")
-    elif candidates:
-        decision = ("a Postgres option does not lose to the in-graph leg on any "
-                    "query class at nDCG@10: " + ", ".join(candidates))
-    else:
-        decision = ("every Postgres option loses significantly on at least one "
-                    "query class; the text index stays")
-    if disqualified and not baseline_disqualified:
-        decision += (f" — but {len(disqualified)} arm(s) were DISQUALIFIED by a "
-                     f"recorded error and are not scored: {', '.join(sorted(disqualified))}")
+    # ⛔ NO `decision` IS BUILT HERE. It used to be, into a local that nothing
+    # read, while the returned `decision` below was rebuilt from scratch — so the
+    # dead copy said the rule decides "at nDCG@10" and the live one said "any
+    # published metric", and editing the visible block changed nothing. The
+    # return dict is the single place the text is produced.
 
     return {
         "rule": ("a candidate qualifies unless it is significantly WORSE "
@@ -996,7 +991,8 @@ def main(argv: list[str] | None = None) -> int:
               reuse=args.reuse, full=args.full)
     print(json.dumps(art["verdict"], indent=1))
     if art.get("tokenizer_fallbacks"):
-        print(f"!! {len(art['tokenizer_fallbacks'])} query text(s) used the REGEX "
+        print(f"!! {len({e['text'] for e in art['tokenizer_fallbacks']})} query "
+              "text(s) used the REGEX "
               "fallback because the product tokenizer returned nothing (see "
               "`tokenizer_fallbacks` in the artifact); those queries are not "
               "priced by the shared tokenizer the record claims")

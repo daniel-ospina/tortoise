@@ -347,9 +347,17 @@ The same file recomputes §5's numbers — every arm's three metrics, all six Δ
 in the row of the backend that produced them. It does **not** recompute §6's prose (licence, preload
 list, `pg_search` version, `copy_s`): those are presence-checked, not derived.
 
-⚠️ **The two committed artifacts predate two record keys this harness now writes**, and a rerun will
-differ structurally from them, not only in timings: `corpus.queries_sha256` and
-`results[*].arm_errors`. Their `verdict` blocks ARE regenerated from each file's own `results` (so the
-decision rule and the published conclusion cannot diverge), but the two keys above only appear on the
-next measurement run — which is why the query digest is also stated in prose above, and why the
-disqualification path is pinned by unit tests rather than by the committed artifacts.
+⚠️ **The two committed artifacts predate record keys this harness now writes**, and a rerun will
+differ structurally from them, not only in timings. Three keys need reading with that in mind:
+
+- `corpus.queries_sha256` and `results[*].arm_errors` are **absent** — they only appear on the next
+  measurement run, which is why the query digest is also stated in prose above, and why the
+  disqualification path is pinned by unit tests rather than by the committed artifacts.
+- `tokenizer_fallbacks` **is** present, but it was appended when the `verdict` blocks were regenerated
+  (it sits AFTER `verdict` in the file; a fresh `run()` writes it BEFORE), so its `[]` is not a
+  reading taken by the original run — it is a separate measurement over the committed query set
+  (all 296 query texts, 0 raising and 0 returning an empty token list), which is why the value is
+  trustworthy while its position is not the one a rerun produces.
+
+The `verdict` blocks themselves ARE regenerated from each file's own `results`, so the decision rule
+and the published conclusion cannot diverge.
