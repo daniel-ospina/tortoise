@@ -435,7 +435,18 @@ class BatchPlan:
     :class:`tortoise.record_projection.ReplayReport` reports — the position row
     is excluded from both, so an operator can compare a plan to a run and a
     disagreement means something. ``position_rows`` is the excluded half, stated
-    rather than silently dropped: one per record, and it IS written.
+    rather than silently dropped: on the ENUMERATED arm it is one position row
+    per record, and it IS written.
+
+    ⛔ IT COUNTS STATEMENTS THAT WRITE POSITIONS, NOT ROWS (review note). On the
+    ALLOCATE arm every position write travels INSIDE the single
+    ``ALLOCATION_STATEMENT_PREFIX`` statement (N rows in 1 statement), so this
+    reads ``1`` for a batch of N — which
+    ``test_plan_allocate_accounts_the_allocation_statement_as_POSITIONS`` pins as
+    intended ("an allocation batch is ONE position write"). Nothing writable is
+    misled by the coarser unit: only ``plan`` can reach this count, because
+    ``apply --allocate`` is refused. Read it as a statement-class count, never as
+    a census of rows.
     """
 
     start_seq: int
@@ -615,7 +626,6 @@ class ApplyReport:
     checkpoint_before: dict[str, Any]
     start_at: int
     consumed: int = 0
-    skipped: int = 0
     statements: int = 0
     batches: int = 0
     committed: int = 0
@@ -637,7 +647,6 @@ class ApplyReport:
             "checkpoint_before": self.checkpoint_before,
             "start_at": self.start_at,
             "consumed": self.consumed,
-            "skipped": self.skipped,
             "statements": self.statements,
             "batches": self.batches,
             "batches_committed": self.committed,
@@ -887,17 +896,25 @@ def _parser() -> argparse.ArgumentParser:
                     "It does not touch the graph.")
     sub = ap.add_subparsers(dest="verb", required=True)
 
-    def common(p: argparse.ArgumentParser) -> None:
+    def common(p: argparse.ArgumentParser, *, bounds: bool = True) -> None:
         p.add_argument("--org-id", required=True)
         p.add_argument("--graph-id", required=True)
         p.add_argument("--journal", required=True,
                        help="the graph's events.jsonl, or its graph directory")
         p.add_argument("--dsn", default=None,
                        help="the record DSN (default: TORTOISE_RECORD_DSN)")
-        p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
-                       dest="batch_size")
-        p.add_argument("--limit", type=int, default=None,
-                       help="consume at most N events this run")
+        # ⛔ THE BOUNDS ARE NOT `status`'S (review note, PR #13210). `status` runs
+        # no batch and consumes nothing, so `--limit` and `--batch-size` were
+        # ACCEPTED there and silently IGNORED: an operator passing
+        # `status --limit 5` got the full remainder with no indication the flag
+        # did nothing. A flag that cannot do anything is worse than an absent
+        # one, so `status` does not register them and passing one is a usage
+        # error (exit 2) — the honest answer to "what does this flag do here?".
+        if bounds:
+            p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                           dest="batch_size")
+            p.add_argument("--limit", type=int, default=None,
+                           help="consume at most N events this run")
         p.add_argument("--allocate", action="store_true",
                        help="use the ordinal ALLOCATOR (a cut-over graph) instead "
                             "of the journal's enumeration")
@@ -924,12 +941,38 @@ def _parser() -> argparse.ArgumentParser:
                               "acknowledge a number you have not seen")
 
     p_status = sub.add_parser("status", help="where the fold stands; writes nothing")
-    common(p_status)
+    common(p_status, bounds=False)
 
     return ap
 
 
+def _refuse_impossible_bounds(args: argparse.Namespace) -> None:
+    """A bound below 1 is an ARGUMENT error, refused BEFORE any read (review P1).
+
+    ⛔ THE GUARD IN :func:`batch_slices` IS NOT ENOUGH, because it is reachable
+    only from a path that actually computes a window. `apply` took its "nothing
+    to consume" arm BEFORE the slicer was ever called, so `apply --limit 0`
+    printed `NOTHING TO DO — every journal position is already in the record`
+    over an UNTOUCHED record — the same report said `present 0` two lines above
+    and `next run resumes at seq 1` two lines below — and exited 0, while `plan`
+    refused the identical input with `--limit must be >= 1`.
+
+    Two facts had been merged and they must not be: an invalid bound is an
+    ARGUMENT failure (rc 1, nothing read, nothing claimed), and "nothing to do"
+    is a VERIFIED statement about the remainder. A scripted backfill reads
+    `rc=0` plus that sentence as *complete*, so the merge is a false completion
+    claim rather than a cosmetic one. The bound describes the INVOCATION, so it
+    is checked from the parsed arguments — before the journal is read, before a
+    connection is opened, and on every code path the verb could take.
+    """
+    if args.batch_size < 1:
+        raise RunnerError(f"--batch-size must be >= 1 (got {args.batch_size!r})")
+    if args.limit is not None and args.limit < 1:
+        raise RunnerError(f"--limit must be >= 1 (got {args.limit!r})")
+
+
 def cmd_plan(args: argparse.Namespace, *, echo) -> int:
+    _refuse_impossible_bounds(args)
     journal = read_journal(args.journal, salvage=args.salvage)
     start_at = 0
     checkpoint = None
@@ -1054,6 +1097,11 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
 
 
 def cmd_apply(args: argparse.Namespace, *, echo) -> int:
+    # ⛔ BEFORE EVERY OTHER GATE, because it is not a gate about this RECORD:
+    # an impossible bound makes the invocation itself meaningless, so it is
+    # refused before the journal is read and before `consumable` — the value the
+    # `--limit 0` bug turned into a completion claim — is ever computed.
+    _refuse_impossible_bounds(args)
     if args.salvage:
         # ⛔ A WRITE MUST NOT BE POSITIONED FROM A READ THAT SKIPPED A LINE. A
         # mid-file damaged line is skipped in salvage mode, which SHIFTS the

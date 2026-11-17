@@ -22351,6 +22351,47 @@ def test_curate_graph_tool_change_selects_core_not_tier1():
     assert "test_curation_11469.py" in m["test_files"], m
 
 
+def test_record_runner_tool_change_selects_core_not_tier1():
+    # #7879: `tools/record_runner.py` is the production entry point of the record fold —
+    # the only thing that executes `record_projection.replay()` from a CLI, and the home
+    # of every gate that decides whether a fold may write (`--acknowledge-plan`, the
+    # cut-over refusal, the derived checkpoint, rollback-and-claim-nothing).
+    # `tests/test_record_runner.py` (registered `core`) is its only pin.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this
+    # file, so without the CORE_ALSO entry a RUNNER-ONLY diff filtered to `changed == []`
+    # and took the tier-1 smoke path, where `test_record_runner.py` is NOT registered —
+    # i.e. the one diff able to weaken the gates selects no surface that runs the pins
+    # fencing them (the #1349/#3332/#3616 silent-drop class).
+    #
+    # ⛔ WHY THIS TEST EXISTS AT ALL (review P2, agent-infra#3442 rule 3): the CORE_ALSO
+    # row landed with a 13-line comment arguing it is load-bearing, and NOTHING reddened
+    # if it was deleted — 42 new tests import the module directly, `--integrity` exits 0
+    # regardless (classification and `durations` are separate rows), and no `ci_selection`
+    # test mentioned `record_runner`. The claim whose failure mode is "the whole suite
+    # silently does not run on the runner" was the one claim with no evidence behind it.
+    #
+    # MEASURED at the reviewed head: entry present -> `surfaces ['core']`,
+    # `test_record_runner.py` in `test_files`; entry DELETED -> `surfaces []`, suite NOT
+    # selected.
+    #
+    # Mutation check: removing the CORE_ALSO entry fails the TOOL arm below. The MODULE
+    # arm still passes — it is carried by the `core` row in `config/ci-surfaces.yml` via
+    # the `tortoise/record_projection.py` source pattern, not by CORE_ALSO — which is why
+    # both arms are asserted: one registration cannot satisfy them together, and the tool
+    # arm is the one that regresses if the entry goes.
+    r = _sel(["tools/record_runner.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_record_runner.py" in r["test_files"], r
+    # The module arm: the fold the runner drives is `core` on its own, so the two
+    # registrations are independent — deleting either one alone leaves this arm or the
+    # tool arm red rather than both green (proved by the mutation check above).
+    m = _sel(["tortoise/record_projection.py"])
+    assert m["surfaces"] == ["core"], m
+    assert "test_record_runner.py" in m["test_files"], m
+
+
 def test_the_archive_and_its_gate_run_on_the_diffs_that_can_weaken_them():
     # #11609: `tests/test_archive.py` holds the surface archive's guarantee — an archived
     # symbol is GONE from the live surface (it must not be a slow leak back), `archive/`

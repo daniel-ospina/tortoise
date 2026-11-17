@@ -203,6 +203,16 @@ def test_limit_bounds_the_run_without_changing_where_it_starts():
 
 
 def test_a_batch_size_or_limit_below_one_is_a_refusal_not_a_silent_full_run():
+    """The guard ITSELF refuses a below-1 bound, at the level that computes windows.
+
+    ⛔ This is the unit arm only — it calls `batch_slices` directly and therefore
+    cannot see a verb that never reaches it. `apply` took its `consumable == 0`
+    no-op arm BEFORE the slicer, so `apply --limit 0` printed "every journal
+    position is already in the record" over an untouched record and exited 0
+    (review P1). The CLI arm — and the property this test's name describes — is
+    pinned by `test_apply_refuses_an_impossible_bound_...` below; this row stays
+    as the guard's own regression pin, because its mutant HANGS (`take = 0`).
+    """
     for kwargs in ({"batch_size": 0}, {"batch_size": 5, "limit": 0}):
         with pytest.raises(RunnerError):
             batch_slices(10, **kwargs)
@@ -375,6 +385,90 @@ def test_a_fully_consumed_journal_is_a_no_op_that_says_so(monkeypatch, capsys):
     assert rc == EXIT_OK
     out = capsys.readouterr().out
     assert "NOTHING TO DO" in out and "consumed=0" in out
+
+
+def test_apply_refuses_an_impossible_bound_and_does_not_call_it_a_completion(
+        monkeypatch, capsys):
+    """Review P1 (#13210): `--limit 0` is an ARGUMENT error, not "nothing to do".
+
+    ⛔ THE TWO FACTS THE DEFECT MERGED ARE SEPARATE, and this test is the one that
+    separates them. Pre-fix, `apply --limit 0` over an EMPTY record printed
+
+        NOTHING TO DO — every journal position is already in the record.
+        checkpoint after: present 0, high 0, first gap None → next run at seq 1
+
+    and exited 0 — a completion claim contradicted twice by its own report, for a
+    journal of 39 records against a record holding none. `plan --limit 0` refused
+    the same input, so the tool contradicted itself across verbs. A scripted
+    backfill reads rc 0 plus that sentence as *complete*, which is why the false
+    sentence AND the false exit code are both asserted here: the mutant that
+    removes the guard reddens both (measured at the pre-fix commit).
+
+    Both bounds are covered, because the refusal must be uniform: a below-1
+    `--batch-size` has the same defect on the same early-return path.
+    """
+    for flag in (("--limit", "0"), ("--batch-size", "0")):
+        conn = _patched(monkeypatch, checkpoint=Checkpoint())
+        # The fold must never be reached: a refusal that folded first would be a
+        # write behind a rejected invocation.
+        monkeypatch.setattr(_replay_attr(), "replay", _must_not_run)
+        rc = main(["apply", "--org-id", "o", "--graph-id", "g",
+                   "--journal", str(FIXTURE), flag[0], flag[1],
+                   "--acknowledge-plan", "39"])
+        captured = capsys.readouterr()
+        assert rc == EXIT_REFUSED, (flag, rc, captured)
+        assert f"{flag[0]} must be >= 1" in captured.err, captured.err
+        # ⛔ The false sentence, asserted ABSENT — the whole defect was this line.
+        assert "NOTHING TO DO" not in captured.out, captured.out
+        assert "already in the record" not in captured.out, captured.out
+        assert conn.committed == 0
+        assert conn.statements == []
+
+
+def test_an_impossible_bound_is_refused_BEFORE_any_record_is_read(monkeypatch, capsys):
+    """The bound describes the INVOCATION, so it is checked before the record.
+
+    A `--limit 0` run that opened a connection first would still be correct-ish
+    for `apply`, but the property that makes the refusal trustworthy is stronger:
+    nothing was read, so nothing can be claimed. This also covers the `plan` arm,
+    which reached the same refusal only indirectly — through `build_plan` →
+    `batch_slices` — so its sentence and its cost were a side effect of planning.
+    """
+    def boom(*a, **k):  # pragma: no cover - must never run
+        raise AssertionError("an impossible bound opened a record connection")
+    monkeypatch.setattr(record_runner, "open_record", boom)
+    monkeypatch.setattr(_replay_attr(), "replay", _must_not_run)
+
+    for argv in (
+        ["apply", "--limit", "0", "--acknowledge-plan", "39"],
+        ["apply", "--batch-size", "0", "--acknowledge-plan", "39"],
+        ["plan", "--limit", "0"],
+        ["plan", "--batch-size", "0"],
+    ):
+        rc = main([argv[0], "--org-id", "o", "--graph-id", "g",
+                   "--journal", str(FIXTURE), *argv[1:]])
+        assert rc == EXIT_REFUSED, (argv, rc)
+        assert "must be >= 1" in capsys.readouterr().err, argv
+
+
+def test_status_does_not_accept_a_bound_it_cannot_apply(monkeypatch, capsys):
+    """`status` runs no batch, so a bound there was accepted and IGNORED.
+
+    An operator passing `status --limit 5` got the full remainder and no hint that
+    the flag did nothing — a flag that cannot do anything is worse than an absent
+    one, so it is a usage error (exit 2), which is a different answer from a
+    refusal and says which of the two happened.
+    """
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=39, present=39))
+    for flag in (("--limit", "5"), ("--batch-size", "5")):
+        with pytest.raises(SystemExit) as exc:
+            main(["status", "--org-id", "o", "--graph-id", "g",
+                  "--journal", str(FIXTURE), flag[0], flag[1]])
+        assert exc.value.code == EXIT_USAGE, flag
+
+
+def _must_not_run(*a, **k):  # pragma: no cover - the gate must refuse first
+    raise AssertionError("the fold ran behind a rejected invocation")
 
 
 def test_a_resumed_run_reports_where_it_started(monkeypatch, capsys):
