@@ -871,6 +871,17 @@ def fold(
     if not target.exists():
         return out
     pending: dict[tuple[str | None, str, str], list[str | None]] = {}
+    #: #13102 F3 — reads per `(tenant, label, key)` IN FILE ORDER. A traversal asks
+    #: "was this seed read EARLIER", which is a question about position in the
+    #: file, not about whether the stock line had been seen yet: a stock census is
+    #: a separated, later step, so a read that precedes its own registration must
+    #: still be credited. `reads_seen` carries the earlier-read count and
+    #: `seed_trials` defers the classification until the whole file (and the
+    #: pending join) is folded.
+    reads_seen: dict[tuple[str | None, str, str], int] = {}
+    #: Traversals awaiting classification, with the read count their seed already
+    #: had when the traversal was issued: `(ident, reads_before)`.
+    seed_trials: list[tuple[tuple[str | None, str, str], int]] = []
     cutoff = None
     cutoff_dt: datetime | None = None
     if window_days is not None:
@@ -956,12 +967,17 @@ def fold(
                     if not seed:
                         out.traversals_unseeded += 1
                     else:
-                        row = out.rows.get(
-                            (ev.get("tenant"), ev.get("label"), str(seed)))
-                        if row is None:
-                            out.seeds_unstocked += 1
-                        elif row.read_count > 0:
-                            out.seeds_hot += 1
+                        ident = (ev.get("tenant"), ev.get("label"), str(seed))
+                        # BOTH questions are answered at the END of the fold, and
+                        # for different reasons: STOCK membership is a whole-file
+                        # fact ("never registered as stock" — a census written
+                        # later in the file still registers it), while "hot" is an
+                        # EARLIER-read question that `reads_seen` has already
+                        # counted in file order. Reading `out.rows` here instead
+                        # made a seed whose read preceded its stock line look
+                        # UNSTOCKED while `hot_fraction` counted the same read
+                        # (#13102 F3).
+                        seed_trials.append((ident, reads_seen.get(ident, 0)))
                 continue
             label, key = ev.get("label"), ev.get("key")
             if not isinstance(label, str) or not isinstance(key, str):
@@ -1010,6 +1026,10 @@ def fold(
                     continue
                 if cutoff_dt is not None and _at_dt < cutoff_dt:
                     continue
+                # In the window: counted for the seed question REGARDLESS of
+                # whether its stock line has been seen yet — a read is an
+                # observation the moment it is written.
+                reads_seen[ident] = reads_seen.get(ident, 0) + 1
                 row = out.rows.get(ident)
                 if row is None:
                     # NOT yet a hole: the stock line may appear LATER in the file
@@ -1037,6 +1057,17 @@ def fold(
         for stamp in (s for s in stamps if isinstance(s, str)):
             if row.last_read_at is None or _stamp_cmp(stamp, row.last_read_at) > 0:
                 row.last_read_at = stamp
+    # The seed classification, once every read — pending ones included — has been
+    # joined: a seed is UNSTOCKED only when the WHOLE file never registered it,
+    # and HOT when it had an earlier read in the window. Classifying at the
+    # traversal line instead made the two facts disagree with
+    # `hot_fraction`/`seed_hit_rate` for the module's own documented ordering
+    # (reads accumulate first, the stock census is a later step) — #13102 F3.
+    for ident, reads_before in seed_trials:
+        if ident not in out.rows:
+            out.seeds_unstocked += 1
+        elif reads_before > 0:
+            out.seeds_hot += 1
     return out
 
 

@@ -441,6 +441,15 @@ def test_the_absent_is_zero_semantics_are_declared_on_the_dimension():
     assert by_dim["capture_extraction"].absent_is_zero is True
     assert by_dim["graph_storage"].absent_is_zero is True  # ABSENT only
     assert by_dim["postgres_storage"].absent_is_zero is False
+    assert {d.dimension: d.absent_is_zero for d in DIMENSIONS} == {
+        # a FLOW: a window with no ledger row captured NOTHING (a real zero)
+        "capture_extraction": True,
+        # a GAUGE, ABSENT only — the reader's CERTAIN "no row" (#13102)
+        "graph_storage": True,
+        # a GAUGE with no per-org attribution at all (BLOCKED, so this can
+        # never be consumed as a zero into a refusal that over-charges a tenant)
+        "postgres_storage": False,
+    }
 
 
 @pytest.mark.parametrize("reason", ["degraded", "schema_error", None])

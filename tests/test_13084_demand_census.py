@@ -110,6 +110,47 @@ def test_a_read_AFTER_the_traversal_is_not_residency_at_traversal_time(tmp_path)
     assert (seeds.trials, seeds.hot) == (1, 0)
 
 
+def test_a_read_that_PRECEDES_its_stock_line_still_counts_as_resident(tmp_path):
+    """The module's own ordering: reads accumulate first, the census is later.
+
+    A seed whose read was written before its `stock` line is the SAME observation
+    the pending join already applies to the read count — so it must be HOT, not
+    a phantom `unstocked` hole. The two instruments are asserted together:
+    `hot_fraction` counts the same read, so a disagreement between them is the
+    defect (#13102 F3).
+    """
+    p = _write(
+        tmp_path / "l.jsonl",
+        _read("p", at="2026-11-16T10:01:00+00:00"),
+        _stock("p", at="2026-11-16T10:02:00+00:00"),
+        _query("traversal", seed="p", at="2026-11-16T10:03:00+00:00"),
+    )
+    folded = read_ledger.fold(p)
+    seeds = read_ledger.seed_hit_rate(folded)
+    assert (seeds.trials, seeds.hot) == (1, 1)
+    assert seeds.rate == pytest.approx(1.0)
+    assert seeds.unstocked == 0
+    # the other instrument agrees: that read IS a hot key
+    assert read_ledger.hot_fraction(folded).f_keys == pytest.approx(1.0)
+
+
+def test_a_seed_stocked_only_AFTER_the_traversal_is_COLD_not_a_hole(tmp_path):
+    """`unstocked` means the ledger NEVER registered it — not "later in the file".
+
+    A stock census written after the traversal still registers the key, so the
+    trial is a real COLD miss; counting it as a hole would shrink the
+    denominator by exactly the keys a later census describes (#13102 F3).
+    """
+    p = _write(
+        tmp_path / "l.jsonl",
+        _query("traversal", seed="p", at="2026-11-16T10:01:00+00:00"),
+        _stock("p", at="2026-11-16T10:02:00+00:00"),
+    )
+    seeds = read_ledger.seed_hit_rate(read_ledger.fold(p))
+    assert (seeds.trials, seeds.hot) == (1, 0)
+    assert seeds.unstocked == 0
+
+
 def test_the_mix_and_the_seed_rate_are_PER_TENANT(tmp_path):
     p = _write(
         tmp_path / "l.jsonl",

@@ -972,9 +972,14 @@ def test_supabase_gauge_roundtrip(supabase_lane):
 def test_supabase_reader_names_ABSENT_for_an_org_with_no_row(supabase_lane):
     """The remote lane must tell "no row" from "a row we cannot age" too.
 
-    ``metering_get_graph_storage`` returns zeros for both, so it reports
-    ``row_present`` separately — without it the Supabase deployment keeps the
-    #13102 deadlock the registry lane just lost.
+    ``metering_get_graph_storage`` returns zeros for both, so the discriminator
+    is the gauge's OWN payload — ``graph_storage_measured_at`` (an age) and
+    ``graph_storage_samples`` (a gauge write happened, but left a figure that
+    cannot be aged) — not row presence: the shared ``:MeteringRecord`` row is
+    MERGE-created by ``record_write_ops``, so a bumped tenant's first request
+    already has a row with no storage figure at all. Without the payload
+    discriminator the Supabase deployment keeps the #13102 deadlock the registry
+    lane just lost.
     """
     metering_mod, _fake = supabase_lane
     got = metering_mod.get_graph_storage_reading("org_never_measured")
