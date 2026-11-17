@@ -17,7 +17,14 @@
 --   * `postgres_residency_snapshot()` refreshes that table from the audit. It is
 --     explicitly NOT a write-path function — call it from a scheduled job.
 --   * The write path reads one row by PRIMARY KEY: an index lookup, O(1) in the
---     database's size, which is the affordability the block required.
+--     database's size, which is the affordability the block required. An org
+--     with NO row pays ONE more probe — the table's newest `measured_at`, which
+--     is the instant the gate ages that absence by (see the index below) — and
+--     `org_postgres_residency_measured_at_idx` is what keeps THAT probe an
+--     index lookup too. Without it the absent-org branch is a sequential scan
+--     plus a sort over one row per org: O(orgs) on a gated write path, growing
+--     with the fleet's tenant count rather than with anything the writing tenant
+--     did (review finding 4 — measured: this file held 0 `CREATE INDEX`).
 --
 -- ⛔ THE STALENESS IS DECLARED, NOT HIDDEN. A snapshot describes the table as of
 -- `measured_at`; the gate holds it to `STALE_AFTER_SECONDS` (allowance_gate) and
@@ -53,6 +60,19 @@ COMMENT ON TABLE public.org_postgres_residency IS
     'Per-org stored Postgres bytes, snapshotted from postgres_per_org_bytes() '
     'so the allowance gate can read one row on a write path (#9559 R11). '
     'Measured per-org figures only; the unattributable residual is never split.';
+
+-- ⛔ THE ABSENT-ORG PROBE NEEDS ITS OWN ACCESS PATH (review finding 4, P2).
+-- `metering.get_postgres_residency` reads ONE row by PRIMARY KEY for an org that
+-- HAS a snapshot; for an org that has none — every fresh tenant, and every org
+-- the audit attributed nothing to — it asks for the table's NEWEST
+-- `measured_at`, the instant the zero-by-absence is AGED by. The primary key is
+-- on `org_id`, so without this index that probe is a sequential scan plus a sort
+-- over one row per org: O(orgs) on the gated write path, i.e. a tenant's write
+-- cost growing with the FLEET's tenant count. With it the probe is an index
+-- lookup on the leading key, which is what makes the affordability claim true on
+-- BOTH branches rather than only on the one with a row.
+CREATE INDEX IF NOT EXISTS org_postgres_residency_measured_at_idx
+    ON public.org_postgres_residency (measured_at DESC);
 
 -- ============================================================================
 -- The refresh — run OFF the write path (scheduled), never from a request.

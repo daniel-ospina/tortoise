@@ -259,7 +259,7 @@ It does not backfill, does not prune, and does **not** arm `allowance_gate`.
 aggregation with a per-row TOAST lookup, so it can never run on a write path —
 which is why `postgres_storage` shipped blocked for want of a figure the gate
 could afford. `#9559` supplies it as a SNAPSHOT: `org_postgres_residency`
-(migration `20261117000001`) holds one row per org with the bytes the audit
+(migration `20261117000002`) holds one row per org with the bytes the audit
 ATTRIBUTED to it and the instant it measured them, refreshed **offline** by
 
 ```sql
@@ -268,7 +268,17 @@ select * from public.postgres_residency_snapshot();
 
 The write path does one primary-key lookup — `metering.get_postgres_residency` →
 the gate's `_postgres_stored_bytes` — which is O(1) in the database's size, and
-that affordability is what the block required. **The residual is never
+that affordability is what the block required. ⛔ **That is true on BOTH
+branches, and the second one needed an index to be true.** An org WITH a row is
+`org_id` → PRIMARY KEY. An org with **no** row — every fresh tenant, and every org
+the audit attributed nothing to — is answered by the table's NEWEST
+`measured_at` (the instant the zero-by-absence is aged by), so
+`org_postgres_residency_measured_at_idx` indexes that column; without it the
+probe was a sequential scan plus a sort over one row per org, i.e. O(orgs) on the
+gated write path, growing with the fleet's tenant count rather than with anything
+the writing tenant did (#9559 review finding 4). The claim is about the
+INSTRUMENT, not about an excuse: if a future change drops that index, the probe
+is again the whole table and this paragraph is false. **The residual is never
 apportioned**: only the measured per-org figure is stored.
 
 ⛔ **The snapshot has an age, and the gate enforces a bound on it.** The dimension
