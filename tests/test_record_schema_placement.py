@@ -2447,11 +2447,14 @@ def test_no_migration_executes_dynamic_DDL_for_a_props_ban():
     An event must sit in a `CREATE|ALTER TABLE` statement, so DDL executed
     DYNAMICALLY is not read. This test is the compensating control, and ⛔ IT WAS
     FALSE AS FIRST WRITTEN: it matched `EXECUTE '…'` only and measured SILENT on
-    three spellings this repo already writes — `EXECUTE format('… %I …')`,
-    `EXECUTE $q$…$q$`, and `EXECUTE 'a' || 'b'` — while its own prose claimed the
-    blind spot "cannot be entered silently". (Round 7 of review, measured:
-    `supabase/migrations/20260915000001_tenancy_team_to_org.sql:184` is exactly
-    `EXECUTE format('ALTER TABLE %I RENAME CONSTRAINT %I TO %I', …)`.)
+    `EXECUTE format('… %I …')` and on the synthetic `EXECUTE $q$…$q$` and
+    `EXECUTE 'a' || 'b'` shapes, while its own prose claimed the blind spot
+    "cannot be entered silently". ⚠️ Measured (round 13): only the `format(…)`
+    form is actually WRITTEN in `supabase/migrations` — 4 occurrences, incl.
+    `20260915000001_tenancy_team_to_org.sql:184`
+    (`EXECUTE format('ALTER TABLE %I RENAME CONSTRAINT %I TO %I', …)`); the other
+    two appear only in `supabase/tests/` (a dollar-quoted `EXECUTE`) or not at all
+    (`||`), so they are vehicles, not corpus precedent.
 
     Two controls, because a widened keyword match alone is either silent or
     over-broad (that tenancy statement names OTHER constraints, which is legal):
@@ -2735,6 +2738,20 @@ def test_legal_sql_spellings_cannot_false_pass_the_props_ban():
     assert {event.table for event in props_ban_events(named_quoted)} == {"Subject"}, (
         "a QUOTED constraint name was folded to lower case, so a differently-named "
         "constraint was read as the `subject` one")
+
+    # ROUND 13 vehicle — a DOUBLE-QUOTED IDENTIFIER is data: a `--` inside one must
+    # not delete the rest of its line (that hid a real DROP from BOTH the parse and
+    # the guard's count, i.e. silent green — measured before the scanner skipped
+    # them).
+    for hostile_ident in ("a--b", "a;b", "a'b", "a/*b"):
+        quoted_ident = (
+            "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+            "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n"
+            "ALTER TABLE public.subject RENAME COLUMN \"" + hostile_ident + "\" TO c;\n"
+            "ALTER TABLE public.subject DROP CONSTRAINT chk_subject_props_no_derived;\n")
+        assert props_ban_in_force(quoted_ident, "subject")[0] == "drop", (
+            f"a double-quoted identifier containing {hostile_ident!r} swallowed the "
+            "real DROP after it")
 
     # ROUND 11 vehicle — the `E` of a preceding WORD is not an escape prefix, so
     # `LIKE'C:\'` must not swallow the rest of the file (it hid a real DROP).

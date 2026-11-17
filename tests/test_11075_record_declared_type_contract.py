@@ -1141,6 +1141,20 @@ def test_comment_stripping_is_what_keeps_a_DOWN_direction_out_of_the_read():
     # text as CODE — measured on the props-ban pin, whose read then took a
     # disabled `ADD CONSTRAINT` for an executed one. The nesting case is pinned
     # HERE, with the function it belongs to, rather than only in that pin's file.
+    # ⛔ A DOUBLE-QUOTED IDENTIFIER IS DATA: `'`, `;`, `--`, `/*` inside one must
+    # not open a literal, a statement or a comment. Before the scanner skipped them,
+    # `"a--b"` became a line comment and deleted the rest of its line — measured on
+    # the props-ban read, where a real DROP on that line vanished from both the
+    # parse and the guard's count (silent green).
+    for hostile in ('a--b', 'a;b', "a'b", 'a/*b'):
+        ident = 'ALTER TABLE public.t RENAME COLUMN "' + hostile + '" TO c;\n-- tail\n'
+        stripped = rp._strip_sql_comments(ident)
+        assert stripped.startswith("ALTER TABLE public.t RENAME COLUMN"), (
+            f"a double-quoted identifier containing {hostile!r} broke the scanner: "
+            f"{stripped!r}")
+        assert "tail" not in stripped, (
+            f"the comment after the identifier was not stripped ({hostile!r})")
+
     # ⛔ THE `E` OF A PRECEDING WORD IS NOT AN ESCAPE PREFIX: `LIKE'C:\'` armed
     # backslash-escapes, so the literal swallowed the rest of the file and DDL
     # after it became invisible (round 11, measured on the props-ban read). The

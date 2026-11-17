@@ -2336,6 +2336,25 @@ def _scan_sql(sql: str):
             yield (i, j, "block_comment")
             i = start = j
             continue
+        if char == '"':
+            # PostgreSQL DOUBLE-QUOTED IDENTIFIERS can contain `'`, `;`, `--` and
+            # `/*`, all of which are DATA there. Not skipping them made the scanner
+            # read an identifier's `--` as a comment and DELETE real DDL after it on
+            # the same line — measured: `ALTER TABLE … RENAME COLUMN "a--b" TO c;`
+            # followed by a real props-ban DROP left BOTH the parse and the guard's
+            # count blind to that DROP, i.e. a silent green pass. `""` is an escaped
+            # quote, the same rule as `''` in a literal.
+            j = i + 1
+            while j < n:
+                if sql[j] == '"':
+                    if j + 1 < n and sql[j + 1] == '"':
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            i = j
+            continue
         if sql.startswith("--", i):
             j = i
             while j < n and sql[j] != "\n":
@@ -2403,11 +2422,11 @@ def _strip_sql_comments(sql: str) -> str:
     # line comments included: their newline would also separate tokens, but one
     # rule for both is simpler to reason about than two.
     #
-    # ⚠️ STATED RESIDUAL: `_scan_sql` is NOT `"`-aware, so a `'`, `;` or `--`
-    # inside a DOUBLE-QUOTED identifier would be misread as SQL. Latent only:
-    # measured, the corpus's quoted identifiers in code spans contain none of those
-    # characters, and the props-ban guard's count (`hits == parsed`) turns a
-    # resulting DROP mismatch red rather than silent.
+    # DOUBLE-QUOTED IDENTIFIERS are skipped whole (see the scanner), so a `'`, `;`,
+    # `--` or `/*` inside one is data and never opens a literal, a statement or a
+    # comment. Before that, a `--` inside an identifier deleted the rest of its
+    # line, and a real DROP on that line vanished from BOTH the parse and the
+    # props-ban guard's count — silent, because both lost the same event.
     return "".join(
         sql[start:end] if kind in ("code", "literal") else " "
         for start, end, kind in _scan_sql(sql)
