@@ -58,25 +58,15 @@ from tortoise.live import (
 from tortoise.log import EventLog
 from tortoise.sdk import POINT_STATUS_VALUES, TortoiseSDK
 
-#: ANY refusal answers "can this key smuggle a terminal status?".
+#: Either refusal answers "can this key smuggle a terminal status?".
 #:
-#: Three guards can be the one that fires, in an order the production code owns:
-#:
-#: * `not writable on an :Event` — this PR's arm, once the key reaches the `:Event`
-#:   gate;
-#: * `not an exact `str`` — `EventAPI.add_event`'s KEY-TYPE guard (main's
-#:   #12106/#12133), deliberately STRICTER and firing before the `:Event` arm;
-#: * `CONFLICTING status write` — `_sanitize_props`'s doubled-field refusal
-#:   (#13065 review finding 3), which fires at the payload boundary when two keys
-#:   in ONE call render as the same word and ask for different ones; a `str`
-#:   subclass whose content and `__str__` differ is exactly that shape.
-#:
-#: All three are correct answers to the question these tests ask, and none may be
-#: weakened: the assertion is the STATE (nothing stored, nothing journalled), so
-#: the pattern accepts any of them and the ordering is the production code's to
-#: decide — a fourth wording is a matter of adding it here, not of relaxing the
-#: state assertion.
-_EITHER_REFUSAL = r"(not writable on an :Event|not an exact `str`|CONFLICTING status write)"
+#: `EventAPI.add_event` grew main's #12106/#12133 KEY-TYPE guard, which fires
+#: BEFORE the `:Event` arm and is deliberately STRICTER (it refuses a key that is
+#: not an exact `str`, whatever it renders as). Both refusals are correct answers
+#: to the question these tests ask, and neither may be weakened: the assertion is
+#: the STATE (nothing stored, nothing journalled), so the pattern accepts either
+#: and the ordering is main's to decide.
+_EITHER_REFUSAL = r"(not writable on an :Event|not an exact `str`)"
 
 #: The terminal half, as a sorted tuple so a parametrized id list is stable.
 _TERMINAL = tuple(sorted(TERMINAL_EXCLUDED_STATUSES))
@@ -686,13 +676,19 @@ class TestTheEventApiDoor:
                 return isinstance(other, _AliasOutdated) and str.__eq__(self, other)
 
         eid = _event(sdk, name="Masked")
-        # Measured at the #13065 stack merge: `_sanitize_props`'s doubled-field
-        # refusal (#13065 review finding 3) now fires at the PAYLOAD boundary, i.e.
-        # BEFORE this key reaches the `:Event` arm — so the wording here is the
-        # boundary's `CONFLICTING status write`, not `not writable on an :Event`.
-        # Both are refusals to the same question, and the state assertion below is
-        # the one that must hold either way (the file's `_EITHER_REFUSAL` rationale).
-        with pytest.raises(ValueError, match=_EITHER_REFUSAL):
+        # ⛔ RE-DERIVED at #12910's merge of #11824 S0: the MASKING guard this
+        # arm exists for is now the GENERAL one. `#12910`'s `_sanitize_props`
+        # refuses a CONFLICTING status write — "more than one key in this call
+        # renders as `status` and they ask for different words … which word
+        # lands cannot be known here, and guessing it is a bypass" — and it
+        # answers BEFORE the Event terminal door, because the ambiguity is the
+        # bypass (#13065 review finding 3). The property this arm pins is
+        # unchanged and is asserted below: the masked write is REFUSED and
+        # nothing lands. Named as a third accepted refusal rather than relaxed
+        # to `ValueError`, so an arm that stops refusing still reds.
+        with pytest.raises(ValueError,
+                           match=r"(not writable on an :Event"
+                                 r"|CONFLICTING status write)"):
             sdk.update_knowledge(eid, **{"status": "superseded",
                                       _AliasHarmless("status"): "live"})
         assert "status" not in _props(sdk, eid)
