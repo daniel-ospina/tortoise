@@ -177,6 +177,12 @@ there is no cheaper way to stop paying rent on four unindexed labels than to dec
 
 ## 5. Decision
 
+> ⛔ **SUPERSEDED IN PART (2026-11-17).** This section was written while the index question had no answer, so it
+> treats it as one ("about a decision still open", and A2 rejecting an in-graph index for the four labels). The owner
+> answered it on 2026-11-17: the four labels are indexed **in Postgres**, and the graph copies are removable once the
+> record holds and indexes them — `STORAGE-ARCHITECTURE.md` §14.3 **V2**/**V3**. What survives here is A5's shape
+> (the remainder dissolves into neighbours), not the premise that the question was undecided.
+
 **Feature:** epic #5090 — the vector layer (what earns an embedding, and where it lives)
 
 **Decision: REPOINT — the epic stays open with its acceptance reduced to the remainder in §7. It is not discharged, and it is not re-scoped upward.**
