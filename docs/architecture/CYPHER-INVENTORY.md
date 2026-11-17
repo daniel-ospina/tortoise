@@ -409,9 +409,21 @@ stays 297 and `files_with_sites` 99: the reader lives in a file that already car
 `rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,329 / 1,630 bare / 2,063 / 2,401),
 Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts match`**.
 ⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
-inside files that already carried sites, so the re-cut moved **31 of Appendix A's 1,313 rows** while
-all 25 scalars stayed identical — the exact `file:line`-versus-SCALAR gap this section describes,
-caught by measuring rather than by trusting the pins.
+inside files that already carried sites, so re-cutting the appendix moves ROWS while every SCALAR
+stays put. Measured on THIS cut against `origin/main` **`34bd33d22a`**: exactly **one row** differs
+(the symmetric difference is 2 of the 1,311 rows — one added, one dropped) —
+`tortoise/record_projection.py:7689` → `:7804`, the `replay` door's unresolvable `cursor.execute`, and
+all 25 pins are unchanged. That row is `main`'s OWN staleness, inherited by this rebase and corrected
+here: `#13317` regenerated the appendix at `4cbff33e49`, and **`#13265` (`34bd33d22a`) then moved that
+statement 115 lines down** — so `--check` passes on `main` (the pins are 25 SCALARS, and this row is
+not one of them) while the appendix's `file:line` is stale. That is the exact `file:line`-versus-SCALAR
+gap this section describes, caught by regenerating rather than by trusting the pins. (An earlier
+revision of this sentence said "31 of 1,313 rows": `1,313` is the table's LINE count, not its row
+count, and `31` reproduces at no adjacent commit — the row difference between the commits around
+`#13115` is 373, and around each of the three after it, 408 / 376 / 376. A later revision said "137 of
+1,311 rows", measured against the pre-rebase `origin/main`; that base then regenerated its own
+appendix in `#13317`, which is why the figure at THIS base is one row. A count taken off the wrong
+unit, or off a base that has since moved, is the defect class this paragraph exists to name.)
 
 The paragraph below is `main`'s cut, kept as the record of it.
 
@@ -1322,7 +1334,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/record_allocator.py:534` | `_transition` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_allocator.py:658` | `execute_allocation` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_backup.py:512` | `require_bypassing_role` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/record_projection.py:7689` | `replay` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/record_projection.py:7804` | `replay` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_reconcile.py:532` | `scan_cache_view` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) RETURN properties(n)` |
 | `tortoise/record_restore.py:474` | `_target_nodes_before` | plain | read | candidate:SQL-shaped | `MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) RETURN count(…` |
 | `tortoise/rerank.py:555` | `_fetch_embeddings` | plain | read | candidate:SQL-shaped | `MATCH (n:Point) WHERE n.id IN $ids AND n.embedding IS NOT NULL RETUR…` |
