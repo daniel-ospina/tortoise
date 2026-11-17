@@ -1609,10 +1609,48 @@ def test_search_projects_through_the_served_row_helper():
     and dropping `redact=False` there — the exact defect this instrument must not have —
     left every pin green (#13303 cycle 11).
     """
-    src = inspect.getsource(cap.LocalTarget.search)
-    assert "_served_row(" in src, "search() built its rows inline again, bypassing the helper"
-    assert "redact=False" not in src.replace("_served_row(r)", ""), (
-        "search() redacts product rows inline again"
+    # BEHAVIOURAL + AST, not a source substring (#13303 cycle 12): the substring version
+    # passed while the inline duplicate for six of seven keys was restored, FALSE-RED-ed a
+    # behaviourally identical `list(map(_served_row, rows))`, and reported "redacts product
+    # rows inline again" for a re-inline that kept `redact=False` — the opposite of the code.
+    # A stub SDK is enough: `search()` touches only `self.sdk` and `self.search_timeout_ms`.
+    prose = "password rotation policy was superseded"
+
+    class _SDK:
+        def tortoise_fts_query(self, **_kwargs):
+            return [{"id": "x", "content": prose, "point_kind": "fact", "status": "live"}]
+
+    t = object.__new__(cap.LocalTarget)
+    t._sdk = _SDK()
+    t.search_timeout_ms = 0
+    rows = [{"id": "x", "content": prose, "point_kind": "fact", "status": "live"}]
+    served = t.search("q").rows
+    assert served == [cap._served_row(r) for r in rows], (
+        "search() projected its rows somewhere other than `_served_row`"
+    )
+    assert served[0]["what"] == prose, (
+        "the product's words were rewritten on the way into the packet"
+    )
+
+    # …and no inline dict-literal projection may creep back in. AST: a reformat or a
+    # `map(_served_row, rows)` shape is fine, a dict literal is not.
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cap.LocalTarget.search)))
+    inline = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(t, ast.Name) and t.id == "served" for t in targets):
+            continue
+        elt = getattr(node.value, "elt", None)
+        if isinstance(elt, ast.Dict):
+            inline.append(ast.dump(elt)[:80])
+    assert not inline, (
+        "search() builds a dict-literal inline projection again — a duplicate that can drift "
+        f"from `_served_row` and that the helper's own pin cannot see: {inline}"
     )
 
 
@@ -1643,22 +1681,33 @@ def test_every_post_ingestion_refusal_drops_the_graph(monkeypatch, tmp_path):
     monkeypatch.setattr(cap, "DEFAULT_OUT", bundle)
     monkeypatch.setattr(cap, "build_target", lambda *a, **k: _NoTarget())
 
-    # the sibling gate: a --verdicts-out that names a directory
+    # `--judge file` with a valid map is REQUIRED to reach the gate: `verdicts_target` is
+    # only computed when `judged` is truthy, so `--judge none` made this pin VACUOUS — it
+    # ran a SUCCESSFUL run (exit 1 from `exit_code`, graph dropped on the success path) and
+    # called that coverage (#13303 cycle 12).
+    verdicts = tmp_path / "verdicts.json"
+    verdicts.write_text(json.dumps({"Q1": {"verdict": "right"}}))
+    scratch = tmp_path / "scratch"
     rc = cap.main(
         [
             "run",
             "--target",
             "local",
             "--judge",
-            "none",
+            "file",
+            "--verdicts",
+            str(verdicts),
             "--out",
-            str(tmp_path / "scratch"),
+            str(scratch),
             "--verdicts-out",
-            str(tmp_path),
+            str(tmp_path),  # a DIRECTORY: the sibling gate
             "--drop-graph",
         ]
     )
-    assert rc == 1
+    assert rc == 1, "the --verdicts-out directory gate did not fire"
     assert dropped == [True], (
         "a run refused at the --verdicts-out gate left its throwaway graph behind"
+    )
+    assert not (scratch / "run-local.json").exists(), (
+        "the refusal happened AFTER the board was written"
     )
