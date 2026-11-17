@@ -169,8 +169,32 @@ for a reason that is **not ranking**.
 | `pg_bm25` (`pg_search`) | 1.0000 | **0.9947** | **1.0000** | +4.87 [+2.44, +7.44] | +15.80 [+13.62, +17.96] | +29.36 [+25.83, +32.92] | 99.8 |
 | `hybrid_baseline` | 0.9968 | 0.9623 | 0.9409 | +4.55 [+2.32, +6.93] | +12.55 [+11.21, +13.93] | +23.45 [+21.18, +25.73] | 100.0 |
 | `hybrid_bm25` | 1.0000 | 0.9939 | 1.0000 | +4.87 [+2.44, +7.44] | +15.71 [+13.57, +17.84] | +29.36 [+25.83, +32.92] | 100.0 |
+| ⛔ `in_graph_fulltext_raw` (diagnostic, **not a candidate**) | 0.8607 | 0.4701 | 0.3869 | −9.06 [−13.54, −4.82] | −36.67 [−40.22, −33.26] | −31.95 [−36.23, −27.58] | 34.2 |
 
-### 5.3 Why the in-graph leg loses on exact names — a worked example, from the artifact
+### 5.3 `natural_language_question` (n=100) — reported, but **not evidence** (see §4)
+
+Included so the three-class request is answered in full. Read §4 before using any number in this
+table: the class adds only out-of-vocabulary scaffolding, so these values **duplicate §5.1** and
+carry no independent signal.
+
+| arm | nDCG@10 | nDCG@100 | recall@100 | Δ nDCG@10 | Δ nDCG@100 | Δ recall@100 | returned |
+|---|---|---|---|---|---|---|---|
+| `in_graph_fulltext` (baseline) | 0.8171 | 0.7241 | 0.6785 | — | — | — | 92.9 |
+| `pg_ts_rank` | 0.8403 | 0.8164 | 0.8143 | +2.32 [−0.93, +5.46] | +9.23 [+6.68, +11.85] | +13.58 [+10.46, +16.78] | 92.9 |
+| `pg_ts_rank_cd` | 0.8403 | 0.8164 | 0.8143 | +2.32 [−0.93, +5.46] | +9.23 [+6.68, +11.85] | +13.58 [+10.46, +16.78] | 92.9 |
+| `pg_ts_rank_simple` | 0.8517 | 0.8287 | 0.8250 | +3.45 [+0.10, +7.01] | +10.47 [+7.92, +13.12] | +14.65 [+11.58, +17.82] | 92.7 |
+| `pg_bm25` (`pg_search`) | 0.8358 | 0.8252 | 0.8300 | +1.87 [−1.90, +5.98] | +10.12 [+7.10, +13.16] | +15.15 [+11.40, +18.88] | 92.7 |
+| `hybrid_baseline` | 0.8504 | 0.8210 | 0.8086 | +3.32 [−0.56, +7.19] | +9.69 [+7.16, +12.33] | +13.01 [+9.87, +16.21] | 100.0 |
+| `hybrid_bm25` | 0.8436 | 0.8451 | 0.8429 | +2.64 [−1.43, +7.06] | +12.11 [+8.63, +15.74] | +16.44 [+12.03, +20.81] | 100.0 |
+| ⛔ `in_graph_fulltext_raw` (diagnostic) | 0.0000 | 0.0000 | 0.0000 | −81.71 [−86.55, −76.43] | −72.41 [−76.39, −68.27] | −67.85 [−72.43, −63.09] | 0.0 |
+
+**The `raw` row is the clearest single demonstration of *why* the class is degenerate, and of a
+second fact worth recording:** with the raw question text, RediSearch's space-separated groups are an
+implicit **AND**, so it returns **zero** rows for all 100 queries (mean `returned` 0.0). The shipped
+path never sends a raw question — it sends `build_or_query`'s OR-union — which is exactly why the
+builder is part of the measurement and not a detail.
+
+### 5.4 Why the in-graph leg loses on exact names — a worked example, from the artifact
 
 `worked_examples[0]` in `artifact.json`, reproducible from the harness:
 
@@ -193,7 +217,7 @@ the one place the in-graph leg genuinely trails is a **ranking-property deficit 
 not a reason the store is wrong. `#12298` reached the same structural conclusion for `_`-carrying
 identifiers: a 25-point gap that was the query builder, not the scorer.
 
-### 5.4 What the numbers say, read honestly
+### 5.5 What the numbers say, read honestly
 
 - **The 8–23 point deficit does not appear.** At `nDCG@10` the gap is **+2.32 points in Postgres's
   favour and not significant**; the recorded direction (Postgres behind) is **not observed at all**.
