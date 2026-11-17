@@ -310,7 +310,10 @@ opposite of the ordering in §5.
 > reproduce against the leg we actually run.** ⚠️ **The 8–23 figure itself is untouched:** it compares
 > Postgres FTS to BM25 on three foreign datasets, while this compares **our leg** to Postgres **on our
 > corpus** — a different claim, and the one a decision here can rest on. The place the in-graph leg
-> genuinely trails **at the head** is exact-name lookup (**+4.87 nDCG@10**, CI excluding 0, n=96); at
+> genuinely trails **at the head** is exact-name lookup (**+4.87 nDCG@10**, CI excluding 0, n=96) —
+> ⚠️ **but that class's head metric SATURATES**: every Postgres arm returns `nDCG@10 = 1.0000` on all
+> 96 queries, so +4.87 is the remaining headroom (baseline 0.9513 → ceiling 1.0), not a margin between
+> candidates; the candidates separate at depth there (0.9873 / 0.9947 / 1.0000). At
 > depth it trails on the keyword class too (**+9.23 nDCG@100**, above), so "it only loses on names"
 > would be the wrong reading. The mechanism is
 > recorded with a worked example: a document matching 2 of a query's 7 terms scores 9.0 while the

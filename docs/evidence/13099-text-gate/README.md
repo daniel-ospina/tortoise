@@ -185,12 +185,23 @@ for a reason that is **not ranking**.
 | `hybrid_bm25` | 1.0000 | 0.9939 | 1.0000 | +4.87 [+2.44, +7.44] | +15.71 [+13.57, +17.84] | +29.36 [+25.83, +32.92] | 100.0 |
 | ⛔ `in_graph_fulltext_raw` (diagnostic, **not a candidate**) | 0.8607 | 0.4701 | 0.3869 | −9.06 [−13.54, −4.82] | −36.67 [−40.22, −33.26] | −31.95 [−36.23, −27.58] | 34.2 |
 
+⚠️ **This class's head metric is SATURATED, so the +4.87 does not rank the candidates.** Every
+Postgres arm — `pg_ts_rank`, `pg_ts_rank_cd`, `pg_ts_rank_simple`, `pg_bm25` — returns `nDCG@10 =
+1.0000` on **96 of 96** queries (min = max = 1.0, read from each arm's own `per_query_metrics`), and
+`pg_bm25` also returns `recall@100 = 1.0000` on all 96. So the +4.87 is the **entire remaining
+headroom** on the class (the baseline's 0.9513 is the only distance left to close), not a margin one
+candidate has over another; at the head this class cannot separate them, and the separation it does
+offer is at depth (0.9873 / 0.9947 / 1.0000). The same caveat §5's intro applies to depth — "an arm
+that cannot return `LIMIT` rows has a lower `nDCG@100` ceiling for a reason that is not ranking" —
+applies here in the opposite direction, and it is recorded for the same reason: an unstated ceiling is
+read as a ranking result.
+
 ### 5.3 `natural_language_question` (n=100) — reported, but **not evidence** (see §4)
 
 Included so the three-class request is answered in full. Read §4 before using any number in this
 table. The four **lexical** rows are identical to §5.1 to six decimals — that is the degeneracy §4
 measures. The `raw` diagnostic collapses to 0.0 (see below), and the two **hybrid** rows differ from
-§5.1 by ~0.3–0.4 pts at @10 because their vector leg is fed the question text, so the wording does
+§5.1 by ~0.27–0.34 pts at @10 because their vector leg is fed the question text, so the wording does
 reach them. No row here carries independent lexical signal.
 
 | arm | nDCG@10 | nDCG@100 | recall@100 | Δ nDCG@10 | Δ nDCG@100 | Δ recall@100 | returned |
@@ -391,8 +402,11 @@ differ structurally from them, not only in timings. Five keys need reading with 
 - **The FalkorDB server version (`v4.20.6`, §2) is recorded in NO artifact** — `graph_seed` carries
   `fulltext_index_build_s`, `graph_memory_usage`, `points` and `seed_s` only, while the Postgres seed
   records its own `server_version`. The comparability argument in §3 rests on WHICH graph build ran
-  the measurement, so this is the one deployment fact in the record that no committed file can
-  corroborate; it is asserted from the lane, not pinned. `seed_graph` already shells `redis-cli INFO`
+  the measurement, so this is **one of** the deployment facts in the record that no committed file can
+  corroborate (§6's licence, `pg_search` version, `requires`/relocatability cell, the preload list and
+  `paradedb.min_rows_per_worker` are in neither artifact either — those are read from the image and
+  presence-pinned, which is a different kind of record than a value the artifact HOLDS); it is asserted
+  from the lane, not pinned. `seed_graph` already shells `redis-cli INFO`
   for memory, so the next run can record `redis_version` beside it and a pin can follow.
 
 The `verdict` blocks themselves ARE regenerated from each file's own `results`, so the decision rule

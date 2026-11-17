@@ -237,17 +237,29 @@ def test_the_corpus_is_built_without_touching_a_graph(monkeypatch):
     whose every attribute access raises, so any attempt to reach a graph while
     building the corpus or the query classes fails this test.
 
-    ⛔ AND THE MODULE BODY IS RE-EXECUTED UNDER THE SHIM. An attribute-only shim
-    installed AFTER the import cannot see a binding created at import time:
+    ⛔ AND A MODULE-SCOPE BINDING IS CHECKED IN BOTH FILES. An attribute-only
+    shim installed AFTER the import cannot see a binding created at import time:
     `from falkordb import FalkorDB` at module scope resolves before this test
-    runs, and the later call then reaches the real class without ever touching
-    the shim — measured, and a plausible edit, since the harness's own imports
-    are function-local. Reloading the corpus module re-executes its body against
-    the shim, so a module-scope falkordb import reds this test instead of opening
-    a connection. (Narrowing the docstring was the alternative; closing the hole
-    is the point of the pin.)
+    runs, and the later call then reaches the real class without touching the
+    shim (measured). Two arms close that:
+
+      * `benchmarks.synthetic_corpus` is RELOADED under the shim, so its body
+        re-executes against it;
+      * BOTH files are scanned at MODULE SCOPE for a `falkordb` import, because
+        the file that actually names `falkordb` is the HARNESS
+        (`tools/text_gate_13099.py` — its two sites are function-local today) and
+        reloading a module does not rebind the names a caller imported from it.
+        ⛔ The harness is NOT reloaded instead: reload re-executes its body and
+        rebinds module-level state other pins depend on (measured —
+        `TOKENIZER_FALLBACKS` came back as a fresh list, and
+        `test_a_tokenizer_fallback_is_recorded_once_per_query_text` went red
+        because it holds the pre-reload object). Scanning is side-effect free.
+        (Measured: the harness escape passed GREEN before this scan existed and
+        fails after.)
     """
+    import ast
     import importlib
+    import pathlib
     import sys
     import types
 
@@ -258,7 +270,27 @@ def test_the_corpus_is_built_without_touching_a_graph(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "falkordb", _NoGraph("falkordb"))
     import benchmarks.synthetic_corpus as corpus_mod
-    importlib.reload(corpus_mod)  # the module BODY now runs against the shim
+    importlib.reload(corpus_mod)  # the corpus BODY now runs against the shim
+    import tools.text_gate_13099 as harness
+
+    # module-scope imports only — a function-local `from falkordb import …` is the
+    # shape this harness uses on purpose, and the shim above catches it at call time
+    offenders: list[str] = []
+    for mod in (corpus_mod, harness):
+        tree = ast.parse(pathlib.Path(mod.__file__).read_text())
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            if any(n.split(".")[0] == "falkordb" for n in names):
+                offenders.append(f"{pathlib.Path(mod.__file__).name}:{node.lineno}")
+    assert offenders == [], (
+        "a MODULE-SCOPE falkordb import escapes the `_NoGraph` shim (the binding is "
+        f"created before this test runs): {offenders} — keep it function-local")
+
     oracle, points, live = build_corpus()
     classes = build_query_classes(oracle, points, load_committed_queries())
     oov_evidence(points, classes)  # the README's degeneracy claim must need no graph
