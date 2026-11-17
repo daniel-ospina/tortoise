@@ -202,8 +202,10 @@ The measurement is `docs/evidence/12186-m2-windowed-quality/` — instrument `to
 five coverages under two eviction policies.
 
 **On entity names the cost is exactly the eviction share and nothing compensates.** `found@deep` equals
-the resident share in every `:Object` arm (91.3 / 77.3 / 51.7 / 23.3 / 8.7), so what the window keeps it can
-still find, and what it demotes it never returns (`found_deep_of_demoted` is 0.0 in every arm of both
+the resident share in **every windowed `:Object` arm of both policies**; the five `tail` arms read
+91.3 / 77.3 / 51.7 / 23.3 / 8.7 and the `random` arms read their **own** shares
+91.7 / 76.3 / 49.7 / 25.3 / 12.0, so what the window keeps it can still find, and what it demotes it
+never returns (`found_deep_of_demoted` is 0.0 in every arm of both
 populations).
 ⛔ Those `:Object` figures describe `#11901`'s deliberately class-stratified oversample (60 % `definite`,
 30 % `ident`, 10 % `path`) against a real mix the artifact holds at ~8.0 % / ~3.4 % — the shapes
@@ -223,9 +225,11 @@ work on for a demoted candidate. The vector leg escapes this once it moves to Po
 does not, because §6.2's decision item 2 keeps it in the graph.
 
 **Two things the measurement changed that are not numbers.** A smarter *static* eviction policy buys back
-no retrieval quality — the cold-tail order and a random control are not separated at any coverage
-(46.0 vs 46.3 at the target size, though they diverge at the lowest coverages where the realized
-resident share differs too) — because a demoted node is unretrievable whatever selected it. ⛔ That
+no retrieval quality — the cold-tail order and a random control are **not separated at the mid
+coverages** (recall@3 46.0 vs 46.3 at 0.50, 81.0 vs 81.7 at 0.90), and at the low coverages they
+diverge (20.3 vs 25.3 at 0.25 — a 5.0-point gap, 5× the artifact's own 1.0 pp `recall@k` band) because
+the realized resident share differs too. So a static ranking is not a lever: a demoted node is
+unretrievable whatever selected it. ⛔ That
 order is a **static popularity** count, not recency (this corpus has no read ledger), so §7's *recency*
 claim was **not** re-tested and is not overturned here. And a
 demotion must invalidate `fallback_snapshot`, whose 60 s

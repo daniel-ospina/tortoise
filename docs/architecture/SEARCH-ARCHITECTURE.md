@@ -583,9 +583,12 @@ The record is `docs/evidence/12186-m2-windowed-quality/` (README + artifact + th
 
 **The cost is exactly the eviction, and nothing compensates.** On the capture-prior population
 (`:Object`, 1000 nodes, 300 fixed queries, lexical leg) `found@deep` **equals** the resident share in
-every arm — 91.3 / 77.3 / 51.7 / 23.3 / 8.7 at coverage 0.90 / 0.75 / 0.50 / 0.25 / 0.10 — so on that
-population a node the window keeps is always still findable at depth 50, and a demoted node is never
-returned at any rank (`found_deep_of_demoted` is 0.0 in every arm of both populations).
+**every windowed arm of both policies** — so on that population a node the window keeps is always still
+findable at depth 50, and a demoted node is never
+returned at any rank (`found_deep_of_demoted` is 0.0 in every arm of both populations). ⚠️ The five
+`tail` arms read 91.3 / 77.3 / 51.7 / 23.3 / 8.7 at coverage 0.90 / 0.75 / 0.50 / 0.25 / 0.10; the
+`random` arms equal **their own** resident shares 91.7 / 76.3 / 49.7 / 25.3 / 12.0, so quote a figure
+with the policy that produced it — they are not one series.
 ⛔ **Read every `:Object` figure below as the shape `#11901` CHOSE, not as a production rate.** That
 population is a deliberately class-stratified oversample — 60 % `definite`, 30 % `ident`, 10 % `path` —
 while this corpus's real mix is ~8.0 % / ~3.4 % on the two minority classes (`names_harvested`: 12,557
@@ -606,8 +609,10 @@ still the consequence that matters — a miss costs a new node, a wrong top-1 is
 epic exists to prevent is minted — but it is not a difference the window makes.
 
 ⚠️ **"Never returned at any rank" is a statement about this configuration, not a law.** Demotion here is
-`DETACH DELETE`, and the only tier that could still serve a deleted node — `fallback_snapshot`'s 60 s
-in-memory corpus — is invalidated explicitly by the instrument. So the zero is evidence for the
+`DETACH DELETE`, and the only tier **in this read path** that could still return a demoted node at a rank
+— `fallback_snapshot`'s 60 s
+in-memory corpus — is invalidated explicitly by the instrument (the record still serves *anchored* reads
+of a demoted node by design; what it cannot do is mint one as a candidate). So the zero is evidence for the
 invalidation hook (Finding 6, `#13123`), not proof that no compensating leg could ever exist. The
 stronger reading would need a run in which a demotion is performed WITHOUT that invalidation.
 

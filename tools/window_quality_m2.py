@@ -85,15 +85,21 @@ METRICS, AND WHAT EACH ONE WOULD MAKE US DO
                       wires a signal moves this field instead of leaving the doc
                       claiming silence forever.
 
-THREE INVARIANTS, ASSERTED — because they falsify the INSTRUMENT
-----------------------------------------------------------------
+FOUR INVARIANTS, ASSERTED — because they falsify the INSTRUMENT
+-----------------------------------------------------------------
  1. A demoted node cannot be returned, so
     ``recall@k(windowed) <= resident_share`` for every k and every arm.
  2. The graph must hold EXACTLY the intended resident set after eviction.
     Checks 1 and 2 catch different failures: over-eviction lowers recall AND the
     share, so it satisfies (1) and violates (2); a delete that did not take
     effect violates (1).
- 3. The query-sample seed and the ``random`` eviction seed must not collide
+ 3. No demoted node is returned at ANY rank — ``found_deep_of_demoted == 0``.
+    This is the STRONG form of (1) and the one the record's verdict rests on.
+    It is not redundant: ``found_deep`` is a rate over ALL queries, so on a
+    population whose complete-graph ceiling is below 1.0 (``:Point`` on this
+    corpus: 0.410 against a resident share of 0.5267) a leak of demoted queries
+    sits UNDER (1)'s bound and passes it. (3) has no ceiling to hide behind.
+ 4. The query-sample seed and the ``random`` eviction seed must not collide
     (``EVICT_SEED_OFFSET``). They are permutations of the SAME list, so one shared
     seed makes the retained suffix and the sampled prefix DISJOINT by
     construction — measured on this instrument's first run, which reported
@@ -895,7 +901,7 @@ def run(args: argparse.Namespace) -> int:
                 # sits UNDER the bound and passes. The comment here used to claim
                 # the opposite — that it "fails for any demoted node surfaced at
                 # any rank" — which was only true on `:Object`, where the
-                # ceiling is 1.0. INVARIANT 2 below is the per-demoted detector
+                # ceiling is 1.0. INVARIANT 3 below is the per-demoted detector
                 # and is the one the record's "no demoted node is returned"
                 # sentence rests on.
                 for name in [f"recall@{k}" for k in KS] + ["found_deep"]:
@@ -906,7 +912,7 @@ def run(args: argparse.Namespace) -> int:
                             f"{arm['resident_share']:.4f} — a demoted node was "
                             f"returned, so the eviction did not take effect")
 
-                # ⛔ INVARIANT 2 — no demoted node is returned at any rank. This
+                # ⛔ INVARIANT 3 — no demoted node is returned at any rank. This
                 # is the strong form and the one the verdict turns on, so it is
                 # asserted unconditionally on EVERY arm of BOTH populations: it
                 # does not depend on the ceiling, and an `:Object`-only or

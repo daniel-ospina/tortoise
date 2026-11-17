@@ -299,7 +299,7 @@ def test_the_artifact_records_that_the_loss_carries_no_signal(artifact):
 
 
 def test_no_arm_returns_a_demoted_node(artifact):
-    """INVARIANT 1 **and** INVARIANT 2, re-derived from the artifact.
+    """INVARIANTS 1 **and** 3, re-derived from the artifact.
 
     A demoted node cannot be returned, so both axes are bounded by the resident
     share. The instrument refuses a run that violates this; this asserts the
@@ -325,7 +325,7 @@ def test_no_arm_returns_a_demoted_node(artifact):
             assert data["found_deep"] <= bound, f"{kind}/{arm} found_deep"
             for k in KS:
                 assert data[f"recall@{k}"] <= bound, f"{kind}/{arm} recall@{k}"
-            # INVARIANT 2 — the strong form, unconditional on the ceiling.
+            # INVARIANT 3 — the strong form, unconditional on the ceiling.
             assert data["found_deep_of_demoted"] == pytest.approx(0.0), (
                 f"{kind}/{arm}: a demoted node was returned at depth — the loss "
                 f"is then NOT purely the eviction")
@@ -553,22 +553,55 @@ _NON_ARTIFACT_FIGURES = {
     "54", "1.0",
     # the rule comparison the instrument's docstring records (a superseded rule)
     "19.0",
-    # the claim-leg unreachable share, derived as 100 - found@deep (28.7)
-    "28.7",
-    # the reproducibility band the artifact itself declares (reproducibility block)
-    "0.33", "9.9", "9.85", "13", "43",
     # §9's own M-numbering and the other measurements' figures
     "90", "900",
     # the complete-graph share a windowed arm is a fraction OF (100 %)
     "100",
-    # the misbind gap the record quotes as a magnitude in POINTS (27.7 -> 41.0)
-    "13.3",
     # §8.1's budget overshoot that motivates the window (193 % of the 30 % budget)
     "193",
     # the ceiling the FIRST-window rule costs against the adopted one (19.0 - 15.7),
     # quoted as an approximation ("~3 points") and not an artifact rate
     "3",
+    # ⛔ NOT hard-coded here, because the artifact DERIVES them and a literal would
+    # survive a regenerated artifact while the prose went stale (#12186 review P2-4):
+    #   the reproducibility band   <- artifact["reproducibility"] / REPRODUCIBILITY_BOUND
+    #   the corpus mix 8.0 / 3.4   <- corpus.names_harvested
+    #   the per-resident 87.1      <- object/tail@0.25 recall@3 / resident_share
+    #   the unreachable 28.7       <- 100 - complete found@deep
+    # They are computed into `allowed` by `_derived_figures()` below.
 }
+
+
+#: Ranges the record states as `A-B %` / `A to B points`. The scan's single-figure
+#: alternative cannot see a range's LOWER bound at all (it is followed by an
+#: en-dash, not a unit), so `3.7-51.0 %` could become `4.9-51.0 %` while only
+#: `51.0` was checked — and an upper bound that happens to equal SOME artifact
+#: rate passed membership while the statistic was wrong (#12186 review P2-5).
+_DOC_RANGE_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:–|-|\bto\b)\s*(\d+(?:\.\d+)?)\s*(?:%|pp\b|(?:percentage\s+)?points?\b)")
+
+
+def _derived_figures(artifact: dict) -> set[str]:
+    """Figures the artifact IMPLIES, computed rather than whitelisted."""
+    out: set[str] = set()
+    rep = artifact["reproducibility"]
+    for key in ("found_deep_max_delta_pp", "recall_at_k_max_delta_pp",
+                "tie_counting_max_delta_pp", "runs_compared"):
+        out.add(f"{rep[key]:g}")
+        out.add(f"{rep[key]:.1f}")
+    low, _, high = rep["conclusions_rest_on_gap_pp"].partition(" to ")
+    out |= {low, high}
+    # the corpus mix, from the artifact's own harvest counts
+    corpus = artifact["corpus"]["names_harvested"]
+    total = sum(corpus.values())
+    for cls in ("ident", "path"):
+        out.add(f"{corpus[cls] / total * 100:.1f}")
+    # the per-resident rate the README quotes for the tail arm at 0.25
+    tail = artifact["populations"]["object"]["arms"]["tail@0.25"]
+    out.add(f"{tail['recall@3'] / tail['resident_share'] * 100:.1f}")
+    # the claim leg's unreachable share, complete
+    out.add(f"{(1 - artifact['populations']['point']['arms']['complete']['found_deep']) * 100:.1f}")
+    return out
 
 
 #: ⛔ A figure followed by a UNIT is a claim about the measurement whatever the
@@ -664,7 +697,7 @@ def test_no_doc_states_a_percentage_the_artifact_does_not_hold():
     that a stale number violates.
     """
     art = json.loads(ARTIFACT.read_text(encoding="utf-8"))
-    allowed = set(_NON_ARTIFACT_FIGURES)
+    allowed = set(_NON_ARTIFACT_FIGURES) | _derived_figures(art)
     for pop in art["populations"].values():
         for d in pop["arms"].values():
             for _k, v in d.items():
@@ -685,6 +718,17 @@ def test_no_doc_states_a_percentage_the_artifact_does_not_hold():
     end = arch_91.index("\n---", start)
     bad = []
     for name, text in (("README", readme), ("§9.1", arch_91[start:end])):
+        # the RANGES first, so their lower bound is checked too (P2-5)
+        for m in _DOC_RANGE_RE.finditer(text):
+            low, high = m.group(1), m.group(2)
+            line = text[: m.start()].count("\n") + 1
+            for end_ in (low, high):
+                if end_ not in allowed:
+                    bad.append(
+                        f"{name}:{line} states the range {m.group(0)!r} and its "
+                        f"bound {end_} is not a figure the artifact holds")
+            if float(low) >= float(high):
+                bad.append(f"{name}:{line} states {m.group(0)!r} — not a range")
         for m in _DOC_FIGURE_RE.finditer(text):
             figure = m.group(1)
             if figure not in allowed:
@@ -694,6 +738,21 @@ def test_no_doc_states_a_percentage_the_artifact_does_not_hold():
         "these figures are stated with a unit but the artifact does not hold "
         "them — a stale number left behind by a re-run, or a number that was "
         "never the artifact's:\n  " + "\n  ".join(bad))
+
+
+def test_the_stated_empty_range_is_the_artifact_range(artifact):
+    """The one range with no table row behind it is pinned to min/max.
+
+    `empty` is not a column in either published table, so the `3.7–51.0 %` the
+    README quotes for `:Object` is guarded by nothing but this — the range scan
+    above can only check that both ends are rates the artifact holds SOMEWHERE.
+    """
+    windowed = [a["empty"] for name, a in _arms(artifact, "object").items()
+                if name != "complete"]
+    readme = README.read_text(encoding="utf-8")
+    assert f"{min(windowed) * 100:.1f}–{max(windowed) * 100:.1f} %" in readme, (
+        f"the README no longer states the artifact's `:Object` `empty` range "
+        f"({min(windowed) * 100:.1f}–{max(windowed) * 100:.1f} %)")
 
 
 def test_the_tool_refuses_without_a_live_graph():

@@ -84,15 +84,19 @@ arms compare graph states and not populations. Every query makes **one** read at
 is a slice of it and `found@deep` is the whole of it, which separates *"the leg cannot rank it"* from
 *"the window does not hold it"*.
 
-### Two invariants, both enforced and both fired during development
+### Three invariants, all enforced — and two of them fired during development
 
-(Below them, a third bullet records a *property* the control depends on rather than a refusal — it is
+(Below them, a fourth bullet records a *property* the control depends on rather than a refusal — it is
 a constant in the instrument, and it is not counted among the invariants.)
 
 1. **`recall@k <= resident_share` and `found@deep <= resident_share`** — a demoted node cannot be
-   returned.
+   returned at a rank.
 2. **The graph holds exactly the intended resident set** after eviction.
-3. The query-sample seed and the `random` eviction seed are **independent** (`EVICT_SEED_OFFSET`).
+3. **`found_deep_of_demoted == 0`** — no demoted node is returned at **any** rank. This is the strong
+   form of (1) and the one the verdict rests on: `found@deep` is a rate over ALL queries, so on a
+   population whose complete-graph ceiling is below 1.0 (`:Point`: 0.410 against a resident share of
+   0.5267) a leak of demoted queries sits *under* the aggregate bound and passes (1).
+4. The query-sample seed and the `random` eviction seed are **independent** (`EVICT_SEED_OFFSET`).
    They are permutations of the same list; one shared seed made the retained suffix and the sampled
    prefix disjoint by construction, and the first run reported `resident_share` 0.667 / 0.167 / 0.000
    at coverage 0.90 / 0.75 / 0.50 — true about the graph, useless as a control.
@@ -100,7 +104,10 @@ a constant in the instrument, and it is not counted among the invariants.)
    `measurement.json`**; they are quoted to show what the invariant caught, not as evidence a reader
    can check. The artifact carries the fixed instrument's numbers only.
 
-⛔ **Invariant 2 caught a real defect in the product, not in the instrument.** `fallback_snapshot`
+⛔ **Invariant 1 caught a real defect in the product, not in the instrument** — the symptom was the
+aggregate bound being crossed, which is (1)'s refusal; (2)'s exact-set check was satisfied, because the
+graph *did* hold the intended set and the stale rows came from the snapshot, outside the graph.
+`fallback_snapshot`
 keeps a 60 s in-memory copy of the whole corpus and serves it on the **degraded** path. It is
 invalidated by `SDK._mark_dirty`, which every normal write surface calls — and which a raw Cypher
 `DELETE` does **not**. The first eviction therefore left the snapshot serving the demoted corpus and
@@ -162,11 +169,15 @@ For `:Object`, `found@deep` equals `resident_share` in **every** windowed arm, t
 - **no demoted canonical is ever returned** — `found_deep_of_demoted` is **0.0** in every arm of both
   populations. No record repair rescues a demoted candidate (`record_serve` cannot serve the set read
   it would need), and no leg in this run returns one. ⛔ **The single qualifier is the degraded
-  snapshot**, and it is a qualifier on *staleness*, not on demotion: `fallback_snapshot` can serve a
-  node the graph no longer holds for up to 60 s after a delete (Finding 6), and `legs_seen` records
-  that tier **serving** during this run. Its corpus is built from `MATCH (n:Point)` on the *live*
-  graph, so it is window-bounded and cannot resurrect a demoted node — but it *is* a fallback, so
-  "there is no fallback" would be false.
+  snapshot**, and what it qualifies is *how* the zero is obtained. `fallback_snapshot` keeps a 60 s
+  in-memory corpus, so it can serve a node the graph no longer holds for up to 60 s after a delete
+  (Finding 6) — and `legs_seen` records only that the tier **ran** (the submitted predicate, whether or
+  not it was degraded; it is not a record of the tier serving anything). Its corpus is
+  `MATCH (n:Point)` against the live graph, which bounds it to the nodes resident **when it was built**:
+  it therefore *cannot* hold a node demoted before the build, but it *can and does* serve one demoted
+  **after** it, until `_mark_dirty` or the 60 s TTL expires. That is exactly why the zero rests on the
+  instrument's explicit `invalidate_degraded_snapshot()` call (Finding 6) and not on the corpus source —
+  and why "there is no fallback" would be false.
 
 ⚠️ **`:Point` is not an instance of that bullet.** There `found@deep` falls below `resident_share`
 (keeping 52.7 % finds 41.0 %), because the claim leg has a ceiling of its own (Finding 7). On claims
@@ -247,7 +258,8 @@ conclusion is narrower than "the policy does not matter":
 - The two reason strings §7 requires (`degraded: "truncated_boundary"` /
   `degraded: "insufficient_graph"`) appear nowhere in the tree.
 
-So the 46.9 % of demoted entity queries that came back empty at coverage 0.50 came back empty with
+So the 46.9 % of demoted entity queries that came back empty under `tail@0.5` (36.4 % under
+`random@0.5`) came back empty with
 **no signal at all**, and §5's **Q2 — *"Nothing is silently invisible"*** — is violated for every one
 of them. §5 ranks Q2 above latency, and Q1 (traversal completeness) above Q2:
 `coalesce(ep_alpha, 1.0)` turns a demoted neighbour into a prior.
