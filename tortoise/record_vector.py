@@ -475,7 +475,7 @@ def cutover_armed() -> bool:
 #: because a check that cannot be applied to this tenant must never report that
 #: tenant as complete. The consequence is stated where it bites: an armed
 #: MULTI-TENANT deployment keeps the graph branch until the journal can be
-#: resolved PER SCOPE rather than from the environment (#13353).
+#: resolved PER SCOPE rather than from the environment (#13366).
 RECORD_JOURNAL_ENV = "TORTOISE_RECORD_JOURNAL"
 
 #: How long one tenant's readiness verdict is trusted. A coverage read is one
@@ -567,7 +567,7 @@ def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
     answer than the scope, it is a WRONG one, and it fails silently — so this
     returns ``False`` with ONE warning naming `TORTOISE_RECORD_SINGLE_TENANT`.
     The graph branch answers instead, which is `#11642` P1's correct answer,
-    until the journal can be resolved per scope (#13353).
+    until the journal can be resolved per scope (#13366).
 
     ⛔ THE COUNT COMES FROM `EventLog.position_readonly()`, never from
     `EventLog.position()` (#13331 review F2): the latter takes the append lock
@@ -666,7 +666,7 @@ def _warn_readiness_multitenant() -> None:
         "journal against another tenant's rows is a wrong answer, not a weak "
         "one (#9192). Every tenant on this process keeps the graph branch, "
         "which is a correct answer, until the journal is declared per tenant "
-        "(#13353); set %s=1 ONLY in a process that serves one graph",
+        "(#13366); set %s=1 ONLY in a process that serves one graph",
         RECORD_JOURNAL_ENV, RECORD_SINGLE_TENANT_ENV, RECORD_SINGLE_TENANT_ENV)
 
 

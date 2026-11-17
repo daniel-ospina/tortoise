@@ -2089,7 +2089,7 @@ class EventLog:
         the lock, the write-fd requirement and the lock-state amplification. A
         caller that cannot afford the recount must bound its own use of this
         (``record_vector.READINESS_TTL_SECONDS`` is the dense leg's bound), and
-        the incremental-count design is #13352.
+        the incremental-count design is #13365.
 
         A PEER that appends DURING the count makes the returned number stale by
         however much the peer wrote — a LOWER bound on the state at the instant
