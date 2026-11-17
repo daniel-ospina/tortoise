@@ -253,6 +253,13 @@ sequentially; a capture fleet does not.
 | **8,000 names**, probe windows c=1 | load 114–134 | 120 | `{hybrid: 120}` | 0 % |
 | **8,000 names**, probe windows c=1 | **load 122–132** | 60 | `{hybrid: 58, keyword_only: 2}` | **3.3 %** — reason **`timeout`** |
 
+⚠️ **The four committed 8,000-row artifacts predate the `population_arg`/`population_measured`
+fix (`#13121` rounds 4–9) and still carry `config.population: 1000` with `population_measured:
+null`, beside their own `census.labels.Object.stored: 8000`.** That field is the `--seed`
+ARGUMENT on a `--no-seed` run, not the population read; **`census.labels.*.stored` is the reading
+to quote**, and it is the field these rows rest on. (The tool now writes both halves; the
+artifacts were not regenerated — the same disclosure §5 makes for the empty-arm zeros.)
+
 ⛔ **A fourth 8,000/1,000-window row is WITHDRAWN, not carried** (`#13121` round 6, F5): an earlier
 revision listed `1,000 names, probe windows c=8/16/32` with `{hybrid: 96}` and window p50s
 638/1249/2607 ms. No committed artifact backs it — no 1,000-name artifact has a populated `windows`
@@ -343,7 +350,7 @@ read, `:Point` included — which is why the two halves exist.
 | | before (`None` = not measured) | after (inventory supplied) | change |
 |---|---|---|---|
 | `:Object` c=1, **1,000** nodes (100 reads each, at rest, paired) | p50 **34.78 ms** | p50 **13.26 ms** | **−62 %** |
-| `:Object` c=1, **8,000** nodes (60 reads each, paired) | p50 **65.73 ms** | p50 **47.47 ms** | **−28 %** |
+| `:Object` c=1, **8,000** nodes (60 reads each, paired) ⚠️ `population` field is pre-fix — see §3.3 | p50 **65.73 ms** | p50 **47.47 ms** | **−28 %** |
 | eval windows under load ~130, 8,000 nodes | p50 **15.41 s** | ⚠️ **not measured** | ⚠️ **withdrawn** — see the note below |
 | the `#11901` eval, 1,000 names, end-to-end | 442.4 s, `{hybrid: 4396, keyword_only: 0}` | **304.5 s**, `{hybrid: 4396, keyword_only: 0}` | **−31 %** wall clock, **same mode split**, recall@3 300/300 both sides (⚠️ between-run — see §3.3) |
 
@@ -387,7 +394,15 @@ load ~130 the dense leg still timed out (§3.3).
 
 ## 6. What an index would be for, and what it would cost — the V3 evidence
 
-**No index was created.** This section is the argument, with numbers, that the decision needs.
+**No index was created — on the labels the decision is about.** ⛔ Stated exactly (`#13121` round
+11 F1): this lane creates **no** index on `:Object`, `:Subject`, `:Event` or `:Source` — not by a
+flag, not by an argument. What a **fresh probe graph** does get is the `:Point` VECTOR index, from
+the projection's own `_ensure_indexes()` on construction (`tortoise/projection/__init__.py`), which
+is the index the product already ships (`#4997`) and the reason the control arm can be a control;
+`tools/dense_leg_probe_13108.py`'s docstring names it as the one thing the tool creates that it does
+not own, and `census.vector_indexes` records it on the probe's own graphs. An unqualified "no index
+was created" would be false, and this section says so before making the argument that the decision
+needs.
 
 * **What it would be for:** removing the size dependence. The indexed control's p50 is
   **21.04 ms at 1,000 rows and 21.48 ms at 8,000** — flat; the scan's is **34.45 → 56.88 ms** and
