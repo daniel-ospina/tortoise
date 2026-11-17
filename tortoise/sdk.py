@@ -31268,7 +31268,7 @@ class TortoiseSDK:
                 violations.append({
                     "section": "entities", "index": i,
                     "message": f"ingest: entities[{i}] would store a "
-                               f"non-string status {_mint!r} on the "
+                               f"non-string status {_refusal_repr(_mint)} on the "
                                f"{_elabel} — ONTOLOGY §4.3 declares `status` "
                                f"as a STRING, and the write door refuses a "
                                f"non-string (#12869), so this bundle would "
@@ -52892,13 +52892,6 @@ class TortoiseSDK:
             # refused — the same unaddressable-row class this issue is about. The
             # identical payload at a genuinely-Object door was already refused.
             _subj_named = lifecycle_props_by_rendering(props, {"status"})
-            # ⛔ THE OPERAND GOES THROUGH `_refusal_repr` (#12910 review, F1).
-            # `name` is the CALLER's object — `create_object` relays it here
-            # untouched — so a `str` subclass whose `__repr__` raises replaced
-            # this refusal with its own exception class (measured:
-            # `RuntimeError: id-repr-boom` where the door promises `ValueError`).
-            # The rule is `_refusal_repr`'s own docstring; this was the FIFTH
-            # site this PR added and the only one left on the raw `!r`.
             if _status_write_is_ambiguous(props):
                 raise ValueError(
                     f"create_entity refused a CONFLICTING status write for "

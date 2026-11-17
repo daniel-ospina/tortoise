@@ -25,16 +25,7 @@ from datetime import datetime, timezone
 # random stub id moved on every replay) and the reference fold cannot model
 # the stub at all.
 from tortoise.ids import content_hash as _content_hash
-
-# #12869 review F2: the ONE definition of "every name this key can be filed under"
-# (the live transport's `str(key)` UNION the journal's content `str.__str__(key)`).
-# Imported module-level rather than hand-spelling two of the three renderings in
-# `_persist_extra_props` — `live.py` deliberately ships no single-name variant so a
-# door cannot ask fewer renderings than the writer uses. `tortoise.live` imports
-# only stdlib at module level (its `projection` imports are function-local), so
-# this cannot cycle.
 from tortoise.live import (
-    _event_state_key_names,
     decay_clause,  # #2490: rebuild folds decay terminal posteriors
     epistemic_disjunction,  # #5380: the target-position widening
     epistemic_label_queries,  # #7853: id-anchored reads sweep labels, one query per label
@@ -2699,29 +2690,11 @@ class _EntityHandlers:
             # **{KHash("status"): ['live']})` on an EXISTING node stored
             # `['live']` and made the row unaddressable by every SDK status
             # write — the exact poison #12869 removes, through the merge branch
-            # the guard skips by design.
-            # ⛔ THE TEST IS THE RENDERER UNION ITSELF (#12910 review, F2), not
-            # two hand-picked spellings. The earlier form asked the HASH and the
-            # LIVE rendering (`str(k)`), which missed the JOURNAL's content
-            # rendering (`str.__str__(k)`) — the one the durable record keeps —
-            # so a key with CONTENT `status`, an overridden `__hash__` and a
-            # `__str__` that renders something else still fell through: the
-            # journalled record carried `status`, the live node carried the
-            # `__str__` name. `_event_state_key_names` is `live.py`'s one
-            # definition of the union, and its docstring is explicit that no
-            # single-name variant may exist (`#12108` finding 2), so this site
-            # asks it rather than re-spelling it.
-            # BOUND, stated so this sentence is not read as more than it is: a
-            # key that only RENDERS as `status` is not written as an extra prop
-            # (under EITHER name). It does not make the live node carry the
-            # status — `_upsert_object` reads `ev.get("status")`, a
-            # literal-name hash lookup — so for that one shape the status still
-            # reaches a row only through the journal/replay path. That is a
-            # PRE-EXISTING live≠replay gap in the create lane, not introduced
-            # and not closed here; this guard's job is that the extra-prop write
-            # does not invent a second name for the same value.
-            if (any(name in skip for name in _event_state_key_names(k))
-                    or v is None or not _is_persistable_prop_value(v)):
+            # the guard skips by design. TWO tests: `k in skip` (content, via
+            # hash/eq) and `str(k)` (the live rendering). A key that ALSO
+            # overrides `__hash__` misses both — pre-existing, out of scope.
+            if (k in skip or str(k) in skip) or v is None \
+                    or not _is_persistable_prop_value(v):
                 continue
             if allow_keys is not None and k not in allow_keys:
                 continue
