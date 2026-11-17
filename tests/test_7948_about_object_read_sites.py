@@ -615,6 +615,17 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
         'edge_type = "aboutSubject" if entity_label == "Subject" else "aboutObject"',
         "MATCH (p:Point)-[:{edge_type}]->",
     ),
+    # ⚠️ RE-DERIVED by #12184: this row named `StateRanker._fetch_object_signals`,
+    # whose body is now a one-line delegation to the shared `fetch_entity_signals`.
+    # A row is decided by its OWN SPAN, so the row and this pin moved to the
+    # symbol that now spells the read — keeping the old symbol and pinning the
+    # DELEGATION would have left the census blind to the shared query itself (a
+    # refactor could stop reading the edge behind a still-green pin, which is the
+    # false PASS this table exists to stop).
+    "ranking.py::fetch_entity_signals": (
+        'preds = "|".join(tuple(extra_preds) + tuple(ABOUT_EDGE_TYPES))',
+        '"OPTIONAL MATCH (p)-[a:" + preds + "]->(n) "',
+    ),
     # The supersede path on BOTH sides — the SDK write and the MCP dry-run
     # preview — plus the replay delete-leg. All three consume the rel family
     # through a constant or a run-time name, so none of them spells the edge;

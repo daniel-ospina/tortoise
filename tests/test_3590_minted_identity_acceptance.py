@@ -1431,10 +1431,19 @@ def test_a_lifecycle_event_on_a_doubly_held_name_is_not_a_green_run(sdk):
 
     client, _ = sdk
     proj = client._get_proj()
-    client.create_entity("object", "Dup", _server_id="id-dup-live-a",
-                         is_episodic=False)
-    client.create_entity("object", "Dup", _server_id="id-dup-live-b",
-                         is_episodic=False)
+    # ⛔ `objectKind='venture:tranche'` is LOAD-BEARING, not decoration: the
+    # fold this event declares is guarded to the DECLARING pack's namespaced
+    # kind (§`_fold_object_status`'s half 1 — "each is guarded to the Object
+    # whose ``objectKind`` is the DECLARING pack's namespaced kind"), so a
+    # carrier of no declared kind can NEVER be moved by
+    # `venture:disbursement` — and the assertion below would then hold whether
+    # or not the ambiguity guard works, i.e. it would pin nothing. Both carriers
+    # declare the kind so the guard is the ONLY thing standing between the
+    # mutant and a moved stage.
+    client.create_entity("object", "Dup", objectKind="venture:tranche",
+                         _server_id="id-dup-live-a", is_episodic=False)
+    client.create_entity("object", "Dup", objectKind="venture:tranche",
+                         _server_id="id-dup-live-b", is_episodic=False)
     assert sorted(_name_ids(proj, "Object", "Dup")) == [
         "id-dup-live-a", "id-dup-live-b"], (
         "fixture did not produce the legal two-LIVE-carrier state")
@@ -1461,6 +1470,21 @@ def test_a_lifecycle_event_on_a_doubly_held_name_is_not_a_green_run(sdk):
         assert _stage_of(proj, "Object", oid) is None, (
             "the fold MOVED one carrier's state out of an ambiguous target: "
             f"{oid}")
+
+    # ⛔ SELF-GUARDING PREMISE (the sibling test's `_stage_of(...) ==
+    # "released"` in miniature): the two assertions above can only catch a
+    # guard that folds onto one carrier if the fold CAN move THESE carriers.
+    # It can, and only because they declare `objectKind='venture:tranche'`
+    # (`_fold_object_status` guards a declared fold to the declaring pack's
+    # namespaced kind) — so prove it here, on a carrier this test owns: if the
+    # declaration is ever dropped, THIS reds instead of the guard above going
+    # quietly vacuous. Measured: revert the fixture to `create_entity("object",
+    # "Dup", ...)` with no `objectKind` and this reads None.
+    proj._fold_object_status("Dup", "venture:disbursement",
+                             object_id="id-dup-live-a")
+    assert _stage_of(proj, "Object", "id-dup-live-a") == "released", (
+        "the fixture cannot show a moved stage — the fold is guarded off for "
+        "these carriers, so the 'nothing moved' assertions above pin nothing")
 
 
 def test_an_about_target_that_folds_cannot_mask_the_explicit_targets_miss(sdk):

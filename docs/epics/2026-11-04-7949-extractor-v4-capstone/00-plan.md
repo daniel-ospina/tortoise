@@ -420,18 +420,14 @@ fan-out respected; C8 holds.
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
 **Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:344`, called
-from `sdk.py`'s point-creation path at `:21019` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
+from `sdk.py`'s point-creation path at `:21028` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
 `subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6834` and
-consumed at `sdk.py:12056`/`:12109` — ⚠️ all three are LINE cites, not symbols (nothing in this tree
+consumed at `sdk.py:12065`/`:12118` — ⚠️ all three are LINE cites, not symbols (nothing in this tree
 keys them by symbol, and an earlier version of this parenthesis said the pair was), so an insert
 above any of them moves the claim: this PR's own +22-line tail to `search_engine.py` moved the definition
-`6637` -> `6659` at the merge of `origin/main` `070d97360c`, #12184's `_searchText`-per-door
-docstring (`run_fts_query`, +3 above this line) moved it to `6664`, and the stacked forward-merge's own
-code growth carried it on to `6779`; `origin/main`'s growth moved the CONSUME pair `10522`/`10575` ->
-`10533`/`:10586` -> `11540`/`:11593`, where the stack's growth landed it at `11569`/`:11622` — every
-number re-derived from the merged tree
+`6637` -> `6659` at the merge of `origin/main` `070d97360c`, re-derived from the merged tree
 rather than carried from either side), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
