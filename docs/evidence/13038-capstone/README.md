@@ -15,7 +15,10 @@ exists to show the gap, not to hide it.
 
 ---
 
-## The first scoreboard — measured 2026-11-17, `main` @ `446bd09a09`
+## The first scoreboard — measured 2026-11-17, `tortoise-sdk` @ `6f162b9efc`
+
+The measured tree is this lane's head, which carries `origin/main` @ `b8f56fdec4` (the
+instrument records the exact commit in `run-local.json` → `header.product`).
 
 ```text
 ## Scoreboard: 3 right · 3 wrong · 0 blocked · 0 unjudged
@@ -27,17 +30,20 @@ exists to show the gap, not to hide it.
 | **Q2** | Did we ever plan a launch event, and did it happen? | **right** | `search` → the plan; `read_entity` → stage `scheduled`, slot `entry`, `isClosed=false`; `read_events` → the two uptime measurements only | planned and happened are told apart |
 | **Q3** | Why did the pricing decision change, and what replaced it? | **right** | Q3 served as `superseded`; the live Q4 row states the replacement and carries `supersedes=[Q3]` | the successor is named, no rationale invented |
 | **Q4** | Is the uptime goal met, and on what basis? | **right** | `judge` → `unmet`, comparator `>=`, threshold 99.9, reading 99.72 as of 2026-11-15 | achievement is measured from the reading, not declared from a status |
-| **Q5** | What was planned and never happened? | **wrong** | question-shaped search → 0 rows; the name search serves the cancelled call as `status='live'`, while the by-id `read_entity` shows slot `terminal`, `isClosed=true` | a cancelled plan is served as current — **#13034 / S1** |
-| **Q6** | Has anything we relied on been withdrawn? | **wrong** | both default-scope searches → 2 rows each with **zero** query-word overlap (score 0.0); in a *search* the retracted claim appears only with terminal scope forced | a customer is told nothing was withdrawn — **S6** (no ended-scope read) + the failed-leg fallback |
+| **Q5** | What was planned and never happened? | **wrong** | both default-scope searches → **0 rows**; the cancelled call is reachable only by its id, and the by-id read shows slot `terminal`, `isClosed=true` | the customer's question gets an empty answer — the terminal plan is correctly *excluded*, but nothing lets the question be asked **of** terminal things (F1/F3) |
+| **Q6** | Has anything we relied on been withdrawn? | **wrong** | both default-scope searches → 2 rows each with **zero** query-word overlap (score 0.0); in a *search* the retracted claim appears only with terminal scope forced | a customer is told nothing was withdrawn — **#13302** (no ended-scope read) + the failed-leg fallback |
 
-Read it as: **3 of 6 customer questions get a truthful answer today.** The three that fail split
-into two causes, and the table keeps them apart: Q5 and Q6 are *lifecycle* failures — a cancelled
-plan served as current (`#13034` / S1: the shared currency predicate reads neither the terminal
-slot nor `isClosed`) and no read whose question is "what was withdrawn" (S6's ended-scope
-parameter, which exists today only as ad-hoc `include_terminal` / `include_retracted` on a subset
-of surfaces) — while Q1 is a *reach* failure: the question is answered from an `entity_type`-scoped
-read, so an Object-shaped commitment is absent unless the caller guesses its name (Q2's own call,
-which names the plan, does return it).
+Read it as: **3 of 6 customer questions get a truthful answer today**, and the three that fail
+fail on **one shared gap seen from three sides — no read whose question is an ended/terminal one**:
+
+* **Q5** — the terminal-slot plan is no longer *served as current* (it is excluded from the default
+  scope, which is the currency rule working), but "what was planned and never happened?" returns
+  **0 rows**: the customer is told nothing rather than told what ended.
+* **Q6** — the same shape for withdrawals: the retracted claim is absent from both default-scope
+  searches, and the answer the customer gets is two unrelated rows at score 0.0.
+* **Q1** is a *reach* failure rather than a lifecycle one: the commitment question is answered from
+  an `entity_type`-scoped read, so an Object-shaped commitment is missing unless the caller guesses
+  its name (Q2's own call, which names the plan, does return it).
 
 Two of the issue's predicted failures did **not** materialise at this head, and that is a result
 worth recording rather than explaining away: **Q2** passes because a plan is a first-class Object
@@ -98,12 +104,13 @@ uv run python tools/capstone_state_value.py judge \
 ```
 
 ⚠️ **The bundle directory is REFUSED, not merely discouraged.** `judge` rebuilds the header from
-the packet's header, which was frozen *before* the reader ran, so writing here would replace
-`run-local.json` / `scoreboard-local.md` with a lower-fidelity copy (`mode: file`, 62.8 s instead of
-the real `mode: fresh` · 150.2 s · 213.0 s) and silently make the `header` claims below false — while
-exiting 0. It now returns 2 with that reason when the resolved `--out` (or the default, which is the
-packet's own directory) is this bundle. The same command into `/tmp` re-renders the identical six
-rows, which is the useful check.
+the packet's header, which was frozen before any verdicts were applied, so writing here would
+replace `run-local.json` / `scoreboard-local.md` with a lower-fidelity copy (it drops
+`header.judge`, and anything the run wrote after the packet) and silently make the `header` claims
+below false — while exiting 0. It returns 2 with that reason when the resolved `--out` (or the
+default, which is the packet's own directory) is this bundle. The committed board is produced by
+`run --judge file` instead, which writes its own header; and the same `judge` command into `/tmp`
+re-renders the identical six rows, which is the useful check.
 
 `judge` also refuses a packet whose questions are not the frozen scenario's (a truncated packet
 rendered a complete-looking board over a smaller denominator), and one that is not a judge packet at
@@ -145,20 +152,23 @@ doctored `--verdicts` file, say) is recorded `unjudged` with the offending word 
 rendered as a verdict and never dropped from the tally — whereas a document that is not a verdicts
 map at all (a `run-local.json` passed as `--verdicts`) is REFUSED before anything is written.
 
-⚠️ **The committed baseline below predates the reader-sandbox hardening, and its own header says
-so.** `run-local.json` → `header.judge.judge_cmd` is `pi -p --no-session`: that run's reader had
-tools and sat in the repo root. The verdicts are NOT re-derived here — the change is to what a
-reader *can* do, not to what it concluded — and no number moved. A re-run now records
-`pi -p --no-session --no-tools` in that field and spawns the reader in a throwaway directory.
+**The committed board's header records how its verdicts were applied, not a reader command.**
+`run-local.json` → `header.judge` is `{"mode": "file", "file": …/verdicts-baseline.json}`: the six
+verdicts in that file were produced by a fresh `pi -p` reader given this scenario, and this run
+applied them. A `--judge fresh` run — when the box's spawn gate admits a reader — records
+`mode: fresh` with `judge_cmd: pi -p --no-session --no-tools` and spawns it in a throwaway
+directory; the gate's refusal path is described under *Why the committed run is scored `--judge
+file`*.
 
 **Cost:** one throwaway FalkorDB container (a fresh graph, `header.store`) and **17 ingestion ops**
 (`run-local.json` → `ingest`); **20 product calls** (11 `search`, 6 `read_entity`, 2 `read_events`,
-1 `judge`); **213.0 s** end to end for the run above (`run-local.json` → `header.duration_s`,
-2026-11-17T18:42:34Z→18:46:07Z), of which **150.2 s** is the fresh reader (`judge.elapsed_s`) —
-so the ingest + ask portion is the remainder, ~63 s. **No LLM tokens in the ingest or the reads** —
-they are retrieval, entity reads and the goal comparator, so no provider key and no model spend are
-needed there; the only model spend is the reader's own `pi -p` invocation. The run deletes nothing
-by default (`--drop-graph` cleans up); the graph name is printed in the scoreboard.
+1 `judge`); **35.5 s** wall clock for the run above (`run-local.json` →
+`header.duration_s`, 2026-11-17T20:25:19Z→2026-11-17T20:25:55Z) — the ingest + ask portion, because this run
+applied stored verdicts. The reader itself is one `pi -p` agent invocation; the committed bundle
+does not time it (a `--judge fresh` run records it as `judge.elapsed_s`). **No LLM tokens in the
+ingest or the reads** — they are retrieval, entity reads and the goal comparator, so no provider key
+and no model spend are needed there. The run deletes nothing by default (`--drop-graph` cleans up);
+the graph name is printed in the scoreboard.
 
 ### What the committed artifacts let a reader check
 
@@ -166,16 +176,15 @@ Everything below is derivable from the four committed files, and nothing about h
 produced is asserted beyond that:
 
 * `run-local.json` → `header` is the run this bundle records (graph
-  `capstone13038_20261117t184234z`, `2026-11-17T18:42:34Z → 18:46:07Z`, 213.0 s) and
-  `judge` says how its verdicts were produced (`mode: fresh`, `elapsed_s: 150.2`, and
-  `judge_cmd` — the invocation that produced them, `pi -p --no-session` for this baseline; a
-  committed run made after the sandbox change carries `--no-tools`);
+  `capstone13038_20261117t202519z`, `2026-11-17T20:25:19Z → 2026-11-17T20:25:55Z`, 35.5 s) and
+  `judge` says how its verdicts were applied (`mode: file` — the committed
+  `verdicts-baseline.json`); a run scored with a fresh reader instead records `mode: fresh`,
+  `elapsed_s` and `judge_cmd` — the exact invocation that produced them.
   `scoreboard-local.md` renders that header and those rows; `judge-packet.json` carries the same
   identity fields (`started`, `graph`, `product`, `store`, `narrative`, `retrieval_posture`) and the
-  verdict-free payloads — its own `finished`/`duration_s` are the **ingest + ask** portion (62.8 s,
-  written before the reader runs) and it has no `judge` key; `verdicts-baseline.json` carries that
-  packet's own reader output (copied from `run-local.json`'s rows, which the instrument filled
-  from `judge`). The tally is one value in the three files that carry verdicts — `run-local.json`
+  verdict-free payloads — its header IS this run's header, written before any verdicts are applied,
+  so it has no `judge` key; `verdicts-baseline.json` carries the fresh reader's six verdicts, which
+  this run applied. The tally is one value in the three files that carry verdicts — `run-local.json`
   (`tally`), `scoreboard-local.md` (the scoreboard line) and `verdicts-baseline.json`;
   `judge-packet.json` carries none. The value is 3 right · 3 wrong · 0 blocked · 0 unjudged.
 * **Q1's cause must not be read as "Objects are structurally unreturnable".** Q2's own call refutes
@@ -204,12 +213,12 @@ produced is asserted beyond that:
 
 | # | what was observed | evidence in this run | where it belongs |
 |---|---|---|---|
-| F1 | **A plan ended by a terminal stage is served as current.** The cancelled call has `pipelineSlot='terminal'`, `pipelineOutcome='withdrawn'`, `isClosed=true` — and the plain default-scope search returns it as a row with `status='live'`. | Q5 signals: `by-id read_entity: stage='cancelled' slot='terminal' isClosed=True` and `SEARCH STILL SERVES THE CANCELLED PLAN … status='live'` | **#13034** (S1: the shared currency predicate reads neither the terminal slot nor `isClosed`). No new issue: this is the known root. |
-| F2 | **A retired Object is not served by the object read path, while a terminal-staged plan is.** The run creates the old onboarding flow and then deprecates it (`deprecate_object` → `status=deprecated`); `search('onboarding flow', entity_type='object')` returns **0 rows** in the same run where the terminal plan comes back from a default-scope search. | Q1 call 3 vs Q5 call 2, plus the `object` → `deprecate_object` ingest ops | the same root as F1, and a useful contrast: the *lifecycle word* half of the predicate works; the *position* half is missing. |
-| F3 | **"What was withdrawn?" cannot be asked.** The retracted claim is excluded from default scope (correct for currency), and in a *search* it appears only when terminal scope is forced per call (Q6 call 3) — while a by-id `read_entity` returns it directly (Q6 call 4), which is not a way to ask the question, because it needs the id already. There is no read whose *question* is "what ended, and how". | Q6 signals: `claim status='retracted' (a by-id read_entity)`; Q6 call 4 `read_entity` | **S6** (the ended-scope parameter, `include_retracted` today on a subset of MCP read tools). |
-| F4 | **When the FTS leg finds nothing, the read falls back to a whole-corpus TF-IDF ranking and serves zero-overlap rows at score 0.0.** `search('has anything we relied on been withdrawn')` returned the Q4 pricing claim and an uptime statement (`score: 0.0, match: 'tfidf'`), neither sharing a word with the question. The read *does* label itself `degraded` — the defect is not a mislabel, it is that a customer-facing answer assembled from it looks like an answer. | Q6 signals: `NO-RELATION-TO-QUESTION: all 2 rows served … share no word with it`; `row.degraded = true` | recorded here rather than filed: the fallback is documented behaviour (`search_engine.fallback_tfidf`, "last resort"), so the repair is the read-surface one (S6 / a caller-side threshold), not a new ticket. |
-| F5 | **A judgement is itself a served claim.** `record_judgement` mints a Point ("Q4 uptime: unmet — latest reading 99.72 percent against >= 99.9 …") and it then appears in **5 of the 6 point-scope searches** of this run (Q1 call 1, Q3 calls 1–2, Q6 calls 1–2) and in none of the 5 object-scope ones. The one point-scope search that does not return it is Q6 call 3 — `search('beach club confirmed booking', point, include_terminal=True)`, whose single row is the retracted claim, because its FTS leg matched instead of falling back to the corpus ranking. | Q1/Q3/Q6 rows (`kind=statement`) | not a defect — the writer's design — but it is why Q1's answer is a decision plus a judgement rather than a list of commitments; worth knowing before reading Q1 as a pure lifecycle result. |
-| F6 | **Target posture, not the state model:** the vector leg is absent (`no_embedder`) on this box, so every read is `degraded` and keyword-only — `header.retrieval_posture` reads vector 11 of 11 degraded, fallback 5 of 5 degraded, `fts` 0 of 11. The product's own **500 ms** collective read budget is the cap those reads run under; it was not exceeded in this run, so no `truncated` flag appears here. | `header.retrieval_posture`, `header.notes` | a target property. It is recorded in the scoreboard header so a `wrong` row is never silently attributed to the state model when it was the read path. |
+| F1 | **A plan ended on a terminal slot is correctly EXCLUDED from the default scope — and that is all the customer gets.** The cancelled call carries `pipelineSlot='terminal'`, `pipelineOutcome='withdrawn'`, `isClosed=true`, and neither the question-shaped search nor the by-name search returns it; the state is visible only through a by-id `read_entity`. So the *currency* half holds (no retired plan served as current) while the *legibility* half does not: nothing answers "what was planned and never happened?". | Q5 calls `question` / `by_name` → 0 rows each; Q5 signals `by-id read_entity: stage='cancelled' slot='terminal' isClosed=True` and `NOT-SERVED: partner_call …` | the currency half is **#13034**'s subject; the legibility half is **#13302** (filed from this baseline). |
+| F2 | **A retired Object is not served either — the exclusion works on both sides while the enumeration exists on neither.** The run creates the old onboarding flow and deprecates it (`deprecate_object` → `status=deprecated`); `search('onboarding flow', entity_type='object')` returns **0 rows**, exactly as the terminal plan does. The contrast is the *live* object: `search('launch event', entity_type='object')` → 1 row (Q2). | Q1 call `retired_flow` (0 rows) vs Q2 call `search` (1 row), plus the `object` → `deprecate_object` ingest ops | the same pair as F1: correct currency, missing enumeration (**#13302**). |
+| F3 | **"What was withdrawn?" cannot be asked.** The retracted claim is excluded from both default-scope searches (correct for currency), and in a *search* it appears only when terminal scope is forced per call (Q6 `include_terminal`) — while a by-id `read_entity` returns it directly (Q6 `claim_node`), which is not a way to ask the question, because it needs the id already. There is no read whose *question* is "what ended, and how". | Q6 signals: `claim status='retracted' (a by-id read_entity)`; `include_terminal` vs `claim_node` | **#13302** (filed from this baseline). |
+| F4 | **When the FTS leg finds nothing, the read falls back to a whole-corpus TF-IDF ranking and serves zero-overlap rows at score 0.0.** `search('has anything we relied on been withdrawn')` returned the Q4 pricing claim and an uptime statement (`score: 0.0, match: 'tfidf'`), neither sharing a word with the question. The read *does* label itself `degraded` — the defect is not a mislabel, it is that a customer-facing answer assembled from it looks like an answer. | Q6 signals: `NO-RELATION-TO-QUESTION: all 2 rows served … share no word with it`; `row.degraded = true` | recorded here rather than filed separately: the fallback is documented behaviour (`search_engine.fallback_tfidf`, "last resort"), so the repair is the read-surface one — **#13302** / a caller-side threshold — not a new ticket. |
+| F5 | **A judgement is itself a served claim.** `record_judgement` mints a Point ("Q4 uptime: unmet — latest reading 99.72 percent against >= 99.9 …") and it then appears in 5 of the 6 point-scope searches of this run — every DEFAULT-scope one (Q1 `committed_points`, Q3 `default`, Q6 `question`/`by_name`) — and in none of the object-scope ones; the exception is Q6's `include_terminal` search, whose single row is the retracted claim and in none of the object-scope ones — so a "current commitments" answer contains a *judgement* alongside the commitment. | Q1/Q3/Q6 rows (`kind=statement`) | not a defect — the writer's design — but it is why Q1's answer is a decision plus a judgement rather than a list of commitments; worth knowing before reading Q1 as a pure lifecycle result. |
+| F6 | **Target posture, not the state model:** the vector leg is absent (`no_embedder`) on this box, so every read is `degraded` and keyword-only — `header.retrieval_posture` reads vector 11 of 11 degraded, fallback 6 of 6 degraded, `fts` 0 of 11. The product's own **500 ms** collective read budget is the cap those reads run under; it was not exceeded in this run. | `header.retrieval_posture`, `header.notes` | a target property. It is recorded in the scoreboard header so a `wrong` row is never silently attributed to the state model when it was the read path. |
 
 ---
 
@@ -238,9 +247,9 @@ owner already named in the table above.
 
 | after | expect |
 |---|---|
-| **S1 / #13034** (predicate reads the position axis) | Q5 moves to `right`: the cancelled plan stops being served as current, and "planned and never happened" becomes answerable from the stage slot. |
-| **S6** (one ended-scope parameter) | Q6 moves to `right`: "what was withdrawn?" becomes a question a read can be asked. Q1 improves (ended records excluded consistently rather than by surface accident). |
-| **S7** (plans are their own kind, events are occurrences) | Q2 stays `right` but stops depending on a run-declared pipeline; Q5's enumeration becomes a declared read rather than a name search. |
+| **#13302** (one ended-scope read: "what ended, and how") | Q5 and Q6 both move to `right`: "planned and never happened" and "what was withdrawn" become questions a read can be asked, instead of an empty result and two unrelated rows. Q1 improves slightly (ended records enumerated consistently rather than excluded silently). |
+| **#13034 / S1** (the currency predicate reads the position axis) | **already visible in this baseline**: an earlier run of this same scenario was served the cancelled plan as `status='live'` by a plain default-scope search; this run returns **0 rows** for both of Q5's searches. The currency half now holds in the payloads even though Q5's verdict stays `wrong` — which is the distinction the instrument exists to make (a fixed currency rule is not the same thing as an answerable question). |
+| **#13100 / S7** (plans are their own kind, events are occurrences) | Q2 stays `right` but stops depending on a run-declared pipeline; Q5's enumeration becomes a declared read rather than a name search. |
 | **S0 / S4** (the write door and the narrowed vocabulary) | nothing here should move the scoreboard — that is the point of measuring *behaviour*: a vocabulary slice that reds a drift test and moves no question has not yet been proven to help a customer. |
 
 The instrument is the arbiter for that last row: **if a slice moves the drift test and not the

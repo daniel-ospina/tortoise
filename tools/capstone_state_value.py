@@ -91,11 +91,11 @@ USAGE
 WHAT IT COSTS
 -------------
 Local target: one throwaway FalkorDB container and 17 write ops on a fresh graph; measured
-62.8 s of wall clock for the committed run (judge-packet.json → header.duration_s, which is
-the ingest + ask portion); no LLM tokens, no provider keys, no money. `--judge fresh` adds one
-agent invocation (measured 150.2 s / ~2.5 minutes on the committed run: run-local.json →
-judge.elapsed_s). Deployed target: refused unless a dedicated disposable graph is named
-(see rule 1 above) — the measurement below says why.
+35.5 s of wall clock for the committed run (judge-packet.json → header.duration_s, which is
+the ingest + ask portion — the committed run applied stored verdicts); no LLM tokens, no
+provider keys, no money. `--judge fresh` adds one agent invocation (the reader's own `pi -p`),
+which a fresh run records as `judge.elapsed_s`. Deployed target: refused unless a dedicated
+disposable graph is named (see rule 1 above) — the measurement below says why.
 
 EXIT CODES
 ----------
@@ -1993,7 +1993,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     notes: list[str] = []
 
     # Validate `--judge file` BEFORE the target is built or anything is written: the run
-    # measures a whole scenario, so a mistyped verdicts file must not cost 213 s and a
+    # measures a whole scenario, so a mistyped verdicts file must not cost a full run and a
     # board overwrite to discover (#13303 cycle 4, P1).
     judged_from_file: dict | None = None
     if args.judge == "file":
@@ -2308,7 +2308,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     (out_dir / f"scoreboard-{target.kind}.md").write_text(md)
 
     # AFTER the scoreboard, deliberately: this write is secondary, and a bad path here
-    # used to abort the run once the 150 s reader had already been paid for, losing the
+    # used to abort the run once the reader had already been paid for, losing the
     # verdicts AND the scoreboard. The primary artifact lands first; a verdicts-out failure
     # is then loud but costs nothing that cannot be re-derived from the packet.
     if verdicts_target:
@@ -2417,11 +2417,11 @@ def cmd_judge(args: argparse.Namespace) -> int:
         )
         return 2
 
-    # The bundle's own board comes from a REAL run (`run --judge fresh`), whose header says
-    # `mode: fresh` and carries the run's own durations. `judge` rebuilds the header from
-    # the packet, which was frozen BEFORE the reader ran, so writing here replaces the
-    # baseline with a lower-fidelity copy (`mode: file`, 62.8 s) and exits 0 while doing
-    # it — measured, with the bundle's two files changing md5 (#13303 cycle 6, P2).
+    # The bundle's own board comes from a REAL run (`run --judge fresh|file`), whose header
+    # carries the run's own durations and its `judge` block. `judge` rebuilds the header from
+    # the packet, which was frozen BEFORE any verdicts were applied, so writing here replaces
+    # the baseline with a lower-fidelity copy (it loses `header.judge`) and exits 0 while
+    # doing it — measured, with the bundle's two files changing md5 (#13303 cycle 6, P2).
     out_dir = Path(args.out).resolve() if args.out else packet_path.parent
     if out_dir == DEFAULT_OUT.resolve():
         print(

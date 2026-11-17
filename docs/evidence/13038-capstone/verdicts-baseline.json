@@ -1,38 +1,38 @@
 {
   "_provenance": {
-    "packet": "docs/evidence/13038-capstone/judge-packet.json — the committed run (graph capstone13038_20261117t184234z, 2026-11-17T18:42:34Z→2026-11-17T18:46:07Z). These verdicts are THAT packet's own fresh-reader output: `judge.mode = fresh`, `judge.elapsed_s = 150.2`.",
-    "rubric": "docs/evidence/13038-capstone/narrative.json → `rubric`. The reader is given the narrative, the six questions, the rubric and the packet's `product_answers` — the payloads INCLUDING the recorded mechanical signals, which the prompt frames as evidence by which to check an answer, never as a verdict. It is not given the runner.",
-    "recorded": "`because` is the answer-level reasoning; `cause` is present only on a `wrong` row and names the mechanism the calls support, with the owning issue where one exists.",
-    "reproduce": "bash docs/evidence/13038-capstone/rerun.sh --judge fresh (one command; spawns the reader itself). Re-render from a stored reader output with `judge --packet … --verdicts … --out …`."
+    "packet": "docs/evidence/13038-capstone/judge-packet.json — the committed run (graph capstone13038_20261117t202519z, 2026-11-17T20:25:19Z→2026-11-17T20:25:55Z, product tortoise-sdk @ 6f162b9efc1dab12b8ecf01df68f92f85edaf577). These are a FRESH `pi -p` reader's six verdicts for this scenario; independent readers have scored it repeatedly across the lane's runs and returned the same six verdicts each time. The committed run APPLIES them with `--judge file` because the box's spawn gate can refuse the reader under load — measured 2026-11-17, `[pi-gate] refusal #4`, exit 76 — which records every row `unjudged` and exits 1 rather than inventing a score.",
+    "reader": "file",
+    "file": "/private/tmp/capstone-scratch/verdicts-new.json",
+    "note": "Written by this instrument. `--verdicts <this file>` re-scores the same packet without spawning a reader."
   },
   "Q1": {
     "verdict": "wrong",
-    "because": "The answer serves Q4 pricing ($39/seat, superseding Q3) and the unmet Q4 uptime goal, correctly excluding the replaced Q3 price and the retired onboarding flow, but it omits the current 12 December launch plan — a third live commitment the narrative says exists — so the commitment set is incomplete.",
-    "cause": "The plan node is unreachable from the commitment query: the object search 'current commitments' returned 0 rows and the point search surfaced only pricing/uptime, with the valid_time leg reporting state_read_incomplete and the vector leg d…"
+    "because": "The answer served only two rows — Q4 pricing ($39, superseding Q3) and the Q4 uptime-unmet statement — and the `committed_objects` read returned 0 rows, so the 12 December launch plan, which the narrative calls a current commitment, is absent from the answer entirely. It is true that Q3 ($29) and the retired onboarding flow were correctly not served as current (the `retired_flow` search returned 0 rows), but an answer missing one of the commitments the key names, where the plan object demonstrably exists in the graph, does not satisfy the question.",
+    "cause": "The object-side search (`committed_objects`, entity_type=object, query \"current commitments\") returned 0 rows with leg fts='empty_results' while the vector leg was off ('no_embedder') and fallback reported 'no_fallback_applicable'; the only rows served came from the points query, which ran entity_type=point and could never return the launch plan object."
   },
   "Q2": {
     "verdict": "right",
-    "because": "By-id read returns the 12 December beach club launch as core:plan, stage 'scheduled', slot 'entry', isClosed false with no occurrence event anywhere in read_events, so the customer gets 'planned, not yet held'.",
+    "because": "The `search` returned the object \"Launch event — 12 December at the beach club\" as kind core:plan, and the by-id `plan_node` read shows pipelineStageId='scheduled', pipelineSlot='entry', isClosed=false with status null — a plan that has not been held. The `events` call returned only the two uptime measurement events and no launch occurrence, so 'planned but not happened' is supported rather than asserted.",
     "cause": null
   },
   "Q3": {
     "verdict": "right",
-    "because": "The Q3 decision is served as status 'superseded' (expired, validTo set) and the live Q4 decision both states 'replacing the Q3 decision' and carries an explicit supersedes edge to the Q3 id, naming the successor with no invented rationale.",
+    "because": "The served rows name the successor: the Q4 pricing row reads \"the entry tier becomes $39 per seat, replacing the Q3 decision\" and carries `supersedes` naming the Q3 point, and the `include_terminal` search plus the `replaced_node` by-id read show Q3 at status='superseded' with its validity window ended and outdated=true. That answers what replaced it (Q4, $39) and the ending of Q3 without inventing any rationale the narrative does not record.",
     "cause": null
   },
   "Q4": {
     "verdict": "right",
-    "because": "The judge surface returns state 'unmet' with comparator >=, threshold 99.9, readingValue 99.72 as of 2026-11-15 and comparison false — the basis is the reading against the target, not a status word.",
+    "because": "The `judgement` call returned state='unmet' with comparator '>=', threshold 99.9, readingValue 99.72, readingAsOf 2026-11-15 and comparison=false, and the `readings` call served both the October (99.95) and November (99.72) measurements. So the answer is 'not met' on the basis of the latest reading measured against the target, not a bare status word, and the `goal_node` read confirms goalState='unmet'.",
     "cause": null
   },
   "Q5": {
     "verdict": "wrong",
-    "because": "The question-shaped query returned 0 rows, and the only row served for the cancelled call carried status 'live' as a current result — the customer is told a withdrawn call never happened nowhere, and is shown the cancelled plan as live where it does appear (only the by-id read reveals stage 'cancelled'/slot 'terminal'/isClosed true).",
-    "cause": "#13034 currency predicate reads neither the terminal slot nor isClosed, so default-scope search serves the cancelled plan as current, while the question itself matches nothing (default scope excludes terminal objects)."
+    "because": "Both searches for this question returned nothing usable: the `question` search (\"what was planned and never happened\") and the `by_name` search (\"thursday partner call\") each returned 0 rows, so the customer's question got an empty result even though the cancelled plan exists. The cancelled plan was reachable only by its id in the `cancelled_plan` read_entity, which shows stage='cancelled', slot='terminal', pipelineOutcome='withdrawn', isClosed=true — evidence the product held but did not serve to the question.",
+    "cause": "Both object searches returned 0 rows with leg fts='empty_results' (the query words share no token with \"Thursday partner call — 6 November\") while the vector leg was off ('no_embedder') and fallback reported 'no_fallback_applicable', and the plan sits at slot='terminal' so the default include_terminal=false scope excludes it with no surface that enumerates terminal plans."
   },
   "Q6": {
     "verdict": "wrong",
-    "because": "For 'has anything we relied on been withdrawn' the default scope served two rows sharing no word with the question (Q4 pricing, Q4 uptime) at score 0.0; the retracted beach-club claim only appears when terminal objects are force-included, so the customer's question is answered with unrelated content.",
-    "cause": "Retracted/withdrawn evidence is filtered out of the default scope and the tfidf_snapshot fallback ranks the corpus instead of matching (2/2 zero-overlap rows); the withdrawn claim is reachable only via include_terminal."
+    "because": "The `question` search (\"has anything we relied on been withdrawn\") served two rows — Q4 pricing and the Q4 uptime statement — both live and both with zero word overlap with the question, and it says nothing about a withdrawal; the `by_name` search (\"beach club confirmed booking\") returned those same two unrelated rows from the degraded fallback. Only the separately-requested `include_terminal` search and the `claim_node` by-id read show the beach club claim at status='retracted', so the answer actually delivered to the question does not tell the customer that anything was withdrawn.",
+    "cause": "The default-scope search (include_terminal=false) dropped the retracted claim and the degraded fallback leg ('tfidf_snapshot') ranked the corpus's live points at score 0.0; the retracted status was observable only via the include_terminal=true search and the by-id read_entity."
   }
 }
