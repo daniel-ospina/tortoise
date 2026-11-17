@@ -2334,7 +2334,12 @@ def storage_overage_cost_usd(tier: str, dimension: str, used, *,
             missing is a figure that is BOTH per-org and affordable here: the
             audit is a whole-table aggregation per call (with a per-row TOAST
             lookup), and the ledger reader is the window addend, not the org's
-            stored footprint. And the only database-grain reader,
+            stored footprint. ⛔ THAT AFFORDABILITY GAP IS NOW CLOSED (#9559):
+            ``get_postgres_residency`` reads the per-org snapshot the audit
+            writes offline (one row by primary key), and the gate's meter is
+            wired to it. Read the gate's ``RELEASE_CONDITIONS`` for the LIVE
+            state rather than this paragraph's history. And the only
+            database-grain reader,
             ``measure_postgres_storage()``, returns the WHOLE database — passing
             that as ``used`` would bill every tenant for the shared database's
             bytes, the over-charge the allowance gate records as one reason for
@@ -2978,3 +2983,67 @@ def get_postgres_bytes_written(org_id: str) -> int:
         params={"tid": org_id, "pstart": period.start_iso},
     ).result_set
     return int(rows[0][0] or 0) if rows else 0
+
+
+def get_postgres_residency(org_id: str) -> dict:
+    """The org's snapshotted Postgres STORED bytes — the residency GAUGE (#9559).
+
+    ⛔ THE DIFFERENCE FROM :func:`get_postgres_bytes_written`, WHICH IS THE WHOLE
+    POINT. That function returns the ADDEND of the current window: how many bytes
+    the org wrote since the window opened. A storage cap held against that
+    figure does not cap what the org STORES — a tenant that wrote 10 GB last
+    window and nothing this one reads as zero. Residency is the stored footprint,
+    and only the audit (``postgres_bytes.per_org_bytes``) measures it.
+
+    The audit is a whole-table aggregation with a per-row TOAST lookup plus a
+    second pass over the TOAST relation, so it can NOT be called on a write path.
+    This reads the SNAPSHOT the audit writes (``org_postgres_residency``,
+    refreshed by ``postgres_residency_snapshot()`` offline) — one row by primary
+    key, O(1) in the database's size. That is the affordability the block on
+    ``postgres_storage`` required.
+
+    Returns ``{"stored_bytes": int, "rows": int, "measured_at": ISO|None,
+    "source": str|None}``.
+
+    ⛔ NO ROW IS **NO READING**, NEVER A ZERO — the opposite of
+    :func:`get_postgres_bytes_written`'s "no row means nothing was written".
+    Both readings are honest *for their own dimension kind*, and confusing them
+    is the fail-open this file already documents: an org that has never been
+    snapshotted must not compare as 0 bytes and pass a cap. ``measured_at`` is
+    ``None`` in that case, which the gate treats as STALE (a reading that cannot
+    be aged cannot prove freshness).
+
+    A read FAILURE degrades to the same no-reading shape rather than raising: the
+    gate's own ``_reading`` classifies a ``None`` reading as "no figure" and
+    refuses a configured allowance, so a broken read can never become a pass.
+    """
+    empty: dict = {"stored_bytes": None, "rows": None,
+                   "measured_at": None, "source": None}
+    if not org_id:
+        return empty
+    if not _supabase_mode():
+        # The registry/embedded lane has no ``org_postgres_residency`` table:
+        # storage there is the graph's, not Postgres's. No reading, not a zero.
+        return empty
+    try:
+        from tortoise.supabase_control import get_control_plane
+        rows = get_control_plane().query(
+            "org_postgres_residency",
+            select=["stored_bytes", "rows", "measured_at", "source"],
+            filters=[("org_id", "eq", org_id)],
+        )
+    except Exception as e:
+        _logger.warning(
+            "postgres residency read failed (degrading to NO READING): "
+            "team=%s error=%s", org_id, e,
+        )
+        return empty
+    if not rows:
+        return empty
+    row = rows[0]
+    return {
+        "stored_bytes": row.get("stored_bytes"),
+        "rows": row.get("rows"),
+        "measured_at": row.get("measured_at"),
+        "source": row.get("source"),
+    }

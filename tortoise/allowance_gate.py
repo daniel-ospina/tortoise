@@ -403,6 +403,40 @@ def _graph_storage_mb(org_id: str) -> MeterReading | None:
     )
 
 
+def _postgres_stored_bytes(org_id: str) -> MeterReading | None:
+    """The org's RESIDENCY gauge: stored Postgres bytes, from the snapshot (#9559).
+
+    ⛔ NOT :func:`metering.get_postgres_bytes_written`. That is the window
+    ADDEND — bytes written since the window opened — and a storage cap held
+    against it does not cap what the org stores (a tenant that wrote 10 GB last
+    window and none this one reads as zero). The block on this dimension named
+    that difference, so wiring the ledger reader as the meter would have armed a
+    cap on the wrong figure: a fail-open for exactly the tenant who grew largest.
+
+    The figure comes from ``metering.get_postgres_residency``, which reads the
+    per-org snapshot the whole-table audit writes offline — one row by primary
+    key, affordable on a write path. **No row is NO READING**, never a zero: an
+    org that has never been snapshotted must not compare as 0 bytes and pass.
+    ``measured_at`` is the audit's own ``captured_at``, so the dimension's
+    ``stale_after_seconds`` ages the MEASUREMENT, not the row write.
+    """
+    from .metering import get_postgres_residency
+
+    reading = get_postgres_residency(org_id)
+    stored = reading.get("stored_bytes")
+    measured_at = reading.get("measured_at")
+    if stored is None or not measured_at:
+        return None
+    return MeterReading(
+        used=float(stored),
+        measured_at=str(measured_at),
+        estimated=False,
+        note=("the org's own rows as the audit measured them "
+              "(postgres_per_org_bytes → org_postgres_residency); the "
+              "unattributable residual is never apportioned onto this figure"),
+    )
+
+
 def _describe_fault(reason: str) -> str:
     """The sentence a REFUSAL uses for an our-side metering fault.
 
@@ -541,49 +575,55 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
     ),
     _dimension(
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],
-        meter=None,
-        # ⛔ THE PER-ORG ATTRIBUTION IS NO LONGER THE OBSTACLE — it was, and this
-        # reason said so long after #12762 landed it. The correction is the point
-        # of ``release`` below: the condition that HAS fired is recorded in
-        # ``per_org_postgres_attribution`` (satisfied, evidence in the test) and
-        # is deliberately NOT quoted here as the current obstacle.
+        meter=_postgres_stored_bytes,
+        # The residency gauge is a SNAPSHOT: affordable per write, stale by
+        # construction. The same evidence-age bound the graph gauge uses, for the
+        # same reason — a reading older than this describes rows that may no
+        # longer exist, so enforcing it would decide from a figure we cannot
+        # defend. The gate REFUSES on a stale reading rather than capping from it.
+        stale_after_seconds=STALE_AFTER_SECONDS,
+        # ⛔ NEITHER MEASUREMENT IS THE OBSTACLE ANY MORE, AND THE REASON SAYS SO.
+        # It named the missing attribution long after #12762 landed it, and then
+        # named the missing residency gauge after #9559 wired one. Each correction
+        # is the point of ``release`` below: a condition that HAS fired is
+        # recorded under its own token (satisfied, evidence in the test) and is
+        # deliberately NOT quoted here as the current obstacle.
         #
-        # ⛔ THIS NARROWS THE RECORDED POSITION, AND THE NARROWING IS MARKED.
-        # ``cost_dimensions``, ``postgres_bytes``, ``metering`` and two docs each
-        # recorded that arming waits on ONE thing: the free/anon included
-        # amounts. They are right that that decision is outstanding and
-        # incomplete on what else is — #12762 made the ATTRIBUTION measurable,
-        # and the gate is the consumer that must hold a cap against a figure on
-        # every write, so the FIGURE'S SHAPE is load-bearing too. Without the
-        # second condition, clearing the first arms the dimension with
-        # ``meter=None`` and every gated write answers 500 ("no meter plumbed").
+        # ⛔ THE OVERRIDES THIS ROW CARRIED IS NOW DELIVERED, NOT WITHDRAWN.
+        # It recorded that arming waits on the free/anon included amounts AND on a
+        # per-org residency gauge the gate can read on a write path — because
+        # clearing the first would have armed the dimension with ``meter=None``
+        # and answered 500 on every gated write. The second half is now BUILT:
+        # ``_postgres_stored_bytes`` reads ``org_postgres_residency`` (one row by
+        # primary key, snapshotted offline from the audit that was too expensive
+        # to run per write), aged by ``stale_after_seconds``. So the block is back
+        # on the RECORDED position — one outstanding decision, the included
+        # amounts — and that position was never reversed.
         #
-        # OVERRIDES: the recorded “postgres_storage is armable once the free/anon
-        # included amounts are decided” (cost_dimensions.py, postgres_bytes.py,
+        # OVERRIDES: the recorded "postgres_storage is armable once the free/anon
+        # included amounts are decided" (cost_dimensions.py, postgres_bytes.py,
         # metering.py, docs/ops/postgres-storage-measurement.md,
-        # docs/architecture/CONSUMPTION-MODEL.md) — NARROWED, not reversed: that
-        # decision is still required, AND no per-org RESIDENCY gauge exists that
-        # the gate can read on a write path. If anyone disagrees, the route is a
-        # reopen on #9559, not a quiet edit.
+        # docs/architecture/CONSUMPTION-MODEL.md) — the NARROWING that stood here
+        # is now SATISFIED, so this reason states exactly that decision again. The
+        # OVERRIDES line stays visible because the gauge it added is load bearing:
+        # an arming lane reading only the amounts would need to know a meter is
+        # plumbed, and what shape of figure it must be.
         blocked_reason=(
-            "no per-org RESIDENCY GAUGE, and the included amounts are not "
-            "confirmed. The per-org Postgres BYTE ATTRIBUTION this reason used "
-            "to call missing now EXISTS and is MEASURED (#12762 — "
-            "``postgres_bytes.PerOrgPostgresBytes.for_org``; the "
-            "``cost_dimensions`` attribution carries the OVERRIDES of the #4492 "
-            "'there is no per-org attribution' position). Two things still "
-            "block a cap: (1) no per-org figure this gate can read ON A WRITE "
-            "PATH — the audit (``postgres_bytes.per_org_bytes``, RPC "
-            "``postgres_per_org_bytes``) is a whole-table aggregation with a "
-            "per-row TOAST lookup plus a second pass over the TOAST relation, "
-            "and the ledger reader is the window ADDEND, not the org's stored "
-            "footprint (``metering.get_postgres_bytes_written``: 'the ADDEND of "
-            "the window, not the org's total stored footprint'); (2) the "
-            "free/anon included amounts, which the artifact records as DERIVED, "
-            "NOT OWNER-CONFIRMED (``product/pricing.json`` "
-            "``billing.storage._included_amounts_status``). BLOCKED until a "
-            "per-org gauge exists that is affordable per write AND the included "
-            "amounts are confirmed"),
+            "the free/anon included amounts are not confirmed, so there is no "
+            "number to cap against. Both MEASUREMENTS this reason used to call "
+            "missing now exist and are wired: the per-org Postgres BYTE "
+            "ATTRIBUTION (#12762 — ``postgres_bytes.PerOrgPostgresBytes.for_org``; "
+            "the ``cost_dimensions`` attribution carries the OVERRIDES of the "
+            "#4492 'there is no per-org attribution' position) and the per-org "
+            "RESIDENCY GAUGE this gate can read ON A WRITE PATH (#9559 — "
+            "``org_postgres_residency``, one row by primary key, snapshotted "
+            "offline by ``postgres_residency_snapshot()`` from the whole-table "
+            "audit, and read through ``metering.get_postgres_residency``; aged by "
+            "``stale_after_seconds`` so a snapshot too old to defend is REFUSED, "
+            "not enforced). What remains is the DECISION, not the instrument: "
+            "``product/pricing.json`` records the amounts as DERIVED, NOT "
+            "OWNER-CONFIRMED (``billing.storage._included_amounts_status``). "
+            "BLOCKED until the owner confirms those amounts"),
         release=(
             "per_org_postgres_attribution",
             "postgres_residency_gauge",

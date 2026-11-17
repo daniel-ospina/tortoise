@@ -3161,5 +3161,90 @@ try {
   process.exit(1);
 }
 
+// ── #9559: the per-org RESIDENCY gauge — the refresh is PLANNED, not parsed ──
+// `CREATE FUNCTION` does NOT plan a plpgsql body: the SQL inside it is resolved
+// at FIRST CALL. So "the migration applied" says nothing about whether the
+// refresh works, and a body that named a missing key, an uncast jsonb field or
+// a wrong column would pass every other check here and fail in production the
+// first time the snapshot ran. This calls it on a seeded two-org journal and
+// asserts the four things the allowance gate depends on:
+//   * one row per org, carrying the bytes the AUDIT attributed to that org;
+//   * `measured_at` populated (the gate ages the reading from it, and an
+//     unageable reading is refused on a bounded dimension);
+//   * re-running is IDEMPOTENT (the upsert, not a growing table);
+//   * the per-org figure is the org's OWN rows — a second org's bytes must not
+//     leak into the first, which is the split #4492 refused.
+try {
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('9559-gauge-a', '9559-gauge-a', 'org_9559_gauge_a'),
+             ('9559-gauge-b', '9559-gauge-b', 'org_9559_gauge_b')
+      ON CONFLICT (id) DO NOTHING;
+    INSERT INTO public.graphs (id, org_id, name, namespace)
+      VALUES ('9559-gauge-graph-a', '9559-gauge-a', '9559-gauge-graph-a',
+              'org_9559-gauge-a_9559-gauge-graph-a'),
+             ('9559-gauge-graph-b', '9559-gauge-b', '9559-gauge-graph-b',
+              'org_9559-gauge-b_9559-gauge-graph-b')
+      ON CONFLICT DO NOTHING;
+    INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload)
+      VALUES ('9559-gauge-a', '9559-gauge-graph-a', 1, 'PointCreated',
+              jsonb_build_object('pad', repeat('a', 4000))),
+             ('9559-gauge-a', '9559-gauge-graph-a', 2, 'PointCreated',
+              jsonb_build_object('pad', repeat('a', 4000))),
+             ('9559-gauge-b', '9559-gauge-graph-b', 1, 'PointCreated',
+              jsonb_build_object('pad', repeat('b', 4000)))
+      ON CONFLICT DO NOTHING;
+  `);
+  await db.exec('SELECT * FROM public.postgres_residency_snapshot()');
+  const first = await db.query(`SELECT org_id, stored_bytes, rows, measured_at
+      FROM public.org_postgres_residency
+     WHERE org_id IN ('9559-gauge-a', '9559-gauge-b') ORDER BY org_id`);
+  if (first.rows.length !== 2) {
+    console.error(`✗ #9559: the snapshot did not write one row per org (rows=${first.rows.length})`);
+    process.exit(1);
+  }
+  const [ga, gb] = first.rows;
+  if (Number(ga.rows) !== 2 || Number(gb.rows) !== 1) {
+    console.error(`✗ #9559: the per-org row counts are wrong — the audit attributed `
+      + `a=${ga.rows}, b=${gb.rows} (expected 2, 1)`);
+    process.exit(1);
+  }
+  if (!(Number(ga.stored_bytes) > Number(gb.stored_bytes))) {
+    console.error(`✗ #9559: the org with two rows does not carry more bytes than the `
+      + `org with one (a=${ga.stored_bytes}, b=${gb.stored_bytes}) — the figure is `
+      + `not per-org`);
+    process.exit(1);
+  }
+  if (!ga.measured_at) {
+    console.error('✗ #9559: the snapshot row carries no measured_at — the gate could '
+      + 'not age it, and refuses an unageable reading on a bounded dimension');
+    process.exit(1);
+  }
+  // The upsert: a second refresh must UPDATE, never append.
+  await db.exec('SELECT * FROM public.postgres_residency_snapshot()');
+  const again = await db.query(`SELECT count(*) AS n FROM public.org_postgres_residency
+     WHERE org_id IN ('9559-gauge-a', '9559-gauge-b')`);
+  if (Number(again.rows[0].n) !== 2) {
+    console.error(`✗ #9559: a re-run APPENDED instead of upserting (rows=${again.rows[0].n})`);
+    process.exit(1);
+  }
+  // The journal is APPEND-ONLY (a trigger refuses DELETE unless a tenant
+  // erasure sets `app.record_journal_purge`), so the cleanup takes the documented
+  // erasure path rather than fighting the guard it exists to prove.
+  await db.exec(`DELETE FROM public.org_postgres_residency
+     WHERE org_id IN ('9559-gauge-a', '9559-gauge-b');`);
+  await db.exec(`SET LOCAL app.record_journal_purge = 'on';
+     DELETE FROM public.journal_event
+     WHERE org_id IN ('9559-gauge-a', '9559-gauge-b');
+     DELETE FROM public.graphs WHERE id IN ('9559-gauge-graph-a', '9559-gauge-graph-b');
+     DELETE FROM public.organizations WHERE id IN ('9559-gauge-a', '9559-gauge-b');`);
+  console.log('✓ #9559: `postgres_residency_snapshot()` writes ONE row per org from '
+    + 'the audit, per-org bytes never leak across orgs, `measured_at` is populated, '
+    + 'and a re-run upserts instead of appending');
+} catch (e) {
+  console.error(`✗ #9559 RESIDENCY GAUGE FAILED:\n  ${e.message.split('\n').slice(0, 20).join('\n  ')}`);
+  process.exit(1);
+}
+
 console.log('✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED');
 await db.close();

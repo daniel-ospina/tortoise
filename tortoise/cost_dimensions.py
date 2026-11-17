@@ -476,14 +476,21 @@ DIMENSIONS: tuple[Dimension, ...] = (
         state=MEASURED,
         note=(
             "#4492 sized the Supabase tier on the database total. #12762 adds "
-            "the per-org half the storage dimension needed to be armable, "
-            "measured from what we WRITE — and deliberately does NOT arm it. "
-            "Arming waits on TWO things, both recorded on the gate itself "
-            "(``allowance_gate.RELEASE_CONDITIONS``): the free/anon included "
-            "amounts are still undecided (the owner's), and no per-org "
-            "RESIDENCY gauge exists that the gate can afford on a write path — "
-            "this module's audit is a whole-table aggregation per call, and "
-            "``metering.get_postgres_bytes_written`` is the window addend."),
+            "the per-org MEASUREMENT half, and #9559 adds the FIGURE the gate can "
+            "actually read on a write path. Both are recorded as satisfied "
+            "release conditions on the gate itself "
+            "(``allowance_gate.RELEASE_CONDITIONS``) — and neither arms the "
+            "dimension. Arming waits on ONE thing, the owner's: the free/anon "
+            "included amounts are still undecided. "
+            "⛔ THE GAUGE IS A SNAPSHOT AND THAT IS DELIBERATE: this module's "
+            "audit is a whole-table aggregation per call, so it writes "
+            "``org_postgres_residency`` (``postgres_residency_snapshot()``) "
+            "OFFLINE and the gate reads one row by primary key. Nothing "
+            "schedules that refresh yet — see ``unscheduled_reason``. With no "
+            "row (or a row older than the gate's ``stale_after_seconds``) the "
+            "gate REFUSES a configured allowance instead of capping from a "
+            "figure it cannot defend, so an unscheduled snapshot over-blocks "
+            "rather than failing open."),
         bindings=(
             Binding("tortoise.postgres_storage", "measure_postgres_storage", READER),
             # #12762 — the per-org half. The WRITER is reached from the record
@@ -494,12 +501,19 @@ DIMENSIONS: tuple[Dimension, ...] = (
             Binding("tortoise.postgres_bytes", "measure_written_rows", READER),
             Binding("tortoise.postgres_bytes", "per_org_bytes", READER),
             Binding("tortoise.postgres_bytes", "reconcile", READER),
+            # #9559 — the residency GAUGE: the snapshot the audit writes offline
+            # and the reader the allowance gate calls per write. Two symbols
+            # because they are two objects: the reader is the write-path
+            # contract, the snapshot RPC is the offline measurement.
+            Binding("tortoise.metering", "get_postgres_residency", READER),
+            Binding("tortoise.allowance_gate", "_postgres_stored_bytes", READER),
         ),
         columns=("postgres_bytes_written", "postgres_bytes_records"),
         rpcs=(
             "postgres_storage_footprint",
             "journal_event_bytes_for_rows",
             "postgres_per_org_bytes",
+            "postgres_residency_snapshot",
             "metering_increment_postgres_bytes",
         ),
         unscheduled_reason=(
@@ -514,7 +528,16 @@ DIMENSIONS: tuple[Dimension, ...] = (
             "lookup and increment RPC — so FIVE extra round trips per write "
             "segment, "
             "inside the caller's open transaction. It is measured there and "
-            "RECORDED only after the caller commits."),
+            "RECORDED only after the caller commits. "
+            "⛔ THE RESIDENCY GAUGE'S REFRESH IS THE ONE PIECE STILL UNSCHEDULED "
+            "(#9559): ``postgres_residency_snapshot()`` must run on a timer for "
+            "the gate to hold a storage cap, and nothing calls it yet. That is "
+            "deliberate here — a schedule is a deploy decision (the box has no "
+            "``pg_cron`` in any migration, and an external caller is an "
+            "operator's choice) — and it is DISCLOSED rather than assumed: "
+            "while no snapshot exists the gate has NO READING and refuses a "
+            "configured allowance, which over-blocks instead of billing from a "
+            "guess."),
         limits=(
             "``live_rows`` is a PLANNER STATISTIC (``n_live_tup``) that can lag "
             "the truth; the exact per-org count comes from the row-growth row.",
