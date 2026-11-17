@@ -279,8 +279,18 @@ SKIP_TARGET_LABEL_AMBIGUOUS = "target-label-ambiguous"
 SKIP_NO_USABLE_HOME = "no-usable-home"
 #: The door BENEATH the guard would refuse the redirected write. The guard may
 #: never cause that (the router one function away already refuses to), so it
-#: abstains instead: a legal Object write with an Object-only `status` must not
-#: become a `ValueError` because a name looked person-shaped.
+#: abstains instead.
+#:
+#: ⚠️ #11824 S0 changed WHAT THIS BUYS. It used to mean "a legal Object write
+#: carrying an Object-only `status` must not become a `ValueError` because a
+#: name looked person-shaped" — there were per-family status vocabularies, so a
+#: redirect really could turn a landing write into a refusal. There is no longer
+#: an Object-only status: every knowledge kind takes the same four lifecycle
+#: words (`tortoise/lifecycle_vocabulary.py`), so a status this arm fires on is
+#: one the write door REFUSES immediately afterwards (`active` is a POSITION
+#: word there, not a state). The abstention still fires and still keeps the
+#: guard out of the way — it no longer decides the outcome, and the reason a
+#: client sees is the door's, with its performable repair.
 SKIP_STATUS_NOT_LEGAL_ON_SUBJECT = "status-not-legal-on-subject"
 #: The OTHER prop a `:Subject` door validates and an `:Object` door does not
 #: (`roleHolder` needs `subjectKind='role'`). Same rule as the status arm: a
@@ -1018,11 +1028,15 @@ def subject_only_prop_abstention(
     legal on the kind the guard moved it to. ONE reason for both arms: a
     redirect must never turn a legal write into a refusal (#1934).
 
-    * ``status`` — the Subject lifecycle (ONTOLOGY §4.2). MEASURED before the
-      arm existed: a pack guard redirecting to a §5 Subject kind raised
-      ``ValueError: Invalid status 'active' for a :Subject`` on a write that
-      lands unguarded. The Object door validates nothing, so the redirect — not
-      the caller — would have invented the refusal.
+    * ``status`` — the lifecycle field. MEASURED before the arm existed: a pack
+      guard redirecting to a §5 Subject kind raised ``ValueError: Invalid status
+      'active' for a :Subject`` on a write that landed unguarded.
+      ⚠️ #11824 S0 retired that asymmetry: ``status_values`` and the Object
+      door's set are now the SAME four words, so this arm can only fire on a
+      value the door refuses anyway (``active`` is a position word). It is kept
+      because the guard must never be the thing that decides a refusal, and
+      because ``roleHolder`` below shares the arm — not because it still changes
+      an outcome.
     * ``roleHolder`` (and its snake alias) — legal only on a
       ``subjectKind='role'``. MEASURED (round-3 review P2): the same redirect
       raised ``ValueError: roleHolder is only valid on a Subject of

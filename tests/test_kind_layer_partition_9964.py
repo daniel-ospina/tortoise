@@ -206,24 +206,38 @@ def test_a_vocabulary_only_kind_stays_on_the_door_the_caller_chose(sdk):
         require_calibration=False)['provenance']["subject"] is not None
 
 
-def test_routing_never_turns_a_legal_write_into_a_refusal(sdk):
-    """The re-route must not invent a refusal (#1934 warn-not-block).
+def test_a_write_with_no_legal_status_is_refused_before_it_can_be_routed(sdk):
+    """#1934's "never invent a refusal" is now answered one layer earlier.
 
-    The Object door validates no `status`; the Subject door validates it against
-    ONTOLOGY §4.2. So an Object write that names a Subject kind AND an
-    Object-only status (`active`) would RAISE if it were re-routed — a refusal
-    this fix would have invented. It keeps the layer the caller asked for and is
-    reported instead, verbatim: the write lands, nothing is rewritten to fit.
+    The defect this used to pin: the Object door validated no `status` while the
+    Subject door validated it against ONTOLOGY §4.2, so an Object write naming a
+    Subject kind AND an Object-only status (`active`) would RAISE if it were
+    re-routed — a refusal this fix would have invented.
+
+    ⚠️ #11824 S0 RETIRED THE PREMISE and left the guarantee true for a better
+    reason. Every knowledge kind now validates `status` against the SAME four
+    words (`tortoise/lifecycle_vocabulary.py`), so there is no longer a status
+    legal on an Object and illegal on a Subject — and `active` is a POSITION
+    word refused at EVERY door before the router's opinion matters. The router
+    therefore cannot invent a refusal here, because there is no legal write for
+    it to turn into one. What is asserted instead: the refusal is the DOOR's,
+    it names a performable repair, and nothing is re-routed onto `:Subject` for
+    a write the caller addressed to an Object.
     """
-    r = sdk.create_object("Zeta Holdings", objectKind="core:team", status="active")
-    labels, object_kind, _sk, _pk, _ek = _node(sdk, r["id"])
-    assert labels == ["Object"], r
-    assert object_kind == "core:team"
-    notes = _layer_notes(r)
-    assert [n["code"] for n in notes] == ["kind_other_layer"], r.get("advisories")
-    assert "not re-routed" in notes[0]["message"]
-    # The same write with a Subject-lifecycle status IS routed — the guard is
-    # about the status, not about refusing to route.
+    with pytest.raises(ValueError) as exc:
+        sdk.create_object("Zeta Holdings", objectKind="core:team",
+                          status="active")
+    message = str(exc.value)
+    assert "status 'active' was refused" in message
+    assert "advance_stage" in message, \
+        "a refused position word must name the stage move that replaces it"
+    assert _graph(sdk).query(
+        "MATCH (s:Subject) WHERE s.name = 'Zeta Holdings' RETURN count(s)",
+    ).result_set == [[0]], (
+        "a refused write lands nothing, and must not be re-routed onto the "
+        "Subject layer on its way to being refused")
+    # The same write with a lifecycle word IS routed — the router's rule is the
+    # layer the kind declares; the status no longer distinguishes the families.
     r2 = sdk.create_object("Zeta Live", objectKind="core:team", status="live")
     labels2, _ok2, subject_kind2, _pk2, _ek2 = _node(sdk, r2["id"])
     assert labels2 == ["Subject"], r2
@@ -576,47 +590,28 @@ def test_the_mcp_nested_props_shape_is_reported(sdk):
         r.get("advisories")
 
 
-def test_an_unhashable_status_cannot_crash_the_routing_guard(sdk):
-    """The guard exists to avoid a refusal; it must not invent a CRASH.
+def test_an_unhashable_status_is_refused_not_a_crash_in_the_routing_guard(sdk):
+    """The guard must not invent a CRASH — and since #11824 S0 the refusal is
+    the DOOR's, not a `TypeError` from a hash.
 
     `_SUBJECT_STATUS_VALUES` is a frozenset, so membership HASHES its operand —
     an unhashable `status` (a list/dict) raised `TypeError: unhashable type`
-    where `origin/main` wrote the node. The Subject door's own validation tests
-    `isinstance(…, str)` FIRST; the guard must mirror it (a non-str status is
-    not routable, and it is not a crash either).
-
-    ⛔ RESTATED BY #12869, and the reason is recorded rather than assumed. This
-    pin asserted TWO contracts on ONE fixture, and they belong to different
-    decisions:
-
-      1. **#1934's** — an ADVISORY must never refuse a write. That is the
-         ROUTING guard's job and it is UNCHANGED: the first arm below still
-         lands the write on the object door and still reports
-         `kind_other_layer`.
-      2. *"no write may be refused"* for a NON-STRING `status`. That is not
-         #1934's axis — #1934 is about an advisory deciding a write's fate,
-         while this is a TYPE question. #12869 answers it the other way: §4.3
-         declares `status` a STRING for every kind, and the `:Subject` (#1423),
-         `:Point` (#3311) and `:Event` doors already refuse a non-string. The
-         Object door was the only one that accepted it, which is the
-         three-family divergence #12869 closes.
-
-    So the ADVISORY arm moves to an undeclared STRING — legal under every
-    family, so #1934's contract is still exactly what it exercises — and the
-    unhashable shape gets its own arm asserting the refusal this pin was named
-    for (a `ValueError`, never a `TypeError`).
+    where `origin/main` wrote the node. The guard now mirrors the Subject door's
+    `isinstance(…, str)` test, and #11824 S0's lifecycle door then refuses a
+    non-string status outright as its FIRST arm — the shape check runs before
+    the vocabulary check, the same ordering #12869/#12910 gives the Object
+    doors. So the property worth pinning is no longer "the write lands": it is
+    that the caller gets a DESIGNED `ValueError` naming the shape, never a
+    `TypeError` from a hash, and that nothing is written or re-routed on the way
+    (a `TypeError` is not a `ValueError`, so `pytest.raises(ValueError)` is the
+    assertion that the crash is gone).
     """
-    # ── 1. #1934: the ADVISORY must not refuse a write ──────────────────
-    # `banana` is not a Subject status, so the routing guard still has
-    # something to report; the write still lands, which is the contract.
-    r = sdk.create_object("Q3", objectKind="core:team", status="banana")
-    assert r.get("id"), "warn-not-block (#1934): the write must land"
-    labels, object_kind, _sk, _pk, _ek = _node(sdk, r["id"])
-    assert labels == ["Object"], r
-    assert object_kind == "core:team"
-    # Reported (not re-routed, not crashed): the status is not a Subject status.
-    assert [n["code"] for n in _layer_notes(r)] == ["kind_other_layer"], \
-        r.get("advisories")
+    with pytest.raises(ValueError) as exc:
+        sdk.create_object("Q3", objectKind="core:team", status=["active"])
+    assert "must be a plain string" in str(exc.value), str(exc.value)
+    assert _graph(sdk).query(
+        "MATCH (n) WHERE n.name = 'Q3' RETURN count(n)",
+    ).result_set == [[0]], "a refused write must land nothing"
 
     # ── 2. #12869: the unhashable shape is a REFUSAL, never a crash ─────
     with pytest.raises(ValueError, match="refused a non-string status"):

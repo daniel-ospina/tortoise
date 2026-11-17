@@ -469,7 +469,12 @@ class TestPhase1GuardSeesTheKeyIdentity:
         assert res["created"]["points"] == 2
         assert len(_points_with_key(sdk, k1)) == 1
         assert len(_points_with_key(sdk, k2)) == 1
-        assert sdk.get_point(res["ids"]["points"][0]).get("status") == "retracted"
+        assert sdk.get_point(res["ids"]["points"][0]).get("status") == "deprecated", (
+            # ⛔ #11824 S0: `retracted` is a DECLARED SYNONYM of `deprecated` and
+            # is stored canonically, so the row reads `deprecated`. The claim
+            # here is the IDENTITY resolution (one carrier per key, the guard
+            # not over-rejecting the bundle) — the stored spelling is incidental.
+            "the terminal item landed (as the canonical word) on its own point")
 
 
 class TestPhase1GuardSeesTheContentIdentity:
@@ -703,7 +708,10 @@ class TestPhase1GuardSeesTheContentIdentity:
             "MATCH (n:Point) WHERE n.content IN ['A-DISTINCT','B-DISTINCT'] "
             "RETURN n.status"
         ).result_set
-        assert {r[0] for r in rows} == {"retracted", "live"}
+        assert {r[0] for r in rows} == {"deprecated", "live"}, (
+            # #11824 S0 stores the declared synonym `retracted` as `deprecated`;
+            # one terminal row + one live row is what this pin is about.
+            "one terminal (canonicalised) point and one live point")
 
     def test_a_live_twin_of_a_terminal_point_is_refused(self, sdk):
         """fix-round-2 P2.3 (the behaviour ``docs/INGEST_CONTRACT.md`` row 7
@@ -888,9 +896,12 @@ class TestPhase1GuardSeesTheContentIdentity:
             "props value one level deeper than the item, so one fold reaches "
             f"only item['props']'s keys (got {minted['status']!r})")
         # ONE wrap is one fold deep, so it IS stored — the record must exist.
+        # #11824 S0: the stored word is canonical, so `retracted` reads back as
+        # `deprecated`. The claim (the status IS stored, not dropped by the
+        # fold depth) is unchanged.
         assert sdk.create_point(
             "statement", "MINT-DEPTH-PIN-1",
-            props={"status": "retracted"})["status"] == "retracted"
+            props={"status": "retracted"})["status"] == "deprecated"
         assert _item_effective_status(
             item, _POINT_ITEM_MINT_STATUS_DEPTH) is None, (
             "the guard's mint read must agree with the door: depth "
@@ -1568,7 +1579,10 @@ class TestTheMintRecordIsKeyedByTheSTOREDKind:
         ).result_set
         assert len(rows) == 2, f"two distinct points, got {rows}"
         assert {(r[0], r[1]) for r in rows} == {
-            ("core:deployment", "retracted"), ("statement", "live")}, (
+            # #11824 S0: the declared synonym `retracted` is stored canonically
+            # as `deprecated`; the claim is the TWO distinct points, one per
+            # (kind, identity), not the spelling.
+            ("core:deployment", "deprecated"), ("statement", "live")}, (
             "the props spelling WINS on the stored node, and the second item "
             f"mints under its own positional kind (got {rows})")
 
