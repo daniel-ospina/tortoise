@@ -162,15 +162,25 @@ class TestDeprovisionOnDelete:
                 # real store refuses.
                 assert kw.get("cursor") == "id", kw.get("cursor")
                 assert "id" in (kw.get("select") or []), kw.get("select")
-                # The certificate is DERIVED, not taken on trust: the real walk
-                # cannot advance from a row carrying no cursor value, so a fixture
-                # that omits `id` is a page production would REFUSE — and
-                # `_org_graph_names` then raises. Three fixtures here used to omit
-                # it and were green only because this double certified
-                # unconditionally. `complete` still lets a test SAY "this walk was
-                # truncated" (`test_a_truncated_graphs_walk_…`).
+                # ⛔ DELEGATED — `FakeControlPlane._certifiable` is the ONE statement
+                # of the certificate, and it now mirrors BOTH of production's
+                # branches (an empty page certifies; a non-empty one needs at least
+                # one cursor). Restating it here is what produced the inverse of this
+                # PR's bug: the line used to be `all(...)`, which refused a MIXED page
+                # (the real walk advances from its cursored rows), so
+                # `_org_graph_names` raised and the org could NEVER be purged.
+                #
+                # This line has now been wrong in BOTH directions, which is why all
+                # three arms are pinned: `test_a_MIXED_page_still_certifies_…`,
+                # `test_a_page_with_NO_cursor_anywhere_is_REFUSED`, and the
+                # pre-existing empty-page arm in
+                # `test_a_legacy_stored_name_is_dropped_alongside_the_canonical_one`.
+                # `complete` still lets a test SAY "this walk was truncated"
+                # (`test_a_truncated_graphs_walk_…`).
+                from tests.fake_control_plane import FakeControlPlane
+
                 rows = graphs or []
-                certified = all(isinstance(r, dict) and r.get("id") for r in rows)
+                certified = FakeControlPlane._certifiable(rows, None, "id")
                 return rows, bool(complete and certified)
         return _CP()
 
@@ -264,6 +274,59 @@ class TestDeprovisionOnDelete:
                                 [{"id": "o1", "graph_name": "org_o1"}],
                                 graphs=[{"id": "g_1", "namespace": "org_o1_g_1"}],
                                 complete=False))
+        with pytest.raises(RuntimeError, match="could not be certified complete"):
+            ha._org_graph_names("o1", "org_o1")
+
+    def test_a_MIXED_page_still_certifies_so_the_org_CAN_be_purged(self, monkeypatch):
+        """⛔ The certificate must be as LENIENT as production, not stricter
+        (#13205 review round 13).
+
+        The real walk's rule is ``advanceable = [c for c in cursors if c]; if not
+        advanceable: break`` — so a page carrying at least ONE cursored row still
+        ADVANCES, and the uncursored rows stay in ``rows``. Requiring EVERY row to
+        carry one (an ``all(...)`` certifier) reports such a page as truncated,
+        ``_org_graph_names`` raises, and the purge aborts — the INVERSE of the
+        leak this PR exists to fix: an org that can never be purged at all.
+
+        Both graphs still get dropped, because ownership is decided by
+        ``namespace``; the uncursored row only declines to help the walk ADVANCE,
+        it does not make itself undroppable."""
+        from tortoise import hosted_api as ha
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: self._fake_cp(
+                                [{"id": "o1", "graph_name": "org_o1"}],
+                                graphs=[{"id": "g_1", "namespace": "org_o1_g_1"},
+                                        # no `id`: production keeps this row and
+                                        # still advances from its sibling.
+                                        {"namespace": "org_o1_g_2"}]))
+        names = ha._org_graph_names("o1", "org_o1")
+        assert "org_o1_g_1" in names, names
+        assert "org_o1_g_2" in names, names
+        assert names[-1] == "org_o1", names
+
+    def test_a_page_with_NO_cursor_anywhere_is_REFUSED(self, monkeypatch):
+        """The OTHER half of the same rule (#13205 review round 13), so the
+        certificate cannot drift either way.
+
+        A NON-empty page where not one row carries a cursor leaves
+        ``advanceable`` empty, so the real walk breaks with ``exhausted`` False and
+        CANNOT certify. That is what makes the whole walk refuse rather than
+        drop the graphs it happened to see — the direction the derived certificate
+        was originally introduced for (three deprovision fixtures shipped rows
+        carrying only ``namespace`` and were green because the double certified
+        unconditionally)."""
+        from tortoise import hosted_api as ha
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: self._fake_cp(
+                                [{"id": "o1", "graph_name": "org_o1"}],
+                                graphs=[{"namespace": "org_o1_g_1"},
+                                        {"namespace": "org_o1_g_2"}]))
         with pytest.raises(RuntimeError, match="could not be certified complete"):
             ha._org_graph_names("o1", "org_o1")
 

@@ -181,6 +181,12 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("oauth_refresh_tokens", "revoked_at"),
     ("org_memberships", "created_at"),
     ("org_memberships", "updated_at"),
+    # `#13277` (`20261117000002_postgres_residency_gauge.sql`) declares both, and
+    # the registry is DERIVED — `test_registry_matches_the_migrations` replays every
+    # migration and asserts equality, so the migration landed on `main` with this
+    # pin red until the two columns were named here (`#13249`).
+    ("org_postgres_residency", "measured_at"),
+    ("org_postgres_residency", "updated_at"),
     ("organizations", "backup_latest_at"),
     ("organizations", "backup_restored_at"),
     ("organizations", "created_at"),
@@ -2091,6 +2097,19 @@ class FakeControlPlane:
         decides the certificate.
         """
         cursors = [r.get(cursor) if isinstance(r, dict) else None for r in rows]
+        if not rows:
+            # ⛔ AN EMPTY PAGE IS THE SOUND END-OF-WALK SIGNAL, so it CERTIFIES.
+            # The real walk has two branches here and this double used to mirror
+            # only one: `if not page: exhausted = True; break` (certifies), and
+            # separately `advanceable = [c for c in cursors if c]; if not
+            # advanceable: break` (refuses). Answering False for an empty page was
+            # therefore STRICTER than production in exactly the direction that
+            # matters to a purge: `_org_graph_names` raises on an uncertified walk,
+            # so an org owning NO custom graphs could never be purgeable. Measured
+            # with `#13249`'s deprovision suite when this rule was delegated to:
+            # `test_a_legacy_stored_name_is_dropped_alongside_the_canonical_one`
+            # went red on the empty `graphs` page.
+            return total is None or total <= 0
         if not any(cursors):
             return False
         return total is None or len(rows) >= total
