@@ -121,7 +121,12 @@ def test_terminal_set_is_the_vocabularys_terminal_half() -> None:
     """
     writable = POINT_STATUS_VALUES
     writable_terminal = writable - CURRENT_POINT_STATUS_VALUES
-    # every word a writer may set is CURRENT or NOT-CURRENT — a total split
+    # every word a reader will SERVE as current is one a writer may set — that is
+    # the falsifiable half. The identity below is set algebra for ANY CURRENT ⊆
+    # POINT, so it reds only when CURRENT names a word the write set lacks
+    # (measured: injecting an unclassified write word leaves it green and reds
+    # the `<=` and the classification arm instead); the classification trap lives
+    # there, not here.
     assert writable == CURRENT_POINT_STATUS_VALUES | writable_terminal
     # a word a writer may set as an ending is never served as current (design §8:
     # "what a reader hides is wider than what a writer may create"). Its ABSOLUTE
