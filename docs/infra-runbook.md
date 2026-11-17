@@ -4273,11 +4273,12 @@ own reason — #13093: the record answered `no row` for the labels that door ser
 does NOT serve could still hold the node. Its repairs are per-label parity (#9721) *and* a
 Source-by-`id` probe, so it is kept apart from `record-miss`, whose repair is a backfill.)
 
-⛔ **On an armed deployment the union door's FALSY absent answer is unreachable today.** Because
-coverage is incomplete, every absent id — including one neither store holds — answers
-`{"residency": "not-hot", …}`, which is TRUTHY. An operator or client that tests `if out:` reads that
-as a found node; read the `residency` field instead. This is stated on `TortoiseSDK.get_entity`'s own
-docstring, and it is why the internal readers pass `cache_only=True`.
+⛔ **On an armed deployment the union door's FALSY absent answer is unreachable for a NAMED id.**
+Because coverage is incomplete, every absent name — including one neither store holds — answers
+`{"residency": "not-hot", …}`, which is TRUTHY. (The empty key is the one exception: it names nothing,
+so it answers `{}` in every mode, including `record`.) An operator or client that tests `if out:` reads
+the marker as a found node; read the `residency` field instead. This is stated on
+`TortoiseSDK.get_entity`'s own docstring, and it is why the internal readers pass `cache_only=True`.
 
 **Verification.** `tests/test_12941_read_your_writes.py` pins the seam and every door DB-free (a fake
 record, a fake cache) — read-your-writes, `not-hot`-is-never-empty, the byte-identical default, and

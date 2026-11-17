@@ -59192,17 +59192,19 @@ class TortoiseSDK:
         how the internal-reader tests pin those arms, and their contract says
         the interception must work `regardless of how it is spelled`.
 
-        ⛔ **ON AN ARMED DEPLOYMENT, ``{}`` IS NOT REACHABLE FROM THIS DOOR
-        TODAY — EVERY ABSENT ID ANSWERS THE TRUTHY ``not-hot`` SHAPE.**
+        ⛔ **ON AN ARMED DEPLOYMENT, ``{}`` IS NOT REACHABLE FROM THIS DOOR FOR A
+        NAMED ID — EVERY ABSENT *NAME* ANSWERS THE TRUTHY ``not-hot`` SHAPE.**
+        (The one exception is the EMPTY key, which names nothing and therefore
+        answers ``{}`` in every mode.)
         The coverage rule (`record_serve.entity_coverage_complete`) is `False`
         while ``Event``/``Source`` lack measured parity (#9721) AND a Source
         cannot be addressed by a bare ``id`` at all
         (``record_serve.ENTITY_UNION_ADDRESS_RESIDUALS``), so the falsy arm above
-        is unreachable and a caller MUST read the ``residency`` field rather than
-        the truthiness of the answer. That is why the ten internal readers pass
-        `cache_only=True` instead of testing truthiness, and it is the one
-        migration an external caller of this door owes: `if out:` no longer
-        distinguishes found from absent while the record seam is armed.
+        is unreachable for a named id and a caller MUST read the ``residency``
+        field rather than the truthiness of the answer. That is why the ten
+        internal readers pass `cache_only=True` instead of testing truthiness, and
+        it is the one migration an external caller of this door owes: `if out:`
+        no longer distinguishes found from absent while the record seam is armed.
 
         ``off`` — the default — is byte-identical to the pre-#13093 call: one
         cache query through the accessor, no record consult, no added key, and
@@ -59266,14 +59268,19 @@ class TortoiseSDK:
             # no attribution, no marker.
             return self._get_entity(id_val)
 
-        # ⛔ AN EMPTY KEY NAMES NO NODE, SO NO STORE IS CONSULTED. This has to
-        # short-circuit BEFORE the tenant resolution and the record round trip:
-        # the record's reader refuses an empty key as STRUCTURAL (`read_node`),
-        # so an armed `get_entity("")` would go from `{}` to an exception while
-        # `off` stayed absent — the same id answering two ways depending on a
-        # deployment flag. Nothing is named, so nothing is established.
+        # ⛔ AN EMPTY KEY NAMES NO NODE, SO NO STORE IS CONSULTED — not the
+        # record and NOT THE CACHE. This has to short-circuit here, BEFORE the
+        # tenant resolution and the record round trip: the record's reader
+        # refuses an empty key as STRUCTURAL (`read_node`), so an armed
+        # `get_entity("")` would go from `{}` to an exception while `off` stayed
+        # absent — the same id answering two ways depending on a deployment flag.
+        # And it answers `{}` ITSELF rather than delegating to `_get_entity`:
+        # that would build a graph handle, which `record` mode exists to avoid
+        # (the laziness the point door pins with `handle_opens == 0`), and the
+        # CACHE has no `node_key <> ''` constraint, so it could return a node for
+        # an empty key FROM the store the mode promises not to read.
         if not id_val:
-            return self._get_entity(id_val)
+            return {}
 
         # ⛔ ONE COORDINATE SPELLING (#13322 review observation 3).
         # `record_serve.serve_entity` builds `union:<labels>:<id>`; a second
