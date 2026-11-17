@@ -1380,12 +1380,12 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     ("tortoise/search_engine.py", 4707,
      "for rank, (pid, _score) in enumerate(ranked):",
      "`tortoise/search_engine.py:4707`"),
-    ("tortoise/projection/__init__.py", 20401, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20401`"),
-    ("tortoise/projection/__init__.py", 20829, "def _create_fulltext_index(",
-     "`:20829`"),
-    ("tortoise/projection/__init__.py", 21279,
-     "self._create_fulltext_index(label, fields)", "`:21279`"),
+    ("tortoise/projection/__init__.py", 20439, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20439`"),
+    ("tortoise/projection/__init__.py", 20867, "def _create_fulltext_index(",
+     "`:20867`"),
+    ("tortoise/projection/__init__.py", 21317,
+     "self._create_fulltext_index(label, fields)", "`:21317`"),
 )
 
 
