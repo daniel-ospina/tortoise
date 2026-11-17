@@ -660,6 +660,29 @@ def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
         assert art["provenance"]["git_head_note"]
 
 
+def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
+    """The same four corrections, at the other place the figures are published.
+
+    `docs/00_index.md` carries a full row for this brief, and it repeated both
+    retired claims verbatim (`60 of 60 items returned the identical ranked list`,
+    `id_digest … , ids_match_all_arms: true`) — the propagation the review warns
+    about: the record other lanes read carries the error to artifacts that were
+    correct. A doc-only edit of either file selects `tier1` and nothing else, so
+    these pins are why the row is registered there.
+    """
+    index = (Path(__file__).resolve().parent.parent / "docs" / "00_index.md").read_text()
+    head = _artifact("paired-point-300.json")
+    rows = [ln for ln in index.splitlines() if "2026-11-17-2518-paired-ab" in ln]
+    assert rows, "the brief's index row is where a reader first meets these figures"
+    row = rows[0]
+    assert "60 of 60 items returned the identical ranked list" not in row
+    assert "ids_match_all_arms: true" not in row
+    assert "id_digest 4d6899d3" not in row
+    assert head["items"]["name_digest"][:8] in row
+    for transposed in ("10.36", "10.27"):
+        assert transposed not in row
+
+
 # ── 3. the pair, live ───────────────────────────────────────────────────────
 
 def _falkordb_available() -> bool:
