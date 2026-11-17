@@ -5162,7 +5162,7 @@ surfaces:
   # readers stop answering it themselves. ⛔ REGISTERED LATE, and this row is the main-red
   # repair: the file landed on main with NO manifest row, so `ci_selection.py --integrity`
   # went red ('manifest drift') and `python-ci`'s manifest-integrity leg went with it —
-  # an unlisted file is a #1262 red AND runs in no leg (#1349/#2938). ⛔ THREE legs, not one:
+  # an unlisted file is a #1262 red AND runs in no leg (#1349/#2938). ⛔ FIVE legs, not one:
   # `manifest-integrity`; the FAST shard `test (c)` (run 44025094904, job 133859918441), where
   # `tests/test_ci_manifest.py::test_integrity_notices_unknown_and_still_fails_red` drives
   # `--integrity` over a copy of the committed manifest and reds `assert 1 == 0` (that job's
@@ -5178,10 +5178,22 @@ surfaces:
   # `test_integrity_still_notices_an_absent_stamp_and_exits_zero` plus
   # `test_null_or_non_mapping_durations_reports_instead_of_tracebacking` are exit-code arms
   # (`_integrity_with_stamp(...) == 0`, `main() == 0`) that this row's absence reds at exit 1
-  # without ever naming the file. ⛔ NOT `test-slow (a)` from that same run: it is red for an
+  # without ever naming the file. ⛔ TWO MORE fast shards carry the same assertion, and both
+  # went red in that run: `test (g)` (job 133859918249, its ONLY failure — 1 failed of 4414) is
+  # `tests/test_registry_integrity.py::test_the_integrity_entry_point_names_a_duplicate_durations_key`,
+  # whose `--integrity` call prints `❌ manifest drift: ['test_13034_currency_rule_reads_position.py']`;
+  # and `test (h)` (job 133859918343, 5 failed of 3773) is five `tests/test_ci_timing.py` arms —
+  # `test_integrity_problems_agrees_with_the_integrity_cli`,
+  # `…_catches_a_duplicate_durations_key`, `…_promotes_a_present_but_unparseable_stamp`,
+  # `test_refresh_durations_on_the_real_manifest_adds_a_pending_file` and `…_of_record` — each
+  # asserting `['test_13034_currency_rule_reads_position.py'] == []`. So the blast radius is
+  # FIVE lights across four shards plus the required job, not the one the PR title implies.
+  # ⛔ NOT `test-slow (a)` from that same run: it is red for an
   # UNRELATED class — every one of its failures is `tests/test_surface_manifest.py` (a
   # shallow clone that cannot resolve `cut_at_commit`, plus the `tortoise_query` digest) —
-  # which is the next paragraph's subject, not this row's.
+  # and NOT `test (e)` either (job 133859918292, 3 failed: a `hosted_api.py` cite census in
+  # `test_demo_session_read_exclusion_8290.py` plus two `test_extractor_v4_citation_rot.py`
+  # arms) — both are the next paragraph's subject, not this row's.
   # Reproduced locally too: `integrity()` over this manifest is `[]`, and over the same
   # manifest with this file's rows removed from BOTH lists (the state `main` was in) it
   # returns `['test_13034_currency_rule_reads_position.py']`. ⛔ Removing only the `core`
