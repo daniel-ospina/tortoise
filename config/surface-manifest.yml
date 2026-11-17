@@ -108,8 +108,8 @@
 # a constant here.
 #
 # ROWS RE-STAMPED FOR A DECLARATION CHANGE (#13110) — recorded HERE because a re-cut
-# erases body comments (see the ⚠️ above). `tortoise_create_object`,
-# `tortoise_create_entity` and `tortoise_create_point` each gained a `goalState`
+# erases body comments (see the ⚠️ above). `tortoise_create_entity` and
+# `tortoise_create_point` each gained a `goalState`
 # PARAMETER, which moved both of their cells: `served_from` is the `_code_digest` of the
 # handler's code object (bytecode, names, constants — a docstring counts, it is a
 # `co_const`; `co_firstlineno` is excluded on purpose, so a pure code move moves
@@ -123,6 +123,11 @@
 # public SDK method” rule (AGENTS.md §MCP/SDK Surface Approval); a parameter on an
 # existing door is neither, `counts:`/`high_water_counts:` are unchanged, and the tool
 # and SDK name sets are unchanged. A green `surface-guard` run is a consistency result.
+# ⛔ `tortoise_create_object` IS NOT IN THAT LIST ANY MORE, and this note said it was until
+# the `origin/main` merge: `#13052` (`#4282` Phase 2) retired the door from the ADVERTISED
+# surface, so it has no row here and the parameter is declared only on its Python alias
+# (kept for in-repo callers). A note on the shard-layout input that names a retired tool is
+# the same rot this header exists to stop.
 #
 # `cut_at_commit` IS a DEFAULT-BRANCH COMMIT, never a lane one (#11057 review F1). It names
 # the `main` commit this baseline was cut AGAINST, so `cut --commit <sha-in-main>` — not the
