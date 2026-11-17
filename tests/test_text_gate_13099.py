@@ -27,8 +27,8 @@ import hashlib
 from benchmarks.synthetic_corpus import build_topic_oracle, generate_oracle_points
 from tools.text_gate_13099 import (
     N_POINTS,
-    SEED,
     QUERY_CLASSES,
+    SEED,
     build_corpus,
     build_query_classes,
     labels_for,
@@ -82,7 +82,7 @@ def test_short_keyword_class_reuses_the_committed_queries_verbatim():
 
 def test_all_classes_reuse_the_committed_grade_function():
     """Grade 2 is exactly the topic's live point set — no new labels anywhere."""
-    oracle, points, live = build_corpus()
+    oracle, _points, live = build_corpus()
     for topic in (0, 7, 23):
         labels = labels_for(oracle, live, topic)
         grade2 = {pid for pid, g in labels.items() if g == 2}

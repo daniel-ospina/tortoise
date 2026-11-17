@@ -198,7 +198,7 @@ builder is part of the measurement and not a detail.
 
 `worked_examples[0]` in `artifact.json`, reproducible from the harness:
 
-```
+```text
 query   "cap-dominated boot cold-start band verdict"        (a live stored document, p-0000022)
 in-graph top-1   p-0000023  score 9.0000  grade 1   ("cap-dominated fingerprint provenance handoff sha git")
 in-graph target  p-0000022  score 4.1429  rank 99   (matches ALL SEVEN query terms)

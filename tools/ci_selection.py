@@ -1793,6 +1793,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # this file's suite (the same #1349/#3332/#3616 silent-drop class as
              # queue_resweep/batch_open above).
              "tools/next_work.py",
+             # #13099: `tools/text_gate_13099.py` is the text-index quality gate's
+             # harness (the measurement `SEARCH-ARCHITECTURE.md` §6.2's stop
+             # condition rests on), and `tests/test_text_gate_13099.py` — the pins
+             # for its corpus determinism, its verbatim query reuse and its
+             # CI-DIRECTION decision rule — is registered `core`. `tools/` is in
+             # `NON_PYTHON_PREFIXES`, so without this entry a harness-only change is
+             # filtered out BEFORE the "not matched -> core" fallback and takes the
+             # docs-only early return: `select(["tools/text_gate_13099.py"])` would
+             # yield NO surface and the pins would never run on the file they guard
+             # (the same #1349/#3332/#3616 silent-drop class as queue_resweep /
+             # batch_open / next_work above). Measured: without the entry
+             # `surfaces: []`; with it `surfaces: ['core']` and the file's suite is
+             # selected. (`integrity()` does NOT read CORE_ALSO — measured: `[]`
+             # either way — so it is not a pin; the manifest row above is what keeps
+             # the file classified.)
+             "tools/text_gate_13099.py",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
