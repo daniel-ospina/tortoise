@@ -234,9 +234,13 @@ def vector_index_drop_statements(label: str, property: str) -> tuple[str, ...]:
     The first entry is :func:`vector_index_drop_statement` — the only form
     measured to drop a VECTOR index. The generic forms follow for an engine that
     reaches vector indexes through its plain drop; they are CANDIDATES, tried
-    only on a sweep whose catalogue says the vector index is present, so a form
-    the engine rejects costs one failed DDL on the ONE migration sweep and
-    nothing afterwards.
+    only on a sweep whose catalogue says the vector index is present. ⛔ **A
+    refusal is not a one-off cost**: the gate re-reads the catalogue every setup
+    and keeps seeing the index, so a store whose engine refuses ALL of these
+    re-issues every candidate on EVERY setup — on a method the hosted path
+    reaches per request. The retirement's latch silences the WARNING, not the
+    retries; see `projection._ensure_vector_index_api`'s comment on the drop loop
+    for the measurement (3 candidates per setup, 2 at `main`).
 
     ⛔ ``graph_key_restore`` deliberately does NOT use this list — it must issue
     the one measured form and verify it, never "try something and see". This
