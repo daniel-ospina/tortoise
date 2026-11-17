@@ -367,4 +367,10 @@ class TestDedupHitDropsCallerStatus:
         sdk.create_point("statement", content, dedup=True)
         with pytest.raises(ValueError) as exc:
             sdk.create_point("statement", content, dedup=True, status="bogus")
-        assert "Invalid status" in str(exc.value)
+        # ⛔ The WORD refusal is the ONE lifecycle door's text since `#11824` S0
+        # (`status 'bogus' was refused: it is not a lifecycle word for :Point`).
+        # The per-door `Invalid status …` line survives only for a value that is
+        # not a plain `str`, so asserting it here pinned the retired spelling —
+        # measured RED on `origin/main` at `97fd713ffb`, which is why this is
+        # fixed in the PR that merges S0 rather than left as an inherited red.
+        assert "was refused" in str(exc.value)
