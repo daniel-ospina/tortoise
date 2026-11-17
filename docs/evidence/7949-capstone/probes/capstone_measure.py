@@ -3314,7 +3314,7 @@ def _a4_pointkind(projection) -> dict:
 
     ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
-    with no kind — `tortoise/projection/__init__.py:14336-14338`, `# Ensure pointKind is present
+    with no kind — `tortoise/projection/__init__.py:14389-14391`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
     `projection/entities.py:2979`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
