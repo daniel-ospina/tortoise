@@ -1144,14 +1144,15 @@ def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
 
     `_declared_stage_slot`'s docstring promises a pack key is *"stated at the call
     site rather than guessed"*, and the helper states the two questions separately.
-    ⚠️ MEASURED: that split is a CLARIFICATION, not a behaviour fix — the earlier
-    `_PIPELINE_DECLS.get(str(key or CORE_KEY))` already passed a PRESENT key through
-    verbatim and returned `None` for an unrecognised one, so no row was ever read
-    against CORE's declaration. This test therefore pins the CONTRACT (an
-    unrecognised key gets no opinion; an absent one resolves core) and cannot
-    redden on the pre-fix code — it is a pin of a rule that survived, not of a bug
-    that was fixed. The declaration arm's real discriminators are the stale-prop
-    and the armed rows below.
+    ⚠️ MEASURED: that split is a CLARIFICATION, not a behaviour fix — the pre-fix
+    line was, verbatim,
+    `_PIPELINE_DECLS.get(str(pipeline_key or CORE_WORK_ITEM_PIPELINE_KEY))`, which
+    already passed a PRESENT key through verbatim and returned `None` for an
+    unrecognised one, so no row was ever read against CORE's declaration. This test
+    therefore pins the CONTRACT (an unrecognised key gets no opinion; an absent one
+    resolves core) and cannot redden on the pre-fix code — it is a pin of a rule
+    that survived, not of a bug that was fixed. The declaration arm's real
+    discriminators are the stale-prop and the armed rows below.
 
     Absent key → core (the fold resolves core too, `cur_key` falsy).
     Present-but-unrecognised key → no opinion on this arm. ⛔ And the caller does

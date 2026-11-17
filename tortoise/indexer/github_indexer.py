@@ -399,18 +399,18 @@ def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
     """
     if stage_id is None:
         return None
-    # ⛔ ABSENT key and PRESENT-BUT-UNRECOGNISED key are DIFFERENT questions
-    # (#13289 F2), and the split below states them SEPARATELY so the refusal is
-    # visible at the point it happens. ⚠️ MEASURED, and it is NOT a behaviour
-    # change: the earlier `_PIPELINE_DECLS.get(str(key or CORE_KEY))` already passed
-    # a PRESENT key through VERBATIM, `.get` returned falsy for it, and the
-    # `if not decl: return None` below fired — so an unrecognised pack key never
-    # resolved against CORE, and the collision this comment used to narrate (a pack
-    # `done` read as CORE's `terminal`) could not occur. What the split buys is that
-    # the two questions are stated where they are answered; the contract itself is
-    # pinned by `test_a_pack_keyed_stage_is_not_resolved_against_the_core_
-    # declaration`, which — like any pin of unchanged behaviour — cannot redden on
-    # the pre-fix code, and says so.
+    # ⛔ ABSENT key and PRESENT-BUT-UNRECOGNISED key are DIFFERENT questions (#13289
+    # F2); the split below states them SEPARATELY so the refusal is visible where
+    # it happens. ⚠️ MEASURED, and it is NOT a behaviour change: the pre-fix line was
+    # verbatim, `_PIPELINE_DECLS.get(str(pipeline_key or CORE_WORK_ITEM_PIPELINE_KEY))`,
+    # and a PRESENT key went through VERBATIM, `.get` returned falsy, and the
+    # `if not decl: return None` below fired, so an unrecognised pack key never
+    # resolved against CORE and the collision this comment used to narrate (a pack
+    # `done` read as CORE's `terminal`) could not occur. What the split buys is
+    # that both questions are stated where they are answered; the contract is
+    # pinned by `test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration`
+    # — which, like any pin of unchanged behaviour, cannot redden on the pre-fix
+    # code, and says so.
     key = str(pipeline_key or "")
     if key:
         decl = _PIPELINE_DECLS.get(key)
