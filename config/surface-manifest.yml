@@ -1209,9 +1209,10 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  # ⛔ #13075 moved this handler (`a09a0b3840`, "the currency rule reads the position axis") and
-  # left `served_from` at the value #12726 had hand-refreshed, so
-  # `surface_manifest.py check --provenance-strict` has been red on `main` ITSELF since then —
+  # ⛔ #13075 changed this handler IN PLACE (`a09a0b3840`, "the currency rule reads the position
+  # axis" — its diff is three hunks INSIDE `def tortoise_query`, so the handler was EDITED, not
+  # relocated) and left `served_from` at the value #12726 had hand-refreshed,
+  # so `surface_manifest.py check --provenance-strict` has been red on `main` ITSELF since then —
   # the same FAIL row measured on a pristine worktree of `main` BOTH before #13144 (`55ec2c71b1`)
   # and at the head this branch is re-cut onto (`3d437429e9` — the re-cut whose only changed file
   # was `config/ci-surfaces.yml`, so it cannot reach this row; measured there: rc=1, the identical
@@ -1239,7 +1240,9 @@ rows:
   # the value the tree DERIVES, which is what `check` compares against.
   #
   # A full `cut` is deliberately NOT run. It is NOT owner-only — it is documented as a human step,
-  # once, with an explicit `--commit`, and `cmd_cut` carries no identity check — but it is gated on
+  # once, with an explicit `--commit` (the flag itself is OPTIONAL: `p_cut.add_argument("--commit")
+  # carries no `required=True`, and `build_doc` falls back to `git rev-parse HEAD`), and `cmd_cut`
+  # carries no identity check — but it is gated on
   # the owner's approval DOCUMENT: `read_approval` (`tools/surface_manifest.py`) reads
   # `docs/product/canonical-mcp-tools.md` and, through `build_doc`, REFUSES when that file is
   # missing (`_frontmatter` raises `SurfaceEvidenceUnreadable`) or carries no `approval_status`
@@ -1253,6 +1256,16 @@ rows:
   # so a cut here would buy one cell and cost the rationale. No tool or SDK method is added,
   # removed or renamed here (55 MCP tools / 94 public SDK methods, unchanged), so this is a
   # fingerprint refresh, not a surface change.
+  #
+  # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the
+  # source and RE-RUN the generator (buf/protoc baselines and the mainstream codegen convention all
+  # state it, and it is the right default) — because `cut` re-emits only `MANIFEST_HEADER`, so
+  # regenerating this file would DELETE every per-row rationale in it to buy back one cell, and the
+  # record of WHY each row reads as it does is worth more than the uniformity. What is NOT
+  # hand-derived is the value: `served_from` below is the digest the tree computes, which is
+  # exactly what `check --provenance-strict` compares — a re-stamp to the DERIVED value, never a
+  # value typed from memory. A reader holding the "always regenerate" page should put it down
+  # here, not "fix" this row by cutting.
   #
   # IDENTICAL TO #13000's `c1e3ff8500` (#12992) IN THE VALUE it writes (`served_from:
   # tortoise/mcp_server.py:59f8f7e5957d81d8`, byte-for-byte): whichever lands second applies to an
