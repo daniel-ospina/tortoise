@@ -120,6 +120,20 @@ EVENT_CAPPED = "capped"
 #: claim a completeness it never had.
 EVENT_UNRESOLVED = "unresolved"
 
+#: #13084: a read CALL was issued, with the KIND of question it asked.
+#:
+#: WHY ITS OWN EVENT. The row events record what a read RETURNED, so an empty
+#: result set records nothing — and a query MIX built from hits is not a mix of
+#: queries (an empty search is still a search, and the one that paid for a cold
+#: miss). One line per CALL, whatever it returned.
+EVENT_QUERY = "query"
+
+#: The four kinds the mix is reported over — a CLOSED set, so a typo is a loud
+#: error rather than a fifth bucket nobody reads. The kind is the DOOR's shape
+#: (what the caller asked for), not a per-leg attribution: a hybrid door that
+#: fired its dense leg records `vector` once, not one event per leg.
+QUERY_KINDS = ("traversal", "vector", "text", "lookup")
+
 #: Caller-facing entity types that are NOT graph labels: a document IS a
 #: `:Source` (D10, ONTOLOGY v3.15 §4.4) and an OPERATOR IS A `:Point`
 #: (`is_operator: true`), so recording `("Operator", id)` or `("Document", id)`
@@ -567,6 +581,47 @@ def record_read(
     )
 
 
+def record_query(
+    kind: str,
+    *,
+    label: str | None = None,
+    returned: int = 0,
+    seed: str | None = None,
+    at: str | None = None,
+    path: Path | None = None,
+    tenant_id: str | None = None,
+) -> bool:
+    """Record ONE read CALL and the kind of question it asked (#13084).
+
+    ``returned`` is informational — the mix counts CALLS, not rows. ``seed`` is
+    the traversal's START key: a later report asks whether that `(label, seed)`
+    coordinate had an EARLIER read in the window, which is what "the seed was
+    already resident" means here. (A stock-membership test cannot answer it: a
+    graph-derived projection is almost entirely stock, so it would report a ~100 %
+    hit rate by construction.)
+
+    A kind outside :data:`QUERY_KINDS` RAISES: an instrument that silently
+    invents a bucket produces a mix whose shares do not sum to 1 with nothing
+    saying why.
+    """
+    if kind not in QUERY_KINDS:
+        raise ValueError(
+            f"query kind {kind!r} is not one of {QUERY_KINDS} — the mix is a "
+            f"closed set so a typo cannot become a fifth bucket")
+    return _append(
+        {
+            "at": at or _now(),
+            "event": EVENT_QUERY,
+            "kind": kind,
+            "label": label,
+            "returned": int(returned),
+            "seed": str(seed) if seed else None,
+            "tenant": tenant_id if tenant_id is not None else tenant(),
+        },
+        path=path,
+    )
+
+
 def row_key(label: str, row: Mapping[str, Any]) -> str | None:
     """The `(label, key)` coordinate of ONE returned row, or `None`.
 
@@ -711,10 +766,76 @@ class LedgerFold:
     #: The earliest `at` the FILE contains. A rotated ledger starts a new window,
     #: and this is the only thing in the report that says so.
     first_event_at: str | None = None
+    #: #13084: read CALLS per kind (see :data:`QUERY_KINDS`) — the query mix.
+    query_counts: dict[str, int] = field(default_factory=dict)
+    #: Queries with no/unknown kind. COUNTED, never folded into a bucket: a
+    #: ledger written before the kind existed must not read as if every query
+    #: were, say, `lookup`.
+    queries_unattributed: int = 0
+    #: Traversal queries whose seed key had an EARLIER read in the window — "the
+    #: seed was already resident".
+    seeds_hot: int = 0
+    #: Traversal queries with no seed key (an unaddressable seed is a hole in the
+    #: numerator, never a miss).
+    traversals_unseeded: int = 0
+    #: Traversal queries whose seed key was never registered as STOCK — a second,
+    #: distinct hole ("not stock" is not "stock but cold").
+    seeds_unstocked: int = 0
 
     @property
     def stock_keys(self) -> int:
         return len(self.rows)
+
+
+@dataclass(frozen=True)
+class QueryMix:
+    """The mix of read CALLS by kind (#13084), with the unattributed count.
+
+    A MIX, not a hit distribution: a query that returned nothing is counted, so
+    the shares describe the QUESTIONS ASKED. ``unattributed`` is traffic the
+    ledger cannot classify (a pre-#13084 line, or an undated one) and is reported
+    rather than absorbed.
+    """
+
+    counts: dict[str, int]
+    unattributed: int
+
+    @property
+    def total(self) -> int:
+        return sum(self.counts.values())
+
+    @property
+    def shares(self) -> dict[str, float | None]:
+        total = self.total
+        return {kind: (n / total if total else None)
+                for kind, n in self.counts.items()}
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"counts": dict(self.counts), "shares": self.shares,
+                "total": self.total, "unattributed": self.unattributed}
+
+
+@dataclass(frozen=True)
+class SeedHitRate:
+    """Of the traversals run, how often the seed was already resident (#13084).
+
+    ``hot`` counts traversals whose seed key had an EARLIER read in the window.
+    The two holes are named, not folded in: ``unseeded`` (no seed key recorded)
+    and ``unstocked`` (a seed the ledger never saw registered).
+    """
+
+    trials: int
+    hot: int
+    unseeded: int
+    unstocked: int
+
+    @property
+    def rate(self) -> float | None:
+        return (self.hot / self.trials) if self.trials else None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"rate": self.rate, "trials": self.trials, "hot": self.hot,
+                "unseeded": self.unseeded, "unstocked": self.unstocked}
 
 
 def fold(
@@ -802,6 +923,38 @@ def fold(
                 if cutoff_dt is not None and _at_dt < cutoff_dt:
                     continue
                 out.unresolved_reads += 1
+                continue
+            if kind == EVENT_QUERY:
+                # #13084: the QUERY MIX and the SEED HIT RATE fold here, in FILE
+                # ORDER — "was the seed already resident" is a question about
+                # EARLIER reads, and `rows` holds exactly what the ledger had
+                # observed by this line. (Stock membership cannot answer it: every
+                # projected row is stock, so a stock test would report a 100 %
+                # hit rate by construction.)
+                qkind = ev.get("kind")
+                if qkind not in QUERY_KINDS:
+                    out.queries_unattributed += 1
+                    continue
+                if cutoff_dt is not None:
+                    q_at = _stamp(ev.get("at"))
+                    if q_at is None or q_at < cutoff_dt:
+                        # Same rule as a read: an undated query is COUNTED as
+                        # unattributed rather than silently excluded.
+                        if q_at is None:
+                            out.queries_unattributed += 1
+                        continue
+                out.query_counts[qkind] = out.query_counts.get(qkind, 0) + 1
+                if qkind == "traversal":
+                    seed = ev.get("seed")
+                    if not seed:
+                        out.traversals_unseeded += 1
+                    else:
+                        row = out.rows.get(
+                            (ev.get("tenant"), ev.get("label"), str(seed)))
+                        if row is None:
+                            out.seeds_unstocked += 1
+                        elif row.read_count > 0:
+                            out.seeds_hot += 1
                 continue
             label, key = ev.get("label"), ev.get("key")
             if not isinstance(label, str) or not isinstance(key, str):
@@ -967,6 +1120,35 @@ class HotFraction:
         }
 
 
+def query_mix(folded: LedgerFold) -> QueryMix:
+    """Reduce a fold to the QUERY MIX (#13084) — one place the shares happen.
+
+    Shares are over the ATTRIBUTED calls only, and the unattributed count is
+    reported beside them: a mix whose shares silently excluded unlabelled calls
+    would sum to 1 while describing only a subset of the traffic.
+    """
+    counts = {kind: int(folded.query_counts.get(kind, 0))
+              for kind in QUERY_KINDS}
+    return QueryMix(counts=counts, unattributed=int(folded.queries_unattributed))
+
+
+def seed_hit_rate(folded: LedgerFold) -> SeedHitRate:
+    """Reduce a fold to the SEED HIT RATE (#13084) — one place the division happens.
+
+    ``trials`` is every traversal query with an ADDRESSABLE seed (hot + cold);
+    the two hole counters are reported separately and never folded into a miss,
+    because a traversal we could not address says nothing about residency.
+    """
+    traversals = int(folded.query_counts.get("traversal", 0))
+    return SeedHitRate(
+        trials=max(0, traversals - folded.traversals_unseeded
+                   - folded.seeds_unstocked),
+        hot=int(folded.seeds_hot),
+        unseeded=int(folded.traversals_unseeded),
+        unstocked=int(folded.seeds_unstocked),
+    )
+
+
 def hot_fraction(folded: LedgerFold) -> HotFraction:
     """Reduce a fold to `f` — the ONE place the division happens."""
     stock_bytes = read_bytes = 0
@@ -1115,6 +1297,8 @@ def _main(argv: list[str] | None = None) -> int:
         mixed_namespace = None in all_tenants and len(all_tenants) > 1
         pooled_single_namespace = bool(all_tenants) and all_tenants <= {None}
     f = hot_fraction(folded)
+    mix = query_mix(folded)
+    seeds = seed_hit_rate(folded)
     if a.json:
         # `lines_skipped` / `lines_read` are fold-level facts, not `f`'s: a torn
         # line is a LOST event, so they belong beside the reading they qualify.
@@ -1122,6 +1306,8 @@ def _main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     **f.as_dict(),
+                    "query_mix": mix.as_dict(),
+                    "seed_hit_rate": seeds.as_dict(),
                     "lines_read": folded.lines_read,
                     "lines_skipped": folded.lines_skipped,
                     "reads_undated": folded.reads_undated,
@@ -1210,6 +1396,33 @@ def _main(argv: list[str] | None = None) -> int:
         print(
             "⛔ the ledger reached its size bound and stopped recording — this "
             "window is truncated, not quiet"
+        )
+    # #13084: the two figures Phase 1's window is sized from, beside `f`.
+    if mix.total or mix.unattributed:
+        parts = " · ".join(
+            (f"{kind} {n:,} ({share:.0%})" if share is not None
+             else f"{kind} 0")
+            for kind, n in mix.counts.items()
+            for share in (mix.shares[kind],)
+        )
+        print(f"query mix        : {parts}")
+        if mix.unattributed:
+            print(
+                f"⚠️ unattributed   : {mix.unattributed:,} read call(s) carry no "
+                f"recognised kind (a pre-#13084 line, or undated) — OUTSIDE the mix"
+            )
+    sr = seeds.rate
+    print(
+        f"seed hit rate    : {sr:.3f}  ({seeds.hot:,}/{seeds.trials:,} traversals "
+        f"whose seed was already read in the window)"
+        if sr is not None
+        else "seed hit rate    : n/a — no addressable traversal seed recorded"
+    )
+    if seeds.unseeded or seeds.unstocked:
+        print(
+            f"⚠️ seed holes     : {seeds.unseeded:,} traversal(s) with no seed key, "
+            f"{seeds.unstocked:,} whose seed was never registered as stock — "
+            f"outside the rate, not counted as misses"
         )
     return 0
 
