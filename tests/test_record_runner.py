@@ -540,8 +540,15 @@ def test_plan_from_checkpoint_opens_ONE_read_only_connection(monkeypatch, capsys
 
 def test_plan_reports_CUT_OVER_and_does_not_hand_over_an_acknowledgement(
         monkeypatch, capsys):
-    """`report.cursor` was hardcoded None, so this line was unreachable."""
-    _patched(monkeypatch, checkpoint=Checkpoint(), cursor=(4, "seedod"))
+    """`report.cursor` was hardcoded None, so this line was unreachable.
+
+    And the checkpoint it uses is an ALLOCATOR position, deliberately above the
+    journal's length: on the allocated arm `high_seq` is not an index into this
+    journal, so the journal-length guard must not fire — before this, a correctly
+    seeded graph was refused with "they are not the same journal".
+    """
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=502, present=3, min_seq=500),
+             cursor=(600, "seeded"))
     rc = main(["plan", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
                "--dsn", "postgresql://x/y", "--from-checkpoint"])
     assert rc == EXIT_OK
