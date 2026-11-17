@@ -17,8 +17,11 @@ aboutObjects: SEARCH-ARCHITECTURE.md §6.2 / M3, #13082 phase 2, #4051, #1144 re
 `SEARCH-ARCHITECTURE.md` §6.2 (*the text index does NOT move yet*) and the Cypher→Postgres plan
 `#13082` phase 2. · **Harness:** `tools/text_gate_13099.py` · **Artifacts, this directory:**
 `artifact.json` (every arm, every query class, the paired CIs, the depth audit and the worked
-example) and `artifact-repeat.json` (a **second independent run**; its metrics, per-query id lists
-and verdict are **byte-identical** to the first). · **Measured:** 2026-11-17, one box, both backends
+example) and `artifact-repeat.json` (a **second independent run**; its metrics, its per-query
+metrics and its verdict are **identical** to the first — a determinism check, not a second opinion).
+The artifacts carry per-query **metrics** so every paired CI in this record is recomputable by a
+reader; the per-query retrieved-id lists are omitted at ~4 MB because the harness regenerates them
+exactly (`--full` keeps them). · **Measured:** 2026-11-17, one box, both backends
 in one process, twice.
 
 ---
@@ -287,6 +290,7 @@ uv run --with "psycopg[binary]" python tools/text_gate_13099.py run \\
 
 # 4. repeat for the determinism check
 uv run --with "psycopg[binary]" python tools/text_gate_13099.py run ... --out .../artifact-repeat.json
+#    add --full to also write the per-query retrieved-id lists (~4 MB)
 ```
 
 `tests/test_text_gate_13099.py` pins the parts that must not drift: the corpus is byte-deterministic,

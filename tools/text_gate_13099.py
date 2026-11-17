@@ -518,7 +518,7 @@ ARM_NAMES = (
 
 
 def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
-        reuse: bool = False) -> dict:
+        reuse: bool = False, full: bool = False) -> dict:
     oracle, points, live_by_topic = build_corpus()
     committed = load_committed_queries()
     classes = build_query_classes(oracle, points, committed)
@@ -560,6 +560,7 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         qs = classes[cls]
         per_arm: dict[str, dict[str, list[float]]] = {a: {} for a in ARM_NAMES}
         per_query_ids: dict[str, dict[str, list[str]]] = {a: {} for a in ARM_NAMES}
+        pq_by_arm: dict[str, dict[str, dict[str, float]]] = {a: {} for a in ARM_NAMES}
         depths: dict[str, list[int]] = {a: [] for a in ARM_NAMES}
         labels_by_q: dict[str, dict[str, int]] = {}
 
@@ -610,7 +611,10 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
                 ids = score_list(lists.get(name, []))[:LIMIT]
                 per_query_ids[name][q["qid"]] = ids
                 depths[name].append(len(ids))
-                for m, v in per_query_metrics(ids, labels).items():
+                pq = per_query_metrics(ids, labels)
+                pq_by_arm[name][q["qid"]] = {
+                    k: round(v, 6) for k, v in pq.items()}
+                for m, v in pq.items():
                     per_arm[name].setdefault(m, []).append(v)
 
             # WORKED EXAMPLE — the mechanism, recorded where it is generated so
@@ -678,7 +682,12 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
             "arms": table,
             "result_depth": depth_block,
             "query_texts": [{k: q[k] for k in ("qid", "text", "target", "shape")} for q in qs],
-            "per_query_ids": {a: per_query_ids[a] for a in ARM_NAMES},
+            # Per-query METRICS are always kept: they are what makes the paired
+            # CIs recomputable by a reader. The full id lists are opt-in
+            # (`--full`), because they are ~4 MB and prove nothing the metrics
+            # do not — the harness regenerates them exactly.
+            "per_query_metrics": pq_by_arm,
+            "per_query_ids": per_query_ids if full else "omitted (run with --full)",
             "empty_pairs": {a: sum(1 for v in per_query_ids[a].values() if not v)
                             for a in ARM_NAMES},
         }
@@ -775,9 +784,13 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--out", required=True)
     r.add_argument("--reuse", action="store_true",
                    help="do not re-seed (both backends already hold the corpus)")
+    r.add_argument("--full", action="store_true",
+                   help="also write the per-query retrieved-id lists (~4 MB); "
+                        "per-query METRICS are always written")
     args = ap.parse_args(argv)
 
-    art = run(args.fg_host, args.fg_port, args.pg_dsn, Path(args.out), reuse=args.reuse)
+    art = run(args.fg_host, args.fg_port, args.pg_dsn, Path(args.out),
+              reuse=args.reuse, full=args.full)
     print(json.dumps(art["verdict"], indent=1))
     if art["errors"]:
         print(f"!! {len(art['errors'])} recorded arm error(s) — see artifact.json")
