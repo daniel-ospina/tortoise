@@ -43,6 +43,8 @@ evidence lives, and it must never point at `live-v5`.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests.test_record_serve import (
@@ -654,6 +656,186 @@ def test_read_entity_addresses_each_label_by_its_OWN_contract_key():
         f"IS the eventId, got {event!r}")
     assert conn.row_statements()[-1][1][-1] == "ev-1", (
         f"the Event row was anchored on {conn.row_statements()[-1][1]!r}")
+
+
+# ── the record's own pin on an Event's node_key, read append-only-safe ──────
+
+#: The record's constraint pinning an `event`'s `node_key` to its `event_id`.
+_EVENT_KEY_CONSTRAINT = "chk_event_node_key_is_contract_key"
+
+#: What that constraint must say. Compared after normalisation, so a cosmetic
+#: reflow is not a change.
+_EVENT_KEY_CHECK = "(event_id is not null and node_key = event_id)"
+
+#: ONE statement that touches the constraint, in file order — either a
+#: re-declaration (`CONSTRAINT <name> CHECK (…)`, in the landed `CREATE TABLE` or
+#: behind a forward `ADD CONSTRAINT`) or a `DROP CONSTRAINT`. The `[^;]*?` body
+#: runs to the statement boundary, so a nested paren in a re-keyed expression
+#: still reaches the real closing paren, and the `$$`-quoted function bodies
+#: several record migrations carry cannot be mistaken for a statement split.
+_EVENT_KEY_STMT_RE = re.compile(
+    r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(?P<drop>" + _EVENT_KEY_CONSTRAINT
+    + r")|(?:ADD\s+)?CONSTRAINT\s+(?P<decl>" + _EVENT_KEY_CONSTRAINT
+    + r")\s+CHECK\s*(?P<expr>\([^;]*?\))\s*(?:NOT\s+VALID\s*)?[,;]",
+    re.IGNORECASE | re.DOTALL)
+
+
+def _effective_event_node_key_check(sql: str) -> str | None:
+    """The `node_key = …` expression the record ENFORCES, or `None` if dropped.
+
+    ⛔ **The LAST statement wins.** Migrations are append-only history, so a
+    re-key arrives as a FORWARD `ALTER TABLE … DROP/ADD CONSTRAINT` — never as an
+    edit of the landed `CREATE TABLE`. That is the rule
+    `record_projection.key_properties` already applies to `node_identity`
+    (`#9881`: a key move arrives as a forward `ALTER`, and the last declaration
+    is the enforced one), and it is the external convention too: Alembic's
+    autogenerate diffs the EFFECTIVE schema, and its own docs warn that a named
+    `CHECK` cannot be compared by substring.
+
+    ⛔ A substring search over the corpus finds the HISTORICAL expression for
+    ever, so it stays GREEN on the one mutation this premise exists to catch —
+    the false green #13347's review (P1) measured, where a forward re-key left
+    the `Event` row green with its justification gone.
+
+    Returns the normalised expression (whitespace collapsed, spaces inside the
+    parentheses trimmed, lowercased), or `None` when a later statement drops the
+    constraint so nothing is enforced. Raises via `assert` if no migration names
+    the constraint at all: a rename is a change of premise, not a silent `None`.
+    """
+    stated = False
+    expr: str | None = None
+    for match in _EVENT_KEY_STMT_RE.finditer(sql):
+        stated = True
+        body = match.group("expr")
+        if body is None:
+            expr = None
+            continue
+        normalised = " ".join(body.split()).lower()
+        normalised = re.sub(r"\(\s+", "(", normalised)
+        expr = re.sub(r"\s+\)", ")", normalised)
+    assert stated, (
+        f"no migration declares `{_EVENT_KEY_CONSTRAINT}` at all — the premise "
+        "that makes `Event` addressable by a bare id has been renamed or "
+        "removed, so re-derive ENTITY_UNION_ADDRESS_RESIDUALS")
+    return expr
+
+
+def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
+    """The premise row must red on the SANCTIONED way a re-key arrives (#13347 P1).
+
+    The review measured the previous assertion as a FALSE GREEN: it regex-searched
+    the concatenation of all record migrations, so a forward `ALTER TABLE …
+    DROP/ADD CONSTRAINT` — how a re-key is actually allowed to arrive — left it
+    green while an edit of the already-landed `CREATE TABLE` (which this repo
+    forbids) was the only shape it caught. Two arms here measure that the reader
+    sees the forward shapes; a third keeps it off the cosmetic-reflow trigger.
+    """
+    from tortoise import record_projection as _rp
+
+    landed = _rp._read_migrations(None)
+    assert _effective_event_node_key_check(landed) == _EVENT_KEY_CHECK, (
+        "the landed corpus does not read back as the expected premise, so the "
+        "arms below would prove nothing")
+
+    # 1. A forward re-key, the way the repo allows one. The last declaration
+    #    moved, so the premise reader must move with it.
+    re_keyed = landed + (
+        "\nALTER TABLE public.event\n"
+        f"    DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        "ALTER TABLE public.event\n"
+        f"    ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT}\n"
+        "    CHECK (event_id IS NOT NULL AND node_key = payload ->> 'ref');\n")
+    assert _effective_event_node_key_check(re_keyed) != _EVENT_KEY_CHECK, (
+        "a forward `ALTER TABLE … DROP/ADD CONSTRAINT` re-key did not move the "
+        "premise reader — the `Event` row would stay green with its "
+        "justification gone (the false green #13347's review caught)")
+
+    # 2. A forward DROP with no re-declaration. The constraint is GONE, so no
+    #    expression is enforced and the premise is not merely different — it is
+    #    absent, which is the answer the addressability declaration must not
+    #    survive.
+    dropped = landed + (
+        "\nALTER TABLE public.event\n"
+        f"    DROP CONSTRAINT IF EXISTS {_EVENT_KEY_CONSTRAINT};\n")
+    assert _effective_event_node_key_check(dropped) is None, (
+        "a forward `DROP CONSTRAINT` left the reader reporting an expression "
+        "the record no longer enforces")
+
+    # 3. NOT formatting-coupled: a cosmetic reflow inside the parentheses is the
+    #    SAME declaration and must not red this with a message that sends a lane
+    #    to re-derive an invariant that did not move.
+    reflowed, hits = re.subn(
+        r"CHECK\s*\(" + re.escape(_EVENT_KEY_CHECK[1:-1]) + r"\)",
+        "CHECK (\n      event_id IS NOT NULL\n      AND node_key = event_id\n  )",
+        landed, count=1, flags=re.IGNORECASE)
+    assert hits == 1, (
+        "the reflow fixture no longer matches the corpus — update it rather "
+        "than deleting this arm")
+    assert _effective_event_node_key_check(reflowed) == _EVENT_KEY_CHECK, (
+        "a cosmetic reflow inside the CHECK reds the premise reader")
+
+
+def test_an_EVENT_is_addressable_by_the_bare_id_that_IS_its_eventId():
+    """The RECORD-side premise of "Event is addressable", read from the DDL.
+
+    `ENTITY_UNION_ADDRESS_RESIDUALS` says `Event` is NOT a residual because a bare
+    id does address an Event. That sentence has a record-side premise no test
+    pinned: the schema's
+
+        CONSTRAINT chk_event_node_key_is_contract_key
+            CHECK (event_id IS NOT NULL AND node_key = event_id)
+
+    while :func:`read_entity` addresses an Event by its contract key (`eventId`)
+    and :func:`read_node` anchors on `node_key`. A forward migration that re-keys
+    `event` leaves every declaration in this module untouched and still wrong, so
+    the premise is read from its OWNERS here: the EFFECTIVE DDL expression (last
+    declaration wins — see :func:`_effective_event_node_key_check`), the record's
+    key contract for the label, the column the record matches an `event` by, and
+    then the REAL reader, asserting the query was bound to `node_key` with the
+    bare value handed in.
+
+    ⛔ `Event.id` is NOT that identity and nothing here rests on it (#13347
+    review P2): `projection/entities.py::_event_guarded_merge`'s SUFFIX branch
+    MERGEs on a suffixed `eventId` while `id` keeps the candidate, so two Events
+    can share one `id` — `live.py::EPISTEMIC_ID_KEYS` forbids using it as one.
+    The value this door is handed for an Event is the one the cache RESOLVER
+    matched (`FalkorProjection._RESOLVE_BRANCHES` → `("Event", "eventId")`).
+    """
+    assert "Event" not in rs.ENTITY_UNION_ADDRESS_RESIDUALS, (
+        "Event's record coordinate is the eventId, and the bare id handed to "
+        "this door IS that value — putting it in the residual map tells the "
+        "next lane the wrong repair (parity, #9721, not re-addressing)")
+    assert "Source" in rs.ENTITY_UNION_ADDRESS_RESIDUALS, (
+        "a Source's record coordinate is `url` — a bare Source id names nothing "
+        "in the record, which is why that residual stands")
+
+    from tortoise import record_projection as _rp
+
+    got = _effective_event_node_key_check(_rp._read_migrations(None))
+    assert got == _EVENT_KEY_CHECK, (
+        "the record's own DDL no longer pins an Event's node_key to its "
+        "event_id — the premise that makes `Event` addressable by a bare id "
+        f"has changed, so re-derive ENTITY_UNION_ADDRESS_RESIDUALS — got {got!r}")
+    assert _rp.key_properties()["Event"] == "eventId", (
+        "public.node_identity no longer keys an Event by `eventId` — the value "
+        "this door is handed for an Event is no longer its contract key")
+    assert _rp._ENTITY_MATCH_COLUMNS["event"] == ("node_key",), (
+        "the record no longer matches an `event` by `node_key` — an id-keyed "
+        "read would address a different column than the constraint pins")
+
+    conn = _TableConn({"event": [{"event_id": "ev-1", "name": "decided",
+                                   "node_key": "ev-1"}]})
+    out = rs.read_entity(conn, org_id=TENANT[0], graph_id=TENANT[1],
+                         id_val="ev-1", labels=("Event",))
+    assert out is not None and out.get("name") == "decided", (
+        "the record could not be asked for an Event by the id that IS its "
+        f"eventId — got {out!r}")
+    sql, params = conn.row_statements()[-1]
+    assert "node_key = %s" in " ".join(sql.split()), (
+        "the Event read must anchor on node_key — the column the DDL pins to "
+        f"event_id — got {sql!r}")
+    assert "ev-1" in params, (
+        f"the read was not bound to the bare id handed in — params were {params!r}")
 
 
 def test_a_label_with_no_contract_key_RAISES_rather_than_being_skipped(monkeypatch):
