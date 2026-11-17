@@ -182,9 +182,17 @@ def test_rerun_zero_new_nodes(sdk):
 # ── Lifecycle decision table ──────────────────────────────────────
 
 def test_close_event_and_object_status(sdk):
-    """close ⇒ Event github.issue.closed + Object.status=completed; the
-    #1844 object-only path writes NO statement points (nothing to mutate,
-    no CORRECTS)."""
+    """close ⇒ Event github.issue.closed + the Object's POSITION advanced to the
+    terminal stage; the #1844 object-only path writes NO statement points
+    (nothing to mutate, no CORRECTS).
+
+    ⛔ #13143 (S0): the connector close fold writes the POSITION axis now
+    (`pipelineStageId='done'`, `pipelineSlot='terminal'`, `isClosed=True`) and
+    NOT the lifecycle word this test used to assert (`status='completed'`, which
+    the four-word axis cannot hold). `status` stays NULL on purpose — a progress
+    event is not a lifecycle ending (design §3.2) — and that half is asserted
+    too, so a future re-introduction of a lifecycle write here is caught.
+    """
     t = MockGitHubTransport(issues=[gh_issue(1)])
     _run(_indexer(t), sdk)
     proj = sdk._get_proj()
@@ -202,11 +210,18 @@ def test_close_event_and_object_status(sdk):
     ).result_set
     assert [tuple(r) for r in rows] == [
         ("github-issue-acme/repo1-1-closed", "github.issue.closed")]
-    # Object.status projection ONLY — no points exist to mutate
-    status = proj.g.query(
-        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.status"
-    ).result_set[0][0]
-    assert status == "completed"
+    # Object POSITION projection ONLY — no points exist to mutate. The status
+    # word is asserted NULL: S0 made this fold a STAGE move, never a lifecycle
+    # write.
+    status, stage, slot, closed = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
+        "RETURN o.status, o.pipelineStageId, o.pipelineSlot, o.isClosed"
+    ).result_set[0]
+    assert (stage, slot, closed) == ("done", "terminal", True), (
+        "the close event did not advance the Object to the terminal stage")
+    assert status is None, (
+        "a connector close folded a LIFECYCLE word — S0 moved this fold to the "
+        "position axis, and `status` is the four-word lifecycle axis")
     assert proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0
 
 
@@ -229,10 +244,17 @@ def test_reopen_status_open_no_corrects(sdk):
     ).result_set
     assert [tuple(r) for r in rows] == [
         ("github-issue-acme/repo1-1-reopened", "github.issue.reopened")]
-    status = proj.g.query(
-        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.status"
-    ).result_set[0][0]
-    assert status == "in_progress"
+    status, stage, slot, closed = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
+        "RETURN o.status, o.pipelineStageId, o.pipelineSlot, o.isClosed"
+    ).result_set[0]
+    # S0: the reopen fold moves the POSITION back to the active slot and clears
+    # the durable `isClosed` latch (a terminal lifecycle ending could not be
+    # cleared at all, which is why the closing fold targets a terminal STAGE).
+    assert (stage, slot, closed) == ("in_progress", "active", False), (
+        "the reopen event did not move the Object back to the active stage")
+    assert status is None, (
+        "a connector reopen folded a LIFECYCLE word onto the four-word axis")
     # object-only (#1844): no statement points exist, so reopen can never
     # CORRECTS anything
     assert proj.g.query("MATCH ()-[r:CORRECTS]->() RETURN count(r)").result_set[0][0] == 0
@@ -399,11 +421,16 @@ def test_repeated_transitions_mint_monotonic_ids(sdk):
         ("github-issue-acme/repo1-1-closed-2", "2026-07-22T08:00:00Z"),
         ("github-issue-acme/repo1-1-reopened", None),
     ], "both closes must exist with distinct monotonic ids"
-    # Object.status projection reflects the FINAL close
-    status = proj.g.query(
-        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.status"
-    ).result_set[0][0]
-    assert status == "completed"
+    # The Object's POSITION reflects the FINAL close (S0: the terminal stage
+    # plus the durable latch, not a lifecycle word).
+    stage, slot, closed, status = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
+        "RETURN o.pipelineStageId, o.pipelineSlot, o.isClosed, o.status"
+    ).result_set[0]
+    assert (stage, slot, closed) == ("done", "terminal", True), (
+        "the second close did not leave the Object terminal")
+    assert status is None, (
+        "a connector close folded a LIFECYCLE word onto the four-word axis")
 
 
 # ── P1-5 (PR #1792): indexer is a routing pass-through ───────────────
