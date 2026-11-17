@@ -719,7 +719,6 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     refuses on the strength of its OWN writer/door rather than on a blanket
     "reject every non-string" rule.
     """
-    """
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
         sdk.create_entity("object", "writer-probe-status", status={"a": 1})
