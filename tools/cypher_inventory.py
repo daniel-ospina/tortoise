@@ -149,7 +149,33 @@ SQL_VETO = re.compile(r"\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|VALUES\s*
 NODE_PATTERN = re.compile(r"\(\s*`?\w*`?\s*:|<-\[|-\[|\[\w*\s*:\s*\w+\]")
 
 VAR_LENGTH = re.compile(r"-\[[^\]]*\*[^\]]*\]-|<-\[[^\]]*\*[^\]]*\]-|shortestPath\s*\(", re.IGNORECASE)
-EDGE_PATTERN = re.compile(r"(?:<)?-\[[^\]]*\]-?")
+#: A relationship pattern. ⛔ THE BRACKETLESS SPELLINGS ARE THE SECOND ARM.
+#: Cypher accepts `-->`, `<--` and a bare `--` between two node patterns, and the
+#: bracketed-only arm could not see any of them — so `MATCH (a)-->(b) RETURN b.id`
+#: fell through every shape arm to `plain`/`read` and was published as a migration
+#: CANDIDATE: the one direction the verdict flips (`#13098` review P3). No live site
+#: spelled it that way at this head, so this is prophylactic and the census counts
+#: do not move — the property `--check` proves below.
+#:
+#: ⛔ IT IS CONTEXT-ANCHORED ON PURPOSE, and it is NOT added to `NODE_PATTERN`.
+#:
+#:  * `--` is ALSO SQL's comment introducer. A blanket `--` arm calls
+#:    `SELECT * FROM public.point -- note` an `adjacency` statement. That is only
+#:    harmless because `SQL_VETO` runs first in `enumerate_file` — so a rule that
+#:    is correct ONLY because of a caller's ordering is a latent false candidate,
+#:    which is the exact class this fix exists to remove. An arrowhead (`-->`,
+#:    `<--`) is unambiguous, and a bare `--` counts only BETWEEN two node patterns
+#:    (`)--(`, `]--[`), which no SQL statement's comment sits between.
+#:  * `NODE_PATTERN`'s ONE caller is that SQL veto, so widening it with `--` would
+#:    stop a SQL statement carrying a comment from being vetoed at all: the fix for
+#:    a false candidate would create one.
+EDGE_PATTERN = re.compile(
+    r"(?:<)?-\[[^\]]*\]-?"          # bracketed: -[..]->, <-[..]-
+    r"|<--+>?"                       # <-- and <-->
+    r"|--+>"                         # -->
+    r"|\)\s*-{2,}\s*\("              # bare -- between two node patterns
+    r"|\]\s*-{2,}\s*\["              # …and between two list/bracket patterns
+)
 FULLTEXT = re.compile(r"db\.idx\.fulltext|fulltext\.query", re.IGNORECASE)
 VECTOR = re.compile(r"db\.idx\.vector|vector\.query", re.IGNORECASE)
 DDL = re.compile(

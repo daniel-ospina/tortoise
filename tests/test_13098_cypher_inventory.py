@@ -152,6 +152,15 @@ def test_a_lambda_body_is_part_of_its_enclosing_function():
         ("MATCH p = shortestPath((a:Point)-[*]-(b:Point)) RETURN p", "traversal"),
         # adjacency: an edge pattern with no variable length
         ("MATCH (op:Point)-[:IMPL]->(t) RETURN t.id", "adjacency"),
+        # adjacency: the BRACKETLESS spellings. They have no brackets for the first
+        # arm to see, so they fell through every shape arm to `plain`/`read` →
+        # `candidate:SQL-shaped`, the one direction the verdict flips (`#13098`
+        # review P3). There IS one live site in this form —
+        # `tortoise/domain_validators.py:240`'s `AND NOT (n)--()`, which is a real
+        # adjacency predicate — so this is not purely prophylactic.
+        ("MATCH (a:Point {id:$a})-->(b:Point) RETURN b.id", "adjacency"),
+        ("MATCH (a:Point {id:$a})<--(b:Point) RETURN a.id", "adjacency"),
+        ("MATCH (a:Point {id:$a})--(b:Point) RETURN a.id", "adjacency"),
         # a fulltext QUERY must not be eaten by the DDL arm
         ("CALL db.idx.fulltext.queryNodes('Point', $q) YIELD node, score", "fulltext"),
         ("CALL db.idx.fulltext.createNodeIndex('Point', ['content'])", "ddl"),
@@ -164,6 +173,46 @@ def test_a_lambda_body_is_part_of_its_enclosing_function():
 )
 def test_shape_precedence(statement, shape):
     assert census.classify(statement)[0] == shape
+
+
+def test_a_sql_comment_is_not_a_bracketless_edge():
+    """The bracketless arm is CONTEXT-ANCHORED, and this is why.
+
+    `--` is also SQL's comment introducer, so a blanket `--` arm reports
+    `SELECT * FROM public.point -- note` as an `adjacency` statement. In
+    `enumerate_file` that is currently harmless because `SQL_VETO` runs first —
+    but a classification that is correct only because of a caller's ordering is
+    a latent false candidate, which is the class this fix removes. So an
+    arrowhead (`-->`, `<--`) counts anywhere, and a bare `--` counts only BETWEEN
+    two node patterns, which is where no SQL comment sits.
+    """
+    for sql in (
+        "SELECT id FROM public.point -- the draft filter",
+        "INSERT INTO public.point (id) VALUES ($1) -- note",
+        "UPDATE public.point SET content = $1 WHERE id = $2 -- note",
+    ):
+        assert census.classify(sql)[0] != "adjacency", sql
+    # …while the Cypher bare `--` between node patterns does.
+    assert census.classify(
+        "MATCH (n:Point {status:'draft'}) WHERE NOT (n)--() RETURN n.id")[0] == "adjacency"
+    # The widening must not touch the SQL veto: `--` is NOT a node pattern, so a
+    # SQL statement carrying a comment is still vetoed as non-Cypher.
+    assert not census.NODE_PATTERN.search("SELECT id FROM public.point -- note")
+
+
+def test_the_one_live_bracketless_site_is_an_adjacency_predicate():
+    """`tortoise/domain_validators.py:240` — the site the widening actually moves.
+
+    It left `candidate:SQL-shaped` for `measure:across shapes`, which is the
+    correct direction: `AND NOT (n)--()` asks the graph a question about EDGES, so
+    it is not a statement an SQL row could answer. Pinned by file:line so a later
+    edit that removes the predicate also removes this expectation.
+    """
+    source = (census.ROOT / "tortoise/domain_validators.py").read_text()
+    assert "AND NOT (n)--()" in source, (
+        "the live bracketless site moved or was deleted; re-cut the census pins "
+        "and this test together (§7 of the doc)"
+    )
 
 
 def test_a_postgres_statement_is_not_cypher():

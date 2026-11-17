@@ -1244,9 +1244,18 @@ def _run(args: argparse.Namespace) -> int:
             print(f"cypher-diff: {exc}", file=sys.stderr)
             return 2
         try:
+            # ⛔ THE STATEMENT IS NOT TENANT-SCOPED HERE, and the asymmetry is
+            # deliberate: the graph's tenancy IS the graph NAME (`--graph-name`,
+            # one corpus per graph), so there is nothing to bind into the Cypher;
+            # the record's is the `(org_id, graph_id)` pair, which `_scoped_params`
+            # supplies to BOTH lanes. This used to call a `_scoped_cypher()` that
+            # returned its argument unchanged under a docstring claiming it bound
+            # the tenant — a seam that read as live and bound nothing (`#13098`
+            # review P3). It is deleted rather than reworded: a no-op named like an
+            # operation is a claim a later reader would trust.
             cypher_rows, cypher_cols = run_cypher(
                 args.graph_uri, args.graph_name,
-                _scoped_cypher(candidate.cypher), _scoped_params(candidate.params),
+                candidate.cypher, _scoped_params(candidate.params),
             )
             sql_rows, sql_cols = run_sql(args.record_dsn, sql,
                                          _scoped_params(candidate.params))
@@ -1268,13 +1277,6 @@ def _run(args: argparse.Namespace) -> int:
         for result in results:
             _render(result)
     return 0 if all(r["equal"] for r in results) else 1
-
-
-def _scoped_cypher(cypher: str) -> str:
-    """Bind the tenant into the graph statement — the corpus lives in one graph
-    (`--graph-name`), so the graph's tenancy IS the graph name; the record's is
-    the (org_id, graph_id) pair. Named here so the asymmetry is not silent."""
-    return cypher
 
 
 def _scoped_params(params: dict) -> dict:

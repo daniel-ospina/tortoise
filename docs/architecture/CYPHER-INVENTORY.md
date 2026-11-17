@@ -27,9 +27,9 @@ this document classifies **statements**.
 | product surface (`tortoise/**/*.py`, test modules excluded) | **295** files scanned |
 | files carrying at least one statement site | **97** |
 | **statement sites (this census)** | **1301** |
-| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **852** (571 read, 281 write) |
-| **`plain` READS — the migration candidates** | **571** |
-| `adjacency` (edge pattern, fixed length) | 289 |
+| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **851** (570 read, 281 write) |
+| **`plain` READS — the migration candidates** | **570** |
+| `adjacency` (edge pattern, fixed length) | 290 |
 | `ep` (the epistemic scalars) | 32 |
 | `traversal` (variable length) | 3 |
 | `fulltext` | 2 |
@@ -38,10 +38,10 @@ this document classifies **statements**.
 | non-Cypher door calls (excluded from every shape total) | 256 |
 | **AST door calls** = census + non-Cypher | **1557** |
 
-> **The finding, with its count: 571 of 1301 product statements (43.9 %) need none of the
+> **The finding, with its count: 570 of 1301 product statements (43.8 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
-> not an adjective; it is 571 statements.
+> not an adjective; it is 570 statements.
 
 ---
 
@@ -189,8 +189,8 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 
 | shape | total | roles |
 |---|---|---|
-| `plain` | **852** | read=571, write=281 |
-| `adjacency` | **289** | read=189, write=100 |
+| `plain` | **851** | read=570, write=281 |
+| `adjacency` | **290** | read=190, write=100 |
 | `ep` | **32** | read=21, write=11 |
 | `ddl` | **17** | ddl=17 |
 | `traversal` | **3** | read=3 |
@@ -364,7 +364,7 @@ if both forms answer the same wrong thing, the diff is empty and says so honestl
   authorises it; landing it deletes the Cypher form in the same PR, which is a caller-visible change
   owned by `#13083`'s placement table.
 * **No shape §3 keeps is proposed for a move.** `traversal` (3), `ep` (32), `fulltext`
-  (2) are `stays`, each citing its section. `adjacency` (289) is `measure`, not `move`.
+  (2) are `stays`, each citing its section. `adjacency` (290) is `measure`, not `move`.
 * The text index is **not** re-decided: `#13099` measured the gate and §6.2's STATUS note records that
   the decision stands; adopting from that measurement is a reopen on `#4051`, not a lane's move.
 * `cache_projection.py` and `cache_tier` are untouched — `#13083` owns them.
@@ -400,17 +400,17 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:files = 97 -->
 <!-- cypher-inventory:files_scanned = 295 -->
 <!-- cypher-inventory:unresolved = 106 -->
-<!-- cypher-inventory:candidates = 571 -->
-<!-- cypher-inventory:shape_adjacency = 289 -->
+<!-- cypher-inventory:candidates = 570 -->
+<!-- cypher-inventory:shape_adjacency = 290 -->
 <!-- cypher-inventory:shape_ddl = 17 -->
 <!-- cypher-inventory:shape_ep = 32 -->
 <!-- cypher-inventory:shape_fulltext = 2 -->
-<!-- cypher-inventory:shape_plain = 852 -->
+<!-- cypher-inventory:shape_plain = 851 -->
 <!-- cypher-inventory:shape_traversal = 3 -->
 <!-- cypher-inventory:shape_unresolved = 106 -->
-<!-- cypher-inventory:shape_plain_read = 571 -->
+<!-- cypher-inventory:shape_plain_read = 570 -->
 <!-- cypher-inventory:shape_plain_write = 281 -->
-<!-- cypher-inventory:shape_adjacency_read = 189 -->
+<!-- cypher-inventory:shape_adjacency_read = 190 -->
 <!-- cypher-inventory:shape_adjacency_write = 100 -->
 <!-- cypher-inventory:shape_ep_read = 21 -->
 <!-- cypher-inventory:shape_ep_write = 11 -->
@@ -539,7 +539,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/domain_validators.py:173` | `validate_chain_integrity` | plain | read | candidate:SQL-shaped | `MATCH (uj:Point) WHERE uj.pointKind IN $uj_kinds AND {} AND uj.cover…` |
 | `tortoise/domain_validators.py:196` | `validate_chain_integrity` | plain | read | candidate:SQL-shaped | `MATCH (wf:Point) WHERE wf.pointKind IN $wf_kinds AND {} AND wf.enabl…` |
 | `tortoise/domain_validators.py:225` | `validate_chain_integrity` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/domain_validators.py:240` | `validate_chain_integrity` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT…` |
+| `tortoise/domain_validators.py:240` | `validate_chain_integrity` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT…` |
 | `tortoise/domain_validators.py:580` | `validate_portfolio_shape` | plain | read | candidate:SQL-shaped | `MATCH (o:Object) WHERE toLower(o.objectKind) IN $kinds AND o.status …` |
 | `tortoise/domain_validators.py:632` | `validate_portfolio_shape` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (e:Event) WHERE toLower(e.eventKind) IN $mark_forms OPTIONAL M…` |
 | `tortoise/dream.py:480` | `Dreamer._ep_run_batch` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
