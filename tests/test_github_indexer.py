@@ -898,7 +898,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
 
     The mirror of the pin above. `_fold_object_stage` returns BEFORE
     `apply_stage_fold` when the Object's `status` is in the fold's OWN latch set
-    (`entities.py:6218-6220`, `excluded = _terminal_object_statuses()` =
+    (`entities.py:6228`, `excluded = _terminal_object_statuses()` at `:5894` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
     coherent un-supersede does clear `superseded` (`sdk.py:54063-54072`), and this
@@ -1440,8 +1440,10 @@ def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
         "an unrecognised pipeline key was resolved against CORE — the guess the "
         "docstring forbids")
     # …and end-to-end: that row is not called ended, so an OPEN issue on it mints
-    # nothing. Pre-fix CORE's `terminal` slot was used, the row read "closed",
-    # and every poll minted another `-reopened`.
+    # nothing — and it minted nothing BEFORE the split either: the pre-fix helper
+    # returned `None` for this key, and the pre-fix reader's own
+    # `_key not in _PIPELINE_DECLS` guard (`4c4fd7c90f~1:1250-1253`) did the same.
+    # The shape that DID loop is the CLOSED fixture below.
     oid = "github-issue-acme/repo1-1"
     t = MockGitHubTransport(issues=[gh_issue(1)])
     _run(_indexer(t), sdk)
