@@ -2019,6 +2019,14 @@ def test_the_body_scan_honours_a_named_dollar_tag():
     assert code is not None
     assert "RAISE WARNING" in code
     assert "after" not in code, f"the scan ran past the closing tag: {code!r}"
+    # ⛔ THE OTHER HALF OF THE DOCSTRING, and the half a naive closer fails: with
+    # `code.find("$$", opener.end())` the slice ends at the literal inside the
+    # string, so `code` becomes "\nBEGIN\n  RAISE WARNING 'mentions " — which
+    # satisfies BOTH assertions above (the warning is inside the truncated prefix)
+    # while every statement AFTER the literal goes unasserted: a fail-open for the
+    # exact regression class this test exists to catch. These two live past it.
+    assert "RETURN;" in code, f"the scan stopped at the literal $$ in the body: {code!r}"
+    assert "END;" in code, f"the scan stopped at the literal $$ in the body: {code!r}"
 
 
 # --------------------------------------------------------------------------- #
