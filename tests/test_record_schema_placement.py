@@ -567,12 +567,14 @@ _PREREQ_PGVECTOR_TOTAL_RE = re.compile(r"over all (?P<count>\d+)\s+migrations")
 #: `_INDEX_MIGRATION_COUNT_RE` for why it is no longer a literal `0`).
 _MIGRATION_COUNT_OF_RE = re.compile(
     r"(?P<occurrences>\d+) of (?P<count>\d+)\s+migrations")
-#: The three documents carrying the `0 of N migrations` form — scanned WHOLE,
+#: The three documents carrying the `N of M migrations` form — scanned WHOLE,
 #: because the phrase is not confined to one row. ⛔ A FOURTH file matches the same
 #: phrase and is deliberately NOT registered: `docs/epics/2026-11-04-7949-
-#: extractor-v4-capstone/05-verify.md` quotes `1 of 82` against `1 of 83` inside a
-#: historical narrative about a past head, so deriving it would read two
-#: contradictory denominators and RED for a record that is correct as history.
+#: extractor-v4-capstone/05-verify.md` quotes the form inside a historical
+#: narrative about a past head, where it reads `1 of 82` — a denominator this tree
+#: has moved past — so deriving it would RED for a record that is correct as
+#: history. (Only THAT one is read there: the `1 of 83` beside it is not followed by
+#: the word `migrations`, so this pattern never sees it — measured, not assumed.)
 _COUNT_OF_DOCS = (
     REPO_ROOT / "docs" / "00_index.md",
     REPO_ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md",
@@ -1691,7 +1693,7 @@ def test_the_migration_and_grep_census_reproduces_at_this_head():
         text = path.read_text(encoding="utf-8")
         stated = [int(m.group("count")) for m in _MIGRATION_COUNT_OF_RE.finditer(text)]
         assert stated, (
-            f"{path.relative_to(REPO_ROOT)} no longer states `0 of N migrations` "
+            f"{path.relative_to(REPO_ROOT)} no longer states `N of M migrations` "
             "— restate it rather than deleting the phrase: this pin reads it"
         )
         assert set(stated) == {on_disk}, (
