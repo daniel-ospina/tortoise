@@ -185,10 +185,21 @@ SEAMS, AND WHAT THE CALLER OWNS. ``ping`` MUST own its own connection: it is pol
 from the witness thread while ``restore`` runs on another, so sharing one client would
 measure the client's lock, not the instance. ``dump``/``delete``/``restore`` are
 callables so the driver never needs a credential-fetching or decoding policy of its
-own; ``dump`` should return a binary-safe payload (a ``decode_responses=True`` client
-raises ``UnicodeDecodeError`` on it) and ``RESTORE`` needs ``REPLACE`` — the engine
-keeps the graph in its module registry after the Redis key is deleted, so a bare
-``RESTORE`` fails ``BUSYKEY``.
+own; ``dump`` must return the RAW payload, and ``RESTORE`` needs ``REPLACE`` — the
+engine keeps the graph in its module registry after the Redis key is deleted, so a
+bare ``RESTORE`` fails ``BUSYKEY``.
+
+⛔ CORRECTED (``#13102`` review F3): this paragraph used to justify the seam with
+*"a ``decode_responses=True`` client raises ``UnicodeDecodeError`` on it"*. On the
+driver this repo PINS that is false — ``Redis.dump()`` marks its reply
+``NEVER_DECODE`` (``redis/commands/core.py``: ``options[NEVER_DECODE] = []`` at tag
+``v7.4.1``, the single ``redis`` entry in ``uv.lock``), so ``DUMP`` comes back as
+``bytes`` under EITHER decoding policy and no client ``decode_responses`` setting
+can make this call raise. The seam is still worth its keep for the reason that
+survives: the payload is OPAQUE BINARY, so the caller must not hand this module a
+text-decoded one, and a seam is where that stays the caller's decision (a future
+driver or policy change must not reach in here). Do not "fix" a caller by turning
+``decode_responses`` off on the strength of the old sentence.
 
 ⛔ **Do not use this driver to restore an indexed payload under a DIFFERENT graph
 name while the source still exists.** On the engine this repo's CI pins

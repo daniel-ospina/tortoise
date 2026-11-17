@@ -464,7 +464,15 @@ class QuotaExceededError(Exception):
     """
 
     def __init__(self, message: str, *, resource: str | None = None,
-                 used: int | None = None, limit: int | None = None,
+                 # ``used`` AND ``limit`` are `int | float` on purpose: both
+                 # carry the figures the gate COMPARED, and a banded dimension
+                 # compares at a fractional hard stop (77 × 1.5 = 115.5), so the
+                 # threshold reported is fractional too. Integral figures still
+                 # arrive as ints, so existing payloads are unchanged
+                 # (#13102: `int()` had silently floored `used`, and `limit`
+                 # reported the 1.0x cap while the gate refused at that stop).
+                 used: int | float | None = None,
+                 limit: int | float | None = None,
                  estimate: int | None = None,
                  estimated: bool | None = None,
                  code: str = QUOTA_REFUSAL_CODE) -> None:
@@ -655,6 +663,85 @@ def derived_tier(org_row: dict) -> str:
         return tier
 
 
+def _arm_graph_storage(limits: dict, tier: str) -> dict:
+    """Arm the per-ACCOUNT graph-storage cap on ``limits`` when the tier has one.
+
+    ``#13084``. This is the ONE place the cap enters a resolved limits dict, so
+    ``carry_resolved_allowances`` reaches every surface (REST's
+    ``hosted_api._check_org_limit`` and MCP's ``_enforce_quota`` both fill from
+    ``ALLOWANCE_KEYS``) without a second edit — the seam #9567 D12 built.
+
+    ⛔ THE NUMBER COMES FROM THE ARTIFACT, never from this file. The derivation
+    is ``docs/architecture/SEARCH-ARCHITECTURE.md`` §8, and ⚠️ it is NOT
+    "30 % of the price ÷ $74/GB-month" — that shortcut reproduces solo and
+    nothing else (#13102 F4: $7.50/74 = 101.4, $44.70/74 = 604.1), because the
+    shared project line is part of the same budget:
+
+        provisioned MB  p = (0.30·P − $0.125) ÷ ($43.75/1000 + $85/8000)
+        hot window        = 0.75 · p
+        solo $19 → 77 MB · pro $25 → 102 MB · team $149 → 615 MB
+
+    Decimal MB, the meter's own unit, so no MiB/MB factor is applied (that mix
+    is the measured 3.77x error class). The key NAME is read from the
+    artifact's declared dimension too, for the same reason: two spellings of
+    one allowance is how an arming edit silently lands on a key the gate never
+    reads.
+
+    ⚠️ WHAT THESE NUMBERS ARE, AND ARE NOT. The artifact records them as
+    **DERIVED, NOT OWNER-CONFIRMED**
+    (``billing.storage._included_amounts_status``): solo's hot window follows the
+    owner's 30 %-of-price rule, while pro and team are that rule carried to
+    another price — *"not a ruling on those tiers"* (#11758 comment 6807826749,
+    where the included amounts are listed as explicitly NOT decided: *"a product
+    choice, not implied by the rates"*). They are defaults of record, PENDING.
+    Arming a reversible write-refusal at them is this slice's decision (#13082);
+    the figures are the artifact's to revise without a code change here.
+
+    ⛔ ``free``/``anon`` ARE LEFT UNARMED, and that is a deliberate DEPARTURE
+    from a recorded figure, not an omission and not an unpopulated one. The
+    artifact carries ``0`` for their hot window as a STATED amount
+    (``billing.storage._included_amounts_status``: *"Free/anon are the
+    exception: hot capacity 0 is stated by the decision record"*, and
+    ``docs/architecture/SEARCH-ARCHITECTURE.md`` §8 tabulates their window
+    target as 0). It cannot be armed as a cap: the gate's rule is
+    ``used >= allowance``, so a 0 would refuse EVERY gated write — including the
+    very first byte — on a tier that still grants a graph. The amount is
+    therefore omitted here (absent key = unconfigured = unlimited, and the
+    dimension keeps being metered by its own writer), and the gate declares the
+    same rule defensively as ``zero_means_unarmed`` (an EXACT zero only; a
+    negative is a fault and refuses).
+    """
+    from tortoise.pricing import storage_dimensions, storage_limits
+
+    key = storage_dimensions()["graph_storage"]["allowance_key"]
+    value = storage_limits(tier)[key]
+    if value is None:
+        return limits
+    try:
+        mb = int(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        # FAIL CLOSED on an unreadable amount: a hand-edited artifact value we
+        # cannot read must not silently disarm a cap (the mirror of the
+        # resolver's own #4051 rule).
+        raise QuotaCheckError(
+            f"pricing.json tier {tier!r} {key} is unreadable ({value!r})") from e
+    if mb > 0:
+        limits[key] = mb
+    elif mb < 0:
+        # ⛔ A NEGATIVE AMOUNT IS NOT THE UNSET SENTINEL. The artifact marks
+        # "unset" with ``0`` (free/anon, deliberately unarmed); a negative is a
+        # corrupt figure, and folding it into "unset" would silently leave a
+        # PAID tier UNCAPPED on the enforcement path while the money path
+        # (``metering.storage_overage_cost_usd`` -> ``_number``) raises
+        # ``ValueError`` on the same value — one corrupt input, two opposite
+        # answers (#13102 review, P3). Fail the way the unreadable branch above
+        # already fails.
+        raise QuotaCheckError(
+            f"pricing.json tier {tier!r} {key} is negative ({value!r}) — an "
+            f"unset amount is 0, never a negative figure")
+    return limits
+
+
 def resolve_org_limits(org_id: str) -> dict:
     """Resolve an org's limits from the control plane.
 
@@ -749,7 +836,7 @@ def resolve_org_limits(org_id: str) -> dict:
         mp = row.get("max_points")
         if mp is None:
             mp = row.get("graph_size_cap")
-        return {
+        out = {
             "org_id": org_id, "tier": tier,
             "max_users": (lim["max_users_per_team"] if anon_override
                            else (int(mu) if mu is not None else None)),
@@ -760,6 +847,8 @@ def resolve_org_limits(org_id: str) -> dict:
             "max_api_keys": lim["max_api_keys"],
             "max_sessions": None,
         }
+        _arm_graph_storage(out, tier)
+        return out
     reg = _make_sdk(namespace="registry")
     rows = reg._get_registry().query(
         "MATCH (t:Team {id:$id}) "
@@ -773,7 +862,7 @@ def resolve_org_limits(org_id: str) -> dict:
     tier = tier or "free"
     from tortoise.pricing import tier_limits
     lim = tier_limits(tier)
-    return {
+    out = {
         "org_id": org_id,
         "tier": tier,
         # max_users/max_graphs: None means unlimited (Team tier); preserve it.
@@ -791,6 +880,8 @@ def resolve_org_limits(org_id: str) -> dict:
         # actually decides.
         "max_sessions": None,
     }
+    _arm_graph_storage(out, tier)
+    return out
 
 
 def api_key_occupies_slot(org_id: str, key_id: str, sdk=None) -> bool:
@@ -1411,10 +1502,20 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     # enforced HERE, ahead of the legacy node count, through the ONE declared
     # registry (``cost_dimensions``) — see ``tortoise/allowance_gate.py``.
     #
-    # ⛔ INERT BY DEFAULT: no production resolver emits an ``ALLOWANCE_KEYS``
-    # value, so every dimension is unconfigured and this call is a dict-miss per
-    # dimension. It REFUSES only once an allowance is configured — the ordering
-    # the storage architecture requires (wire the meter, then configure).
+    # ⛔ ONE DIMENSION IS ARMED — since #13084 this call is NOT a dict-miss for
+    # everything. ``resolve_org_limits`` emits ``max_graph_storage_mb`` for every
+    # PAID tier (solo 77 / pro 102 / team 615 decimal MB, from
+    # ``pricing.storage_limits``), so ``enforce_allowances`` below compares the
+    # tenant's measured graph residency against it on the ``points`` and
+    # ``documents`` doors and raises ``QuotaExceededError`` past the 1.5x hard
+    # stop (115.5 / 153 / 922.5 MB measured). That is the answer to "what can
+    # refuse a write": the graph cap can, and this is the call it refuses from.
+    # ``free``/``anon`` carry ``0`` and are UNARMED (an unset amount is not a cap
+    # of zero), and the other two dimensions stay unconfigured — a dict-miss
+    # each — because ``postgres_storage`` is BLOCKED on a per-org byte meter and
+    # ``capture_extraction`` has no resolved allowance. The ordering the storage
+    # architecture requires (wire the meter, then configure) is what #13084
+    # completed for the graph dimension.
     # The legacy ``points`` count below is deliberately RETAINED (it is a real
     # node cap with its own #4051 history); it is a LEGACY dimension whose unit
     # the owner has replaced, and it stays until an allowance is configured.
