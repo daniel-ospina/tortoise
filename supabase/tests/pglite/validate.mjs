@@ -3362,18 +3362,22 @@ try {
   }
   // ── #9559 (review round 8, finding 1, P1): an org the audit STOPS reporting ──
   // `postgres_per_org_bytes()` groups `journal_event` BY `org_id`, so an org whose
-  // journal rows are erased — the documented `record_journal_purge` path this very
-  // block uses for cleanup — drops out of the audit's `orgs` array entirely. Two
-  // behaviours are wrong here and NEITHER reds without this check:
+  // journal rows are gone but whose ORGANIZATION survives drops out of the audit's
+  // `orgs` array entirely. That state is reachable: `org_postgres_residency` has no
+  // FK to `organizations`, so `purge_org_record()` (which hard-deletes the org and
+  // cascades to `journal_event`) leaves the residency row behind as an orphan, and
+  // a reused `org_id` — or an operator journal purge that keeps the org — meets it.
+  //
+  // Two behaviours here are wrong and NEITHER reds without this check:
   //   * a FROZEN row keeps its old `measured_at`, so after `stale_after_seconds`
   //     the gate refuses that org for ever — the write that would re-create its
   //     journal rows is the one being refused (the fresh-tenant deadlock
   //     #13084/#13102, made permanent); and
   //   * a DELETED row empties the table in a single-tenant database, flipping
   //     every org to `unreported` and refusing everyone.
-  // The shipped refresh writes a MEASURED ZERO with a fresh instant instead, and
-  // only over rows that already exist (an org the audit has never reported still
-  // gets no invented row — asserted above).
+  // The shipped refresh writes a zero with a fresh instant instead, and only over
+  // rows that already exist (an org the audit has never reported still gets no
+  // invented row — asserted above).
   await db.exec(`SET LOCAL app.record_journal_purge = 'on';
      DELETE FROM public.journal_event WHERE org_id = '9559-gauge-b';`);
   const vanishedRefresh = await db.query('SELECT * FROM public.postgres_residency_snapshot()');
@@ -3404,6 +3408,58 @@ try {
   if (Number(va.stored_bytes) <= 0) {
     console.error(`✗ #9559: zeroing the vanished org also zeroed a still-reported `
       + `org (a=${va.stored_bytes} B) — the zero is not org-scoped`);
+    process.exit(1);
+  }
+
+  // ── ⛔⛔ AND THE ZEROING MUST NOT FIRE OVER AN EMPTY AUDIT ────────────────────
+  // (review round 2 of the follow-up, P1, MEASURED). `postgres_per_org_bytes()`
+  // returns `orgs: '[]'` when `journal_event` holds no rows, and an unguarded
+  // `NOT EXISTS` is TRUE for EVERY residency row — so ONE refresh over an empty
+  // journal would re-stamp the whole table to 0 bytes with a fresh instant. Every
+  // org would then compare as 0 against any cap, and the reader's `unreported`
+  // refusal — which exists for exactly this — could never fire, because the table
+  // never empties and nothing ever goes stale. Measured before the guard: 28 rows
+  // zeroed in a single call, one of them still holding two journal rows.
+  //
+  // The guard leaves the rows UNTOUCHED when the audit reports nobody, so they age
+  // out under the gate's bound and the gate REFUSES (fail-closed, which is this
+  // project's preferred error) instead of serving a zero it cannot defend.
+  // `a` still holds its real figure immediately before this purge — that is what
+  // makes the assertion discriminating.
+  const beforeEmptyAudit = (await db.query(`SELECT org_id, stored_bytes, measured_at
+      FROM public.org_postgres_residency WHERE org_id = '9559-gauge-a'`)).rows[0];
+  // ⛔ EVERY journal row must go, not only these two: other spot checks above leave
+  // their own rows in `journal_event`, so a purge scoped to a/b leaves a NON-empty
+  // audit and exercises the ordinary per-org zeroing instead of the empty-audit
+  // case. Only an empty `journal_event` makes `postgres_per_org_bytes()` return
+  // `orgs: '[]'`. This is the last #9559 check, and the cleanup below deletes these
+  // orgs anyway, so nothing downstream depends on the journal's contents.
+  await db.exec(`SET LOCAL app.record_journal_purge = 'on';
+     DELETE FROM public.journal_event;`);
+  const auditNow = await db.query(
+    "SELECT jsonb_array_length(public.postgres_per_org_bytes()->'orgs')::int AS n");
+  if (Number(auditNow.rows[0].n) !== 0) {
+    console.error(`✗ #9559 HARNESS: the audit still reports ${auditNow.rows[0].n} org(s) `
+      + `after the purge, so the empty-audit case is not being exercised`);
+    process.exit(1);
+  }
+  await db.exec('SELECT * FROM public.postgres_residency_snapshot()');
+  const afterEmptyAudit = (await db.query(`SELECT org_id, stored_bytes, measured_at
+      FROM public.org_postgres_residency WHERE org_id = '9559-gauge-a'`)).rows[0];
+  if (!afterEmptyAudit) {
+    console.error('✗ #9559: a refresh over an EMPTY journal DELETED the residency row '
+      + '— in a single-tenant database the table then empties, every org reads '
+      + '`unreported`, and every gated write is refused');
+    process.exit(1);
+  }
+  if (Number(afterEmptyAudit.stored_bytes) !== Number(beforeEmptyAudit.stored_bytes)
+      || Date.parse(afterEmptyAudit.measured_at) !== Date.parse(beforeEmptyAudit.measured_at)) {
+    console.error(`✗ #9559: a refresh over an EMPTY journal RE-STAMPED org a `
+      + `(${beforeEmptyAudit.stored_bytes} B @ ${beforeEmptyAudit.measured_at} -> `
+      + `${afterEmptyAudit.stored_bytes} B @ ${afterEmptyAudit.measured_at}) — the audit `
+      + `returns \`orgs: []\` when the journal is empty, so an unguarded zeroing `
+      + `writes a FLEET-WIDE zero with a fresh instant: every org then passes every `
+      + `cap, and the \`unreported\` refusal can never fire because nothing goes stale`);
     process.exit(1);
   }
 
