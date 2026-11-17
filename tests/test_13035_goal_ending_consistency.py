@@ -801,3 +801,86 @@ def test_the_SWEEP_clears_a_goal_retired_on_its_status(sdk):
     assert out["counts"]["cleared"] >= 1, out["counts"]
     node = sdk.get_entity(goal["id"])
     assert node.get("goalState") in (None, ""), node.get("goalState")
+
+
+# ── 11. review round 6: the shapes that walked past rounds 3-5 ───────────────
+
+
+class _TwoRenderings(str):
+    """A key whose JOURNAL content and LIVE rendering differ — the shape the
+    transport's two-renderer contract makes reachable (`live.py`)."""
+
+    def __new__(cls, content, rendered):
+        obj = str.__new__(cls, content)
+        obj.rendered = rendered
+        return obj
+
+    def __str__(self):
+        return self.rendered
+
+
+def test_ONE_key_rendering_as_BOTH_guarded_names_is_refused(sdk):
+    """#13065 review round 6, finding 2.
+
+    ``_event_state_key_names`` answers the UNION of both renderers, so ONE key can
+    populate ``status`` AND ``goalState`` in the guard's view while the live write
+    files it under ``str(key)`` only. ``doubled`` counts keys PER name, so it read
+    1 and 1 and never fired — measured: ``('superseded','superseded')`` ADMITTED
+    and the node left ``status=None`` beside ``goalState='superseded'``.
+    """
+    goal = _goal(sdk, tag="two-renderings")
+    key = _TwoRenderings("status", "goalState")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], **{key: "superseded",
+                                           "supersededBy": "succ-1"})
+    assert "CONFLICTING status write" in str(exc.value), str(exc.value)
+    node = sdk.get_entity(goal["id"])
+    assert node["goalState"] == "active"           # nothing landed
+
+
+def test_a_successor_cleared_through_a_RENDERED_key_is_refused(sdk):
+    """#13065 review round 6, finding 3.
+
+    The carrier was recognised by ``snake(key)`` (the key's CONTENT) while the
+    live write files the key by ``str(key)``. A key with content ``'harmless'``
+    and ``__str__() == 'supersededBy'`` was invisible to the scan, so the guard
+    fell back to the STORED column — the very one the write nulls — and admitted
+    the clear.
+    """
+    goal = _goal(sdk, tag="rendered-carrier", goalState="superseded",
+                 status="superseded", supersededBy="succ-2")
+    key = _TwoRenderings("harmless", "supersededBy")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="superseded", **{key: None})
+    assert "names no successor" in str(exc.value), str(exc.value)
+    assert sdk.get_entity(goal["id"])["supersededBy"] == "succ-2"
+
+
+def test_the_SWEEP_clears_a_goal_retired_by_the_LEGACY_outdated_flag(sdk):
+    """#13065 review round 6, finding 4 — the OTHER half of the same predicate.
+
+    ``_retired_by_status`` is ``ended_on_status or bool(goal.get("outdated"))``;
+    round 5 fed the sweep only the first half, so a flag-retired goal with a
+    standing cache word still short-circuited to ``consistent`` (measured), while
+    the door called directly cleared it.
+    """
+    from tortoise.derived_invalidation import reconcile_goal_states
+
+    goal = _goal(sdk, tag="sweep-outdated")
+    indicator = sdk.create_object("CI pipeline duration [outdated]",
+                                 objectKind="workflow")
+    target = sdk.create_object("CI <= 10m [outdated]", objectKind="target",
+                              comparator="<=", threshold=10.0, dwell=1)
+    sdk.create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
+                     unit="minutes", startedAt="2026-11-11T10:00:00Z",
+                     aboutObject=indicator["id"])
+    made = judge_and_record(sdk, goal_id=goal["id"],
+                            indicator_id=indicator["id"],
+                            target=Target.from_node(target))
+    assert made["goalState"] == "met", made
+    sdk._get_proj().g.query(
+        "MATCH (n {id:$id}) SET n.outdated = true", params={"id": goal["id"]})
+    out = reconcile_goal_states(sdk)
+    assert out["counts"]["consistent"] == 0, out["counts"]
+    assert out["counts"]["cleared"] >= 1, out["counts"]
+    assert sdk.get_entity(goal["id"]).get("goalState") in (None, "")

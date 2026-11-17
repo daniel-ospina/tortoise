@@ -5917,7 +5917,20 @@ def _goal_successor_named(props: dict, stored_view) -> bool:
 
     named_in_write = False
     for key, value in props.items():
-        if snake(key) != "superseded_by":
+        # ⛔ #13065 review round 6 finding 3 (P2): the carrier is recognised by
+        # BOTH renderers. `snake(key)` normalises the key's CONTENT, while the
+        # live write files the key by `str(key)` (`live.py`'s two-renderer
+        # contract) — so a key with content `'harmless'` and `__str__() ==
+        # 'supersededBy'` was invisible here, `named_in_write` stayed False, and
+        # the guard fell back to the STORED view: i.e. to the very column the
+        # write NULLS. Measured: `supersededBy` cleared where the plain-key
+        # control is refused. Whichever name the live write files it under is a
+        # name the guard must see.
+        try:
+            live_name = str(key)
+        except Exception:      # a hostile `__str__` cannot hide a carrier
+            live_name = "supersededBy"
+        if snake(key) != "superseded_by" and live_name != "supersededBy":
             continue
         named_in_write = True
         if value not in (None, ""):
@@ -6024,6 +6037,21 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
     doubled = sorted(
         name for name in ("status", "goalState")
         if len(keys_rendering_as(props, {name})) > 1)
+    if not doubled:
+        # ⛔ #13065 review round 6 finding 2 (P2): ONE KEY can populate BOTH
+        # guarded names. `_event_state_key_names` answers the UNION of the two
+        # renderers (`str(key)` for the live write, the CONTENT for the journal),
+        # so a key with content `'status'` and `__str__() == 'goalState'` sets
+        # both names in `rendered` while `doubled` (keys PER name) sees 1 and 1.
+        # The guard then graded the pair the bag spells and the writer filed it
+        # under `str(key)` only — measured: `('superseded','superseded')` admitted,
+        # node left `status=None` beside `goalState='superseded'`, the issue's own
+        # headline pair through the door that claims to refuse it. Fewer
+        # contributing keys than guarded names is that shape.
+        contributing = {key for name in rendered
+                        for key in keys_rendering_as(props, {name})}
+        if len(contributing) < len(rendered):
+            doubled = sorted(rendered)
     if doubled:
         # ⛔ ONE WORDING WITH THE DOOR'S OWN CHECK (`update_entity`'s
         # `_status_write_is_ambiguous` refusal, #12786): a caller that trips this
@@ -6179,10 +6207,29 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             "to end the goal."
         )
 
-    if _stored_ending and not (_is_lifecycle_word(status,
-                                                 TERMINAL_EXCLUDED_STATUSES)
-                               and _is_lifecycle_word(goal_state,
-                                                     GOAL_ENDING_STATES)):
+    if _stored_ending and (
+            # ⛔ #13065 review round 6 finding 1 (P1): SCOPED TO THE GOAL AXIS.
+            # The arm exists for `status`/`goalState` disagreement, and the
+            # ending it protects is the GOAL's. Firing on a stored TERMINAL
+            # `status` alone refused every re-create of an ended `:Point` —
+            # measured red on the pre-existing, CI-registered
+            # `test_5365_fail_open_visible.py::test_apply_supersessions_dead_
+            # sibling_makes_the_ref_a_noop`, and on the documented duplicate-id
+            # re-create route for a retracted STATEMENT (which carries no
+            # achievement word at all). A node with no `goalState` anywhere and a
+            # write that names none is not a goal, so there is no pair here to
+            # keep coherent — the plain lifecycle rule owns that shape.
+            # ⛔ `goal_state` is NOT a reliable "was it named" test HERE: the
+            # missing-side branch above already replaced the sentinel with the
+            # node's (possibly absent) word, so a plain statement re-create would
+            # have read `None is not sentinel` as "this is a goal". The BAG's own
+            # value is the one that still carries the sentinel.
+            bag_goal is not _GOAL_ENDING_UNSET
+            or _stored_view().get("goalState") is not None
+    ) and not (_is_lifecycle_word(status,
+                                 TERMINAL_EXCLUDED_STATUSES)
+              and _is_lifecycle_word(goal_state,
+                                     GOAL_ENDING_STATES)):
         # #13065 review finding 4, LAST so the two branches above keep their more
         # specific refusals. Reaching here means the requested pair is itself
         # COHERENT and ends nothing — but the node this door can land on is

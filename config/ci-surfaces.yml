@@ -13335,14 +13335,16 @@ durations:
   # registration above puts it in `fast_pool()`, and `--integrity`'s
   # `duration_coverage_issues` floor is measured against that pool's own size.
   # The weight is a DELIBERATE local reading, not a junit sweep (this file has
-  # never run on main): 11 cases, one graph per case through the shared
-  # `sdk_factory`, and the only expensive one is the cross-product proof (48
-  # single-write goal creates in ONE graph, no EP, no judgement). Measured whole
-  # file in ~119 s on this box at load ~110, so ~1/10 of that on an idle host —
-  # the weight below is the idle-order estimate, and
-  # `tools/ci_timing.py --refresh-durations` replaces it from the first
-  # push-to-main junit sweep that includes the file. ⛔ No CASE COUNT is recorded
-  # as a pin: it moves whenever a review round adds an arm.
+  # never run on main): one graph per case through the shared `sdk_factory`, and
+  # the only expensive one is the cross-product proof (48 single-write goal
+  # creates in ONE graph, no EP, no judgement). ⛔ NO CASE COUNT IS PINNED (it
+  # moves whenever a review round adds an arm — 11 at first landing, 23 by
+  # round 5, and a stale count in this comment is just stale prose). Measured
+  # whole file ~12 s on THIS box at the current head (`test_lane.py run --
+  # tests/test_13035_goal_ending_consistency.py -q` → 23 passed in 12.66 s), and
+  # the earlier ~119 s reading was taken at load ~110 — the weight below is the
+  # idle-order estimate, and `tools/ci_timing.py --refresh-durations` replaces it
+  # from the first push-to-main junit sweep that includes the file.
   test_13035_goal_ending_consistency.py: 6.0
   test_7902_write_path_label_widening.py: 8.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 7.4
   test_7925_route_parity.py: 2.3  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 61.0

@@ -1198,7 +1198,8 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
 #: two scans is counted, reported and repaired twice.
 _GOAL_STATE_CANDIDATES = (
     "MATCH (n) WHERE NOT n:Point AND toStringOrNull(n.goalState) IN $words "
-    "RETURN n.id AS id, n.goalState AS word, n.status AS status "
+    "RETURN n.id AS id, n.goalState AS word, n.status AS status, "
+    "n.outdated AS outdated "
     "ORDER BY n.id LIMIT $lim"
 )
 
@@ -1547,8 +1548,9 @@ def reconcile_goal_states(
         _GOAL_STATE_CANDIDATES,
         params={"words": words, "lim": limit + 1},
     ).result_set or []
-    rows: list[tuple[str, str, Any]] = [(row[0], row[1], row[2])
-                                        for row in result if row and row[0]]
+    rows: list[tuple[str, str, Any, Any]] = [
+        (row[0], row[1], row[2], row[3])
+        for row in result if row and row[0]]
     # A matched node with no `id` cannot be named to the entity surface, so it is
     # not repairable here — and it is COUNTED rather than filtered away: a
     # candidate that matched the scan and then vanished from the payload is the
@@ -1587,7 +1589,7 @@ def reconcile_goal_states(
               "consistent": 0, "preserved": 0, "gone": 0, "failed": 0,
               "wouldRepair": 0, "notDurable": not_durable,
               "unaddressable": unaddressable}
-    for goal_id, word, stored_status in rows:
+    for goal_id, word, stored_status, stored_outdated in rows:
         counts["scanned"] += 1
         record: dict[str, Any] = {"goalId": goal_id, "from": word}
         # ⛔ #13065 review round 5, finding 2: "the word already stands" is NOT
@@ -1601,7 +1603,15 @@ def reconcile_goal_states(
         # cleared it and named the reason). The retirement is read from the SAME
         # predicate the door uses, on the `status` this scan now returns, so the
         # sweep and the door cannot disagree about what the goal IS.
-        retired = _retired_by_status({"status": stored_status})
+        # ⛔ #13065 review round 6 finding 4 (P2): BOTH halves of the predicate.
+        # Round 5 fed this the stored `status` but not the legacy `outdated`
+        # flag, which `_retired_by_status` treats as the OTHER half of the same
+        # retirement (`ended_on_status or bool(goal.get("outdated"))`) — so the
+        # short-circuit still reported `consistent` over a flag-retired goal the
+        # door clears (measured: `SET n.outdated = true` + a `met` cache ⇒
+        # `consistent: 1`, word left standing, door answers `cleared: True`).
+        retired = _retired_by_status({"status": stored_status,
+                                      "outdated": stored_outdated})
         try:
             standing = latest_judgement(sdk, goal_id=goal_id)
             state = standing.get("judgementState") if standing else None
