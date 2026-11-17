@@ -167,6 +167,7 @@ EXIT CODES
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from dataclasses import dataclass, field
@@ -287,20 +288,16 @@ def _write_pending(journal: str | None, ids: list) -> None:
     path = _pending_path(journal)
     if path is None:
         return
-    try:
+    with contextlib.suppress(OSError):
         path.write_text("\n".join(str(i) for i in ids) + "\n", encoding="utf-8")
-    except OSError:
-        pass
 
 
 def _clear_pending(journal: str | None) -> None:
     path = _pending_path(journal)
     if path is None:
         return
-    try:
+    with contextlib.suppress(OSError, AttributeError):
         path.unlink()
-    except (OSError, AttributeError):
-        pass
 
 
 def _read_pending(journal: str | None) -> list[str]:
@@ -815,7 +812,7 @@ def render(rep: Report) -> str:
         lines.append(f"  (unexpected) :Object rows with status={word}: {n}")
     pop = f"  population: {rep.total}"
     if (rep.store_count is not None
-            and rep.store_count != rep.total):        # pragma: no cover - guarded by truncated
+            and rep.store_count != rep.total):
         pop += f"  (store count {rep.store_count})"
     lines.append(pop)
     if rep.truncated:

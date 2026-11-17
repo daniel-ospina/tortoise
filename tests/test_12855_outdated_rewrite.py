@@ -932,3 +932,38 @@ def test_an_unreadable_journal_probe_fails_the_row_instead_of_skipping(env, monk
     assert rep.rewritten == [], "nothing may be certified on an unread position"
     assert len(rep.failures) == 3, rep.failures
     assert all("UNPROVEN" in f["error"] for f in rep.failures), rep.failures
+
+
+def test_a_dual_arm_row_needs_a_record_that_names_the_OBJECT(env, monkeypatch):
+    """A `[Object, Source]` row appends TWO records; the OBJECT's is the one that counts.
+
+    The door writes once per arm (measured 2026-11-17: this row appends two), so a
+    gate that is satisfied by "the journal grew" can be satisfied by the WRONG
+    arm's record. Reproduced by failing the FIRST append after arming (the
+    `:Object` arm) and letting the second succeed: the journal still grows, and a
+    rebuild reverts the Object to `outdated` because only the Object record folds
+    onto it. The gate must demand the row's OWN record, by label and id.
+    """
+    sdk, _events = env
+    oid = sdk.create_object("dual-arm", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$id}) SET n:Source", params={"id": oid})
+
+    real_append = EventLog.append
+    calls = {"n": 0}
+
+    def flaky(self, event):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("journal is read-only for the Object arm")
+        return real_append(self, event)
+
+    monkeypatch.setattr(EventLog, "append", flaky)
+
+    rep = tool.run(sdk, execute=True)
+
+    assert calls["n"] >= 2, "the fixture must reach both arms"
+    assert rep.rewritten == [], (
+        "the :Object arm's record never landed, so the row is not durable")
+    assert [f.get("id") for f in rep.failures] == [oid], rep.failures
