@@ -822,9 +822,10 @@ def _census_tmp_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     resolves every path through the module-global ``REPO``, which is redirected.
 
     ⛔ The file list is DERIVED from ``_NOTES`` (``_note_paths``), not spelled: a row
-    naming a fourth file must be copied here too, and the hand-listed three-tuple this
-    replaces would have left that file UNREDIRECTED — so a test degrading it would
-    have been writing into the real checkout.
+    naming a fourth file must be copied here too, or ``_sweep`` raises
+    ``FileNotFoundError`` while it builds its ``sources`` dict — a crash, not a check
+    (the same class the tool's own ``_NOTES`` comment records as a ``KeyError``). The
+    confinement itself is the ``REPO`` monkeypatch below, not this list.
     """
     from tools import hosted_api_cite_census as census_mod
 
@@ -1180,7 +1181,8 @@ def test_the_census_sees_and_restates_its_docstring_pivot_example(tmp_path, monk
         "`--check` stayed green over a stale `--pivot` example — the example is "
         "outside the figure set, so a recurrence is invisible to the verb that "
         "exists to catch it (#13152 review, P2)")
-    census_mod._sweep(measured, refresh=True)
+    assert census_mod._sweep(measured, refresh=True) == 1, (
+        "a stale example is stale work: the refresh pass must report it, not 0")
     assert _stated(pattern, own.read_text(encoding="utf-8")) == measured["pivot"], (
         "`--refresh` left the docstring example stating an old site — the "
         "restatement pass and the row it reads have diverged")
