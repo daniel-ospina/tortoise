@@ -1424,10 +1424,13 @@ def _tool_provenance(*, git_head: str | None, git_head_note: str) -> dict:
     """WHICH BYTES produced the artifact — not just which commit they sat on.
 
     ⛔ `git_head` alone LIED here: the committed artifacts record
-    `44a1b82` — the previous commit — while carrying fields (`seed_effect`,
+    `9b537d875a` while carrying fields (`seed_effect`,
     `off_topk_displacement`, `off_top1_kept_in_window`) that do not exist at that
     commit, so they were produced by a DIRTY tree and the one field a reader uses
-    to locate the producing code pointed at different code (`#13267` F4).
+    to locate the producing code pointed at different code (`#13267` F4). An
+    EARLIER generation recorded `44a1b82` while carrying fields first committed in
+    `9b537d8` — the same defect one generation back, which is why the field
+    records whether the bytes were committed rather than only where HEAD sat.
     `tool_sha256` is self-identifying bytes; `tool_uncommitted` says whether those
     bytes were in the commit at all.
     """

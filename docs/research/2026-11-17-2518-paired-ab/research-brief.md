@@ -153,7 +153,8 @@ contradicts the 2026-11-10 KEEP ruling (`#11395`), `SEARCH-ARCHITECTURE.md` V1, 
 4. **One read per item per arm** at `--read-limit`, so every k is a **prefix** of one ranked list and the
    arms cannot differ by read width.
 5. **Both arms in one process, back to back**: the headline run is bracketed by load **13.09 → 12.55**
-   (Δ −0.54) and the object control by **11.25 → 11.25** (Δ −0.01). `window_modes` recorded per arm; a
+   (Δ −0.54) and the object control by **11.25 → 11.25** (Δ −0.01 — the 2-dp bracket hides the
+   movement its own recorded delta shows). `window_modes` recorded per arm; a
    mixed mode is refused as contamination. ⛔ The figures are the artifacts' own `environment` block — a
    re-run moves them, so they are quoted from the committed evidence and must be re-read when it moves
    (`#13267` F3: an earlier revision quoted a trace that appears in NO committed artifact — the

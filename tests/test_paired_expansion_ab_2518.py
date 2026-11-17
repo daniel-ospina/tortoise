@@ -89,8 +89,10 @@ def test_the_briefs_sample_size_arithmetic_reproduces_from_the_formula():
     assert mde_at_15 == pytest.approx(0.078, abs=0.002)
     n_for_5pp = 300 * (mde_at_15 / 0.05) ** 2
     n_for_3pp = 300 * (mde_at_15 / 0.03) ** 2
-    assert 700 <= n_for_5pp <= 800, f"expected ~755, got {n_for_5pp:.0f}"
-    assert 1900 <= n_for_3pp <= 2300, f"expected ~2100, got {n_for_3pp:.0f}"
+    assert 700 <= n_for_5pp <= 800, (
+        f"expected ~{round(300 * (mde_at_15 / 0.05) ** 2)}, got {n_for_5pp:.0f}")
+    assert 1900 <= n_for_3pp <= 2300, (
+        f"expected ~{round(300 * (mde_at_15 / 0.03) ** 2):,}, got {n_for_3pp:.0f}")
 
 
 def test_paired_design_needs_far_fewer_items_than_two_independent_arms():
@@ -1833,9 +1835,18 @@ def test_the_snapshot_digest_and_every_load_trace_are_pinned_where_quoted():
     pair_form = f"{manifest['file_count']} files / {manifest['total_lines']:,} lines"
     trio_form = (f"{manifest['file_count']} files, {manifest['total_lines']:,} lines, "
                  f"{manifest['total_bytes']:,} bytes")
-    for form, where in ((pair_form, "the §1/§3 file+line pair"),
-                        (trio_form, "the §3/§5 digest/files/lines/bytes trio")):
-        assert form in brief, f"the brief must print {where} as {form!r}"
+    # ⛔ `form in brief` is a PRESENCE check, and §5's copy carries `**23 files**`
+    # markup while §3's does not — so §3 satisfied it and a re-stale of §5 ALONE
+    # stayed GREEN (measured by the reviewer: `78,571,361` → `…362`,
+    # `**23 files**` → `**24 files**`, `14,225` → `14,226`, each 49-passed).
+    # Compare on `_plain` (which drops `**` and `,`) and COUNT, so each site must
+    # carry its own form and neither can satisfy the other's assertion.
+    plain = _plain(brief)
+    assert plain.count(_plain(pair_form)) == 1, (
+        f"the file+line pair {pair_form!r} is printed at exactly one site (§1)")
+    assert plain.count(_plain(trio_form)) == 2, (
+        f"the digest/files/lines/bytes trio {trio_form!r} is printed at TWO sites "
+        "(§3 and the §5 falsifier); fewer means one has been re-staled or dropped")
 
     # ⛔ EVERY load trace the brief prints must be one an artifact recorded: a
     # presence check let one of the two headline sites re-stale. The object
@@ -1900,7 +1911,11 @@ def test_every_published_sample_size_and_load_delta_recomputes():
     assert brief.count(f"~{sizes[0.03]:,}") == 2, (
         "the 3 pp per-arm size is quoted at two sites (§0 and §5)")
 
-    # ⛔ every load DELTA printed must be an artifact's own `load_delta_1m`
+    # ⛔ every load DELTA printed must be the artifact ITS OWN site quotes, not
+    # merely SOME artifact's. A set-membership check let `Δ −0.54` become
+    # `Δ −0.01` at BOTH headline sites and stayed GREEN — the brief then printed
+    # `load 13.09 → 12.55 (Δ −0.01)`, arithmetic that cannot add up — and let one
+    # site borrow the short-query arm's −0.98.
     recorded = {f"{abs(_artifact(n)['environment']['load_delta_1m']):.2f}"
                 for n in _ARTIFACTS}
     shown = re.findall(r"Δ\s*[−-]\s*(\d+\.\d+)", brief)
@@ -1909,6 +1924,16 @@ def test_every_published_sample_size_and_load_delta_recomputes():
         assert d in recorded, (
             f"the brief prints a load delta of -{d}, which NO committed artifact "
             f"recorded — the recorded deltas are {sorted(recorded)}")
+    ctrl = _artifact("paired-object-60-control.json")
+    head = _artifact("paired-point-300.json")
+    head_delta = f"{abs(head['environment']['load_delta_1m']):.2f}"
+    ctrl_delta = f"{abs(ctrl['environment']['load_delta_1m']):.2f}"
+    assert shown.count(head_delta) == 2, (
+        f"the headline delta -{head_delta} belongs to BOTH sites that quote the "
+        f"headline trace (§3 and §5); found {shown.count(head_delta)}")
+    assert shown.count(ctrl_delta) == 1, (
+        f"the control's delta -{ctrl_delta} belongs to its ONE site; found "
+        f"{shown.count(ctrl_delta)}")
 
 
 def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
