@@ -127,7 +127,9 @@ class TestTheLaneIsNotAStateCarrier:
         """Behavioural half: the lane IS reachable (an SDK-created Event node
         carries ``eventStatus``) and still yields no Event state — the node
         gets no ``status`` column, so ``create_event``'s
-        ``eventStatus="scheduled"`` is an ingest marker, not a state read."""
+        ``eventStatus="pending"`` is an ingest marker, not a state read
+        (``pending`` -> ``indexed``; the lifecycle-shaped ``scheduled`` word was
+        retired by #13100)."""
         db = os.path.join(tempfile.mkdtemp(prefix="tortoise_2788_"), "t.db")
         sdk = TortoiseSDK(db)
         try:
@@ -137,31 +139,37 @@ class TestTheLaneIsNotAStateCarrier:
                 "MATCH (e:Event {eventId:$e}) RETURN properties(e)",
                 params={"e": eid},
             ).result_set[0][0]
-            assert props.get("eventStatus") == "scheduled"
+            assert props.get("eventStatus") == "pending"
             assert "status" not in props
         finally:
             sdk.close()
             shutil.rmtree(os.path.dirname(db), ignore_errors=True)
 
-    def test_a_writer_supplied_status_lands_as_a_prop(self):
-        """The declared surface has no Event ``status`` column, yet the extras
-        lane still carries a writer-supplied ``status`` onto the node — which
-        is why the projection-declared absence must not be read as "an Event's
-        ``status`` is inert". ``_promote_incident_operators`` reads exactly
-        this prop as a live/draft gate (#7853).
+    def test_a_writer_supplied_status_is_refused(self):
+        """The declared surface has no Event ``status`` column, and since #13100
+        no write door will put one there either.
+
+        ⛔ This replaces #2788's "accepted, and read as a live/draft gate" pin.
+        The prop lane is still open (``eventStatus`` and any tenant prop ride
+        it); what closed is the LIFECYCLE word, which is the conflation S7
+        removes. The gate that read it is re-homed onto the plan's position.
         """
         db = os.path.join(tempfile.mkdtemp(prefix="tortoise_2788_"), "t.db")
         sdk = TortoiseSDK(db)
         try:
-            created = sdk.create_entity(
-                "event", "StatusCarrier", eventKind="meeting", status="draft")
-            node = created["node"]
+            with pytest.raises(ValueError, match=":Event"):
+                sdk.create_entity(
+                    "event", "StatusCarrier", eventKind="meeting",
+                    status="draft")
+            node = sdk.create_entity(
+                "event", "StatusCarrier", eventKind="meeting")["node"]
             eid = node.get("eventId") or node.get("id")
             props = sdk._get_proj().g.query(
                 "MATCH (e:Event {eventId:$e}) RETURN properties(e)",
                 params={"e": eid},
             ).result_set[0][0]
-            assert props.get("status") == "draft"
+            assert "status" not in props
+            assert props.get("eventStatus") == "pending"
         finally:
             sdk.close()
             shutil.rmtree(os.path.dirname(db), ignore_errors=True)

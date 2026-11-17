@@ -37,7 +37,7 @@ governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.31; STORAGE-ARCHITECTURE.md
 > ⚠️ **§1's `path:line` citations are as-of 2026-09-05 and have drifted since.** Read them as
 > historical. §7 re-measures the **decisions**, not these citations; measured on this head,
 > `_validity_marker` is `retrieval.py:1289` (not `:398`) and `invalidate_point` is `sdk.py:20126`
-> (not `:3458`).
+> (not `:3483`).
 
 # Scope research — Epic #2281
 
@@ -66,7 +66,7 @@ re-invent W2-b or the harness — it should (a) add a distilled-first read prefe
 
 | Capability | Where | Status |
 |---|---|---|
-| Supersede machinery (CORRECTS edge + `outdated:true` + `expiredAt` + edge transfer IMPL/NAND/source/structural) | `tortoise/sdk.py:3458` (`invalidate_point`), `:3535` (`supersede_point`), `:3487` (`supersede` unified) | **SHIPPED** — `tests/test_supersede_edges.py` (40–356: transfer incl. NAND+source, double-supersede, window stamps additive) |
+| Supersede machinery (CORRECTS edge + `outdated:true` + `expiredAt` + edge transfer IMPL/NAND/source/structural) | `tortoise/sdk.py:3458` (`invalidate_point`), `:3535` (`supersede_point`), `:3512` (`supersede` unified) | **SHIPPED** — `tests/test_supersede_edges.py` (40–356: transfer incl. NAND+source, double-supersede, window stamps additive) |
 | Terminal statuses excluded from default reads | `tortoise/search_engine.py:23` `TERMINAL_EXCLUDED_STATUSES` (`retracted/superseded/outdated/archived/deprecated`); `_exclude_status_clause` `:28` | **SHIPPED** — `tests/test_supersede_edges.py:289-356` |
 | Ask lane *includes* terminal hits **with markers** (`include_terminal=True`) | `tortoise/sdk.py:11471`; decoration `tortoise/search_engine.py:1667-1744` (`superseded_by`/`supersedes`) | **SHIPPED** |
 | Marker rendering into reader context (`[SUPERSEDED BY: …]`, `[SUPERSEDES: …]`, `[valid since/to; expired …]`) | `tortoise/retrieval.py:398` `_validity_marker`, `:442` `_render_block`, `Current Date:` header `:558/:579` | **SHIPPED** — `tests/test_e2e9_point_in_time.py` (`test_rendered_context_valid_marker:188`, `test_undated_hit_renders_no_valid_marker:204`) |
@@ -88,8 +88,8 @@ the v2 pipeline, which #2134 shows truncates on large multi-session haystacks.
 
 | Capability | Where | Status |
 |---|---|---|
-| S5 execution emits point-level supersession records (reason `REVISES` — "fact-value contradiction, later session value change") | `tortoise/extractor_v2.py:2848` `execute_embed`; `:3120` (`reason = "REVISES"`); `REVISES_MIN_OVERLAP = 0.6` `:2048` | **SHIPPED** |
-| Entity-level supersession derivation (state-centric Object lifecycle) | `tortoise/extractor_v2.py:2549` `_resolve_superseded`, `:2689` `derive_supersessions`, `_supersession_records` `:2604` | **SHIPPED** |
+| S5 execution emits point-level supersession records (reason `REVISES` — "fact-value contradiction, later session value change") | `tortoise/extractor_v2.py:2848` `execute_embed`; `:3145` (`reason = "REVISES"`); `REVISES_MIN_OVERLAP = 0.6` `:2048` | **SHIPPED** |
+| Entity-level supersession derivation (state-centric Object lifecycle) | `tortoise/extractor_v2.py:2549` `_resolve_superseded`, `:2714` `derive_supersessions`, `_supersession_records` `:2629` | **SHIPPED** |
 | Layer-1 commit payload carries `supersessions` channel | `tortoise/commit_schema.py:464` `SupersessionRecord`, `:498` `CommitPayload.supersessions` | **SHIPPED** |
 | **Execution** of supersession records at write time: point-level → `sdk.supersede()` (CORRECTS+outdated+edge transfer); entity-level → `_fold_object_superseded` (Object.status fold cache) | `tortoise/commit_ops.py:146` `apply_supersessions` (called after entity/point write, `tortoise/sdk.py:2833-2834`) | **SHIPPED** |
 | SDK commit entry point threads supersessions | `tortoise/sdk.py:2149` `commit_session` (`:2248-2300`) | **SHIPPED** |
@@ -108,7 +108,7 @@ Workstream **#2080 W5** (issue #2104) is **mostly merged** via the `feat/2080-w5
 | Phase | Content | PR | Status |
 |---|---|---|---|
 | A+B | `memory_write_v1` write verb + provenance REQUIRED (`PROVENANCE_MISSING`) + verified gate order | #2247 | **MERGED** |
-| C | EP-on-ingest (live-at-capture + bounded ingest EP pass) | #2256; `tortoise/sdk.py:878` `_apply_capture_ingest_ep`, `:2603`; `tortoise/hosted_api.py:6529` | **MERGED** |
+| C | EP-on-ingest (live-at-capture + bounded ingest EP pass) | #2256; `tortoise/sdk.py:878` `_apply_capture_ingest_ep`, `:2628`; `tortoise/hosted_api.py:6529` | **MERGED** |
 | E | ingestion toggle contract S11 + disclosure marker `surfaced` | #2283 | **MERGED** |
 | F | deterministic `sessionCaptured` Event id + SDK mirror replay parity | #2293 | **DRAFT (in flight)** |
 | D | (phase-D: id-ingest-calibrate list, `tortoise/sdk.py:847`) | worktree `feat/2080-w5-phase-d` | **unmerged** |
@@ -400,9 +400,9 @@ wave by reading the tree, not inherited from a prior comment.
 
 | # | decision (2026-09-05) | state | evidence |
 |---|---|---|---|
-| **D1** | Option B — additive dated current-state block above raw evidence, no global ranking change | **LANDED** ✔ | `tortoise/assembly.py` renders `STATE (couch): superseded by sofa` — the f-string at `:2985` in `_state_header_hit()` (def at `:2956`; it sat at `:2767` on this doc's measurement base and #11451 moved it, so cite the symbol, not the line); pinned by `tests/test_assembly_sdk.py::test_fired_routing_exact_goldens` |
+| **D1** | Option B — additive dated current-state block above raw evidence, no global ranking change | **LANDED** ✔ | `tortoise/assembly.py` renders `STATE (couch): superseded by sofa` — the f-string at `:3010` in `_state_header_hit()` (def at `:2981`; it sat at `:2792` on this doc's measurement base and #11451 moved it, so cite the symbol, not the line); pinned by `tests/test_assembly_sdk.py::test_fired_routing_exact_goldens` |
 | **D2** | single pass (one LLM call per ask; empty output escalates and fails loud, #2280) | **CLOSED BY CONTRACT** | product contract — the abstention label cannot gate a second pass: `tortoise/ask_lane.py:714` computes `abstained` via `_looks_abstained` (`tortoise/reader.py:759`), published as `"abstained"` at `ask_lane.py:824`, and that helper's own docstring says *"measurement/UX sugar — NEVER a gate; the two-phase prompt is authoritative"* (`reader.py:760-762`). A second pass therefore has no gate to hook, and #2280's rule is that empty output escalates and fails loud instead |
-| **D3** | 3-tier read ordering: statement > turn Point > raw chunk | **LANDED** (#9092) ✔ | `tortoise/retrieval.py:3311-3313` (`_PACKAGE_TYPE_STATEMENT/_TURN/_CHUNK = 0/1/2`), `_package_type_tier()` `:3316-3336`, `_package_tier()` `:3339`, which returns `(_package_type_tier(h), marked, _pkg_rank)` at `:3353` so hit type is the primary key. The 2026-10-19 comment's `:1948` citation has drifted; the behaviour has not |
+| **D3** | 3-tier read ordering: statement > turn Point > raw chunk | **LANDED** (#9092) ✔ | `tortoise/retrieval.py:3311-3313` (`_PACKAGE_TYPE_STATEMENT/_TURN/_CHUNK = 0/1/2`), `_package_type_tier()` `:3341-3361`, `_package_tier()` `:3364`, which returns `(_package_type_tier(h), marked, _pkg_rank)` at `:3378` so hit type is the primary key. The 2026-10-19 comment's `:1948` citation has drifted; the behaviour has not |
 | **D4** | extend W2-b (sealed-gold discipline); no parallel benchmark | **SATISFIED BY SCOPE** | the W2-b sealed-gold discipline is `tests/eval/write_path/` — `gold/` (per-fixture `.gold.json`), `baselines/` (`main.json`, `m2.json`) and `_manifest.json`, 73 tracked files; no parallel benchmark was built |
 | **D5** | code parallel, measurement gated on #2134 | **SATISFIED** ✔ | #2134 **CLOSED** 2026-09-06 — the measurement gate is clear |
 | **D6** | route on retrieval composition; #2009 detector stays parked (0.284) | **HONOURED** | the D3 ordering keys on **hit type**, never on the detector (`_package_type_tier` takes only the hit, `retrieval.py:3316`); the lane still picks its reader prompt by `detect_question_type` (`ask_lane.py:685`/`:934`, `reader.py:532`), which D6 did not forbid. **#2009 is now CLOSED 2026-09-28** — the 2026-09-05 record above calls it OPEN; that is historical text, not a claim about today |
@@ -436,7 +436,7 @@ wave by reading the tree, not inherited from a prior comment.
 
 Per `docs/ONTOLOGY.md` (v3.31) and the precedence recorded on `#2281`: the ontology outranks
 `#5013`/D10, which outranks `STORAGE-ARCHITECTURE.md` + `EXTRACTOR-V4-ARCHITECTURE.md`, which outrank
-this document. D3 is a retrieval-ordering key (`retrieval.py:3339`/`:3353`) — it mints no `pointKind` and no
+this document. D3 is a retrieval-ordering key (`retrieval.py:3339`/`:3378`) — it mints no `pointKind` and no
 status, so it does not touch §4.4/§4.5.
 
 ## 8. Decomposition — workstream → child, and the exit bar as a predicate

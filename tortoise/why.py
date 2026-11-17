@@ -45,8 +45,8 @@ Contract invariants (plan §3.1.1/§3.1.3/§3.1.4/§6.1 + #2101):
   and, today, without any signal saying so); and ⛔ ``''`` = **this layer exposes
   no ``status`` family at all** — the value ``live.status_as_reported`` renders for
   a NAMED non-status-carrying layer, emitted as ``supersession.line`` /
-  ``supersession.status`` on an ``:Event`` (its lifecycle is ``eventStatus``) or a
-  ``:Source``. It is NOT a missing value and NOT the same as ``live``: the layers
+  ``supersession.status`` on an ``:Event`` (it has no lifecycle at all, #13100) or
+  a ``:Source``. It is NOT a missing value and NOT the same as ``live``: the layers
   that carry a ``status`` read ``live`` when it is absent. Clean empty is NEVER a
   degradation — this module raises nothing into the recall turn.
 - **Bounded reads (S8):** the assembly issues a number of batch Cypher
@@ -1530,8 +1530,8 @@ def project_item(item: dict, block: dict) -> dict:
     # `supersession` for a NON-Point anchor by design (the read is Point-only,
     # #11824), so the projection's fallback is what a goal `:Object` / reading
     # `:Event` gets — and the old blanket `or "live"` put a POINT-LANE lifecycle
-    # word on an `:Event`, whose layer carries no `status` family at all (its
-    # lifecycle is `eventStatus`; the #6976 conflation). An ABSENT status still
+    # word on an `:Event`, whose layer carries no `status` family at all (it has
+    # no lifecycle, #13100; the #6976 conflation). An ABSENT status still
     # reads `live` on the status-carrying layers, which is the recorded rule and
     # is why an `:Object` keeps the word.
     out["supersession"] = {
@@ -1589,7 +1589,7 @@ def item_to_why_entry(item: dict) -> dict | None:
     # ⛔ #11928 review round 6: the `status` follows the ONE rendering rule
     # (`live.status_as_reported`) with the item's own label, exactly as
     # `project_item` does — an absent status reads `live` on a status-carrying
-    # layer and `''` on `:Event` (whose lifecycle is `eventStatus`).
+    # layer and `''` on `:Event` (which has no lifecycle, #13100).
     superseded_by = item.get("superseded_by")
     entry["supersession"] = {
         "status": item.get("status") or status_as_reported(

@@ -82,9 +82,19 @@ def test_terminal_vocabulary_is_the_shared_set():
     ) == TERMINAL_EXCLUDED_STATUSES
     for s in TERMINAL_EXCLUDED_STATUSES:
         assert is_terminal_status(s), s
-    # `deprecated` is a legacy write-only status — outside POINT_STATUS_VALUES
-    # but still terminal in the shared vocabulary (read surfaces exclude it).
-    assert "deprecated" not in POINT_STATUS_VALUES
+    # ⚠️ #11824 S0 REVERSED this pin, deliberately and on the record. It used to
+    # read `"deprecated" not in POINT_STATUS_VALUES` — the pin for a deliberate
+    # OMISSION recorded at `live.py:90-98`, where `deprecated` was a read-side/
+    # legacy word a Point could not be given. S0 closes every knowledge kind at
+    # ONE four-word vocabulary (`draft` / `live` / `deprecated` / `superseded`)
+    # because the rule that separates the two endings is one rule: `superseded`
+    # NAMES ITS SUCCESSOR, and if nothing replaced it the word is `deprecated`.
+    # A Point that could not be `deprecated` therefore had no way to say "this
+    # ended and nothing replaced it" — the omission was the defect the four-word
+    # set removes. So the assertion is now the opposite, and it is STILL a pin:
+    # dropping `deprecated` from the set would make one of the four words
+    # unwritable again, and this line is what fails.
+    assert "deprecated" in POINT_STATUS_VALUES
     assert is_terminal_status("live") is False
     assert is_terminal_status(None) is False          # legacy/absent = live
     assert is_terminal_status("live", True) is True   # legacy outdated flag

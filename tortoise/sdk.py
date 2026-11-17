@@ -62,6 +62,17 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 # `_update_entity`. Imported so neither surface re-literals the vocabulary.
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .commit_ops import SUBJECT_TERMINAL_STATUSES as _SUBJECT_TERMINAL_STATUSES
+# #11824 S0: THE lifecycle write door for every knowledge kind — the four words
+# and their AX outcomes (re-spelling/synonym normalised silently, `outdated` and
+# the position words refused with a per-word repair). ONE home, imported by
+# every `status` door below, so the Point, Object and Subject arms cannot
+# disagree about what a value means.
+from .lifecycle_vocabulary import (
+    LIFECYCLE_STATUS_SYNONYMS as _LIFECYCLE_STATUS_SYNONYMS,
+    LIFECYCLE_STATUS_VALUES as _LIFECYCLE_STATUS_VALUES,
+    read_caller_status as _read_caller_status,
+    status_refusal_reason as _status_refusal_reason,
+)
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 # #12297: the fused-candidate rerank, imported at module scope because the read
 # path evaluates its gate on EVERY search. `rerank` is a light module (stdlib +
@@ -130,7 +141,7 @@ from .live import _current_status_clause  # #4058 canonical current-status allow
 from .live import same_mitigation_assertion  # #9962 redelivery vs re-assertion
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
-from .search_engine import belief_value  # #11702: ONE belief-value reader
+from .search_engine import belief_value, VECTOR_LEG_BUDGET_MS  # #11702; #11691
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
 from .live import direction_flows  # #7852 (source→target, target→source) flows
 from .live import direction_spellings  # #7852 stored-token equivalence class
@@ -147,7 +158,8 @@ from .live import terminal_row_marker  # …and ONE way to name it
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
-from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
+from .live import status_as_reported, refuse_event_lifecycle_state  # #9974 R1 + #13100
+from .live import endpoint_permits_operator_promotion  # #13100: the re-homed live/draft gate
 # #10893: the read-stage timeline, so a breached wait budget can NAME the stage it
 # died in. `mark` is a NO-OP when no timeline is bound (every CLI, unit test and
 # in-process SDK user), so the hot read path pays one ContextVar read per
@@ -304,10 +316,26 @@ register_kind("evidence")  # used by file_decision (#133)
 register_kind("criterion")
 
 # Valid status values for Point nodes (used by update_point status validation)
-# #432: claim lifecycle vocabulary — draft → live → retracted → superseded
-# (plus outdated/archived). challenged is a DERIVED condition (NAND operator
-# edge on a live point), NOT a stored status.
-POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
+# #11824 S0: the Point lifecycle is the FOUR-word knowledge-kind vocabulary
+# (draft → live → deprecated / superseded) — the same closed set every other
+# knowledge kind uses, because the rule that separates the two endings is one
+# rule: `superseded` names its successor, and if nothing replaced it the word is
+# `deprecated`.
+#
+# ⚠️ The PREVIOUS six (draft/live/retracted/superseded/outdated/archived) were
+# the #432 set plus the two words that were never lifecycle states: `outdated`
+# (the past name of "no longer counts", whose meaning `deprecated`/`superseded`
+# already carry) and `archived` (a collision of *this ended* with *do not show me
+# this* — design §3.2). Both are now REFUSED-and-repaired at the door; the pair
+# `retracted`/`archived` are declared SYNONYMS of `deprecated` and are stored as
+# it (see `tortoise/lifecycle_vocabulary.py`). `challenged` remains a DERIVED
+# condition (NAND operator edge on a live point), NOT a stored status.
+#
+# ⛔ The WRITE set narrowed; the READ set did NOT (`live.TERMINAL_EXCLUDED_STATUSES`
+# still names every legacy word, and it must — stored rows keep whatever they
+# hold, no backfill: #11824 §1 / design §8 "what a reader hides is wider than
+# what a writer may create").
+POINT_STATUS_VALUES = frozenset(_LIFECYCLE_STATUS_VALUES)
 
 # ── #2199 decide-part calibration + baseline provenance ────────────────
 # Decision parts filed through the decide tooling (create_point / commit_ops /
@@ -1065,7 +1093,7 @@ def _capture_redaction_warning(count: int) -> str:
     )
 
 
-def _record_vector_searcher(sdk=None):
+def _record_vector_searcher(sdk=None, timeout_ms=None):
     """The dense leg's POSTGRES searcher for THIS request — or ``None``.
 
     #11642 / #4051 V1. Two properties are the whole reason this is a function
@@ -1096,13 +1124,41 @@ def _record_vector_searcher(sdk=None):
 
     A broken install (an unimportable module) is ``None`` for the same reason:
     a search must not become a 500 because a retrieval accelerator is missing.
+
+    ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET, AND IT IS BOUND HERE (#11691).
+    ``record_vector.searcher`` threads it into the returned closure, which divides
+    it once (``record_vector.record_statement_ms``: two bounded statements per
+    read, so each gets a third) and hands the quotient to the door, where the
+    applied ``statement_timeout`` is ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``.
+    The division is what leaves the graph branch time to answer after a
+    cancellation; see that function for the arithmetic. The reason it is bound at
+    CONSTRUCTION rather than passed per call: the callable's FOUR-argument shape is
+    what keeps both legs' rows going through ONE ordering pass
+    (``#6214``/``#10121``), and a fifth, per-call budget argument would re-open
+    exactly the drift the shape prevents.
+
+    Why it is needed at all: ``run_vector_query`` bounds the GRAPH branches at
+    500 ms while this leg inherited ``record_serve``'s 15 s statement bound and a
+    10 s connect bound — and the fused read JOINS its workers
+    (``degradation_chain``'s ``ThreadPoolExecutor.__exit__``), so the read's own
+    cap could not bound it. One slow record read turned a 500 ms search into a
+    multi-second one AND recorded ``timeout``, discarding rows it may have had.
+
+    ⚠️ CALLERS MUST PASS THE BUDGET THEY GIVE ``run_vector_query`` /
+    ``degradation_chain``, or the leg is back on the door's 15 s: ``None`` (the
+    default, kept for the places that do not go through a bounded read) leaves
+    the door bound untouched. The three construction sites pass
+    ``VECTOR_LEG_BUDGET_MS``, ``degradation_chain``'s own fallback
+    (``_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS``) and the expansion pass's
+    ``timeout_ms`` respectively.
     """
     try:
         from .record_vector import searcher
     except Exception:  # noqa: BLE001, RUF100 — an unimportable accelerator is "unarmed"
         return None
     try:
-        return searcher(carried=getattr(sdk, "_record_tenant", None))
+        return searcher(carried=getattr(sdk, "_record_tenant", None),
+                        timeout_ms=timeout_ms)
     except Exception:  # noqa: BLE001, RUF100 — never let the accelerator break a read
         _logger.debug("record dense searcher unavailable — using the graph",
                       exc_info=True)
@@ -4748,7 +4804,7 @@ CROSS_LENS_ANN_TOP_K_MAX = 100
 
 # #432: declarative spec for the Point lifecycle — ONTOLOGY §5's transition
 # table in code, PLUS one code-review decision the doc does not carry: a DRAFT
-# may terminalize before it is ever live (``draft -> retracted/superseded``), so
+# may terminalize before it is ever live (``draft -> deprecated/superseded``), so
 # the map is a SUPERSET of §5's `draft` row and an exact match of its `live`
 # row. ``tests/test_claim_lifecycle.py`` cross-checks the terminal words and the
 # doc's declared transitions; the `draft` widening is pinned there as the #432
@@ -4759,27 +4815,68 @@ CROSS_LENS_ANN_TOP_K_MAX = 100
 # ⛔ IT IS CONSULTED, for the transition question, by `_update_entity`'s Point
 # `status` arm (#9649) — the generic tenant door, which had no transition check
 # at all: `update_entity(superseded_point, status='live')` resurrected a dead
-# claim and `status='archived'` minted a status ONTOLOGY declares reserved.
+# claim.
 # What that door consults is the DECLARED TARGET SET for a stored status — never
 # terminality, which stays in the shared predicate (#2498's
-# `live.is_terminal_status`, which also covers `deprecated` and the legacy
-# `outdated=true` flag, neither of which is a key here). A stored status with no
-# entry here (NULL/legacy) defers rather than being guessed at.
+# `live.is_terminal_status`, which also covers the legacy `outdated=true` flag,
+# not a key here). A stored status with no entry here (NULL/legacy) defers rather
+# than being guessed at.
+#
+# #11824 S0: the LIVE rows now offer `deprecated`, because it is a declared word
+# of the four-word vocabulary (it was absent from `POINT_STATUS_VALUES` before,
+# so the vocabulary gate raised before this table was ever read — the design §3
+# notes the change adds BOTH the word and the entry). The legacy spellings keep
+# TERMINAL rows rather than being deleted: they are READ deltas for stored rows
+# (no backfill, #11824 §1), and a stored word with no row would DEFER — i.e.
+# silently become transitionable — which is the opposite of terminal.
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    # P2 (code-review): guards allow draft→retracted/superseded (a draft point
+    # P2 (code-review): guards allow draft→deprecated/superseded (a draft point
     # can be terminal before ever going live); keep the declarative spec
     # aligned with the retract/supersede guards.
-    "draft": frozenset({"live", "retracted", "superseded"}),  # promote + terminal
-    "live": frozenset({"retracted", "superseded"}),    # via retract_point / supersede_point
-    "retracted": frozenset(),                            # terminal
+    "draft": frozenset({"live", "deprecated", "superseded"}),  # promote + terminal
+    "live": frozenset({"deprecated", "superseded"}),  # retract_point / supersede_point
+    "deprecated": frozenset(),                           # terminal
     "superseded": frozenset(),                           # terminal
-    # #2498: `outdated` is TERMINAL for the shared lifecycle guard
-    # (`live.TERMINAL_EXCLUDED_STATUSES` + the legacy `outdated=true` flag),
-    # so it has no outgoing transition. The pre-#2498 `{"retracted"}` entry
-    # diverged from the guard — a dead claim could be re-terminalized.
+    # ── legacy stored words: READ deltas, terminal, minted by no door ──
+    # `retracted` is what `retract_point`'s CAS still stores (the verb is not yet
+    # migrated to `deprecated` — a stated residual of #11824 S0, tracked on
+    # #11824); `outdated` is the retired Point word and `archived` the retired
+    # collision word. All three are terminal in the shared read predicate, and
+    # none may gain an outgoing transition.
+    "retracted": frozenset(),
     "outdated": frozenset(),
-    "archived": frozenset(),                             # terminal (reserved — no v1 write path)
+    "archived": frozenset(),
 }
+
+
+def _lifecycle_meaning(word: str) -> str:
+    """The lifecycle word a stored/echoed spelling MEANS (#11824 S0).
+
+    ONE home for "read a word by its meaning, not its spelling", so the three
+    places that compare a caller's status with a STORED one cannot drift:
+
+    * the Point arm's entailment test (``_status_entailed``, which disarms the
+      terminal guard), and
+    * the Point arm's declared-transition loop (which asks
+      ``_ALLOWED_TRANSITIONS``).
+
+    WHY IT IS NEEDED. `lifecycle_vocabulary.read_caller_status` normalises a
+    declared SYNONYM on the way in — ``archived``/``retracted`` are not words a
+    caller gets to mint, they are spellings of ``deprecated`` — while the graph
+    still HOLDS them (``retract_point``'s CAS writes ``status='retracted'``, a
+    residual of this slice, and ``archived`` is a pre-#11824 stored word). A
+    generic tenant PUT echoes the row it just read, so without this the echo
+    ``stored 'retracted' + caller 'retracted'`` arrived at the comparison as
+    ``'retracted' != 'deprecated'``: the entailment test above it said "this is
+    not a transition" (so the terminal guard was correctly disarmed) and the
+    loop then said "this IS a transition, and ``retracted`` declares none" —
+    the SAME call judged both ways, refusing a read-modify-write that writes
+    what the row already holds.
+
+    One-way, like ``LIFECYCLE_STATUS_SYNONYMS`` itself: a stored word is never
+    rewritten by this helper, it is only READ as the meaning it carries.
+    """
+    return _LIFECYCLE_STATUS_SYNONYMS.get(word, word)
 
 # Event types that write to the :GraphEvent store (#432). Other types
 # (e.g. PointRevised) only write to the JSONL event log (#548).
@@ -5838,6 +5935,65 @@ door cannot answer, whatever the two values say.
     """
     ids = {id(key) for key in keys_rendering_as(props, {"status"})}
     return sum(1 for key in props if id(key) in ids) > 1
+
+
+def _rehome_rendered_status_key(props: dict, *, door: str, label: str) -> bool:
+    """Refuse an ambiguous status write, and file a renderer-named one under ``status``.
+
+    #13143 review (F1, P1) — the two DEDICATED Point doors tested the LITERAL
+    NAME (``"status" in props`` / ``props.pop("status", "live")``) while the
+    transport applies ``str(key)``. A ``str`` subclass whose content and
+    ``__str__`` differ therefore slipped past those tests:
+
+        ``update_point({<K content 'zzz', __str__ 'status'>: 'in_progress'})``
+        STORED ``status='in_progress'`` (and ``'garbage'``)
+        ``create_point(the same shape)`` — the caller's key reached the inline
+        CREATE map beside the map's own ``status: $st`` field, so WHICH failure
+        it produced depended on the engine: on the graph lane the duplicate
+        key was rejected by the driver
+        (``ResponseError: Duplicate property key 'status'``, i.e. a raw error a
+        caller cannot act on) and on the embedded engine the caller's key won
+        last-wins and stored the ungraded word.
+
+    Both are defects, and the one that matters is the shared one: **neither door
+    GRADED the word**. ``update_knowledge`` refused both bags on the same day, so
+    the family disagreed, and an ungraded word no read leg excludes reads as
+    CURRENT — exactly the fail-open #10371 / #11824 exists to close.
+
+    (The engine split is recorded because the first draft of this docstring
+    claimed the create half "STORED" the word, which is only true embedded; a
+    review finding corrected it, and a measurement that does not reproduce in
+    the lane its own test runs in is not evidence — #13143 review round 2.)
+
+    The entity doors had already been moved onto the renderer union
+    (:func:`keys_rendering_as`, :func:`_status_write_is_ambiguous`); this is the
+    same rule for the Point doors, so the family cannot answer differently
+    again. Call it BEFORE the door's own ``'status' in props`` arms: after it,
+    a status-rendering key has the literal spelling, so every arm below sees the
+    write the transport will apply.
+
+    Returns True when the call carried a status at all (the caller's
+    ``explicit_status`` question), and refuses more than one rendered key — the
+    landing word of a two-key write cannot be known here (#12786).
+    """
+    if _status_write_is_ambiguous(props):
+        raise ValueError(
+            f"{door} refused a CONFLICTING status write for {label}: more "
+            f"than one key in this call renders as `status`. A `str` subclass "
+            f"whose content and `__str__` differ is filed under one name by "
+            f"the live write and the other by the journal, so which word "
+            f"lands cannot be known here. Pass `status` ONCE, as a plain "
+            f"str, with the word you mean."
+        )
+    keys = list(keys_rendering_as(props, {"status"}))
+    if not keys:
+        return False
+    # ⛔ ONE key, guaranteed by the refusal above. It is POPPED and re-filed
+    # under the literal name: leaving it in place would let the same call land
+    # the column twice (the door's graded word AND the raw renderer key), which
+    # is the divergence the renderer-union guard exists to refuse.
+    props["status"] = props.pop(keys[0])
+    return True
 
 
 def _status_key_leaves_the_dead_state(props: dict) -> bool:
@@ -7533,19 +7689,44 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
               and len(named_kinds) == 1 else None)
     moved = named[0][2]
     if target is not None and target != t:
-        # ⛔ ROUTING MUST NEVER TURN A LEGAL WRITE INTO A REFUSAL (#1934). The
-        # Subject door validates `status` against ONTOLOGY §4.2; the Object door
-        # validates nothing. So routing object→subject with an Object-only status
-        # (`status='active'`) would RAISE where the caller's write previously
-        # succeeded — a refusal invented by this fix. When that would happen the
-        # write keeps the layer the caller asked for and is REPORTED instead: no
-        # write is ever refused, and no prop is ever rewritten to fit.
-        # ⚠️ `isinstance` FIRST, exactly as the Subject door's own validation does
-        # (`_subj_status` below): `_SUBJECT_STATUS_VALUES` is a frozenset, so
-        # membership HASHES the operand and an unhashable `status` (a list/dict)
-        # raised `TypeError: unhashable type` HERE — a crash invented by a guard.
-        # A non-str status is not routable (the Subject door would refuse it), and
-        # it is not a crash either.
+        # ⛔ ROUTING MUST NEVER TURN A LEGAL WRITE INTO A REFUSAL (#1934). This
+        # guard was written when the Subject door validated `status` and the
+        # Object door validated nothing, so routing object→subject with an
+        # Object-only status (`status='active'`) raised where the caller's write
+        # previously succeeded — a refusal invented by this fix. When that would
+        # happen the write keeps the layer the caller asked for and is REPORTED
+        # instead: no write is ever refused, and no prop is ever rewritten.
+        #
+        # ⚠️ #11824 S0 RETIRED THE ASYMMETRY THAT MOTIVATED THIS BRANCH:
+        # `_SUBJECT_STATUS_VALUES` is now the same four lifecycle words every
+        # knowledge kind takes, so there is no longer a status that is legal on an
+        # Object and illegal on a Subject.
+        #
+        # ⛔ BUT THIS TEST IS RAW SET MEMBERSHIP AND THE DOOR NORMALISES, so the
+        # two do NOT agree on every legal spelling. `blocked` is false for exactly
+        # the four canonical words, and TRUE for a re-spelling (`'Live'`,
+        # `' live '`) and for a declared synonym (`archived`, `retracted`) — all of
+        # which the lifecycle door ACCEPTS and stores canonically. Measured
+        # consequence, recorded on #11824 rather than fixed here because it is a
+        # ROUTING decision and not a vocabulary one: an Object write naming a
+        # Subject-layer kind lands as `:Object` with `status='archived'` and as
+        # `:Subject` with `status='deprecated'`, although both store `deprecated`.
+        # Deriving `blocked` from the door's own verdict — and then asking whether
+        # the branch has any reachable case left — is the follow-up.
+        #
+        # What the branch still does is keep the ROUTER from being the thing that
+        # decides a refusal, and from attributing the error to the wrong subsystem
+        # when the door refuses the write a moment later (`active` reaches it as a
+        # POSITION word). It no longer turns a landing write into a refusal, which
+        # is what the `why` text below now says.
+        # ⚠️ A TYPE TEST FIRST, which is the same ORDER the lifecycle door uses
+        # (`read_caller_status` tests the type before it consults any set — with
+        # `issubclass(type(value), str)` there, deliberately, so a value claiming
+        # `__class__ = str` cannot pass): `_SUBJECT_STATUS_VALUES` is a frozenset,
+        # so membership HASHES the operand and an unhashable `status` (a
+        # list/dict) raised `TypeError: unhashable type` HERE — a crash invented by
+        # a guard. A non-str status is not routable (the lifecycle door refuses it
+        # as its first arm), and it is not a crash either.
         _status = props.get("status", "live")
         blocked = (target == "subject"
                    and not (isinstance(_status, str)
@@ -7559,10 +7740,10 @@ def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
         return t, {"code": "kind_other_layer", "kind": moved,
                    "layer": t, "actual": (target,),
                    "why": (f"the write's status {props.get('status')!r} is not one "
-                           f"of the {target.capitalize()} lifecycle's "
-                           f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))} values, "
-                           f"and re-routing would refuse a write that is legal "
-                           f"at this door")}
+                           f"of the {target.capitalize()} lifecycle's canonical "
+                           f"words ({', '.join(sorted(_SUBJECT_STATUS_VALUES))}) as "
+                           f"spelled, so the write keeps the layer the caller "
+                           f"asked for")}
     # 2. A kind declared only on other layer(s) cannot be re-routed here: report
     #    it (warn-not-block) and let the write land as asked.
     return t, _first_layer_mismatch(named, t)
@@ -9840,11 +10021,12 @@ def _item_declared_status(item: dict, depth: int = 1) -> tuple[bool, object]:
     but collapses "absent" and "explicitly ``None``" onto ``None``. Those are
     different to the entity writers: an absent ``status`` stores NOTHING — the
     fold seeds ``status=$st`` so the property stays absent, which reads live
-    (``live._terminal_excluded``; #9974 R1) — while an explicit ``None`` is
-    VALIDATED and refused on the Subject door
-    (``create_entity(type='subject', status=None)`` raises ``Invalid status
-    None``). Phase 1 cannot claim writer agreement without the distinction, so
-    it is kept here (#7925 review P3).
+    (``live._terminal_excluded``; #9974 R1) — while an explicit ``None`` is the
+    DELETE sentinel (``_sanitize_props``) that both knowledge doors carry
+    through untouched (#11824 S0), so it removes the property instead of
+    minting one. Phase 1 cannot claim writer agreement without the distinction,
+    so it is kept here (#7925 review P3) — and it is why the vocabulary arm
+    above SKIPS a ``None`` value rather than asking the door about it.
     """
     return _item_prop_at_depth(item, "status", depth)
 
@@ -16581,7 +16763,18 @@ class TortoiseSDK:
         # the invisibility were the SAME mechanism — a goal created plainly
         # and wired only as an operator TARGET was never promoted, so EP
         # discarded the whole arm while the run still reported converged=True.
-        explicit_status = "status" in props
+        # ⛔ #13143 review (F1, P1): the renderer UNION, never the literal name —
+        # a `str` subclass whose content and `__str__` differ is written as
+        # `status` by the transport while a literal-name test misses it, so the
+        # word went UNGRADED. Which failure that produced is engine-specific and
+        # is recorded in full in :func:`_rehome_rendered_status_key`'s docstring
+        # (graph lane: the caller's key duplicates the inline CREATE map's own
+        # `status` field and the driver refuses the statement; embedded: the
+        # caller's key won last-wins and the ungraded word read as CURRENT). The
+        # helper also refuses a two-key bag this door would otherwise answer
+        # differently from `create_object`.
+        explicit_status = _rehome_rendered_status_key(
+            props, door="create_point", label="a Point")
         # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
         # hit must never forward the caller's status into update_point (which
         # rejects any non-'live' status — a gated re-ingest of the same draft
@@ -16596,19 +16789,21 @@ class TortoiseSDK:
         # EP-inert while converged=True is still reported), and so is every
         # other kind. An explicit status is honoured by the pop below.
         status = props.pop("status", "live")
-        # Fail-closed vocabulary validation (mirrors update_point): a
-        # non-canonical status (case variant, junk, non-str, typo) would
-        # otherwise be stored verbatim and treated as EP-LIVE by _live_only
-        # (which excludes 'draft' and terminal statuses/flag — #2422; junk
-        # outside the closed vocabulary is the residual EP-live surface) —
-        # a silent-promotion hole
-        # (PR #1073 review P0/P1). isinstance guard keeps the error a
-        # ValueError for unhashable values (list/dict) too.
-        if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
-            raise ValueError(
-                f"Invalid status {status!r}. Valid statuses: "
-                f"{sorted(POINT_STATUS_VALUES)}"
-            )
+        # Fail-closed vocabulary validation (mirrors update_point): the FOUR-word
+        # lifecycle vocabulary is read through `lifecycle_vocabulary`,
+        # the ONE home (#11824 S0) — so a re-spelling (`'LIVE'`, `' Live '`) is
+        # normalised silently, a declared synonym (`archived` / `retracted`) is
+        # stored as `deprecated`, and `outdated` or a position word
+        # (`in_progress` / `completed` / `active` / `paused`) is REFUSED with a
+        # performable repair instead of being stored verbatim.
+        #
+        # The hole this closes is measured: a non-canonical status used to be
+        # stored and then treated as EP-LIVE by `_live_only` (which excludes
+        # 'draft' and the terminal statuses/flag — #2422), so junk outside the
+        # vocabulary was the residual EP-live surface (PR #1073 review P0/P1).
+        # The door now also raises for unhashable values (list/dict), because the
+        # guard's own first arm is a type test.
+        status = _read_caller_status(status, kind=":Point")
         # #2351 (epic #2349 E-derived): the claim class. Validated HERE, before
         # any graph write — an unknown class fails loud with nothing created
         # (the same fail-closed posture as the status vocabulary above and the
@@ -21974,6 +22169,17 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # ⛔ #13143 review (F1, P1): FIRST, before any of this door's own
+        # `'status' in props` arms — they test the LITERAL name while the
+        # transport applies `str(key)`, so a renderer-named key was written as
+        # `status` by `SET n += $props` and never graded (measured:
+        # `update_point({<K content 'zzz', __str__ 'status'>: 'garbage'})`
+        # STORED `status='garbage'`, where `update_knowledge` refused it).
+        # Re-filing it under the literal spelling makes every arm below see the
+        # same write the transport will apply, and refuses a two-key bag whose
+        # landing word cannot be known (#12786).
+        _rehome_rendered_status_key(
+            props, door="update_point", label=f"point {id!r}")
         # #10000 / §9.1: `update_point` writes with a raw `SET n += $props` and
         # consults no point deny-set, so it accepted the narrative and journalled
         # it as `PointRevised` — measured at #10389 review cycle 3, which is also
@@ -22254,13 +22460,12 @@ class TortoiseSDK:
                 "Context has been removed. See #49."
             )
 
-        # Validate status if present
-        if 'status' in props and (not isinstance(props['status'], str)
-                                  or props['status'] not in POINT_STATUS_VALUES):
-            raise ValueError(
-                f"Invalid status {props['status']!r}. "
-                f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
-            )
+        # Validate status if present — through the ONE lifecycle door, so a
+        # re-spelling is normalised (and stored normalised) and a synonym lands
+        # as `deprecated` (#11824 S0). The promote-only arm below then decides
+        # whether this door may write the resulting word at all.
+        if 'status' in props:
+            props['status'] = _read_caller_status(props['status'], kind=":Point")
 
         # #2351 (review P0): ``claimClass`` is a CREATE-time marker, NOT a
         # revision prop, and this door refuses it — through the SAME #7951
@@ -23805,15 +24010,15 @@ class TortoiseSDK:
         # window rewrites and the non-terminal `draft -> live` promotion
         # included — because it delegates TERMINALITY to this one instrument.
         # Its `:Event` half is answered at its own call site by
-        # `refuse_terminal_event_state(props, ...)`, the PROPS-AWARE predicate
-        # that knows whether the RESULT status is terminal; this arm is
-        # label-only, so firing it for that door refused `draft -> live` on a
-        # hybrid — the prop lane #2788 pins and #11825's own
-        # `test_a_non_terminal_update_still_lands_on_a_multi_label_event`
-        # requires (measured at the merge head: 1 failed). So the arm is gated
-        # on a SECOND question, defaulted on for the doors that only ever write
-        # a terminal value, and switched off by the one door that decides from
-        # its props.
+        # `refuse_event_lifecycle_state(props, ...)`, the PROPS-AWARE predicate
+        # that reads the caller's DECLARED keys; this arm is
+        # label-only, so firing it for that door answered for the LABEL rather
+        # than the declaration — #11825's `test_a_non_terminal_update_still_lands_
+        # on_a_multi_label_event` required the prop lane there, and #13100 has
+        # since retracted that allowance at the DOOR, which is the site that owns
+        # the question. So the arm is gated on a SECOND question, defaulted on for
+        # the doors that only ever write a terminal value, and switched off by the
+        # one door that decides from its props.
         if (refuse_terminal and refuse_event_terminalization
                 and self._get_proj().g.query(
                 "MATCH (n:Point:Event {id:$id}) RETURN count(n)",
@@ -24666,8 +24871,10 @@ class TortoiseSDK:
         # #12914 round-4 P1 measured, reported here instead of papered over. The
         # write below goes through ``update_knowledge`` -> ``_update_entity``, and
         # THAT door runs label-surface guards this one does not: the
-        # ``refuse_terminal_event_state`` probe (an ``:Event`` row cannot take a
-        # terminal ``status``) and the ``:Source`` closed-surface refusal (D30).
+        # ``refuse_event_lifecycle_state`` probe (an ``:Event`` row cannot take
+        # ANY ``status``, #13100 §8 — this branch widened it from the terminal
+        # subset, so the divergence below is wider than this comment first said)
+        # and the ``:Source`` closed-surface refusal (D30).
         # Measured on the round-4 head: for the HYBRID shapes ``:Object:Event``,
         # ``:Subject:Event``, ``:Object:Source`` and ``:Subject:Source`` the
         # preview answers ``would supersede`` and the write REFUSES. Before this
@@ -26852,12 +27059,19 @@ class TortoiseSDK:
         live edge (the exact pollution the draft lifecycle prevents). The
         endpoint read is NOT Point-only: #7853 widened it to
         `epistemic_disjunction('s')`, so it covers all four epistemic labels
-        (`Point`, `Subject`, `Object`, `Event`) and a draft `:Event` endpoint
-        blocks promotion just as a draft `:Point` does. Unset-status operators
-        are LIVE under the canonical read model (projection coalesce default;
-        #944 review) and are skipped — never re-promoted into the event
+        (`Point`, `Subject`, `Object`, `Event`). An endpoint that is not live
+        blocks promotion — an explicitly non-``live`` stored word, a terminal one,
+        or (since #13100) a PLAN whose position is not terminal, because a plan
+        that has not reached a terminal stage has not happened. That last arm is
+        the live/draft suppression RE-HOMED off the ``:Event`` non-terminal
+        ``status`` this change retires; a legacy Event row that still carries the
+        word keeps suppressing through the status arm (#2977). Unset-status
+        operators are LIVE under the canonical read model (projection coalesce
+        default; #944 review) and are skipped — never re-promoted into the event
         stream.
         """
+        from .planned_occurrence import is_plan_kind, plan_position
+
         rows: list = []
         # #7853: n is id-anchored — sweep the epistemic labels so a draft
         # operator incident to an Event/Subject/Object endpoint is promoted.
@@ -26883,21 +27097,40 @@ class TortoiseSDK:
             eps = proj.g.query(
                 "MATCH (o:Point {id:$oid})-[r]->(s) "
                 f"WHERE {epistemic_disjunction('s')} "
-                "RETURN s.id, s.status, coalesce(s.outdated, false)",
+                "RETURN s.id, s.status, coalesce(s.outdated, false), "
+                "       s.objectKind, s.pipelineStageId, "
+                "       s.pipelineOutcome, coalesce(s.isClosed, false), "
+                "       s.pipelineStageKey",
                 params={"oid": oid},
             ).result_set
             if not eps:
                 continue  # no endpoints — nothing to gate on
-            # TWO arms, and BOTH are needed (``live.is_terminal_status`` alone is
-            # NOT the gate): the terminal predicate is the canonical mirror of
-            # the flag + terminal-status exclusion, and ``draft`` is not in
-            # ``TERMINAL_EXCLUDED_STATUSES`` — a draft endpoint is un-promoted,
-            # not dead, and admitting it here would re-open the pollution #944
-            # closed. Unset status stays LIVE (the legacy-node rule), which is
-            # what ``(st or "live")`` preserves.
+            # The gate itself is ONE predicate (``live.endpoint_permits_
+            # operator_promotion``), not a condition spelled at this call site:
+            # three arms are needed and missing any of them re-opens a closed
+            # pollution. ``is_terminal_status`` alone is not the gate (a draft
+            # endpoint is un-promoted, not dead — #944), and since #13100 the
+            # retired non-terminal ``:Event`` status is replaced by the plan's
+            # POSITION: a plan whose stage is a non-terminal one — and which the
+            # durable ``isClosed`` marker does not end, and which HAS a position
+            # at all — has not happened, so it suppresses exactly as
+            # ``status='scheduled'`` on an Event did. A stored legacy Event word still suppresses through the
+            # status arm (the reader net stays wider than the write door, #2977).
             all_live = all(
-                (st or "live") == "live" and not is_terminal_status(st, bool(od))
-                for _, st, od in eps
+                endpoint_permits_operator_promotion(
+                    st, bool(od),
+                    # ⛔ The plan's position is resolved by the ONE helper the
+                    # plan writers and the Q5 read also use (`plan_position`), not
+                    # from the stored `pipelineSlot` PROP: a plan ended through the
+                    # generic door carries a terminal `pipelineStageId` beside a
+                    # stale slot, and reading the prop kept a settled plan
+                    # suppressing promotion for ever.
+                    plan_state=(plan_position(stage_id, outcome=outcome,
+                                              is_closed=bool(closed),
+                                              pipeline_key=key)
+                                if is_plan_kind(kind) else None))
+                for (_, st, od, kind, stage_id, outcome, closed,
+                     key) in eps
             )
             if not all_live:
                 continue  # keep draft until every endpoint is live
@@ -31824,44 +32057,60 @@ class TortoiseSDK:
         # above gives the flag, and the one the sibling `:Subject` arm inside
         # the endpoint loop could never provide.
         #
-        # `:Object` is deliberately NOT refused: its writer does not validate,
-        # it STORES the value (measured), so a refusal here would reject bundles
-        # the writer accepts — the over-rejection class this PR already fixed
-        # once. `:Event` is no longer in that sentence: since #11825 its door
-        # refuses the TERMINAL half, and the arm BELOW mirrors that refusal at
-        # Phase 1 for the same partial-mutation reason.
+        # `:Object` used to be deliberately EXEMPT ("its writer does not
+        # validate, it STORES the value"), so refusing it here would have
+        # rejected bundles the writer accepted. #11824 S0 closes that asymmetry:
+        # the Object writer validates against the SAME four-word lifecycle door
+        # as the Subject one, so both are checked here, through the SAME question
+        # (`_status_refusal_reason`) rather than a re-spelt vocabulary — a
+        # divergence between this phase and the writer is exactly the
+        # partial-mutation class. `:Event` is no longer in that sentence: since
+        # #11825 its door refuses the TERMINAL half, and the arm BELOW mirrors
+        # that refusal at Phase 1 for the same reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            if _ENTITY_ITEM_LABELS.get(_item_type_text(item)) != "Subject":
+            _item_label = _ENTITY_ITEM_LABELS.get(_item_type_text(item))
+            if _item_label not in ("Subject", "Object"):
                 continue
             _declares_status, own_status = _item_declared_status(
                 item, _item_flatten_depth(item, "entities"))
-            if not (_declares_status and (
-                    not isinstance(own_status, str)
-                    or own_status not in _SUBJECT_STATUS_VALUES)):
+            if not _declares_status:
+                continue
+            # ⛔ AN EXPLICIT ``None`` IS THE DELETE SENTINEL, NOT A WORD
+            # (#11824 S0 review, P2). Both write doors this arm exists to agree
+            # with exempt it (`create_entity`: `if _lifecycle_value is not None`,
+            # `_update_entity`: `if _np_status is not None`), because
+            # `_sanitize_props` documents ``None`` as the removal form. Asking
+            # the vocabulary question here refused the WHOLE bundle for a
+            # `status: null` item the writer stores happily — and the refusal
+            # text accused the writer of "refusing it mid-write", which is
+            # false for this value. Over-rejection is the direction this arm's
+            # own history says was fixed once already.
+            if own_status is None:
+                continue
+            _status_refusal = _status_refusal_reason(
+                own_status, kind=f":{_item_label}")
+            if _status_refusal is None:
                 continue
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{own_status!r} for a :Subject — the writer "
+                           f"{own_status!r} for a :{_item_label} — the writer "
                            f"validates against the declared lifecycle and "
                            f"refuses it mid-write, so the bundle is "
-                           f"rejected at validation. Must be one of: "
-                           f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}",
+                           f"rejected at validation. {_status_refusal}",
             })
-        # ── #11825: the `:Event` TERMINAL half, refused at Phase 1 ──
+        # ── #11825 / #13100: an `:Event` `status`, refused at Phase 1 ──
         # The same class as the `:Subject` vocabulary arm directly above, and
         # for the same measured reason: `create_event` now runs
-        # `live.refuse_terminal_event_state`, so an item carrying a terminal
-        # status raises in step 3 AFTER the point items have committed. The
-        # predicate is `live.is_terminal_status` — the ONE mirror of the Cypher
-        # terminal rule — so a status added to the vocabulary moves the door and
-        # this arm together (`#2901`/`#3301`). NON-terminal statuses are NOT
-        # refused: the door accepts them and `_promote_incident_operators` reads
-        # `draft`/`live` as its gate (#7853, #10828), so refusing here would be
-        # this file's own over-rejection class. `outdated` needs no arm: the loop
-        # above already refuses it bundle-wide on ANY point or entity item.
+        # `live.refuse_event_lifecycle_state`, so an item carrying ANY status
+        # raises in step 3 AFTER the point items have committed. Since #13100 it
+        # is the whole KEY that is refused (the terminal half alone was #11825's
+        # interim boundary), so this arm and the door cannot disagree on a value
+        # or a type — the arm refuses whatever the door would. `outdated` needs
+        # no arm here: the loop above already refuses it bundle-wide on ANY point
+        # or entity item.
         # ⛔ EMITTED UNCONDITIONALLY, and the duplicate for a DIRECT-route
         # operator connection is the accepted cost — the same bargain the
         # `:Subject` vocabulary arm above makes. Deferring to the connection arm
@@ -31937,61 +32186,37 @@ class TortoiseSDK:
                                 if k not in _merged})
             _status_values = [v for k, v in _merged.items()
                               if "status" in _event_state_key_names(k)]
-            own_status = None
             if not _status_values:
-                _declares_status, own_status = _item_declared_status(
+                _declares_status, _own_status = _item_declared_status(
                     item, _item_flatten_depth(item, "entities"))
-                _status_values = [own_status] if _declares_status else []
-            else:
-                own_status = _status_values[-1]
+                _status_values = [_own_status] if _declares_status else []
             # `status: None` is the DOCUMENTED clear route the door ACCEPTS, so it
             # is not a violation (review cycle 5, P2).
             _status_values = [v for v in _status_values if v is not None]
             if not _status_values:
                 continue
-            # The TYPE dimension (review cycle 6, P1): a PERSISTABLE non-string is
-            # refused by the door, a discarded one is accepted-and-dropped.
-            from .live import _status_is_discarded_by_every_writer as _is_discarded
-            _stored_bad = [v for v in _status_values
-                           if not isinstance(v, str)
-                           and not _is_discarded(v)]
-            if _stored_bad:
-                violations.append({
-                    "section": "entities", "index": i,
-                    "message": f"ingest: entities[{i}] declares status "
-                               f"{_stored_bad[0]!r} for an :Event — `status` on "
-                               f"the node is a STRING drawn from the "
-                               f"vocabulary, or `None` to clear it, so the "
-                               f"bundle is rejected at validation rather "
-                               f"than mid-write. WHAT TO DO: pass a string "
-                               f"(the door accepts `scheduled`/`draft`/"
-                               f"`live`), or drop `status`.",
-                })
-                continue
-            # ⛔ NAME THE DECLARATION THAT FAILED, not the LAST one. The test above
-            # is an `any`, and the writer applies EVERY key of the map, so an item
-            # can declare both names — one terminal, one not. Rendering
-            # `_status_values[-1]` then indicted the LEGAL value and advised the
-            # caller to pass it, with the offending terminal declaration absent
-            # from the message (measured, review: conflict-sweep lane F — an item
-            # declaring `superseded` and `live` produced "declares status 'live' …
-            # use a non-terminal value", naming only the value that was fine).
-            _terminal_hits = [
-                v for v in _status_values
-                if isinstance(v, str) and is_terminal_status(str.__str__(v))
-            ]
-            if not _terminal_hits:
-                continue
+            # ⛔ EXACT PARITY WITH THE DOOR, and since #13100 that is the WHOLE
+            # axis: the door refuses any non-`None` `status` on an `:Event`
+            # (`live.refuse_event_lifecycle_state`), so Phase 1 refuses any
+            # declaration too — whatever its VALUE or TYPE. The earlier split
+            # (terminal refused, non-terminal and non-persistable values
+            # accepted) mirrored the interim #11825 boundary, and keeping it
+            # would let Phase 1 call a bundle clean that step 3 raises on AFTER
+            # the point items committed — the #2422/#7925 partial-mutation class
+            # this arm exists to prevent.
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{', '.join(repr(v) for v in _terminal_hits)} for an "
+                           f"{', '.join(repr(v) for v in _status_values)} for an "
                            f":Event — an :Event "
-                           f"carries no lifecycle, so its door refuses the "
-                           f"terminal half mid-write and the bundle is rejected "
-                           f"at validation. WHAT TO DO: drop `status` from the "
-                           f"item, or use a non-terminal value (the door "
-                           f"accepts `scheduled`/`draft`/`live`).",
+                           f"carries no lifecycle at all (#13100), so its door "
+                           f"refuses the declaration mid-write and the bundle is "
+                           f"rejected at validation. WHAT TO DO: drop `status` "
+                           f"from the item. If the thing has not happened yet, "
+                           f"create a plan (`core:plan`) and record the :Event "
+                           f"when it does; for ingest bookkeeping use "
+                           f"`eventStatus` (`pending` -> `indexed`); to clear a "
+                           f"legacy word pass `status: None`.",
             })
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
@@ -33934,17 +34159,18 @@ class TortoiseSDK:
           ``SUBJECT_STATUS_VALUES`` before the name merge, so an invalid value
           (outside that set, non-string, or an explicit ``null``) on ANY entity
           item is a Phase-1 violation, while ``:Object``/``:Event`` statuses
-          are stored verbatim and stay accepted. ⛔ The ``:Event`` half of that
-          is now split, and the split is the whole point of #11825: a
-          NON-TERMINAL ``status`` (``scheduled``/``draft``/``live``) is still
-          stored verbatim, but the TERMINAL half is refused bundle-wide here
-          for exactly the reason the ``:Subject`` vocabulary is — the door
+          are stored verbatim and stay accepted. ⛔ A ``:Event`` status is
+          refused bundle-wide, and since #13100 (S7) that means ANY non-``None``
+          ``status`` — the terminal half alone was #11825's interim boundary, and
+          the non-terminal half is retired too because "will happen" is a PLAN's
+          job (`tortoise/planned_occurrence.py`). It is refused here for exactly
+          the reason the ``:Subject`` vocabulary is — the door
           (``create_event`` → ``create_entity(type='event')``) runs
-          ``live.refuse_terminal_event_state``, so leaving it to step 3 means the
-          point items commit and THEN the write raises (measured: a bundle with
-          one point and one ``status='superseded'`` event returned ``[]`` here
-          and raised a bare ``ValueError`` after ``Point 1`` was written — the
-          #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
+          ``live.refuse_event_lifecycle_state``, so leaving it to step 3 means the
+          point items commit and THEN the write raises (measured at #11825: a
+          bundle with one point and one ``status='superseded'`` event returned
+          ``[]`` here and raised a bare ``ValueError`` after ``Point 1`` was
+          written — the #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
           the ITEM'S write door flattens (``_item_prop_at_depth``): TWICE for a
           ``subject``/``object``/``event`` item (step 3 relays
           ``create_subject``/``create_object``/``create_event`` →
@@ -36057,7 +36283,7 @@ class TortoiseSDK:
             name=f"human approval of {artifact_ref}",
             eventKind="humanApproval",
             startedAt=now,
-            eventStatus="completed",
+            eventStatus="indexed",
         )
         event_id = event["eventId"]
         # Wire provenance: approver performs; uses artifact; aboutPoint each
@@ -36638,7 +36864,7 @@ class TortoiseSDK:
         pool cap — the documented degradation. ``top_k`` is hard-clamped at
         CROSS_LENS_ANN_TOP_K_MAX by the caller.
         """
-        from .search_engine import run_vector_query  # noqa: I001
+        from .search_engine import VECTOR_LEG_BUDGET_MS, run_vector_query  # noqa: I001
         import numpy as np
 
         proj = self._get_proj()
@@ -36655,12 +36881,18 @@ class TortoiseSDK:
                 embeddings[pid] = np.asarray(emb, dtype=np.float64)
 
         best: dict[tuple[str, str], float] = {}
+        # #11691: ONE budget for this read — the graph branches' `timeout_ms` and
+        # the RECORD leg's statement bound. The record leg is constructed HERE,
+        # per call, with that budget, so it can no longer run to the record
+        # door's 15 s inside a 500 ms read (the fused read JOINS its workers).
+        _budget_ms = VECTOR_LEG_BUDGET_MS
         for pid, meta in pool.items():
             vec = embeddings.get(pid)
             if vec is None:
                 continue
             hits = run_vector_query(proj.g, vec.tolist(), limit=top_k + 1,
                                     is_embedded=is_embedded,
+                                    timeout_ms=_budget_ms,
                                     # #1359: recorded index API → skip the
                                     # failing signature attempt on Cypher engines.
                                     vector_index_api=getattr(
@@ -36668,7 +36900,21 @@ class TortoiseSDK:
                                     # #11642: the Postgres ANN leg when a record
                                     # tenant is armed on this request; `None`
                                     # keeps the graph branch unchanged.
-                                    pg_vector=_record_vector_searcher(self))
+                                    # #11691: bound to this read's budget.
+                                    pg_vector=_record_vector_searcher(
+                                        self, timeout_ms=_budget_ms),
+                                    # #13108: the store's own measured index
+                                    # inventory, so an unindexed label skips the
+                                    # doomed queryNodes attempt (`None` = not
+                                    # measured → attempt as before). ⚠️ The
+                                    # BEHAVIOURAL half, not the reporting one:
+                                    # `_vector_indexed_labels` reports
+                                    # "measured-but-unparseable" as an empty
+                                    # set, and a reader must never skip an
+                                    # index attempt on that evidence.
+                                    vector_indexed_labels=getattr(
+                                        proj, "_vector_indexed_labels_for_reads",
+                                        None))
             for nid, _score in hits:
                 if nid == pid or nid not in pool:
                     continue
@@ -42911,7 +43157,7 @@ class TortoiseSDK:
                                 "prs": metadata.get("prs", []),
                                 "critical_decisions": metadata.get("critical_decisions", []),
                             }),
-                            "eventStatus": "completed",
+                            "eventStatus": "indexed",
                             "classificationLevel": "internal",
                             "format": "markdown",
                         }
@@ -44279,6 +44525,7 @@ class TortoiseSDK:
             expand_structural_hops,
             _recency_factors,
             _trace_entry,
+            VECTOR_LEG_BUDGET_MS,
         )
         # W4 (#2101): the additive why-layer enrichment (shared assembly —
         # DM-1; lazy import — why.py pulls search_engine helpers only).
@@ -44558,7 +44805,7 @@ class TortoiseSDK:
             # — an unbounded probe would let a wedged store stall the read it
             # annotates.
             try:
-                graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or 500))
+                graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS))
             except Exception as e:  # noqa: BLE001, RUF100
                 # The store IS configured (the projection object was obtained
                 # just above) but did not answer: off by OUTAGE — `degraded`,
@@ -44578,7 +44825,7 @@ class TortoiseSDK:
         # #7952: the store is reachable, so the known-hot set can be READ.
         if read_status_out is not None and _residency_enabled():
             _residency = _read_declaration(
-                graph, timeout_ms=int(_elevated_timeout_ms or 500))
+                graph, timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS))
         # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
@@ -44811,6 +45058,14 @@ class TortoiseSDK:
         # contains it; per-leg detail already has its own channel (`leg_trace`,
         # a different question).
         _mark_read_stage(STAGE_RETRIEVAL)
+        # #11691: the SAME budget `degradation_chain` gives every leg's
+        # `timeout_ms` below, so the RECORD dense leg's statement bound is
+        # `min(record door, a third of this)` instead of the door's 15 s — the
+        # third is `record_vector.record_statement_ms`, which reserves the rest of
+        # the read for the graph branch after a cancellation. Derived with the
+        # identical expression degradation_chain uses (`int(elevated or
+        # VECTOR_LEG_BUDGET_MS)`) rather than a second guess at it.
+        _leg_budget_ms = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -44819,6 +45074,19 @@ class TortoiseSDK:
             # #1359: the recorded vector-index API (procedure vs Cypher-native)
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
+            # #13108: the labels this STORE measured a VECTOR index for
+            # (`_record_vector_index_inventory`). A label absent from it skips
+            # two round trips that can only be REFUSED — measured at ≈58 % of an
+            # unindexed `:Object` read's store time. `None` (the inventory's
+            # not-measured lane) is forwarded as None, i.e. attempt as before.
+            # ⛔ The BEHAVIOURAL half (`…_for_reads`), never
+            # `_vector_indexed_labels`: the reporting half collapses "the
+            # catalogue was returned but unparseable" into an empty set, and
+            # skipping on that evidence would demote every dense read —
+            # `:Point` included — to a full scan after an engine catalogue
+            # reshape.
+            vector_indexed_labels=getattr(
+                proj, "_vector_indexed_labels_for_reads", None),
             excluded_statuses=() if include_terminal else None,
             leg_trace=status_trace,
             # A1 (#2070): the ask-lane numeric-token policy threads into the
@@ -44847,7 +45115,7 @@ class TortoiseSDK:
             # would find no tenant and take the graph branch on EVERY request
             # while reporting nothing. `None` (no record DSN, or no tenant
             # installed) keeps the graph branches byte-identically.
-            pg_vector=_record_vector_searcher(self),
+            pg_vector=_record_vector_searcher(self, timeout_ms=_leg_budget_ms),
         )
 
         if _bm25_lexical and "vector" not in _floored_legs:
@@ -44881,7 +45149,7 @@ class TortoiseSDK:
             _bm25_trace_start = len(status_trace) if status_trace is not None else None
             _bm25_hits = run_bm25_query(
                 graph, query, entity_type=entity_type, limit=str_limit,
-                timeout_ms=int(_elevated_timeout_ms or 500),
+                timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS),
                 excluded_statuses=() if include_terminal else None,
                 leg_trace=status_trace,
                 keep_numeric=keep_numeric,
@@ -45180,7 +45448,7 @@ class TortoiseSDK:
                     graph, text_hit_ids, max_hops=structural_hops,
                     limit=str_limit,
                     excluded_statuses=() if include_terminal else None,
-                    timeout_ms=int(_elevated_timeout_ms or 500),
+                    timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS),
                 )
                 if expansion:
                     merged = list(dict(raw_results.get("structural", [])).items())
@@ -45272,7 +45540,7 @@ class TortoiseSDK:
                     scope_kinds=_scope_kinds,
                     # the shipped leg's own timeout, so on a slow store the
                     # expansion no-ops for the same reason rather than sooner.
-                    timeout_ms=int(_elevated_timeout_ms or 500),
+                    timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS),
                 )
                 if expanded_vec is not None:
                     raw_results["vector"] = expanded_vec
@@ -47127,7 +47395,7 @@ class TortoiseSDK:
         leg_trace: list[dict] | None,
         min_similarity: float | None = None,
         scope_kinds: tuple[str, ...] | None = None,
-        timeout_ms: int = 500,
+        timeout_ms: int = VECTOR_LEG_BUDGET_MS,
     ) -> list[tuple[str, float]] | None:
         """C2 (#2518) indicator 2 — DENSE-leg parity for the key expansion.
 
@@ -47214,6 +47482,10 @@ class TortoiseSDK:
                 is_embedded=getattr(proj, "_is_embedded", True),
                 entity_type="point",
                 vector_index_api=getattr(proj, "_vector_index_api", None),
+                # #13108: the same measured inventory the shipped leg gets —
+                # the BEHAVIOURAL half (see the `degradation_chain` call site).
+                vector_indexed_labels=getattr(
+                    proj, "_vector_indexed_labels_for_reads", None),
                 excluded_statuses=excluded_statuses,
                 leg_trace=_exp_trace,
                 min_similarity=min_similarity,
@@ -47231,7 +47503,10 @@ class TortoiseSDK:
                 # the tenant ContextVar is readable here — unlike the shipped
                 # leg, which runs on a pool worker and is handed the callable
                 # by `_record_vector_searcher()` at the `degradation_chain` call.
-                pg_vector=_record_vector_searcher(self),
+                # #11691: bound to THIS pass's budget, the same `timeout_ms` the
+                # graph branches just above get — otherwise the record leg would
+                # still be on the door's 15 s inside a 500 ms read.
+                pg_vector=_record_vector_searcher(self, timeout_ms=timeout_ms),
                 # ONE dense slot, ONE tally: the shipped leg already counted it
                 # (the #8488 arm's ``meter=False`` precedent — the trace still
                 # records the second pass, so a measurement can see it ran).
@@ -47278,9 +47553,9 @@ class TortoiseSDK:
         is layer-bound: `:Point` carries `status` (live / superseded /
         retracted / draft / outdated / archived), `:Object` and `:Subject`
         carry their own `status` families (which include `deprecated`), and an
-        `:Event` carries NO `status` at all — its lifecycle is `eventStatus`,
-        a different vocabulary this field deliberately does not mix in, so an
-        `:Event` peer reports `""`. `""` therefore means "this peer's layer
+        `:Event` carries NO `status` at all — it has no lifecycle (#13100), and
+        `eventStatus` is an INGEST marker this field deliberately does not mix
+        in, so an `:Event` peer reports `""`. `""` therefore means "this peer's layer
         exposes no `status`", and it is now reached by LOOKING at the peer's
         label rather than by never asking.
 
@@ -52031,12 +52306,14 @@ class TortoiseSDK:
                     props, label=_carrier_label, surface="update_entity",
                     stored_status=_carrier_rows[0][0])
                 break
-        # ── #11825: an `:Event` target, BEFORE the first write ──
+        # ── #11825 → #13100: an `:Event` target, BEFORE the first write ──
         # ⛔ THIS BLOCK MUST PRECEDE the Point status arm below, which WRITES
         # (`SET n += $s`) and only THEN drops the key from `props`. It used to sit
         # after that arm, so on a node carrying BOTH `:Point` and `:Event` the
         # Point arm consumed and cleared `status` before this guard ran — the
-        # guard then saw no declaration at all and the terminal status stood.
+        # guard then saw no declaration at all and the terminal status stood. The
+        # same ordering is what makes #13100's widened refusal (EVERY non-`None`
+        # `status`, not just the terminal half) atomic on that hybrid.
         # Measured (review cycle 9, P1): `update_entity(<:Point:Event>,
         # status="superseded")` was ACCEPTED, the node ended with
         # `status='superseded'` on an `:Event`, and the record (label="Point")
@@ -52079,13 +52356,18 @@ class TortoiseSDK:
                 "RETURN count(e)",
                 params={"id": id_val},
         ).result_set[0][0]:
-            refuse_terminal_event_state(props, door="update_entity")
-            # ⛔ No `props` surgery here on purpose: a NON-terminal status is a
-            # legal write on an `:Event` target (#2788's prop lane), and on a
-            # multi-label node the property is shared, so there is no "Point side"
-            # to keep it away from. The guard's whole job is the TERMINAL half,
-            # and it has it — measured: dropping the key here red 9 pins that
-            # legitimately land `draft`/`live` through this door.
+            refuse_event_lifecycle_state(props, door="update_entity")
+            # ⛔ No `props` surgery here on purpose. #13100 retired #2788's
+            # non-terminal prop lane, so this guard now refuses EVERY
+            # non-`None` `status` and returns only for a CLEAR (`status=None`,
+            # the documented un-mark route for a legacy row). On a multi-label
+            # node the property is SHARED, so there is no "Point side" to keep
+            # it away from — dropping the key here would turn that clear into a
+            # silent no-op instead of a `SET n += {status:null}` that removes the
+            # word, which is why it is left to the write arms below. (One shape
+            # cannot reach the clear route: a `:Point:Event` hybrid, whose Point
+            # arm refuses `None` as a non-vocabulary word — `Invalid status
+            # None`, a pre-existing Point-side behaviour, unchanged here.)
 
         # ── #9649: this door consults the lifecycle guard (#2498/#7819) ───────
         # Measured on the pre-change tree (issue #9649, comment `6839154493`, at
@@ -52317,14 +52599,23 @@ class TortoiseSDK:
             # IS entailed here (measured — `__str__` is never consulted, calls=0),
             # and what catches it is the write arm's own normalisation
             # (`_status = str.__str__(_status)`), not this test (#12907 cycle 4).
+            # ⛔ BOTH SIDES ARE COMPARED BY MEANING, not by spelling either
+            # (#11824 S0 review, P2). The door normalises a declared synonym
+            # (``retracted``/``archived`` -> ``deprecated``) while the row still
+            # HOLDS the legacy word, so a raw spelling compare reported an echo
+            # of the row's own status as a CHANGE — the terminal guard asked and
+            # refused, and (on a a live row) the transition loop below refused
+            # the same call for the opposite reason. ``_lifecycle_meaning`` is
+            # the ONE reader of that mapping, so this test and the loop cannot
+            # disagree about what the caller asked for.
             _pt_statuses_exact = (
-                tuple(str.__str__(_stored_status)
+                tuple(_lifecycle_meaning(str.__str__(_stored_status))
                       for _stored_status in _pt_statuses)
                 if all(issubclass(type(_stored_status), str)
                        for _stored_status in _pt_statuses) else None)
             _rendered_status = _lifecycle_rendered.get("status")
             _rendered_status_exact = (
-                str.__str__(_rendered_status)
+                _lifecycle_meaning(str.__str__(_rendered_status))
                 if issubclass(type(_rendered_status), str) else None)
             _status_entailed = (
                 "status" in _lifecycle_rendered
@@ -52333,14 +52624,14 @@ class TortoiseSDK:
                 and _pt_statuses_exact == (_rendered_status_exact,))
             for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
                 try:
-                    # ⛔ `refuse_event_terminalization=False` (#11825 merge): this
-                    # door writes a WINDOW or a non-terminal prop as often as it
-                    # writes a terminal status, so the guard's label-only `:Event`
-                    # arm is the wrong question here — it refused `draft -> live`
-                    # on a hybrid (the prop lane #2788 pins). The Event half is
-                    # answered ABOVE, by the props-aware
-                    # `refuse_terminal_event_state`, which refuses exactly the
-                    # TERMINAL values and lets a non-terminal one ride that lane.
+                    # ⛔ `refuse_event_terminalization=False` (#11825 merge): the
+                    # label-only `:Event` arm is the wrong QUESTION at this site —
+                    # it answered for the label where the door's question is the
+                    # caller's DECLARATION, and it was the prop lane #2788 used to
+                    # pin here that made the difference visible. (That lane is
+                    # retired: #13100 refuses any non-`None` `status` on an
+                    # `:Event` at the door, above.) The Event half is answered
+                    # ABOVE, by the props-aware `refuse_event_lifecycle_state`.
                     self._assert_lifecycle_guard(
                         _lifecycle_id, method="update_entity", missing_ok=True,
                         allow_operator=True,
@@ -52491,16 +52782,25 @@ class TortoiseSDK:
                 # returned False on the non-serialisable value): a graph/record
                 # divergence. Every legitimate shape is exact-str here, because a
                 # real `str` subclass was just normalised to its exact content.
-                if type(_status) is not str or _status not in POINT_STATUS_VALUES:
-                    # Same refusal `update_point` issues (#3311 defect 1). The
-                    # raise precedes every write, so a refused status leaves
-                    # the node untouched. The operand is rendered through
-                    # `_refusal_repr` so a hostile `__repr__` cannot replace the
-                    # promised `ValueError` with its own class.
+                if type(_status) is not str:
+                    # Same refusal `update_point` issues (#3311 defect 1) for a
+                    # value that is not a word at all. The raise precedes every
+                    # write, so a refused status leaves the node untouched. The
+                    # operand is rendered through `_refusal_repr` so a hostile
+                    # `__repr__` cannot replace the promised `ValueError` with
+                    # its own class.
                     raise ValueError(
                         f"Invalid status {_refusal_repr(_status)}. "
                         f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
                     )
+                # #11824 S0: the WORD itself is read through the ONE lifecycle
+                # door — a re-spelling is normalised (and this arm writes the
+                # normalised word, not the caller's object), a declared synonym
+                # lands as `deprecated`, and `outdated` / a position word is
+                # REFUSED with a performable repair. The vocabulary test that
+                # used to sit here asked only "is it one of six words" and could
+                # not tell the caller what to do instead.
+                _status = _read_caller_status(_status, kind=":Point")
                 # ── #9649: the DECLARED transition, from `_ALLOWED_TRANSITIONS` ──
                 # The vocabulary check above asks whether `_status` is a Point
                 # status word; it never asked whether the ROW may become it. That
@@ -52576,9 +52876,24 @@ class TortoiseSDK:
                     if not issubclass(type(_stored), str):
                         continue
                     _stored = str.__str__(_stored)
-                    if str.__eq__(_stored, _status) is True:
+                    # ⛔ AN ECHO IS JUDGED BY MEANING (#11824 S0 review, P2).
+                    # `retract_point`'s CAS still stores `retracted` (a stated
+                    # residual), and `archived` is a pre-#11824 stored word;
+                    # the door hands this loop the CANONICAL word for either
+                    # (`deprecated`). Comparing spellings made the row's own
+                    # status look like a transition INTO `deprecated` — refused
+                    # with "`retracted` is terminal" — so a tenant PUT that
+                    # echoes the status it just read failed on every point the
+                    # shipped `retract_point` had retired. The stored side is
+                    # therefore read through the same mapping the door writes
+                    # through: a stored `retracted`/`archived` IS `deprecated`,
+                    # and `_ALLOWED_TRANSITIONS` is consulted for THAT meaning
+                    # (both keys already declare the same empty outgoing set, so
+                    # the terminal answer is unchanged — only the echo is).
+                    _stored_meaning = _lifecycle_meaning(_stored)
+                    if str.__eq__(_stored_meaning, _status) is True:
                         continue
-                    _declared = _ALLOWED_TRANSITIONS.get(_stored)
+                    _declared = _ALLOWED_TRANSITIONS.get(_stored_meaning)
                     if _declared is None or _status in _declared:
                         continue
                     _declared_text = ", ".join(
@@ -52640,6 +52955,31 @@ class TortoiseSDK:
                         f"supersede this one with "
                         f"`supersede_point({_refusal_repr(_named_id)}, <new_id>)`."
                     )
+                # ⛔ AN ECHO WRITES THE WORD THE ROW ALREADY HOLDS (#11824 S0
+                # review, P2). The door answers "which word may be MINTED" and a
+                # declared synonym is minted as `deprecated` — but an entailed
+                # call mints nothing (#3305: an unchanged status cannot
+                # resurrect anything, and the terminal guard above is DISARMED
+                # on the strength of that). Writing the canonical spelling back
+                # over a stored `retracted`/`archived` would be a different
+                # write wearing an echo's clothes: it rewrites a legacy row
+                # nobody asked to change, and it makes a stale client's second
+                # echo inconsistent with its first. So when EVERY bound row
+                # holds the SAME word and that word MEANS the caller's, the word
+                # written is the one already stored — the call lands (it is
+                # journaled, it is not a refusal) and the row is untouched.
+                #
+                # A fan-out holding TWO different spellings of one meaning keeps
+                # the canonical word: there is no single stored word to echo.
+                _bound_words = {
+                    str.__str__(_stored_word) for _stored_word in
+                    (_pt_statuses or ())
+                    if issubclass(type(_stored_word), str)}
+                if len(_bound_words) == 1:
+                    (_echo_word,) = _bound_words
+                    if str.__eq__(
+                            _lifecycle_meaning(_echo_word), _status) is True:
+                        _status = _echo_word
                 # Write FIRST, journal SECOND, gated on the write having
                 # MATCHED (a missed/no-op write must never leave a phantom
                 # record — the count probe above and this SET are two
@@ -52814,15 +53154,22 @@ class TortoiseSDK:
         #
         # ⚠️ RESIDUAL, on the STORED side, and NARROWED BY THIS PR (#12896 review,
         # P2) rather than left as it was: this fix guards the TARGET's type and
-        # hashability. A row whose stored `status` is a list is reachable at all
-        # only because a LIVE row accepts `status=['live']` (#10371's vocabulary
-        # hole). Before the P2 above, that stored shape made the dead-set build
-        # raise `TypeError: unhashable type: 'list'` on the NEXT lifecycle write;
-        # the dead set now takes `str` stored values only, so NO traceback escapes
-        # here (measured: stored `['live']`, then `'live'`/`['live']`/`123`/`None`
-        # all ACCEPTED, row intact). What is left is the VOCABULARY hole, not a
-        # traceback — #12869's wording predates this narrowing and should be
-        # re-measured there before it is restated.
+        # hashability. A row whose stored `status` is a list was reachable at all
+        # only because a LIVE row USED TO accept `status=['live']` — the
+        # vocabulary hole #11824 S0 closed at the write door (a non-string is now
+        # refused as the door's FIRST arm, shape before vocabulary, the ordering
+        # #12869/#12910 gives the Object doors). Rows written before that still
+        # hold the shape, which is the population this arm answers for. Before the
+        # P2 above, that stored shape made the dead-set build raise
+        # `TypeError: unhashable type: 'list'` on the NEXT lifecycle write; the
+        # dead set now takes `str` stored values only, so NO traceback escapes
+        # here (measured BEFORE S0's door: stored `['live']`, then
+        # `'live'`/`['live']`/`123`/`None` all were ACCEPTED, row intact; today
+        # only `'live'` lands — the other three are refused with the door's
+        # `ValueError`, which is the narrowing this work was for). What is left
+        # is the STORED-side question, not
+        # a traceback and no longer a write-side hole — #12869's wording predates
+        # both narrowings and should be re-measured there before it is restated.
         #
         # ⛔ THE REMEDY IS `supersede_knowledge` (#12914 review P3): #12592 gave
         # the Object/Subject families their OWN supersede path, so this paragraph
@@ -52950,6 +53297,7 @@ class TortoiseSDK:
                 for _np_key in list(keys_rendering_as(props, {"status"})):
                     if issubclass(type(props[_np_key]), str):
                         props[_np_key] = str.__str__(props[_np_key])
+            _np_lifecycle_checked = False
             for _np_label, _np_terminal, _np_section in (
                 ("Subject", _SUBJECT_TERMINAL_STATUSES, "§4.2"),
                 ("Object", _OBJECT_TERMINAL_STATUSES, "§4.3"),
@@ -52967,6 +53315,43 @@ class TortoiseSDK:
                 ).result_set[0]
                 if not _np_row or not _np_row[0]:
                     continue
+                # ── #11824 S0: THE LIFECYCLE WORD, on the family write door ──
+                # The Object family had NO write-side vocabulary guard, ever
+                # (`commit_ops` recorded that as a constraint, not a to-do):
+                # `status` is not server-managed and this method ends in
+                # `SET n += $props`, so `tortoise_create_entity` /
+                # `tortoise_update_entity` accepted `status='outdated'`,
+                # `'archived'` or `'garbage'` on an Object and a reader's
+                # exclusion list was the only thing standing between the junk
+                # word and a row that reads as CURRENT.
+                #
+                # It runs HERE — once, inside the loop, AFTER a mounted
+                # `:Subject`/`:Object` row is known to exist — and not at the top
+                # of the block: the same props bag also addresses `:Event`s, and
+                # an Event has no lifecycle (#11825 / the design's §8), so its
+                # writer-supplied `status` must stay untouched until S7 retires
+                # it. A lifecycle node's word is normalised (re-spelling,
+                # `archived`/`retracted` → `deprecated`) or refused with a
+                # performable repair (`outdated`, the position words), and EVERY
+                # key that renders as `status` is rewritten to the canonical word
+                # so the `SET n += $props` below cannot store the caller's
+                # spelling.
+                if not _np_lifecycle_checked:
+                    _np_lifecycle_checked = True
+                    # ⛔ AN EXPLICIT ``None`` IS THE DOCUMENTED DELETE, NOT A
+                    # WORD (#11824 S0 review P2). ``_sanitize_props`` states the
+                    # contract this door must not break: *"``None`` REMOVES the
+                    # property outright (``SET n += $props`` with a None deletes
+                    # it)"*, and ``record_reconcile``/``cache_projection`` model
+                    # ``update_entity(obj, status=None)`` as a real clear on a
+                    # non-terminal row. Validating it as a vocabulary value would
+                    # turn a LEGAL write into a refusal (#1934). ``None`` is the
+                    # delete sentinel; every other value takes the vocabulary.
+                    if _np_status is not None:
+                        _np_status = _read_caller_status(
+                            _np_status, kind=f":{_np_label}")
+                        for _np_key in list(keys_rendering_as(props, {"status"})):
+                            props[_np_key] = _np_status
                 # `collect` DROPS NULLs, so an empty list means every bound row
                 # holds no status — the legacy shape, which reads as live and is
                 # the backfill's business, not this guard's.
@@ -53169,8 +53554,17 @@ class TortoiseSDK:
             ).result_set[0][0]
             if _subj_hits:
                 _status = _subject_status_rendered["status"]
-                if (not isinstance(_status, str)
-                        or _status not in _SUBJECT_STATUS_VALUES):
+                # ⛔ ONE FIELD, ONE ANSWER: an explicit ``None`` is the DELETE
+                # sentinel on this door too (#11824 S0 review, P3). The family
+                # write door above exempts it (`if _np_status is not None`) and
+                # the create door exempts it, so refusing it HERE made
+                # `create_entity('subject', status=None)` succeed while
+                # `update_entity(<subject>, status=None)` raised the pre-S0
+                # text — the same value with two different outcomes in one
+                # slice whose own comment claims they agree.
+                if (_status is not None
+                        and (not isinstance(_status, str)
+                             or _status not in _SUBJECT_STATUS_VALUES)):
                     raise ValueError(
                         f"Invalid status {_status!r} for a :Subject. "
                         f"Must be one of: "
@@ -53711,6 +54105,56 @@ class TortoiseSDK:
                 "(#1934: an advisory never refuses a write).",
                 type(_layer_exc).__name__, _layer_exc)
             _layer_note = None
+        # ⛔ #11824 S0 — THE LIFECYCLE WORD, ONCE FOR BOTH KNOWLEDGE KINDS.
+        # The create surface had TWO different answers: a `:Subject` was
+        # validated against its declared set, and an `:Object` was not validated
+        # AT ALL (`create_object(..., status='outdated')` stored the word and the
+        # read families then treated the row as current). One closed set of four
+        # is correct for both now, so the door is ONE call: a re-spelling or a
+        # declared synonym is normalised into `props` (the value the fold
+        # stores), and `outdated` / a position word is refused with the repair
+        # named. `:event` is untouched — an Event has no lifecycle (#11825).
+        if t in ("subject", "object"):
+            # ⛔ A write that names `status` TWICE is not a write this door can
+            # reason about, and guessing is a BYPASS — the same refusal the
+            # family WRITE door makes (`_update_entity`, #12786 review rounds
+            # 2-3), so create and update cannot disagree about which bags they
+            # accept. Measured WITHOUT this line, on a bag whose FIRST
+            # rendered value is the `None` delete sentinel:
+            #   create_object(props={K("zzz"): None, "status": "in_progress"})
+            # STORED `status='in_progress'` (and `'garbage'`) — the exemption
+            # below read only the first value, so the second key's word was
+            # never graded and never rewritten, while the identical bag through
+            # `update_entity` was refused as CONFLICTING. A position/junk word
+            # no read leg excludes is exactly the fail-open this door exists to
+            # close (#10371 / #11824), so it fails closed here.
+            if _status_write_is_ambiguous(props):
+                raise ValueError(
+                    f"create_entity refused a CONFLICTING status write for "
+                    f"{name!r}: more than one key in this call renders as "
+                    f"`status`. A `str` subclass whose content and `__str__` "
+                    f"differ is filed under one name by the live write and the "
+                    f"other by the journal, so which word lands cannot be known "
+                    f"here. Pass `status` ONCE, as a plain str, with the word "
+                    f"you mean."
+                )
+            _lifecycle_keys = list(keys_rendering_as(props, {"status"}))
+            if _lifecycle_keys:
+                # An explicit ``None`` is the DELETE sentinel `_sanitize_props`
+                # documents, not a word to grade — the same exemption the
+                # family write door makes, so create and update agree.
+                # ⛔ The exemption is safe ONLY because the ambiguity refusal
+                # above leaves at most ONE status-rendering key: first-wins on a
+                # bag of one is that key's own value, so a `None` here is the
+                # caller's whole intent (a delete) and nothing else in the bag
+                # can carry an ungraded word.
+                _lifecycle_value = lifecycle_props_by_rendering(
+                    props, {"status"})["status"]
+                if _lifecycle_value is not None:
+                    _lifecycle_word = _read_caller_status(
+                        _lifecycle_value, kind=f":{t.capitalize()}")
+                    for _lifecycle_key in _lifecycle_keys:
+                        props[_lifecycle_key] = _lifecycle_word
         if t == "subject":
             # #12047: a role Subject may DECLARE who holds it. The prop is a write
             # SHORTHAND for the sanctioned ``holdsRole`` edge (ONTOLOGY §3.6 —
@@ -53732,22 +54176,13 @@ class TortoiseSDK:
             # The PRE-FLIGHT's resolved holder id, kept (#12047 round-3 P1): the
             # self-edge refusal needs it, and it must run before the write.
             _holder_id = None
-            # #1423 (review P1): `status` arrives through `**props` below, so this
-            # surface is a SECOND door onto an undeclared Subject status.
-            # Validate against ONTOLOGY §4.2's declared lifecycle and fail closed,
-            # exactly as `_update_entity` does. #9974 R1: there is no defaulted
-            # `status` to override any more, so the door validates only a value
-            # the caller actually NAMED — an unnamed one is ABSENT on the node
-            # and reads LIVE, which is not a status to validate (hence the
-            # read-only sentinel below: it decides nothing the fold writes).
-            _subj_status = props.get("status", "live")
-            if (not isinstance(_subj_status, str)
-                    or _subj_status not in _SUBJECT_STATUS_VALUES):
-                raise ValueError(
-                    f"Invalid status {_subj_status!r} for a :Subject. "
-                    f"Must be one of: "
-                    f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
-                )
+            # ⛔ #1423's Subject VOCABULARY guard is now the shared lifecycle
+            # door above (#11824 S0): `SUBJECT_STATUS_VALUES` is the same four
+            # words as every other knowledge kind, and a re-spelling/synonym was
+            # already normalised INTO `props` there — so re-validating here would
+            # be a second spelling of one rule (and would refuse the un-named
+            # sentinel the old block validated for no reason). `roleHolder`
+            # validation below is unchanged and still runs before any write.
             if _role_holder is not None:
                 # #12047 review F5: pre-flight, so a refusal writes nothing.
                 # ⛔ The kind is compared through `named_kind` — the SAME
@@ -53874,7 +54309,7 @@ class TortoiseSDK:
             # stored it. Refused BEFORE any write or journal emission, so a
             # refused create leaves nothing behind (the Point/Subject doors'
             # shape, #9287/#1423).
-            refuse_terminal_event_state(props, door="create_entity(type='event')")
+            refuse_event_lifecycle_state(props, door="create_entity(type='event')")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
             # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
             # (server-ONLY channel via the ``_server_id`` keyword — the
@@ -54024,7 +54459,7 @@ class TortoiseSDK:
             # `unfolded-mention` exemption.
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
-                "eventStatus": "scheduled", **props}, "EventRecorded",
+                "eventStatus": "pending", **props}, "EventRecorded",
                 is_episodic=is_episodic,
                 _journal_extra={"aboutLinks": about_links} if about_links else None)
             # The writes use the SAME resolution the record was built from: an
@@ -56127,7 +56562,7 @@ class TortoiseSDK:
                 "prs": metadata.get("prs", []),
                 "critical_decisions": metadata.get("critical_decisions", []),
             }),
-            "eventStatus": "completed",
+            "eventStatus": "indexed",
             "classificationLevel": "internal",
             "format": "markdown",
         }
@@ -56229,7 +56664,7 @@ class TortoiseSDK:
             "source_file": sf_rel,
             "format": "markdown",
             "classificationLevel": "internal",
-            "eventStatus": "completed",
+            "eventStatus": "indexed",
         }
         resolved, rejected = proj._upsert_event(
             inner, guard=True, guard_source_file=sf_rel)
