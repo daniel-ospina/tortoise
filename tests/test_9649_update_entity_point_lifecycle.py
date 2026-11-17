@@ -1021,7 +1021,17 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
         "MATCH (e:Event {eventId:'ev-9649-prov'}) RETURN e.validTo",
     ).result_set == [["2031-01-01T00:00:00Z"]], (
         "the Event the caller addressed must take the write")
-    assert sdk.get_entity(provenance)["status"] == "retracted", (
+    # ⛔ THE CANONICAL WORD, not the caller's spelling: `create_point` above
+    # passes `status="retracted"`, and since S0 (#11824) that value is a DECLARED
+    # SYNONYM — `lifecycle_vocabulary` outcome 2 stores `retracted`/`archived` as
+    # `deprecated`, silently. The claim this row exists for is that the write to
+    # `ev-9649-prov` reached the EVENT and left the provenance POINT alone; the
+    # spelling of a terminal word is incidental to that, so asserting the caller's
+    # word would pin the pre-S0 create door instead. Measured RED on `main` at
+    # `97fd713ffb` before this line was fixed (`assert 'deprecated' ==
+    # 'retracted'`): #13133 landed this file's #13100 rewrite without running it,
+    # and the row it left asserted a stored word the door had already moved.
+    assert sdk.get_entity(provenance)["status"] == "deprecated", (
         "the provenance Point must be untouched")
 
 
