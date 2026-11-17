@@ -2078,7 +2078,7 @@ def test_a_tool_produced_artifact_recomputes_its_derived_figures(
     _assert_derived_figures_recompute(art, "tool-produced")
 
     # ⛔ the mutant the reviewer measured GREEN at the reviewed head
-    for key, cell in block["per_k"].items():
+    for cell in block["per_k"].values():
         cell["seed_effect"]["seed_lost_from_window"] += 1
         cell["seed_effect"]["seed_at_top1_off"] += 1
     block["expansion_fired_items"] = 1
@@ -2111,7 +2111,7 @@ def test_the_refusal_producers_fire_not_only_the_exit_code(
     assert P.STRUCTURAL_REFUSAL in blind["refusal_kinds"], (
         "an object-only run must REFUSE to publish a verdict — every arm is "
         "blind to the lever")
-    assert P._exit_code(list(zip(blind["refusal_kinds"], blind["refusals"])),
+    assert P._exit_code(list(zip(blind["refusal_kinds"], blind["refusals"], strict=True)),
                         allow_mixed_modes=True) == 3, (
         "`--allow-mixed-modes` must NOT excuse structural blindness")
 
@@ -2125,9 +2125,9 @@ def test_the_refusal_producers_fire_not_only_the_exit_code(
     assert P.MODE_REFUSAL in mixed["refusal_kinds"], (
         "an arm whose two sides ran different legs is contaminated by the LEG, "
         "not the lever, and must refuse")
-    assert P._exit_code(list(zip(mixed["refusal_kinds"], mixed["refusals"])),
+    assert P._exit_code(list(zip(mixed["refusal_kinds"], mixed["refusals"], strict=True)),
                         allow_mixed_modes=False) == 3
-    assert P._exit_code(list(zip(mixed["refusal_kinds"], mixed["refusals"])),
+    assert P._exit_code(list(zip(mixed["refusal_kinds"], mixed["refusals"], strict=True)),
                         allow_mixed_modes=True) == 0, (
         "the mode refusal is the ONE class the opt-out is scoped to")
 
@@ -2170,7 +2170,7 @@ def test_the_brief_carries_no_duplicated_or_dangling_bullet():
     """F6 — a leftover from the MDE rewrite: the same bullet twice, one dangling."""
     brief = (_DOCS / "research-brief.md").read_text()
     lines = brief.splitlines()
-    for i, (a, b) in enumerate(zip(lines, lines[1:]), start=1):
+    for i, (a, b) in enumerate(itertools.pairwise(lines), start=1):
         assert a != b or not a.strip(), (
             f"line {i} is duplicated verbatim (and one copy dangles): {a[:120]!r}")
 
