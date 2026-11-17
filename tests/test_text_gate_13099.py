@@ -420,6 +420,37 @@ def test_the_operational_facts_table_quotes_the_artifact():
             if e.replace("x", "\u00d7") in row or e in row:
                 continue
             drift.append(f"§6 row {label!r} is missing {e!r} (row: {row.strip()[:120]})")
+    # ── THE PROSE FACTS, BY ROW ─────────────────────────────────────────────
+    # §6's adoption-cost argument is not only numbers: the licence, the extension
+    # version, the `requires`/relocatability cell and the exact preload list are
+    # what the PREFERENCE between `ts_rank` and `pg_search` turns on ("no preload,
+    # no AGPL"). Until this loop existed the README said these were
+    # "presence-checked" and NOTHING checked them — measured at the head that added
+    # this pin: `grep -c 'AGPL\|preload\|0.26.6\|copy_s' tests/test_text_gate_13099.py`
+    # → 0, 0, 0, 0 — so `AGPL-3.0-or-later`→`MIT` or the preload list rewritten to
+    # one extension redded nothing. That is the defect class this PR's own
+    # `config/ci-surfaces.yml` rows cite by name ("claimed coverage that did not
+    # exist"). `copy_s` is deliberately NOT required here: §6 prints no such cell,
+    # and the record states that it is pinned by nothing rather than implying it is.
+    per_row_prose = {
+        "in-graph": ["| FalkorDB |"],
+        "ts_rank": ["| PostgreSQL |"],
+        "pg_search": [
+            "**AGPL-3.0-or-later**",
+            "0.26.6",
+            "requires = 'vector'",
+            "not relocatable",
+            "`shared_preload_libraries` change required",
+            "`pg_search,pg_cron,pg_stat_statements`",
+        ],
+    }
+    for label, expected in per_row_prose.items():
+        row = _sec6_row(label)
+        for e in expected:
+            if e not in row:
+                drift.append(
+                    f"§6 row {label!r} is missing its prose fact {e!r} "
+                    f"(row: {row.strip()[:160]})")
     # …and the REPEAT-run figures printed in the same cells. They come from the
     # other artifact, so they were unguarded until now: mutating every one of the
     # four left the pin green.

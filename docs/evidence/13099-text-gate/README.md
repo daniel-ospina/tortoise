@@ -358,9 +358,13 @@ cells of every non-baseline row (21 per class, not "six"), and the `returned` co
 size and memory figures, including the repeat run's, must appear in the row of the backend that
 produced them — a whole-section presence check would pass a table whose two labels had been swapped,
 which is the shape §6's figures were actually wrong in. §0/§6's store-to-store figures are pinned with
-the heap derivation they rest on (`tg_docs` is `pg_total_relation_size`, i.e. heap + every index). It
-does **not** recompute §6's prose (licence, preload list, `pg_search` version, `copy_s`): those are
-presence-checked, not derived.
+the heap derivation they rest on (`tg_docs` is `pg_total_relation_size`, i.e. heap + every index). §6's
+prose facts are held to the same rule, **by row**: the licence cell, the `pg_search` version, the
+`requires`/relocatability cell and the exact `shared_preload_libraries` list are each required to
+appear in the row of the backend that produced them. They are not *derived* from `artifact.json` —
+they are read from the image (§6's caveats say where) — so the pin is a presence check, and ⛔
+`copy_s` is **not** covered by any pin at all: §6 does not print it, so it lives in the artifact and
+is guarded by nothing. Stated rather than implied to be covered.
 
 ⚠️ **The two committed artifacts predate record keys this harness now writes**, and a rerun will
 differ structurally from them, not only in timings. Four keys need reading with that in mind:

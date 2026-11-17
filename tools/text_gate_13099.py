@@ -194,7 +194,10 @@ def committed_queries_digest() -> str:
 
     The comparability of every published number rests on the committed query set
     being the one that produced it, and a path string does not establish that.
-    `tests/test_text_gate_13099.py` pins this digest; the artifact records it.
+    `tests/test_text_gate_13099.py` pins this digest as a constant. The artifact
+    records it on a RUN (`run()` writes `corpus.queries_sha256`); the two committed
+    artifacts predate that key and do not carry it — the record states which keys
+    are absent rather than implying the digest is readable from the artifact.
     """
     path = REPO / "tests" / "eval" / "retrieval" / "queries" / "oracle_queries.json"
     return hashlib.sha256(path.read_bytes()).hexdigest()
