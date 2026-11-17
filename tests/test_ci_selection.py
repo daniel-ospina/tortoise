@@ -10260,11 +10260,20 @@ def test_every_fast_file_this_fold_rows_carries_a_durations_row():
 def test_the_entry_rule_bites_on_the_two_rows_this_fold_registered():
     """Non-vacuity for #13110's two added rows — the state the round-5 review found.
 
-    Reconstructed from the LIVE map by dropping the two rows this fix adds, the same
-    way the #2148 pin above reconstructs its own pre-fix state: the assertion is then
-    about the map this PR shipped, and a later reader can re-derive it without an
-    invented fixture. `--integrity` cannot stand in for this: the coverage check is a
-    0.90 RATIO with ~70 files of headroom, so it was green over both missing rows.
+    Reconstructed from the LIVE map by dropping rows, the same way the #2148 pin above
+    reconstructs its own pre-fix state: the assertion is then about the map this PR
+    shipped, and a later reader can re-derive it without an invented fixture.
+    `--integrity` cannot stand in for this: the coverage check is a 0.90 RATIO with ~70
+    files of headroom, so it was green over both missing rows.
+
+    ⛔ ONE row at a time, never both together. `pre_fix = {k: v for k, v in real.items()
+    if k not in added}` removes both names UNCONDITIONALLY, so both are absent from the
+    reconstruction whatever the map holds and the assertion is INVARIANT — green under
+    the very row deletion it claimed to pin (the #13116 round-6 review falsified it by
+    deleting `config/ci-surfaces.yml`'s row). Dropping a single name keeps the
+    reconstruction a function of the map, so each deletion reds here, naming the row.
+    The flat-weight half of the ENTRY RULE is the sibling pin's business
+    (`test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading`).
 
     ⛔ Both files must be IN the guarded set for the pin above to see them at all — that
     is the half of this defect the rows alone do not fix (measured: with the rows added
@@ -10273,19 +10282,26 @@ def test_the_entry_rule_bites_on_the_two_rows_this_fold_registered():
     """
     from tools.ci_selection import load_manifest
     real = load_manifest()["durations"]
-    added = {
+    added = (
         "test_13110_goalstate_doors.py",
         "test_13034_currency_rule_reads_position.py",
-    }
-    assert added <= set(ROWED_BY_THIS_FOLD), (
+    )
+    assert set(added) <= set(ROWED_BY_THIS_FOLD), (
         "the two rows this fold added must be in the guarded set, otherwise the "
         "ENTRY RULE pin cannot see them: "
-        f"{sorted(added - set(ROWED_BY_THIS_FOLD))}")
-    pre_fix = {k: v for k, v in real.items() if k not in added}
-    assert sorted(f for f in ROWED_BY_THIS_FOLD if f not in pre_fix) == sorted(added), (
-        "the pre-fix reconstruction must name exactly the two rowless files the "
-        "#13116 round-5 review reported — otherwise this pin is not testing that "
-        "defect")
+        f"{sorted(set(added) - set(ROWED_BY_THIS_FOLD))}")
+    for name in added:
+        assert name in real, (
+            f"#13110 put {name} in a fast surface but shipped no `durations:` row, so "
+            "it packs at the flat default — add the row")
+        holed = {k: v for k, v in real.items() if k != name}
+        rowless = [f for f in ROWED_BY_THIS_FOLD if f not in holed]
+        assert rowless == [name], (
+            "dropping ONE row from the live map must name exactly that file as the "
+            f"rowless one the #13116 round-5 review reported. Dropped {name}; the "
+            f"reconstruction named {rowless} — so either {name} has no row to drop "
+            "or another member of the guarded set is missing one, and this pin "
+            "cannot distinguish the reported defect from that state")
 
 
 def test_the_added_file_row_guard_bites_at_the_pre_fix_head():

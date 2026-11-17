@@ -437,11 +437,16 @@ def test_mcp_refuses_an_unknown_word_with_the_closed_set(tmp_path):
             assert isinstance(out, dict) and out.get("error"), out
             assert _vocabulary_in(out["error"]), out
             # Refused BEFORE any graph write — the SDK guard's own promise, so
-            # it is pinned on this door too and not only on REST.
-            proj = ha._make_sdk(namespace=_ORG)._get_proj()
-            rows = proj.g.query(
-                "MATCH (n) WHERE n.name = $n OR n.content = $n RETURN count(n)",
-                params={"n": name}).result_set
+            # it is pinned on this door too and not only on REST. The handle is
+            # CLOSED: one leak per arm here (the #13116 round-6 review's P3 note)
+            # and the embedded engine's teardown is not strict enough to report it.
+            sdk = ha._make_sdk(namespace=_ORG)
+            try:
+                rows = sdk._get_proj().g.query(
+                    "MATCH (n) WHERE n.name = $n OR n.content = $n RETURN count(n)",
+                    params={"n": name}).result_set
+            finally:
+                sdk.close()
             assert rows[0][0] == 0, name
 
 
