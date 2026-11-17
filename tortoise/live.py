@@ -1134,10 +1134,31 @@ def endpoint_permits_operator_promotion(
       are repaired by writing a declared stage id, which
       ``planned_occurrence._unresolvable_message`` prescribes), so denying here
       is recoverable; the durability bounds above are unchanged.
+
+    ⛔ The **not live** arm is EVALUATED FIRST, and that order is load-bearing —
+    see the ordering note at the code below. The bullet order above is the
+    SEMANTIC reading, not the evaluation order.
     """
-    if is_terminal_status(status, bool(outdated)):
-        return False
+    # ⛔ ORDER IS LOAD-BEARING: the NOT-LIVE arm runs first, exactly as the
+    # inline gate this predicate was extracted from did
+    # (`origin/main:tortoise/sdk.py`: `(st or "live") == "live" and not
+    # is_terminal_status(st, bool(od))` — equality FIRST, so `and`
+    # short-circuited). `is_terminal_status` is a `frozenset` MEMBERSHIP test
+    # (`(status or "") in TERMINAL_EXCLUDED_STATUSES`), and membership HASHES
+    # the value, so a stored ARRAY `status` raises `TypeError: unhashable type`.
+    # That value is reachable by ONE supported write: an array is PERSISTABLE,
+    # so `update_knowledge(id, status=[…])` stores it verbatim on an `:Object`
+    # (#8926), and `:Object` is an operator endpoint since #7853 widened the
+    # four-label sweep. Running the membership test first turned the old silent
+    # suppression into an unnamed 500 out of `tortoise_promote_point` (#10183).
+    # The equality arm answers every non-`live` value WITHOUT hashing it, so
+    # this order keeps each input's pre-#13100 answer: `""`/`0`/`None` still
+    # read live, a list still suppresses, terminal words still deny. Normalising
+    # the array to a word instead would be WRONG — `(None or "live") == "live"`
+    # promotes the array row, which the pre-change gate never did.
     if (status or "live") != "live":
+        return False
+    if is_terminal_status(status, bool(outdated)):
         return False
     if plan_state is not None:
         # A plan that HAS a position and has not ENDED has not happened yet.

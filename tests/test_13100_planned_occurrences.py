@@ -1299,6 +1299,51 @@ class TestThePromotionSuppressionIsRehomed:
         assert op in _promote(sdk, point), (
             "a repaired, then settled plan must not keep suppressing for ever")
 
+    def test_a_NON_STRING_status_on_an_ENDPOINT_suppresses_and_never_crashes(
+            self, sdk):
+        """A stored ARRAY `status` is PERSISTABLE, so it can sit on an operator
+        endpoint — and the gate must ANSWER it, never hash it.
+
+        `is_terminal_status` is a `frozenset` membership test, so a list raises
+        `TypeError: unhashable type` — and this gate runs inside
+        `promote_point` with no try/except, so the escape is an unnamed 500 with
+        no door name and no remedy (#10183). The pre-#13100 inline gate tested
+        `(st or "live") == "live"` FIRST and short-circuited, so an array
+        endpoint suppressed promotion silently; a predicate that runs the
+        membership test first re-introduces the crash on the most-travelled
+        path. Pinned at the PREDICATE and through the real door — the array
+        value is one supported write (`update_knowledge(id, status=['archived'])`
+        is accepted and stored verbatim on an `:Object`, an operator endpoint
+        since #7853) and is made below the doors here, as the sibling
+        `test_a_NON_STRING_status_is_foreign_not_a_crash` does.
+        """
+        from tortoise.live import endpoint_permits_operator_promotion
+
+        # 1. The predicate itself: an array denies, and does not raise.
+        assert endpoint_permits_operator_promotion(["archived"], False) is False
+
+        # 2. Through the door, which is where a raise becomes a bare 500.
+        point = sdk.create_point("statement", "a live point")["id"]
+        endpoint = sdk.create_point("statement", "an array-status endpoint")["id"]
+        op = f"op-array-{endpoint}"
+        _operator_over(sdk, (point, endpoint), op)
+        sdk._get_proj().g.query(
+            "MATCH (s:Point {id:$s}) SET s.status = ['archived']",
+            params={"s": endpoint})
+
+        assert op not in _promote(sdk, point), (
+            "an unhashable stored status must SUPPRESS promotion, not raise")
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$o}) RETURN o.status",
+            params={"o": op}).result_set[0][0] == "draft"
+
+        # 3. Control, so the suppression cannot pass vacuously: clearing the
+        #    foreign value lets the SAME operator promote.
+        sdk._get_proj().g.query(
+            "MATCH (s:Point {id:$s}) SET s.status = null", params={"s": endpoint})
+        assert op in _promote(sdk, point), (
+            "the array must be the reason the operator stayed draft")
+
     def test_the_LEGACY_event_path_still_suppresses(self, sdk):
         """The acceptance bullet says "on the Event path", not "on draft Points".
 
