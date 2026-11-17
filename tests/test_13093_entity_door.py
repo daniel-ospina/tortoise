@@ -316,6 +316,36 @@ def test_SDK_an_EVENT_is_not_hot_and_never_an_empty_answer(armed):
     assert out.get("fallbackReason") == rs.FALLBACK_RECORD_LABEL_NOT_SERVED, out
 
 
+def test_a_RECORD_mode_miss_carries_no_fallback_reason_and_counts_nothing(monkeypatch):
+    """A coverage fact is not a fallback, and the wire must agree with the counter.
+
+    ⛔ MEASURED DEFECT THIS PINS (#13353 review cycle 2, finding 2): the `record`
+    arm used to set `fallbackReason: "record-label-not-served"` on a read where
+    NOTHING fell back — no cache branch, no counted reason, the graph handle never
+    opened — so an operator reconciling the wire attribution against
+    `fallback_counts()` saw two different stories for the same read, and
+    `ServedAnswer.fallback_reason`'s own docstring ("the named reason a
+    `prefer`-mode read landed on the cache, or `None` when no fallback happened")
+    was false on that arm.
+    """
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    rs.reset_fallback_counts()
+    conn = _TableConn({"object": []})
+    monkeypatch.setattr(rs, "open_record", _opener(conn))
+    sdk = _sdk_class()(nodes=None)
+
+    out = sdk.get_entity("obj-1")
+
+    assert out != {}, "a record-mode miss is not an established absence here (#9721)"
+    assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, out
+    assert "fallbackReason" not in out or out["fallbackReason"] is None, (
+        f"a `record`-mode miss named a fallback that never happened: {out!r}")
+    assert rs.fallback_counts() == {}, (
+        f"a reason was counted for a read that never fell back: {rs.fallback_counts()}")
+    assert sdk.handle_opens == 0, (
+        "record mode must answer without building a graph handle")
+
+
 def test_the_coverage_reason_is_never_read_as_an_established_absence():
     """⛔ THE LOAD-BEARING PIN on the reason vocabulary.
 

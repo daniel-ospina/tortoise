@@ -87,16 +87,20 @@ S4/S5 clause has two halves: *"a read answered from the record must return the s
 cache path"* (**this unit**, §2 below) and *"a read for a non-resident node must return `not-hot`,
 never empty"*. The second half was the SEARCH path's (`GET /v1/search`, `#7952`/`#7953`) and this
 unit did not touch it; **#12941** gives the anchored point read its own verdict, from one rule in
-`record_serve`: an empty answer is a finding of absence only when the record answered it
-(`served_from == "record"`) **AND the read covers every label the coordinate can name**
-(`record_serve.entity_coverage_complete()` — #13093/#13322's correction: a record `no row` settles only the
-labels that read serves, so the bare entity UNION abstains while `Event`/`Source` lack parity, and it can
-never establish an absence while a `Source` can be named by a bare `id` the record addresses by `url`;
-`record_serve.entity_absent_wire` is the one home for that rule) or was successfully ASKED first
-(`record-miss`, the sole member of
-`RECORD_ANSWERED_REASONS`) — every other fallback reason means nobody who could see the node was
-consulted, and the answer carries `residency: "not-hot"` (`ServedAnswer.absent_wire`, deliberately a
-separate method from `as_wire` whose key set is pinned). The record path's own mirror is unchanged
+`record_serve` — **and there are TWO rules, which must not be generalised from each other**: a
+SINGLE-LABEL anchored read (this unit's point route) calls an empty answer an established absence when the
+record answered it (`served_from == "record"`) or was successfully ASKED first (`record-miss`, the sole
+member of `RECORD_ANSWERED_REASONS`) — **no coverage test applies**, because a point's coordinate names one
+label and the record either holds that Point or it does not; every other fallback reason means nobody who
+could see the node was consulted, and the answer carries `residency: "not-hot"`
+(`ServedAnswer.absent_wire`, deliberately a separate method from `as_wire` whose key set is pinned). The
+bare **entity UNION** (`entity-union-by-id`, #13093) adds a second, separate condition on top:
+`record_serve.entity_absent_wire` answers `{}` only when `absence_established` **AND**
+`entity_coverage_complete()` — because a bare id can name any of five labels and a record `no row` settles
+only the ones that read serves, so the union abstains while `Event`/`Source` lack parity (#9721) and can
+never claim an absence while a `Source` can be named by a bare `id` the record addresses by `url`
+(#13351). ⛔ The coverage clause belongs to the UNION door only: adding it to a single-label read would turn
+every point 404 into `not-hot`, and dropping it from the union re-opens #13093. The record path's own mirror is unchanged
 and still pinned by test: **an impaired record is 503, never 404** — *"the record could not be
 asked"* is not "no such point".
 

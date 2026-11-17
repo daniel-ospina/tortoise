@@ -59195,7 +59195,10 @@ class TortoiseSDK:
         ⛔ **ON AN ARMED DEPLOYMENT, ``{}`` IS NOT REACHABLE FROM THIS DOOR FOR A
         NAMED ID — EVERY ABSENT *NAME* ANSWERS THE TRUTHY ``not-hot`` SHAPE.**
         (The one exception is the EMPTY key, which names nothing and therefore
-        answers ``{}`` in every mode.)
+        answers ``{}`` — in the ARMED modes, where the short-circuit below runs.
+        ``off`` never reaches it: that mode delegates to the accessor unchanged,
+        byte for byte, which is what ``off`` means and why an empty key there
+        behaves exactly as it did before #13093.)
         The coverage rule (`record_serve.entity_coverage_complete`) is `False`
         while ``Event``/``Source`` lack measured parity (#9721) AND a Source
         cannot be addressed by a bare ``id`` at all
@@ -59276,9 +59279,11 @@ class TortoiseSDK:
         # absent — the same id answering two ways depending on a deployment flag.
         # And it answers `{}` ITSELF rather than delegating to `_get_entity`:
         # that would build a graph handle, which `record` mode exists to avoid
-        # (the laziness the point door pins with `handle_opens == 0`), and the
-        # CACHE has no `node_key <> ''` constraint, so it could return a node for
-        # an empty key FROM the store the mode promises not to read.
+        # (the laziness the point door pins with `handle_opens == 0`). ⚠️ The
+        # CACHE's own view of an empty key is not something this door should be
+        # deciding: no fold WRITES such a node (`projection._writable_id` refuses
+        # it), so it is a state only a raw write can create — and `record` mode
+        # must not go looking in the store it exists to replace.
         if not id_val:
             return {}
 

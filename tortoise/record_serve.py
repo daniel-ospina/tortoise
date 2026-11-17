@@ -1563,6 +1563,18 @@ def entity_absent_wire(answer: ServedAnswer) -> dict[str, Any]:
     "we cannot see it" / "it does not exist" conflation this whole module
     exists to remove, re-introduced by the door that was supposed to close it.
 
+    ⛔ THIS IS THE **UNION** RULE, AND IT IS NOT THE SINGLE-LABEL RULE — do not
+    generalise it (or drop it) by analogy (#13353 review, finding 1):
+    ``ServedAnswer.absent_wire``'s ``absence_established`` is ``served_from ==
+    "record"`` OR ``record-miss``, with NO coverage clause, and that is correct for
+    a read whose coordinate names ONE label (``serve_point``: the record either
+    holds that Point or it does not). A bare id is not such a coordinate — it can
+    name any of five labels — so on this door ``absent_wire`` alone would answer
+    `{}` for an Event the record cannot reproduce. Hence:
+    ``absent_wire`` decides whether a store SETTLED the coordinate; this function
+    adds *"…and every label that coordinate can name is covered"*. Both halves are
+    required here, and neither is required of a single-label read.
+
     ⚠️ A FOUND ANSWER IS NOT THIS FUNCTION'S INPUT — ``answer.props`` is checked
     first, so a caller that routes a hit through it gets the hit and not a marker.
     Without that guard this name quietly discards every property (``id``
@@ -1836,14 +1848,17 @@ def serve_entity(*, tenant: tuple[str, str], id_val: str,
         if mode == MODE_PREFER:
             return _fell_back(_miss_reason())
         # `record`: the record answered `no row` for the served labels. That is
-        # an answer about THOSE labels only, so it is named as the coverage gap
-        # it is rather than handed back as an absence (`entity_absent_wire`
-        # reads both the reason and the coverage).
-        return ServedAnswer(
-            read=READ_ENTITY_UNION_BY_ID, coordinate=coordinate,
-            served_from="record", props=None,
-            fallback_reason=None if entity_coverage_complete()
-            else FALLBACK_RECORD_LABEL_NOT_SERVED)
+        # an answer about THOSE labels only — the coverage gap is a FACT about
+        # what this read covers, not a fallback: nothing fell back, no cache was
+        # consulted, and NOTHING WAS COUNTED. So this answer carries NO
+        # `fallbackReason` (#13353 review, finding 2, measured: the wire carried
+        # `record-label-not-served` while `fallback_counts()` stayed `{}` and the
+        # graph handle was never opened, so an operator reconciling the wire
+        # against the counter saw two different stories for one read). The gap is
+        # expressed where it is decided: `entity_absent_wire` reads
+        # `entity_coverage_complete()` and answers `residency: "not-hot"`.
+        return ServedAnswer(read=READ_ENTITY_UNION_BY_ID, coordinate=coordinate,
+                            served_from="record", props=None)
     return ServedAnswer(read=READ_ENTITY_UNION_BY_ID, coordinate=coordinate,
                         served_from="record", props=props)
 

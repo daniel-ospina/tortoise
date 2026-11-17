@@ -4276,7 +4276,8 @@ Source-by-`id` probe, so it is kept apart from `record-miss`, whose repair is a 
 ⛔ **On an armed deployment the union door's FALSY absent answer is unreachable for a NAMED id.**
 Because coverage is incomplete, every absent name — including one neither store holds — answers
 `{"residency": "not-hot", …}`, which is TRUTHY. (The empty key is the one exception: it names nothing,
-so it answers `{}` in every mode, including `record`.) An operator or client that tests `if out:` reads
+so in the ARMED modes it answers `{}` without touching either store. `off` is unchanged — it delegates to
+the cache accessor exactly as it did before #13093.) An operator or client that tests `if out:` reads
 the marker as a found node; read the `residency` field instead. This is stated on
 `TortoiseSDK.get_entity`'s own docstring, and it is why the internal readers pass `cache_only=True`.
 
