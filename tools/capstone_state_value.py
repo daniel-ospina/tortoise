@@ -107,6 +107,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -1204,7 +1205,11 @@ def judge_fresh(packet: dict, *, cmd: str | None = None, timeout: int = 900) -> 
 
     A judge that fails is `unjudged` — never a guess, never a default verdict.
     """
-    argv = shlex_split(cmd) if cmd else ["pi", "-p", "--no-session"]
+    # `--no-tools` is not cosmetic (#13303 review P2): DEFAULT_OUT is the committed
+    # evidence dir, so a reader holding Read/Bash can reproduce the PREVIOUS run's
+    # verdicts from `run-{target}.json` / `scoreboard-{target}.md`, which are still
+    # on disk when it is spawned. Independence must be enforced, not requested.
+    argv = shlex_split(cmd) if cmd else ["pi", "-p", "--no-session", "--no-tools"]
     if shutil.which(argv[0]) is None:
         return {"ok": False, "reason": f"judge command not found: {argv[0]}", "verdicts": {}}
     prompt = (
@@ -1218,9 +1223,16 @@ def judge_fresh(packet: dict, *, cmd: str | None = None, timeout: int = 900) -> 
     )
     started = time.time()
     try:
-        proc = subprocess.run(
-            [*argv, prompt], capture_output=True, text=True, timeout=timeout, cwd=ROOT
-        )
+        # An EMPTY sandbox, never ROOT: a reader that could still reach the repo would
+        # find this run's and every earlier run's artifacts beside the packet.
+        with tempfile.TemporaryDirectory(prefix="capstone-judge-") as sandbox:
+            proc = subprocess.run(
+                [*argv, prompt],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=sandbox,
+            )
     except subprocess.TimeoutExpired:
         return {"ok": False, "reason": f"judge timed out after {timeout}s", "verdicts": {}}
     elapsed = round(time.time() - started, 1)
@@ -1403,6 +1415,17 @@ def retrieval_posture(answers: list[Answer]) -> dict:
     }
 
 
+def exit_code(tally: dict) -> int:
+    """The run's exit: 0 only when EVERY question was actually answered by the product
+    and read by the judge. A `blocked` or `unjudged` row is not a completed run, so it
+    is non-zero — the one rule that stops a partial run reporting as a full score.
+
+    Extracted (from `cmd_run` and `cmd_judge`, which each carried a copy) so the rule
+    has ONE definition and is pinnable without a graph, a model or a subprocess.
+    """
+    return 0 if tally.get("blocked", 0) == 0 and tally.get("unjudged", 0) == 0 else 1
+
+
 def build_scoreboard(
     *, narrative: dict, header: dict, answers: list[Answer], judged: dict, ingest: list[dict]
 ) -> dict:
@@ -1412,7 +1435,12 @@ def build_scoreboard(
         ans = by_id.get(q["id"])
         j = judged.get(q["id"]) or {}
         verdict = j.get("verdict") or "unjudged"
-        if ans is not None and ans.status == "blocked" and verdict != "right":
+        # `blocked` wins over EVERY judge verdict, `right` included: a question the
+        # instrument could not ask was not answered, so a reader that says `right`
+        # is reading the packet's own framing rather than a product response. (HONESTY
+        # RULE 2; #13303 review P1. Without the `right` arm the run exits 0 — "every
+        # question was judged" — over a row that was never asked.)
+        if ans is not None and ans.status == "blocked":
             verdict = "blocked"
             j = {
                 "verdict": "blocked",
@@ -1780,7 +1808,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
     tally = board["tally"]
-    return 0 if tally["blocked"] == 0 and tally["unjudged"] == 0 else 1
+    return exit_code(tally)
 
 
 def cmd_judge(args: argparse.Namespace) -> int:
@@ -1872,7 +1900,7 @@ def cmd_judge(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     tally = board["tally"]
-    return 0 if tally["blocked"] == 0 and tally["unjudged"] == 0 else 1
+    return exit_code(tally)
 
 
 def cmd_render(args: argparse.Namespace) -> int:
@@ -1923,7 +1951,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--verdicts", default=None, help="verdicts JSON for --judge file")
     run.add_argument(
-        "--judge-cmd", default=None, help="judge command, default `pi -p --no-session`"
+        "--judge-cmd", default=None, help="judge command, default `pi -p --no-session --no-tools`"
     )
     run.add_argument(
         "--allow-existing-graph",
