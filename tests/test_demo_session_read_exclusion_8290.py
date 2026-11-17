@@ -756,10 +756,10 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
         f"the census tool's fallback pivot {DEFAULT_PIVOT} is not the site "
         f"{lifetime_query_sites()} — nothing shipped reads it, but `census()` and "
         "`pivot_is_the_lifetime_site()` default to it; re-derive it in the same "
-        "commit that moves the site. ⚠ The module docstring's `--pivot <line>` "
-        "EXAMPLE is hand-written and NOT covered by this pin (measured: mutating "
-        "it to `--pivot 99999` leaves `--check` at exit 0) — move it too, or the "
-        "documented command reports `site: False` over a correct tree")
+        "commit that moves the site. (The module docstring's `--pivot <line>` "
+        "EXAMPLE is a row of its own in `_NOTES` — see "
+        "`test_the_census_sees_and_restates_its_docstring_pivot_example` — so it is "
+        "NO LONGER a hand edit to remember.)")
 
     # the census command is the notes' stated remedy, so it must work and must not
     # collapse to nothing (that, and only that, about the population is pinned here)
@@ -1129,6 +1129,51 @@ def test_the_census_sees_and_restates_its_own_fallback_pivot(tmp_path, monkeypat
         "and the row it reads have diverged")
     assert census_mod._sweep(measured, refresh=False) == 0, (
         "the constant now states the measured pivot and `--check` still calls it "
+        "stale — the verb is not reading the line it just wrote")
+
+
+def test_the_census_sees_and_restates_its_docstring_pivot_example(tmp_path, monkeypatch):
+    """The usage block's ``--pivot <line>`` example is a ROW, not a hand edit.
+
+    Why this exists (#13152 review, P2): the module docstring spells the pivot a FIFTH
+    time, and while it sat outside ``_NOTES`` the arm above recorded it as a RESIDUAL
+    to be remembered rather than closing it — a stale example left ``--check`` at exit
+    0 while the documented command printed
+    ``pivot is the LIFETIME_MEMORY_QUERY site: False`` over a correct tree. A row that
+    cannot red is dead weight, so this is the arm that keeps the row honest.
+
+    REDS IF: a stale example survives ``--check`` (exit 0 — the pre-row behaviour),
+    ``--refresh`` leaves it stale, or the restated example does not then read green.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    repo = _census_tmp_repo(tmp_path, monkeypatch)
+    measured = census_mod.census(_PIVOT)
+    own = repo / census_mod._CENSUS
+    pattern = r"(?m)--pivot (\d+)$"
+
+    shipped = _stated(pattern, own.read_text(encoding="utf-8"))
+    # DERIVED from the copy, like the fallback arm: a restatement elsewhere must not
+    # turn this degradation into a silent no-op.
+    stale = shipped + 7
+    own.write_text(
+        own.read_text(encoding="utf-8").replace(
+            f"--pivot {shipped}", f"--pivot {stale}", 1),
+        encoding="utf-8")
+    assert _stated(pattern, own.read_text(encoding="utf-8")) == stale, (
+        "the degradation did not land on the docstring example — the row would then "
+        "be read as stale for a reason other than the one this arm asserts")
+
+    assert census_mod._sweep(measured, refresh=False) == 1, (
+        "`--check` stayed green over a stale `--pivot` example — the example is "
+        "outside the figure set, so a recurrence is invisible to the verb that "
+        "exists to catch it (#13152 review, P2)")
+    census_mod._sweep(measured, refresh=True)
+    assert _stated(pattern, own.read_text(encoding="utf-8")) == measured["pivot"], (
+        "`--refresh` left the docstring example stating an old site — the "
+        "restatement pass and the row it reads have diverged")
+    assert census_mod._sweep(measured, refresh=False) == 0, (
+        "the example now states the measured pivot and `--check` still calls it "
         "stale — the verb is not reading the line it just wrote")
 
 

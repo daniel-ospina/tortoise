@@ -203,14 +203,25 @@ _NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
      r"tracked files \((\d+) distinct", ("distinct_targets",)),
     ("test contract pin _PIVOT", _TEST,
      r"(?m)^_PIVOT = (\d+)$", ("pivot",)),
-    # ⛔ THE TOOL'S OWN FALLBACK (#12755, third recurrence): every other row states a
-    # figure OBSERVED beside the pivot, so while this constant had no row a stale one
-    # here was invisible to both verbs — the notes said the measured site while the
-    # fallback said the old one, and `--check` exited 0 over it. The pattern is line-
-    # anchored so it cannot match the prose above or a `DEFAULT_PIVOT` reference in an
-    # expression; `--refresh` rewrites it in place like any other figure.
+    # ⛔ THE TOOL'S OWN FALLBACK (#12755, third recurrence): the other rows already
+    # covered their own figures, so while THIS constant had no row a stale one here
+    # was the one figure no verb could see — the notes said the measured site while
+    # the fallback said the old one, and `--check` exited 0 over it. The pattern is
+    # line-anchored so it cannot match the prose above or a `DEFAULT_PIVOT` reference
+    # in an expression; `--refresh` rewrites it in place like any other figure.
     ("census DEFAULT_PIVOT", _CENSUS,
      r"(?m)^DEFAULT_PIVOT = (\d+)$", ("pivot",)),
+    # ⛔ AND THE DOCSTRING'S OWN USAGE EXAMPLE (#13152 review, P2): the block above
+    # spells the pivot a FIFTH time as `--pivot <line>`, and while it sat outside this
+    # table the very defect the row above closes survived one screen higher — a stale
+    # example left `--check` at exit 0 while the documented command printed
+    # `pivot is the LIFETIME_MEMORY_QUERY site: False` over a correct tree. The test in
+    # `tests/test_demo_session_read_exclusion_8290.py` used to RECORD that residual and
+    # ask a future editor to "move it too"; the row is what removes the hand edit.
+    # Anchored to end-of-line so it cannot match `add_argument("--pivot", …)` or the
+    # `pass --pivot explicitly` message, neither of which carries a figure.
+    ("census --pivot example", _CENSUS,
+     r"(?m)--pivot (\d+)$", ("pivot",)),
 )
 
 
