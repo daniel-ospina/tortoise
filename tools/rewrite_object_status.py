@@ -306,6 +306,34 @@ def _row_recorded(records, rid) -> bool:
     return last == REWRITE_TO
 
 
+def _row_gone(records, rid) -> bool:
+    """True when the journal's LAST record for this row is its DELETE.
+
+    ⛔ WITHOUT THIS THE MARKER CAN BE PERMANENTLY UNCLEARABLE. `_row_recorded`
+    reads status-bearing records only, so a row a killed run marked and a later
+    run DELETED has its last status record still `outdated` — under a
+    record-existence rule it was kept forever, and the prescribed repair
+    (`rebuild_all`, then re-run) provably could not clear it: the row is gone, so
+    it never re-enters the population and no rewrite ever happens. Measured: mint
+    a legacy row, `_set_pending(journal, [oid])`, delete it through the SDK, then
+    `--execute` twice around a `rebuild_all` — exit 1 each time, marker unchanged,
+    and the "0 rows ⇒ the `assembly` member is dead weight" measurement could
+    never be produced on that graph.
+
+    A deleted row cannot be live-only: there is nothing left for `rebuild_all` to
+    restore. Terminal, so it is discharged.
+    """
+    last = None
+    for rec in records or ():
+        if not isinstance(rec, dict):
+            continue
+        if (rec.get("type") == "EntityMutated"
+                and rec.get("label") == "Object"
+                and str(rec.get("id")) == str(rid)):
+            last = rec
+    return last is not None and str(last.get("op") or "") == "delete"
+
+
 def _pending_path(journal: str | None):
     """The durable marker beside the journal, or ``None`` when there is no path.
 
@@ -569,7 +597,12 @@ def _kept_pending(pending, population, log) -> list[str]:
     for pid in ids:
         # ⛔ An id still carrying a legacy word LIVE is NOT dischargeable,
         # whatever an older record says about an earlier life of the row.
-        if pid not in population and _row_recorded(records, pid):
+        if pid in population:
+            kept.append(pid)
+            continue
+        # Not in the population: dischargeable only on PROOF — its own record
+        # says rewritten, or the journal says the row is GONE (`_row_gone`).
+        if _row_recorded(records, pid) or _row_gone(records, pid):
             continue
         kept.append(pid)
     return kept
@@ -633,7 +666,17 @@ def _nodes_sharing_id(g, rid: str) -> list[list[str]]:
     `live -> deprecated` while its Object stayed `outdated`, and an id-addressed
     run over a url-only `:Source` stub wrote the Source and exited 0.
     """
-    return [list(labs or []) for (labs,) in g.query(
+    # ⛔ TWO COLUMNS, AND THE NODE ID IS LOAD-BEARING. `labels(m)` alone is NOT
+    # node-unique, and `UNION` is a set operation over whole ROWS: two DISTINCT
+    # `:Object` nodes with the same label set collapse to ONE result row, so the
+    # `len(nodes) != 1` fan-out refusal never fires and the write restamps the
+    # sibling — measured: `(a:Object {id:'dup1', status:'outdated'})` beside
+    # `(b:Object {id:'dup1', status:'live'})` yielded `[['Object']]`, the run
+    # reported `rewritten: ['dup1']`, and the never-populated `live` sibling came
+    # back `deprecated` at exit 0 (the journal names `(Object, dup1)`, so a replay
+    # applies it to both). Returning `id(m)` keeps two nodes distinct while ONE
+    # node matched by two of its own arms still collapses — the de-dup holds.
+    return [list(labs or []) for (_nid, labs) in g.query(
         _binding_cypher(), params={"rid": rid}).result_set]
 
 
@@ -652,6 +695,12 @@ def _binding_cypher() -> str:
     ``UNION`` (not ``UNION ALL``) so a node matching two of its own arms — a
     `:Source` carrying both the id and the url, a dual-labelled node — is counted
     ONCE.
+
+    ⛔ THE PROJECTION IS `id(m), labels(m)`, NEVER `labels(m)` ALONE. `UNION`
+    de-duplicates ROWS, so a labels-only projection also merges two DIFFERENT
+    nodes that happen to carry the same label set — the fan-out gate then sees
+    one binding and the write restamps a sibling it never saw (measured; see
+    `_nodes_sharing_id`).
     """
     global _BINDING_CYPHER
     if _BINDING_CYPHER is None:
@@ -661,7 +710,7 @@ def _binding_cypher() -> str:
         )
         pairs = (list(_CANONICAL_ENTITY_ID_PROPS)
                  + list(_CANONICAL_ENTITY_SECONDARY_ID_PROPS))
-        arms = [f"MATCH (m:{label} {{{prop}: $rid}}) RETURN labels(m)"
+        arms = [f"MATCH (m:{label} {{{prop}: $rid}}) RETURN id(m), labels(m)"
                 for label, prop in pairs]
         _BINDING_CYPHER = "\nUNION\n".join(arms)
     return _BINDING_CYPHER
@@ -1262,7 +1311,11 @@ def render(rep: Report) -> str:
             "record behind it — in the latter case `rebuild_all` restores the "
             "legacy word. "
             "The `0 rows` reading on this graph is NOT a measurement until they "
-            "are repaired — re-run `--execute` after `rebuild_all`.")
+            "are repaired — re-run `--execute` after `rebuild_all`. An id whose "
+            "row no longer exists is discharged automatically once its journal "
+            "record says rewritten or deleted; for any id that survives that, "
+            "read the marker, confirm each one by hand, and delete the file — "
+            "no replay can clear a row that is gone.")
     if rep.flag_count:
         lines.append(
             f"  note: {rep.flag_count} :Object row(s) carry the legacy `outdated` "

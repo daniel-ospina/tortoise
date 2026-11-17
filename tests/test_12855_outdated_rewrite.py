@@ -1130,6 +1130,79 @@ def test_a_point_sharing_the_id_is_refused_and_never_written(env):
     assert statuses["Point"] == "live", "the sibling :Point must be untouched"
 
 
+def test_two_OBJECTS_with_the_SAME_labels_sharing_an_id_are_refused(env,
+                                                                   tmp_path):
+    """The fan-out gate must count NODES, not label SETS.
+
+    ⛔ `_binding_cypher` UNIONs one arm per (label, identity-prop) pair and
+    projects the bound node. `UNION` de-duplicates whole ROWS, so a
+    `RETURN labels(m)` projection merges two DIFFERENT nodes that carry the same
+    label set: the gate then sees ONE binding, `_binding_refusal` never fires,
+    and the write restamps a sibling that was never in the population. Measured
+    before the fix: `rewritten: ['dup1']`, exit 0, and the untouched `live`
+    sibling came back `deprecated` — with a single journal record naming
+    `(Object, dup1)`, so a replay applies it to both.
+    """
+    sdk, _events = env
+    g = sdk._get_proj().g
+    g.query(
+        "CREATE (:Object {id:'dup-12855', name:'legacy', "
+        "objectKind:'test:widget', status:'outdated'})")
+    g.query(
+        "CREATE (:Object {id:'dup-12855', name:'live-sibling', "
+        "objectKind:'test:widget', status:'live'})")
+
+    assert tool._nodes_sharing_id(g, "dup-12855") == [["Object"], ["Object"]], (
+        "fixture precondition: two distinct nodes share this address")
+
+    preview = tool.run(sdk, execute=False)
+    assert [r["id"] for r in preview.rows] == ["dup-12855"], preview.rows
+    assert [r["id"] for r in preview.fanout] == ["dup-12855"], preview.fanout
+
+    rep = tool.run(sdk, execute=True)
+
+    assert rep.rewritten == [], "a fan-out row must never be counted as rewritten"
+    assert [f.get("id") for f in rep.failures] == ["dup-12855"], rep.failures
+    after = {
+        name: st for name, st in g.query(
+            "MATCH (n:Object {id:'dup-12855'}) RETURN n.name, n.status",
+        ).result_set
+    }
+    assert after == {"legacy": "outdated", "live-sibling": "live"}, (
+        f"neither node may be touched, got {after!r}")
+    assert tool.main(["--db-path", str(tmp_path / "outdated12855.db"),
+                      "--event-log-path", str(sdk._get_event_log().path),
+                      "--execute"]) == 1, (
+        "a population the tool refused to write is NOT a clean exit")
+
+
+def test_an_id_whose_row_was_DELETED_is_discharged_not_kept_forever(env):
+    """A row a killed run marked, then deleted, must not poison the marker.
+
+    ⛔ Without a delete arm the marker is PERMANENTLY UNCLEARABLE: `_row_recorded`
+    reads status-bearing records only, so the deleted row's last status record is
+    still the legacy word, the id is kept forever, and the prescribed repair
+    (`rebuild_all`, then re-run) cannot help — the row is gone, so it never
+    re-enters the population. Measured before the fix: two `--execute` runs and a
+    `rebuild_all` all exited 1 with the marker unchanged. A deleted row cannot be
+    live-only: there is nothing for a replay to restore.
+    """
+    sdk, _events = env
+    oid = sdk.create_object("doomed", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    journal = str(sdk._get_event_log().path)
+    tool._set_pending(journal, [oid])          # exactly what a killed run leaves
+    sdk._delete_entity(oid)
+    assert _status(sdk, oid) is None, "fixture precondition: the row is gone"
+
+    rep = tool.run(sdk, execute=False)
+
+    assert rep.pending == [], (
+        "a row the journal records as deleted is discharged, not accused: "
+        f"{rep.pending!r}")
+    assert rep.total == 0, rep.total
+
+
 def test_a_truncated_read_cannot_print_the_zero_rows_conclusion():
     """The `0 rows / dead weight` sentence is what authorises the SEQUENCED drop.
 
