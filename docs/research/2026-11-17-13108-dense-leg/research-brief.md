@@ -17,7 +17,7 @@ aboutObjects: STORAGE-ARCHITECTURE.md §14.3 V3, §12.1a size-earned rule, SEARC
 `tools/dense_leg_probe_13108.py` · **Artifacts, this directory:** `probe-*.json` (dense-leg arms +
 the eval's own windows), `eval-*.json` (the `#11901` harness, `window_modes` split).
 **Decision this feeds:** `STORAGE-ARCHITECTURE.md` §14.3 **V3** — the *index* question, which
-`#11901` closed as *"not earned"* on a 390 s sweep. **No index is created here on the served-but-unindexed labels**
+`#11901` closed as *"not earned"* on a 390 s sweep. **No VECTOR index is created here on the served-but-unindexed labels**
 (`:Object`/`:Subject`/`:Event`/`:Source`) — a fresh probe graph does get the product's own `:Point`
 VECTOR index, which §6 names; §6 is the evidence a reopen would need.
 
@@ -395,9 +395,12 @@ load ~130 the dense leg still timed out (§3.3).
 
 ## 6. What an index would be for, and what it would cost — the V3 evidence
 
-**No index was created — on the labels the decision is about.** ⛔ Stated exactly (`#13121` round
-11 F1): this lane creates **no** index on `:Object`, `:Subject`, `:Event` or `:Source` — not by a
-flag, not by an argument. What a **fresh probe graph** does get is the `:Point` VECTOR index, from
+**No VECTOR index was created — on the labels the decision is about.** ⛔ Stated exactly (`#13121`
+rounds 11–13): this lane creates **no VECTOR index** on `:Object`, `:Subject`, `:Event` or
+`:Source` — not by a flag, not by an argument. **"VECTOR" is load-bearing:** `_ensure_indexes()`
+does create the ordinary **RANGE** (`id`/`name`/…) and **FULL-TEXT** indexes those labels have
+always carried (and on `:Point`), and none of those is what V3 asks about — `CALL db.indexes()` on
+a probe graph shows them, which is exactly why the sentence has to say which kind. What a **fresh probe graph** does get is the `:Point` VECTOR index, from
 the projection's own `_ensure_indexes()` on construction (`tortoise/projection/__init__.py`), which
 is the index the product already ships (`#4997`) and the reason the control arm can be a control;
 `tools/dense_leg_probe_13108.py`'s docstring names it as the one thing the tool creates that it does
@@ -444,7 +447,7 @@ as such rather than assumed.
 
 ## 8. What is still open
 
-1. **V3's index question — for the owner.** §6 is the evidence; this lane creates no index on the served-but-unindexed labels (the `:Point` control's index is the product's own, §6).
+1. **V3's index question — for the owner.** §6 is the evidence; this lane creates no VECTOR index on the served-but-unindexed labels (the `:Point` control's VECTOR index is the product's own, §6).
 2. **The 45 % magnitude is not reproduced here** (§3.3). Reproducing it needs a census-sized
    label and a store shared with fleet traffic; both are named, neither is guessed at.
 3. **The scan's ≈71× gap to a tuned exact scan** (§2.2, §6) — an alternative remedy with no

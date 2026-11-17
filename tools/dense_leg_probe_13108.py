@@ -14,14 +14,15 @@ budget**, and the two candidate answers have OPPOSITE fixes:
   index (`tools/dod_5090_probe.py` row 2: `indexed: ['Point']` only), so every object-ish
   dense read is a full scan that first pays a FAILING index round trip. If this is the
   cause, the fix is an index, and that is `STORAGE-ARCHITECTURE.md` §14.3 **V3** — an OWNER
-  decision `#11901` closed as *"not earned"* on a 390 s sweep. **This tool measures; it
-  creates no index on `:Object`, `:Subject`, `:Event` or `:Source`** — not by a flag, not by
-  an argument. ⚠️ The ONE exception is stated below and is not a choice this tool makes: on a
-  fresh graph the projection's own `_ensure_indexes()` creates the `:Point` VECTOR index the
-  product already ships, which is what makes the `:Point` arm a control (see "THE ONE THING THE
-  SEED DOES NOT DO"). Unqualified, "it indexes nothing" would be false and would contradict this
-  same docstring. Creating an index on the served-but-unindexed labels would reverse a recorded
-  decision on a hunch.
+  decision `#11901` closed as *"not earned"* on a 390 s sweep. **This tool measures; it creates
+  no VECTOR index on `:Object`, `:Subject`, `:Event` or `:Source`** — not by a flag, not by an
+  argument. ⛔ **"VECTOR" is load-bearing** (`#13121` round 13): what the projection's own
+  `_ensure_indexes()` creates on a fresh graph is (a) the `:Point` VECTOR index the product
+  already ships — the one thing this tool creates that it does not own, and what makes the
+  `:Point` arm a control (see "THE ONE THING THE SEED DOES NOT DO") — and (b) the ordinary RANGE
+  and FULL-TEXT indexes those labels have always carried. Neither (b) nor a plain "it indexes
+  nothing" is what V3 asks about; creating the VECTOR index on the served-but-unindexed labels
+  WOULD reverse a recorded decision on a hunch.
 * **budget-only** — the leg is merely slow, and the fix is the budget or a bounded retry.
 
 ⛔ **A bug that only appears under contention cannot be reproduced on an idle box.** The
