@@ -168,11 +168,16 @@ COMPARATORS: Mapping[str, str] = {
 }
 
 #: How a judgement state caches onto the goal's ``goalState`` word (the closed
-#: #7856 vocabulary). ⛔ ``unknown`` maps to ``None`` — NO cache write: the
-#: vocabulary has no word for "not decided", and writing ``active`` over a
-#: human's ``blocked`` or ``guideline`` because a reading went missing would let
+#: #7856 vocabulary, six words since #13035). ❛❛ ``unknown`` maps to ``None`` — NO
+#: cache write: the vocabulary has no word for "not decided", and writing
+#: ``active`` over a human's ``blocked`` because a reading went missing would let
 #: the cache outrank a word nobody measured. :func:`record_judgement` reports
-#: ``goalState: None`` in that case instead of guessing.
+#: ``goalState: None`` in that case instead of guessing. ⛔ The cache writes only
+#: the two words a MEASUREMENT can produce — ``met``/``unmet`` — and NEVER an
+#: ending (``abandoned``/``superseded``): an ending is a lifecycle decision that
+#: arrives with a verb, and since #13035 it also sets ``status``, so a cache that
+#: wrote one would either be refused at the write boundary or end a goal nobody
+#: decided to end.
 GOAL_STATE_CACHE: Mapping[str, str | None] = {
     "met": "met",
     "unmet": "unmet",
@@ -1483,7 +1488,7 @@ def _write_goal_state_cache(sdk: Any, goal_id: str, state: str) -> str | None:
     """Write the goal's ``goalState`` CACHE from the judgement, or nothing.
 
     ``unknown`` writes NOTHING (:data:`GOAL_STATE_CACHE`) rather than putting
-    ``active`` over a human's ``blocked``/``guideline``: a judgement that reaches
+    ``active`` over a human's ``blocked``: a judgement that reaches
     no state cannot improve the cache, and the closed vocabulary has no word for
     "not decided". The write is unconditional (rather than "only if it differs")
     because checking would mean READING ``goalState`` in this module — the one
@@ -1491,6 +1496,18 @@ def _write_goal_state_cache(sdk: Any, goal_id: str, state: str) -> str | None:
     """
     cached = GOAL_STATE_CACHE[state]
     if cached is not None:
+        if _goal_retired_on_status(sdk, goal_id):
+            # ⛔ #13065 review finding 1: a goal retired on its `status` keeps no
+            # derived word (the retirement arm in `derived_invalidation` asserts
+            # exactly that, and the write boundary now REFUSES the pair), so
+            # stamping `met`/`unmet` here raised AFTER the judgement Point and
+            # its arrow had already landed — a partial write, and the exception
+            # reached the caller. A RETIRED goal's cache is not this module's to
+            # write at all: `reconcile_goal_state_cache` owns clearing a derived
+            # word (it knows the derived vocabulary), and writing NOTHING here
+            # cannot erase a human's own ending word (`abandoned`/`superseded`)
+            # the way an unconditional clear did.
+            return None
         # #12915 review F1: `update_entity` is RETIRED (#4282) and
         # `TortoiseSDK.__getattr__` RAISES on it, so this call made every
         # `met`/`unmet` judgement die inside the cache write — and
@@ -1500,6 +1517,36 @@ def _write_goal_state_cache(sdk: Any, goal_id: str, state: str) -> str | None:
         # `update_entity` relayed to, so the written props are unchanged.
         sdk.update_knowledge(goal_id, goalState=cached)
     return cached
+
+
+def _goal_retired_on_status(sdk: Any, goal_id: str) -> bool:
+    """Is the goal retired on its ``status`` axis (so its cache must be FREE)?
+
+    Reads ``status`` — never ``goalState``, which this module still does not
+    read — and applies the type-first terminal test so a malformed stored value
+    cannot turn a judgement into a ``TypeError`` (#13065 review finding 1).
+    """
+    try:
+        node = sdk.get_entity(goal_id) or {}
+    except Exception:
+        # ⛔ #13065 review round 13, finding 2 (P2): this is FAIL-CLOSED, and the
+        # `# pragma: no cover` that used to sit here is gone so the coverage floor
+        # can see the arm. The guard exists to stop `_cache_then_arrow` stamping a
+        # derived word over a RETIRED goal (the write boundary refuses that pair,
+        # and the `ValueError` lands AFTER the judgement Point and its IMPL arrow
+        # — a partial write). "I could not read the status" is not evidence that
+        # the goal is live: answering `False` here restored exactly that
+        # partial-write path on a transient read fault, with nothing measured and
+        # nothing logging it. Answering "retired" suppresses at most one cache
+        # write, and `reconcile_goal_state_cache` owns repairing a cache — so the
+        # safe direction costs a repair, while the unsafe one corrupts a retired
+        # goal's ending. Pinned by
+        # `test_a_goal_whose_status_CANNOT_BE_READ_is_treated_as_RETIRED`.
+        return True
+    status = node.get("status")
+    return ((issubclass(type(status), str)
+             and str.__str__(status) in _TERMINAL_EXCLUDED_STATUSES)
+            or bool(node.get("outdated")))
 
 
 def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
