@@ -6084,7 +6084,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`, the
         # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s, in
         # `tortoise-capture.ts`, and re-derived no cite, so the pair is
-        # **`:1023`/`:1015`** here — measured at this head
+        # **`:1030`/`:1022`** here — measured at this head
         # (`grep -nF 'export function postCapture(' …`) and re-measured at the head this
         # de-conflict merges at (`0449273b`), which still reads `:1023`/`:1015`; repaired
         # at this head rather than carried, because a red on `main` blocks every head.
@@ -6103,13 +6103,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # silently resolving.
         # RE-DERIVED by CONTENT on the merged tree (the de-conflict of `main` into
         # `#12295`): `grep -n 'export function postCapture(\|export function postInstallProbe('
-        # tortoise/pi-hooks/tortoise-capture.ts` -> 1023 / 1015, still 8 apart. The
+        # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart at `main`. The
         # `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
         # and is RED here, measured: main's tortoise-capture.ts carries +16 lines above
         # both `def`s that neither of that row's two sides moved.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("1023", "export function postCapture("),
-            ("1015", "export function postInstallProbe("),
+            ("1030", "export function postCapture("),
+            ("1022", "export function postInstallProbe("),
         ), "pi_hooks"),
         # ⛔ THE SENTENCE'S THIRD FILE (`hosted_api.py`) HAD NO READER EITHER (#12462
         # review round 5), in the very row this PR re-points the other two cites of:
