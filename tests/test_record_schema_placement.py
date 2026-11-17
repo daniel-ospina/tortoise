@@ -567,7 +567,7 @@ _PREREQ_PGVECTOR_TOTAL_RE = re.compile(r"over all (?P<count>\d+)\s+migrations")
 #: `_INDEX_MIGRATION_COUNT_RE` for why it is no longer a literal `0`).
 _MIGRATION_COUNT_OF_RE = re.compile(
     r"(?P<occurrences>\d+) of (?P<count>\d+)\s+migrations")
-#: The three documents carrying the `0 of N migrations` form — scanned WHOLE,
+#: The three documents carrying the `N of M migrations` form — scanned WHOLE,
 #: because the phrase is not confined to one row. ⛔ A FOURTH file matches the same
 #: phrase and is deliberately NOT registered: `docs/epics/2026-11-04-7949-
 #: extractor-v4-capstone/05-verify.md` quotes the form inside a historical
@@ -1693,7 +1693,7 @@ def test_the_migration_and_grep_census_reproduces_at_this_head():
         text = path.read_text(encoding="utf-8")
         stated = [int(m.group("count")) for m in _MIGRATION_COUNT_OF_RE.finditer(text)]
         assert stated, (
-            f"{path.relative_to(REPO_ROOT)} no longer states `0 of N migrations` "
+            f"{path.relative_to(REPO_ROOT)} no longer states `N of M migrations` "
             "— restate it rather than deleting the phrase: this pin reads it"
         )
         assert set(stated) == {on_disk}, (

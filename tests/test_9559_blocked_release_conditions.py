@@ -1724,14 +1724,28 @@ def test_the_refresh_keeps_its_fail_closed_arm():
         "erased-org fix (an org the audit stops reporting must not be frozen "
         "stale) has no home; restore it as an APPEND-ONLY migration (#1095)")
     sql = candidates[-1].read_text(encoding="utf-8")
-    # The executed text: from the function's `AS $$` to its closing `$$;`, minus
-    # `--` comments (the header's prose must not satisfy this).
+    # ⛔ THE WINDOW IS BOUNDED BY THIS DEFINITION, NOT BY THE FILE'S FIRST AND LAST
+    # `$$` — and block comments are removed BEFORE either bound is taken. A third
+    # review round measured two false PASSes through the old window: a `/* … */`
+    # block quoting a previous definition (guard included) ABOVE the live one put
+    # `sql.index("AS $$")` inside that comment, so the scanned text carried the
+    # quoted guard while the live body had none; and a helper function defined
+    # before the live one made `rindex("$$")` bound only the far end. Both stayed
+    # GREEN over a body with no fail-closed arm. `/* */` is not exotic here
+    # (`20260915000001_tenancy_team_to_org.sql` uses it), so the window starts at
+    # the FIRST `AS $$` at or after the selected DEFINITION and ends at the FIRST
+    # `$$` after it.
+    stripped = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
     marker = "AS $$"
-    assert sql.count(marker) >= 1, (
+    assert defs_rx.search(stripped), (
+        f"{candidates[-1].name} matches the definition pattern only inside a "
+        "comment — the body scan cannot reach an executed definition there")
+    assert stripped.count(marker) >= 1, (
         f"{candidates[-1].name} declares no `AS $$` body — the scan below cannot "
         "reach the executed statements")
-    body = sql[sql.index(marker) + len(marker):]
-    body = body[:body.rindex("$$")]
+    start = stripped.index(marker, defs_rx.search(stripped).end())
+    body = stripped[start + len(marker):]
+    body = body[:body.index("$$")]
     code = "\n".join(line.split("--", 1)[0] for line in body.splitlines())
 
     guard = re.compile(
