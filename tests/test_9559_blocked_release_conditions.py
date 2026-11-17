@@ -1782,14 +1782,23 @@ def _function_body(sql: str, decl_rx: re.Pattern[str]) -> str | None:
     sibling function's statements are never scanned, and a `$function$`-tagged
     body — what `pg_dump` emits — works.
 
+    ⛔ AND IT IS THE **LAST** DECLARATION IN THE FILE, not the first. `CREATE OR
+    REPLACE` executes in order, so a file that defines the function twice is left
+    holding its SECOND definition — the live one. Anchoring on the first
+    (``decl_rx.search``) measured GREEN over a file whose earlier definition still
+    carried the guard while the live one did not: the scan read the SUPERSEDED
+    body and reported a fail-closed arm that the executed function had lost — the
+    same false PASS this window exists to close, one position further in.
+
     Returns ``None`` when the declaration or its delimiters cannot be found, so
     the caller REDs with a message naming the file instead of silently scanning
     the wrong text.
     """
     code = _strip_sql_comments(sql)
-    decl = decl_rx.search(code)
-    if decl is None:
+    decls = list(decl_rx.finditer(code))
+    if not decls:
         return None
+    decl = decls[-1]
     opener = _DOLLAR_TAG.search(code, decl.end())
     if opener is None:
         return None
@@ -2006,6 +2015,42 @@ def test_the_body_scan_honours_a_named_dollar_tag():
 
 
 # --------------------------------------------------------------------------- #
+def test_the_body_window_is_the_LIVE_definition_not_the_first_one():
+    """A file that defines the function twice leaves the SECOND definition live.
+
+    `CREATE OR REPLACE` executes in order, so a migration that redefines the
+    function later in its own body is left holding the later one. Anchoring the
+    window on the FIRST declaration read the SUPERSEDED body — measured: a guarded
+    earlier cut followed by an unguarded live one came back WITH the guard, so every
+    assertion built on this function passed over a live body that had lost its
+    fail-closed arm. Two definitions in one migration is not this directory's habit;
+    the window must not depend on that.
+    """
+    decl_rx = re.compile(r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.twice\b")
+    guarded = (
+        "BEGIN\n"
+        "  IF jsonb_array_length(v_audit->'orgs') > 0 THEN\n"
+        "    RETURN;\n"
+        "  END IF;\n"
+        "END;\n")
+    unguarded = "BEGIN\n  RETURN;\nEND;\n"
+    head = "CREATE OR REPLACE FUNCTION public.twice() RETURNS void AS $$"
+    tail = "$$ LANGUAGE plpgsql;\n"
+
+    superseded_guarded = _function_body(
+        head + guarded + tail + head + unguarded + tail, decl_rx)
+    assert superseded_guarded is not None
+    assert "jsonb_array_length" not in superseded_guarded, (
+        "the window read the FIRST definition, which the second one supersedes: "
+        f"{superseded_guarded!r}")
+
+    live_guarded = _function_body(
+        head + unguarded + tail + head + guarded + tail, decl_rx)
+    assert live_guarded is not None and "jsonb_array_length" in live_guarded, (
+        f"the window missed the live (last) definition: {live_guarded!r}")
+
+
+
 # The two REVIEW findings on this selector — both "the gate asserts over text the
 # server does not execute", one spelling further in than the defect it replaced.
 # --------------------------------------------------------------------------- #
