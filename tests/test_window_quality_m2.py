@@ -843,12 +843,13 @@ def _marker_hit(tail: str, marker: Marker) -> bool:
 
 
 # ── where a claim ENDS ────────────────────────────────────────────────────────
-# One definition each, shared by `_scope_bound` (how far a `required` marker may sit
-# from its anchor) and by the inversion scan (which looks back before a forbidden
-# spelling), so the two halves of the ledger cannot disagree about what a sentence
-# or a clause is.
+# Shared by `_scope_bound` (how far a `required` marker may sit from its anchor) and
+# by the inversion scan (which looks back before a forbidden spelling), so the two
+# halves of the ledger cannot disagree about what a sentence is. The CLAUSE boundary
+# is one of `_TERMINATION`'s terms rather than a second split: `;` and `:` are in it,
+# so a cue before them cannot dismiss a phrase after them, and one definition is one
+# thing to keep pinned.
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
-_CLAUSE_END = re.compile(r"(?<=[;:])\s+")
 
 
 def _claim_bound(flat: str, occurrence: re.Match, window: int) -> int:
@@ -2051,7 +2052,6 @@ _NEGATION_CUE = re.compile(
     r"\bwithout\b|n['\u2019]t\b|\brather than\b|\binstead of\b|\bas opposed to\b)",
     re.IGNORECASE)
 _NEGATION_CUE_WINDOW = 32
-
 # ⛔ A cue governs only the PHRASE it introduces, not every following word in the
 # clause. NegEx stops a negation's scope at a TERMINATION term (`but`, `however`,
 # `except`, `although`, …) as well as at the sentence end; the round-13 repair cut at
@@ -2066,26 +2066,45 @@ _NEGATION_CUE_WINDOW = 32
 # `passes neither A nor B, and it passes both` — a cue may not reach across the
 # punctuated break that ends its own phrase. `and` / `or` are deliberately NOT in the
 # list (they are ordinary conjunctions inside a negation's scope: `no A or B`), which
-# is also why the canonical NegEx termination set names `but`/`however`/`except` rather
 # than the coordinating conjunctions.
+#
+# ⛔ A COORDINATOR that starts a NEW PREDICATION terminates the cue's scope too, and
+# the canonical set leaves that form open — measured GREEN at `e24e8a209c` and again at
+# `26c0ff8262`, both asserting the row's own forbidden spelling:
+#
+#   `the loss is equal to the eviction and it carries no signal and it is smaller
+#    than the eviction.`
+#   `the loss is equal to the eviction, it carries no signal so it is smaller than
+#    the eviction.`
+#
+# In both, `no` belongs to the FIRST predication (`carries no signal`) and the claim the
+# row binds is asserted in the second. `or` stays OUT — `no A or B` is a negation
+# scoping over a coordinated list, the reading NegEx relies on — and the cost of
+# including the rest falls on the SAFE side of this ledger's own trade-off: a false red
+# is friction a lane reads and relaxes, while a spared inversion is the fail-open the
+# ledger exists to prevent (measured: no wording in this record trips it, 64 passed).
 _TERMINATION = re.compile(
     r"[,;:]|\b(?:but|however|nevertheless|though|although|yet|except|whereas|"
-    r"aside from|apart from)\b",
+    r"aside from|apart from|and|so|which|because|while|therefore|thus|hence)\b",
     re.IGNORECASE)
 
 
 def _dismissed(prefix: str) -> bool:
     """Is the spelling that FOLLOWS `prefix` negated by a cue in its own PHRASE?
 
-    Four bounds, each added because a wider one was measured to launder an asserted
-    inversion: the SENTENCE (a negation in the previous sentence cannot dismiss this
-    one), the CLAUSE (`;`/`:`), the PHRASE (a termination term — NegEx's own scope
-    rule), and the row's own words, blanked out of `prefix` before this is called
-    (`_own_claim_spans`).
+    Each bound was added because a wider one was measured to launder an asserted
+    inversion, and each is pinned by a mutant that reds only it: the SENTENCE (a
+    negation in the previous sentence cannot dismiss this one), the PHRASE (a
+    termination term — NegEx's own scope rule, `_TERMINATION`), the row's own words,
+    blanked out of `prefix` before this is called (`_own_claim_spans`), and the
+    CLAUSAL COORDINATOR, which is what a claim joined to an unrelated negative
+    statement uses when the sentence carries no punctuation at all. The `;`/`:` clause
+    cut this used to carry separately is one of `_TERMINATION`'s terms, so it is one
+    bound rather than two — a second mechanism nothing can red is the class under
+    review here.
     """
     sentence = _SENTENCE_END.split(prefix)[-1]
-    clause = _CLAUSE_END.split(sentence)[-1]
-    phrase = _TERMINATION.split(clause)[-1]
+    phrase = _TERMINATION.split(sentence)[-1]
     return bool(_NEGATION_CUE.search(phrase))
 
 
@@ -2662,6 +2681,84 @@ def test_the_claim_ledger_matcher_is_pinned_on_synthetic_input():
     assert "claim no longer stated" in violations(
         [("nothing of the sort is written.", "the record does not serve", None,
           "does serve")])
+
+
+def test_a_cue_must_govern_the_phrase_it_dismisses():
+    """The P1 fail-open, one step INSIDE the clause it was narrowed to.
+
+    The clause cut (#13126 round 13) closed `… it is not larger; the loss is smaller
+    than the eviction …`. The same class survives inside a clause, because this record
+    joins a claim to an unrelated negative statement with a comma or an `and` — the
+    reviewer's own probe `The loss carries no signal and the loss is smaller than the
+    eviction`, which with its comma form measures GREEN at `e24e8a209c`. Both ASSERT
+    the row's forbidden spelling, and in both the cue governs a different predication:
+    "carries no signal" is not a statement about "smaller than the eviction".
+
+    The controls are the wordings the escape hatch exists for — they are why the rule
+    is "nothing that starts a new predication may stand between the cue and the
+    spelling", not "the cue must be adjacent". `not the case that …` (a matrix
+    negation governing its complement) must keep sparing, and does.
+    """
+    row = ("the loss is", "equal to the eviction", "smaller than the eviction")
+
+    def violations(doc: str) -> str:
+        return " ".join(_ledger_violations([(doc, *row)]))
+
+    for label, doc in (
+            ("comma-joined predications",
+             "m2 measured that the loss is equal to the eviction, carries no signal, "
+             "is smaller than the eviction."),
+            ("coordinator `and`",
+             "m2 measured that the loss is equal to the eviction and it carries no "
+             "signal and it is smaller than the eviction."),
+            ("`so` between the cue and the claim",
+             "the loss is equal to the eviction, it carries no signal so it is "
+             "smaller than the eviction.")):
+        assert "claim inverted at the site" in violations(doc), (
+            f"a cue that does not govern the phrase dismissed it ({label}): {doc!r}")
+
+    # ⛔ The row's OWN words are the cue here and NOTHING breaks the gap, so the
+    # answer rests on the claim-span blanking alone — reverting it leaves this GREEN
+    # (measured 63 passed at `e24e8a209c`+). `— ` is not a break: it joins one
+    # predication.
+    assert "claim inverted at the site" in " ".join(_ledger_violations(
+        [("the capture path passes neither `read_status_out` nor `_truncation_out` "
+          "— passes both in the same call.", "passes neither", "nor `_truncation_out`",
+          ("passes both",))])), (
+        "the row's own `nor` dismissed its own inversion: the claim-span blanking "
+        "is not doing the work")
+
+    for label, doc in (
+            ("a `rather than` dismissal",
+             "the loss is equal to the eviction, rather than smaller than the "
+             "eviction."),
+            ("an adjacent `not`",
+             "the loss is equal to the eviction and is **not smaller than the "
+             "eviction**."),
+            ("a matrix negation governing its complement",
+             "it is not the case that the loss is smaller than the eviction, and the "
+             "loss is equal to the eviction.")):
+        assert violations(doc) == "", (
+            f"the escape hatch stopped sparing correct English ({label}): "
+            f"{violations(doc)}")
+
+
+def test_the_inversion_scan_reads_every_anchor_occurrence():
+    """F2's other half: the SCAN must read every occurrence, not only the first.
+
+    `_scope_bound`'s every-occurrence read is pinned in
+    `test_the_claim_ledger_matcher_is_pinned_on_synthetic_input`; the inversion scan's
+    was not — reverting `_inversions` to the first occurrence left 63 passed
+    (measured). A guard nobody can fail is the class this module condemns, so the
+    inversion sits in the SECOND statement's window only.
+    """
+    assert "claim inverted" in " ".join(
+        _inversions("the claim is A. the claim is B.", "the claim is", ("B",),
+                    radius=6)), (
+        "an inversion beside the SECOND occurrence was not read — the scan is back to "
+        "one window forward of the first (#13126 round 12, F2)")
+    assert not _inversions("the claim is A. the claim is B.", "the claim is", ("ZZZ",),
+                           radius=6)
 
 
 def test_the_arming_decision_is_stated_and_cannot_be_inverted_green(artifact):
