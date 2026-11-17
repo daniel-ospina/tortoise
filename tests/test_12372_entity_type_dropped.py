@@ -762,13 +762,13 @@ def test_the_operator_remedy_discloses_the_view_it_bounds() -> None:
     """The operator remedy names a CURRENT-VIEW read while implying the layer.
 
     `tortoise_search`'s structural leg for `operator` sets
-    `label_str = "Point"` (`tortoise/search_engine.py:4261` region) and `Point`
+    `label_str = "Point"` (`tortoise/search_engine.py:4315` region) and `Point`
     is in `_STATUS_FILTERED_LABELS` (`:148`), so the terminal-status clause is
     appended to the WHERE — a terminally-stated operator is NOT returned. And
     the reconciliation target counts a WIDER predicate than the leg reads:
     `summarize_structure` uses `is_operator = true OR op_type IS NOT NULL`
     (`tortoise/sdk.py:26563`) while the leg appends only `n.is_operator = true`
-    (`search_engine.py:4261`). So "one call at the SDK's maximum … no
+    (`search_engine.py:4315`). So "one call at the SDK's maximum … no
     single-call read above 10,000" hands the caller a short answer shaped like
     the layer, with none of its causes named — the same false PASS this guard
     removes, one level down (round 2 fixed the `limit` half of it). The NAMED
@@ -820,7 +820,7 @@ def test_the_object_and_subject_remedies_disclose_the_status_filter(
 
     Verified in `tortoise/search_engine.py`: `_STATUS_FILTERED_LABELS =
     ("Point", "Object", "Subject")` (`:148`) and the exclusion clause is
-    appended for each of those labels (`:2967`), while the count these remedies
+    appended for each of those labels (`:2992`), while the count these remedies
     tell the caller to reconcile against — `taxonomy()` served as
     `status().counts` — is `MATCH (n:<Label>) RETURN count(n)` over EVERY
     status. So a reconciled gap for `object`/`subject` has two causes (the
@@ -939,9 +939,9 @@ def test_every_remedy_that_names_a_search_names_the_silent_cause() -> None:
     `tortoise_search(entity_type=…, kind=…)`, i.e. `run_structural_query`. That
     leg answers `[]` with no field reporting it from two causes that are not
     population differences at all: `_breaker_allow("structural")` returning
-    False (`tortoise/search_engine.py:4252`), and `graph.query(...,
-    timeout=timeout_ms)` raising into the `except Exception` arm (`:4308`,
-    500 ms default from the signature at `:4168`). A per-entry assertion cannot
+    False (`tortoise/search_engine.py:4305`), and `graph.query(...,
+    timeout=timeout_ms)` raising into the `except Exception` arm (`:4363`,
+    500 ms default from the signature at `:4221`). A per-entry assertion cannot
     stop the NEXT entry from repeating the omission — this PR has already
     re-derived the same class three times — so this sweeps the remedy table
     itself. `source` is exempt BY CONSTRUCTION: it names
