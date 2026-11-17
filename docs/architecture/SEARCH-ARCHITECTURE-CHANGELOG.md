@@ -276,9 +276,12 @@ graph-side embeddings; ⛔ **but that ruling was itself SUPERSEDED for the GRAPH
 its write stopped **once the record holds and indexes those vectors** — record first (`#13220` step 1),
 graph removal second, in a later release, and never before (removing it early would delete the only copy,
 the failure the original ruling existed to prevent). `:Event`/`:Source` were never named by that ruling,
-so their graph copies were already retirable once the record serves them. ⛔ **SUPERSEDED 2026-11-17
-(`#13350`, the entry below):** no owner ruling makes them retirable — comment `6956793300` authorises
-retirement for `:Object`/`:Subject` and no other label — and the design document now says so.
+so their graph copies were already retirable once the record serves them. ⚠️ **Sharpened 2026-11-17
+(`#13350` and the correction below):** no **owner ruling** names them — comment `6956793300` authorises
+retirement for `:Object`/`:Subject` and no other label — but nothing forbids theirs either, and `#13220`'s
+**step 3** orders it (*"Retire what may be retired — `:Event`/`:Source` graph-side vectors once the record
+serves them"*) under `#13082`'s rule. The design document states both halves and denies neither, and keeps
+the release boundary: record first, graph removal second, **not in one release**.
 
 **What the design document does NOT gain, on purpose.** No delivery state and no census: the per-label
 vector population is still `tools/dod_5090_probe.py --census`'s to measure on a named graph, the probe's
