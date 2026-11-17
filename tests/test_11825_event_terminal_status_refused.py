@@ -1342,6 +1342,39 @@ class TestTheBundleValidationDoor:
                           "objectKind": "policy", "status": "superseded"}],
         }) == []
 
+    @pytest.mark.parametrize("label", ["object", "subject"])
+    def test_a_null_status_item_is_not_a_phase_1_violation(self, sdk, label):
+        """`status: null` is the DELETE sentinel, not a word (#11824 S0 review P2).
+
+        Both write doors this Phase-1 arm exists to agree with exempt `None`
+        (`create_entity`: `if _lifecycle_value is not None`; `_update_entity`:
+        `if _np_status is not None`), because `_sanitize_props` documents `None`
+        as the removal form — and this PR's own
+        `test_an_explicit_None_is_still_the_documented_status_DELETE` proves
+        `create_entity("object", …, status=None)` stores.
+
+        The arm asked the vocabulary question about EVERY item that DECLARES a
+        status, and a `null` DOES declare it, so this bundle was refused with a
+        message claiming the writer "refuses it mid-write" — false for this
+        value, and over-rejection is the direction this arm's own history says
+        was fixed once already. Mutant that reddens: delete the
+        `if own_status is None: continue` arm in `sdk._validate_bundle`.
+        """
+        item = {"ref": "n1", "type": label, "name": "NullStatusItem",
+                "status": None}
+        if label == "object":
+            item["objectKind"] = "policy"
+        else:
+            item["subjectKind"] = "organization"
+        assert sdk._validate_bundle({"entities": [item]}) == [], (
+            "a `status: null` item was refused at Phase 1 although both write "
+            "doors store it as a property DELETE")
+        # CONTROL: the arm still REFUSES what the doors refuse, so the
+        # exemption is the delete sentinel and not the whole axis.
+        assert sdk._validate_bundle({"entities": [dict(item, status="banana")]}), (
+            "the arm stopped refusing an undeclared word — the exemption is "
+            "wider than the delete sentinel")
+
     @pytest.mark.parametrize("status", [42, 3.5, True])
     def test_a_persistable_non_string_status_is_a_phase_1_violation(
             self, sdk, status):
@@ -1593,9 +1626,12 @@ class TestTheGuardDoesNotOverBlock:
         assert row[0][0] == "superseded"
 
     def test_a_point_still_refuses_an_undeclared_status(self, sdk):
-        """The Point door's own vocabulary is untouched by this change."""
+        """The Point door validates through the SHARED four-word door (#11824 S0)."""
         pid = sdk.create_point("statement", "a claim", status="live")["id"]
-        with pytest.raises(ValueError, match="Invalid status"):
+        # #11824 S0: the message comes from `lifecycle_vocabulary`, which every
+        # knowledge kind now shares — same refusal, one home, and its third part
+        # names the words that ARE accepted.
+        with pytest.raises(ValueError, match="not a lifecycle word for :Point"):
             sdk.update_knowledge(pid, status="dead")
 
     def test_a_subject_still_takes_a_terminal_status(self, sdk):
@@ -1663,10 +1699,28 @@ class TestTheGuardDoesNotOverBlock:
     def test_the_whole_terminal_vocabulary_is_a_subset_of_the_point_vocabulary(self):
         """Documents the boundary: the Point door validates, the Event door denies.
 
-        `TERMINAL_EXCLUDED_STATUSES` is the Point vocabulary's terminal half plus
-        the legacy `deprecated`; every member except `deprecated` is a legal
-        Point status. Nothing here changes that — this is a WRITE denial on the
-        one label that has no lifecycle.
+        `TERMINAL_EXCLUDED_STATUSES` is the READ vocabulary; `POINT_STATUS_VALUES`
+        is the WRITE one, and #11824 S0 made the read set strictly WIDER than the
+        write set — deliberately (#2977): stored rows keep whatever they hold (no
+        backfill), so `retracted`/`outdated`/`archived` still read as dead while no
+        door can mint them any more. `deprecated` used to be the single member
+        outside the write set; it is now IN it, which is the reversal S0 records.
         """
         extra = TERMINAL_EXCLUDED_STATUSES - POINT_STATUS_VALUES
-        assert extra == {"deprecated"}
+        assert extra == {"retracted", "outdated", "archived"}
+        # …and the door's treatment of each is NOT uniform, which is the point of
+        # the three words being different: `retracted`/`archived` are DECLARED
+        # SYNONYMS (stored as `deprecated`, silently), while `outdated` is
+        # REFUSED because it names a CHOICE — the two endings differ, and the
+        # caller is the only one who knows which happened.
+        from tortoise.lifecycle_vocabulary import read_caller_status
+        for synonym in ("retracted", "archived"):
+            assert read_caller_status(synonym) == "deprecated", synonym
+        # ⛔ `match="deprecated"` was NOT discriminating (#13143 review, finding
+        # 3): `_ACCEPTED_FORMS` quotes all four words into EVERY refusal, so the
+        # generic fall-through satisfied it and deleting the `outdated` arm
+        # shipped green. Only `_OUTDATED_REPAIR` names the two words it collapses
+        # and the successor route that makes the refusal performable.
+        with pytest.raises(ValueError, match=r"supersededBy.*supersede_point") as exc:
+            read_caller_status("outdated")
+        assert "TWO different lifecycle words" in str(exc.value), str(exc.value)

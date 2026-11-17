@@ -5859,11 +5859,17 @@ class _EntityHandlers:
           named, and a journal that replays on ``main`` stays rebuildable.
         """
         index = _status_fold_index()
-        from tortoise.status_folds import builtin_fold_status
+        from tortoise.status_folds import (
+            BUILTIN_CONNECTOR_PIPELINE,
+            BUILTIN_CONNECTOR_PIPELINE_KEY,
+            FOLD_AXIS_STAGE,
+            builtin_fold_reopens,
+            builtin_fold_stage,
+        )
 
         excluded = _terminal_object_statuses()
         declared = index.folds_for_event(event_kind)
-        builtin_status = builtin_fold_status(event_kind)
+        builtin_stage = builtin_fold_stage(event_kind)
         # #3590: the fold addresses an ENTITY, so it addresses the entity's id.
         # `object_id` is the id `_event_plain_merge` resolved for the event's
         # explicit `object`; `about_entities` are loose names, resolved here to
@@ -5928,8 +5934,43 @@ class _EntityHandlers:
             # pack's kind simply is not this Object's kind).
             missed: list[tuple[str, str]] = []
             for _key_prop, key_value, report, target_name in targets:
-                for target_kind, status in declared:
+                for fold_target in declared:
+                    target_kind = fold_target.kind
                     kinds = index.kind_forms_for(target_kind)
+                    if fold_target.axis == FOLD_AXIS_STAGE:
+                        # ── #11824 S0: the POSITION axis ──
+                        # A migrated kind's words are its pipeline stages, so
+                        # the fold advances a stage instead of writing a status.
+                        # The declaration the target resolves in is the kind's
+                        # own `pipeline` (carried on the index — the fold's
+                        # validation already refused a stage that is not in it),
+                        # and the move goes through
+                        # `pipeline.apply_stage_fold` so the fold and the
+                        # `advance_stage` verb share ONE decision.
+                        applied = self._fold_object_stage(
+                            key_value, kinds,
+                            pipeline_key=target_kind,
+                            decl=index.pipeline_for(target_kind),
+                            stage_ref=fold_target.target,
+                            reopen=False, excluded=excluded)
+                        if applied:
+                            matched_any = True
+                            continue
+                        if not report:
+                            continue
+                        # No write: the terminal guard refused (correct,
+                        # silent) or no Object of the declaring kind exists
+                        # (a fold violation) — the same split the status arm
+                        # makes below.
+                        present = self.g.query(
+                            "MATCH (o:Object {id:$n}) "
+                            "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds "
+                            "RETURN count(o) AS n",
+                            params={"n": key_value, "kinds": kinds},
+                        ).result_set
+                        if not (present and present[0][0]):
+                            missed.append((target_kind, target_name))
+                        continue
                     rows = self.g.query(
                         "MATCH (o:Object {id:$n}) "
                         "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds "
@@ -5937,7 +5978,8 @@ class _EntityHandlers:
                         "SET o.status = $status "
                         "RETURN count(o) AS n",
                         params={"n": key_value, "kinds": kinds,
-                                "status": status, "excluded": excluded},
+                                "status": fold_target.target,
+                                "excluded": excluded},
                     ).result_set
                     if rows and rows[0][0]:
                         matched_any = True
@@ -6019,7 +6061,7 @@ class _EntityHandlers:
         #     raised `NonFoldedEventsError` on replay while replaying cleanly on
         #     the tree that minted the ghost.
         if (name and object_is_entity and not object_id
-                and (declared or builtin_status is not None)):
+                and (declared or builtin_stage is not None)):
             # ⛔ The exemption is decided by the LIVE count, not by "any
             # holder exists" (#3590 review, finding 1 — fail-open).
             # `all_name_holder_ids` is ANY-status, so `mention=bool(_held)` was
@@ -6067,40 +6109,124 @@ class _EntityHandlers:
                 self.g, "Object", name, any_status=True)
             _live_holders = _live_holders_same_entity(
                 self.g, "Object", name)[0]
-            object_id = resolve_fold_name(
-                self.g, "Object", name, context="status fold object",
-                mention=bool(_held) and not _live_holders)
-        if builtin_status is not None and object_id:
-            # Guarded on the RESOLVED ID, not on `name` (#3590). A name is not an
-            # identity any more, so a name-keyed write here would move EVERY
-            # carrier's status — the harm class the identity change exists to
-            # remove. `object_id` is None in two reachable shapes: the event's
-            # `object` is a Document rather than an entity (the caller passes
-            # None deliberately), and an unresolved name (recorded just above —
-            # NON-exempt when nothing holds it, the bounded `no-live-holder`
-            # exemption when every holder is terminal).
-            # Guarding on `name` instead would issue this query with the literal
-            # string "None" as the id — a silent no-op that looks like a fold.
-            # `toStringOrNull` (not `toLower` on the raw property) so a
-            # payload-supplied non-string `objectKind` (an int, an array —
-            # `create_entity(objectKind=...)`, `uses[].kind`) cannot raise
-            # `Type mismatch` and abort the whole event write. Pre-#2729 the
-            # built-in fold never read `objectKind` at all, so it tolerated
-            # any value; the ownership guard must not regress that. A
-            # non-string can never be a declared lifecycle kind, so the
-            # coercion is exact: null/absent -> apply; non-string/null-able
-            # -> `IS NULL` -> apply; a string -> the case-folded set test.
-            self.g.query(
-                "MATCH (o:Object {id:$n}) "
-                "WHERE (o.objectKind IS NULL "
-                "       OR toStringOrNull(o.objectKind) IS NULL "
-                "       OR NOT (toLower(toStringOrNull(o.objectKind)) IN $declared)) "
-                "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
-                "SET o.status=$status",
-                params={"n": object_id, "status": builtin_status,
-                        "declared": sorted(index.kind_forms),
-                        "excluded": excluded},
-            )
+            # ⛔ #11824 S0: A **REOPENING** FOLD MUST BE REACHABLE BY NAME.
+            # S0 moved the closing connector fold onto a TERMINAL STAGE, so a
+            # closed work item now has `isClosed=True` and a terminal current
+            # slot — and the currency read below correctly says it has no LIVE
+            # holder. That made `github.issue.reopened` INERT: the name resolved
+            # to nothing, the fold never ran, and the durable close was never
+            # cleared (measured: after open/close/reopened the row stays
+            # `done`, `isClosed=True`; the rebuilt path DOES reopen, because the
+            # replay arm folds by `object_name` — so live and rebuild
+            # disagreed).
+            #
+            # The narrow exception is the position axis's own by-name arm
+            # (`live_name_holder_ids(..., live_only=False)`): *"the position
+            # axis's own read/write must be able to name a CLOSED object, or the
+            # terminal guard and the explicit reopen become unreachable by
+            # name"* (entity_identity, design §6). It is taken ONLY for the
+            # declared reopening fold, and ONLY for a single registered
+            # incarnation — the decision to move is still `apply_stage_fold`'s,
+            # which refuses unless `reopen` is requested AND the target is
+            # non-terminal, and `_fold_object_stage` still refuses a row whose
+            # `status` is terminal (a superseded/deprecated Object is not
+            # resurrected by a passing mention).
+            _reopen_targets_closed = (
+                bool(builtin_fold_reopens(event_kind))
+                and not _live_holders
+                and len(_held) == 1
+                and isinstance(_held[0], str))
+            if _reopen_targets_closed:
+                object_id = _held[0]
+            else:
+                object_id = resolve_fold_name(
+                    self.g, "Object", name, context="status fold object",
+                    mention=bool(_held) and not _live_holders)
+        if builtin_stage is not None and object_id:
+            # ── #11824 S0: the compatibility fold is a STAGE move now ──
+            # It used to write `in_progress` / `completed` as `Object.status`,
+            # which the four-word lifecycle axis can no longer hold. It advances
+            # the explicit target through the CORE default work-item pipeline
+            # instead (`status_folds.BUILTIN_CONNECTOR_PIPELINE`), guarded by the
+            # SAME two conditions as before: the Object's kind must declare no
+            # state of its own (the `$declared` ownership guard — a migrated
+            # kind's words are its own stages), and an Object whose STATUS is
+            # terminal is never moved (the latch this fold has always applied;
+            # `apply_stage_fold` adds the durable `isClosed` half).
+            _builtin_applied = self._fold_object_stage(
+                object_id, None,
+                pipeline_key=BUILTIN_CONNECTOR_PIPELINE_KEY,
+                decl=BUILTIN_CONNECTOR_PIPELINE,
+                stage_ref=builtin_stage,
+                reopen=builtin_fold_reopens(event_kind),
+                excluded=excluded,
+                declared_kinds=sorted(index.kind_forms))
+            _ = _builtin_applied
+
+    def _fold_object_stage(self, object_id: str, kinds: list[str] | None, *,
+                           pipeline_key: str, decl: dict | None,
+                           stage_ref: str, reopen: bool,
+                           excluded, declared_kinds: list[str] | None = None,
+                           ) -> bool:
+        """Advance ONE Object's pipeline stage for a fold — ``True`` if written.
+
+        #11824 S0. The DECISION is `pipeline.apply_stage_fold`'s (the same
+        function the `advance_stage` verb calls, so a fold and a verb cannot
+        drift); this method only does the graph mechanics round it:
+
+        * read the Object's current stage props and its ``status``;
+        * refuse silently when the Object's KIND is not the declaring one
+          (``kinds``) or when the kind OWNS its state (``declared_kinds`` — the
+          built-in fold's ownership guard, contract 2);
+        * refuse silently when the Object's ``status`` is TERMINAL — the latch
+          this fold has always applied, now spelled once. A dead Object is not
+          revived by a passing connector event (#2164/#3309), and `deprecated`
+          is final, so the status half must survive the axis moving;
+        * write the props the decision returned, and nothing on a refusal.
+
+        ⚠️ ``kinds`` is the DECLARING kind's admissible spellings (the status
+        arm's ``$kinds`` test, so a bare-spelled ``objectKind`` folds like its
+        namespaced twin); it is ``None`` for the built-in arm, which instead
+        applies when the Object's kind is NOT in ``declared_kinds`` (or is
+        absent — the pre-#2729 shape, which always folded).
+        """
+        from tortoise.pipeline import apply_stage_fold
+
+        row = self.g.query(
+            "MATCH (o:Object {id:$n}) "
+            "RETURN o.pipelineStageId, o.pipelineStageKey, o.isClosed, "
+            "       o.status, o.objectKind",
+            params={"n": object_id},
+        ).result_set
+        if not row or row[0] is None:
+            return False
+        stage_id, cur_key, is_closed, status, object_kind = row[0]
+        if status is not None and status in excluded:
+            return False
+        kind_text = None if object_kind is None else str(object_kind).lower()
+        if kinds is not None and (kind_text is None or kind_text not in kinds):
+            return False
+        # The built-in arm's ownership guard, verbatim in behaviour: apply when
+        # the kind is absent, non-string, or NOT a state-declaring kind. A
+        # non-string can never be a declared kind, which is why the coercion
+        # above is exact. (The two arms are mutually exclusive at every call
+        # site — a caller passes one of `kinds`/`declared_kinds` — and both
+        # refuse the same way, so they share one body.)
+        if (declared_kinds is not None and object_kind is not None
+                and kind_text in declared_kinds):
+            return False
+        cur = {
+            "stageId": stage_id,
+            "pipelineKey": cur_key,
+            "isClosed": is_closed,
+        }
+        _reason, props = apply_stage_fold(
+            cur, pipeline_key, decl, stage_ref, reopen=reopen)
+        if not props:
+            return False
+        self.g.query("MATCH (o:Object {id:$n}) SET o += $props",
+                     params={"n": object_id, "props": props})
+        return True
 
     def _event_plain_merge(self, eid: str, props: dict, embedding,
                            inner: dict,

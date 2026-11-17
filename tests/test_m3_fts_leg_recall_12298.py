@@ -1362,34 +1362,24 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # `run_fts_query` sits at 2830, its brief cited 2800), and this branch's own
     # #12360 insert inside `run_fts_query` moves the two LATE rows a further +22.
     # Re-derived against the live file, not nudged by a constant.
-    ("tortoise/search_engine.py", 2841, "def run_fts_query(",
-     "`tortoise/search_engine.py:2841`"),
+    #
+    # #11691 (PR #13133) inserted `search_engine.remaining_read_ms` and its arm in
+    # `run_vector_query`, which moves every row below: +25 for the rows above that
+    # function's body, +55 for the rows after it. Re-derived against the live file
+    # again — the pin caught it, which is what it is for.
+    ("tortoise/search_engine.py", 2866, "def run_fts_query(",
+     "`tortoise/search_engine.py:2866`"),
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
     # moves the two LATE rows and only them: the FTS call +1 (3038 -> 3039,
     # span 3039-3048) and the rank loop +2 (4544 -> 4546). Re-derived against
     # the live file after the forward-merge, not nudged by a constant.
-    # #12184: `run_fts_query`'s docstring gained three lines (2839-2845, the
-    # `_searchText`-is-filled-PER-DOOR correction) BELOW the `def` and ABOVE both
-    # late rows, so each moves +3 — 3039 -> 3042 and 4546 -> 4549. The `def` row
-    # (2830) and `recency_tie_clause` (2672) sit above the insert and do NOT move.
-    # Re-derived against the live file (`grep -n 'CALL db.idx.fulltext.queryNodes'
-    # tortoise/search_engine.py`), never nudged by a constant.
-    # #11081 merge stack: the branches stacked above this one insert further into
-    # `search_engine.py` (`#13108`'s dense-leg inventory + `#13084`'s RAM-cap block),
-    # which moves the FTS call 3042 -> 3053 (span 3053-3062), the tie clause
-    # 2672 -> 2683 and the rank loop 4549 -> 4652. Re-derived by CONTENT at the
-    # stacked head with that same grep, never by adding the insert's delta.
-    ("tortoise/search_engine.py", 3053, "CALL db.idx.fulltext.queryNodes",
-     "`:3053-3062`"),
-    ("tortoise/search_engine.py", 2683, "def recency_tie_clause(",
-     "`search_engine.py:2683`"),
-    ("tortoise/search_engine.py", 4652,
+    ("tortoise/search_engine.py", 3078, "CALL db.idx.fulltext.queryNodes",
+     "`:3078-3087`"),
+    ("tortoise/search_engine.py", 2708, "def recency_tie_clause(",
+     "`search_engine.py:2708`"),
+    ("tortoise/search_engine.py", 4707,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4652`"),
-    # #11081 merge stack: the projection module grew above these three (the stacked
-    # branches' index-manifest work), so the declaration 20346 -> 20401, the def
-    # 20774 -> 20829 and the loop 21224 -> 21279. Re-derived by CONTENT at the
-    # stacked head, never by adding a delta.
+     "`tortoise/search_engine.py:4707`"),
     ("tortoise/projection/__init__.py", 20401, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:20401`"),
     ("tortoise/projection/__init__.py", 20829, "def _create_fulltext_index(",

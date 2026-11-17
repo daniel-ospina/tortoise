@@ -2165,8 +2165,11 @@ def docker_resolver_port(sdk) -> ResolverPort:
 # NARROWING of the read-surface vocabulary
 # ``commit_ops.OBJECT_TERMINAL_STATUSES`` (#3301); the resolver's legs
 # apply it, see `docker_resolver_port`), and (b) the RENDER/probe-time set
-# (``_RECALL_OBJECT_EXCLUDED_STATUSES``, five statuses including ``outdated``,
-# used only by `_probe_visible_successors`). Neither is EVER applied to a
+# (``_RECALL_OBJECT_EXCLUDED_STATUSES``, used only by
+# `_probe_visible_successors` — which still carries its ``outdated`` divergence:
+# #11824 S0 closed the WRITE path that could mint the word, but stored rows keep
+# it (no backfill, #11824 §1), so the drop waits for the stored-rows rewrite
+# (#12855) and is S4's acceptance, not S0's). Neither is EVER applied to a
 # resolved subject's OWN state row (the superseded couch's state IS the
 # answer) nor to Points). One batched typed walk (never
 # row-level N+1, never blind BFS): state slice
@@ -4365,15 +4368,33 @@ def collect_class_slices(port, window: ClassWindow, *,
 # set that was a frozen snapshot of a source it did not reference drifts the
 # moment the canonical set moves.
 #
-# The one divergence is ``outdated``, and it is LOAD-BEARING — not dead. The
-# generic write path CAN put it on an :Object: ``create_entity("object", ...)``
-# spreads caller props over its literal defaults, and ``_update_entity`` issues
+# ── #11824 S0: the member STAYS, and its reason has changed ────────────────
+# The paragraph below records why ``outdated`` was added: the generic write path
+# could put it on an :Object. #11824 S0 has now closed that path — every
+# knowledge kind's ``status`` is read through ONE door
+# (``tortoise/lifecycle_vocabulary.py``), which REFUSES ``outdated`` (it names
+# two different words without saying which) — so no in-tree writer can mint the
+# word any more.
+#
+# ⛔ IT IS STILL NOT DROPPED HERE, and the ordering is the reason. Rows that
+# ALREADY hold ``outdated`` keep it — there is no backfill (#11824 §1), and a
+# legacy graph, a raw Cypher producer, or a JSONL replay of either can still
+# carry one. Removing a value from a READER before the stored population is
+# rewritten is the inverted order this slice exists to avoid: it would flip a
+# legacy successor from recall-excluded (NAME-ONLY) to a verified link on graphs
+# that were never migrated. The drop belongs to the stored-rows rewrite
+# (#12855), whose ``assembly`` row is S4's acceptance test, NOT S0's — S0's own
+# acceptance is that the door validates and that NOTHING is dropped from any
+# filter in this slice.
+#
+# The one divergence is ``outdated``, and it was LOAD-BEARING — not dead. The
+# generic write path COULD put it on an :Object: ``create_entity("object", ...)``
+# spread caller props over its literal defaults, and ``_update_entity`` issued
 # an unvalidated ``SET n += $props``; ``status`` is not a server-managed prop,
-# so both are reachable from the MCP surface (``tortoise_create_entity`` /
+# so both were reachable from the MCP surface (``tortoise_create_entity`` /
 # ``tortoise_update_entity``). Dropping the member would flip such a successor
-# from recall-excluded (NAME-ONLY annotation) to a verified link. The guard
-# that would reject the status (#2977 / PR #3326, ``OBJECT_STATUS_VALUES``) is
-# NOT on main.
+# from recall-excluded (NAME-ONLY annotation) to a verified link. (That write
+# path is closed by #11824 S0; the STORED rows it produced are not.)
 #
 # The divergence is FROZEN by tests/test_assembly_pure.py, which asserts this
 # set equal to ``OBJECT_TERMINAL_STATUSES | {"outdated"}`` — a silent drop or

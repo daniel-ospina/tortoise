@@ -204,7 +204,15 @@ ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 #: pays a ``timeout`` with no rows. With a third of the budget per statement, two
 #: statements spend at most two thirds and the remaining third is the reserve the
 #: graph fallback is answered from — which is what makes the named
-#: ``scan_fallback`` land INSIDE the read's budget instead of after it.
+#: ``scan_fallback`` land INSIDE the read's budget instead of after it. ⚠️ That
+#: reserve is HANDED OVER, not merely left on the clock: on a fall-through,
+#: ``search_engine.run_vector_query`` queries the graph branches with
+#: ``search_engine.remaining_read_ms(<the record leg's start>, read budget)``
+#: rather than the whole budget again (#11691 review P2). Without that half the
+#: division would buy nothing: a leg cancelled at a third of the read could then
+#: spend the WHOLE budget in the graph branch and end past the collector's
+#: deadline, which is the ``reason="timeout"``-with-no-rows outcome this
+#: constant exists to prevent.
 #:
 #: ⛔ THIS DIVIDES, and the acceptance as written on #11691 says
 #: ``min(<record door bound>, the read's own budget)`` — so the implemented bound is
@@ -481,7 +489,9 @@ def searcher(
     door's ceiling, tightened, and then DIVIDED by
     :data:`RECORD_LEG_STATEMENTS_PER_READ` — so the query is cancelled with part
     of the read's budget still on the clock, the graph branch answers inside that
-    remainder, and the trace records the NAMED fallback (``scan_fallback``)
+    remainder (``run_vector_query`` pins it to
+    ``search_engine.remaining_read_ms`` of the record leg's own start, #11691
+    review P2), and the trace records the NAMED fallback (``scan_fallback``)
     instead of a ``timeout`` with no rows.
 
     ⚠️ ``timeout_ms`` IS THE READ'S BUDGET, NOT THE STATEMENT'S, and the
@@ -591,7 +601,9 @@ def vector_search(
     ``count(*)``). That is why the read's budget is split into
     :data:`RECORD_LEG_STATEMENTS_PER_READ` shares instead of being applied whole:
     at most two statements spend at most two thirds of the read, and the last
-    third is what the graph branch answers from after a cancellation. Reducing
+    third is what the graph branch answers from after a cancellation — bounded
+    there by ``search_engine.remaining_read_ms``, so the reserve is spent by the
+    graph branch rather than merely left unclaimed (#11691 review P2). Reducing
     the leg to a single statement is not available — the shortfall assertion is
     what stops a truncated kNN answer being rendered as a small corpus (§6.1) — so
     the second statement is bounded by arithmetic rather than removed.

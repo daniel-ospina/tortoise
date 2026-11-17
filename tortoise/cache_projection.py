@@ -3335,7 +3335,14 @@ def apply_event_stream_folds(
 
     if index is None:
         index = _lifecycle_index()
-    from tortoise.status_folds import builtin_fold_status
+    from tortoise.pipeline import STAGE_PROPS, apply_stage_fold
+    from tortoise.status_folds import (
+        BUILTIN_CONNECTOR_PIPELINE,
+        BUILTIN_CONNECTOR_PIPELINE_KEY,
+        FOLD_AXIS_STAGE,
+        builtin_fold_reopens,
+        builtin_fold_stage,
+    )
 
     out: list[RecordNode] = []
     for node in nodes_t:
@@ -3443,6 +3450,20 @@ def apply_event_stream_folds(
         # (o.status IN $excluded))`. So a terminal word written by one event
         # latches: the later events are refused instead of resurrecting it.
         status: str | None = current
+        #: ── #11824 S0: the POSITION axis, replayed alongside the lifecycle one ──
+        #: The fold targets are STAGES for a migrated kind and for the built-in
+        #: connector map, so a replay that tracked only `status` would rebuild a
+        #: graph where the live fold moved a stage and the record-side fold moved
+        #: nothing — `live ≡ rebuilt` is the invariant this function exists to
+        #: hold. The dict is shaped for `pipeline.apply_stage_fold`'s ``cur``
+        #: (the read keys), seeded from the node's own props so an Object that
+        #: already sits in a stage keeps its guard context.
+        stage: dict[str, Any] = {
+            "stageId": node.props.get("pipelineStageId"),
+            "pipelineKey": node.props.get("pipelineStageKey"),
+            "isClosed": node.props.get("isClosed"),
+        }
+        stage_props: dict[str, Any] = {}
         birth_seen = False
         for event in evs:
             if event.is_birth:
@@ -3543,7 +3564,36 @@ def apply_event_stream_folds(
                 # named as residue (c) at the top of this module.
                 if not birth_seen:
                     birth_seen = True
+                    # ⛔ #11824 S0: the POSITION half of the same rule. A fold
+                    # that lands BEFORE this record folded nothing live (the
+                    # node did not exist, and the live fold matches on a
+                    # resolved id), while this replay is name-keyed and already
+                    # holds the row — so a pre-birth STAGE must be cleared for
+                    # the same reason a pre-birth status is overwritten below,
+                    # or the rebuilt Object carries a stage the live graph never
+                    # wrote. A TERMINAL stage is kept (fail-safe, the same trade
+                    # the status latch makes: the rebuild claims LESS life).
+                    if not stage.get("isClosed"):
+                        stage = {"stageId": None, "pipelineKey": None,
+                                 "isClosed": None}
+                        # Restore the ROW's own stage props (usually none). NOT a
+                        # dict of nulls: the row is the graph's live state and
+                        # must survive, while what the replay FOLDED is
+                        # discarded — so the rebuilt node carries exactly what
+                        # the live graph carries at that point.
+                        stage_props = {p: node.props[p] for p in STAGE_PROPS
+                                       if p in node.props}
                     if not _is_terminal_status(status):
+                        # ⛔ #11824 S0 measured this, and it must NOT canonicalise:
+                        # the DOOR writes the canonical word into the record
+                        # itself (`create_object(status='archived')` journals
+                        # `status: "deprecated"` — measured), so a record's value
+                        # is already what the live graph holds. Re-reading it
+                        # through the synonym map here would fork the OPPOSITE
+                        # way for a LEGACY record, whose graph row still holds
+                        # `archived` (no backfill, #11824 §1): the rebuild would
+                        # answer `deprecated` while `record_serve` answered
+                        # `archived`, which is #9974's two-answers split.
                         status = event.birth_status
                 continue
             # #9974: a `restatus` is the caller's explicit write, applied the way
@@ -3551,26 +3601,73 @@ def apply_event_stream_folds(
             # move a terminal node and it beats any earlier in-stream fold. It
             # carries no `eventKind`, so it can never match a connector/pack key.
             if event.target_id is not None:
+                # Same rule as the birth arm above: the record carries what the
+                # door STORED, so the raw value is the canonical word for a new
+                # record and the graph's own word for a legacy one.
                 status = event.restatus_status
                 continue
             if not object_side:
                 continue
             if kind_key:
-                for target_kind, fold_status in index.folds_for_event(
-                        event.event_kind):
-                    if kind_key in index.kind_forms_for(target_kind) \
-                            and not _is_terminal_status(status):
-                        status = fold_status
+                for fold_target in index.folds_for_event(event.event_kind):
+                    if kind_key not in index.kind_forms_for(fold_target.kind):
+                        continue
+                    if fold_target.axis == FOLD_AXIS_STAGE:
+                        # The POSITION axis. TWO latches, exactly as the live
+                        # fold applies TWO: `apply_stage_fold`'s own
+                        # (`isClosed` / a terminal current slot) AND the
+                        # STATUS-terminal latch (`entities.py::_fold_object_status`
+                        # returns False when the stored word is terminal, on
+                        # BOTH its arms). The second one is not `apply_stage_fold`'s
+                        # to make — it reads `status`, which that function never
+                        # sees — so it is applied here, mirroring the status arm
+                        # below. Without it a rebuild moved a stage the live fold
+                        # refused (live ≢ rebuilt on the position axis, #11824).
+                        if not _is_terminal_status(status):
+                            _reason, _props = apply_stage_fold(
+                                stage, fold_target.kind,
+                                index.pipeline_for(fold_target.kind),
+                                fold_target.target, reopen=False)
+                            if _props:
+                                stage = {
+                                    "stageId": _props.get("pipelineStageId"),
+                                    "pipelineKey": _props.get("pipelineStageKey"),
+                                    "isClosed": _props.get("isClosed"),
+                                }
+                                stage_props = _props
+                        continue
+                    if not _is_terminal_status(status):
+                        status = fold_target.target
             if event.object_name == name:
-                builtin = builtin_fold_status(event.event_kind)
-                if builtin is not None and not owns \
+                builtin_stage = builtin_fold_stage(event.event_kind)
+                # The same STATUS-terminal latch the live built-in arm applies
+                # (`entities.py::_fold_object_status`: a terminal stored word
+                # latches, so a later event cannot resurrect the row).
+                if builtin_stage is not None and not owns \
                         and not _is_terminal_status(status):
-                    status = builtin
-        if status is None or status == current:
+                    _reason, _props = apply_stage_fold(
+                        stage, BUILTIN_CONNECTOR_PIPELINE_KEY,
+                        BUILTIN_CONNECTOR_PIPELINE, builtin_stage,
+                        reopen=builtin_fold_reopens(event.event_kind))
+                    if _props:
+                        stage = {
+                            "stageId": _props.get("pipelineStageId"),
+                            "pipelineKey": _props.get("pipelineStageKey"),
+                            "isClosed": _props.get("isClosed"),
+                        }
+                        stage_props = _props
+        if (status is None or status == current) and not stage_props:
             out.append(node)
             continue
         props = dict(node.props)
-        props["status"] = status
+        if status is not None:
+            props["status"] = status
+        # The stage props are written LAST and wholesale, from the ONE spelling
+        # (`pipeline.stage_move_props`) — so a rebuilt Object carries exactly the
+        # properties a live fold would have written, including the cleared
+        # review-queue pair and the ``pipelineStageSince`` a fold deliberately
+        # leaves unset (no wall clock exists on a replay either).
+        props.update(stage_props)
         out.append(RecordNode(label=node.label, key=node.key, props=props,
                               dropped_vectors=node.dropped_vectors))
     return tuple(out)
