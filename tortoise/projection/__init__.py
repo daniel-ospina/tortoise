@@ -11786,6 +11786,32 @@ class FalkorProjection(
         # "what does the catalog say right now" (a READ-path measurement). They
         # can disagree in the fail-open lane and that is correct.
         self._vector_indexed_labels: set[str] | None = None
+        # #13108: the SAME measurement, in the lane a BEHAVIOUR may act on.
+        #
+        # ⛔ Why a second attribute instead of reading `_vector_indexed_labels`:
+        # its `set()` lane is decided by the SHAPE of the catalogue response, and
+        # a response that is a row list whose rows do not PARSE lands there too
+        # (rows are parsed per row and an unparseable row is skipped — the
+        # docstring on `_record_vector_index_inventory` states this, and
+        # #11087 pins it). That is the right semantic for a REPORT ("measured,
+        # and nothing is indexed"), and the wrong one for a DECISION: an engine
+        # whose catalogue is reshaped would read as "this store indexes nothing",
+        # and a read path that skips the index attempt on that evidence would
+        # demote every dense read — `:Point` included, the label the product
+        # ships indexed — to a full scan, for ever, with only an INFO pair as the
+        # signal.
+        #
+        # So this half is `None` whenever the catalogue was returned but could not
+        # be INTERPRETED (a non-empty row list of which no row parsed). Three
+        # lanes, and only the third is new:
+        #   None    -> NOT MEASURED for behaviour: unknown, so act as before.
+        #   set()   -> measured, and nothing served is indexed (includes the
+        #              genuinely-empty catalogue `[]`).
+        #   {…}     -> measured, and these served labels carry a VECTOR index.
+        # ⚠️ The REPORTING pair above is deliberately not narrowed: #11087's
+        # "answered but unparseable reads as measured-and-empty" stays exactly as
+        # pinned, so this attribute changes no message and no warning.
+        self._vector_indexed_labels_for_reads: set[str] | None = None
         # #11087 (S4): the OTHER half of that pair — the labels the vector leg
         # SERVES, retained so the store can state the contract instead of only
         # its shortfall. Same three-valued semantics as `_vector_indexed_labels`
@@ -19884,6 +19910,14 @@ class FalkorProjection(
           response that is not iterable at all (an `int`, a `bool`) is NOT this
           lane: it raises in the walk, so it reaches the fail-open lane below
           and both halves are `None`.
+          ⚠️ **`_vector_indexed_labels_for_reads` (`#13108`) is this lane's
+          BEHAVIOURAL half and it is NOT identical**: it goes `None` when the
+          row list was non-empty but not one row parsed (`parsed_rows == 0`),
+          because a read that SKIPS an index attempt on "measured, nothing
+          indexed" evidence would demote every dense read to a scan on a
+          catalogue the engine reshaped. The reporting halves above keep
+          #11087's pinned semantics; only the half a behaviour may act on is
+          narrowed.
         * **NOT MEASURED** — the catalogue could not be read (the call raised, or
           it answered ``None``): BOTH halves are ``None``, so the pair is never
           half-populated. ``None`` never means "serves nothing".
@@ -19974,6 +20008,9 @@ class FalkorProjection(
                     "— the serves/indexes pair stays None"
                 )
                 self._vector_indexed_labels = None
+                # #13108: the behavioural half follows the reporting half into
+                # the NOT-MEASURED lane — nothing was read, so nothing may act.
+                self._vector_indexed_labels_for_reads = None
                 # #11087: BOTH halves of the pair are None — the pair is never
                 # half-populated, so `served is None` alone means "not measured".
                 self._vector_index_served_labels = None
@@ -19987,6 +20024,11 @@ class FalkorProjection(
 
             served = set(ENTITY_TYPE_LABELS.values())
             measured: set[str] = set()
+            # #13108: how many rows were INTERPRETABLE as catalogue rows. A
+            # non-empty response of which nothing parsed is a catalogue this
+            # store could not read, not a store with no index (see
+            # `_vector_indexed_labels_for_reads`).
+            parsed_rows = 0
             for row in rows:
                 try:
                     if len(row) < 3:
@@ -19994,6 +20036,7 @@ class FalkorProjection(
                     label, types = row[0], row[2]
                     if not isinstance(types, dict):
                         continue
+                    parsed_rows += 1
                     for _field, type_list in types.items():
                         if not isinstance(type_list, (list, tuple, set)):
                             continue
@@ -20005,6 +20048,16 @@ class FalkorProjection(
 
             self._vector_index_served_labels = served
             self._vector_indexed_labels = measured & served
+            # #13108: the behavioural half. `[]` is a genuine measured-empty
+            # (an engine with no indexes at all answers with no rows), so it
+            # keeps `set()`; a non-empty response where NOT ONE row parsed is
+            # unreadable, so it goes to the NOT-MEASURED lane and the read
+            # path keeps its historic behaviour.
+            self._vector_indexed_labels_for_reads = (
+                self._vector_indexed_labels
+                if (not rows or parsed_rows)
+                else None
+            )
             # #11087: sort INSIDE the guard. `sorted()` runs the labels'
             # `__lt__`, and `measured & served` does NOT sanitise the type:
             # when the catalogue is the shorter operand CPython keeps ITS
@@ -20018,6 +20071,8 @@ class FalkorProjection(
         except Exception as e:  # fail-open: never break store setup
             log.debug("#4997: vector-index inventory read failed: %s", e)
             self._vector_indexed_labels = None
+            # #13108: a failed read measures nothing, so nothing may act on it.
+            self._vector_indexed_labels_for_reads = None
             self._vector_index_served_labels = None
             # #11087: as in the answered-`None` lane — an unmeasured store has no
             # pair to have already reported, so the register entry goes.

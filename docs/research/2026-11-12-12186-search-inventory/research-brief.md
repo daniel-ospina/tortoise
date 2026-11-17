@@ -54,7 +54,7 @@ Verified against the tree at `1f28d107cf`, not against the epic's status column.
 
 | # | epic says | code says | evidence |
 |---|---|---|---|
-| **C2** | `BLOCKED-ON-MEASUREMENT`, scoped to *"measure a BM25-capable Postgres option (extensions) against the current `db.idx.fulltext` scores"* — ⚠️ **that scope IS the index move, so the STATUS is correct; what misleads is the row's TITLE, "BM25 instead of TF-IDF"** | **BUILT AND ON BY DEFAULT** (embedded lane). A full Okapi BM25 (`idf` + `tf` saturation + length normalisation) exists and is **armed by default** since the owner's 2026-10-28 ruling | `tortoise/bm25.py:166` `BM25_DEFAULT_ENABLED = True`; `bm25.py:152` records the ruling and its ordering precondition (#10121 tie-fix); wired `tortoise/sdk.py:39588-39600`; leg `tortoise/search_engine.py:3198` `run_bm25_query` |
+| **C2** | `BLOCKED-ON-MEASUREMENT`, scoped to *"measure a BM25-capable Postgres option (extensions) against the current `db.idx.fulltext` scores"* — ⚠️ **that scope IS the index move, so the STATUS is correct; what misleads is the row's TITLE, "BM25 instead of TF-IDF"** | **BUILT AND ON BY DEFAULT** (embedded lane). A full Okapi BM25 (`idf` + `tf` saturation + length normalisation) exists and is **armed by default** since the owner's 2026-10-28 ruling | `tortoise/bm25.py:166` `BM25_DEFAULT_ENABLED = True`; `bm25.py:152` records the ruling and its ordering precondition (#10121 tie-fix); wired `tortoise/sdk.py:39588-39600`; leg `tortoise/search_engine.py:3223` `run_bm25_query` |
 | **A4** | *"partly BUILT — `#2518` has the switch with no producer"* | **the producer exists** — sparse half **and** dense half, default OFF behind the `#2513` sealed A/B gate | `tortoise/sdk.py:41408` `_entity_key_expansion_pass`, `:41466` `_entity_key_dense_pass`, harvest shared; call site `:40034-40072` |
 | **C1** | `BUILT-OFF` — *"not wired into the noun/search path"* | **BUILT and wired into the ASK lane**, default OFF; correctly absent from the noun path | `tortoise/ask_lane.py:630` `ask_lane_rerank`; `tortoise/rerank.py:77` `rerank_enabled` (fail-safe OFF, `TORTOISE_ASK_RERANK`); degrade-to-unreranked at `:484` (gate off) and `:497-498` (score exception — degrade, never raise) |
 
@@ -204,7 +204,7 @@ over exactly those shingles, so this arm **rejects** it. What the shingle key bu
 tolerance at 0.9 but **sublinearity** (LSH banding) at a precision-safe threshold; transposition and typo
 proximity are the job of our `difflib` rung (≥ 0.60, review queue) and the semantic rung.
 
-**Why it matters:** the tokenisation class is real, but two claims here need correcting. (a) **`search_graph`/FTS is not our only blocker — but the other one is NOT on this path.** A character-prefix blocker exists (`entity_resolver.block_key`, `:185-187`), yet it runs only inside `entity_candidates` (`:394`), the ambiguity-pair **review surface**; the capture matcher `extractor_v2._find_existing_entity` (`:5762-5781`) compares `_norm(name)` over the search table and never calls `block_key`. So the capture-path blocker set really is FTS alone. (b) ⚠️ **21.1 % and 30.0 % are the SUPERSEDED keyword-only figures**, not the product's read — `#11901` comment `6826507139` supersedes them, and on the hybrid read the same classes move **+25.6** (identifiers) and **+63.3** (paths) points — ⚠️ **`+63.3`, not the `+63.4` that comment prints: `#11901`'s correction comment `6826725103` fixes it (`29/30 − 10/30 = 63.333`; the `+63.4` came from subtracting two *rounded* percentages).** ⛔ **Do not add those deltas to the keyword-only bases to compose a hybrid percentage** — the same comment is explicit that *"the class deltas are between-run, not paired"*, so `21.1 + 25.6` and `30.0 + 63.3` are numbers **no artifact holds**. The identifier class's **mechanism is not established** — stated in `6825791142`'s DoD item (b) (*"a 5-node probe with `keep_numeric` toggled reproduces none of it, so nothing is diagnosed here"*), a caveat about mechanism rather than one of that comment's superseded figures. So this lever rests on a weaker premise than the row implies: paths are largely fixed on the product's read, and identifiers are half-fixed with an undiagnosed cause.
+**Why it matters:** the tokenisation class is real, but two claims here need correcting. (a) **`search_graph`/FTS is not our only blocker — but the other one is NOT on this path.** A character-prefix blocker exists (`entity_resolver.block_key`, `:185-187`), yet it runs only inside `entity_candidates` (`:394`), the ambiguity-pair **review surface**; the capture matcher `extractor_v2._find_existing_entity` (`:5817-5836`) compares `_norm(name)` over the search table and never calls `block_key`. So the capture-path blocker set really is FTS alone. (b) ⚠️ **21.1 % and 30.0 % are the SUPERSEDED keyword-only figures**, not the product's read — `#11901` comment `6826507139` supersedes them, and on the hybrid read the same classes move **+25.6** (identifiers) and **+63.3** (paths) points — ⚠️ **`+63.3`, not the `+63.4` that comment prints: `#11901`'s correction comment `6826725103` fixes it (`29/30 − 10/30 = 63.333`; the `+63.4` came from subtracting two *rounded* percentages).** ⛔ **Do not add those deltas to the keyword-only bases to compose a hybrid percentage** — the same comment is explicit that *"the class deltas are between-run, not paired"*, so `21.1 + 25.6` and `30.0 + 63.3` are numbers **no artifact holds**. The identifier class's **mechanism is not established** — stated in `6825791142`'s DoD item (b) (*"a 5-node probe with `keep_numeric` toggled reproduces none of it, so nothing is diagnosed here"*), a caveat about mechanism rather than one of that comment's superseded figures. So this lever rests on a weaker premise than the row implies: paths are largely fixed on the product's read, and identifiers are half-fixed with an undiagnosed cause.
 
 ### M-3 **Identity-property blocking** — a second, cheaper key
 
@@ -491,16 +491,16 @@ would **do**, vs what the title **describes**), so they are compatible: keep the
 
 #### The bound round 1 stated but never explained: the arm is embedded-only for a latency reason, not a decision
 
-`tortoise/search_engine.py:3103-3107`, verbatim:
+`tortoise/search_engine.py:3128-3132`, verbatim:
 
 > "…`search_keys` into Python and tokenises all of them on the caller's thread, OUTSIDE
 > `degradation_chain`'s `as_completed` deadline (only the driver-side query timeout bounds it). **That is
 > why the arm is gated off, is embedded-lane-only, and why its latency must be measured (#8486) before it is
 > enabled anywhere.**"
 
-with `DEFAULT_BM25_CORPUS_CAP = 20000` (`:3108`) and the arm gated on `is_embedded`
+with `DEFAULT_BM25_CORPUS_CAP = 20000` (`:3133`) and the arm gated on `is_embedded`
 (`tortoise/sdk.py:40641`, `:40740`; `BM25_DEFAULT_ENABLED = True` at `tortoise/bm25.py:166`,
-`run_bm25_query` at `search_engine.py:3198`). So the hosted wall is **a ≤20 000-row corpus read tokenised
+`run_bm25_query` at `search_engine.py:3223`). So the hosted wall is **a ≤20 000-row corpus read tokenised
 in Python off the deadline**, not a decision that hosted should stay TF-IDF. `#8486` — the issue the code
 names as this latency's gate — is **OPEN and never executed** (`gh issue view 8486`: *"PENDING — never
 executed; no comparable number exists"*, which is its **title**), and `bm25.py`'s own constant records that
@@ -517,11 +517,11 @@ it. M-7 inherits that: its gate is *a number nobody has scoped*, not a scheduled
 
 #### The mechanism nobody had stated: the scorer acts on RECALL, not on order
 
-The FTS leg does `ORDER BY score DESC … LIMIT $limit` (`search_engine.py:2993-2994`), and `rrf_fusion`
+The FTS leg does `ORDER BY score DESC … LIMIT $limit` (`search_engine.py:3018-3019`), and `rrf_fusion`
 **throws the leg's score away** — the binding is literally `for rank, (pid, _score) in enumerate(ranked)`
 (`search_engine.py:4492`), and the function's own comment states the rule: *"fusion consumes leg
-POSITIONS"* (`:4520`). §6.2 states the same rule (`SEARCH-ARCHITECTURE.md:252-254`) but carries the **stale pins**
-`search_engine.py:3021` / `:3091-3093` — at this head the fusion function opens at `:4411` and the binding is
+POSITIONS"* (`:4575`). §6.2 states the same rule (`SEARCH-ARCHITECTURE.md:252-254`) but carries the **stale pins**
+`search_engine.py:3046` / `:3116-3118` — at this head the fusion function opens at `:4466` and the binding is
 `:4492`, so a reader must not chase those two numbers. So the
 TF-IDF score never reaches the answer *as a score*: **it decides which rows survive the LIMIT.** That makes
 C2 a **candidate-generation (recall) lever**, not a ranking lever — i.e. it belongs to §A of the epic, and
@@ -626,7 +626,7 @@ is absent — which is round 1's conclusion, reached on a claim it had stated to
 #### `:Object` carries `title`, not just `name`
 
 `tortoise/projection/entities.py`: `title` is in the `:Object` property list (`:1902`), written
-`o.title=coalesce($title, '')` (`:5069`) and merged `o.title=coalesce($title, o.title)` (`:5087`).
+`o.title=coalesce($title, '')` (`:5124`) and merged `o.title=coalesce($title, o.title)` (`:5142`).
 `STORAGE-ARCHITECTURE.md:1317` says *"Its only text fields are `name` and `title`"* — which round 1 read as
 "no context field", but **`title` is a context field**. What is unknown is its **fill rate**, and the
 `coalesce($title, '')` write makes an absent title indistinguishable from an empty one at the row. **One
@@ -636,7 +636,7 @@ that count does not exist anywhere in this repo. See **M-8**.
 #### Our `:Object` vector is ALREADY Zep's shape
 
 `_upsert_object` computes the embedding from the **name alone** —
-`embedding = encode_for_row(name, self.required_embedding_dim)` (`:5013-5020`, comment *"Compute embedding
+`embedding = encode_for_row(name, self.required_embedding_dim)` (`:5068-5075`, comment *"Compute embedding
 from name (#7845)"*), behind the `#5008` embed gate. Zep does exactly the same thing:
 
 ```python
@@ -693,7 +693,7 @@ vector.
 | **1** | *(round-1 **comment** only)* "Zep unions **FOUR** candidate sources" | `node_operations.py:_collect_candidate_nodes` (`:456-484`) unions **three**: identity-property (`:463-467`), exact-normalised name (`:468`), semantic search (`:469`) — the union itself is `:480`. LSH is a **separate, earlier, deterministic** stage. | ✅ Round 1's **doc** already corrected this (§2 A2). The comment's FOUR was never re-derived and should not be quoted. |
 | **2** | "C2 — drop the 'build BM25' reading; the only open question is whether the **text index** moves" | The product lane has **no BM25 leg at all** and the vendor API **cannot express one** (§7.1). The embedded-only limit is a **latency** reason, not a decision, and its gate (`#8486`) is open. | A **second, cheaper route to BM25 ranking** exists that does not move the index (M-7). It does not overturn M3; it makes M3's *quality* half reachable before M3's *migration* half. |
 | **3** | "**No** surveyed system reports typed-edge neighbourhood overlap as a ranking feature" | True of memory systems; **ER practice recommends it** (archtin: *"add graph structural similarity to your score"*). | The claim narrows to *"no memory system; ER practice does, on a graph that has typed edges"* — and our substrate census (`#4211`) is what kills it here, not the absence of precedent. |
-| **4** | A3: *"name + context has **no context to embed**"* | `Object.title` exists and is written (`entities.py:1902`, `:5069`). The **fill rate** is unmeasured; `description`/`summary` = 0 rows is a different statistic. | A3 becomes **one census** away from an answer, and its remaining work moves to B1. |
+| **4** | A3: *"name + context has **no context to embed**"* | `Object.title` exists and is written (`entities.py:1902`, `:5124`). The **fill rate** is unmeasured; `description`/`summary` = 0 rows is a different statistic. | A3 becomes **one census** away from an answer, and its remaining work moves to B1. |
 | **5** | *(round-2 brief premise, and the epic's phrasing)* `#11901` carries an **explicit DECLINE** of widening the window | The record says *"**not decided, and deliberately not changed**"*, and the DoD box is **unchecked** (`#11901` comment `6826507139`). The first comment's *"do not widen now"* was **superseded** by that comment. | Round 1 stated it correctly (*"declined neither"*). ⛔ **The window question is still UN-OWNED** — no child carries the paired decision — and a lane reading "declined" would think it closed. |
 | **6** | A2: *"419 real surface variants"* — ⚠️ **not a round-1 quotation: this wording appears in neither round 1's doc nor the epic's body** (which says *"0 of 419 spelling variants"*). It is a **wording guard**, kept in this table so the distinction is not lost, not a falsification of anything round 1 wrote. | The population is **GENERATED** from real names, not observed (`#11901` comment `6836274599`, the relay). | Any sentence that calls the 419 a population of *real* variants overstates it; round 1's own word (`variants`) is correct. |
 | **7** | *(brief premise, not a round-1 quotation — §5 item 1 already keeps the two citations apart: the **arXiv paper** is 2025/ECAI, the **2026 report** is the April-2026 numbers)* Mem0's April-2026 algorithm is documented by **an arXiv paper** | There is **no April-2026 paper**. `arXiv:2504.19413` is **2025** (ECAI 2025) and **predates** the April-2026 algorithm; Mem0's own page says so explicitly: *"this report also covers Mem0's April 2026 … update, which **post-dates** the original ECAI 2025 paper and isn't reflected in its published numbers"* ([mem0.ai/blog/state-of-ai-agent-memory-2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026)). | Cite the **README + blog + code** for the April-2026 algorithm, and the **2025 paper** only for what the 2025 paper measured. The two must not be merged into one citation. |
@@ -877,7 +877,7 @@ persists a merge.
    read `_name_holder_ids_same_entity` (`entity_identity.py:410`) does **not** collapse, because "is this name
    held at all" must not read a held name as unheld (`:412`, #12120). ⚠️ **The retrieval readers are the other
    exception, and that is round 3's D-1**
-   (`round-3-verification.md` §8.2): the FTS leg filters on `status` alone (`search_engine.py:148`, `:2973-2980`)
+   (`round-3-verification.md` §8.2): the FTS leg filters on `status` alone (`search_engine.py:148`, `:2998-3005`)
    and never reads the pointer — `git grep resolved_from 9828250732 -- tortoise/search_engine.py` is empty — so a
    search for the merged-away spelling still returns the carrier. `dedup_reviewed='link'` is **inert in the
    entity queue and silently consequential in the content queue**, so state both rather than one cardinality.
@@ -911,7 +911,7 @@ non-destructive-merge rule (`#2730` §6.7.3, `#783` J-2) rather than revising it
 
 The in-process Okapi BM25 leg exists, is default-ON, and is gated to `is_embedded` for a stated
 **latency** reason (a ≤`DEFAULT_BM25_CORPUS_CAP` = 20 000-row corpus read tokenised in Python outside
-`degradation_chain`'s deadline — `search_engine.py:3103-3108`). Its own recorded precondition for wider
+`degradation_chain`'s deadline — `search_engine.py:3128-3133`). Its own recorded precondition for wider
 arming is **`#8486`**, which is OPEN, **never executed**, and — §7.1 — **not scoped to this number**
 (the issue is the LongMemEval-S QA benchmark).
 **Why it matters:** it reaches BM25 *ranking* on the product lane **without moving the text index**, so it
@@ -1006,7 +1006,7 @@ still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool
 | **M-9** stamp `method`/`similarity`/`decidedAt` on the merge redirect | none — obeys `#2730` §6.7.3 / `#783` J-2 (non-destructive merge) | ✅ candidate |
 | **M-10** blast-radius guard | none — it **strengthens** the KEEP ruling's purpose | ✅ candidate |
 | **M-11** entity boost over the union | none | ✅ candidate |
-| **B1's link band as a `resolved_from` redirect, not a `SAME_AS` edge** (§7.7 item 4) | none — but it reverses nothing and **delivers nothing either**: `resolved_from` is the merge pointer in every **collapsing** identity reader (`entity_resolver.py:207`, `:624`, `entity_identity.py:589-594` — eight of round 3's nine; `entity_identity.py:410` `_name_holder_ids_same_entity` deliberately does not collapse, #12120) and reaches no retrieval reader (round 3's D-1: the FTS leg filters on `status` alone, `search_engine.py:148`, `:2973-2980`) | ⛔ **not a candidate as stated** — a `resolved_from` write is the merge, so it cannot carry the link band |
+| **B1's link band as a `resolved_from` redirect, not a `SAME_AS` edge** (§7.7 item 4) | none — but it reverses nothing and **delivers nothing either**: `resolved_from` is the merge pointer in every **collapsing** identity reader (`entity_resolver.py:207`, `:624`, `entity_identity.py:589-594` — eight of round 3's nine; `entity_identity.py:410` `_name_holder_ids_same_entity` deliberately does not collapse, #12120) and reaches no retrieval reader (round 3's D-1: the FTS leg filters on `status` alone, `search_engine.py:148`, `:2998-3005`) | ⛔ **not a candidate as stated** — a `resolved_from` write is the merge, so it cannot carry the link band |
 | Cognee's `id = f(name)` identity | ⛔ **reverses `#3590`** (`merge_key = "id"`) and the KEEP ruling's premise | ⛔ **not a candidate** — evidence for a reopen only, argued at `#3590` |
 | Supermemory/Honcho/Mastra "no entity graph" | ⛔ would reverse §12.2c's entity-vector work and the KEEP ruling | ⛔ **not a candidate** — and note two of the three are *repository*-shaped systems, not identity-bearing ones |
 | "Widen the window" | `#11901`'s record says *not decided*; a wider window without a verdict is X7's known regression | ⛔ **not a candidate** until the paired decision is taken |

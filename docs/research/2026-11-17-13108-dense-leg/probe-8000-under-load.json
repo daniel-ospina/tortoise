@@ -1,0 +1,1074 @@
+{
+ "arms": {
+  "object@c1": {
+   "concurrency": 1,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "object",
+   "external_load_procs": 22,
+   "latency_ms": {
+    "max": 635.45,
+    "mean": 169.07,
+    "p50": 78.83,
+    "p95": 555.25,
+    "p99": 635.45
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     114.85,
+     56.21,
+     41.61
+    ]
+   },
+   "mechanism": {
+    "scan_fallback": 40
+   },
+   "n": 40,
+   "over_budget": 3,
+   "reason": {
+    "ok": 40
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 55.57,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.74,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 60.9,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 62.51,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 62.52,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 63.58,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 64.35,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 64.75,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 64.88,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 65.51,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 66.8,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 71.48,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 72.5,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 75.74,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.6,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.91,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 77.25,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 77.29,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 78.08,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 78.25,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 78.83,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 79.98,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 84.77,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 86.29,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 87.58,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 96.08,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 97.61,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 103.13,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 109.2,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 270.39,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 272.16,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 313.43,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 317.76,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 325.52,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 387.13,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 423.41,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 431.92,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 555.25,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 634.89,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 635.45,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  },
+  "point@c1": {
+   "concurrency": 1,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "point",
+   "external_load_procs": 22,
+   "latency_ms": {
+    "max": 440.2,
+    "mean": 135.48,
+    "p50": 92.1,
+    "p95": 383.84,
+    "p99": 440.2
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     132.68,
+     81.87,
+     52.73
+    ]
+   },
+   "mechanism": {
+    "index": 40
+   },
+   "n": 40,
+   "over_budget": 0,
+   "reason": {
+    "ok": 40
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 24.99,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 25.48,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 25.5,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 27.96,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 28.49,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 29.53,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 32.06,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 37.82,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 42.23,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 42.56,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 42.63,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 46.83,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 50.82,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 51.1,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.09,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 59.87,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 66.93,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 68.2,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 75.29,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.66,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 92.1,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 97.04,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 97.36,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 106.03,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 116.24,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 117.17,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 154.79,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 158.01,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 167.79,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 183.93,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 193.28,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 207.61,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 233.99,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 301.29,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 324.56,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 337.83,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 367.31,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 383.84,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 431.77,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 440.2,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  }
+ },
+ "box": {
+  "cpus": 16,
+  "loadavg": [
+   115.66,
+   80.76,
+   52.84
+  ]
+ },
+ "census": {
+  "labels": {
+   "Object": {
+    "embedded": 8000,
+    "stored": 8000
+   },
+   "Point": {
+    "embedded": 8000,
+    "stored": 8000
+   }
+  },
+  "vector_indexes": [
+   [
+    "Point",
+    "['id', 'pointKind', 'content_hash', 'key', 'lastDreamedAt', 'content', 'search_keys', 'quote', 'embedding']",
+    "OrderedDict({'id': ['RANGE'], 'pointKind': ['RANGE'], 'content_hash': ['RANGE'], 'key': ['RANGE'], 'lastDreamedAt': ['RANGE'], 'content': ['FULLTEXT'], 'search_keys': ['FULLTEXT'], 'quote': ['FULLTEXT'], 'embedding': ['VECTOR']})",
+    "OrderedDict({'id': OrderedDict(), 'pointKind': OrderedDict(), 'content_hash': OrderedDict(), 'key': OrderedDict(), 'lastDreamedAt': OrderedDict(), 'content': OrderedDict(), 'search_keys': OrderedDict(), 'quote': OrderedDict(), 'embedding': OrderedDict({'dimension': 384, 'similarityFunction': 'cosine', 'M': 16, 'efConstruction': 200, 'efRuntime': 10})})"
+   ]
+  ]
+ },
+ "code_head": "d93c4c99e970249de8336ae949c8418bee08538c",
+ "config": {
+  "concurrency": [
+   1
+  ],
+  "external_load": 22,
+  "labels": [
+   "object",
+   "point"
+  ],
+  "limit": 3,
+  "population": 1000,
+  "reads": 40,
+  "sessions_dir": "~/.tortoise/session-events",
+  "timeout_ms": 500
+ },
+ "index_attempt": [
+  {
+   "answered_signature": null,
+   "attempts": [
+    {
+     "elapsed_ms": 12.48,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "A"
+    },
+    {
+     "elapsed_ms": 12.08,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "B"
+    }
+   ],
+   "elapsed_ms": 24.58,
+   "label": "Object",
+   "outcome": "refused-both-signatures"
+  },
+  {
+   "answered_signature": "B",
+   "attempts": [
+    {
+     "elapsed_ms": 11.17,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "A"
+    },
+    {
+     "elapsed_ms": 8.82,
+     "outcome": "ok",
+     "raised": null,
+     "signature": "B"
+    }
+   ],
+   "elapsed_ms": 20.01,
+   "label": "Point",
+   "outcome": "ok"
+  }
+ ],
+ "issue": 13108,
+ "measured_at": "2026-11-17T02:32:11Z",
+ "seed": null,
+ "uri_graph": "dense13108_8000",
+ "windows": {
+  "windows@c1": {
+   "concurrency": 1,
+   "keyword_only_share": 0.0,
+   "latency_ms": {
+    "max": 115.77313090674579,
+    "p50": 78.86149804107845,
+    "p95": 105.86879192851484,
+    "p99": 115.71050400380045
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     134.71,
+     83.13,
+     53.3
+    ]
+   },
+   "vector_mechanism": {
+    "scan_fallback": 120
+   },
+   "vector_reason": {
+    "ok": 120
+   },
+   "window_modes": {
+    "hybrid": 120
+   },
+   "windows": 120
+  }
+ }
+}
