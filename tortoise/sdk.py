@@ -130,7 +130,7 @@ from .live import _current_status_clause  # #4058 canonical current-status allow
 from .live import same_mitigation_assertion  # #9962 redelivery vs re-assertion
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
-from .search_engine import belief_value  # #11702: ONE belief-value reader
+from .search_engine import belief_value, VECTOR_LEG_BUDGET_MS  # #11702; #11691
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
 from .live import direction_flows  # #7852 (source→target, target→source) flows
 from .live import direction_spellings  # #7852 stored-token equivalence class
@@ -147,7 +147,8 @@ from .live import terminal_row_marker  # …and ONE way to name it
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
-from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
+from .live import status_as_reported, refuse_event_lifecycle_state  # #9974 R1 + #13100
+from .live import endpoint_permits_operator_promotion  # #13100: the re-homed live/draft gate
 # #10893: the read-stage timeline, so a breached wait budget can NAME the stage it
 # died in. `mark` is a NO-OP when no timeline is bound (every CLI, unit test and
 # in-process SDK user), so the hot read path pays one ContextVar read per
@@ -998,7 +999,7 @@ def _capture_redaction_warning(count: int) -> str:
     )
 
 
-def _record_vector_searcher(sdk=None):
+def _record_vector_searcher(sdk=None, timeout_ms=None):
     """The dense leg's POSTGRES searcher for THIS request — or ``None``.
 
     #11642 / #4051 V1. Two properties are the whole reason this is a function
@@ -1029,13 +1030,41 @@ def _record_vector_searcher(sdk=None):
 
     A broken install (an unimportable module) is ``None`` for the same reason:
     a search must not become a 500 because a retrieval accelerator is missing.
+
+    ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET, AND IT IS BOUND HERE (#11691).
+    ``record_vector.searcher`` threads it into the returned closure, which divides
+    it once (``record_vector.record_statement_ms``: two bounded statements per
+    read, so each gets a third) and hands the quotient to the door, where the
+    applied ``statement_timeout`` is ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``.
+    The division is what leaves the graph branch time to answer after a
+    cancellation; see that function for the arithmetic. The reason it is bound at
+    CONSTRUCTION rather than passed per call: the callable's FOUR-argument shape is
+    what keeps both legs' rows going through ONE ordering pass
+    (``#6214``/``#10121``), and a fifth, per-call budget argument would re-open
+    exactly the drift the shape prevents.
+
+    Why it is needed at all: ``run_vector_query`` bounds the GRAPH branches at
+    500 ms while this leg inherited ``record_serve``'s 15 s statement bound and a
+    10 s connect bound — and the fused read JOINS its workers
+    (``degradation_chain``'s ``ThreadPoolExecutor.__exit__``), so the read's own
+    cap could not bound it. One slow record read turned a 500 ms search into a
+    multi-second one AND recorded ``timeout``, discarding rows it may have had.
+
+    ⚠️ CALLERS MUST PASS THE BUDGET THEY GIVE ``run_vector_query`` /
+    ``degradation_chain``, or the leg is back on the door's 15 s: ``None`` (the
+    default, kept for the places that do not go through a bounded read) leaves
+    the door bound untouched. The three construction sites pass
+    ``VECTOR_LEG_BUDGET_MS``, ``degradation_chain``'s own fallback
+    (``_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS``) and the expansion pass's
+    ``timeout_ms`` respectively.
     """
     try:
         from .record_vector import searcher
     except Exception:  # noqa: BLE001, RUF100 — an unimportable accelerator is "unarmed"
         return None
     try:
-        return searcher(carried=getattr(sdk, "_record_tenant", None))
+        return searcher(carried=getattr(sdk, "_record_tenant", None),
+                        timeout_ms=timeout_ms)
     except Exception:  # noqa: BLE001, RUF100 — never let the accelerator break a read
         _logger.debug("record dense searcher unavailable — using the graph",
                       exc_info=True)
@@ -12775,8 +12804,9 @@ def _read_stored_number(value, default):
         return default
 
 
-def _ledger_record(label: str, rows: list[dict]) -> None:
-    """#7983: feed the READ LEDGER (the instrument for the hot fraction `f`).
+def _ledger_record(label: str, rows: list[dict], *, kind: str | None = None,
+                   seed: str | None = None) -> None:
+    """#7983/#13084: feed the READ LEDGER (the instrument for `f` and the mix).
 
     Called from EVERY caller-facing row-returning read path that has a known
     LABEL. The named set is carried by §17.4.6, not duplicated here — a case
@@ -12802,18 +12832,42 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
     reads an `f` that is too LOW (which flatters the split). #8877 carries the
     wiring; the coverage gaps are named in STORAGE-ARCHITECTURE.md §17.4.6.
 
+    ``kind`` (#13084) names WHAT QUESTION the call asked — one of
+    ``read_ledger.QUERY_KINDS`` — and makes this helper record a `query` event as
+    well, INCLUDING when the call returned nothing (the mix counts calls; a hit
+    distribution is a different, flattering question).
+
+    ⛔ ``seed`` IS THE DOOR'S OWN START KEY, passed by the caller that HAS one —
+    and NOTHING is synthesised when it does not. The two doors wired with
+    ``kind="traversal"`` today (``recall_state``, ``recall_gaps``) are filtered
+    and ranked retrieval over a pool, not seeded walks: they have no start key,
+    so they record none and land in the report's ``unseeded`` holes. Substituting
+    the rank-0 RETURNED row instead would answer a different question — "was the
+    first row I handed back already read", which for ``recall_gaps`` is close to
+    the COMPLEMENT of whether the traversal's origin was resident — and a hook
+    that answers a flattering question in the metric's own name is the failure
+    mode this instrument exists to avoid. A door with a real seed
+    (``recall_subgraph(seed=…)``) passes it once #8877 turns that leg on.
+
     OFF by default and never imported when off: one env lookup (the #4097 truthy
     contract), and a ledger failure is swallowed inside the module (a measurement
     may not break the thing it measures).
     """
-    if not rows or not is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
+    rows = rows or []
+    if not rows and kind is None:
+        return
+    if not is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
         return
     try:
         from . import read_ledger
     except Exception:  # pragma: no cover — a broken install must not break a read
         return
 
-    read_ledger.record_rows(label, rows)
+    if rows:
+        read_ledger.record_rows(label, rows)
+    if kind is not None:
+        read_ledger.record_query(kind, label=label, returned=len(rows),
+                                 seed=seed)
 
 
 #: ``entity_type`` values that resolve to a ``:Point`` read — the only rows
@@ -23733,15 +23787,15 @@ class TortoiseSDK:
         # window rewrites and the non-terminal `draft -> live` promotion
         # included — because it delegates TERMINALITY to this one instrument.
         # Its `:Event` half is answered at its own call site by
-        # `refuse_terminal_event_state(props, ...)`, the PROPS-AWARE predicate
-        # that knows whether the RESULT status is terminal; this arm is
-        # label-only, so firing it for that door refused `draft -> live` on a
-        # hybrid — the prop lane #2788 pins and #11825's own
-        # `test_a_non_terminal_update_still_lands_on_a_multi_label_event`
-        # requires (measured at the merge head: 1 failed). So the arm is gated
-        # on a SECOND question, defaulted on for the doors that only ever write
-        # a terminal value, and switched off by the one door that decides from
-        # its props.
+        # `refuse_event_lifecycle_state(props, ...)`, the PROPS-AWARE predicate
+        # that reads the caller's DECLARED keys; this arm is
+        # label-only, so firing it for that door answered for the LABEL rather
+        # than the declaration — #11825's `test_a_non_terminal_update_still_lands_
+        # on_a_multi_label_event` required the prop lane there, and #13100 has
+        # since retracted that allowance at the DOOR, which is the site that owns
+        # the question. So the arm is gated on a SECOND question, defaulted on for
+        # the doors that only ever write a terminal value, and switched off by the
+        # one door that decides from its props.
         if (refuse_terminal and refuse_event_terminalization
                 and self._get_proj().g.query(
                 "MATCH (n:Point:Event {id:$id}) RETURN count(n)",
@@ -24594,8 +24648,10 @@ class TortoiseSDK:
         # #12914 round-4 P1 measured, reported here instead of papered over. The
         # write below goes through ``update_knowledge`` -> ``_update_entity``, and
         # THAT door runs label-surface guards this one does not: the
-        # ``refuse_terminal_event_state`` probe (an ``:Event`` row cannot take a
-        # terminal ``status``) and the ``:Source`` closed-surface refusal (D30).
+        # ``refuse_event_lifecycle_state`` probe (an ``:Event`` row cannot take
+        # ANY ``status``, #13100 §8 — this branch widened it from the terminal
+        # subset, so the divergence below is wider than this comment first said)
+        # and the ``:Source`` closed-surface refusal (D30).
         # Measured on the round-4 head: for the HYBRID shapes ``:Object:Event``,
         # ``:Subject:Event``, ``:Object:Source`` and ``:Subject:Source`` the
         # preview answers ``would supersede`` and the write REFUSES. Before this
@@ -26780,12 +26836,19 @@ class TortoiseSDK:
         live edge (the exact pollution the draft lifecycle prevents). The
         endpoint read is NOT Point-only: #7853 widened it to
         `epistemic_disjunction('s')`, so it covers all four epistemic labels
-        (`Point`, `Subject`, `Object`, `Event`) and a draft `:Event` endpoint
-        blocks promotion just as a draft `:Point` does. Unset-status operators
-        are LIVE under the canonical read model (projection coalesce default;
-        #944 review) and are skipped — never re-promoted into the event
+        (`Point`, `Subject`, `Object`, `Event`). An endpoint that is not live
+        blocks promotion — an explicitly non-``live`` stored word, a terminal one,
+        or (since #13100) a PLAN whose position is not terminal, because a plan
+        that has not reached a terminal stage has not happened. That last arm is
+        the live/draft suppression RE-HOMED off the ``:Event`` non-terminal
+        ``status`` this change retires; a legacy Event row that still carries the
+        word keeps suppressing through the status arm (#2977). Unset-status
+        operators are LIVE under the canonical read model (projection coalesce
+        default; #944 review) and are skipped — never re-promoted into the event
         stream.
         """
+        from .planned_occurrence import is_plan_kind, plan_position
+
         rows: list = []
         # #7853: n is id-anchored — sweep the epistemic labels so a draft
         # operator incident to an Event/Subject/Object endpoint is promoted.
@@ -26811,21 +26874,40 @@ class TortoiseSDK:
             eps = proj.g.query(
                 "MATCH (o:Point {id:$oid})-[r]->(s) "
                 f"WHERE {epistemic_disjunction('s')} "
-                "RETURN s.id, s.status, coalesce(s.outdated, false)",
+                "RETURN s.id, s.status, coalesce(s.outdated, false), "
+                "       s.objectKind, s.pipelineStageId, "
+                "       s.pipelineOutcome, coalesce(s.isClosed, false), "
+                "       s.pipelineStageKey",
                 params={"oid": oid},
             ).result_set
             if not eps:
                 continue  # no endpoints — nothing to gate on
-            # TWO arms, and BOTH are needed (``live.is_terminal_status`` alone is
-            # NOT the gate): the terminal predicate is the canonical mirror of
-            # the flag + terminal-status exclusion, and ``draft`` is not in
-            # ``TERMINAL_EXCLUDED_STATUSES`` — a draft endpoint is un-promoted,
-            # not dead, and admitting it here would re-open the pollution #944
-            # closed. Unset status stays LIVE (the legacy-node rule), which is
-            # what ``(st or "live")`` preserves.
+            # The gate itself is ONE predicate (``live.endpoint_permits_
+            # operator_promotion``), not a condition spelled at this call site:
+            # three arms are needed and missing any of them re-opens a closed
+            # pollution. ``is_terminal_status`` alone is not the gate (a draft
+            # endpoint is un-promoted, not dead — #944), and since #13100 the
+            # retired non-terminal ``:Event`` status is replaced by the plan's
+            # POSITION: a plan whose stage is a non-terminal one — and which the
+            # durable ``isClosed`` marker does not end, and which HAS a position
+            # at all — has not happened, so it suppresses exactly as
+            # ``status='scheduled'`` on an Event did. A stored legacy Event word still suppresses through the
+            # status arm (the reader net stays wider than the write door, #2977).
             all_live = all(
-                (st or "live") == "live" and not is_terminal_status(st, bool(od))
-                for _, st, od in eps
+                endpoint_permits_operator_promotion(
+                    st, bool(od),
+                    # ⛔ The plan's position is resolved by the ONE helper the
+                    # plan writers and the Q5 read also use (`plan_position`), not
+                    # from the stored `pipelineSlot` PROP: a plan ended through the
+                    # generic door carries a terminal `pipelineStageId` beside a
+                    # stale slot, and reading the prop kept a settled plan
+                    # suppressing promotion for ever.
+                    plan_state=(plan_position(stage_id, outcome=outcome,
+                                              is_closed=bool(closed),
+                                              pipeline_key=key)
+                                if is_plan_kind(kind) else None))
+                for (_, st, od, kind, stage_id, outcome, closed,
+                     key) in eps
             )
             if not all_live:
                 continue  # keep draft until every endpoint is live
@@ -28917,7 +28999,7 @@ class TortoiseSDK:
         # read after one `recall_gaps()` call (f -> ~1) and bias `f` HIGH, the
         # direction that removes the saving the ledger exists to measure.
         if _record_reads:
-            _ledger_record("Point", points)
+            _ledger_record("Point", points, kind="lookup")
         return points
 
     def paginated_query(self, kind: str | None = None,
@@ -29012,7 +29094,7 @@ class TortoiseSDK:
         # `f` must see the structural query path, not only the FTS funnel, or the
         # keys it serves are reported as never read (the flattering direction for
         # the split's own saving).
-        _ledger_record("Point", results)
+        _ledger_record("Point", results, kind="lookup")
 
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
@@ -29458,7 +29540,7 @@ class TortoiseSDK:
             if not include_retracted:
                 rows = [r for r in rows if r.get("status") != "retracted"]
             page = rows[offset:offset + (limit or 100)]
-            _ledger_record("Point", page)  # #7983: the served page, not the tag
+            _ledger_record("Point", page, kind="lookup")  # #7983: the served page
             return {"results": page, "total": len(rows),
                     "hasMore": offset + (limit or 100) < len(rows)}
         if mode == "sessions":
@@ -29937,7 +30019,7 @@ class TortoiseSDK:
         ).result_set
         points = [r[0] for r in rows]
         if _record_reads:
-            _ledger_record("Point", points)  # #7983: a product read of these keys
+            _ledger_record("Point", points, kind="lookup")  # #7983: a product read
         return points
 
     def _list_namespaces(self) -> list[dict]:
@@ -31755,9 +31837,10 @@ class TortoiseSDK:
         # `:Object` is deliberately NOT refused: its writer does not validate,
         # it STORES the value (measured), so a refusal here would reject bundles
         # the writer accepts — the over-rejection class this PR already fixed
-        # once. `:Event` is no longer in that sentence: since #11825 its door
-        # refuses the TERMINAL half, and the arm BELOW mirrors that refusal at
-        # Phase 1 for the same partial-mutation reason.
+        # once. `:Event` is no longer in that sentence: since #13100 its door
+        # refuses ANY `status` (the terminal half alone was #11825's interim
+        # boundary), and the arm BELOW mirrors that refusal at Phase 1 for the
+        # same partial-mutation reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
@@ -31778,18 +31861,16 @@ class TortoiseSDK:
                            f"rejected at validation. Must be one of: "
                            f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}",
             })
-        # ── #11825: the `:Event` TERMINAL half, refused at Phase 1 ──
+        # ── #11825 / #13100: an `:Event` `status`, refused at Phase 1 ──
         # The same class as the `:Subject` vocabulary arm directly above, and
         # for the same measured reason: `create_event` now runs
-        # `live.refuse_terminal_event_state`, so an item carrying a terminal
-        # status raises in step 3 AFTER the point items have committed. The
-        # predicate is `live.is_terminal_status` — the ONE mirror of the Cypher
-        # terminal rule — so a status added to the vocabulary moves the door and
-        # this arm together (`#2901`/`#3301`). NON-terminal statuses are NOT
-        # refused: the door accepts them and `_promote_incident_operators` reads
-        # `draft`/`live` as its gate (#7853, #10828), so refusing here would be
-        # this file's own over-rejection class. `outdated` needs no arm: the loop
-        # above already refuses it bundle-wide on ANY point or entity item.
+        # `live.refuse_event_lifecycle_state`, so an item carrying ANY status
+        # raises in step 3 AFTER the point items have committed. Since #13100 it
+        # is the whole KEY that is refused (the terminal half alone was #11825's
+        # interim boundary), so this arm and the door cannot disagree on a value
+        # or a type — the arm refuses whatever the door would. `outdated` needs
+        # no arm here: the loop above already refuses it bundle-wide on ANY point
+        # or entity item.
         # ⛔ EMITTED UNCONDITIONALLY, and the duplicate for a DIRECT-route
         # operator connection is the accepted cost — the same bargain the
         # `:Subject` vocabulary arm above makes. Deferring to the connection arm
@@ -31865,61 +31946,37 @@ class TortoiseSDK:
                                 if k not in _merged})
             _status_values = [v for k, v in _merged.items()
                               if "status" in _event_state_key_names(k)]
-            own_status = None
             if not _status_values:
-                _declares_status, own_status = _item_declared_status(
+                _declares_status, _own_status = _item_declared_status(
                     item, _item_flatten_depth(item, "entities"))
-                _status_values = [own_status] if _declares_status else []
-            else:
-                own_status = _status_values[-1]
+                _status_values = [_own_status] if _declares_status else []
             # `status: None` is the DOCUMENTED clear route the door ACCEPTS, so it
             # is not a violation (review cycle 5, P2).
             _status_values = [v for v in _status_values if v is not None]
             if not _status_values:
                 continue
-            # The TYPE dimension (review cycle 6, P1): a PERSISTABLE non-string is
-            # refused by the door, a discarded one is accepted-and-dropped.
-            from .live import _status_is_discarded_by_every_writer as _is_discarded
-            _stored_bad = [v for v in _status_values
-                           if not isinstance(v, str)
-                           and not _is_discarded(v)]
-            if _stored_bad:
-                violations.append({
-                    "section": "entities", "index": i,
-                    "message": f"ingest: entities[{i}] declares status "
-                               f"{_stored_bad[0]!r} for an :Event — `status` on "
-                               f"the node is a STRING drawn from the "
-                               f"vocabulary, or `None` to clear it, so the "
-                               f"bundle is rejected at validation rather "
-                               f"than mid-write. WHAT TO DO: pass a string "
-                               f"(the door accepts `scheduled`/`draft`/"
-                               f"`live`), or drop `status`.",
-                })
-                continue
-            # ⛔ NAME THE DECLARATION THAT FAILED, not the LAST one. The test above
-            # is an `any`, and the writer applies EVERY key of the map, so an item
-            # can declare both names — one terminal, one not. Rendering
-            # `_status_values[-1]` then indicted the LEGAL value and advised the
-            # caller to pass it, with the offending terminal declaration absent
-            # from the message (measured, review: conflict-sweep lane F — an item
-            # declaring `superseded` and `live` produced "declares status 'live' …
-            # use a non-terminal value", naming only the value that was fine).
-            _terminal_hits = [
-                v for v in _status_values
-                if isinstance(v, str) and is_terminal_status(str.__str__(v))
-            ]
-            if not _terminal_hits:
-                continue
+            # ⛔ EXACT PARITY WITH THE DOOR, and since #13100 that is the WHOLE
+            # axis: the door refuses any non-`None` `status` on an `:Event`
+            # (`live.refuse_event_lifecycle_state`), so Phase 1 refuses any
+            # declaration too — whatever its VALUE or TYPE. The earlier split
+            # (terminal refused, non-terminal and non-persistable values
+            # accepted) mirrored the interim #11825 boundary, and keeping it
+            # would let Phase 1 call a bundle clean that step 3 raises on AFTER
+            # the point items committed — the #2422/#7925 partial-mutation class
+            # this arm exists to prevent.
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{', '.join(repr(v) for v in _terminal_hits)} for an "
+                           f"{', '.join(repr(v) for v in _status_values)} for an "
                            f":Event — an :Event "
-                           f"carries no lifecycle, so its door refuses the "
-                           f"terminal half mid-write and the bundle is rejected "
-                           f"at validation. WHAT TO DO: drop `status` from the "
-                           f"item, or use a non-terminal value (the door "
-                           f"accepts `scheduled`/`draft`/`live`).",
+                           f"carries no lifecycle at all (#13100), so its door "
+                           f"refuses the declaration mid-write and the bundle is "
+                           f"rejected at validation. WHAT TO DO: drop `status` "
+                           f"from the item. If the thing has not happened yet, "
+                           f"create a plan (`core:plan`) and record the :Event "
+                           f"when it does; for ingest bookkeeping use "
+                           f"`eventStatus` (`pending` -> `indexed`); to clear a "
+                           f"legacy word pass `status: None`.",
             })
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
@@ -33862,17 +33919,18 @@ class TortoiseSDK:
           ``SUBJECT_STATUS_VALUES`` before the name merge, so an invalid value
           (outside that set, non-string, or an explicit ``null``) on ANY entity
           item is a Phase-1 violation, while ``:Object``/``:Event`` statuses
-          are stored verbatim and stay accepted. ⛔ The ``:Event`` half of that
-          is now split, and the split is the whole point of #11825: a
-          NON-TERMINAL ``status`` (``scheduled``/``draft``/``live``) is still
-          stored verbatim, but the TERMINAL half is refused bundle-wide here
-          for exactly the reason the ``:Subject`` vocabulary is — the door
+          are stored verbatim and stay accepted. ⛔ A ``:Event`` status is
+          refused bundle-wide, and since #13100 (S7) that means ANY non-``None``
+          ``status`` — the terminal half alone was #11825's interim boundary, and
+          the non-terminal half is retired too because "will happen" is a PLAN's
+          job (`tortoise/planned_occurrence.py`). It is refused here for exactly
+          the reason the ``:Subject`` vocabulary is — the door
           (``create_event`` → ``create_entity(type='event')``) runs
-          ``live.refuse_terminal_event_state``, so leaving it to step 3 means the
-          point items commit and THEN the write raises (measured: a bundle with
-          one point and one ``status='superseded'`` event returned ``[]`` here
-          and raised a bare ``ValueError`` after ``Point 1`` was written — the
-          #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
+          ``live.refuse_event_lifecycle_state``, so leaving it to step 3 means the
+          point items commit and THEN the write raises (measured at #11825: a
+          bundle with one point and one ``status='superseded'`` event returned
+          ``[]`` here and raised a bare ``ValueError`` after ``Point 1`` was
+          written — the #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
           the ITEM'S write door flattens (``_item_prop_at_depth``): TWICE for a
           ``subject``/``object``/``event`` item (step 3 relays
           ``create_subject``/``create_object``/``create_event`` →
@@ -35985,7 +36043,7 @@ class TortoiseSDK:
             name=f"human approval of {artifact_ref}",
             eventKind="humanApproval",
             startedAt=now,
-            eventStatus="completed",
+            eventStatus="indexed",
         )
         event_id = event["eventId"]
         # Wire provenance: approver performs; uses artifact; aboutPoint each
@@ -36566,7 +36624,7 @@ class TortoiseSDK:
         pool cap — the documented degradation. ``top_k`` is hard-clamped at
         CROSS_LENS_ANN_TOP_K_MAX by the caller.
         """
-        from .search_engine import run_vector_query  # noqa: I001
+        from .search_engine import VECTOR_LEG_BUDGET_MS, run_vector_query  # noqa: I001
         import numpy as np
 
         proj = self._get_proj()
@@ -36583,12 +36641,18 @@ class TortoiseSDK:
                 embeddings[pid] = np.asarray(emb, dtype=np.float64)
 
         best: dict[tuple[str, str], float] = {}
+        # #11691: ONE budget for this read — the graph branches' `timeout_ms` and
+        # the RECORD leg's statement bound. The record leg is constructed HERE,
+        # per call, with that budget, so it can no longer run to the record
+        # door's 15 s inside a 500 ms read (the fused read JOINS its workers).
+        _budget_ms = VECTOR_LEG_BUDGET_MS
         for pid, meta in pool.items():
             vec = embeddings.get(pid)
             if vec is None:
                 continue
             hits = run_vector_query(proj.g, vec.tolist(), limit=top_k + 1,
                                     is_embedded=is_embedded,
+                                    timeout_ms=_budget_ms,
                                     # #1359: recorded index API → skip the
                                     # failing signature attempt on Cypher engines.
                                     vector_index_api=getattr(
@@ -36596,7 +36660,21 @@ class TortoiseSDK:
                                     # #11642: the Postgres ANN leg when a record
                                     # tenant is armed on this request; `None`
                                     # keeps the graph branch unchanged.
-                                    pg_vector=_record_vector_searcher(self))
+                                    # #11691: bound to this read's budget.
+                                    pg_vector=_record_vector_searcher(
+                                        self, timeout_ms=_budget_ms),
+                                    # #13108: the store's own measured index
+                                    # inventory, so an unindexed label skips the
+                                    # doomed queryNodes attempt (`None` = not
+                                    # measured → attempt as before). ⚠️ The
+                                    # BEHAVIOURAL half, not the reporting one:
+                                    # `_vector_indexed_labels` reports
+                                    # "measured-but-unparseable" as an empty
+                                    # set, and a reader must never skip an
+                                    # index attempt on that evidence.
+                                    vector_indexed_labels=getattr(
+                                        proj, "_vector_indexed_labels_for_reads",
+                                        None))
             for nid, _score in hits:
                 if nid == pid or nid not in pool:
                     continue
@@ -42839,7 +42917,7 @@ class TortoiseSDK:
                                 "prs": metadata.get("prs", []),
                                 "critical_decisions": metadata.get("critical_decisions", []),
                             }),
-                            "eventStatus": "completed",
+                            "eventStatus": "indexed",
                             "classificationLevel": "internal",
                             "format": "markdown",
                         }
@@ -43117,7 +43195,7 @@ class TortoiseSDK:
         if graph_ranker is not None and results:
             results = graph_ranker.rerank(results, entity_type="point", query=q)
 
-        _ledger_record("Point", results)  # #7983: the rows this call SERVES
+        _ledger_record("Point", results, kind="text")  # #7983: rows SERVED
         return results
 
     # ── Session Context (#6989) ──────────────────────────────
@@ -43382,7 +43460,7 @@ class TortoiseSDK:
 
         # #7983: the semantic pool opted out above; the hits that SURVIVE the
         # gate are what the caller receives, so record those (this is the read).
-        _ledger_record("Point", semantic_hits)
+        _ledger_record("Point", semantic_hits, kind="vector")
         data_points: list[dict] = []
         for h in semantic_hits:
             dp = {"kind": h.get("point_kind"), "content": (h.get("content") or "")[:200]}
@@ -44207,6 +44285,7 @@ class TortoiseSDK:
             expand_structural_hops,
             _recency_factors,
             _trace_entry,
+            VECTOR_LEG_BUDGET_MS,
         )
         # W4 (#2101): the additive why-layer enrichment (shared assembly —
         # DM-1; lazy import — why.py pulls search_engine helpers only).
@@ -44373,7 +44452,6 @@ class TortoiseSDK:
                     _caller_trace.extend(status_trace or ())
             if (
                 _read_ledger is not None
-                and rows
                 and _read_ledger_enabled
                 and _record_reads
             ):
@@ -44381,7 +44459,19 @@ class TortoiseSDK:
                 # `(label, key)` of every row this read returned, and a ledger
                 # failure is swallowed inside the module (a measurement may not
                 # break the thing it measures).
-                _read_ledger.record_rows(label, rows)
+                if rows:
+                    _read_ledger.record_rows(label, rows)
+                # #13084: the CALL is recorded whether or not it returned rows —
+                # the query mix counts questions asked, and an empty search is
+                # still a search (and the one that paid for a cold miss).
+                # The kind follows `classify_query`'s own rule below: the dense
+                # leg fires exactly when a text query is present, and a call with
+                # no query is the structural/full-scan read.
+                _read_ledger.record_query(
+                    "vector" if (query and str(query).strip()) else "lookup",
+                    label=label,
+                    returned=len(rows or ()),
+                )
             return rows
 
         def _with_claim_class(rows: list[dict],
@@ -44486,7 +44576,7 @@ class TortoiseSDK:
             # — an unbounded probe would let a wedged store stall the read it
             # annotates.
             try:
-                graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or 500))
+                graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS))
             except Exception as e:  # noqa: BLE001, RUF100
                 # The store IS configured (the projection object was obtained
                 # just above) but did not answer: off by OUTAGE — `degraded`,
@@ -44506,7 +44596,7 @@ class TortoiseSDK:
         # #7952: the store is reachable, so the known-hot set can be READ.
         if read_status_out is not None and _residency_enabled():
             _residency = _read_declaration(
-                graph, timeout_ms=int(_elevated_timeout_ms or 500))
+                graph, timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS))
         # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
@@ -44739,6 +44829,14 @@ class TortoiseSDK:
         # contains it; per-leg detail already has its own channel (`leg_trace`,
         # a different question).
         _mark_read_stage(STAGE_RETRIEVAL)
+        # #11691: the SAME budget `degradation_chain` gives every leg's
+        # `timeout_ms` below, so the RECORD dense leg's statement bound is
+        # `min(record door, a third of this)` instead of the door's 15 s — the
+        # third is `record_vector.record_statement_ms`, which reserves the rest of
+        # the read for the graph branch after a cancellation. Derived with the
+        # identical expression degradation_chain uses (`int(elevated or
+        # VECTOR_LEG_BUDGET_MS)`) rather than a second guess at it.
+        _leg_budget_ms = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -44747,6 +44845,19 @@ class TortoiseSDK:
             # #1359: the recorded vector-index API (procedure vs Cypher-native)
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
+            # #13108: the labels this STORE measured a VECTOR index for
+            # (`_record_vector_index_inventory`). A label absent from it skips
+            # two round trips that can only be REFUSED — measured at ≈58 % of an
+            # unindexed `:Object` read's store time. `None` (the inventory's
+            # not-measured lane) is forwarded as None, i.e. attempt as before.
+            # ⛔ The BEHAVIOURAL half (`…_for_reads`), never
+            # `_vector_indexed_labels`: the reporting half collapses "the
+            # catalogue was returned but unparseable" into an empty set, and
+            # skipping on that evidence would demote every dense read —
+            # `:Point` included — to a full scan after an engine catalogue
+            # reshape.
+            vector_indexed_labels=getattr(
+                proj, "_vector_indexed_labels_for_reads", None),
             excluded_statuses=() if include_terminal else None,
             leg_trace=status_trace,
             # A1 (#2070): the ask-lane numeric-token policy threads into the
@@ -44775,7 +44886,7 @@ class TortoiseSDK:
             # would find no tenant and take the graph branch on EVERY request
             # while reporting nothing. `None` (no record DSN, or no tenant
             # installed) keeps the graph branches byte-identically.
-            pg_vector=_record_vector_searcher(self),
+            pg_vector=_record_vector_searcher(self, timeout_ms=_leg_budget_ms),
         )
 
         if _bm25_lexical and "vector" not in _floored_legs:
@@ -44809,7 +44920,7 @@ class TortoiseSDK:
             _bm25_trace_start = len(status_trace) if status_trace is not None else None
             _bm25_hits = run_bm25_query(
                 graph, query, entity_type=entity_type, limit=str_limit,
-                timeout_ms=int(_elevated_timeout_ms or 500),
+                timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS),
                 excluded_statuses=() if include_terminal else None,
                 leg_trace=status_trace,
                 keep_numeric=keep_numeric,
@@ -45108,7 +45219,7 @@ class TortoiseSDK:
                     graph, text_hit_ids, max_hops=structural_hops,
                     limit=str_limit,
                     excluded_statuses=() if include_terminal else None,
-                    timeout_ms=int(_elevated_timeout_ms or 500),
+                    timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS),
                 )
                 if expansion:
                     merged = list(dict(raw_results.get("structural", [])).items())
@@ -45200,7 +45311,7 @@ class TortoiseSDK:
                     scope_kinds=_scope_kinds,
                     # the shipped leg's own timeout, so on a slow store the
                     # expansion no-ops for the same reason rather than sooner.
-                    timeout_ms=int(_elevated_timeout_ms or 500),
+                    timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS),
                 )
                 if expanded_vec is not None:
                     raw_results["vector"] = expanded_vec
@@ -47055,7 +47166,7 @@ class TortoiseSDK:
         leg_trace: list[dict] | None,
         min_similarity: float | None = None,
         scope_kinds: tuple[str, ...] | None = None,
-        timeout_ms: int = 500,
+        timeout_ms: int = VECTOR_LEG_BUDGET_MS,
     ) -> list[tuple[str, float]] | None:
         """C2 (#2518) indicator 2 — DENSE-leg parity for the key expansion.
 
@@ -47142,6 +47253,10 @@ class TortoiseSDK:
                 is_embedded=getattr(proj, "_is_embedded", True),
                 entity_type="point",
                 vector_index_api=getattr(proj, "_vector_index_api", None),
+                # #13108: the same measured inventory the shipped leg gets —
+                # the BEHAVIOURAL half (see the `degradation_chain` call site).
+                vector_indexed_labels=getattr(
+                    proj, "_vector_indexed_labels_for_reads", None),
                 excluded_statuses=excluded_statuses,
                 leg_trace=_exp_trace,
                 min_similarity=min_similarity,
@@ -47159,7 +47274,10 @@ class TortoiseSDK:
                 # the tenant ContextVar is readable here — unlike the shipped
                 # leg, which runs on a pool worker and is handed the callable
                 # by `_record_vector_searcher()` at the `degradation_chain` call.
-                pg_vector=_record_vector_searcher(self),
+                # #11691: bound to THIS pass's budget, the same `timeout_ms` the
+                # graph branches just above get — otherwise the record leg would
+                # still be on the door's 15 s inside a 500 ms read.
+                pg_vector=_record_vector_searcher(self, timeout_ms=timeout_ms),
                 # ONE dense slot, ONE tally: the shipped leg already counted it
                 # (the #8488 arm's ``meter=False`` precedent — the trace still
                 # records the second pass, so a measurement can see it ran).
@@ -47206,9 +47324,9 @@ class TortoiseSDK:
         is layer-bound: `:Point` carries `status` (live / superseded /
         retracted / draft / outdated / archived), `:Object` and `:Subject`
         carry their own `status` families (which include `deprecated`), and an
-        `:Event` carries NO `status` at all — its lifecycle is `eventStatus`,
-        a different vocabulary this field deliberately does not mix in, so an
-        `:Event` peer reports `""`. `""` therefore means "this peer's layer
+        `:Event` carries NO `status` at all — it has no lifecycle (#13100), and
+        `eventStatus` is an INGEST marker this field deliberately does not mix
+        in, so an `:Event` peer reports `""`. `""` therefore means "this peer's layer
         exposes no `status`", and it is now reached by LOOKING at the peer's
         label rather than by never asking.
 
@@ -47955,7 +48073,8 @@ class TortoiseSDK:
         # — these are the rows the caller actually receives, and they are what a
         # read of this path means for `f`.
         _ledger_record(
-            "Point", [i for i in out if i.get("entity_type") == "point"]
+            "Point", [i for i in out if i.get("entity_type") == "point"],
+            kind="traversal",
         )
         # NOT the Object leg — and since #9881 that is a WIRING choice (#8877),
         # not a shape limit. Before the move an Object's key was `name` and these
@@ -48335,7 +48454,7 @@ class TortoiseSDK:
             and r["gaps_ranking"]["support"] <= max_support
         ][:limit]
         # #7983: the pool above opted out; the rows the caller RECEIVES are a read.
-        _ledger_record("Point", ranked)
+        _ledger_record("Point", ranked, kind="traversal")
         return ranked
 
     def recall_subgraph(self, seed: str, *,
@@ -51959,12 +52078,14 @@ class TortoiseSDK:
                     props, label=_carrier_label, surface="update_entity",
                     stored_status=_carrier_rows[0][0])
                 break
-        # ── #11825: an `:Event` target, BEFORE the first write ──
+        # ── #11825 → #13100: an `:Event` target, BEFORE the first write ──
         # ⛔ THIS BLOCK MUST PRECEDE the Point status arm below, which WRITES
         # (`SET n += $s`) and only THEN drops the key from `props`. It used to sit
         # after that arm, so on a node carrying BOTH `:Point` and `:Event` the
         # Point arm consumed and cleared `status` before this guard ran — the
-        # guard then saw no declaration at all and the terminal status stood.
+        # guard then saw no declaration at all and the terminal status stood. The
+        # same ordering is what makes #13100's widened refusal (EVERY non-`None`
+        # `status`, not just the terminal half) atomic on that hybrid.
         # Measured (review cycle 9, P1): `update_entity(<:Point:Event>,
         # status="superseded")` was ACCEPTED, the node ended with
         # `status='superseded'` on an `:Event`, and the record (label="Point")
@@ -52007,13 +52128,18 @@ class TortoiseSDK:
                 "RETURN count(e)",
                 params={"id": id_val},
         ).result_set[0][0]:
-            refuse_terminal_event_state(props, door="update_entity")
-            # ⛔ No `props` surgery here on purpose: a NON-terminal status is a
-            # legal write on an `:Event` target (#2788's prop lane), and on a
-            # multi-label node the property is shared, so there is no "Point side"
-            # to keep it away from. The guard's whole job is the TERMINAL half,
-            # and it has it — measured: dropping the key here red 9 pins that
-            # legitimately land `draft`/`live` through this door.
+            refuse_event_lifecycle_state(props, door="update_entity")
+            # ⛔ No `props` surgery here on purpose. #13100 retired #2788's
+            # non-terminal prop lane, so this guard now refuses EVERY
+            # non-`None` `status` and returns only for a CLEAR (`status=None`,
+            # the documented un-mark route for a legacy row). On a multi-label
+            # node the property is SHARED, so there is no "Point side" to keep
+            # it away from — dropping the key here would turn that clear into a
+            # silent no-op instead of a `SET n += {status:null}` that removes the
+            # word, which is why it is left to the write arms below. (One shape
+            # cannot reach the clear route: a `:Point:Event` hybrid, whose Point
+            # arm refuses `None` as a non-vocabulary word — `Invalid status
+            # None`, a pre-existing Point-side behaviour, unchanged here.)
 
         # ── #9649: this door consults the lifecycle guard (#2498/#7819) ───────
         # Measured on the pre-change tree (issue #9649, comment `6839154493`, at
@@ -52261,14 +52387,14 @@ class TortoiseSDK:
                 and _pt_statuses_exact == (_rendered_status_exact,))
             for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
                 try:
-                    # ⛔ `refuse_event_terminalization=False` (#11825 merge): this
-                    # door writes a WINDOW or a non-terminal prop as often as it
-                    # writes a terminal status, so the guard's label-only `:Event`
-                    # arm is the wrong question here — it refused `draft -> live`
-                    # on a hybrid (the prop lane #2788 pins). The Event half is
-                    # answered ABOVE, by the props-aware
-                    # `refuse_terminal_event_state`, which refuses exactly the
-                    # TERMINAL values and lets a non-terminal one ride that lane.
+                    # ⛔ `refuse_event_terminalization=False` (#11825 merge): the
+                    # label-only `:Event` arm is the wrong QUESTION at this site —
+                    # it answered for the label where the door's question is the
+                    # caller's DECLARATION, and it was the prop lane #2788 used to
+                    # pin here that made the difference visible. (That lane is
+                    # retired: #13100 refuses any non-`None` `status` on an
+                    # `:Event` at the door, above.) The Event half is answered
+                    # ABOVE, by the props-aware `refuse_event_lifecycle_state`.
                     self._assert_lifecycle_guard(
                         _lifecycle_id, method="update_entity", missing_ok=True,
                         allow_operator=True,
@@ -53802,7 +53928,7 @@ class TortoiseSDK:
             # stored it. Refused BEFORE any write or journal emission, so a
             # refused create leaves nothing behind (the Point/Subject doors'
             # shape, #9287/#1423).
-            refuse_terminal_event_state(props, door="create_entity(type='event')")
+            refuse_event_lifecycle_state(props, door="create_entity(type='event')")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
             # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
             # (server-ONLY channel via the ``_server_id`` keyword — the
@@ -53952,7 +54078,7 @@ class TortoiseSDK:
             # `unfolded-mention` exemption.
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
-                "eventStatus": "scheduled", **props}, "EventRecorded",
+                "eventStatus": "pending", **props}, "EventRecorded",
                 is_episodic=is_episodic,
                 _journal_extra={"aboutLinks": about_links} if about_links else None)
             # The writes use the SAME resolution the record was built from: an
@@ -56055,7 +56181,7 @@ class TortoiseSDK:
                 "prs": metadata.get("prs", []),
                 "critical_decisions": metadata.get("critical_decisions", []),
             }),
-            "eventStatus": "completed",
+            "eventStatus": "indexed",
             "classificationLevel": "internal",
             "format": "markdown",
         }
@@ -56157,7 +56283,7 @@ class TortoiseSDK:
             "source_file": sf_rel,
             "format": "markdown",
             "classificationLevel": "internal",
-            "eventStatus": "completed",
+            "eventStatus": "indexed",
         }
         resolved, rejected = proj._upsert_event(
             inner, guard=True, guard_source_file=sf_rel)

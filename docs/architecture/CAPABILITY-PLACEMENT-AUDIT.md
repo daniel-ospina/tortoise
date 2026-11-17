@@ -144,19 +144,19 @@ marked **none**.
 | `tortoise/mcp_server.py:11158` / `:11161` | `MATCH (new:Point {id:$n})-[r]->(t)` / `(t)-[r]->(new:Point)` — edge discovery | **adjacency** |
 | `tortoise/projection/edges.py:1888` | `(p:Point {id:$pid})-[:TAGGED]->(t:Tag)` | **traversal** |
 | `tortoise/sdk.py:21978` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
-| `tortoise/search_engine.py:4425-4429` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
-| `tortoise/search_engine.py:6300` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg | **adjacency** |
-| `tortoise/search_engine.py:6659` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:6658-6661`, consumed only by `subject_binding_available()` at `:6664-6677`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
-| `tortoise/search_engine.py:3042` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
-| `tortoise/search_engine.py:4353-4355` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
-| `tortoise/search_engine.py:3941` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
+| `tortoise/search_engine.py:4528-4532` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
+| `tortoise/search_engine.py:6415` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg | **adjacency** |
+| `tortoise/search_engine.py:6774` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:6773-6776`, consumed only by `subject_binding_available()` at `:6779-6792`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
+| `tortoise/search_engine.py:3053` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
+| `tortoise/search_engine.py:4456-4458` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
+| `tortoise/search_engine.py:4044` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
 | `tortoise/domain_validators.py:105` (and the same property-join shape at `:174-182`, `:197-205`) | `MATCH (req) WHERE (req:Point OR req:Object) AND (req.pointKind IN $req_kinds OR req.objectKind IN $req_kinds)`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
 | `tortoise/domain_validators.py:153-158` (`orphan_use_case`) | `OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, op_type:'composedOf'})-[:hasPart]->(jtbd:Point)` — a **2-hop `hasPart` walk**, i.e. every parented use-case is found THROUGH the tree | **adjacency** |
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
 | **the whole-node accessor family** — `tortoise/sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296` (`get_point`'s `_cache_answer`), `:40513`; `tortoise/record_serve.py:306` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
 
 **Verdict: `graph`.** Seventeen reader rows, **fourteen of them capability-carrying** (three are deliberately
-`none`: `search_engine.py:4353-4355`, a plain label scan; `domain_validators.py:105`, a property-equality join;
+`none`: `search_engine.py:4456-4458`, a plain label scan; `domain_validators.py:105`, a property-equality join;
 and the whole-node accessor family above), **fourteen of them across six files** (`projection/propagation.py`,
 `sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`, `domain_validators.py`) — the three
 `none` rows bring `record_serve.py`, `projection/__init__.py` and `record_reconcile.py` as well; a
@@ -180,7 +180,7 @@ prevent — recorded rather than quietly edited.
 | `tortoise/sdk.py:38818` | `MATCH (s:Source)-[:references]->(o:Source)` — source-to-source provenance | **traversal** |
 | `tortoise/sdk.py:52878` | `MATCH (s:Source {url:$url})-[:references]->(n)` | **traversal**. |
 | `tortoise/sdk.py:15659` (target side) | `(p:Point)-[:extractedFrom]->(s:Source)` — every claim must reach its source (§9.4 ①) | **traversal** |
-| `tortoise/search_engine.py:3042` | `CALL db.idx.fulltext.queryNodes('<label>', $query)` — the index `:3014`'s note says is built on **`Source._searchText` for every Source** | **fulltext index** |
+| `tortoise/search_engine.py:3053` | `CALL db.idx.fulltext.queryNodes('<label>', $query)` — the index `:3025`'s note says is built on **`Source._searchText` for every Source** | **fulltext index** |
 | `tortoise/session_source_migration.py:432-434` | `SET new.provenance_spans = CASE WHEN coalesce(size(new.provenance_spans),0)=0 THEN $spans ELSE new.provenance_spans END` — a **`SET` that READS the node**, i.e. a reader by §2's rule | **none** |
 
 ⚠️ **That last row is the rule that put it here.** §2's method statement says a `SET` expression that reads
@@ -193,7 +193,7 @@ mechanism, not a citation nicety.
 
 > ⚠️ **The fulltext index is declared on FIVE labels, not two.** This is the census's most easily missed
 > reader: `_FULLTEXT_INDEX_LABEL_FIELDS` (`projection/__init__.py:6815-6831`) declares `Point`, `Event`,
-> `Subject`, `Object` and `Source`, and the query is **label-parametric** (`search_engine.py:2947` derives
+> `Subject`, `Object` and `Source`, and the query is **label-parametric** (`search_engine.py:2958` derives
 > the label from `entity_type`), so ONE call site serves all five. The FTS row is carried for `:Point`
 > (§2.1) and `:Source` (§2.2) *and* for `:Event` (§2.3) and `:Object`/`:Subject` (§2.5); leaving it out of
 > the last three made them look adjacency-only. No verdict flips — all five are `graph` either way — but an
@@ -204,9 +204,9 @@ mechanism, not a citation nicety.
 | reader (`file:line`) | what it does | capability |
 |---|---|---|
 | `tortoise/goal_judgement.py:1119` | `MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator` | **adjacency** |
-| `tortoise/search_engine.py:6661` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
+| `tortoise/search_engine.py:6776` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
 | `tortoise/assembly.py:2629` | `MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event)` | **adjacency** |
-| `tortoise/search_engine.py:3042` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:2947` derives the label from `entity_type`; `sdk.py:52011` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6825` | **fulltext index** |
+| `tortoise/search_engine.py:3053` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:2947` derives the label from `entity_type`; `sdk.py:52011` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6825` | **fulltext index** |
 
 **Verdict: `graph`.** ⚠️ Two whole-node reads are absent from the table above and belong to it by §2's own rule:
 `tortoise/session_indexer.py:746` (`MATCH (e:Event {eventId: $eid}) RETURN properties(e)`) and the
@@ -279,7 +279,7 @@ Every Cypher site above is a point lookup or a property guard — capability **`
 | `tortoise/audit.py:810` (and `:2445`, `:2456`) | `OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy AND id(carrier) <> id(sup)` — **no relationship in the pattern**; a property-equality scan | **none** |
 | `tortoise/definite_description_backfill.py:434` | `MATCH (o:Object) OPTIONAL MATCH (o)<-[r]-() WITH o, count(r) …` — degree census | **adjacency** |
 | `tortoise/sdk.py:34355` | `MATCH (s:Subject {id:$sid})-[r]->(n)` | **adjacency** |
-| `tortoise/search_engine.py:3042` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no **product** caller passes the literal `'subject'` (test modules do — `tests/test_search_engine_gaps.py:1395`, `:1559`, `tests/test_integration_search.py`) — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5035`, `:5475`, `:7911`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6826` and `("Object", ["name"])` at `:6830` | **fulltext index** |
+| `tortoise/search_engine.py:3053` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no **product** caller passes the literal `'subject'` (test modules do — `tests/test_search_engine_gaps.py:1395`, `:1559`, `tests/test_integration_search.py`) — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5035`, `:5475`, `:7911`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6826` and `("Object", ["name"])` at `:6830` | **fulltext index** |
 
 `:Tag` belongs on this row too, and an earlier draft got it **wrong** by calling it bookkeeping: every tag
 read resolves the node **through the edge** — `sdk.py:28069`
@@ -384,7 +384,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
 | 12 | `_searchText` on a **non**-episodic `:Source` | FTS | **yes** | **graph** | the fulltext index's field set |
 | 13 | `Source.summary` on an **episodic** Source | the record door reads it as the WITNESS and declines to project it (`cache_projection.py:2650-2657`); **Cypher DOES name it, at capability `none`** — `session_source_prose_migration.py:218-223` (`_SOURCE_ROWS`, `RETURN s.url, s.sourceKind, s.summary, …`, issued by `find_session_sources_carrying_prose` and run on every rebuild via `reconcile_after_replay`), `:1263-1268` (`_HITS_ROWS`) and `:1292-1300` (`_CONTROL_LEXICON_ROWS`, `WHERE s.summary STARTS WITH $prefix … AND s.documentKind IS NULL` — exactly this episodic population) | **no** — property projections and a prefix predicate | **`record_only`** ✅ already shipped | a display label — the index reads `_searchText`, not this. ⚠️ **An earlier draft wrote "no Cypher reader names it", which was false** and is the same false-negative-reader class corrected for `story_arc` and `capture_redactions`: the verdict rests on CAPABILITY, never on "unread" |
-| 13b | `Source._searchText` on an **episodic** Source (BOTH derivations) | FTS — `CALL db.idx.fulltext.queryNodes('Source', $query)` (`search_engine.py:3042`) over the index declared for the WHOLE label (`projection/__init__.py:6831`), populated by both Source writers (`sdk.py:19637`, `#3518`) | **yes** — fulltext index | **`graph`** | ⚠️ The record door's per-ROW decline (`cache_projection.py:2660-2662`, the post-`#10000` lexicon rows) is a RECORD-projection decision, not a licence to drop the graph copy: whatever the graph holds, the index reads it, and dropping it "un-indexes a restored session" (`:2650-2651`). A pre-`#10000` row's value is prose derived FROM `summary` (`:2077-2081`) — prose, but still index input |
+| 13b | `Source._searchText` on an **episodic** Source (BOTH derivations) | FTS — `CALL db.idx.fulltext.queryNodes('Source', $query)` (`search_engine.py:3053`) over the index declared for the WHOLE label (`projection/__init__.py:6831`), populated by both Source writers (`sdk.py:19637`, `#3518`) | **yes** — fulltext index | **`graph`** | ⚠️ The record door's per-ROW decline (`cache_projection.py:2660-2662`, the post-`#10000` lexicon rows) is a RECORD-projection decision, not a licence to drop the graph copy: whatever the graph holds, the index reads it, and dropping it "un-indexes a restored session" (`:2650-2651`). A pre-`#10000` row's value is prose derived FROM `summary` (`:2077-2081`) — prose, but still index input |
 | 14 | `Point.mentions` (the held-phrase JSON tail prop, `projection/entities.py:1206`) | `sdk.py:27210` (`get_point` — *"Returns dict of all properties"*, the whole-node read); `projection/__init__.py:22118-22120` — a **write-only** fold (the branch is computed in Python at `:22109` from the journal payload, so the `SET` reads no node; `none`); `sdk.py:18841` is **not** a reader of the stored shape — it reads the extractor PAYLOAD dict, `pt` bound at `:18769` | **no** | **`record_only`** ⛔ gated — the two test pins refuse the declaration (§5.1) | nothing walks, filters or indexes it, and it is **not** an embedding input (`sdk.py:15975` composes from `quote`/`content` only) — but the move is blocked |
 
 ⚠️ **Row 14 was corrected in review — twice, and the second correction is the instructive part.** It first
