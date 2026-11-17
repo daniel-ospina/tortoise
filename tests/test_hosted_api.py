@@ -14615,6 +14615,14 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # dropping that seam reds this gate instead of passing silently.
         "the team allowances could not be resolved for",
         "unreadable for dimension",
+        # #13084: a NEGATIVE configured amount is the SAME corrupt-state category
+        # as "unreadable for dimension" directly above. The artifact spells
+        # "unset" as `0` (free/anon); a negative is a hand-edited figure on OUR
+        # side that no plan a customer buys can lift — and it is refused instead
+        # of being folded into "unset", because folding it would leave the tier
+        # silently UNCAPPED. Registered as a CATEGORY entry, never by rewording
+        # the message (the #10142 rule the "pricing.json tier" row below follows).
+        "is negative for dimension",
         # #13084: the ARMING seam's own fail-closed arm — a hand-edited or
         # truncated ``pricing.json`` amount that `int()` cannot read. It is the
         # SAME category as "unreadable for dimension" two lines above (the
