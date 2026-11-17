@@ -15635,10 +15635,14 @@ class TortoiseSDK:
         # discarded the whole arm while the run still reported converged=True.
         # ⛔ #13143 review (F1, P1): the renderer UNION, never the literal name —
         # a `str` subclass whose content and `__str__` differ is written as
-        # `status` by the transport while a literal-name test misses it, so an
-        # ungraded word landed and read as CURRENT (see
-        # :func:`_rehome_rendered_status_key`, which also refuses a two-key bag
-        # this door would otherwise answer differently from `create_object`).
+        # `status` by the transport while a literal-name test misses it, so the
+        # word went UNGRADED. Which failure that produced is engine-specific and
+        # is recorded in full in :func:`_rehome_rendered_status_key`'s docstring
+        # (graph lane: the caller's key duplicates the inline CREATE map's own
+        # `status` field and the driver refuses the statement; embedded: the
+        # caller's key won last-wins and the ungraded word read as CURRENT). The
+        # helper also refuses a two-key bag this door would otherwise answer
+        # differently from `create_object`.
         explicit_status = _rehome_rendered_status_key(
             props, door="create_point", label="a Point")
         # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
