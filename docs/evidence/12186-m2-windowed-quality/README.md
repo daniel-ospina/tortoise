@@ -260,7 +260,7 @@ matters most, because that path is active exactly when retrieval is already fail
 
 ⚠️ The same gap exists in shipped code: `tortoise/cache_evictor.py::_delete_nodes` issues
 `DETACH DELETE n` and never invalidates the snapshot, so the egress executor can delete a node and
-leave it returnable for up to 60 s. Filed separately (see the PR body) rather than fixed here — this
+leave it returnable for up to 60 s. Filed separately as **#13123** rather than fixed here — this
 lane measures and does not change the eviction path.
 
 ### 7. The lexical leg's own ceiling is low on claims, independent of the window
