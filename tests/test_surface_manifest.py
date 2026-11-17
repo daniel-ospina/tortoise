@@ -366,12 +366,14 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         f"canonical-mcp-tools.md says the door wave lands the surface on {door_wave.group(2)} "
         f"advertised tools; the manifest derives {live}"
     )
-    # ⛔ BY CONTENT, NOT BY POSITION (#13052 review at 0881a403, P3): the parenthetical is a
-    # RUNNING record that has already been appended to twice, so `equations[0]` / `equations[-1]`
-    # silently retarget the moment a movement is appended — measured, an append ahead of a wrong
-    # retired total stayed green, and a legitimate append red with a message blaming the retired
-    # total. Each side is therefore found by the words that introduce it, so an append ADDS
-    # coverage instead of moving the binding off the equation it was written for.
+    # ⛔ NEITHER SIDE IS FOUND BY POSITION (#13052 review at 0881a403, then at 7a61cde, both
+    # P3). The parenthetical is a RUNNING record that has already grown twice, so an index into
+    # `equations` retargets on the next append, and a first-match regex retargets on the next
+    # insertion BEFORE the clause — both were measured as a false GREEN (a wrong retired total
+    # passing) and a false RED (a correct doc change refused). Each side is therefore anchored
+    # to the SENTENCE'S OWN FORM: the advertised side is the equation followed by
+    # `then the door wave's`, and the retired side is the equation that CLOSES the parenthetical
+    # before `) over a …`. A change to either form reds here, by design.
     advertised_eq = re.search(
         r"\((\d+(?:\s*[−+-]\s*\d+)+)\s*=\s*(\d+),\s*then the door wave's", arithmetic)
     assert advertised_eq, (
@@ -379,11 +381,16 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "equation immediately followed by `then the door wave's` — the binding below is "
         "written against that form, so a reworded sentence must update it in the same change"
     )
-    retired_eq = re.search(r"and\s+(\d+(?:\s*\+\s*\d+)+)\s*=\s*(\d+)", arithmetic)
+    retired_eq = re.search(r"and\s+((?:\d+\s*\+\s*)+\d+)\s*=\s*(\d+)\)\s*over a\s*$", arithmetic)
     assert retired_eq, (
-        "canonical-mcp-tools.md's parenthetical no longer states the retired side as "
-        "`and <terms> = <total>`; that clause is what binds the retired-forward arithmetic to "
-        "the manifest, so its absence is a failure and not a vacuous pass"
+        "canonical-mcp-tools.md's composed-surface parenthetical no longer ENDS with "
+        "`and <plus-chain> = <total>) over a …`, which is the form this pin binds the "
+        "retired-forward total to. ⛔ THE FORM IS DECLARED, not inferred: a clause in a "
+        "RUNNING record cannot be identified by position (a last match retargets on an "
+        "append, a first match on an insertion before it — both measured, #13052 review at "
+        "0881a403 and at 7a61cde), so the sentence's own closing form is the anchor and a "
+        "change to it fails CLOSED here. If the movement record grew, extend this pin in "
+        "the same change rather than reshuffling the sentence to fit it"
     )
     assert int(advertised_eq.group(2)) - int(door_wave.group(1)) == live, (
         f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
