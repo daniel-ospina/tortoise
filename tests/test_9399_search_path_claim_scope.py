@@ -375,9 +375,10 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
         "`ABOUT_EDGE_TYPES` no longer carries `aboutObject`; the alternation the "
         "claim cites as the reason a literal grep misses the ranking reads is gone"
     )
-    # …and it must be USED, not merely defined: the claim is that ranking reads
-    # the edge *through* the alternation, so a dead constant would leave the
-    # document's justification false while the assertion above stayed green.
+    # …and the constant must be CONSUMED BY the alternation, not merely defined:
+    # a dead constant would leave the document's justification false while the
+    # assertion above stayed green. What is pinned here is exactly that — the
+    # constant reaches a `"|".join(...)` — and no more (see the STATED LIMITS).
     # ⛔ THE BEHAVIOUR, NOT THE SPELLING (#13387): `8ba6de4438` (#13124) composed
     # the alternation with extra predicates — `"|".join(tuple(extra_preds) +
     # tuple(ABOUT_EDGE_TYPES))` — while still joining the constant, and a literal
@@ -392,10 +393,20 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
     # this, while every revert still does — dropping `+ tuple(ABOUT_EDGE_TYPES)`,
     # deleting the join, or composing the alternation from literals all leave no
     # `"|".join(...)` call whose argument mentions the constant.
-    # STATED LIMIT, unchanged in kind: this is a shape test on the parse, so a
-    # DIFFERENT `"|".join` that mentions `ABOUT_EDGE_TYPES` would satisfy it
-    # (the same limit the substring had); the quote grep above already refuses
-    # the constant's value going missing.
+    # STATED LIMITS — all three directions, because a shape test is only honest
+    # when it says which shapes it cannot see:
+    #   * FALSE GREEN, the same limit the substring had: a DIFFERENT
+    #     `"|".join` that mentions `ABOUT_EDGE_TYPES` satisfies it. The quote
+    #     regex above independently refuses the constant's VALUE going missing,
+    #     so a revert has to keep the value and fake the consumption.
+    #   * FALSE RED on an alias: `_t = tuple(ABOUT_EDGE_TYPES); "|".join(_t)` is
+    #     correct and would be refused — the name must appear in the call's own
+    #     arguments. Resolving local aliases was considered and declined: it is
+    #     more machinery in a guard whose failure would be loud and a one-line
+    #     fix, and a wrong resolver re-opens the false-GREEN direction.
+    #   * FALSE GREEN on a discarded result: a `preds` computed and then never
+    #     read stays green. That was equally true of the substring, and pinning
+    #     it needs dataflow, not a shape test.
     joins_the_constant = any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
