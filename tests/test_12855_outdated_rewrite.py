@@ -377,7 +377,7 @@ def test_a_second_execute_cannot_erase_a_previous_failure_marker(env):
     "0 rows ⇒ dead weight". The marker is therefore MERGED, and cleared only when
     the ids are discharged by an actual rewrite.
     """
-    sdk, events = env
+    sdk, _events = env
     oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 
@@ -774,22 +774,29 @@ def test_the_legacy_outdated_FLAG_is_reported_and_not_rewritten(env):
     every read surface performs.
 
     ⛔ Both halves are measured: the flag is REPORTED, and an `--execute` run
-    leaves it exactly as it found it (a preview-only assertion would hold for
-    any preview ever taken and measure nothing about the write).
+    leaves it exactly as it found it. ⚠️ The row carries a legacy STATUS WORD as
+    well as the flag, on purpose: with only the flag the execute population is
+    empty, the write loop never runs, and the surviving-flag assertion would hold
+    for ANY implementation — including one that cleared the flag on every row it
+    rewrote (review finding, 2026-11-17).
     """
     sdk, _events = env
     oid = sdk.create_object("flagged", objectKind="test:widget")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) SET n.outdated = true", params={"id": oid})
+    _mint_legacy(sdk, oid, "outdated")
 
     rep = tool.run(sdk, execute=False)
 
     assert rep.flag_count == 1, rep.flag_count
     assert [r["id"] for r in rep.flag_sample] == [oid]
-    assert rep.by_word["outdated"] == 0, (
-        "the flag is not a status word — it must not enter the status population")
+    assert rep.by_word["outdated"] == 1, (
+        "the row's STATUS word is the reason it is in the write population; the "
+        "flag is a separate axis and is asserted through flag_count above")
 
-    tool.run(sdk, execute=True)
+    executed = tool.run(sdk, execute=True)
+    assert executed.rewritten == [oid], (
+        f"the write loop must actually have touched this row: {executed.failures}")
 
     flag = sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) RETURN n.outdated",
