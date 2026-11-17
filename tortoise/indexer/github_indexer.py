@@ -236,7 +236,7 @@ def _row_is_frozen(status, outdated) -> bool:
     (``live.TERMINAL_EXCLUDED_STATUSES``) is deliberately WIDER than the fold's
     ``OBJECT_TERMINAL_STATUSES``. ``_fold_object_stage`` does not fetch
     ``o.outdated`` and its set has no ``outdated`` member
-    (``entities.py:6196-6199``, ``commit_ops.py:88``; ``commit_ops.py:82-83``
+    (``entities.py:6219-6224``, ``commit_ops.py:88``; ``commit_ops.py:82-83``
     says so from the other side: the render-time probe *"adds `outdated` …
     which this fold does not"*).
 
@@ -277,7 +277,7 @@ def _status_is_latched(status) -> bool:
     """True when ``status`` is a word ``_fold_object_stage`` LATCHES on.
 
     ``commit_ops.OBJECT_TERMINAL_STATUSES`` — the set the fold refuses on, read
-    BEFORE any position test (``entities.py:6219``) — is NARROWER than the
+    BEFORE any position test (``entities.py:6228``) — is NARROWER than the
     reader's vocabulary: it has no ``outdated`` member. That single missing word
     is the whole difference, and it is not cosmetic, because the two folds that
     consume these transitions are dispatched under DIFFERENT rules
@@ -288,7 +288,7 @@ def _status_is_latched(status) -> bool:
       ``live.TERMINAL_EXCLUDED_STATUSES``/the ``outdated`` flag conjunct, so such
       a row has NO live holder and the fold is never dispatched. Nothing can
       move it, so any state this read answers about it re-fires forever.
-    * the REOPEN fold takes ``_reopen_targets_closed`` (``entities.py:6149-6158``),
+    * the REOPEN fold takes ``_reopen_targets_closed`` (``entities.py:6159-6162``),
       which bypasses the live-holder requirement when there is exactly one
       registered incarnation — so for that direction the fold IS dispatched, and
       it APPLIES, because the latch is this narrower set.
@@ -1288,7 +1288,8 @@ class GitHubIndexer:
         # projection refuses to move it.
         # ⛔ The two folds do NOT refuse alike, so the WIDER terms are handled below,
         # after the position is known — see `_status_is_latched`'s docstring and the
-        # `wide` arm: answering `None` for `outdated` here (round 4, finding 2) was a
+        # the wide-term arm below: answering `None` for `outdated` here (round 4,
+        # finding 2) was a
         # SILENT FALSE NEGATIVE — it dropped a reopen the projection WOULD apply.
         if _status_is_latched(status):
             return None
@@ -1385,16 +1386,23 @@ class GitHubIndexer:
         # that arm declines, so the order below is load-bearing.
         if position_ended:
             return "closed"
-        # ⚠️ Only when there IS a position to have answered from. A legacy pre-S0
-        # row (`status='completed'`, no pipeline props) that also carries
-        # `outdated` would otherwise stop here and drop the reopen the fold DOES
-        # apply (`_reopen_targets_closed`, `entities.py:6149-6153`, needs only one
-        # registered incarnation and no live holder). With no position this read
-        # falls through to `_STATUS_TO_STATE` instead, which is where a legacy
-        # row's answer has always lived.
+        # ⚠️ Only the STAGE position counts. A legacy pre-S0 row (`status='completed'`,
+        # no pipeline props) that also carries `outdated` must not stop here, or it
+        # drops the reopen the fold DOES apply (`_reopen_targets_closed`,
+        # `entities.py:6159-6162`: one registered incarnation, no live holder). With no
+        # stage position this read falls through to `_STATUS_TO_STATE`, which is where
+        # a legacy row's answer has always lived.
+        # ⛔ The test is `stage_id`/`slot`, NOT `is_closed` (round-6 review, P2). By this
+        # point `is_position_ended` has already answered for any TRUTHY marker, so
+        # `is_closed` here is necessarily falsy — and a stored `False` carries the SAME
+        # position answer as an absent value, so an `is_closed is not None` conjunct
+        # distinguishes nothing the position already decided. Its only effect was to
+        # convert the word answer `"closed"` into `None`: `status='completed'` +
+        # `outdated=true` + `isClosed=false` + no stage props read `"closed"` on `main`
+        # and CONVERGED (the reopen fold applies), and read `None` here — dropping that
+        # reopen for ever. A silent false negative, the direction that loses data.
         if _row_is_frozen(status, outdated):
-            if (stage_id is not None or slot is not None
-                    or is_closed is not None):
+            if stage_id is not None or slot is not None:
                 return None
             # ⛔ A POSITION-LESS legacy row is the same asymmetry in one fewer
             # dimension: the REOPEN fold can still be dispatched and applies, the
@@ -1403,7 +1411,7 @@ class GitHubIndexer:
             # reconcile — and `None` where it says "open", because minting a close
             # against a row with no live holder would re-fire for ever
             # (`resolve_fold_name` → `live._terminal_excluded`, which carries the
-            # `outdated` conjunct; `entities.py:6157-6160`).
+            # `outdated` conjunct; `resolve_fold_name` at `entities.py:6166-6168`).
             # ⚠️ Falling through unconditionally here instead put the loop back:
             # `status='in_progress'` + `outdated=true`, GitHub closed, minted
             # `-closed` on every poll.

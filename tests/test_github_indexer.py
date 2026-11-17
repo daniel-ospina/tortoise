@@ -516,7 +516,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     `entities.py:5121-5123`), so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
-    (`entities.py:6219-6220`).
+    (`entities.py:6228`).
 
     A LATCHED row now answers `None` — this module's "no opinion" — so no
     transition is minted in EITHER direction, the only stable answer while the
@@ -588,7 +588,7 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
     """#13289 round-4 finding 2: the two folds refuse ASYMMETRICALLY on `outdated`.
 
     `_fold_object_stage`'s latch is `commit_ops.OBJECT_TERMINAL_STATUSES`
-    (`projection/entities.py:6219`), which has no `outdated` member — but the two
+    (`projection/entities.py:6228`), which has no `outdated` member — but the two
     folds that consume these transitions are dispatched under DIFFERENT rules, so
     neither single answer serves both directions:
 
@@ -597,7 +597,7 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
       (`live.py` `TERMINAL_EXCLUDED_STATUSES` + the flag conjunct), so such a row has
       NO live holder and the close fold is NEVER dispatched. Nothing can move it, so
       any state this read answers about it re-fires once per poll, without bound;
-    * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6149-6158`), which
+    * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6159-6162`), which
       bypasses the live-holder requirement for a single registered incarnation — so it
       IS dispatched, and it APPLIES, because the latch is that narrower set.
 
@@ -708,6 +708,14 @@ def test_a_POSITIONLESS_wide_term_row_answers_one_direction_only(sdk):
         "a row whose word is not in _STATUS_TO_STATE + the legacy flag": (
             "SET o.status='outdated', o.outdated=true, o.pipelineStageId=null, "
             "o.pipelineSlot=null, o.isClosed=null", "closed", open_issue, [1, 0, 0]),
+        # ── round-7 review P2: a STORED FALSY `isClosed` is NOT a position. By this
+        # point `is_position_ended` has answered for any TRUTHY marker, so `False`
+        # and `null` carry the same position answer — the `is_closed is not None`
+        # conjunct treated them differently, turned this row's `"closed"` into
+        # `None`, and dropped the reopen the fold applies. ──
+        "a legacy pre-S0 CLOSED row + the flag + a stored FALSY isClosed": (
+            "SET o.status='completed', o.outdated=true, o.pipelineStageId=null, "
+            "o.pipelineSlot=null, o.isClosed=false", "closed", open_issue, [1, 0, 0]),
         # ── the word says OPEN: a close could never be dispatched, so withhold ──
         "a legacy OPEN row + the legacy flag": (
             "SET o.status='in_progress', o.outdated=true, o.pipelineStageId=null, "
