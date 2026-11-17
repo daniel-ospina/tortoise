@@ -899,11 +899,13 @@ def test_a_readable_handle_is_verified_by_the_server_and_kept():
     FALSIFIER: one per mutant, and they red DIFFERENT assertions — which matters,
     because the two halves are the two ways this pin can be defeated:
 
-    * drop `_verify_pending_input` (or return True from it without asking) and the
-      handle IS lent, so the first assertion stays green and the `commands` one
-      reds: `assert [] == ['cursor()']`.
-    * discard a readable handle instead — the shape the paragraph above describes
-      — and the FIRST assertion reds (the healthy handle is closed, not lent).
+    * make `_verify_pending_input` answer True without asking (the verification is
+      a no-op) and the handle IS lent, so the first assertion stays green and the
+      `commands` one reds: `assert [] == ['cursor()']`.
+    * discard a readable handle instead — drop the `and not
+      _verify_pending_input(...)` conjunct, which is the shape the paragraph above
+      describes — and the FIRST assertion reds (the healthy handle is closed, not
+      lent).
     """
     live = SocketFakeStatusConnection(IDLE)
     live.pending_input(b"NOTIFY record, 'a peer spoke'")
