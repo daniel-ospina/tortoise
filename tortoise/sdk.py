@@ -10468,10 +10468,10 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     raise ValueError(
         f"{door} refused a non-string status for {_refusal_repr(target)}: "
         f"{_refusal_repr(word)} is {_refusal_type_name(word)}, not a `str`. ONTOLOGY §4.3 declares "
-        f"`status` as a STRING, and `#11824` S0 CLOSED the word set — one "
-        f"four-word set for every knowledge kind, with a pack's own words on "
-        f"the STAGE axis — so an arbitrary STRING is refused by name, not "
-        f"accepted. A non-string is undeclared under ANY kind, "
+        f"`status` as a STRING. `#11824` S0 CLOSED the word set — one "
+        f"four-word set per kind, pack words on the STAGE axis — WHICH THIS "
+        f"DOOR DOES NOT ENFORCE: `add_object` still stores an arbitrary STRING "
+        f"(the known bypass), so a non-string is undeclared under ANY kind, "
         f"and it cannot be stored: `:Object.status` is what the lifecycle "
         f"guard hashes to decide whether a row is terminal, so a non-scalar "
         f"stored here makes every later lifecycle write on this row fail "
@@ -54867,7 +54867,7 @@ class TortoiseSDK:
             # `str` word, pinned at `tests/test_status_projection.py:2262`
             # (`test_the_CREATE_guard_is_a_LANDING_test_not_a_presence_test`: the MERGE
             # arm leaves the row byte-identical; the id-less ADOPT arm gains the id
-            # stamp AND the `canonical_name` the create's own props set. The helper's
+            # stamp AND the `canonical_name` the create's own props set). The helper's
             # `lands` scoping still governs `EventAPI.add_object` (`api.py:2927`).
             # Its two-key AMBIGUITY raise never fires either: at `add_object` that
             # answer comes from `_refuse_non_str_keys` (`api.py:381`), and the
