@@ -4394,7 +4394,25 @@ def collect_class_slices(port, window: ClassWindow, *,
 # so both were reachable from the MCP surface (``tortoise_create_entity`` /
 # ``tortoise_update_entity``). Dropping the member would flip such a successor
 # from recall-excluded (NAME-ONLY annotation) to a verified link. (That write
-# path is closed by #11824 S0; the STORED rows it produced are not.)
+# path is closed by #11824 S0; the STORED rows it produced are not — the door
+# maps ``archived``/``retracted`` to ``deprecated`` but REFUSES ``outdated``
+# outright, so nothing is rewritten at the door either.)
+#
+# RETIRING THE MEMBER IS SEQUENCED, NOT FORBIDDEN — do not read "load-bearing"
+# as "permanent". The owner's decision on #12855 (2026-11-16) is *rewrite the
+# stored rows once*: every :Object whose ``status`` is ``outdated`` (and any
+# stored ``retracted``) is rewritten to ``deprecated`` THROUGH THE SDK's
+# journaled update path (``tools/rewrite_object_status.py`` — preview by
+# default, ``--execute`` to write, idempotent, and it refuses a target with no
+# journal because a live-only write is reverted by the next ``rebuild_all``).
+# That tool is what makes the member dead weight on a graph. Of the two
+# preconditions for dropping it, ONE IS NOW MET: #11824 S0 landed the write
+# door (``tortoise/lifecycle_vocabulary.py``). The other is not — the rewrite
+# has NOT been executed against production, so the population that still needs
+# the member is UNMEASURED there, and dropping it first would flip any
+# surviving row to the verified link this comment documents. The tool's preview
+# IS that measurement; run it first. Once it reports 0 rows on the target, the
+# member is dropped and the pin below moves with it, in the same change.
 #
 # The divergence is FROZEN by tests/test_assembly_pure.py, which asserts this
 # set equal to ``OBJECT_TERMINAL_STATUSES | {"outdated"}`` — a silent drop or
