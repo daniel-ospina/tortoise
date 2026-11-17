@@ -86,11 +86,15 @@ _SUPPORTED_SCHEMES = ("docker", "redis", "rediss")
 def _fresh_warning_latches():
     """Clear the process-global latches around EVERY test here.
 
-    ``_VECTOR_INDEX_DROP_FAILED_WARNED`` (#13320) and the #4997/#11087 registers
-    are keyed per ``(endpoint, graph)`` and never expire, so without this a second
-    in-process run of the survivor pin would find its bucket already latched and
-    red spuriously — a pin that only passes on the first run is not a pin. This is
-    the same hook ``tests/test_4997_vector_index_parity.py`` uses (#13330 review).
+    Every register here never expires, so without this a second in-process run of
+    the survivor pin would find its bucket already latched and red spuriously — a
+    pin that only passes on the first run is not a pin. The KEY SHAPES DIFFER and
+    are stated rather than generalised (#13330 review P3): the #4997/#11087
+    registers are keyed per ``(endpoint, graph)``, and
+    ``_VECTOR_INDEX_DROP_FAILED_WARNED`` (#13320) per
+    ``(endpoint, graph, KIND)`` — one bucket per kind, because a transient read
+    failure must never spend the permanent survivor verdict's budget. This is the
+    same hook ``tests/test_4997_vector_index_parity.py`` uses (#13330 review).
     """
     _reset_vector_gap_warnings()
     yield
@@ -459,6 +463,17 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
     assert not any("dropped the in-graph" in r.getMessage() for r in caplog.records), (
         "the sweep claimed a drop that did not happen — that is the false PASS "
         "#13320 was filed on")
+    # ⛔ THE MEASURED HALF OF THE COST CLAIM (#13330 review P3). `_cost_clause` has
+    # two directions: the survivor arm KEEPS "the store keeps paying … so arming
+    # did NOT take effect" (measured here), and the unconfirmed arms drop it
+    # (pinned by `test_a_row_that_did_not_parse_withholds_the_confirmed_absence`).
+    # Without this line the \"always the non-asserting clause\" mutation reddens
+    # nothing, so the operator's one measured statement about a survivor could be
+    # deleted with the suite green.
+    assert ("keeps paying for the in-graph index AND the pgvector copy, so "
+            "arming did NOT take effect") in joined, (
+        "the SURVIVOR line must keep the measured cost/arming claim — it is the "
+        f"one arm where that statement was measured: {joined!r}")
 
 
 def _retirement_warnings(caplog) -> list[str]:
