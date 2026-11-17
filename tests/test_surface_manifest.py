@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import copy
 import difflib
+import itertools
 import pathlib
 import re
 import subprocess
@@ -30,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "config" / "surface-manifest.yml"
 RENDERED = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 CANONICAL = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
+SURFACE_ORDER = ROOT / "config" / "surface-order.yml"
 VISION = ROOT / "docs" / "product" / "vision-mcp-sdk-surface.md"
 
 #: A well-formed `--commit` for the `cut` tests: 40 lowercase hex, the ONE shape the write
@@ -302,15 +304,252 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         f"carries {retired}"
     )
 
-    # 2. "took the live surface A → B" — B is a claim about this head.
-    live_endpoints = [
-        int(b) for b in re.findall(r"took the live surface \d+\s*→\s*(\d+)", canonical)
-    ]
-    assert live_endpoints, "the canonical doc stopped naming the surface this container lands on"
-    assert live_endpoints == [live] * len(live_endpoints), (
-        f"canonical-mcp-tools.md ends the container's movement on {live_endpoints[0]} advertised "
-        f"tools; the manifest derives {live}"
+    # 1b. The SERVED population the clause above sits on, and the table it may NOT credit.
+    # The amendment had said the served figure "is what `config/surface-order.yml` totals", which
+    # is false — that table counts the ADVERTISED rows only. The sentence was corrected, but a
+    # correction is prose and prose drifts, so both halves are bound here: the split's arithmetic,
+    # and the number the sentence says that table sums to (#13052 review F5).
+    served_rows = re.findall(
+        r"SERVED population of\s+\*\*(\d+)\*\* rows \((\d+) live \+ (\d+) shims\)", canonical
     )
+    assert served_rows, "the canonical doc's #4282 amendment stopped stating the served population"
+    for served_n, live_n, retired_n in served_rows:
+        assert (int(served_n), int(live_n), int(retired_n)) == (live + retired, live, retired), (
+            f"canonical-mcp-tools.md states a SERVED population of {served_n} ({live_n} live + "
+            f"{retired_n} shims); the manifest derives {live + retired} ({live} live + {retired} "
+            f"retired)"
+        )
+    per_keyword = yaml.safe_load(SURFACE_ORDER.read_text(encoding="utf-8"))["baseline_counts"]
+    assert sum(per_keyword.values()) == live, (
+        f"config/surface-order.yml's `baseline_counts` total {sum(per_keyword.values())} across "
+        f"its ten keywords, but that table is the one the amendment now measures against "
+        f"`counts.tools` = {live} — a keyword table that totals anything else makes the "
+        f"comparison it states untrue"
+    )
+    cited = re.findall(r"its `baseline_counts`\s+sum to the \*\*[a-z ]*(\d+)\*\*", canonical)
+    assert cited, (
+        "canonical-mcp-tools.md no longer states what `config/surface-order.yml`'s "
+        "`baseline_counts` sum to. That sentence exists to stop the served 108 being credited to "
+        "that table (#13052 review F5); delete the attribution and the false claim can return "
+        "unchecked, so its absence is a failure and not a vacuous pass"
+    )
+    assert [int(n) for n in cited] == [live] * len(cited), (
+        f"canonical-mcp-tools.md says `baseline_counts` sum to {cited}; the table totals "
+        f"{sum(per_keyword.values())} and the manifest derives counts.tools = {live}"
+    )
+
+    # 1c. The SAME movement is also stated as ARITHMETIC, in the parenthetical that opens "(68 −
+    # 9 + 5 − 14 + 6 − 7 + 6 = 55, then the door wave's −7 … = 48, and 23 + 9 + 14 + 7 + 7 = 60)".
+    # Nothing parsed that form (#13052 review at 7752959, finding 2's second half): a movement
+    # stated as arithmetic is a claim with no machine behind it, and the earlier pin only read the
+    # "… → …" form, so an error here stayed green. Every equation is evaluated against its own
+    # stated result, and the two results that ARE claims about this head are bound to the manifest.
+    # ⛔ BOTH SLICE BOUNDS ARE NAMED ASSERTIONS, NOT `str.index` (#13052 review at
+    # `71afedb`, P2). The start used to be a hard-coded `"(68 − 9 + 5"`, so a purely
+    # editorial `−`→`-` reformat — a spelling the evaluator below already tolerates
+    # (`lhs.replace("−", "-")`) — died as `ValueError: substring not found`, with no
+    # message and no pointer to the em-dash. Each bound now accepts the forms the rest of
+    # the block accepts and, when neither is present, fails with a sentence naming the
+    # clause that went missing rather than a traceback.
+    composed = re.search(r"\(\s*68\s*[−-]\s*9\s*\+\s*5", canonical)
+    assert composed, (
+        "canonical-mcp-tools.md no longer opens its composed-surface parenthetical with "
+        "`(68 − 9 + 5 …`. That parenthetical is the ONE place the advertised and retired "
+        "movements are recorded as arithmetic, and every binding below is written against "
+        "it — so a reworded sentence must update this pin in the same change"
+    )
+    paren_start = composed.start()
+    served_caption = re.search(r"SERVED population", canonical[paren_start:])
+    assert served_caption, (
+        "canonical-mcp-tools.md's composed-surface parenthetical is no longer followed by "
+        "the `SERVED population` clause that CLOSES it; without that bound the slice below "
+        "would read to the end of the document and its equations would no longer be this "
+        "parenthetical's"
+    )
+    arithmetic = canonical[paren_start : paren_start + served_caption.start()]
+    equations = re.findall(r"(\d+(?:\s*[−+-]\s*\d+)+)\s*=\s*(\d+)", arithmetic)
+    assert len(equations) >= 2, (
+        f"canonical-mcp-tools.md's composed-surface parenthetical states {len(equations)} "
+        f"evaluable equation(s); it must state the advertised and the retired totals"
+    )
+    for lhs, rhs in equations:
+        computed = eval(lhs.replace("−", "-"), {"__builtins__": {}}, {})  # digits and ± only
+        assert computed == int(rhs), (
+            f"canonical-mcp-tools.md states `{lhs} = {rhs}`, which evaluates to {computed} — "
+            f"the composed arithmetic does not add up"
+        )
+    door_wave = re.search(r"the door wave's\s*−(\d+) with no container row arriving\s*=\s*(\d+)", arithmetic)
+    assert door_wave, (
+        "canonical-mcp-tools.md's parenthetical stopped stating the door wave's subtraction and "
+        "its result; that is half the movement this container's own arithmetic records"
+    )
+    assert int(door_wave.group(2)) == live, (
+        f"canonical-mcp-tools.md says the door wave lands the surface on {door_wave.group(2)} "
+        f"advertised tools; the manifest derives {live}"
+    )
+    # ⛔ NEITHER SIDE IS FOUND BY POSITION (#13052 review at 0881a403, then at 7a61cde, both
+    # P3). The parenthetical is a RUNNING record that has already grown twice, so an index into
+    # `equations` retargets on the next append, and a first-match regex retargets on the next
+    # insertion BEFORE the clause — both were measured as a false GREEN (a wrong retired total
+    # passing) and a false RED (a correct doc change refused). Each side is therefore anchored
+    # to the SENTENCE'S OWN FORM: the advertised side is the equation followed by
+    # `then the door wave's`, and the retired side is the equation that CLOSES the parenthetical
+    # before `) over a …`. A change to either form reds here, by design.
+    advertised_eq = re.search(
+        r"\((\d+(?:\s*[−+-]\s*\d+)+)\s*=\s*(\d+),\s*then the door wave's", arithmetic)
+    assert advertised_eq, (
+        "canonical-mcp-tools.md's parenthetical no longer states the advertised side as an "
+        "equation immediately followed by `then the door wave's` — the binding below is "
+        "written against that form, so a reworded sentence must update it in the same change"
+    )
+    retired_eq = re.search(r"and\s+((?:\d+\s*\+\s*)+\d+)\s*=\s*(\d+)\)\s*over a\s*$", arithmetic)
+    assert retired_eq, (
+        "canonical-mcp-tools.md's composed-surface parenthetical no longer ENDS with "
+        "`and <plus-chain> = <total>) over a …`, which is the form this pin binds the "
+        "retired-forward total to. ⛔ THE FORM IS DECLARED, not inferred: a clause in a "
+        "RUNNING record cannot be identified by position (a last match retargets on an "
+        "append, a first match on an insertion before it — both measured, #13052 review at "
+        "0881a403 and at 7a61cde), so the sentence's own closing form is the anchor. WHAT "
+        "THAT BUYS, MEASURED — an append whose closing plus-chain totals something OTHER "
+        "than the retired count reds at the total comparison below, an append that totals "
+        "the retired count is accepted (the binding moves to it, and the total, which is "
+        "the only claim this fragment makes, stays true), and a MINUS-form append cannot "
+        "match a plus-chain at all, so it reds here. If the record grows, extend this pin "
+        "in the same change rather than reshaping the sentence to fit it"
+    )
+    assert int(advertised_eq.group(2)) - int(door_wave.group(1)) == live, (
+        f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
+        f"{door_wave.group(1)} = {int(advertised_eq.group(2)) - int(door_wave.group(1))}, "
+        f"not {live}"
+    )
+    assert int(retired_eq.group(2)) == retired, (
+        f"canonical-mcp-tools.md's retired-forward arithmetic (`{retired_eq.group(1)}`) states "
+        f"{retired_eq.group(2)}; the manifest carries {retired}"
+    )
+
+    # 1d. The SAME count, stated a SECOND time in present tense a few paragraphs earlier —
+    # "The population is **60** now … and it is still 60 of 60 verified" (#13052 review at
+    # 2c3c9acc, P3). Nothing read it: mutating all three numbers to 61 stayed green while every
+    # other pin still agreed with itself, which is this wave's own defect class — a present-tense
+    # claim with no machine behind it.
+    # ⛔ ONE PATTERN, TWO PASSES (#13052 review at ff2602f24, 07ba02cd, 32c041df — P3, P3, P2/P3).
+    # Every round of this pin was defeated by one spelling it did not read, and twice the two
+    # matchers DRIFTED apart: the number pass tolerated `population is now **N**` while the triple
+    # pass did not, and both demanded a fence the declared limit never mentioned — so the reach the
+    # comment claimed was wider than the reach the code had. The pattern is therefore compiled ONCE
+    # and BOTH passes read it, which is the only version of this pin that cannot reintroduce the
+    # drift — so the pin now reads ONE NORMALIZED VIEW, not a regex race between spellings.
+    # ⛔ NORMALIZE FIRST, MATCH SECOND (#13052 review at 3ebd3cb, then 2e1bfc93, P3 each time):
+    # six rounds were each defeated by an emphasis/wrapping/case spelling the pattern did not
+    # carry (`*N*`, `_N_`, `__N__`, `***N***`, `**N** of **N**`, a triple wrapped onto the next
+    # line, `Verified` capitalised). Those are not separate forms to enumerate — they are markup,
+    # so every paragraph is FLATTENED before anything is read: emphasis/backtick characters are
+    # stripped and all whitespace (including hard wraps) collapsed to single spaces. That single
+    # step subsumes every spelling above, so this pin can no longer trail the next one.
+    # WHAT THE PIN READS, EXACTLY: within a paragraph, EVERY statement of the form
+    # `<subject> population is [any single word] <number>` is checked against the count its
+    # SUBJECT names — `retired`/unqualified -> the retired rows (what this pin is here for),
+    # `served` -> live + retired, `advertised`/`live`/`live surface` -> counts.tools, `sdk` ->
+    # counts.sdk_public_methods — and every `N of N verified` in the CLAUSE that contains that
+    # number must agree with it. Two boundaries are written as classes, not as spellings (#13052
+    # review at 4d9c8c70 and 71afedb3, P3 each): the CLAUSE is cut at any sentence terminator
+    # FOLLOWED BY closing quotes/brackets if present (`"measurement."` and `measurement.)` end a
+    # sentence just as `measurement.` does), and the SUBJECT is read and COMPARED, not merely
+    # skipped — a skipped statement is an unchecked number, which is a false PASS on a figure this
+    # same test derives two blocks above.
+    # OUT OF REACH, by construction and disclosed here (#13052 review at 71afedb3, 8b7481e2 and
+    # cc273bc3): a paraphrase that never says `population is`; a figure stated only in a FOLLOWING
+    # sentence; a reworded sentence whose new wording drops the number from that clause; a statement
+    # with TWO OR MORE words between `is` and the number (`The population is currently at 61.` —
+    # the quantifier below tolerates exactly one, so that sentence is skipped WHOLE, which is the
+    # unchecked-number class this block exists to name); and a statement about a DIFFERENT
+    # population whose subject word is not one of `served`/`advertised`/`live`/`live surface`/`sdk`/
+    # `retired` — that one is read as the RETIRED count, so a correct figure for it reds and a wrong
+    # one can pass. The durable closure for any of those is to stop restating the count in free
+    # prose — not to widen this matcher again; a reworded statement must update this pin in the same
+    # change.
+    clause_break = re.compile(r"[.!?;:][\"')\]]*\s|\s\u2014\s")
+    #: subject word -> the count the manifest derives for THAT population. ⛔ LONGEST FORM FIRST and
+    #: both spellings listed: `"the live surface".endswith("live")` is FALSE (the window ends in
+    #: `surface`), so the two-word form needs its own entry — measured, without it a correct
+    #: `The live surface population is 48.` REDS as a retired claim and a wrong `… is 60.` PASSES
+    #: (#13052 review at 8b7481e2, P2). A claim in this comment that `endswith` subsumes the
+    #: two-word form is exactly the kind of unmeasured sentence this whole pin exists to stop.
+    population_subjects = (
+        ("live surface", "live surface", live),
+        ("served", "served", live + retired),
+        ("advertised", "advertised", live),
+        ("live", "live", live),
+        ("sdk", "sdk", _manifest()["counts"]["sdk_public_methods"]),
+    )
+    stated_now = []
+    for paragraph in canonical.split("\n\n"):
+        flat = re.sub(r"\s+", " ", re.sub(r"[*`_]", "", paragraph))
+        breaks = [m.end() for m in clause_break.finditer(flat)]
+        for statement in re.finditer(r"population is (?:\w+ )?(\d+)", flat, re.I):
+            stated = int(statement.group(1))
+            subject = flat[max(0, statement.start() - 40): statement.start()].lower().rstrip()
+            named = next(((suffix, word, value) for suffix, word, value in population_subjects
+                          if subject.endswith(suffix)), None)
+            if named is None:
+                expected, word = retired, "retired"
+                stated_now.append(stated)
+            else:
+                _suffix, word, expected = named
+            assert stated == expected, (
+                f"canonical-mcp-tools.md says the {word} population is {stated}; the manifest "
+                f"derives {expected} for it ({retired} retired rows, {live} advertised tools)"
+            )
+            head = max([b for b in breaks if b <= statement.start()], default=0)
+            tail = min([b for b in breaks if b >= statement.end()], default=len(flat))
+            for of_verified, verified in re.findall(r"(\d+) of (\d+) verified", flat[head:tail], re.I):
+                assert (int(of_verified), int(verified)) == (stated, stated), (
+                    f"canonical-mcp-tools.md's clause around `{statement.group(0)!r}` says the "
+                    f"{word} population is {stated} and then {of_verified} of {verified} "
+                    f"verified; the two halves of that sentence disagree")
+    assert stated_now, (
+        "canonical-mcp-tools.md no longer states the retired population in present tense at "
+        "all (`population is [now] <N>`, any markup) — the amendment's SECOND statement of "
+        "that count. Its absence is a failure and not a vacuous pass: delete the sentence and "
+        "the surviving clause is the only statement left to check"
+    )
+    assert stated_now == [retired] * len(stated_now), (
+        f"canonical-mcp-tools.md states the retired population as {stated_now} across "
+        f"{len(stated_now)} present-tense statement(s), and the manifest's retired rows number "
+        f"{retired} — every statement of the count has to agree with the manifest, not just "
+        "the one this pin was written against"
+    )
+    # 2. The live surface's MOVEMENTS — they COMPOSE, so the rule is the chain.
+    # The doc records the whole history in one blockquote and states each movement with a
+    # different verb: `moved the live surface 72 → 68`, then `took it 68 → 60`, `took it
+    # 60 → 59`, `took the live surface 59 → 55`, `took the live surface 55 → 48`.
+    # ⛔ Both verbs are matched on purpose (#13052 review F4): matching ONLY `took the live
+    # surface` read the last two movements and left the earlier three unchecked, while this
+    # comment claimed the composition was "stated, not implied". A pin that verifies 2 of 5
+    # movements is not the composition — it is the tail of it.
+    # Each endpoint except the LAST is an intermediate state, not a claim about this head,
+    # so every move's endpoint must be the next move's start, and only the LAST endpoint
+    # must equal this head's count.
+    moves = [
+        (int(a), int(b))
+        for a, b in re.findall(r"(?:live surface|took it)\s+(\d+)\s*→\s*(\d+)", canonical)
+    ]
+    assert moves, "the canonical doc stopped naming the surface this container lands on"
+    # Evidence floor: the five movements ARE the record of how 72 became 48, and deleting
+    # one loses evidence rather than moving a number — so a silent drop reds here instead
+    # of shortening the chain above invisibly. `>=` because a later wave ADDS a movement.
+    assert len(moves) >= 5, (
+        f"canonical-mcp-tools.md states {len(moves)} movements of the live surface; the "
+        "history this container lands on is five (72 → 68 → 60 → 59 → 55 → 48) — a "
+        "movement was DELETED rather than superseded")
+    for (start_a, end_a), (start_b, _end_b) in itertools.pairwise(moves):
+        assert end_a == start_b, (
+            "canonical-mcp-tools.md records two movements that do NOT compose: "
+            f"{start_a} → {end_a} then {start_b} → … — the later wave measured on a base the "
+            "earlier one did not produce")
+    assert moves[-1][1] == live, (
+        f"canonical-mcp-tools.md ends the container's movement on {moves[-1][1]} advertised "
+        f"tools; the manifest derives {live}")
 
     # 3. The vision doc's present-tense restatement of the same two numbers.
     served_claims = re.findall(r"the MCP server serves \*\*(\d+) tools\*\* \((\d+) of them advertised", vision)
@@ -2316,7 +2555,16 @@ def test_response_fields_block_is_present_and_anchored():
         "the response_fields block is the single source of truth for "
         "off-by-default response additions and must not be empty or missing"
     )
+    # A retired-FORWARD name is STILL SERVED (#3883), so a record anchored to one
+    # describes a real response — and the seven doors #11609 lane E retired each carry
+    # true rows here. Reading only the advertised rows made the anchor demand the
+    # opposite: delete a record of keys the shim still emits. Same rule as
+    # `surface_manifest._check_manifest` (#11609 lane E).
     row_names = {str(r["name"]) for r in doc["rows"] if isinstance(r, dict) and "name" in r}
+    row_names |= {
+        str(r["name"]) for r in (doc.get("retired") or [])
+        if isinstance(r, dict) and r.get("name")
+    }
     for rf in block:
         assert rf.get("response") and rf.get("field"), f"malformed entry: {rf!r}"
         assert rf["response"] in row_names or f"sdk:{rf['response']}" in row_names, (
@@ -4637,8 +4885,9 @@ def test_the_render_reports_only_what_it_can_observe_when_no_row_is_measured(
         f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {total}, while we\n"
         "pay context for all of them on every turn. Every comparable we studied pins a smaller set,\n"
         "and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and\n"
-        "`tortoise_get_entity` already absorbed five of the six fetch-by-id getters — the sixth,\n"
-        "`tortoise_get_session`, is proposed for merge. Deferring the rest keeps all " + f"{total} callable."
+        "`tortoise_get_entity` already absorbed all six fetch-by-id getters — the last,\n"
+        "`tortoise_get_session`, answers as `tortoise_get_entity(id, type=\"session\")` and is retired FORWARD in\n"
+        "this change rather than dropped. Deferring the rest keeps all " + f"{total} callable."
     )
     assert _paragraph(text) == expected, (
         "the no-measurement paragraph changed — it may report only the observation, name no "
@@ -4867,11 +5116,16 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #11609 lane C composes with lane B on this tree: 60 -> 59 (six SOURCES/MINE/SESSION
     # containers in, seven advertised members retired into them; the 68 the branch started
     # from is lane B's pre-wave number, so the merged arithmetic is 68 + 6 + 6 - 7 - 14).
-    # #11609 family A's READ/QUERY containers (#12951, merged after this pin was last cut)
-    # then retired nine advertised doors into six containers: 59 - 9 + 5 = 55. The pin had
-    # gone stale on `main` by exactly that wave — this corrects it to the derived count
-    # rather than to any prose, and `surface-target-check.py` reads the same 55.
-    assert live["mcp"] == manifest["counts"]["tools"] == 55
+    # #11609 Phase 2 READ/QUERY (MERGED as #12951): 59 -> 55 — nine READ doors retired into
+    # five arriving containers (the sixth, `graph_overview`, was already live via #10914),
+    # so 59 - 9 + 5 = 55. The retired names keep their #3883 shims, which is why the SERVED
+    # population rises to 108 while the ADVERTISED one falls.
+    # #11609 DOOR RETIREMENT (this PR, lane E): 55 -> 48 — seven doors retired FORWARD into
+    # containers the Phase 2 waves had ALREADY advertised, so the live delta is exactly −7
+    # and there is no `+ n` term. No container row arrives here, the SDK pin does not move
+    # (94, inherited from `main`), and no row is archived: `archive/mcp-tools/` is for doors
+    # with NO destination.
+    assert live["mcp"] == manifest["counts"]["tools"] == 48
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

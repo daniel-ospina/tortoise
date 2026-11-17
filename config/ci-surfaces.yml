@@ -9302,6 +9302,20 @@ surfaces:
   # policy module moves.
   - test_csp_plan_doc_consistency.py
   sdk:
+  - test_11609_door_retirement.py  # #11609 lane E: the seven doors retired FORWARD —
+  # every pointer resolves in ONE hop to a LIVE `TOOL_REGISTRY` name (GitHub's own
+  # `DeprecatedToolAliases` states aliases are not transitive, and a pointer at another
+  # retired name is the churn loop the registry's Tier-1 note forbids), the destination
+  # PERFORMS the absorbed operation (measured by substitution — a recorder replaces the
+  # container door and the call must reach it, which a docstring cannot show), and the
+  # 25 doors a RECORDED decision keeps live still hold their reasons in the code. Same
+  # surface as its two siblings, and the file's subject is the `TortoiseSDK` doors it
+  # builds and monkeypatches. ⚠️ Do not read this row as the load-bearing one for a
+  # `tortoise/tool_registry.py` or `tortoise/sdk.py` diff: both are `SHARED_MODULES`, so
+  # `ci_selection.py --changed-files tortoise/tool_registry.py` answers
+  # `{"surfaces": [all eight], "full": true}` — the FULL matrix, not `sdk`. The row is
+  # what `--integrity` requires (a test file with no surface row is `manifest drift`,
+  # exit 1); the selection already covers the file on every diff that could red it.
   - test_11609_read_containers.py
   - test_11858_source_door_markers.py
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
