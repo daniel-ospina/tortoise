@@ -53861,7 +53861,11 @@ class TortoiseSDK:
                 # not a silent accept. Pinned by
                 # `test_a_row_that_ALREADY_holds_a_non_scalar_is_REFUSED_not_crashed`
                 # and, for the no-traceback half, by
-                # `test_a_non_string_stored_status_does_not_crash_the_dead_set`.
+                # `test_a_non_string_target_on_a_non_scalar_row_is_type_refused`
+                # (⛔ which can no longer REACH this guard — the type door answers
+                # first and that arm now pins the TYPE message; the stored-shape
+                # refusal itself is pinned by
+                # `test_no_SDK_status_write_can_repair_a_non_scalar_row`).
                 _np_dead = sorted(
                     s for s in _np_stored
                     if isinstance(s, str) and s in _np_terminal)
@@ -54746,8 +54750,11 @@ class TortoiseSDK:
             # reverse the recorded `#7925` round-4 decision that this refusal
             # fires ONLY where the value would LAND.
             # ⚠️ AT THIS DOOR THAT SCOPE IS NOW UNOBSERVABLE, and the comment is
-            # not allowed to imply otherwise: `#11824` S0's shared door
-            # (`_validate_bundle` → `_read_caller_status`) type-refuses EVERY
+            # not allowed to imply otherwise: `#11824` S0's TYPE check, run
+            # INLINE by `create_entity` thirty lines above (`_read_caller_status`,
+            # not `_validate_bundle` — `create_object` never enters the bundle
+            # door, which returns an ingest VIOLATION rather than raising),
+            # refuses EVERY
             # declared non-`str` before this writer arm runs — mint, MERGE and
             # ADOPT alike — so this arm's `lands` thunk never gets to answer
             # for one. MEASURED at this head: `create_object(name, kind,
@@ -54778,9 +54785,10 @@ class TortoiseSDK:
             # type door above it — there the landing question is the live one
             # and it keeps that refusal off a merge (`#7925` r4). It also stops
             # this helper's two-key AMBIGUITY refusal, which at this door S0's
-            # shared check answers first (measured: the `{status: None,
+            # inline check answers first (measured: the `{status: None,
             # KHash('status'): …}` spelling returns `refused a CONFLICTING
-            # status write` from the bundle door, not from here).
+            # status write` from `create_entity`'s own ambiguity arm, not from
+            # here).
             #
             # ⛔ SO THE TEST IS "WILL THIS CALL CREATE THE NODE?", AND
             # `resolve_or_mint`'s `created` FLAG IS NOT THAT QUESTION. It means

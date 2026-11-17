@@ -1875,23 +1875,31 @@ class TestLifecycleCarrierCoherence:
         ({"a": 1}, "and dict is not one"),
         (123, "and int is not one"),
     ], ids=["list", "dict", "int"])
-    def test_a_non_string_stored_status_does_not_crash_the_dead_set(
+    def test_a_non_string_target_on_a_non_scalar_row_is_type_refused(
             self, tmp_path, target, expected):
-        """A non-`str` STORED value is not a dead WORD — and is REFUSED, not raised.
+        """⛔ WHAT THIS ARM CAN NO LONGER PROVE, stated so it is not believed:
+        it is NAMED for `_np_dead` not crashing on a non-`str` STORED value, and
+        at this head it cannot reach that guard at all — `#11824` S0's type door
+        refuses the TARGET first, which is exactly what `expected` (the TYPE
+        message) now pins.
 
-        `_np_dead` used to run `s in _np_terminal` over EVERY stored value, so an
-        unhashable one (`['live']`) raised `TypeError: unhashable type: 'list'`
-        out of `update_entity` (#12869). The entailed shortcut had been hiding it
-        for the IDEMPOTENT case only — `['live'] == ['live']` was True, so the
-        write `continue`d — which means tightening that shortcut's type check
-        REVEALED the traceback as a REGRESSION on an idempotent rewrite (measured
-        on `d2872f0967`).
+        The history is worth keeping. `_np_dead` used to run `s in _np_terminal`
+        over EVERY stored value, so an unhashable one (`['live']`) raised
+        `TypeError: unhashable type: 'list'` out of `update_entity` (#12869). The
+        entailed shortcut had been hiding it for the IDEMPOTENT case only —
+        `['live'] == ['live']` was True, so the write `continue`d — so tightening
+        that shortcut's type check REVEALED the traceback as a REGRESSION on an
+        idempotent rewrite (measured on `d2872f0967`).
 
-        ⛔ The assertion is "did not raise `TypeError`, row is intact" — NOT a
-        claim about which word lands. ⚠️ #11824 S0 moved the PRODUCER of such a
-        row: a non-string `status` can no longer be written through the door at
-        all, so the stored non-string is seeded OUT OF BAND here — which is
-        exactly the legacy population the guard must still not crash on.
+        ⛔ S0 MOVED THE PRODUCER, so the population this guard serves is now
+        legacy-only (pre-S0 SDK writes, raw Cypher, journal replay — there is no
+        backfill, `#11824` §1) and the stored non-`str` is seeded OUT OF BAND
+        below. The STORED-shape guard itself is pinned by
+        `test_no_SDK_status_write_can_repair_a_non_scalar_row`, which drives it
+        with a `str` / `None` target (the values the type door accepts) and
+        asserts the `STORED status is` refusal. What THIS arm still proves, and
+        why it is kept: no `TypeError` escapes the door on a row holding the
+        shape, and the row is byte-identical afterwards.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869dead.db"))
         try:
