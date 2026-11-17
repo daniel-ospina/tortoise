@@ -67,7 +67,7 @@ USAGE
 
     # the same, spelled out, when the exports are needed for another command.
     # ⚠️ `--out` IS REQUIRED for an UNJUDGED run: the bundle is the default and publishing a
-    # board nobody scored there would replace the committed baseline with a non-result (exit 2,
+    # board nobody scored there would replace the committed baseline with a non-result (exit 1,
     # nothing written). Score it (`--judge fresh|file`) to publish into the bundle.
     uri="$(uv run python tools/test_lane.py uri)" || exit 1
     eval "$uri"
@@ -2215,6 +2215,52 @@ def cmd_run(args: argparse.Namespace) -> int:
     # A board that carries real `blocked` rows is still publishable: `blocked` is a measured
     # outcome, `unjudged` is not.
     publishing = out_dir.resolve() == DEFAULT_OUT.resolve()
+
+    # WHERE the verdicts go is decided HERE, before any bundle write (#13303 cycle 10):
+    # the cycle-9 rule keyed on the DIRECTORY, so `--verdicts-out <bundle>/run-local.json`
+    # overwrote the machine-readable board with a verdicts map and still exited 0; a
+    # publishing run that omitted the flag left `verdicts-baseline.json` describing a
+    # DIFFERENT run; and a directory target raised `IsADirectoryError` only AFTER three
+    # committed files had been replaced. One decision, keyed on the FILE, taken first.
+    verdicts_target: Path | None = None
+    if publishing and judged:
+        if args.verdicts_out:
+            verdicts_target = Path(args.verdicts_out).resolve()
+        else:
+            # The bundle comes from ONE run, so a complete run that publishes its board
+            # here also publishes the verdicts that produced it — otherwise the three
+            # carriers would disagree with exit 0 and nothing would say so.
+            verdicts_target = DEFAULT_OUT / "verdicts-baseline.json"
+    elif args.verdicts_out and judged:
+        verdicts_target = Path(args.verdicts_out).resolve()
+
+    if verdicts_target is not None:
+        if verdicts_target.is_dir():
+            print(
+                f"capstone: refusing --verdicts-out {verdicts_target} — that is a directory, "
+                "not a verdicts file",
+                file=sys.stderr,
+            )
+            return 1
+        if verdicts_target.parent.resolve() == DEFAULT_OUT.resolve():
+            # Only the baseline may live in the bundle, and only from the run whose board
+            # is published beside it. Any other name would overwrite `run-local.json`,
+            # `scoreboard-local.md` or `judge-packet.json`.
+            if verdicts_target.name != "verdicts-baseline.json":
+                print(
+                    f"capstone: refusing to write {verdicts_target.name} into the evidence "
+                    f"bundle {DEFAULT_OUT} — the bundle holds exactly four files and this is "
+                    "not one of them; write elsewhere",
+                    file=sys.stderr,
+                )
+                return 1
+            if not publishing:
+                print(
+                    f"capstone: refusing to write verdicts into the bundle {DEFAULT_OUT} — "
+                    "these verdicts are not the ones published beside it",
+                    file=sys.stderr,
+                )
+                return 1
     if not may_publish(board, out_dir):
         if not args.json:
             print(render_markdown(board))
@@ -2237,20 +2283,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     # used to abort the run once the 150 s reader had already been paid for, losing the
     # verdicts AND the scoreboard. The primary artifact lands first; a verdicts-out failure
     # is then loud but costs nothing that cannot be re-derived from the packet.
-    if args.verdicts_out and judged:
-        verdicts_out = Path(args.verdicts_out).resolve()
-        # Same rule as the board: the bundle's verdicts come from a COMPLETE run, so a
-        # partial run cannot leave `verdicts-baseline.json` describing a different run than
-        # the `run-local.json` beside it (#13303 cycle 8, P2).
-        if verdicts_out.parent.resolve() == DEFAULT_OUT.resolve() and not publishing:
-            print(
-                f"capstone: refusing to write verdicts into the bundle {DEFAULT_OUT} — "
-                "these verdicts are not the ones published beside it",
-                file=sys.stderr,
-            )
-            return 1
+    if verdicts_target:
         _write_verdicts(
-            verdicts_out,
+            verdicts_target,
             judged,
             packet_path=packet_path,
             mode=args.judge,
@@ -2373,6 +2408,13 @@ def cmd_judge(args: argparse.Namespace) -> int:
     # bundle, where they would describe a run the committed board does not (#13303 c9, P2).
     if getattr(args, "verdicts_out", None):
         vo = Path(args.verdicts_out).resolve()
+        if vo.is_dir():
+            print(
+                f"capstone: refusing --verdicts-out {vo} — that is a directory, not a "
+                "verdicts file",
+                file=sys.stderr,
+            )
+            return 2
         if vo.parent == DEFAULT_OUT.resolve():
             print(
                 f"capstone: refusing --verdicts-out into the evidence bundle {DEFAULT_OUT} "
