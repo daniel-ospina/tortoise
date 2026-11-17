@@ -191,12 +191,14 @@ and the two counts are not reconcilable as one directory observed twice:
 every create, unlink and rename, so each row is *internally* consistent — and the newest member's
 birth time differs between the rows (`00:02:44.189Z` vs `00:07:44.424Z`) on a filesystem where a birth
 time cannot be rewritten from userspace (`/dev/root`, ext4), so the two rows are different inodes, i.e.
-**two directories or two mount views, not one directory at two times**. Lane B's reading is the one
-that can be reproduced from this checkout's shell (five consecutive counts, newest member's birth
-identical to the directory `mtime` at the same nanosecond); lane A's `00:02:44Z` birth does not exist
-in this view at all. **This brief therefore does not claim to know which view produced the artifacts' 14
-— that question is open, not settled in either direction**, and the only safe statement about it is
-the one both rows agree on: 14 is what the artifacts recorded.
+**two directories or two mount views, not one directory at two times**. Which reading a shell sees is a
+property of that shell, not of the path: each lane reproduces **its own** row and neither reproduces
+the other's — from this checkout's shell (`HOME=/home/cmux`, `CELL_HOME=/home/cmux`) the count is
+**14** and the newest member's birth is `00:02:44.189Z`, identical to the directory `mtime`; the `22`
+and the `00:07:44.424Z` birth were reported from another lane's shell and are not reproducible here.
+**This brief therefore does not claim to know which view produced the artifacts' 14 — that question is
+open, not settled in either direction**, and the only safe statement about it is the one both rows
+agree on: 14 is what the artifacts recorded.
 
 What follows for a reader either way: the corpus is live and per-box, so re-running §8 reads a
 **different** corpus, and every number below is its own artifact's recorded input — never a statement
