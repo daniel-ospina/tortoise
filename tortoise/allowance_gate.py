@@ -996,6 +996,20 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         # far inside the 24 h staleness bound and the 1.5x deadband), NOT a
         # silent "unlimited". Same shape as this module's own note about the
         # resolver read.
+        #
+        # ⛔ THE BLOCK THIS REPLACES, named so its retirement is legible. Until
+        # ``#13084`` this dimension was BLOCKED, and ``#9559``'s release machinery
+        # (``RELEASE_CONDITIONS``, ``release=``) carried the ground it waited on as
+        # ``vector_index_measurable``: "the HNSW vector index is measurable, so a
+        # cap MAY be wired to the graph reading". Arming here is the deliberate
+        # RESOLUTION of that block by the ESTIMATE RULE above, not a quiet edit
+        # around it: the index remains unmeasurable, and the refusal is instead
+        # denominated against a LOW reading with the error direction stated to the
+        # customer, so the block's own concern (a cap that would not fire for the
+        # tenants who grow biggest) is answered by UNDER-enforcement rather than by
+        # waiting. The token stays declared in ``RELEASE_CONDITIONS`` with its
+        # evidence predicate — the test that revalidates it still runs — and no
+        # dimension cites it any more, which is what makes its retirement visible.
     ),
     _dimension(
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],

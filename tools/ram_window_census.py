@@ -49,10 +49,31 @@ the measurement half. The cap half is `tortoise/allowance_gate.py`.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) raises ImportError before a
+# later guard could run.
+#
+# #4053/#11342: the refusal must not wear a VERDICT's status. This tool's answers
+# are 0 (census produced) / 2 (usage) / 3 (the census could not be measured), and
+# `raise SystemExit(<message>)` exits 1 — a code it does not otherwise use, but
+# one that reads as a success-or-failure verdict to any caller. 2 is this tool's
+# own "could not run", which is what an old interpreter IS. `SystemExit(<int>)`
+# carries no message, so the refusal is printed explicitly.
+# Pinned by `tests/test_entry_point_python_guard.py`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/ram_window_census.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/ram_window_census.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import contextlib
 import json
-import sys
 from pathlib import Path
 from time import perf_counter
 
