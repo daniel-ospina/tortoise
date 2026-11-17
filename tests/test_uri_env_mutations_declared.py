@@ -1241,6 +1241,47 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # value, and neither that test nor any arm of this module dials it.
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@localhost:6379/g"',
     ],
+    # #13158 (the module #13034 landed): the currency-rule suite is the SAME
+    # two-mutation-shape as #10137/#2206 above, and it landed without its entry,
+    # so `test (j)` on `main` reds with six undeclared sites — all at
+    # tests/test_13034_currency_rule_reads_position.py:{66,75,77,86,89,91}.
+    # **All six are permitted (DELIBERATE_URI); none is the forbidden case.**
+    # But they are two SITE CLASSES — a mutating SET and the save/restore that
+    # makes it safe — and the arms below spell each class instead of authorizing
+    # the file:
+    #   * the SET sites (:66 the module-level live-FalkorDB probe, :86 the autouse
+    #     `_isolated_db_uri` fixture) assign the module's OWN docker URI,
+    #     `DB_URI = _live_utils.docker_uri(GRAPH)` on a per-session
+    #     `tortoise_test_13034_<hex>` graph. The mutation IS the point twice over:
+    #     the probe's set is what decides `FALKORDB_AVAILABLE` — without it the
+    #     probe rides the AMBIENT URI, answers for a graph this suite never uses,
+    #     and reports the suite unavailable/skipped on a lane that has a server —
+    #     and the fixture's set is what pins each case to THAT graph, so no case
+    #     can read another's writes through the shared lane graph.
+    #   * the RESTORE sites (:75 the probe's `finally`, :89 the fixture's
+    #     post-yield) write the captured prior value back, and :77/:91 are their
+    #     restore-to-UNSET arms (taken when nothing was set before). These are not
+    #     lane flips of their own: they are the save-restore half the #2084
+    #     restoration guard requires of both mutating sites, declared so the
+    #     census sees the whole contract rather than half of it.
+    # ⛔ This is NOT a blanket row. Every arm is pinned to the literal its site
+    # spells (`= DB_URI`, `= _OLD_URI`, `= _old`, `pop(…, None)`) with an end
+    # anchor, so a FUTURE mutation spelling a different value — or a bare
+    # `os.environ["TORTOISE_DB_URI"] = some_uri` — reds and must be triaged on
+    # its own. The rejected alternative (stop mutating; take the target from the
+    # lane's seam) fails on the contract's own terms: under the docker-lane
+    # redirect the ambient URI IS the shared lane graph, so a seam-reading suite
+    # would lose the per-module isolation these six sites exist to create.
+    "test_13034_currency_rule_reads_position.py": [
+        # the probe's set (:66) and the fixture's set (:86)
+        r'os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
+        # the probe's `finally` restore of the captured module-level value (:75)
+        r'os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_OLD_URI$',
+        # the fixture's post-yield restore of the captured value (:89)
+        r'os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_old$',
+        # both restore-to-UNSET arms (:77 the probe, :91 the fixture)
+        r'os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$',
+    ],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
