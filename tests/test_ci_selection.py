@@ -22980,20 +22980,28 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
 
     `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match, and a named
     match REPLACES the `core` fallback in `select()` (`core` is added only when
-    nothing named matched). MEASURED before this pin, with the shipped selector
-    and this manifest: `select(['tortoise/hosted_api.py'], 'pull_request',
-    manifest)` -> `surfaces=['api', 'onboarding']`, `full: False`, and this file
-    ABSENT from `test_files`. So BOTH census arms slept on the diff class they
-    exist for: a re-spelled `status != 'superseded'` filter, or a deleted
-    `_terminal_excluded` usage in the hosted door, merged green.
+    nothing named matched). MEASURED with the shipped selector and this manifest
+    **as it stood before this PR — a `core`-ONLY row**: `select(['tortoise/
+    hosted_api.py'], 'pull_request', manifest)` -> `surfaces=['api',
+    'onboarding']`, `full: False`, and this file ABSENT from `test_files`.
+    (⛔ The qualifier is load-bearing: on the manifest WITH the `api` row the
+    same call returns the pin PRESENT, so a reader who re-measures against the
+    committed file and drops the qualifier gets the opposite answer — the
+    review's F4.) So BOTH census arms slept on the diff class they exist for: a
+    re-spelled `status != 'superseded'` filter, or a deleted `_terminal_excluded`
+    usage in the hosted door, merged green.
 
-    That is the #1349/#2938/#3154 silent-drop class in its harmful direction,
-    and it is the exact defect the two rows above record for themselves
+    That is the #1349/#2938/#3154 silent-drop class in its harmful direction, and
+    it is the defect the two rows above record for themselves
     (`test_12941_read_your_writes.py`, `test_11892_health_quota.py` are the
-    `['api', 'core']` siblings; this was the only hosted-door guard registered
-    single-surface). `tortoise/sdk.py` and `tortoise/mcp_server.py` are
-    `full: True` SHARED_MODULES, which is why the gap hid from a census of the
-    other five consumers.
+    `['api', 'core']` siblings). ⛔ NOT "the only hosted-door guard registered
+    single-surface": on `main` this file was registered on **zero** surfaces,
+    and several hosted-door guards legitimately live on `api` alone
+    (`test_hosted_api.py`, `test_billing.py`, `test_commit_endpoint.py`,
+    `test_dr_endpoints.py` — all `['api']`, measured). The defect here is the
+    MISSING row, not the single-surface shape. `tortoise/sdk.py` and
+    `tortoise/mcp_server.py` are `full: True` SHARED_MODULES, which is why the
+    gap hid from a census of the other five consumers.
 
     `integrity()` is not a substitute: it answers only "is every `tests/**/
     test_*.py` classified SOMEWHERE", so it reports `[]` with or without the
@@ -23001,12 +23009,35 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     duplicate row. Asserted on the ROWS and on the SELECTION, both.
     """
     pin = "test_13034_currency_rule_reads_position.py"
-
-    # The registration itself: `core` is where the row was, `api` is the arm the
-    # `hosted_api.py` diff class needs. The rows are the subject because a
-    # selection assert alone would pass the day any second surface also lists
-    # the file (the #12645 pin records that lesson).
     manifest = load_manifest()
+
+    # ── NON-VACUITY FIRST (review F1). `tier1` is unioned into EVERY PR
+    # selection, and a `slow_files` entry is dropped from the fast set for a
+    # second surface's diff (#6234), so either would make the `api`/`core` rows
+    # stop being what selects this file. These run BEFORE the selection asserts
+    # because appending the pin to `slow_files` DROPS it from `test_files` — so
+    # the `api_arm` assert below fires first and reports "the `api` row is what
+    # carries that arm", which is the one diagnosis that is wrong for that
+    # mutation. Measured, both arms.
+    assert pin not in manifest["tier1"], (
+        "if this census joins `tier1` its surface rows stop being load-bearing "
+        "and this pin must be re-derived rather than assumed"
+    )
+    assert pin not in set(manifest["slow_files"]), (
+        f"{pin} is in `slow_files` — a file named by two surfaces is dropped "
+        "from the fast pool and, WHEN THE SECOND SURFACE IS THE MATCHED ONE, "
+        "never re-added to `slow_selected` (#6234) — so it then runs on NEITHER "
+        "leg. (Qualified on purpose: when the matched surface is the one that "
+        "owns it, `slow_selected` DOES carry it and only the fast leg is lost, "
+        "which is why the neither-leg case is the one this comment names — the "
+        "rule is stated whole at the #6234 note above.)"
+    )
+
+    # The registration itself: `api` is the arm the `hosted_api.py` diff class
+    # needs, `core` is the arm that covers the four `core`-classified consumers
+    # (`core` was NOT pre-existing on `main` — this PR added BOTH rows). The rows
+    # are the subject because a selection assert alone would pass the day any
+    # second surface also lists the file (the #12645 pin records that lesson).
     assert pin in manifest["surfaces"]["api"], (
         "`surfaces.api` must list this census by NAME — without it a "
         "`tortoise/hosted_api.py`-only diff selects `['api','onboarding']` and "
@@ -23038,19 +23069,3 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
         "predicate itself lives and no longer selects the census"
     )
 
-    # NON-VACUITY: `tier1` is unioned into EVERY PR selection, and a `slow_files`
-    # entry is dropped from the fast set for a second surface's diff (#6234), so
-    # either would make the rows above stop being what selects this file.
-    assert pin not in load_manifest()["tier1"], (
-        "if this census joins `tier1` its surface rows stop being load-bearing "
-        "and this pin must be re-derived rather than assumed"
-    )
-    assert pin not in set(load_manifest()["slow_files"]), (
-        f"{pin} is in `slow_files` — a file named by two surfaces is dropped "
-        "from the fast pool and, WHEN THE SECOND SURFACE IS THE MATCHED ONE, "
-        "never re-added to `slow_selected` (#6234) — so it then runs on NEITHER "
-        "leg. (Qualified on purpose: when the matched surface is the one that "
-        "owns it, `slow_selected` DOES carry it and only the fast leg is lost, "
-        "which is why the neither-leg case is the one this comment names — the "
-        "rule is stated whole at the #6234 note above.)"
-    )
