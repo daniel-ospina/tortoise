@@ -223,15 +223,24 @@ def cache_store_fingerprint(endpoint: object) -> str:
 def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     """Count one LIVE write against the store+graph it actually folded into.
 
-    Called from the two live lanes that CHOOSE a graph, and only there:
+    Five call sites, and the list is maintained rather than implied:
+    ``projection.note_live_write_target`` is the ONE helper they all go through,
+    so the endpoint resolution has a single owner.
 
     * ``FalkorProjection.apply`` — the fold every door passes (SDK, REST, MCP,
-      capture, the onboarding metadata lane), counted once per fold that LANDED
-      (a skipped/malformed fold is not a write);
+      capture, the metadata lanes), counted once per fold that LANDED (a fold that
+      provably wrote nothing is not a write);
     * ``_record_structural_edges`` — ``create_edge`` and the about-lane mint
       their edges with a raw ``MERGE`` under ``_structural_edge_write_scope`` and
       never pass ``apply``, so without that hook a process whose writes are edges
-      registers NO target (the same "{} means healthy" illusion, one lane over).
+      registers NO target (the same "{} means healthy" illusion, one lane over);
+    * ``onboarding.state._run``, ``webhook_delivery._run``,
+      ``why_snapshot._run`` — the three declared live GATEWAYS that issue their
+      own statements under ``_onboarding_write_scope`` /
+      ``_cache_write_authorized(<lane>)`` and fold no record at all.
+
+    A sixth gateway added tomorrow must be added here; a raw statement issued at
+    ``proj.g`` from somewhere else is the named residual (see the helper).
 
     ⛔ THE RESIDUAL IS NAMED RATHER THAN IMPLIED: a raw statement issued at
     ``proj.g`` inside a live scope — the capture provenance stamps
