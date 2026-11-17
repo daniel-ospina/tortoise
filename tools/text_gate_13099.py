@@ -135,7 +135,6 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
-import contextlib
 import hashlib
 import json
 import random
@@ -313,7 +312,10 @@ def seed_graph(fg_host: str, fg_port: int, points: list[dict]) -> dict:
     from falkordb import FalkorDB
 
     from benchmarks.synthetic_corpus import seed_corpus
-    from tortoise.projection import _bounded_server_socket_kwargs
+    from tortoise.projection import (
+        _bounded_server_socket_kwargs,
+        is_missing_graph_error,
+    )
 
     # #3065/#8118: a measurement tool is not exempt from the read bound. An
     # unbounded socket is the defect this repo already carries a number for —
@@ -323,10 +325,23 @@ def seed_graph(fg_host: str, fg_port: int, points: list[dict]) -> dict:
     # `TORTOISE_DB_SOCKET_*` knobs reach this client too.
     db = FalkorDB(host=fg_host, port=fg_port, **_bounded_server_socket_kwargs())
     g = db.select_graph(GRAPH_NAME)
-    # A fresh graph has nothing to delete; either way the seed below is what
-    # the measurement runs on, so a failing DROP is not a reason to abort.
-    with contextlib.suppress(Exception):
+    # A fresh graph has nothing to delete, so an ABSENT graph is not a reason to
+    # abort the seed — and that is the ONLY class excused here. ⛔ NOT
+    # `contextlib.suppress(Exception)`: this client is now BOUNDED (above), so a
+    # stalled engine raises `redis.TimeoutError` at the DROP instead of parking
+    # forever, and a blanket suppress would swallow exactly that, seed over the
+    # PREVIOUS run's points — `GRAPH_NAME` is fixed, not per-run, and
+    # `seed_corpus` MERGEs by id — and then print a verdict for a population
+    # nothing reset. That is the "records `no rows` rather than `no answer`"
+    # failure this bound exists to prevent, so a timeout MUST abort the seed.
+    # `is_missing_graph_error` is the product's own classifier (#2163), so this
+    # stays one definition of "the graph was never there" rather than a second
+    # text match.
+    try:
         g.delete()
+    except Exception as exc:
+        if not is_missing_graph_error(exc):
+            raise
     t0 = time.perf_counter()
     n = seed_corpus(g, points)
     seed_s = time.perf_counter() - t0

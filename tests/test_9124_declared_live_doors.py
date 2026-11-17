@@ -2567,9 +2567,15 @@ def _census_writer_names(surface: dict | None = None,
     ⛔ THE POLARITY IS "WRITE **OR** NOT-PROVEN-READ", NOT "WRITE" (review,
     measured). A surface entry whose every mutating call is `<unresolved>` is a
     function the census could not settle — it is on the surface for the same
-    reason `_UNRESOLVED` exists, and 45 of 83 entries here are that shape. The
-    message this set drives therefore may not say "the census PROVES reaches the
-    write handle": for that majority the census proves nothing at all.
+    reason `_UNRESOLVED` exists, and a majority of the entries here are that
+    shape. The message this set drives therefore may not say "the census PROVES
+    reaches the write handle": for that majority the census proves nothing at
+    all. ⛔ THE COUNTS ARE DELIBERATELY NOT RESTATED: this sentence carried
+    "45 of 83" while the live registers held 92 names and 45 `_UNRESOLVED` rows
+    — a DATED reading printed beside the set that counts it, which is the rot
+    the message at the far end of this file now derives its numbers from
+    instead. Re-measure with `len(_census_writer_names())`; do not copy a number
+    into prose.
 
     What IS subtracted is the file's own positive verdict: a name registered in
     `_PROVEN_READS` has been hand-checked AND mechanically pinned as an
@@ -3638,9 +3644,14 @@ def test_the_census_writer_set_states_its_own_polarity():
     """The writers arm is "write OR NOT-PROVEN-READ", and its message says so.
 
     `enumerate_handle_surface` keys a function for ANY mutating call, including
-    one it could not resolve — so 45 of 83 entries are functions the census
-    proves nothing about (33 of them this file's own hand-checked `_UNRESOLVED`
-    READ rows). The arm's message claimed "the census PROVES reaches the write
+    one it could not resolve — so most entries are functions the census proves
+    nothing about, a large share of them this file's own hand-checked
+    `_UNRESOLVED` READ rows. ⛔ No counts are restated here either: this sentence
+    carried "45 of 83 … (33 of them)" while the live registers held 92 names and
+    45 `_UNRESOLVED` rows (43 of them on the surface) — a DATED reading that
+    reads as current, which is the same rot the assertion at the end of this
+    file now derives instead of restating.
+    The arm's message claimed "the census PROVES reaches the write
     handle", which is false for that majority, and a call to a name already
     proven read here (`_PROVEN_READS`) redded a correct row for it.
 
@@ -3730,8 +3741,8 @@ def test_the_offenders_helper_docstring_states_the_real_polarity():
     """NON-VACUITY for the `writers` parameter's own docstring (review P2).
 
     `_census_writer_names`'s polarity was corrected to "write **OR**
-    not-proven-read" (45 of 83 entries are functions the census could not
-    settle), and the offender message was corrected with it — but the parameter
+    not-proven-read" (most entries are functions the census could not settle),
+    and the offender message was corrected with it — but the parameter
     DOCSTRING eleven lines below still said "the set of names the census proves
     write", i.e. the narrower, false thing. No pin covered prose, so the
     overtuned sentence could sit beside the corrected one indefinitely and tell
@@ -3743,8 +3754,10 @@ def test_the_offenders_helper_docstring_states_the_real_polarity():
     assert doc, "`_calibration_read_offenders` lost its docstring"
     assert "proves write" not in doc, (
         "the `writers` docstring claims the census PROVES a write again — the "
-        "real polarity is 'write OR not-proven-read' (45 of 83 entries are "
-        f"unproven), so the parameter's stated contract is false (doc={doc!r})")
+        "real polarity is 'write OR not-proven-read'; the census proves "
+        f"nothing about the {len(_UNRESOLVED)} `_UNRESOLVED` rows, so the "
+        "parameter's stated contract is false "
+        f"(doc={doc!r})")
     assert "not-proven-read" in doc, (
         "the `writers` docstring no longer states the 'write OR "
         "not-proven-read' polarity it receives from `_census_writer_names` "

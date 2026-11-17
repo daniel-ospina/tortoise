@@ -27,8 +27,11 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from benchmarks.synthetic_corpus import build_topic_oracle
 from tools.text_gate_13099 import (
+    GRAPH_NAME,
     N_POINTS,
     QUERY_CLASSES,
     SEED,
@@ -40,6 +43,7 @@ from tools.text_gate_13099 import (
     load_committed_queries,
     oov_evidence,
     or_tokens,
+    seed_graph,
     verdict,
 )
 
@@ -827,3 +831,93 @@ def test_a_tokenizer_fallback_is_recorded_once_per_query_text(monkeypatch):
     assert len(TOKENIZER_FALLBACKS) == 1
     assert "RuntimeError: tokenizer exploded" in TOKENIZER_FALLBACKS[0]["reason"]
     TOKENIZER_FALLBACKS.clear()
+
+
+# ── the seed's DROP must not swallow a BOUNDED read failure (#3065/#8118) ────
+#
+# `seed_graph` resets `GRAPH_NAME` (fixed, NOT per-run) before seeding. That
+# reset used to be wrapped in `contextlib.suppress(Exception)`, which was
+# harmless while the client was unbounded — a stall meant the run never
+# finished, so there was no verdict to be wrong. Once the client gained a socket
+# read bound, the SAME stall raises `redis.TimeoutError` at the DROP, and a
+# blanket suppress turns it into a verdict: `seed_corpus` MERGEs by id, so the
+# previous run's points survive the failed reset and the arms score a population
+# nothing reset — a wrong published number, which is the one failure this tool
+# exists to not have. The suppress is therefore narrowed to the ABSENT-graph
+# class, via the product's own classifier (`projection.is_missing_graph_error`).
+#
+# Both arms below fail on the pre-fix text: the first because the timeout was
+# suppressed and the seed continued, the second because the narrow handler is
+# what keeps an absent graph from aborting a first run.
+
+
+class _FakeGraph:
+    """Minimal stand-in for `Graph`: only the three calls `seed_graph` makes."""
+
+    def __init__(self, delete_exc: Exception | None) -> None:
+        self.delete_exc = delete_exc
+        self.deletes = 0
+        self.queries = 0
+
+    def delete(self) -> None:
+        self.deletes += 1
+        if self.delete_exc is not None:
+            raise self.delete_exc
+
+    def query(self, *args: object, **kwargs: object) -> None:
+        self.queries += 1
+        return None
+
+
+def _patch_seed(monkeypatch, graph: _FakeGraph) -> list:
+    """Point `seed_graph`'s two real dependencies at the fake graph."""
+    import falkordb
+
+    import benchmarks.synthetic_corpus as corpus
+
+    seeded: list = []
+
+    class _FakeDB:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def select_graph(self, name: str) -> _FakeGraph:
+            assert name == GRAPH_NAME
+            return graph
+
+    monkeypatch.setattr(falkordb, "FalkorDB", _FakeDB)
+    monkeypatch.setattr(corpus, "seed_corpus", lambda g, points: seeded.append(points) or len(points))
+    return seeded
+
+
+def test_a_bounded_timeout_at_the_drop_aborts_the_seed_instead_of_scoring_stale_points(monkeypatch):
+    """A read timeout is NOT "the graph was absent" — it must propagate."""
+    import redis
+
+    graph = _FakeGraph(redis.exceptions.TimeoutError("Timeout reading from socket"))
+    seeded = _patch_seed(monkeypatch, graph)
+
+    with pytest.raises(redis.exceptions.TimeoutError):
+        seed_graph("127.0.0.1", 6379, [{"id": "p1"}])
+
+    assert graph.deletes == 1
+    assert seeded == [], (
+        "the DROP timed out and the seed ran anyway — `seed_corpus` MERGEs by id "
+        "into a fixed graph name, so the previous run's points survive and the "
+        "arms score a population nothing reset"
+    )
+    assert graph.queries == 0, "the fulltext index was built over an un-reset graph"
+
+
+def test_an_absent_graph_is_excused_so_a_first_run_still_seeds(monkeypatch):
+    """The absent-graph class only — a fresh graph has nothing to delete."""
+    import redis
+
+    graph = _FakeGraph(redis.exceptions.ResponseError("Invalid graph operation on empty key"))
+    seeded = _patch_seed(monkeypatch, graph)
+
+    out = seed_graph("127.0.0.1", 6379, [{"id": "p1"}, {"id": "p2"}])
+
+    assert graph.deletes == 1
+    assert seeded == [[{"id": "p1"}, {"id": "p2"}]], "the seed must still run"
+    assert out["points"] == 2
