@@ -19,8 +19,10 @@ So the database is STUBBED here, deliberately and narrowly:
 
 ⛔ What that cannot catch, stated so a green never over-claims: a checkpoint whose
 SQL is wrong, a `journal_event` write that does not land, or a replay that is not
-idempotent. Those are the reasons `FOLD-*` (the live leg at the bottom) exists and
-the reasons the PR body carries a real fold's output rather than this suite's.
+idempotent. There is NO live leg in this file, deliberately: those three need a
+real Postgres, which the `test-record-postgres` lane and the PR body's evidence
+carry. This suite proves the runner's DECISIONS over a stubbed record; it cannot
+prove the record.
 """
 
 from __future__ import annotations
@@ -210,7 +212,10 @@ def test_plan_opens_NO_connection_at_all_unless_asked_for_the_checkpoint(
     out = capsys.readouterr().out
     assert "rows_written: 0" in out
     assert "statements_executed: 0" in out
-    assert "--acknowledge-plan 39" in out
+    # ⛔ AND IT DOES NOT HAND OVER A NUMBER `apply` WOULD REJECT: this plan never
+    # read the record, so on a non-empty record `apply` computes a different one.
+    assert "--acknowledge-plan" not in out
+    assert "plan --from-checkpoint" in out
 
 
 def test_plan_json_reports_zero_writes_and_the_event_census(capsys):
@@ -426,6 +431,160 @@ def test_a_committed_batch_is_counted_from_the_replay_report_not_from_the_plan(
     # (3 per record), where the PLAN for this journal says 99 — so asserting the
     # fold's number is what proves the report did not come from the plan.
     assert "consumed: 39 events" in out and "117 statements" in out
+
+
+# ── the low edge of the checkpoint (review P0) ──────────────────────────────
+
+
+class _ScriptedCursor:
+    """Answers `read_checkpoint`'s two reads from a script, in order."""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+        self._current = None
+
+    def execute(self, sql, params=None):
+        self._current = self._rows.pop(0)
+
+    def fetchone(self):
+        return self._current
+
+
+def _read_checkpoint_with(monkeypatch, *, aggregate, gap_row, allocated=False):
+    """`read_checkpoint` with only its SQL answers stubbed — the DECISION is the subject."""
+    from tortoise import record_projection
+
+    fake = _ScriptedCursor([aggregate, gap_row])
+    monkeypatch.setattr(record_projection, "scope_connection",
+                        lambda conn, org_id: fake)
+    return record_runner.read_checkpoint(None, "o", "g", allocated=allocated)
+
+
+def test_a_record_whose_lowest_row_is_ABOVE_1_is_a_gap_at_position_1(monkeypatch):
+    """⛔ THE P0: a record starting at 251 has consumed NONE of the journal's prefix.
+
+    The gap query can only see a hole BETWEEN two rows (it looks at a `lead()`
+    neighbour), so a record armed after the journal already held 250 lines — the
+    ordinary shape for this whole lane, since `journal_event.seq` is only
+    `CHECK (seq > 0)` — read as `contiguous` with `next_seq = 252`. `apply` then
+    folded the tail and reported success over a record that had never seen
+    records 1..250: exactly the historic payload this tool exists to move,
+    reported as done.
+    """
+    cp = _read_checkpoint_with(monkeypatch, aggregate=(300, 50, 251), gap_row=(None,))
+    assert cp.min_seq == 251
+    assert cp.first_gap == 1, "the unfolded PREFIX must be the resume point"
+    assert cp.next_seq == 1
+    assert cp.contiguous is False
+
+
+def test_a_hole_BETWEEN_rows_still_wins_over_the_low_edge(monkeypatch):
+    cp = _read_checkpoint_with(monkeypatch, aggregate=(10, 9, 1), gap_row=(4,))
+    assert cp.first_gap == 4 and cp.next_seq == 4
+
+
+def test_a_record_starting_at_1_with_no_holes_is_contiguous(monkeypatch):
+    cp = _read_checkpoint_with(monkeypatch, aggregate=(10, 10, 1), gap_row=(None,))
+    assert cp.contiguous is True and cp.next_seq == 11
+
+
+def test_an_allocated_graph_may_legitimately_start_above_1(monkeypatch):
+    """The allocator's seed floor is not a gap — and only the CALLER may say so."""
+    cp = _read_checkpoint_with(monkeypatch, aggregate=(600, 101, 500),
+                               gap_row=(None,), allocated=True)
+    assert cp.first_gap is None and cp.next_seq == 601
+
+
+def test_an_empty_record_resumes_at_position_1(monkeypatch):
+    cp = _read_checkpoint_with(monkeypatch, aggregate=(0, 0, 0), gap_row=None)
+    assert cp.next_seq == 1 and cp.contiguous is True
+
+
+# ── legs the first cut of this suite was missing (review P2) ────────────────
+
+
+def test_apply_folds_ACROSS_BATCHES_and_counts_every_one(monkeypatch, capsys):
+    """The per-batch loop, executed: 39 records at `--batch-size 10` is 4 batches.
+
+    The first cut of this suite never ran `apply` over more than one batch (the
+    fixture fits in the default 200), so the whole loop — plan-before-write,
+    per-batch commit, accumulation — was untested, which is how the `--allocate`
+    multi-batch defect shipped.
+    """
+    conn = _patched(monkeypatch, checkpoint=Checkpoint())
+    monkeypatch.setattr(_replay_attr(), "replay", _fold_report_for)
+
+    rc = main(["apply", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--batch-size", "10", "--acknowledge-plan", "39"])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert conn.committed == 4, "one commit per batch, and there are four batches"
+    assert "consumed: 39 events in 4 batch(es)" in out
+    assert "seq 1..39" in out
+
+
+def test_plan_from_checkpoint_opens_ONE_read_only_connection(monkeypatch, capsys):
+    """The branch that DOES open a connection must still write nothing."""
+    conn = _patched(monkeypatch, checkpoint=Checkpoint(high_seq=20, present=20),
+                    cursor=None)
+    rc = main(["plan", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--dsn", "postgresql://x/y", "--from-checkpoint"])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert conn.committed == 0, "a plan may not commit"
+    assert conn.rolled_back >= 1
+    assert "resume at seq 21" in out
+    # …and now the acknowledgement line IS the right one for this run
+    assert "--acknowledge-plan 19" in out
+
+
+def test_plan_reports_CUT_OVER_and_does_not_hand_over_an_acknowledgement(
+        monkeypatch, capsys):
+    """`report.cursor` was hardcoded None, so this line was unreachable."""
+    _patched(monkeypatch, checkpoint=Checkpoint(), cursor=(4, "seedod"))
+    rc = main(["plan", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--dsn", "postgresql://x/y", "--from-checkpoint"])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "cutover: cursor present" in out and "REFUSED" in out
+
+
+def test_apply_REFUSES_allocate_because_it_would_mint_fresh_ordinals(
+        monkeypatch, capsys):
+    """The allocation arm cannot carry a historic fold: it issues NEW positions."""
+    _patched(monkeypatch, checkpoint=Checkpoint(), cursor=(0, "active"))
+    rc = main(["apply", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--allocate", "--acknowledge-plan", "39"])
+    assert rc == EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "--allocate" in err and "seed" in err
+
+
+def test_apply_REFUSES_salvage_because_a_skipped_line_SHIFTS_positions(
+        monkeypatch, capsys):
+    _patched(monkeypatch, checkpoint=Checkpoint())
+    rc = main(["apply", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--salvage", "--acknowledge-plan", "39"])
+    assert rc == EXIT_REFUSED
+    assert "SHIFTS" in capsys.readouterr().err
+
+
+def test_plan_allocate_accounts_the_allocation_statement_as_POSITIONS(monkeypatch,
+                                                                     capsys):
+    """⛔ The allocation statement writes positions — it is not a mutation.
+
+    Its SQL begins `WITH payloads AS (`, so it does not match the journal-insert
+    prefix, and the first cut counted it as a mutation while counting none of the
+    positions it writes: `1 statements, 0 position rows` for a 3-record batch.
+    `ReplayReport` skips the allocation prefix, so plan and run disagreed by one
+    per batch.
+    """
+    from record_runner import plan_batch
+
+    planned = plan_batch([{"type": "IngestStarted"} for _ in range(3)],
+                         start_seq=1, org_id="o", graph_id="g", allocate=True)
+    assert planned.statements == 0, "an allocation batch is ONE position write"
+    assert planned.position_rows == 1
 
 
 # ── the CLI contract ─────────────────────────────────────────────────────────

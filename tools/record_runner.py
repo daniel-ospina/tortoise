@@ -151,8 +151,10 @@ class Journal:
     records: list[dict] = field(default_factory=list)
     segmented: bool = False
     salvage: bool = False
-    corrupt: int = 0
-    torn: int = 0
+    #: ``None`` = NOT REPORTED (a segmented layout: its reader does not return
+    #: the counts), which must never be rendered as ``0``.
+    corrupt: int | None = 0
+    torn: int | None = 0
 
     def __len__(self) -> int:
         return len(self.records)
@@ -182,6 +184,16 @@ def read_journal(path: str | Path, *, salvage: bool = False) -> Journal:
     from tortoise.log import EventLog
 
     given = Path(path).expanduser()
+    # ⛔ THE EXISTENCE TEST COMES FIRST (review P2). It used to run AFTER
+    # `graph_dir.iterdir()`, so a mistyped DIRECTORY escaped as the driver's own
+    # `FileNotFoundError: /typo/dir` instead of this branch's crafted refusal —
+    # and the test only ever used a missing file inside an EXISTING parent, so it
+    # passed. The message below is the whole reason the branch exists.
+    if not given.exists():
+        raise RunnerError(
+            f"journal {given} does not exist — a graph with no journal has "
+            f"nothing to fold, and a mistyped path must not read as one. Point "
+            f"--journal at <graph dir>/events.jsonl (or the graph dir)")
     if given.is_dir():
         graph_dir, segmented = given, True
     else:
@@ -189,16 +201,19 @@ def read_journal(path: str | Path, *, salvage: bool = False) -> Journal:
         sealed = [p for p in graph_dir.iterdir()
                   if journal_segments.SEALED_RE.match(p.name)]
         segmented = bool(sealed) or (graph_dir / journal_segments.MANIFEST_NAME).exists()
-    if not given.exists():
-        raise RunnerError(
-            f"journal {given} does not exist — a graph with no journal has "
-            f"nothing to fold, and a mistyped path must not read as one. Point "
-            f"--journal at <graph dir>/events.jsonl (or the graph dir)")
 
     if segmented:
         records = journal_segments.read_all_segments(graph_dir, salvage=salvage)
+        # ⛔ DAMAGE IS REPORTED AS UNKNOWN, NOT AS ZERO (review P2).
+        # `read_all_segments` counts a mid-file damage per segment INTERNALLY and
+        # then discards the count (it raises or logs, and returns only records) —
+        # and it reads every segment through `read_for_replay`, i.e. ALWAYS in
+        # salvage mode. So for a segmented layout this tool cannot report the
+        # count, and printing `0` would assert "no damage" over a read that had
+        # skipped a line and thereby SHIFTED every later record's enumeration.
+        # `None` is the only honest value here; the render says "not reported".
         return Journal(path=graph_dir, records=records, segmented=True,
-                       salvage=salvage)
+                       salvage=salvage, corrupt=None, torn=None)
 
     log = EventLog(given)
     records = log.read_all(salvage=salvage)
@@ -224,6 +239,11 @@ class Checkpoint:
     high_seq: int = 0
     present: int = 0
     first_gap: int | None = None
+    #: The lowest position the record holds (`0` when it holds none). ⛔ THE LOW
+    #: EDGE IS NOT OPTIONAL: a record whose rows start ABOVE 1 has consumed none
+    #: of the journal's prefix, and a gap query that only looks BETWEEN rows calls
+    #: that "contiguous" — see `read_checkpoint`.
+    min_seq: int = 0
 
     @property
     def next_seq(self) -> int:
@@ -234,18 +254,18 @@ class Checkpoint:
         return self.first_gap is None
 
 
-#: One scan, two facts: the high-water mark and the first missing position below
-#: it. The window function is used instead of ``generate_series`` so the cost is
-#: one pass over the graph's own rows, not one row per candidate position.
+#: One scan, three facts: the high-water mark, the row count, and the LOW edge.
+#: ⛔ It no longer computes `lead()` — that column was never read here (the outer
+#: query is an aggregate over `seq` alone), so every `status`/`apply` paid a full
+#: sort of the graph's rows for a window function whose result was discarded, and
+#: `_FIRST_GAP_SQL` then paid the SAME sort again. `min(seq)` costs nothing on the
+#: same scan and is a fact the gap decision cannot do without.
 _CHECKPOINT_SQL = """
-WITH paged AS (
-    SELECT seq, lead(seq) OVER (ORDER BY seq) AS nxt
-    FROM public.journal_event
-    WHERE org_id = %s AND graph_id = %s
-)
 SELECT coalesce(max(seq), 0) AS high,
-       count(*) AS present
-FROM paged
+       count(*) AS present,
+       coalesce(min(seq), 0) AS low
+FROM public.journal_event
+WHERE org_id = %s AND graph_id = %s
 """
 
 _FIRST_GAP_SQL = """
@@ -284,8 +304,31 @@ def record_configured(dsn: str | None) -> bool:
         return True
 
 
-def read_checkpoint(conn: Any, org_id: str, graph_id: str) -> Checkpoint:
-    """The record's consumed positions — the ledger, read rather than kept."""
+def read_checkpoint(conn: Any, org_id: str, graph_id: str, *,
+                    allocated: bool = False) -> Checkpoint:
+    """The record's consumed positions — the ledger, read rather than kept.
+
+    ⛔ TWO EDGES, AND THE LOW ONE IS THE DANGEROUS ONE (review P0). The gap query
+    can only see a hole that sits BETWEEN two rows, because it looks at a row's
+    `lead()` neighbour. A record whose rows start ABOVE position 1 — which is the
+    ORDINARY case for this whole lane, not a corner: `public.journal_event.seq`
+    carries only `CHECK (seq > 0)`, and the live door writes at the journal's own
+    append position, so a graph armed after its journal already held 250 lines
+    mints position **251 alone** — produced `first_gap = NULL`, i.e. "contiguous",
+    `next_seq = 252`, and `apply` then folded the tail and reported success over a
+    record that had never seen records 1..250.
+
+    That is the exact failure this tool exists to prevent, in the exact scenario
+    (#7879 hole 2: the historic payload) it exists for, so the low edge is
+    checked here rather than left to the caller: `min(seq) > 1` IS a gap, and the
+    resume point is position 1.
+
+    ``allocated`` suppresses that check, and only for one reason: on a graph whose
+    ordinals are ISSUED (`public.record_cursor` row), the first position is the
+    allocator's seed floor, not 1 — so a legitimate record that starts at 500 is
+    not short of anything. The caller states which arm it is on; this function
+    does not guess.
+    """
     from tortoise.record_projection import scope_connection
 
     cursor = scope_connection(conn, org_id)
@@ -296,17 +339,25 @@ def read_checkpoint(conn: Any, org_id: str, graph_id: str) -> Checkpoint:
             "the record's checkpoint read returned no row — an aggregate over "
             "an empty set always returns one, so this is not 'empty', it is "
             "unreadable; refusing rather than reporting 0")
-    high, present = (row["high"], row["present"]) if isinstance(row, Mapping) else (row[0], row[1])
-    high, present = int(high or 0), int(present or 0)
+    if isinstance(row, Mapping):
+        high, present, low = row["high"], row["present"], row["low"]
+    else:
+        high, present, low = row[0], row[1], row[2]
+    high, present, low = int(high or 0), int(present or 0), int(low or 0)
     if present == 0:
-        return Checkpoint(high_seq=0, present=0, first_gap=None)
+        return Checkpoint(high_seq=0, present=0, first_gap=None, min_seq=0)
     cursor.execute(_FIRST_GAP_SQL, (org_id, graph_id))
     gap_row = cursor.fetchone()
     gap = None
     if gap_row:
         raw = gap_row["gap"] if isinstance(gap_row, Mapping) else gap_row[0]
         gap = int(raw) if raw is not None else None
-    return Checkpoint(high_seq=high, present=present, first_gap=gap)
+    if gap is None and not allocated and low > 1:
+        # The record holds rows, and the lowest is above 1: the journal's PREFIX
+        # was never folded. Resume at 1 — the unconsumed prefix is the whole job.
+        gap = 1
+    return Checkpoint(high_seq=high, present=present, first_gap=gap,
+                      min_seq=low)
 
 
 def read_cursor_state(conn: Any, org_id: str, graph_id: str,
@@ -394,7 +445,11 @@ def plan_batch(records: Sequence[Mapping[str, Any]], *, start_seq: int,
     ``start_seq``. That is `#13043`'s own rule — the flag is a claim about where
     the batch CAME FROM, and a journal read is the shape the default describes.
     """
-    from tortoise.record_projection import _JOURNAL_INSERT_PREFIX, replay_plan
+    from tortoise.record_projection import (
+        _JOURNAL_INSERT_PREFIX,
+        ALLOCATION_STATEMENT_PREFIX,
+        replay_plan,
+    )
 
     planned = replay_plan(records, org_id=org_id, graph_id=graph_id,
                           start_seq=start_seq, allocate=allocate)
@@ -405,10 +460,21 @@ def plan_batch(records: Sequence[Mapping[str, Any]], *, start_seq: int,
     # run it describes, and an operator comparing the two would see a
     # disagreement that is not one. The count is imported, not re-spelled, so the
     # two cannot drift.
-    mutations = sum(1 for s in planned if not s.sql.startswith(_JOURNAL_INSERT_PREFIX))
+    # ⛔ THREE CLASSES, NOT TWO (review P2). The ALLOCATION statement also writes
+    # journal positions (`INSERT INTO public.journal_event` is INSIDE it), which
+    # is exactly the `startswith` collision `#9318` paid for — but its SQL begins
+    # `WITH payloads AS (`, so `_JOURNAL_INSERT_PREFIX` does NOT match it and it
+    # was counted as a MUTATION while all its position writes were counted as
+    # none. On the allocate arm that read `1 statements, 0 position rows` for a
+    # batch of 3 that writes 3 rows — and `ReplayReport` skips the allocation
+    # prefix too, so plan and run disagreed by one per batch, which is the drift
+    # this docstring claims is impossible.
+    mutations = sum(1 for st in planned
+                    if not st.sql.startswith(_JOURNAL_INSERT_PREFIX)
+                    and not st.sql.startswith(ALLOCATION_STATEMENT_PREFIX))
+    position_rows = len(planned) - mutations
     return BatchPlan(start_seq=start_seq, records=len(records),
-                     statements=mutations,
-                     position_rows=len(planned) - mutations,
+                     statements=mutations, position_rows=position_rows,
                      events=dict(Counter(str(r.get("type")) for r in records)))
 
 
@@ -489,8 +555,15 @@ def build_plan(*, journal: Journal, org_id: str, graph_id: str,
     events_total = 0
     for offset, length in slices:
         batch = journal.records[offset:offset + length]
-        planned = plan_batch(batch, start_seq=offset + 1, org_id=org_id,
-                             graph_id=graph_id, allocate=allocate)
+        # ⛔ ON THE ALLOCATION ARM THE JOURNAL POSITION IS NOT THIS TOOL'S TO
+        # STATE (review P1). `replay_plan` refuses `allocate=True` with
+        # `start_seq != 1` by name — the counter issues the number — so passing
+        # `offset + 1` made every batch after the first refuse, and `apply`
+        # refused AFTER committing batch 1 (a partial write reported as "nothing
+        # was written"). `1` is what the module asks for and what the live door
+        # passes; the allotted range is read back from the fold's own report.
+        planned = plan_batch(batch, start_seq=(1 if allocate else offset + 1),
+                             org_id=org_id, graph_id=graph_id, allocate=allocate)
         statements_total += planned.statements
         positions_total += planned.position_rows
         events_total += planned.records
@@ -592,6 +665,7 @@ def apply_batches(*, journal: Journal, org_id: str, graph_id: str,
         # whole batch before executing any of it, and printing that plan first
         # means an operator watching a long backfill sees the batch it is about
         # to apply rather than one it already applied.
+        start_seq = 1 if allocate else offset + 1
         planned = plan_batch(batch, start_seq=start_seq, org_id=org_id,
                              graph_id=graph_id, allocate=allocate)
         echo(f"batch {index}/{len(slices)}: seq {planned.start_seq}.."
@@ -604,26 +678,50 @@ def apply_batches(*, journal: Journal, org_id: str, graph_id: str,
                             (str(int(timeout_ms)),))
             result = replay(batch, conn, org_id=org_id, graph_id=graph_id,
                             start_seq=start_seq, allocate=allocate)
-            conn.commit()
         except Exception as exc:
+            # The MUTATION failed: roll back and claim nothing. This is the one
+            # case where "nothing from this batch is in the record" is TRUE.
             _quietly(conn.rollback)
+            report.events_by_type = dict(sorted(types.items()))
             raise RunnerError(
                 f"batch {index}/{len(slices)} (seq {planned.start_seq}.."
                 f"{planned.end_seq}) failed and was ROLLED BACK: "
-                f"{_one_line(exc)} — nothing from this batch is in the record. "
+                f"{_one_line(exc)} — nothing from THIS batch is in the record. "
                 f"The checkpoint is derived from the record, so re-running "
-                f"resumes at seq {planned.start_seq}"
+                f"resumes at the position the record actually holds"
+            ) from exc
+        try:
+            conn.commit()
+        except Exception as exc:
+            # ⛔ A COMMIT WHOSE OUTCOME IS UNKNOWN IS NOT A ROLLBACK (review P2).
+            # The server may have committed before the round trip was lost, so
+            # telling the operator "nothing landed" would be a lie in exactly the
+            # case that matters. Say what is known and let the derived checkpoint
+            # decide on the next run — which is what it is for.
+            report.events_by_type = dict(sorted(types.items()))
+            raise RunnerError(
+                f"batch {index}/{len(slices)} (seq {planned.start_seq}.."
+                f"{planned.end_seq}): the COMMIT's outcome is UNKNOWN "
+                f"({_one_line(exc)}). It may be durable. The checkpoint is "
+                f"derived from the record, so re-running decides from what the "
+                f"record actually holds rather than from this message"
             ) from exc
         report.batches += 1
         report.committed += 1
         report.consumed += result.events
         report.statements += result.statements
         types.update(planned.events)
+        # ⛔ THE ALLOTTED RANGE COMES FROM THE FOLD (review P1): on the allocation
+        # arm the numbers are the COUNTER's, and `ReplayReport` reports them
+        # (`first_seq`/`last_seq`, populated from the allocated block). Printing
+        # the plan's enumerated numbers there would name positions nothing wrote.
+        first = getattr(result, "first_seq", 0) or planned.start_seq
+        last = getattr(result, "last_seq", 0) or planned.end_seq
         if not report.first_seq:
-            report.first_seq = planned.start_seq
-        report.last_seq = planned.end_seq
+            report.first_seq = first
+        report.last_seq = last
         echo(f"batch {index}/{len(slices)}: committed — {result.events} events, "
-             f"{result.statements} statements")
+             f"{result.statements} statements, seq {first}..{last}")
     report.events_by_type = dict(sorted(types.items()))
     return report
 
@@ -649,9 +747,15 @@ def _render_plan(report: PlanReport) -> str:
         f" ({'segmented' if j['segmented'] else 'single file'}"
         f"{', SALVAGE' if j['salvage'] else ''})",
     ]
-    if j["corrupt_lines"] or j["torn_tails"]:
+    if j["corrupt_lines"] is None or j["torn_tails"] is None:
+        lines.append("  ⚠ damage NOT REPORTED: this layout's reader does not "
+                     "return its damage counters, and it reads every segment in "
+                     "SALVAGE mode — so a skipped mid-file line would have "
+                     "SHIFTED the enumeration and this run cannot see it")
+    elif j["corrupt_lines"] or j["torn_tails"]:
         lines.append(f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s), "
-                     f"{j['torn_tails']} torn tail fragment(s) — this is NOT a "
+                     f"{j['torn_tails']} torn tail fragment(s) — a SKIPPED line "
+                     f"SHIFTS every later record's position, so this is NOT a "
                      f"completeness claim")
     if report.checkpoint is None:
         # ⛔ TWO DIFFERENT FACTS, and telling them apart is the point: "no record
@@ -690,8 +794,19 @@ def _render_plan(report: PlanReport) -> str:
                  "(the plan path opens no connection unless asked for the checkpoint)")
     if report.events_to_consume:
         lines.append("")
-        lines.append("to apply this plan:  --acknowledge-plan "
-                     f"{report.events_to_consume}")
+        if report.checkpoint is not None:
+            lines.append("to apply this plan:  --acknowledge-plan "
+                         f"{report.events_to_consume}")
+        else:
+            # ⛔ DON'T PRINT AN INSTRUCTION `apply` WILL REJECT (review P2). This
+            # number was planned from seq 1 without reading the record, so on any
+            # non-empty record `apply` computes a DIFFERENT one and refuses. The
+            # tool used to close with the number and thereby hand the operator a
+            # guaranteed refusal.
+            lines.append("this plan did NOT read the record, so its number is not "
+                         "the one `apply` will ask for. Run "
+                         "`record_runner plan --from-checkpoint …` for the number "
+                         "to acknowledge")
     return "\n".join(lines)
 
 
@@ -792,16 +907,24 @@ def cmd_plan(args: argparse.Namespace, *, echo) -> int:
     journal = read_journal(args.journal, salvage=args.salvage)
     start_at = 0
     checkpoint = None
+    cursor = None
     if args.from_checkpoint:
         conn = open_record(args.org_id, dsn=args.dsn, timeout_ms=args.timeout_ms)
         try:
-            cp = read_checkpoint(conn, args.org_id, args.graph_id)
+            cp = read_checkpoint(conn, args.org_id, args.graph_id,
+                                 allocated=False)
+            # ⛔ THE CURSOR IS READ HERE TOO (review P2). `report.cursor` used to
+            # be hardcoded `None`, so the `cutover:` line and the JSON field were
+            # UNREACHABLE from the CLI — this tool would hand an operator an
+            # `events to consume` count and an acknowledgement number for a graph
+            # whose only possible outcome is `apply` refusing with CUT OVER.
+            cursor = read_cursor_state(conn, args.org_id, args.graph_id)
             conn.rollback()   # read-only: nothing was written, so nothing commits
         finally:
             _quietly(conn.close)
         checkpoint = {"high_seq": cp.high_seq, "present": cp.present,
                       "first_gap": cp.first_gap, "next_seq": cp.next_seq,
-                      "contiguous": cp.contiguous}
+                      "min_seq": cp.min_seq, "contiguous": cp.contiguous}
         start_at = max(0, cp.next_seq - 1)
         if cp.next_seq - 1 > len(journal.records):
             raise RunnerError(
@@ -813,7 +936,7 @@ def cmd_plan(args: argparse.Namespace, *, echo) -> int:
                         batch_size=args.batch_size, limit=args.limit,
                         allocate=args.allocate)
     report.checkpoint = checkpoint
-    report.cursor = None
+    report.cursor = None if cursor is None else {"seq": cursor[0], "mode": cursor[1]}
     report.record_armed = record_configured(args.dsn)
     emit(report.as_dict(), _render_plan(report), as_json=args.as_json)
     return EXIT_OK
@@ -823,8 +946,9 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
     journal = read_journal(args.journal, salvage=args.salvage)
     conn = open_record(args.org_id, dsn=args.dsn, timeout_ms=args.timeout_ms)
     try:
-        cp = read_checkpoint(conn, args.org_id, args.graph_id)
         cursor = read_cursor_state(conn, args.org_id, args.graph_id)
+        cp = read_checkpoint(conn, args.org_id, args.graph_id,
+                             allocated=cursor is not None)
         conn.rollback()       # read-only: nothing was written, so nothing commits
     finally:
         _quietly(conn.close)
@@ -855,11 +979,39 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
 
 
 def cmd_apply(args: argparse.Namespace, *, echo) -> int:
+    if args.salvage:
+        # ⛔ A WRITE MUST NOT BE POSITIONED FROM A READ THAT SKIPPED A LINE. A
+        # mid-file damaged line is skipped in salvage mode, which SHIFTS the
+        # enumeration of every later record — and the position written here is
+        # durable and is the checkpoint's key. `plan` may salvage (it writes
+        # nothing and the count is informational); a fold may not.
+        raise RunnerError(
+            "apply refuses --salvage: a skipped mid-file line SHIFTS every later "
+            "record's position, and the position this tool writes is durable and "
+            "is what the next run resumes from. Repair the journal, or use "
+            "`plan --salvage` to see what parses")
+    if args.allocate:
+        # ⛔ REFUSED, NOT BROKEN-BY-DESIGN (review P1). The allocation arm issues
+        # FRESH ordinals from `public.record_cursor` — it does not carry the
+        # journal's — so a HISTORIC fold through it would mint new positions for
+        # old events (inflating the counter and leaving the enumerated checkpoint
+        # with nothing to resume from: position N in the record no longer means
+        # "record N of the journal"). A cut-over graph's history is the
+        # allocator's SEED FLOOR's business, not a replay's.
+        raise RunnerError(
+            "apply refuses --allocate: the counter issues FRESH positions, so a "
+            "historic fold through it mints new ordinals for old events and "
+            "leaves the derived checkpoint with nothing to resume from. A "
+            "cut-over graph's history belongs to the allocator's seed floor "
+            "(`python -m tortoise record-allocator seed --journal …`), and live "
+            "writes are the allocator's (`arm`). `plan --allocate` is still "
+            "available: it writes nothing")
     journal = read_journal(args.journal, salvage=args.salvage)
     conn = open_record(args.org_id, dsn=args.dsn, timeout_ms=args.timeout_ms)
     try:
-        cp = read_checkpoint(conn, args.org_id, args.graph_id)
         cursor = read_cursor_state(conn, args.org_id, args.graph_id)
+        cp = read_checkpoint(conn, args.org_id, args.graph_id,
+                             allocated=cursor is not None)
         conn.rollback()       # read-only: nothing was written, so nothing commits
         start_at = max(0, cp.next_seq - 1)
         if start_at > len(journal.records):
@@ -874,9 +1026,11 @@ def cmd_apply(args: argparse.Namespace, *, echo) -> int:
                 f"mode={cursor[1]!r}): its positions are ISSUED, so an enumerated "
                 f"replay would store the same journal event at a second position "
                 f"with no error (#9190). The fold does not apply here — the "
-                f"remedy belongs to the allocator: "
-                f"`python -m tortoise record-allocator status|seed|arm`, or "
-                f"re-run with --allocate once the graph's mode is 'active'")
+                f"remedy belongs to the allocator, and it is NOT --allocate: a "
+                f"cut-over graph's history is its SEED FLOOR's business "
+                f"(`python -m tortoise record-allocator seed --journal …`), and "
+                f"`--allocate` is refused on a write because it issues fresh "
+                f"ordinals rather than the journal's")
 
         consumable = len(journal.records) - start_at
         if args.limit is not None:
