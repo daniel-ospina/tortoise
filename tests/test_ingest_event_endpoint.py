@@ -709,9 +709,12 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     it is WRITER AGREEMENT rather than over-rejection. Asserting the old shape
     would pin a divergence the slice exists to remove.
 
-    The `:Event` half is unchanged and still proves the other direction: an Event
-    has no lifecycle (#11825), so a non-persistable status is DROPPED there and
-    the bundle must stay accepted — the arm is not simply "reject every non-str".
+    The `:Event` half proves the other direction, and it CHANGED with this diff:
+    since `#13100` an Event has no lifecycle at ALL (#11825), so a declared
+    `status` is REFUSED there rather than dropped, and the bundle must NOT stay
+    accepted. The arm is therefore not "reject every non-`str`" — it is "an
+    `:Event` carries no lifecycle, whatever the value or its type"; the
+    documented clear route stays `status: None`.
     """
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
