@@ -108,8 +108,6 @@
 # a constant here.
 #
 # ROWS RE-STAMPED FOR A DECLARATION CHANGE (#13110) — recorded HERE because a re-cut
-# erases body comments (see the ⚠️ above). `tortoise_create_object`,
-# `tortoise_create_entity` and `tortoise_create_point` each gained a `goalState`
 # erases body comments (see the ⚠️ above). `tortoise_create_entity` and
 # `tortoise_create_point` each gained a `goalState`
 # PARAMETER, which moved both of their cells: `served_from` is the `_code_digest` of the
@@ -1323,7 +1321,9 @@ rows:
   # row now carries. `served_from` is `_code_digest` of the handler's CODE OBJECT, so an
   # edit inside `tortoise_query` re-stamps it: refreshed here to the value the tree
   # derives, because `cut` is owner-gated (`tools/surface_manifest.py`) and this change
-  # adds/removes/renames NO tool or method (55 MCP tools / 94 SDK methods, unchanged).
+  # adds/removes/renames NO tool or method (48 MCP tools / 94 SDK methods, unchanged —
+  # the figures are `counts:` in this file, re-read rather than carried: this comment
+  # said 55 until the merge of `origin/main`, which is the rot the header's own note names).
   # A full `cut` is deliberately NOT committed: it re-emits only `MANIFEST_HEADER`, so
   # the per-row rationale comments in this file are lost, and it re-derives the
   # observed-usage columns from a machine-local call log.
