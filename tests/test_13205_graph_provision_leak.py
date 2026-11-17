@@ -491,15 +491,27 @@ class TestDeprovisionOnDelete:
         from tortoise import hosted_api as ha
 
         class _Broken:
-            def query(self, *a, **k):
+            # ⛔ `query_all`, NOT `query`: `_org_graph_names` calls the walk now, so
+            # a `query`-only double raised `AttributeError` ("no attribute
+            # 'query_all'") and this test silently became a DUPLICATE of
+            # ``test_a_seam_without_query_all_is_ANNOUNCED_not_silent`` — the
+            # store-OUTAGE arm its own docstring names was left unpinned. That
+            # matters because `query_all` "RAISES on an outage by contract" is the
+            # load-bearing sentence both new docstrings lean on: a mutant that
+            # swallowed only `RuntimeError` inside the walk kept the suite green
+            # while re-opening the unrecoverable partial-erasure path.
+            def query_all(self, *a, **k):
                 raise RuntimeError("postgrest down")
 
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                             lambda: True)
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: _Broken())
-        with pytest.raises(RuntimeError, match="refusing to deprovision a SUBSET"):
+        with pytest.raises(RuntimeError, match="refusing to deprovision a SUBSET") as exc:
             ha._org_graph_names("o1", "org_o1")
+        assert "postgrest down" in str(exc.value), (
+            "the refusal must carry the STORE's error — an AttributeError here "
+            "would mean the double is dead again")
 
     def test_a_failed_enumeration_keeps_the_org_row_as_the_retry_anchor(self, monkeypatch):
         """The #926 anchor, end to end: the sweep logs and skips the org, so the
