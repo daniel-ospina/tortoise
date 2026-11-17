@@ -3015,10 +3015,11 @@ class TestNonScalarStatus12869:
         this arm's payload cannot reach the raise through an object-declared
         create.
 
-        ⛔ AND A SIXTH. The bundle validator's non-string refusal
-        (`sdk.py:31271`) was still interpolating the bundle's `status` value
-        with the raw `!r`; its message sits in a violations list that `ingest`
-        raises on, so a hostile `__repr__` replaced that exception. Arm (f).
+        ⛔ AND A SIXTH AND SEVENTH. The bundle validator's two status refusals
+        (`sdk.py:31271` non-string, `sdk.py:31283` array) were still
+        interpolating the bundle's `status` value with the raw `!r`; their
+        messages sit in a violations list that `ingest` raises on, so a hostile
+        `__repr__` replaced that exception. Arms (f) and (i).
 
         ⛔ EACH OPERAND IS ITS OWN ARM, because they are evaluated in SOURCE
         ORDER inside one f-string — `{target!r}` before `{word!r}` — so an arm
@@ -3316,6 +3317,27 @@ class TestNonScalarStatus12869:
                 + str(ei.value))
             assert _carrier_row(sdk, "Object", "rr-iter") is None, (
                 "a refused encoder write left a node behind")
+
+            # (i) the SIBLING bundle refusal — the ARRAY arm (`sdk.py:31283`).
+            #     Arm (f) pins the non-string arm; that one and this one are two
+            #     separate messages, so a revert of either must red something.
+            #     ⛔ A hostile `__repr__` here replaced the violations list with
+            #     the caller's exception (MEASURED: `RuntimeError: repr-boom` out
+            #     of `_validate_bundle`), which is the same class as (f).
+            class _HostileList(list):
+                def __repr__(self):
+                    raise RuntimeError("repr-boom")
+
+            _arr = sdk._validate_bundle({"entities": [
+                {"ref": "a", "type": "object", "name": "arr-ent",
+                 "status": _HostileList(["x"])}]})
+            assert _arr, "the validator did not refuse an array bundle status"
+            assert "an array is stored" in _arr[0]["message"], (
+                "the array arm's refusal did not answer: " + _arr[0]["message"])
+            assert "<_HostileList>" in _arr[0]["message"], (
+                "the array arm did not use `_refusal_repr` on the bundle "
+                "value: " + _arr[0]["message"])
+            assert "repr-boom" not in _arr[0]["message"]
         finally:
             sdk.close()
 
