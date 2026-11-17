@@ -616,6 +616,25 @@ def test_the_DISCHARGE_write_holds_the_run_lock(env, monkeypatch):
         "the discharge wrote the marker with NO lock held — a peer's merge "
         "landing in that gap is erased and the next preview prints a false "
         "`0 rows ⇒ dead weight`")
+    # ⛔ AND FROM OUTSIDE THE PROCESS. The assertion above reads a refcount inside
+    # THIS interpreter, so a leaked lock is invisible to it (measured 2026-11-17:
+    # with the release removed, `main --execute` still exited 0 while a peer
+    # process found the lock BUSY). A second interpreter is the only witness that
+    # the lock is really free once the holder is gone.
+    witness = subprocess.run(
+        [sys.executable, "-c",
+         "import fcntl,sys\n"
+         "f=open(sys.argv[1],'a+')\n"
+         "try:\n"
+         "    fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)\n"
+         "except OSError:\n"
+         "    print('BUSY')\n"
+         "else:\n"
+         "    print('FREE')\n", str(lock_path)],
+        capture_output=True, text=True, timeout=60)
+    assert witness.stdout.strip() == "FREE", (
+        "the run lock outlived its holder (a peer process found it "
+        f"{witness.stdout.strip()!r}), so a later run would be refused forever")
 
 
 def is_flock_held(lock_path) -> bool:

@@ -335,7 +335,7 @@ def _pending_path(journal: str | None):
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    """Replace ``path`` atomically (same-directory tmp + ``os.replace``).
+    """Replace ``path`` atomically AND durably (tmp + fsync + ``os.replace``).
 
     ⛔ NOT ``write_text``: that is truncate-then-write, so a kill, OOM or ENOSPC
     in the window leaves an EMPTY marker — which `_read_pending` reads as "no
@@ -343,11 +343,30 @@ def _atomic_write(path: Path, text: str) -> None:
     dropping the `assembly` member. The guard's own update could produce the
     false PASS it exists to prevent (measured: a torn write ⇒ `pending=[]` ⇒
     "dead weight": True, exit 0).
+
+    ⛔ ``fsync`` BEFORE the replace, and again on the DIRECTORY after it: a
+    rename is atomic against a process kill, not against a machine crash, and
+    the crash leaves a zero-length marker that `_read_pending` refuses on both
+    arms — a dead end the operator cannot clear from the message alone.
+    ``write_text`` stays the write primitive so the torn-write seam a test
+    monkeypatches remains the real one.
     """
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
+        with contextlib.suppress(OSError):
+            fd = os.open(str(tmp), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     finally:
         with contextlib.suppress(OSError):
             if tmp.exists():
@@ -1398,7 +1417,9 @@ def run(sdk, *, execute: bool = False, sample: int = 20,
         raise Refused(REFUSE_PENDING_UNREADABLE, (
             f"the durability marker {_pending_path(rep.journal)} exists but "
             "could not be read, so it is unknown whether a previous run left "
-            "rows LIVE-ONLY. Nothing was written."))
+            "rows LIVE-ONLY. Nothing was written. Repair: read the file (it is "
+            "one row id per line) and, once every id in it is confirmed durable "
+            "by a preview, delete it by hand — this tool will not guess."))
     if rep.pending and log is not None:
         # ⛔ The PREVIEW gets the same discharge test the write arm applies, or a
         # marker left by a killed run (naming only ids whose records landed)
