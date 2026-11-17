@@ -3,7 +3,11 @@
 The read path already knows which labels carry a vector index
 (``FalkorProjection._vector_indexed_labels``, filled by
 ``_record_vector_index_inventory`` — the same measurement behind the `#4997`
-"unindexed for label(s)" notice). On an unindexed label the two
+"unindexed for label(s)" notice). ⛔ **What reaches ``run_vector_query`` is the
+BEHAVIOURAL half, ``_vector_indexed_labels_for_reads``** — never the reported pair:
+the reported pair collapses "the catalogue answered but nothing in it parsed" into
+an empty set (`#11087` pins that for the MESSAGE), and acting on it would demote
+every dense read, ``:Point`` included, after an engine catalogue reshape. On an unindexed label the two
 ``CALL db.idx.vector.queryNodes`` attempts can only be REFUSED, and this engine
 answers ``Invalid arguments for procedure`` for a missing index AND for a wrong
 argument order alike — measured on FalkorDB v4.20.6 with

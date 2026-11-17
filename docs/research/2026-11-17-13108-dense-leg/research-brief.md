@@ -145,11 +145,14 @@ cheaper — it would only move the threshold the queueing crosses.
 
 384-dim `all-MiniLM-L6-v2`, cosine, k=10, 100k vectors, 500 queries.
 
-**PROVENANCE (`#13121` round 8 F3):** this table is reproduced verbatim on two PyPI package pages —
-<https://pypi.org/project/mnemolith/0.3.3/> and <https://pypi.org/project/aether-cache/0.1.8/> (the
-second adds an `ef=200` row). ⛔ **It is a library README benchmark, not a peer-reviewed study**, and
-PyPI serves those pages only to a browser, so the numbers below cannot be re-fetched by a script —
-they are cited as the table's own claim, and the ratios derived from them inherit that weight.
+**PROVENANCE (`#13121` rounds 8–9):** this table is excerpted from ONE source — the mnemolith
+project's README, published at <https://pypi.org/pypi/mnemolith/0.3.3/json> and, before the rename,
+at <https://pypi.org/pypi/aether-cache/0.1.8/json> (one source under two names; `aether-cache` now
+serves a "renamed to mnemolith" notice). It is excerpted to **4 of the README's 6 rows**
+(`ef=20` and `ef=200` are dropped), so "verbatim" would be wrong. ⛔ **It is a library README
+benchmark, not a peer-reviewed study** — the ratios derived from it inherit that weight. ⚠️ The
+`/project/…` HTML page is script-challenged for a non-browser client; the `/pypi/<name>/<version>/json`
+endpoint is not, and that is what a reader should fetch to check these figures.
 **An independently verifiable cross-check disagrees by ~20× and does not weaken the conclusion:**
 <https://zayunsna.github.io/tips/2026-10-19-vector_search_hnsw/> (fetched 2026-11-17; scripts and raw
 output published) measures an exact NumPy scan at **0.805 ms per query on 133,957** real embeddings
@@ -280,8 +283,9 @@ on one population under one load.
 | component | measured |
 |---|---|
 | two refused `queryNodes` round trips | **20.17–20.28 ms** (`index_attempt[0].elapsed_ms`: 10.18 + 9.97 in `fix-1000-paired-at-rest.json`; 10.19 + 10.06 in `probe-1000-at-rest-and-concurrent.json`) |
-| the scan itself (`vec.euclideanDistance` over 1,000 rows + sort) | **≈13.3 ms** — the `hint` arm of `fix-1000-paired-at-rest.json` (`object[hint]@c1` p50 **13.26 ms**), which is the same read with ONLY those two attempts removed (34.78 − 21.52) |
-| the indexed control, same corpus | **21.00 ms** (and **20.88 ms** with the same inventory supplied — the hint is a no-op for an indexed label) |
+| the scan itself (`vec.euclideanDistance` over 1,000 rows + sort) | **13.26 ms** — the `hint` arm of `fix-1000-paired-at-rest.json` (`object[hint]@c1` p50), which is the same read with ONLY those two attempts removed |
+| the indexed control, same corpus, `nohint` (inventory forced to None = pre-#13108) | **20.88 ms** |
+| the indexed control, same corpus, `hint` (inventory supplied — the shipped path) | **21.00 ms** — a 0.12 ms difference, i.e. the hint is a no-op for an indexed label, as it must be |
 
 ⛔ **An earlier version of this table printed `the scan itself ≈23.45 ms` and a `10.11 + 10.05`
 split. Neither is in any committed artifact and the pair is arithmetically impossible beside a
@@ -317,10 +321,15 @@ unresolved; the wasted-round-trips defect is separate, does not touch V3, and is
 ## 5. The smallest honest fix, and what it is not
 
 **Chosen: stop paying for an index the store has already measured absent.** The projection
-already measures it (`FalkorProjection._vector_indexed_labels`, from
-`_record_vector_index_inventory` — the same measurement behind the `#4997` notice), so
-`degradation_chain`/`run_vector_query` now take an optional `vector_indexed_labels`; a label
-absent from it skips the doomed `queryNodes` attempt and goes straight to the scan.
+already measures it, and exposes the measurement in TWO halves —
+`FalkorProjection._vector_indexed_labels` (the REPORTED pair, which `#11087` pins to read
+"measured and empty" when the catalogue answered but nothing in it parsed) and
+`FalkorProjection._vector_indexed_labels_for_reads` (the BEHAVIOURAL half, `None` in exactly
+that lane). ⛔ **What is forwarded is the behavioural half**, at all three `sdk.py` call sites;
+`degradation_chain`/`run_vector_query` take it as the optional `vector_indexed_labels`, and a
+label absent from it skips the doomed `queryNodes` attempt and goes straight to the scan. Wiring
+the reported pair here would turn an engine catalogue reshape into a full scan of every dense
+read, `:Point` included — which is why the two halves exist.
 
 | | before (`None` = not measured) | after (inventory supplied) | change |
 |---|---|---|---|
