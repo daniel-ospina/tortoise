@@ -386,7 +386,7 @@ class LocalTarget:
                 "this route — it hands its argv to pytest."
             )
         if not re.match(r"^(docker|bolt|redis)://", uri):
-            raise TargetRefused(f"TORTOISE_DB_URI is not a store URI: {_cut(uri, 40)}")
+            raise TargetRefused(f"TORTOISE_DB_URI is not a store URI: {_redact(_cut(uri, 40))}")
         os.environ["TORTOISE_DB_URI"] = uri
         self.uri = _redact(uri)
         self.namespace = namespace or f"capstone13038_{_stamp()}"
@@ -745,7 +745,11 @@ class DeployedTarget:
     def provenance(self) -> dict:
         return {
             "target": self.kind,
-            "api": self.api_url,
+            # `_redact` here for the same reason `LocalTarget` redacts its store URI: this
+            # dict is written into `run-deployed-refused.json` inside the COMMITTED
+            # evidence directory, and a deployed API URL can carry userinfo
+            # (`https://user:pass@host`) just as a store URI can (#13303 cycle 4, P2).
+            "api": _redact(self.api_url),
             "reachability": self.reach,
             "capabilities": [],
             "ingest_surface": [],
@@ -1637,6 +1641,7 @@ def build_scoreboard(
                 "answer_status": ans.status if ans else "blocked",
                 "signals": ans.signals if ans else [],
                 "payload": ans.payload if ans else {},
+                "notes": list(ans.notes) if ans else [],
                 "calls": [c.to_dict() for c in ans.calls] if ans else [],
             }
         )
@@ -1759,6 +1764,30 @@ def render_markdown(board: dict) -> str:
 # ── the run ──────────────────────────────────────────────────────────────────────
 
 
+def _load_verdicts_map(path: str | Path) -> dict:
+    """Load a `--verdicts` document, or raise `ValueError` if it is not a verdicts map.
+
+    ONE definition, used by BOTH entry points (`run --judge file` and `judge`), because
+    both write into `--out` whose default is the COMMITTED evidence directory
+    (`DEFAULT_OUT`). A run file passed as `--verdicts` (a plausible typo —
+    `verdicts-baseline.json` is documented as "copied from `run-local.json`'s rows")
+    used to score nothing and replace the board with `0 right · 0 wrong · 0 blocked ·
+    6 unjudged`. Cycle 3 closed this on `judge` only; cycle 4 found the other door open.
+
+    The vocabulary itself is NOT enforced here — a recognised map carrying a word
+    outside `VERDICTS` is `build_scoreboard`'s job (recorded `unjudged`, never refused).
+    """
+    doc = json.loads(Path(path).read_text())
+    if isinstance(doc, dict):
+        doc.pop("_provenance", None)
+    if not isinstance(doc, dict) or not all(isinstance(v, dict) for v in doc.values()):
+        raise ValueError(
+            "not a verdicts map (expected {question_id: {'verdict': one of "
+            f"{', '.join(VERDICTS)}}})"
+        )
+    return doc
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     started, t0 = _now(), time.time()
     narrative_path = Path(args.narrative).resolve()
@@ -1770,6 +1799,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     notes: list[str] = []
+
+    # Validate `--judge file` BEFORE the target is built or anything is written: the run
+    # measures a whole scenario, so a mistyped verdicts file must not cost 213 s and a
+    # board overwrite to discover (#13303 cycle 4, P1).
+    judged_from_file: dict | None = None
+    if args.judge == "file":
+        try:
+            judged_from_file = _load_verdicts_map(args.verdicts)
+        except (OSError, ValueError) as exc:
+            print(
+                f"capstone: refusing --verdicts {args.verdicts} — {exc}; nothing was "
+                "measured and nothing was written",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         target = build_target(
@@ -1824,7 +1868,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "target": "deployed",
             "product": f"hosted api {prov.get('api')} "
             f"commit={(prov.get('reachability') or {}).get('v1_version', {}).get('commit_sha')}",
-            "store": prov.get("api"),
+            "store": _redact(prov.get("api") or ""),
             "graph": "—",
             "narrative": str(narrative_path),
             "narrative_frozen": narrative.get("frozen"),
@@ -1968,12 +2012,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             notes.append(f"no fresh-reader verdicts: {out.get('reason')}")
     elif args.judge == "file":
         verdicts_path = Path(args.verdicts).resolve()
-        try:
-            judged = json.loads(verdicts_path.read_text())
-        except (OSError, ValueError) as exc:
-            notes.append(f"could not read verdicts {verdicts_path}: {exc}")
+        judged = judged_from_file or {}
         judge_meta["file"] = str(verdicts_path)
-        judged.pop("_provenance", None)
     else:
         notes.append(
             "judging was disabled (--judge none): every row is `unjudged`. "
@@ -2080,26 +2120,10 @@ def cmd_judge(args: argparse.Namespace) -> int:
         return 2
     if args.verdicts:
         try:
-            judged = json.loads(Path(args.verdicts).resolve().read_text())
+            judged = _load_verdicts_map(args.verdicts)
         except (OSError, ValueError) as exc:
-            print(f"capstone: cannot read verdicts: {exc}", file=sys.stderr)
-            return 2
-        judged.pop("_provenance", None)
-        # REFUSE a file that is not a verdicts MAP, for the same reason the packet is
-        # checked (#13303 review cycle 3, P3): this command writes into the packet's
-        # directory, and `verdicts-baseline.json` is documented as "copied from
-        # `run-local.json`'s rows", so pointing `--verdicts` at a RUN file is a
-        # plausible typo. Measured: it scored nothing, wrote an all-`unjudged` board
-        # over the committed run. A verdict map is `{QID: {"verdict": …}}`; a run file
-        # maps `schema`/`rows`/`tally` to non-maps. NOTE this is the DOCUMENT-shape
-        # gate only — a recognised map carrying a word outside the closed vocabulary is
-        # `build_scoreboard`'s job (recorded `unjudged`, never refused).
-        if not isinstance(judged, dict) or not all(
-            isinstance(v, dict) for v in judged.values()
-        ):
             print(
-                f"capstone: refusing {args.verdicts} — not a verdicts map "
-                f"(expected {{question_id: {{'verdict': one of {', '.join(VERDICTS)}}}}})",
+                f"capstone: refusing {args.verdicts} — {exc}",
                 file=sys.stderr,
             )
             return 2
