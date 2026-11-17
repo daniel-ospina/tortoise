@@ -101,6 +101,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+
 #: The arming variable the seam itself reads — imported, never copied (#13043
 #: review P2-2): a second spelling of one name is how an operator seeds one
 #: record and arms another. Imported LAZILY inside :func:`_record_env_contract`
