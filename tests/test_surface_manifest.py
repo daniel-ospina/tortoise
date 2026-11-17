@@ -2997,11 +2997,14 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
     )
 
 
-#: The exact line that went stale under `#13052` (`4a5ffa0a14`, the seven-door retirement):
-#: `55` had been `counts.tools` before it, and NOTHING reads a comment, so the claim rotted
-#: with `check --provenance-strict` green. Held as the row arm's POSITIVE CONTROL — see the
-#: bottom of `test_no_per_row_comment_quotes_a_stale_surface_count` for why it has to live
-#: in the test rather than in the manifest.
+#: The fragment of the line that went stale under `#13052` (`4a5ffa0a14`, the seven-door
+#: retirement): on the tree it was written on it spanned two lines and continued
+#: `…, so this is a fingerprint refresh, not a surface change.`; the rejoined fragment below
+#: keeps the count-bearing shapes, which is all this control reads.
+#: `55` had been `counts.tools` before that cut, and NOTHING reads a comment, so the claim
+#: rotted with `check --provenance-strict` green. Held as the row arm's POSITIVE CONTROL —
+#: see the bottom of `test_no_per_row_comment_quotes_a_stale_surface_count` for why it has
+#: to live in the test rather than in the manifest.
 _STALE_SURFACE_COUNT_PROSE = (
     "  # removed or renamed here (55 MCP tools / 94 public SDK methods, unchanged), so this is a\n"
 )
@@ -3070,30 +3073,37 @@ def test_no_per_row_comment_quotes_a_stale_surface_count():
     }
 
     # ⛔ THE POSITIVE CONTROL, FIRST — it is what stops this arm from going inert again.
-    # Every value is derived from `live`, so the control cannot itself go stale when the
-    # surface moves: whatever the current counts are, `+n` is a number that disagrees.
+    # Every value is derived from `live` HERE, and both offsets are above BOTH live counts,
+    # so neither can collide with the other's live value and quietly stop being stale (a
+    # fixed `+7` / `+9` pair could: at `tools=48`, `48+46` is `sdk_methods=94`, which reds
+    # this control pointing at innocent code). Whatever the counts are, these two disagree.
+    stale_tools = max(live.values()) + 1
+    stale_sdk = max(live.values()) + 2
     control = (
-        f"  # stale ({live['tools'] + 7} MCP tools / "
-        f"{live['sdk_methods'] + 9} public SDK methods, unchanged)\n"
+        f"  # stale ({stale_tools} MCP tools / "
+        f"{stale_sdk} public SDK methods, unchanged)\n"
     )
     assert _stale_surface_count_claims(control, live) == [
-        f"{live['tools'] + 7} MCP tools",
-        f"{live['sdk_methods'] + 9} public SDK methods",
+        f"{stale_tools} MCP tools",
+        f"{stale_sdk} public SDK methods",
     ], (
         "the row arm's detector no longer fires: a line quoting two counts that disagree "
         "with `counts:` was judged clean, so the arm below can report green while looking "
         "at nothing. Fix `_SURFACE_COUNT_PATTERNS` rather than loosening this control"
     )
-    # …and the historical shape, which is the one that actually landed. `55` is the number
-    # this repo really wrote; `94` was correct then, so only the tools claim is asserted —
-    # that is the whole point (a check that pins the CORRECT count too would make this
-    # control break every time the SDK surface legitimately moves).
-    assert "55 MCP tools" in _stale_surface_count_claims(
-        _STALE_SURFACE_COUNT_PROSE, live
-    ), (
+    # …and the historical shape, which is the one that actually landed. This asserts the
+    # DETECTOR's shape, not staleness against `live`: the fixture's `55` is only stale while
+    # `counts.tools != 55`, and a surface that grows back would red this control with
+    # "the detector drifted away from the defect it exists for" about a detector that is
+    # fine. Disagreement-implies-reported is control 1's job; this control's job is that
+    # the two shapes the repo actually writes are still recognised at all.
+    assert _surface_count_claims(_STALE_SURFACE_COUNT_PROSE) == [
+        ("tools", "55 MCP tools", 55),
+        ("sdk_methods", "94 public SDK methods", 94),
+    ], (
         "the pre-fix line `…(55 MCP tools / 94 public SDK methods, unchanged)…` is no "
-        "longer recognised as stale — the detector drifted away from the defect it exists "
-        "for, so the clean verdict below proves nothing"
+        "longer recognised — the detector drifted away from the defect it exists for, so "
+        "the clean verdict below proves nothing"
     )
 
     # Everything AFTER the header: the header is exempt BY DESIGN, because it quotes the
@@ -3106,8 +3116,10 @@ def test_no_per_row_comment_quotes_a_stale_surface_count():
         + ", ".join(f"`{shape}`" for shape in stale)
         + f", but `counts.tools` is {live['tools']} / `counts.sdk_public_methods` is "
         f"{live['sdk_methods']} in this tree — a surface count in prose re-stales silently "
-        "because no gate parses comments; state the count from `counts:` or say "
-        "which tree's count it was and why it was that number"
+        "because no gate parses comments. State the count from `counts:`, or — for a "
+        "HISTORICAL figure — write it without either shape this arm matches (e.g. `at 55`, "
+        "naming the head), because the scanner compares the integer and has no way to read "
+        "a qualifier out of `55 MCP tools`"
     )
 
 
