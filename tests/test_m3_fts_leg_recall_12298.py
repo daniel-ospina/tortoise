@@ -1384,13 +1384,20 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # which moves the FTS call 3042 -> 3053 (span 3053-3062), the tie clause
     # 2672 -> 2683 and the rank loop 4549 -> 4652. Re-derived by CONTENT at the
     # stacked head with that same grep, never by adding the insert's delta.
-    ("tortoise/search_engine.py", 3053, "CALL db.idx.fulltext.queryNodes",
-     "`:3053-3062`"),
-    ("tortoise/search_engine.py", 2683, "def recency_tie_clause(",
-     "`search_engine.py:2683`"),
-    ("tortoise/search_engine.py", 4652,
+    # ⛔ THESE THREE ROWS WERE STALE BY 25/25/55 LINES AT THIS HEAD (they were derived on an earlier
+    # stacked head whose `search_engine.py` inserts do not all survive to this tree), so §1's locator
+    # test was PERMANENTLY RED while the DOCUMENT was right — the mirror of the drift it guards.
+    # Re-derived by content at this tree: `grep -n -F 'CALL db.idx.fulltext.queryNodes'
+    # tortoise/search_engine.py` -> 3078 (the statement's Cypher ends at 3086),
+    # `grep -n -F 'def recency_tie_clause('` -> 2708,
+    # `grep -n -F 'for rank, (pid, _score) in enumerate(ranked):'` -> 4707.
+    ("tortoise/search_engine.py", 3078, "CALL db.idx.fulltext.queryNodes",
+     "`:3078-3086`"),
+    ("tortoise/search_engine.py", 2708, "def recency_tie_clause(",
+     "`search_engine.py:2708`"),
+    ("tortoise/search_engine.py", 4707,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4652`"),
+     "`tortoise/search_engine.py:4707`"),
     # #11081 merge stack: the projection module grew above these three (the stacked
     # branches' index-manifest work), so the declaration 20346 -> 20401, the def
     # 20774 -> 20829 and the loop 21224 -> 21279. Re-derived by CONTENT at the

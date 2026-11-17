@@ -56,6 +56,10 @@ _CENSUS = "docs/evidence/13083-capability-census/README.md"
 _EVIDENCE = "docs/architecture/ENTITY-VERDICT-BANDS.md"
 _SE = "tortoise/search_engine.py"
 _CP = "tortoise/cache_projection.py"
+_SDK = "tortoise/sdk.py"
+_CACHE = "tortoise/cache_projection.py"
+_ENT = "tortoise/projection/entities.py"
+_HOSTED = "tortoise/hosted_api.py"
 
 #: (document, cite token the document must still carry, target file, 1-based line, fragment at that line)
 _PINS: tuple[tuple[str, str, str, int, str], ...] = (
@@ -107,6 +111,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # and `2976-3000` is the `build_or_query` byte-identity comment block, not the filter. The pin below
     # is anchored on the line that IS the filter, so the next offset-only edit reds instead of shipping.
     (_EVIDENCE, "search_engine.py:3059-3074", _SE, 3059, "if label in _STATUS_FILTERED_LABELS"),
+    # --- the row-13 cluster (the `Source.summary` placement) and the Event FTS row.
+    # ⛔ ADDED BY REVIEW: `_PINS` covered only `search_engine.py` / `cache_projection.py`, so the doc's
+    # `sdk.py` / `projection/entities.py` / `hosted_api.py` cites had NO READER — and exactly those had
+    # gone stale on `main` (`sdk.py:19679-19680` was ~1,940 lines off) while an offset-only re-derivation
+    # (`+3`, the branch's own `search_engine.py` insert) kept them looking corrected. Each row below is
+    # anchored on the line that carries the code the row QUOTES, so the arithmetic can no longer pass.
+    (_AUDIT, "sdk.py:21620-21621", _SDK, 21620, "s.summary=CASE WHEN $sum <> '' THEN $sum "),
+    (_AUDIT, "`:21743`", _SDK, 21743, "s.summary, s.topics"),   # bare continuation in row 13
+    (_AUDIT, "sdk.py:55815", _SDK, 55815, 'entity_type="event"'),
+    (_AUDIT, "projection/entities.py:5618", _ENT, 5618, "s.summary=coalesce($summary, s.summary, '')"),
+    (_AUDIT, "hosted_api.py:22883", _HOSTED, 22883, "s.title=$title, s.summary=$summary"),
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2712", _CP, 2712, "tail_denied = forbidden | {"),
 )
@@ -184,4 +199,4 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    assert len(_PINS) == 24
+    assert len(_PINS) == 29   # +5: the row-13 sdk/entities/hosted_api cluster, added by review

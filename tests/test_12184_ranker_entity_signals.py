@@ -18,7 +18,14 @@ What is asserted here:
   * the dispatch is explicit for every label in ``VALID_ENTITY_TYPES``;
   * a label with no signal set REFUSES loudly, and the refusal is not swallowed
     into the defensive ``None`` (which a caller reads as "the read did not
-    answer" and ranks anyway);
+    answer" and ranks anyway). ⛔ THE ARM THAT PROVES THAT IS
+    ``test_an_unknown_label_raises_before_any_read``: it calls ``_fetch_signals``
+    directly, so moving the dispatch back INSIDE the ``try`` (the regression the
+    property names) reds it. ``test_rerank_lets_the_refusal_out…`` does NOT prove
+    it — measured: with the dispatch restored inside the ``try`` that arm still
+    passes, because ``rerank`` reaches ``signal_family_for`` a second time,
+    unguarded, at the identity dimension (``ranking.py:1063``). It proves only
+    that ``rerank`` never ANSWERS an unknown label with a ranked list;
   * an entity row's signals are its INBOUND CLAIMS (degree + mean belief), not
     its own belief and not its operator edges — measured on a real graph, with
     the point read on the same ids as an anti-inert control;
@@ -177,7 +184,16 @@ def test_the_refusal_is_a_value_error_for_existing_callers():
 
 
 def test_rerank_lets_the_refusal_out_instead_of_ranking_with_defaults():
-    """The old shape returned a ranked list here. It must not."""
+    """The old shape returned a ranked list here. It must not.
+
+    ⚠️ NOT the arm for "the refusal is not swallowed into the defensive ``None``".
+    Measured by review: restore the dispatch inside ``_fetch_signals``' own ``try``
+    and this arm STILL PASSES, because ``rerank`` calls ``signal_family_for`` a
+    second time (unguarded) at the identity dimension. What it proves is the
+    caller-visible contract: no ranked list for an unknown label. The
+    "not swallowed" property is pinned by
+    ``test_an_unknown_label_raises_before_any_read``, which reds in that state.
+    """
     r = GraphRanker(projection=_NeverQueried())
     rows = [{"id": "a", "scores": {"rrf": 0.9}}, {"id": "b", "scores": {"rrf": 0.5}}]
     with pytest.raises(UnsupportedEntitySignals):
