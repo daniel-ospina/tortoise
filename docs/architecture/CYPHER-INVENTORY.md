@@ -391,7 +391,19 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where these numbers were last cut:** the re-cut into **`2060c92fd3`** — `sites` 1308→1309, `plain` 856→857 (read 575→576; the 281 write half is unchanged), `candidates` 575→576, `non-Cypher door calls` 257→258, `ast_door_calls` 1565→1567, `files_with_sites` unchanged at 98. The two sites are `hosted_api.py::_org_graph_names` (#13218) and `indexer/github_indexer.py::GitHubIndexer._object_state_to_issue_state` (#13222) — both landed on main WITHOUT re-cutting this document, which is the drift the `--check` gate exists to catch. The previous cut, kept as history:  
+**Where these numbers were last cut:** the re-cut into **`05fe46e94ebe`** (`#12910`, "a non-scalar
+`status` is refused at the Object doors") — `sites` 1309→1311, `files_with_sites` 98→99,
+`ast_door_calls` 1567→1569, `plain` 857→859 (read 576→578; the 281 write half is unchanged),
+`candidates` 576→578; `files_scanned` 297 and `non-Cypher door calls` 258 unchanged. The two sites
+are the SAME existence read, `MATCH (n:Object {id:$id}) RETURN count(n)` — one at
+`tortoise/api.py:2929`, one in `tortoise/sdk.py` — because the Object doors now read the row before
+refusing a non-scalar `status` instead of raising on deserialise. ⚠️ `#12910` re-cut the PINS and left
+this paragraph naming the previous cut, which is this document's own subject one level up: measured
+with `--json`, `05fe46e94ebe` prints 1311 sites / 99 files / 258 non-Cypher calls and its parent
+`534f3e1bee63` prints 1309 / 98 / 258. The previous cut, kept as history: the re-cut into
+**`2060c92fd3`** — `sites` 1308→1309, `plain` 856→857 (read 575→576; the 281 write half is
+unchanged), `candidates` 575→576, `non-Cypher door calls` 257→258, `ast_door_calls` 1565→1567,
+`files_with_sites` unchanged at 98. The two sites are `hosted_api.py::_org_graph_names` (#13218) and `indexer/github_indexer.py::GitHubIndexer._object_state_to_issue_state` (#13222) — both landed on main WITHOUT re-cutting this document, which is the drift the `--check` gate exists to catch. The previous cut, kept as history:  
 `origin/main` **`97fd713ffb`** — `sites` 1306→1308, `plain`
 854→856 (read 573→575; the 281 write half is unchanged), `candidates` 573→575, `files_scanned`
 296→297, `ast_door_calls` 1563→1565, the `rg` reconciliation in §1 re-measured on this tree, and
