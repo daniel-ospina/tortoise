@@ -592,11 +592,31 @@ def test_a_missing_journal_refuses_before_any_write(tmp_path, monkeypatch):
         sdk.close()
 
 
-def test_an_empty_target_flag_is_refused_not_treated_as_absent(monkeypatch):
+def test_an_empty_target_flag_is_refused_not_treated_as_absent(
+        tmp_path, monkeypatch, capsys):
     """`--db-path ""` is a set-but-empty value: it would fall through to a
-    different store while the operator believes they named one."""
+    different store while the operator believes they named one.
+
+    ⛔ A REAL JOURNAL IS PASSED, deliberately (review finding, 2026-11-17). When
+    no journal is configured the journal-less refusal ALSO exits 2, so the exit
+    code alone let this row pass with the empty-flag guard disabled — it proved
+    nothing. Supplying the journal leaves `2` reachable only from the guard, and
+    the refusal is then asserted BY NAME.
+    """
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    assert tool.main(["--db-path", ""]) == 2
+    monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+    journal = tmp_path / "journal.jsonl"
+    journal.write_text("")
+
+    rc = tool.main(["--db-path", "", "--event-log-path", str(journal)])
+
+    assert rc == 2, "an empty target flag must be refused, not treated as absent"
+    err = capsys.readouterr().err
+    assert tool.REFUSE_EMPTY_FLAG in err, err
+    assert tool.REFUSE_NO_JOURNAL not in err, (
+        "the wrong refusal answered: the journal WAS supplied, so rc=2 must come "
+        f"from the empty-flag guard. stderr: {err!r}")
+    assert "--db-path" in err, "the refusal must name the flag that was empty"
 
 
 def test_two_targets_at_once_are_refused_not_silently_resolved(monkeypatch):
