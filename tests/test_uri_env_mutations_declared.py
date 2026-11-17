@@ -1264,23 +1264,40 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #     lane flips of their own: they are the save-restore half the #2084
     #     restoration guard requires of both mutating sites, declared so the
     #     census sees the whole contract rather than half of it.
-    # ⛔ This is NOT a blanket row. Every arm is pinned to the literal its site
-    # spells (`= DB_URI`, `= _OLD_URI`, `= _old`, `pop(…, None)`) with an end
-    # anchor, so a FUTURE mutation spelling a different value — or a bare
-    # `os.environ["TORTOISE_DB_URI"] = some_uri` — reds and must be triaged on
-    # its own. The rejected alternative (stop mutating; take the target from the
-    # lane's seam) fails on the contract's own terms: under the docker-lane
-    # redirect the ambient URI IS the shared lane graph, so a seam-reading suite
-    # would lose the per-module isolation these six sites exist to create.
+    # ⛔ This is NOT a blanket row. Every arm is pinned at BOTH ends to the
+    # literal its site spells (`= DB_URI`, `= _OLD_URI`, `= _old`,
+    # `pop(…, None)`), so a FUTURE mutation spelling a different value — or a
+    # bare `os.environ["TORTOISE_DB_URI"] = some_uri` — reds and must be
+    # triaged on its own. The rejected alternative (stop mutating; take the
+    # target from the lane's seam) fails on the contract's own terms: under the
+    # docker-lane redirect the ambient URI IS the shared lane graph, so a
+    # seam-reading suite would lose the per-module isolation these six sites
+    # exist to create.
+    #
+    # ⛔ THE LEADING `^` IS LOAD-BEARING, NOT COSMETIC. `_uri_mutation_sites`
+    # runs `_MUTATION_RE` over WHOLE MODULE SOURCE, which has no comment
+    # awareness, and `_is_declared` then searches the STRIPPED line — so an
+    # arm with no `^` also matches inside a COMMENTED-OUT site
+    # (`# os.environ["TORTOISE_DB_URI"] = DB_URI`), which would let a future
+    # lane silence a live mutation by commenting a line out. Both ends anchor
+    # correctly because the match subject is the stripped line (pinned by
+    # `test_the_census_regex_carries_no_end_of_input_anchor`, which is about
+    # `_MUTATION_RE` over raw source and does not apply here).
+    # Honest limit, stated rather than claimed away: `pop("TORTOISE_DB_URI", None)`
+    # is byte-identical whether it RESTORES a saved value or UNSETS the URI to
+    # force the embedded lane (the #942 vacuity vector this guard exists to
+    # catch), so the pop arms pin the SPELLING and not the intent — a future pop
+    # in THIS file must be triaged by hand. The two SET arms and the two
+    # assignment RESTORE arms are a real narrowing.
     "test_13034_currency_rule_reads_position.py": [
         # the probe's set (:66) and the fixture's set (:86)
-        r'os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         # the probe's `finally` restore of the captured module-level value (:75)
-        r'os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_OLD_URI$',
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_OLD_URI$',
         # the fixture's post-yield restore of the captured value (:89)
-        r'os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_old$',
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_old$',
         # both restore-to-UNSET arms (:77 the probe, :91 the fixture)
-        r'os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$',
+        r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$',
     ],
 }
 
