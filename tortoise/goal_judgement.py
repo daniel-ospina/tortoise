@@ -1528,8 +1528,21 @@ def _goal_retired_on_status(sdk: Any, goal_id: str) -> bool:
     """
     try:
         node = sdk.get_entity(goal_id) or {}
-    except Exception:  # pragma: no cover - a missing node is not fatal here
-        return False
+    except Exception:
+        # ⛔ #13065 review round 13, finding 2 (P2): this is FAIL-CLOSED, and the
+        # `# pragma: no cover` that used to sit here is gone so the coverage floor
+        # can see the arm. The guard exists to stop `_cache_then_arrow` stamping a
+        # derived word over a RETIRED goal (the write boundary refuses that pair,
+        # and the `ValueError` lands AFTER the judgement Point and its IMPL arrow
+        # — a partial write). "I could not read the status" is not evidence that
+        # the goal is live: answering `False` here restored exactly that
+        # partial-write path on a transient read fault, with nothing measured and
+        # nothing logging it. Answering "retired" suppresses at most one cache
+        # write, and `reconcile_goal_state_cache` owns repairing a cache — so the
+        # safe direction costs a repair, while the unsafe one corrupts a retired
+        # goal's ending. Pinned by
+        # `test_a_goal_whose_status_CANNOT_BE_READ_is_treated_as_RETIRED`.
+        return True
     status = node.get("status")
     return ((issubclass(type(status), str)
              and str.__str__(status) in _TERMINAL_EXCLUDED_STATUSES)

@@ -1500,6 +1500,10 @@ def reconcile_goal_states(
     ``consistent`` writes nothing and DOES carry ``to`` (the word that already
     stood), as do ``would-clear``/``would-rewrite``, so a consumer must branch on
     ``action`` and must never infer a write from the mere presence of ``to``.
+    ⛔ ``to`` is always the word that will STAND afterwards, so it is ``None`` for
+    every CLEARING outcome — the live ``cleared`` arm and a ``would-clear`` that
+    clears a row retired on its ``status`` (``expected`` may hold a word there and
+    still be cleared; #13065 review round 13, finding 5).
     ``unaddressable``'s
     ``reason`` is the SWEEP's own :data:`GONE_UNPROVEN`, not the door's: the door
     reported ``gone``, and this arm is the sweep saying it does not believe a
@@ -1655,8 +1659,17 @@ def reconcile_goal_states(
             goals.append(record)
             continue
         if dry_run:
+            # ⛔ #13065 review round 13, finding 5 (P3): `to` reports the OUTCOME —
+            # the word that will STAND once this sweep is done — so a row the
+            # preview is about to CLEAR names `None`, exactly as the live arm
+            # reports `cleared`/`to=None` for the same goal (`:1705-1707`, and the
+            # door answers `goalState: None`). The `or retired` disjunct below is
+            # what made `action='would-clear'` reachable with `expected` still
+            # holding a word, so the preview named the very word it was about to
+            # lose while the run it previewed reported the opposite.
             record.update(action="would-clear" if (expected is None or retired)
-                          else "would-rewrite", to=expected)
+                          else "would-rewrite",
+                          to=(None if (expected is None or retired) else expected))
             counts["wouldRepair"] += 1
             goals.append(record)
             continue

@@ -6201,6 +6201,48 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 )
         return _stored
 
+    def _status_restated_by_an_echo() -> bool:
+        """Does this write merely RESTATE the `status` the row already holds?
+
+        ⛔ #13065 review round 13, finding 1 (P2) — the `#3305`/F4-2 decision, one
+        axis over. A generic tenant PUT is a read-modify-write: it fetches the row
+        and sends it back with the fields it changed, so `status` arrives
+        UNCHANGED beside a new `content`. The live-word arm below fires on the
+        STATE the write leaves — which, for such a call on a goal ended by
+        `supersede_point`/`retract_point`/`invalidate_point`, is
+        `status=terminal` + `goalState=live`: the BENIGN legacy shape this PR's
+        own body calls benign and its sweep exists to keep serving. Measured
+        before this exemption: `update_knowledge(<that goal>, status='superseded',
+        content=…)` raised, though it changed nothing about the ending, and the
+        exemption that would have admitted it (`_status_entailed`, `#3305`)
+        is computed inside `_update_entity` ~700 lines AFTER this guard runs,
+        so it could never disarm it. In-tree decision, quoted:
+        *"An unchanged status cannot resurrect anything."*
+
+        ⛔ NOT a general weakening, and it cannot mint a divergence: both halves
+        must hold — the supplied `status` EQUALS the stored one and the bag does
+        NOT name `goalState` — so the state the write leaves is the state the row
+        already held. A caller moving either field is graded exactly as before.
+
+        ⛔ Both sides are read at their BASE CONTENT (`str.__str__`, the same rule
+        `#12907` cycle 3 applied to `_status_entailed`), never through the
+        caller's overrides — a `str` subclass answers `__eq__` for whichever side
+        it sits on, so an unnormalised comparison could call two different words
+        equal and admit a real ending. A side that is not a `str` at all makes
+        this NOT a restatement: fail-closed, the guard is asked rather than
+        skipped.
+        """
+        if bag_goal is not _GOAL_ENDING_UNSET:
+            # The write moves the achievement axis, so it is graded in full.
+            return False
+        if bag_status is _GOAL_ENDING_UNSET:
+            return False
+        stored_status = _stored_view().get("status")
+        if not (issubclass(type(bag_status), str)
+                and issubclass(type(stored_status), str)):
+            return False
+        return str.__str__(bag_status) == str.__str__(stored_status)
+
     if may_target_existing_node and _stored_view() and (
             _is_lifecycle_word(_stored.get("status"), TERMINAL_EXCLUDED_STATUSES)
             or _is_lifecycle_word(_stored.get("goalState"), GOAL_ENDING_STATES)
@@ -6297,7 +6339,15 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 f"successor)` on a Point goal, which records it as the "
                 f"CORRECTS edge;\n"
                 f"  2. if nothing replaced it, say so — pass "
-                f"goalState='abandoned' with status='deprecated'."
+                f"goalState='abandoned' with a status that ENDS it on the door "
+                f"you are using: status='retracted' on a :Point goal (its "
+                f"declared transitions from a live state are exactly "
+                f"{{retracted, superseded}}, so the 'archived' ending is REFUSED "
+                f"there as reserved), or status='archived' on an "
+                f"Object/Subject goal. ⛔ Not the legacy 'deprecated' spelling: "
+                f"no Point door accepts it, so prescribing it would send a "
+                f"caller in a circle (measured: `ValueError: Invalid status "
+                f"'deprecated'`)."
             )
         return
 
@@ -6313,7 +6363,18 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             # pair) still pays NO stored read — the call-count pin exists because
             # the first draft of this arm read on EVERY write.
             and (_is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
-                 or bool(_stored_view().get("outdated")))):
+                 or bool(_stored_view().get("outdated")))
+            # ⛔ #13065 review round 13, finding 1 (P2): a `status` this write only
+            # RESTATES does not supply the ending, so it cannot be the half that
+            # trips this arm. The `#3305`/F4-2 decision (in-tree at
+            # `_update_entity`'s entailed-echo exemption) — *"An unchanged status
+            # cannot resurrect anything"* — is the same rule one axis over, and
+            # without this conjunct the generic tenant PUT was refused on the
+            # benign legacy shape (`status=terminal` + `goalState=live`) that
+            # `supersede_point`/`retract_point`/`invalidate_point` mint for every
+            # goal they end. Read the helper for why this cannot mint a
+            # divergence and why both sides are compared at base content.
+            and not _status_restated_by_an_echo()):
         want = (_SUPERSEDED_STATUS
                 if status == _SUPERSEDED_STATUS else "abandoned")
         _by_status = _is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
@@ -6345,7 +6406,10 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                     if not _by_status else
                     ("drop the ending from `status` — pass status='live' (or "
                      "'draft'), or leave `status` out of the call if you did "
-                     "not mean to end the goal"))
+                     "not mean to end the goal. ⛔ On a row that is ALREADY dead "
+                     "a live `status` is refused as a dead claim (#2498), so "
+                     "there a live word is NOT a route: on that row the repair "
+                     "is 1 — align `goalState` with the ending it carries"))
         raise ValueError(
             f"REFUSED: {_headline}, but "
             f"goalState={goal_state!r} "

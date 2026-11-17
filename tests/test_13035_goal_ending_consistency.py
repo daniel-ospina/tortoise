@@ -391,12 +391,20 @@ def test_retiring_with_the_ordinary_verb_ends_both_fields_and_the_surfaces_agree
     retired_by_the_invalidation_path = node["goalState"] in RETIRED_GOAL_STATES
     current_to_the_reading_rule = not live.is_terminal_status(
         node.get("status"), bool(node.get("outdated")))
-    assert retired_by_the_invalidation_path is True
-    assert current_to_the_reading_rule is False
-    assert retired_by_the_invalidation_path != current_to_the_reading_rule, (
-        "the two surfaces AGREE about this goal where they must DIFFER — one "
-        "reads it the opposite way from the other (the #13035 divergence, or a "
-        "goal neither surface serves)")
+    # ⛔ #13065 review round 13, finding 6 (rule-3 class): the pair is asserted
+    # AS A PAIR, once. The three-assert form that stood here ended with
+    # `retired != current`, which is ENTAILED by the two lines above
+    # (`True != False`) — an assertion no mutation of the diff can redden, seated
+    # under a message claiming to pin the divergence. The single tuple comparison
+    # below carries the same message and CAN fail: a goal served as current by
+    # the reading rule while the invalidation path considers it retired is
+    # exactly `(False, True)`, and a goal neither surface ends is `(False, False)`.
+    assert (retired_by_the_invalidation_path,
+            current_to_the_reading_rule) == (True, False), (
+        "the two surfaces disagree about this goal where they must AGREE — the "
+        "invalidation path and the reading rule serve it the opposite way "
+        "round (the #13035 divergence), or neither serves it"
+    )
 
     found = verdicts(sdk, goal_id=goal["id"])
     assert len(found) == 1
@@ -1045,3 +1053,209 @@ def test_the_SWEEP_clears_a_goal_retired_by_the_LEGACY_outdated_flag(sdk):
     assert out["counts"]["consistent"] == 0, out["counts"]
     assert out["counts"]["cleared"] >= 1, out["counts"]
     assert sdk.get_entity(goal["id"]).get("goalState") in (None, "")
+
+
+# ── 13. review round 13 ─────────────────────────────────────────────────────
+
+def test_a_READ_MODIFY_WRITE_echo_of_a_terminal_status_is_admitted(sdk):
+    """F1 (P2) — the ``#3305``/F4-2 decision, one axis over.
+
+    A generic tenant PUT is a read-modify-write: it fetches the row and sends it
+    back with the fields it changed. Every goal Point ended by
+    ``supersede_point`` / ``retract_point`` / ``invalidate_point`` sits at
+    ``status=terminal`` + ``goalState=live`` — the shape this file's own body
+    calls the BENIGN direction and ``derived_invalidation``'s sweep exists to keep
+    serving. MEASURED before the exemption: ``update_knowledge(<that goal>,
+    status=<the status it already has>, content=…)`` raised, though it changed
+    nothing about the ending. The exemption that admits it pre-PR
+    (``_status_entailed``, ``#3305``: *"An unchanged status cannot resurrect
+    anything"*) is computed inside ``_update_entity``, far AFTER this guard runs
+    from ``_sanitize_props``, so it could never disarm it.
+
+    ⛔ And it stays NARROW: the second half of the test proves a DIFFERENT
+    terminal word is still graded, so the exemption is a restatement rule and not
+    an open door.
+    """
+    goal = sdk.create_point("goal", "GOAL - echo [a]", goalState="active")
+    successor = sdk.create_point("goal", "GOAL - echo [b]", goalState="active")
+    sdk.supersede_point(goal["id"], successor["id"])
+
+    before = sdk.get_point(goal["id"])
+    assert before["status"] == "superseded", before          # the ending
+    assert before["goalState"] == "active", before           # the benign half
+
+    # the tenant PUT: the status it already has, sent back with another field
+    sdk.update_knowledge(goal["id"], status="superseded",
+                         content="GOAL - echo [a] (edited)")
+    after = sdk.get_point(goal["id"])
+    assert after["status"] == "superseded", after
+    assert after["goalState"] == "active", after
+    assert "(edited)" in after["content"], after
+
+    # narrow: a terminal word the row does NOT already hold is not a restatement,
+    # so the pair is graded and refused as before
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], status="retracted")
+    assert "still describes a live commitment" in str(exc.value), str(exc.value)
+    assert sdk.get_point(goal["id"])["status"] == "superseded"   # nothing landed
+
+
+def test_judging_a_RETIRED_goal_writes_no_cache_and_keeps_its_ending(sdk):
+    """F2 (P2) — the guard that stops a PARTIAL write had no covering assertion.
+
+    ``_write_goal_state_cache`` returns before stamping the cache when the goal is
+    retired. Nothing in the tree went red when those lines were deleted: every
+    caller judges a LIVE goal and retires it afterwards. Without the guard,
+    ``judge_and_record`` on a retired goal stamps ``met`` over the ending, the
+    write boundary refuses that pair, and the ``ValueError`` escapes AFTER the
+    judgement Point and its ``IMPL`` arrow landed — a partial write.
+
+    The ending is written as ONE paired write (``status`` + ``goalState``), which
+    is the only shape the boundary admits; the legacy half-shape is minted by raw
+    graph writes in ``test_11926_derived_invalidation.py``.
+    """
+    indicator, target, goal = _world(sdk, tag="judge-retired")
+    sdk.create_event("CI run", "measurement", value=9.0, unit="minutes",
+                     startedAt="2026-11-11T10:00:00Z",
+                     aboutObject=indicator["id"])
+    first = judge_and_record(sdk, goal_id=goal["id"],
+                             indicator_id=indicator["id"],
+                             target=Target.from_node(target))
+    assert first["goalState"] == "met", first
+
+    sdk.update_knowledge(goal["id"], status="archived", goalState="abandoned")
+    assert sdk.get_entity(goal["id"])["goalState"] == "abandoned"
+
+    # judge the SAME goal again, now that it is retired
+    made = judge_and_record(sdk, goal_id=goal["id"],
+                            indicator_id=indicator["id"],
+                            target=Target.from_node(target))
+    assert made["goalState"] is None, made          # the cache was NOT written
+    node = sdk.get_entity(goal["id"])
+    assert node["goalState"] == "abandoned", node   # the human's ending survived
+    assert node["status"] == "archived", node
+
+
+class _UnreadableSdk:
+    """An sdk whose goal read fails — a transient graph fault, not a missing node."""
+
+    def __init__(self):
+        self.cache_writes = []
+
+    def get_entity(self, _id):
+        raise RuntimeError("transient graph read fault")
+
+    def update_knowledge(self, goal_id, **props):
+        self.cache_writes.append((goal_id, props))
+        return {}
+
+
+def test_a_goal_whose_status_CANNOT_BE_READ_is_treated_as_RETIRED():
+    """F2 (P2), second half — the read failure is FAIL-CLOSED and visible.
+
+    The helper's ``except`` used to answer ``False`` ("not retired") under a
+    ``# pragma: no cover``, so a transient ``get_entity`` fault silently restored
+    the partial-write-then-raise path the guard exists to prevent, and the pragma
+    made the gap invisible to the coverage floor. "I could not read the status" is
+    not evidence that the goal is live: answering "retired" suppresses at most one
+    cache write, which ``reconcile_goal_state_cache`` owns repairing, while the
+    other direction corrupts a retired goal's ending.
+    """
+    from tortoise.goal_judgement import _goal_retired_on_status, _write_goal_state_cache
+
+    boom = _UnreadableSdk()
+    assert _goal_retired_on_status(boom, "goal-unreadable") is True
+    # ...and the cache write is therefore SKIPPED, not attempted blind
+    assert _write_goal_state_cache(boom, "goal-unreadable", "met") is None
+    assert boom.cache_writes == []
+
+
+def test_DUPLICATE_ids_differing_ONLY_on_a_FALSY_flag_SPELLING_are_NOT_a_conflict(sdk):
+    """F3 (P3, rule-1 class) — ``bool()`` in the conflict key had no pin.
+
+    The key normalises ``outdated`` by TRUTHINESS (the predicate compares
+    ``bool(...)``), so a row with the flag ABSENT and a row with it spelled
+    ``false`` are the SAME ending and must not read as a disagreement. Under the
+    pre-fix ``repr`` the keys were ``r:None`` / ``r:False``, the disagreement set
+    held two entries, and a write that legitimately lands was refused
+    "more than one node". The shape is minted raw, the same route the sibling
+    duplicate-id tests use.
+    """
+    goal = sdk.create_point("goal", "GOAL - dup flag falsy [a]",
+                            goalState="active", status="live")
+    sdk._get_proj().g.query(
+        "CREATE (:Point {id:$id, name:'GOAL - dup flag falsy [b]', "
+        "status:'live', goalState:'active', outdated:false})",
+        params={"id": goal["id"]},
+    )
+    # no ValueError: the two rows agree about "did this goal end?" (no)
+    sdk.update_knowledge(goal["id"], goalState="met")
+    assert sdk.get_point(goal["id"])["goalState"] == "met"
+
+
+def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
+    """F4 (P3, AX rule 2) — the prescription must be PERFORMABLE.
+
+    Repair 2 used to say ``goalState='abandoned' with status='deprecated'``, but
+    ``deprecated`` is not in ``POINT_STATUS_VALUES`` (``live.py`` states it
+    outright: no SDK/API write path emits it), so on a Point the prescribed call
+    raised again — the caller was sent in a circle.
+
+    ⛔ The review's own suggested replacement (``status='archived'`` "works on both
+    layers") is FALSIFIED by the primary source and MEASURED here: a Point's
+    declared transitions from a live state are exactly ``{retracted, superseded}``
+    (``_ALLOWED_TRANSITIONS``), and ``update_knowledge(<live goal Point>,
+    status='archived')`` raises ``update_entity refused the status transition
+    'live' -> 'archived'`` — ``archived`` is RESERVED on a Point. So the repair is
+    carrier-aware, and this test performs the Point half rather than grepping it.
+    """
+    goal = sdk.create_point("goal", "GOAL - successor repair", goalState="active")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="superseded",
+                             status="superseded")
+    msg = str(exc.value)
+    assert "successor" in msg, msg
+    assert "status='retracted'" in msg, msg              # the :Point route
+    assert "status='deprecated'" not in msg, msg         # the unperformable one
+    # the prescribed Point write is accepted on both fields at once
+    sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
+    node = sdk.get_point(goal["id"])
+    assert node["goalState"] == "abandoned", node
+    assert node["status"] == "retracted", node
+
+
+def test_the_DRY_RUN_reports_None_for_the_goal_it_is_about_to_CLEAR(sdk):
+    """F5 (P3) — the preview contradicted its own documented contract.
+
+    ``to`` reports the OUTCOME, the word that will STAND. A row retired on its
+    ``status`` while holding a standing ``met`` word is ``expected == word`` AND
+    ``retired``, so the preview reached ``would-clear`` with ``to=expected`` — it
+    named the very word it was about to lose, while the LIVE run for the same goal
+    reported ``cleared`` / ``to=None``. Measured before the fix: ``would-clear``
+    with ``to='met'`` beside a live ``cleared`` with ``to=None``.
+    """
+    from tortoise.derived_invalidation import reconcile_goal_states
+
+    goal = _goal(sdk, tag="dry-run-to")
+    indicator = sdk.create_object("CI pipeline duration [dry-run-to]",
+                                 objectKind="workflow")
+    target = sdk.create_object("CI <= 10m [dry-run-to]", objectKind="target",
+                              comparator="<=", threshold=10.0, dwell=1)
+    sdk.create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
+                     unit="minutes", startedAt="2026-11-11T10:00:00Z",
+                     aboutObject=indicator["id"])
+    made = judge_and_record(sdk, goal_id=goal["id"],
+                            indicator_id=indicator["id"],
+                            target=Target.from_node(target))
+    assert made["goalState"] == "met", made
+    sdk._get_proj().g.query(
+        "MATCH (n {id:$id}) SET n.status='archived'", params={"id": goal["id"]})
+
+    preview = reconcile_goal_states(sdk, dry_run=True)
+    row = next(g for g in preview["goals"] if g["goalId"] == goal["id"])
+    assert row["action"] == "would-clear", row
+    assert row["to"] is None, row
+
+    live = reconcile_goal_states(sdk)
+    live_row = next(g for g in live["goals"] if g["goalId"] == goal["id"])
+    assert (live_row["action"], live_row["to"]) == ("cleared", None), live_row
