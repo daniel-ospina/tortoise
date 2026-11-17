@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -880,7 +881,19 @@ class _FakeGraph:
 
 
 def _patch_seed(monkeypatch, graph: _FakeGraph) -> list:
-    """Point `seed_graph`'s two real dependencies at the fake graph."""
+    """Point `seed_graph`'s three real dependencies at fakes — hermetic, no docker.
+
+    ⛔ `subprocess.run` IS one of them, and stubbing it is not tidiness. `seed_graph`
+    ends with a docker MEMORY PROBE (`docker ps` / `docker exec … redis-cli INFO
+    memory`), and `config/ci-surfaces.yml`'s `durations:` row for this file declares
+    it *hermetic — no docker, no graph, no network, no model call*, a claim a verifier
+    reads INSTEAD of running the test. Leaving the probe real broke that claim the
+    moment an arm called `seed_graph`, and it did worse: the arms pass
+    `fg_port=6379`, so on any box where a container publishes 6379 the probe's
+    second leg would `docker exec` into ANOTHER LANE's container. The arm that pins
+    the probe's bound overrides this stub with its own `subprocess.run` after
+    calling this helper, which is why the override must come second.
+    """
     import falkordb
 
     import benchmarks.synthetic_corpus as corpus
@@ -897,6 +910,10 @@ def _patch_seed(monkeypatch, graph: _FakeGraph) -> list:
 
     monkeypatch.setattr(falkordb, "FalkorDB", _FakeDB)
     monkeypatch.setattr(corpus, "seed_corpus", lambda g, points: seeded.append(points) or len(points))
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr=""),
+    )
     return seeded
 
 
@@ -939,7 +956,7 @@ def test_a_wedged_docker_daemon_costs_a_recorded_error_not_the_run(monkeypatch):
     `seed_graph` shells out to `docker ps` / `docker exec … redis-cli INFO memory`
     for the graph's memory figure — a SIDE READING, not the seed. Without a
     `timeout=` a wedged daemon parks the call forever, which loses the run and
-    hangs this suite (the arm above reaches that code for real). What a missing
+    hangs this suite. What a missing
     bound actually costs, measured on the pre-fix text: the tool's own
     `except …: mem = {"error": …}` RECORDS the failure, so the seed's result
     survives — but only because `docker ps` is what hung. `seed_graph` makes TWO
@@ -948,6 +965,9 @@ def test_a_wedged_docker_daemon_costs_a_recorded_error_not_the_run(monkeypatch):
     pin that hangs the FIRST call leaves the memory read unpinned, and a
     regression on that leg is invisible (reviewer-measured: removing only the
     second call's `timeout=` left this suite green).
+
+    ⛔ `_patch_seed` stubs `subprocess.run` for hermeticity; this arm OVERRIDES
+    that stub, so the order (patch, then override) is load-bearing.
     """
     import subprocess
 
