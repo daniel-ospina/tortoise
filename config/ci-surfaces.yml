@@ -2686,9 +2686,12 @@ surfaces:
   # merge into `main` then left BOTH rows, which `--integrity` reports as
   # `duplicate entry ... at .surfaces.core[]`. One row, one home — do not re-add
   # it here.
-  - test_13084_demand_census.py
-  - test_13084_ram_cap.py
-  - test_13084_ram_window_census.py
+  #
+  # The #13084 trio is registered ONCE, above, in the block #13102 landed on
+  # `main`. This branch's cut of that same PR carried a second trio here; the
+  # `merge=union` driver kept both, and `registry_integrity` refused all three
+  # (`duplicate entry … at .surfaces.core[]`). One row, one home — the duplicate
+  # trio was deleted from THIS side, not from main's.
   # ⛔ #13034 is NOT registered here, and this absence is deliberate — do not add the
   # row back. An earlier cut of this branch carried a `core` row for
   # `test_13034_currency_rule_reads_position.py` because `main` had the file merged
