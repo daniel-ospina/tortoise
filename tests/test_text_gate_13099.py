@@ -25,10 +25,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from benchmarks.synthetic_corpus import build_topic_oracle
 from tools.text_gate_13099 import (
+    GRAPH_NAME,
     N_POINTS,
     QUERY_CLASSES,
     SEED,
@@ -40,6 +44,7 @@ from tools.text_gate_13099 import (
     load_committed_queries,
     oov_evidence,
     or_tokens,
+    seed_graph,
     verdict,
 )
 
@@ -827,3 +832,182 @@ def test_a_tokenizer_fallback_is_recorded_once_per_query_text(monkeypatch):
     assert len(TOKENIZER_FALLBACKS) == 1
     assert "RuntimeError: tokenizer exploded" in TOKENIZER_FALLBACKS[0]["reason"]
     TOKENIZER_FALLBACKS.clear()
+
+
+# ── the seed's DROP must not swallow a BOUNDED read failure (#3065/#8118) ────
+#
+# `seed_graph` resets `GRAPH_NAME` (fixed, NOT per-run) before seeding. That
+# reset used to be wrapped in `contextlib.suppress(Exception)`, which was
+# harmless while the client was unbounded — a stall meant the run never
+# finished, so there was no verdict to be wrong. Once the client gained a socket
+# read bound, the SAME stall raises `redis.TimeoutError` at the DROP, and a
+# blanket suppress turns it into a verdict: `seed_corpus` MERGEs by id, so the
+# previous run's points survive the failed reset and the arms score a population
+# nothing reset — a wrong published number, which is the one failure this tool
+# exists to not have. The suppress is therefore narrowed to the ABSENT-graph
+# class, via the product's own classifier (`projection.is_missing_graph_error`).
+#
+# The pair pins the CLASS BOUNDARY from both sides — it is NOT "both fail on the
+# pre-fix text", which an earlier version of this comment claimed and which is
+# false: a blanket `suppress(Exception)` excused the absent-graph family too, so
+# the second arm passed there. Measured, each mutant in a scratch worktree at
+# the same base:
+#   * pre-fix text (`with contextlib.suppress(Exception): g.delete()`) -> the
+#     TIMEOUT arm reds: the seed runs over a graph the failed reset left
+#     populated. (Counts are deliberately NOT restated here — this file gains
+#     arms, and a number beside the set it counts goes stale on arrival.)
+#   * no handler at all (bare `g.delete()`) -> the ABSENT-GRAPH arm reds: a first
+#     run against a graph that was never created would abort, which is the
+#     over-correction this arm exists to stop.
+# Too wide reds the first; too narrow reds the second.
+
+
+class _FakeGraph:
+    """Minimal stand-in for `Graph`: only the three calls `seed_graph` makes."""
+
+    def __init__(self, delete_exc: Exception | None) -> None:
+        self.delete_exc = delete_exc
+        self.deletes = 0
+        self.queries = 0
+
+    def delete(self) -> None:
+        self.deletes += 1
+        if self.delete_exc is not None:
+            raise self.delete_exc
+
+    def query(self, *args: object, **kwargs: object) -> None:
+        self.queries += 1
+        return None
+
+
+#: Every `subprocess.run` argv the stubbed probe received, in order (#13163).
+#: The stub is the ONLY thing holding the durations row's "no docker" claim, so
+#: an arm ASSERTS it was reached rather than trusting that the stub is installed:
+#: with the stub deleted the arms stay green, and `seed_graph` then runs `docker
+#: ps` / `docker exec … redis-cli INFO memory` against the ambient daemon — into
+#: another lane's container at `fg_port=6379` (measured, pre-fix).
+_PROBE_CALLS: list[list[str]] = []
+
+
+def _record_probe_call(*args: object, **_kwargs: object) -> subprocess.CompletedProcess:
+    """Stub for `subprocess.run`: records the argv, answers with empty stdout."""
+    _PROBE_CALLS.append(list(args[0]) if args else [])
+    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+
+def _patch_seed(monkeypatch, graph: _FakeGraph) -> list:
+    """Point `seed_graph`'s three real dependencies at fakes — hermetic, no docker.
+
+    ⛔ `subprocess.run` IS one of them, and stubbing it is not tidiness. `seed_graph`
+    ends with a docker MEMORY PROBE (`docker ps` / `docker exec … redis-cli INFO
+    memory`), and `config/ci-surfaces.yml`'s `durations:` row for this file declares
+    it *hermetic — no docker, no graph, no network, no model call*, a claim a verifier
+    reads INSTEAD of running the test. Leaving the probe real broke that claim the
+    moment an arm called `seed_graph`, and it did worse: the arms pass
+    `fg_port=6379`, so on any box where a container publishes 6379 the probe's
+    second leg would `docker exec` into ANOTHER LANE's container. The arm that pins
+    the probe's bound overrides this stub with its own `subprocess.run` after
+    calling this helper, which is why the override must come second.
+    """
+    import falkordb
+
+    import benchmarks.synthetic_corpus as corpus
+
+    _PROBE_CALLS.clear()
+
+    seeded: list = []
+
+    class _FakeDB:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def select_graph(self, name: str) -> _FakeGraph:
+            assert name == GRAPH_NAME
+            return graph
+
+    monkeypatch.setattr(falkordb, "FalkorDB", _FakeDB)
+    monkeypatch.setattr(corpus, "seed_corpus", lambda g, points: seeded.append(points) or len(points))
+    monkeypatch.setattr(
+        subprocess, "run",
+        _record_probe_call,
+    )
+    return seeded
+
+
+def test_a_bounded_timeout_at_the_drop_aborts_the_seed_instead_of_scoring_stale_points(monkeypatch):
+    """A read timeout is NOT "the graph was absent" — it must propagate."""
+    import redis
+
+    graph = _FakeGraph(redis.exceptions.TimeoutError("Timeout reading from socket"))
+    seeded = _patch_seed(monkeypatch, graph)
+
+    with pytest.raises(redis.exceptions.TimeoutError):
+        seed_graph("127.0.0.1", 6379, [{"id": "p1"}])
+
+    assert graph.deletes == 1
+    assert seeded == [], (
+        "the DROP timed out and the seed ran anyway — `seed_corpus` MERGEs by id "
+        "into a fixed graph name, so the previous run's points survive and the "
+        "arms score a population nothing reset"
+    )
+    assert graph.queries == 0, "the fulltext index was built over an un-reset graph"
+
+
+def test_an_absent_graph_is_excused_so_a_first_run_still_seeds(monkeypatch):
+    """The absent-graph class only — a fresh graph has nothing to delete."""
+    import redis
+
+    graph = _FakeGraph(redis.exceptions.ResponseError("Invalid graph operation on empty key"))
+    seeded = _patch_seed(monkeypatch, graph)
+
+    out = seed_graph("127.0.0.1", 6379, [{"id": "p1"}, {"id": "p2"}])
+
+    assert graph.deletes == 1
+    assert seeded == [[{"id": "p1"}, {"id": "p2"}]], "the seed must still run"
+    assert out["points"] == 2
+    assert _PROBE_CALLS == [["docker", "ps", "--filter", "publish=6379",
+                             "--format", "{{.Names}}"]], (
+        "the memory probe did not reach the stub — this run reached a real docker "
+        f"daemon: {_PROBE_CALLS}"
+    )
+
+
+def test_a_wedged_docker_daemon_costs_a_recorded_error_not_the_run(monkeypatch):
+    """The memory probe is BOUNDED: a hang there must not cost the measurement.
+
+    `seed_graph` shells out to `docker ps` / `docker exec … redis-cli INFO memory`
+    for the graph's memory figure — a SIDE READING, not the seed. Without a
+    `timeout=` a wedged daemon parks the call forever, which loses the run and
+    hangs this suite. What a missing
+    bound actually costs, measured on the pre-fix text: the tool's own
+    `except …: mem = {"error": …}` RECORDS the failure, so the seed's result
+    survives — but only because `docker ps` is what hung. `seed_graph` makes TWO
+    calls, and this arm must pin BOTH: `_hang` below therefore SUCCEEDS `docker
+    ps` (so the `docker exec … INFO memory` leg is reached) and hangs there. A
+    pin that hangs the FIRST call leaves the memory read unpinned, and a
+    regression on that leg is invisible (reviewer-measured: removing only the
+    second call's `timeout=` left this suite green).
+
+    ⛔ `_patch_seed` stubs `subprocess.run` for hermeticity; this arm OVERRIDES
+    that stub, so the order (patch, then override) is load-bearing.
+    """
+    import subprocess
+
+    graph = _FakeGraph(None)
+    _patch_seed(monkeypatch, graph)
+
+    def _hang(*args, **kwargs):
+        assert kwargs.get("timeout"), "the docker probe must carry a bound"
+        # `docker ps` must SUCCEED so the `docker exec … INFO memory` leg is
+        # actually reached — that read is the one this arm exists to pin, and a
+        # hang on the FIRST call would leave it unexercised.
+        if list(args[0])[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(args[0], 0, stdout="fdb-x\n", stderr="")
+        raise subprocess.TimeoutExpired(cmd="docker", timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", _hang)
+
+    out = seed_graph("127.0.0.1", 6379, [{"id": "p1"}])
+
+    assert out["points"] == 1, "the seed's own result survives a failed memory probe"
+    assert "TimeoutExpired" in out["graph_memory_usage"]["error"], out

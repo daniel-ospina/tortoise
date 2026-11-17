@@ -949,9 +949,15 @@ class TestKindsAreMintable:
 
         position = sdk.create_object("Alpha Holdings (seed position)",
                                      objectKind="venture:investment")
-        # 1. an out-of-vocabulary status on a state-owning kind
-        sdk.create_object("Mandate M-9", objectKind=f"{NS}:mandate",
-                          status="active")
+        # 1. an out-of-vocabulary status on a state-owning kind.
+        # ⛔ #11824 S0: written OUT OF BAND on purpose. The write door refuses a
+        # word the kind does not declare, so a row like this can no longer be
+        # MINTED — but it is exactly what every pre-S0 graph holds (no
+        # backfill, #11824 §1), and the rule exists to find it. `garbage` is
+        # outside both axes: not a lifecycle word and not a mandate stage.
+        sdk.create_object("Mandate M-9", objectKind=f"{NS}:mandate")
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Mandate M-9'}) SET o.status = 'garbage'")
         # 2. a mark with no position behind it
         sdk.create_entity("event", "VM orphan",
                           eventKind=f"{NS}:valuationMark")
@@ -964,6 +970,14 @@ class TestKindsAreMintable:
                       if v["rule"] == "orphaned_valuation_mark")
         assert orphan["kind"] == f"{NS}:valuationMark"
         assert orphan["fix"], "a violation must name its fix"
+        # #11824 S0: the repair must name the declaration this kind ACTUALLY
+        # has. The migration deleted `statuses:` from the migrated packs, so a
+        # fix pointing at that key is unperformable (AX rule 2) — and that was
+        # the ONLY violation this rule could emit on a legacy row.
+        undeclared = next(v for v in verdict["violations"]
+                          if v["rule"] == "undeclared_object_status")
+        assert "`pipeline:`" in undeclared["fix"], undeclared["fix"]
+        assert "`statuses`" not in undeclared["fix"], undeclared["fix"]
 
         # The same graph, corrected, is clean — the rules are about the shape,
         # not about the kinds existing.
@@ -1089,7 +1103,14 @@ class TestKindsAreMintable:
         ).result_set
         assert stored and stored[0][0] in OBJECT_TERMINAL_STATUSES, stored
 
-        declared = set(RAW["ontology"]["kindDefs"]["mandate"]["statuses"])
+        # #11824 S0: the kind's own words are its PIPELINE stages now, so the
+        # "the kind does not declare the framework's words" claim is read off
+        # the axis the kind actually declares ON.
+        mandate = RAW["ontology"]["kindDefs"]["mandate"]
+        declared = set(mandate.get("statuses") or ())
+        declared |= {st["id"] for st in (mandate.get("pipeline") or {})
+                     .get("stages") or ()}
+        assert declared, "the mandate kind must declare a state surface"
         assert "superseded" not in declared, (
             "the framework terminal vocabulary is written by the engine, not "
             "declared by the kind — declaring it would be a second definition")
@@ -1111,13 +1132,21 @@ class TestKindsAreMintable:
         it, which is the same blindness with a smaller blast radius.
         """
         # (a) bare spelling, out-of-vocabulary status → REPORTED
-        sdk.create_object("Mandate M-11 (bare kind)", objectKind="mandate",
-                          status="active")
+        # ⛔ #11824 S0: out of band, for the reason given in
+        # `test_validate_domain_has_teeth` — the door refuses the word, and the
+        # row is the pre-S0 population this rule grades. `garbage` is declared
+        # by NEITHER axis (`active` is a mandate STAGE, so it is legal now).
+        sdk.create_object("Mandate M-11 (bare kind)", objectKind="mandate")
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Mandate M-11 (bare kind)'}) "
+            "SET o.status = 'garbage'")
         # (b) namespaced spelling stored verbatim with a capital, out-of-
         #     vocabulary status → REPORTED
         sdk.create_object("Allocation Target AT-2",
-                          objectKind=f"{NS}:allocationTarget",
-                          status="active")
+                          objectKind=f"{NS}:allocationTarget")
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Allocation Target AT-2'}) "
+            "SET o.status = 'garbage'")
         stored = dict(sdk._get_proj().g.query(
             "MATCH (o:Object) RETURN o.name, o.objectKind").result_set)
         assert stored["Mandate M-11 (bare kind)"] == "mandate", stored
@@ -1272,26 +1301,44 @@ class TestKindsAreMintable:
             for f in index.kind_forms_for(f"{NS}:allocationTarget")]
 
     @requires_db
-    def test_each_object_kind_mints_with_its_own_status(self, sdk):
-        sdk.create_object("Mandate M-1: no sector above 25%",
-                          objectKind=f"{NS}:mandate", status="adopted")
-        sdk.create_object("Allocation Target AT-1: 30% venture",
-                          objectKind=f"{NS}:allocationTarget", status="proposed")
+    def test_each_object_kind_mints_and_reaches_its_own_stage(self, sdk):
+        """#11824 S0: a kind's own words are its STAGES, not its `status`.
+
+        The pre-S0 pin minted each kind with its own status word and asserted
+        the stored word. That write is now REFUSED by the lifecycle door (the
+        word is a position, design §3.2): the kind mints with a lifecycle word
+        and REACHES its own word on the stage axis, through the same
+        ``pipeline.apply_stage_fold``/``advance_stage`` decision the verbs use —
+        so the assertion that the pack's vocabulary is reachable end-to-end
+        survives the cut rather than being dropped.
+        """
+        from tortoise import pipeline as P
+
+        cases = {
+            "Mandate M-1: no sector above 25%": (f"{NS}:mandate", "adopted"),
+            "Allocation Target AT-1: 30% venture": (
+                f"{NS}:allocationTarget", "proposed"),
+        }
+        for name, (kind, _stage) in cases.items():
+            sdk.create_object(name, objectKind=kind, status="live")
+        for name, (kind, stage) in cases.items():
+            decl = RAW["ontology"]["kindDefs"][kind.partition(":")[2]]["pipeline"]
+            move = P.advance_stage(sdk, name, kind, stage, declared=decl)
+            assert move.applied, (name, move)
 
         rows = sdk._get_proj().g.query(
-            "MATCH (o:Object) RETURN o.name, o.objectKind, o.status"
+            "MATCH (o:Object) RETURN o.name, o.objectKind, o.status, "
+            "o.pipelineStageId"
         ).result_set
-        minted = {r[0]: (r[1], r[2]) for r in rows}
-        assert minted["Mandate M-1: no sector above 25%"] == (
-            f"{NS}:mandate", "adopted")
-        assert minted["Allocation Target AT-1: 30% venture"] == (
-            f"{NS}:allocationTarget", "proposed")
+        minted = {r[0]: (r[1], r[2], r[3]) for r in rows}
+        for name, (kind, stage) in cases.items():
+            assert minted[name] == (kind, "live", stage), minted[name]
 
     @requires_db
     def test_the_valuation_mark_mints_as_an_event_about_the_position(self, sdk):
         position = sdk.create_object("Alpha Holdings (seed position)",
                                      objectKind="venture:investment",
-                                     status="invested")
+                                     status="live")
         mark = sdk.create_entity(
             "event", "Valuation Mark VM-3: 2026-Q3",
             eventKind=f"{NS}:valuationMark",
@@ -1340,7 +1387,7 @@ class TestKindsAreMintable:
         sdk.create_object("Mandate M-1 — draft", objectKind=f"{NS}:mandate",
                           status="draft")
         sdk.create_object("Mandate M-1 — adopted", objectKind=f"{NS}:mandate",
-                          status="adopted")
+                          status="live")
         applied = apply_supersessions(
             sdk._get_proj(), sdk,
             [{"superseded": "Mandate M-1 — draft",

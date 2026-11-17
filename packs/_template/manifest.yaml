@@ -114,21 +114,34 @@ ontology:
   #             required: true
   #           - name: trancheLabel
   #             valueKind: quantity
-  #         # #2729 per-kind state lifecycle: the kind's closed status
-  #         # vocabulary, plus the event kinds THAT THIS PACK declares which
-  #         # fold the status. Only a kind listed in this pack's
-  #         # `objectKinds` may declare these keys (the fold dispatches on
+  #         # #2729 per-kind state lifecycle — ⚠️ #11824 S0 MOVED THIS AXIS.
+  #         # A knowledge kind's `status` is now the closed FOUR-word lifecycle
+  #         # vocabulary (`draft` / `live` / `deprecated` / `superseded`,
+  #         # tortoise/lifecycle_vocabulary.py) for every kind, and it can no
+  #         # longer hold a pack's own words. A pack's own words are its
+  #         # POSITION axis: declare them as `pipeline` STAGES and fold onto a
+  #         # stage. Each stage names a SLOT (`entry` / `active` / `suspended` /
+  #         # `terminal`); a `terminal` stage must also declare an `outcome` from
+  #         # PIPELINE_OUTCOMES, and THAT is what makes a word mean "ended" — a
+  #         # reader asks the slot, never the word. Only a kind listed in this
+  #         # pack's `objectKinds` may declare these keys (the fold dispatches on
   #         # the namespaced kind, and a core/non-Object kind has none).
-  #         # A kind with `statuses` owns its Object state:
+  #         # A kind with `pipeline` owns its Object state:
   #         # the built-in connector fold no longer applies to it.
-  #         statuses: [draft, active, retired]
+  #         pipeline:
+  #           defaultStage: draft
+  #           stages:
+  #             - {id: draft, label: Draft, order: 0, slot: entry}
+  #             - {id: active, label: Active, order: 1, slot: active}
+  #             - {id: retired, label: Retired, order: 2, slot: terminal,
+  #                outcome: withdrawn}
   #         folds:
   #           - event: otherKindApproved   # bare or self-ns (`mydomain:...`);
   #             # must be an event kind THIS pack declares, and one fold per
   #             # event per kind (a duplicate event is a validation error —
   #             # `otherKindApproved` and `mydomain:otherKindApproved` are
   #             # the same event, and case variants too)
-  #             status: active           # must be one of `statuses`
+  #             stage: active           # must be one of `pipeline.stages` ids
   kindDefs: {}
 
   # ── memory_granularity (epic #1891 #1931) ──────────────────────────────
