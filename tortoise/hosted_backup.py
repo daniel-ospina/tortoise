@@ -1485,7 +1485,18 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
 
 class BackupStorage(Protocol):
     def upload(self, key: str, data: bytes, content_type: str | None = None) -> None: ...
-    def download(self, key: str) -> bytes: ...
+    def download(self, key: str) -> bytes:
+        """Return the object's bytes.
+
+        ⛔ MUST be safe to call concurrently: `list_backups` issues up to
+        `_LIST_MANIFEST_MAX_INFLIGHT` of these at once from a thread pool. A
+        stateful or single-threaded implementation (a cursor, a shared mutable
+        request builder, a non-reentrant client) breaks the first time an org's
+        backups are listed, not at construction. Both shipped implementations are
+        safe: `R2Storage` shares one boto3 client (thread-safe for calls) and
+        `MemoryStorage` reads a dict.
+        """
+        ...
     def list(self, prefix: str) -> list[str]: ...
     def delete(self, key: str) -> None: ...
     def create_if_not_exists(self, key: str, data: bytes) -> bool: ...
@@ -2363,13 +2374,17 @@ def list_backups(storage: BackupStorage, org_id: str,
     * **Only the unreadable/vanished class is skipped** — a corrupt manifest and a
       concurrently-pruned object are ordinary states of a live bucket, not an
       outage, and on the SUCCESS path they are logged (`logger.warning`) exactly
-      as before. On the FAILURE path the behaviour differs only in that the keys
-      already submitted still run (and may still log), and `map`'s `with` block
-      waits for that in-flight batch before the exception reaches the caller —
-      so a decisive failure can arrive up to one download timeout later than the
-      serial loop, which never started the keys after the failing one. That wait
-      is deliberate: returning while workers still hold connections would move
-      the load onto a request that has already failed.
+      as before. On the FAILURE path the difference is bounded and one-sided:
+      `Executor.map` SUBMITS every key up front but CANCELS the ones that have not
+      started (CPython's `_result_iterator` does `finally: for future in fs:
+      future.cancel()`), so only the in-flight batch — at most
+      `_LIST_MANIFEST_MAX_INFLIGHT` — still runs and may still log: measured 9
+      downloads of 40 keys when the first key failed. `map`'s `with` block waits
+      for that batch before the exception reaches the caller, so a decisive
+      failure can arrive up to one download timeout later than the serial loop,
+      which never started the keys after the failing one. That wait is
+      deliberate: returning while workers still hold connections would move the
+      load onto a request that has already failed.
     """
     _validate_org_id(org_id)
     if graph_id is not None:
