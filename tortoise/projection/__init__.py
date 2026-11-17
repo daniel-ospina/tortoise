@@ -58,6 +58,7 @@ from tortoise.retry import (  # #9532: ONE ownership authority; #7357: ONE "reac
 from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence check
     index_catalogue_has_field,
     index_row_has_field,
+    vector_index_drop_statements,  # #13320: the ONE VECTOR-index DROP rendering
 )
 from tortoise.sparse import (  # #11682: the ONE Point lexical field-set seam
     POINT_INDEX_TEXT_FIELDS,
@@ -700,6 +701,19 @@ def _reset_falkordb_version_cache() -> None:
 # changes is reported correctly even within one process.
 _VECTOR_INDEX_GAP_WARNED: set[tuple] = set()
 _VECTOR_INDEX_GAP_LOCK = threading.Lock()
+
+#: #13320: stores whose retirement sweep could NOT remove the in-graph vector
+#: index — latched for the same reason as `_VECTOR_INDEX_GAP_WARNED`.
+#:
+#: The sweep runs on the hosted PER-REQUEST path, and a survivor is a PERMANENT
+#: state (an engine that refuses the drop keeps refusing it), so an unlatched
+#: line would put a WARNING on the stream at request rate for the life of the
+#: deployment — how a real alarm stops being read. Latched on `(endpoint, graph)`
+#: with the same fallback rule, so a different store still gets its own warning.
+#: ⚠️ Only the LINE is latched: the sweep re-measures the catalogue every setup,
+#: so a store that becomes clean stops warning.
+_VECTOR_INDEX_DROP_FAILED_WARNED: set[tuple] = set()
+_VECTOR_INDEX_DROP_FAILED_LOCK = threading.Lock()
 
 #: #11642 / #4051 V1 — the in-graph vector index is RETIRED, not missing.
 #:
@@ -21493,13 +21507,26 @@ class FalkorProjection(
         # and the rebuild DEADLOCKED the instance (`#7846`). A retired index is
         # not rebuilt, so the restore stops paying that.
         #
-        # `DROP INDEX ON :Point(embedding)` is issued for EVERY engine version
-        # this store supports: the Cypher form is what the modern client's own
-        # `create_node_vector_index` counterpart emits, and on an engine that
-        # never had the index it raises "no such index"-class text, which is
-        # swallowed. A store that HAS one loses it here, once, on the next setup
-        # — that is the migration for every already-deployed graph, and it is
-        # idempotent because the second run finds nothing to drop.
+        # ⛔ CORRECTED (#13320): the statement is `DROP VECTOR INDEX FOR
+        # (p:Point) ON (p.embedding)`, and the two generic forms this comment
+        # used to justify — `DROP INDEX ON :Point(embedding)` and
+        # `DROP INDEX FOR (p:Point) ON (p.embedding)` — are REFUSED by the engine
+        # even while `CALL db.indexes()` reports the index. An earlier version of
+        # this comment argued the generic Cypher form was "what the modern
+        # client's own `create_node_vector_index` counterpart emits"; measured on
+        # graph module 42006, both answer `Unable to drop index on
+        # :Point(embedding): no such index.`, and the restore path
+        # (`graph_key_restore.VectorIndexDefinition.drop_cypher`) had already
+        # recorded exactly that. The rendering is now ONE function
+        # (`index_catalogue.vector_index_drop_statement`, imported here) shared by
+        # both sites, so a third caller cannot re-derive the guess.
+        # The forms are tried in order (`vector_index_drop_statements`), the
+        # measured one first; only a store that HAS the index pays for the attempt,
+        # so this is one failed DDL on the ONE migration sweep at worst — and the
+        # sweep now reports a survivor at WARNING instead of failing only at DEBUG.
+        # A store that HAS the index loses it here, once, on the next setup — that
+        # is the migration for every already-deployed graph, and it is idempotent
+        # because the second run finds nothing to drop.
         #
         # ⚠️ CONSEQUENCE, stated rather than discovered: on an ARMED store
         # `required_embedding_dim` is derived from `_vector_index_api`, so it
@@ -21557,7 +21584,15 @@ class FalkorProjection(
         if not vector_index_retired():
             return self._create_vector_index_api(catalogue_rows)
         self._vector_index_api = None
-        dropped = False
+        #: The statement that reported SUCCESS, or ``None`` when none did. The
+        #: sweep's verdict is made from the MEASUREMENT (the inventory's
+        #: post-drop catalogue read), never from this alone — see the report
+        #: below (#13320).
+        _dropped_with: str | None = None
+        #: ``(statement, error)`` for every candidate the engine REFUSED, so the
+        #: line an operator reads in an incident can name what was tried instead
+        #: of making them reconstruct it from a debug stream they do not have.
+        _drop_refusals: list[tuple[str, BaseException]] = []
         # ⛔ THE DROP IS GATED ON THE CATALOGUE, not attempted blind. An
         # unconditional `DROP INDEX` on an already-clean store is a FAILING DDL
         # round trip on every single setup — and this method is reached from the
@@ -21602,15 +21637,26 @@ class FalkorProjection(
         # unarmed store is `main`'s silent success path (#4997 warns when a
         # label really has no index, which is the only thing worth saying).
         if _has_vector_index:
-            for _stmt in (
-                "DROP INDEX ON :Point(embedding)",
-                "DROP INDEX FOR (p:Point) ON (p.embedding)",
-            ):
+            # ⛔ #13320: THE FORM IS THE FIX. A VECTOR index is NOT reachable
+            # through the generic drop — measured on graph module 42006 (and
+            # recorded for #7846 before it): both `DROP INDEX` forms below
+            # answer `Unable to drop index on :Point(embedding): no such index`
+            # while the catalogue reports the index, and only
+            # `DROP VECTOR INDEX FOR (p:Point) ON (p.embedding)` removes it. The
+            # shipped list was the two generic forms, so every ARMED deployment
+            # read a catalogue that said VECTOR, issued DROPs the engine
+            # rejected, and logged each rejection at DEBUG — the index survived,
+            # silently.
+            # ⛔ The rendering is `index_catalogue.vector_index_drop_statements`,
+            # the SAME one `graph_key_restore` drops with, so the two cannot
+            # disagree about the statement again (`#3441`'s rule, second row).
+            for _stmt in vector_index_drop_statements("Point", "embedding"):
                 try:
                     self.g.query(_stmt)
-                    dropped = True
+                    _dropped_with = _stmt
                     break
                 except Exception as e:  # noqa: BLE001, RUF100
+                    _drop_refusals.append((_stmt, e))
                     _log.debug("#11642: %r did not drop the vector index: %s",
                                _stmt, e)
                     continue
@@ -21619,30 +21665,9 @@ class FalkorProjection(
         # that read to the inventory instead of letting it probe again. After a
         # DROP the rows describe a catalogue that no longer exists, so that one
         # case re-reads.
-        if catalogue_rows is None and not dropped:
+        if catalogue_rows is None and _dropped_with is None:
             catalogue_rows = _rows
-        if dropped:
-            # ⛔ SAY WHY THIS SWEEP WAS ALLOWED TO DROP IT (#11660 review round
-            # 4, P2). The gate above is `vector_index_retired()`, which asks BOTH
-            # arming conditions, so the unarmed case never reaches this line —
-            # but the line is emitted ONCE, on the sweep that destroys the only
-            # in-graph ANN index, and an operator reading it in an incident must
-            # not have to reconstruct a predicate to learn what replaced it. (The
-            # pre-gate wording said "the dense leg is served from the Postgres
-            # record" unconditionally, which was FALSE on the default posture:
-            # a DSN without `TORTOISE_RECORD_VECTOR_LEG` still full-scans, and
-            # that is the line the same sweep emitted next to the #4997 warning.)
-            _log.info(
-                "#11642: dropped the in-graph Point.embedding vector index on %s "
-                "— because the replacement is ARMED (TORTOISE_RECORD_VECTOR_LEG="
-                "1 and a record DSN), so the dense leg is served from the "
-                "Postgres record (pgvector) wherever a record tenant resolves; "
-                "an UNARMED store never reaches this line (it keeps the index). "
-                "A graph without the index pays none of the index-bearing "
-                "restore cost #7846 measured (436.5 s at 20k nodes, 191.8 s "
-                "tuned, instance blocked) — for dumps taken AFTER this sweep; a "
-                "dump taken before it still carries the index", self._graph_name)
-        _wrote_index = dropped
+        _wrote_index = _dropped_with is not None
 
         # #4997: measure what the catalog ACTUALLY has, AFTER the creation
         # attempt above, so a fresh graph reports post-creation state rather
@@ -21668,6 +21693,86 @@ class FalkorProjection(
         self._record_vector_index_inventory(
             None if _wrote_index
             else (_rows if catalogue_rows is None else catalogue_rows))
+
+        # ⛔ SAY WHAT THIS SWEEP DID, AND CLAIM ONLY WHAT THE CATALOGUE CONFIRMS
+        # (#13320). The report is made AFTER the inventory's post-drop read, so
+        # it can distinguish the three states that a `g.query()` that raised
+        # nothing cannot: REMOVED, STILL THERE, and NOT MEASURED. The line that
+        # used to sit here fired on `dropped` alone — and the measured defect
+        # was worse than a wrong message: the sweep's two statements both
+        # FAILED, so nothing logged above DEBUG at all and an armed production
+        # store kept the index while its operator believed the switch was on.
+        # ⛔ The gate above (`vector_index_retired()`) is the UNARMED case, and
+        # it never reaches this code — these lines describe an ARMED sweep only.
+        # The unarmed lane is `main`'s silent success path, unchanged (#11660
+        # review round 7, P2-3).
+        if _has_vector_index:
+            # `_vector_indexed_labels` is the inventory's own post-drop verdict:
+            # the served labels the catalogue STILL reports a VECTOR index for.
+            _still_indexed = self._vector_indexed_labels
+            if _still_indexed is not None and "Point" not in _still_indexed:
+                # SAY WHY THIS SWEEP WAS ALLOWED TO DROP IT (#11660 review round
+                # 4, P2), and with WHAT (#13320) — the line is emitted ONCE, on
+                # the sweep that destroys the only in-graph ANN index, and an
+                # operator reading it in an incident must not have to reconstruct
+                # a predicate or a statement to learn what happened. (The
+                # pre-gate wording said "the dense leg is served from the
+                # Postgres record" unconditionally, which was FALSE on the
+                # default posture: a DSN without `TORTOISE_RECORD_VECTOR_LEG`
+                # still full-scans.)
+                _log.info(
+                    "#11642: dropped the in-graph Point.embedding vector index "
+                    "on %s with %r — confirmed absent from the post-drop "
+                    "catalogue (#13320) — because the replacement is ARMED "
+                    "(TORTOISE_RECORD_VECTOR_LEG=1 and a record DSN), so the "
+                    "dense leg is served from the Postgres record (pgvector) "
+                    "wherever a record tenant resolves; an UNARMED store never "
+                    "reaches this line (it keeps the index). A graph without the "
+                    "index pays none of the index-bearing restore cost #7846 "
+                    "measured (436.5 s at 20k nodes, 191.8 s tuned, instance "
+                    "blocked) — for dumps taken AFTER this sweep; a dump taken "
+                    "before it still carries the index",
+                    self._graph_name, _dropped_with)
+            else:
+                # ⛔ THE SURVIVOR, OR THE UNCONFIRMED ONE. Both leave the store in
+                # the state #13320 was filed on (paying for the index AND the
+                # pgvector copy), and neither may be silent: `_dropped_with` set
+                # means the engine ACCEPTED a statement and the catalogue still
+                # reports the index (a false PASS, which is why the verdict is
+                # the measurement and not the query's return); `None` means every
+                # candidate was refused.
+                _state = (
+                    "the catalogue still reports it after the engine accepted "
+                    f"{_dropped_with!r}" if _dropped_with
+                    else "every candidate DROP was refused")
+                if _still_indexed is None:
+                    _state += (
+                        " and the post-drop catalogue read FAILED, so the "
+                        "removal is UNCONFIRMED")
+                _refusals = "; ".join(
+                    f"{stmt!r}: {err}" for stmt, err in _drop_refusals
+                ) or "none"
+                try:
+                    _bucket: tuple = (self._stable_endpoint(), self._graph_name)
+                except Exception:  # noqa: BLE001, RUF100 — unidentified store
+                    _bucket = ("unidentified", self._graph_name)
+                with _VECTOR_INDEX_DROP_FAILED_LOCK:
+                    _first_report = _bucket not in _VECTOR_INDEX_DROP_FAILED_WARNED
+                    _VECTOR_INDEX_DROP_FAILED_WARNED.add(_bucket)
+                if _first_report:
+                    _log.warning(
+                        "#13320: the in-graph Point.embedding vector index on %s "
+                        "SURVIVED an ARMED retirement sweep — %s. Statements "
+                        "tried: %s. The store keeps paying for the in-graph "
+                        "index AND the pgvector copy, so arming did NOT take "
+                        "effect here. Do not hand-run DROP INDEX on production "
+                        "to \"finish\" it: the statement that removes a VECTOR "
+                        "index is `DROP VECTOR INDEX FOR (p:Point) ON "
+                        "(p.embedding)` (index_catalogue."
+                        "vector_index_drop_statement), and a survivor means the "
+                        "engine refused or ignored every form this sweep can "
+                        "issue — report it rather than masking it",
+                        self._graph_name, _state, _refusals)
 
     def _create_vector_index_api(self, catalogue_rows=None) -> None:
         """The PRE-#11642 creation path, kept for the rollback switch (F9).

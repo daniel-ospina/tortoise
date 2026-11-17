@@ -223,8 +223,19 @@ from typing import Any
 
 #: The repo's SINGLE catalogue-row reader (#3154/#3441), IMPORTED rather than copied, so
 #: this module cannot drift from the other readers of the same row. ``index_catalogue``
-#: imports nothing, so this stays hermetic.
-from tortoise.index_catalogue import catalogue_cell as _cell
+#: imports only the standard library, so this stays hermetic — and its VECTOR-index DROP
+#: rendering (#13320) and its entity-TYPE tokens are imported from there rather than
+#: restated here, for the same reason.
+from tortoise.index_catalogue import (
+    NODE_ENTITY_TYPE,
+    RELATIONSHIP_ENTITY_TYPE,
+    catalogue_cell,
+    quote_identifier,
+    vector_index_drop_statement,
+)
+
+#: The historical private spelling, kept because ``tools/dod_5090_probe.py`` imports it.
+_cell = catalogue_cell
 
 logger = logging.getLogger(__name__)
 
@@ -325,20 +336,17 @@ VECTOR_INDEX_TYPE = "VECTOR"
 
 #: Entity types a definition may carry, as the catalogue spells them. A VECTOR index on
 #: anything else has no DROP/CREATE form known here, and guessing one is how a definition
-#: gets destroyed — see :func:`vector_index_definitions`.
-_NODE = "NODE"
-_RELATIONSHIP = "RELATIONSHIP"
-_ENTITY_TYPES = frozenset({_NODE, _RELATIONSHIP})
+#: gets destroyed — see :func:`vector_index_definitions`. The tokens themselves come from
+#: ``index_catalogue`` (#13320), which is the leaf every catalogue reader shares.
+_ENTITY_TYPES = frozenset({NODE_ENTITY_TYPE, RELATIONSHIP_ENTITY_TYPE})
 
 
 # ---------------------------------------------------------------------------------
 # Index definitions — read off the engine catalogue, never hardcoded (#7846)
 # ---------------------------------------------------------------------------------
 
-#: An identifier that needs no quoting. Anything else is backtick-quoted (with interior
-#: backticks doubled) because a label/property name reaches Cypher by interpolation and
-#: comes from the graph's own schema — i.e. from whatever the customer wrote there.
-_BARE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+#: Integers as the catalogue renders them. The identifier rule this module used to own
+#: moved to ``index_catalogue`` (#13320) — one escaping rule, not two.
 _INTEGER = re.compile(r"^-?\d+$")
 
 
@@ -436,7 +444,7 @@ class VectorIndexDefinition:
 
     def _pattern(self, variable: str) -> str:
         label = _quote_identifier(self.label)
-        if self.entity_type == _RELATIONSHIP:
+        if self.entity_type == RELATIONSHIP_ENTITY_TYPE:
             return f"()-[{variable}:{label}]-()"
         return f"({variable}:{label})"
 
@@ -448,10 +456,15 @@ class VectorIndexDefinition:
         :Point(embedding): no such index`` for a vector index that ``CALL db.indexes()``
         is reporting one row for. Following that error would leave the index in place and
         the restore index-bearing — the defect this path exists to avoid.
+
+        ⛔ RENDERED BY ``index_catalogue.vector_index_drop_statement``, not here (#13320).
+        That measurement was already in this docstring when the #11642 retirement sweep
+        derived its own statement list from prose and shipped the two generic forms, so an
+        ARMED deployment kept the index and failed only at DEBUG. One rendering, imported
+        by both, is the fix that does not leave a third site to ship the guess again.
         """
-        return (
-            f"DROP VECTOR INDEX FOR {self._pattern('p')} "
-            f"ON (p.{_quote_identifier(self.property)})"
+        return vector_index_drop_statement(
+            self.label, self.property, entity_type=self.entity_type
         )
 
     def create_cypher(self) -> str:
@@ -466,10 +479,14 @@ class VectorIndexDefinition:
 
 
 def _quote_identifier(name: str) -> str:
-    """``name`` as a Cypher identifier, backtick-quoted only when it must be."""
-    if _BARE_IDENTIFIER.match(name or ""):
-        return name
-    return "`" + str(name).replace("`", "``") + "`"
+    """``name`` as a Cypher identifier, backtick-quoted only when it must be.
+
+    The historical private name for :func:`index_catalogue.quote_identifier`, kept as a
+    delegating alias (#13320): ``tools/dod_5090_probe.py`` imports this spelling, and a
+    second copy of the escaping rule is how two sites come to quote a backtick
+    differently.
+    """
+    return quote_identifier(name)
 
 
 def _render_option_value(value: str | int) -> str:

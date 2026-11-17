@@ -1,0 +1,380 @@
+"""#13320 — an ARMED store must actually REMOVE the in-graph Point vector index.
+
+THE DEFECT (issue #13320; reproduced on production 2026-11-17 and again here on
+``falkordb-server:v4.20.6``, graph module 42006). On a deployment whose
+replacement is armed — a record DSN **and** ``TORTOISE_RECORD_VECTOR_LEG=1``, so
+``projection.vector_index_retired()`` is ``True`` — constructing a projection for
+a graph that HOLDS the in-graph ``Point.embedding`` HNSW index did not drop it:
+
+* the catalogue was read and the index WAS seen (so the gate is not the defect),
+* both statements the retirement issued — ``DROP INDEX ON :Point(embedding)`` and
+  ``DROP INDEX FOR (p:Point) ON (p.embedding)`` — were rejected by the engine
+  (``Unable to drop index on :Point(embedding): no such index.``), because a
+  VECTOR index is not reachable through the generic drop, and
+* each rejection was logged at DEBUG ONLY, so on a box logging at INFO the whole
+  sweep was silent: ``before: present=True``, ``after: present=True``, no line.
+
+The statement that DOES drop it — ``DROP VECTOR INDEX FOR (p:Point) ON
+(p.embedding)`` — was already measured and written down in
+``tortoise/graph_key_restore.py`` (``VectorIndexDefinition.drop_cypher``) for the
+RESTORE path, with the very same error text quoted. The retirement path derived
+its own list instead. Both now render it from ONE place
+(``index_catalogue.vector_index_drop_statement``), so the next site cannot
+re-derive the guess.
+
+WHAT IS PINNED HERE
+
+1. ``test_an_armed_setup_REMOVES_a_real_in_graph_vector_index`` — the LIVE
+   falsifier the issue asks for: a real VECTOR index on a real engine, armed, the
+   setup path invoked ⇒ the index is GONE from ``CALL db.indexes()``, and a line
+   names what removed it. On the shipped code this fails on the survived-index
+   assertion (that is the red this file was written against).
+2. ``test_the_retirement_drops_with_the_VECTOR_form`` — DB-free, so CI without a
+   live engine still reds if the form regresses to the generic one. The fake
+   engine answers the generic DROPs the way the real one does (``no such
+   index``), so a fake that merely says "something dropped" cannot pass.
+3. ``test_a_vector_index_that_SURVIVES_is_not_silent`` — the second half of the
+   defect: an index that survives the sweep must produce a WARNING naming it, and
+   must NOT produce the "dropped" INFO. Silence is how #13320 shipped.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import re
+import uuid
+from types import SimpleNamespace
+from urllib.parse import urlparse
+
+import pytest
+import redis
+
+from tests import _live_utils
+from tortoise.embeddings import EMBEDDING_DIM
+from tortoise.index_catalogue import vector_index_drop_statement
+from tortoise.projection import FalkorProjection, vector_index_retired
+
+#: The arming surface (a record DSN) and the arming DECISION — BOTH, or
+#: ``vector_index_retired()`` is False and this file would be testing the
+#: unarmed posture (see that function's docstring).
+RECORD_DSN_ENV = "TORTOISE_RECORD_DSN"
+ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
+_RECORD_DSN = "postgresql://localhost/record"
+
+_SUPPORTED_SCHEMES = ("docker", "redis", "rediss")
+
+
+# ── the live lane ───────────────────────────────────────────────────────────
+
+def _live_target():
+    """``(host, port, username, password, ssl)`` for the live FalkorDB, or None.
+
+    Read at CALL time: the conftest recomposes ``TORTOISE_DB_URI`` per test (a
+    unique graph name), so the connection must follow the env it is given.
+    """
+    uri = os.environ.get("TORTOISE_DB_URI") or ""
+    parsed = urlparse(uri)
+    if parsed.scheme not in _SUPPORTED_SCHEMES or not parsed.hostname:
+        return None
+    from tortoise.config import parse_uri_userinfo
+
+    username, password = parse_uri_userinfo(uri)
+    return (
+        parsed.hostname,
+        parsed.port or _live_utils.docker_port(),
+        username,
+        password,
+        parsed.scheme == "rediss",
+    )
+
+
+_LIVE_ONLY = pytest.mark.skipif(
+    _live_target() is None, reason=_live_utils.LIVE_URI_SKIP_REASON)
+
+
+def _raw_client():
+    target = _live_target()
+    assert target is not None, "the live lane was not skipped but has no URI"
+    host, port, username, password, ssl = target
+    return redis.Redis(
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        ssl=ssl,
+        decode_responses=True,
+        socket_timeout=30.0,
+        socket_connect_timeout=10.0,
+    )
+
+
+def _rows(client, graph: str, cypher: str):
+    """The result rows of a ``GRAPH.QUERY`` reply (``[header, rows, stats]``)."""
+    out = client.execute_command("GRAPH.QUERY", graph, cypher)
+    return out[1] if isinstance(out, (list, tuple)) and len(out) > 1 else []
+
+
+def _type_tokens(cell) -> set[str]:
+    """The index-TYPE tokens of a ``db.indexes()`` row's ``types`` cell.
+
+    ⛔ The raw client hands this cell over as a STRING
+    (``"{embedding: [VECTOR]}"``), not a dict, so it is TOKENISED — never
+    substring-tested — the rule ``tortoise/index_catalogue.py`` states for the
+    same column's property names.
+    """
+    if isinstance(cell, dict):
+        return {
+            str(token).upper()
+            for types in cell.values()
+            for token in (types or ())
+        }
+    return {token.upper() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(cell))}
+
+
+def _vector_index_present(client, graph: str) -> bool:
+    """Is there a VECTOR index on ``Point.embedding`` in this graph's catalogue?"""
+    for row in _rows(client, graph, "CALL db.indexes()"):
+        if len(row) < 3 or str(row[0]) != "Point":
+            continue
+        if "VECTOR" in _type_tokens(row[2]):
+            return True
+    return False
+
+
+def _seed_vector_index(client, graph: str) -> None:
+    """Create the in-graph index the way the store does: procedure, then Cypher.
+
+    Mirrors ``_create_vector_index_api``: the procedure is not registered on the
+    pinned server image, so the Cypher-native form is the live path — the same
+    the products's own creation code takes there.
+    """
+    try:
+        _rows(client, graph,
+              "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+              f"{EMBEDDING_DIM}, 'HNSW')")
+        return
+    except Exception:
+        # The procedure is NOT registered on the pinned server image — the
+        # Cypher-native form below is the measured path there, and the same one
+        # the product's own creation code takes.
+        pass
+    _rows(client, graph,
+          "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
+          f"OPTIONS {{dimension: {EMBEDDING_DIM}, similarityFunction: 'cosine'}}")
+
+
+@_LIVE_ONLY
+def test_an_armed_setup_REMOVES_a_real_in_graph_vector_index(monkeypatch, caplog):
+    """THE FALSIFIER (#13320 acceptance): armed + index present ⇒ index absent.
+
+    Written to FAIL on the shipped code, and it does: the sweep issued two DROPs
+    the engine rejects and reported nothing above DEBUG, so the catalogue still
+    answered ``Point … {'embedding': ['VECTOR']}`` after the projection was
+    constructed — the exact post-state the production transcript recorded.
+
+    Falsifiable both ways: dropping the retirement gate's arming check would make
+    an UNARMED store lose its index, which the sibling pins in
+    ``tests/test_4997_vector_index_parity.py`` own; a sweep that issues the
+    generic DROP forms leaves this one red on the ``VECTOR still present``
+    assertion.
+    """
+    client = _raw_client()
+    graph = f"test_13320_{uuid.uuid4().hex[:10]}"
+    proj = None
+    try:
+        # The fixture's PRECONDITION, asserted rather than assumed: a seed that
+        # silently created no index would make this pin vacuous.
+        _rows(client, graph, "CREATE (:Point {id:'p1', pointKind:'entity'})")
+        _seed_vector_index(client, graph)
+        assert _vector_index_present(client, graph), (
+            "the fixture did not seed a VECTOR index — this pin would be vacuous")
+
+        monkeypatch.setenv(RECORD_DSN_ENV, _RECORD_DSN)
+        monkeypatch.setenv(ARMING_ENV, "1")
+        assert vector_index_retired() is True, (
+            "the store is not armed, so this pin is not testing the retirement")
+
+        with caplog.at_level(logging.INFO):
+            # The production path verbatim: constructing the projection runs
+            # `_ensure_indexes()` (`Projection.__init__`), which is where the
+            # retirement lives.
+            proj = FalkorProjection.from_uri(
+                os.environ["TORTOISE_DB_URI"], graph_name=graph)
+
+        assert not _vector_index_present(client, graph), (
+            "#13320: an ARMED store kept its in-graph Point.embedding VECTOR "
+            "index — the retirement issued a statement the engine rejects and "
+            "logged it only at DEBUG, so the deployment pays for the index AND "
+            "the pgvector copy while reporting the switch as on. The DROP that "
+            "works is "
+            f"{vector_index_drop_statement('Point', 'embedding')!r}; the "
+            "catalogue after the sweep still reports: "
+            f"{_rows(client, graph, 'CALL db.indexes()')}")
+
+        dropped = [
+            r.getMessage() for r in caplog.records
+            if r.levelno >= logging.INFO
+            and "dropped the in-graph" in r.getMessage()
+        ]
+        assert dropped, (
+            "the retirement removed the index without a line saying so — the "
+            "operator has no artifact for what the sweep did "
+            f"(INFO lines seen: {[r.getMessage()[:90] for r in caplog.records]})")
+        assert vector_index_drop_statement("Point", "embedding") in dropped[0], (
+            "the line that names the retirement must name the statement that "
+            f"did it; got {dropped[0]!r}")
+    finally:
+        if proj is not None:
+            try:  # noqa: SIM105
+                proj.close()
+            except Exception:
+                pass
+        for cypher in ("MATCH (n) DETACH DELETE n", None):
+            try:
+                if cypher is None:
+                    client.execute_command("GRAPH.DELETE", graph)
+                else:
+                    _rows(client, graph, cypher)
+            except Exception:
+                pass
+
+
+# ── DB-free pins: the FORM, and the silence ─────────────────────────────────
+
+def _catalogue_row(label: str, prop: str, kind: str):
+    """A 9-column ``CALL db.indexes()`` row, the shape the inventory walks."""
+    return (label, [prop], {prop: [kind]}, 0, 0, 0, "NODE", "OPERATIONAL", "")
+
+
+class _Result:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _EngineLikeGraph:
+    """A fake engine that answers the DROP forms the REAL engine answers.
+
+    ``drop_accepts``: ``"vector"`` — only ``DROP VECTOR INDEX`` drops the index
+    (the measured engine); ``"none"`` — nothing drops it (the survivor lane).
+
+    ⛔ The generic forms are REJECTED with the engine's own message rather than
+    accepted. A fake that accepts any statement mentioning ``embedding`` is how
+    #13320 shipped: the pin asserted "a DROP was issued", which was true and
+    useless.
+    """
+
+    def __init__(self, *, drop_accepts: str = "vector"):
+        self.calls: list[str] = []
+        self.drop_accepts = drop_accepts
+        self._rows = [_catalogue_row("Point", "embedding", "VECTOR")]
+
+    def query(self, cypher, params=None, timeout=None):
+        self.calls.append(cypher)
+        low = cypher.lower()
+        if "db.indexes()" in low:
+            return _Result(list(self._rows))
+        if low.startswith("drop"):
+            if self.drop_accepts == "vector" and "drop vector index" in low:
+                self._rows = [
+                    r for r in self._rows
+                    if not (str(r[0]) == "Point" and "VECTOR" in str(r[2]).upper())
+                ]
+                return _Result([])
+            raise RuntimeError(
+                "Unable to drop index on :Point(embedding): no such index.")
+        return _Result([])
+
+    @property
+    def drops(self) -> list[str]:
+        return [c for c in self.calls if c.lower().startswith("drop")]
+
+
+def _bare(graph_obj, *, graph: str = "test_13320_bare") -> FalkorProjection:
+    """A projection over a fake engine — no connection, no health probe.
+
+    ``.db`` carries a PRODUCTION-shaped pool so ``_stable_endpoint()`` resolves a
+    store identity and the #11087/#13320 latches key on something stable.
+    """
+    proj = object.__new__(FalkorProjection)
+    proj._is_embedded = False
+    proj._graph_name = graph
+    proj._skip_guard = True
+    proj._host = "test-host"
+    proj.db = SimpleNamespace(connection=SimpleNamespace(
+        connection_pool=SimpleNamespace(
+            connection_kwargs={"host": "test-host", "port": 6379})))
+    proj._falkordb_version = (4, 20, 6)
+    proj._vector_index_api = None
+    proj._vector_indexed_labels = None
+    proj._vector_indexed_labels_for_reads = None
+    proj._vector_index_served_labels = None
+    proj._index_catalogue_rows = None
+    proj.g = graph_obj
+    return proj
+
+
+def _arm(monkeypatch):
+    monkeypatch.setenv(RECORD_DSN_ENV, _RECORD_DSN)
+    monkeypatch.setenv(ARMING_ENV, "1")
+
+
+def test_the_retirement_drops_with_the_VECTOR_form(monkeypatch):
+    """The DROP the sweep issues is the form the engine actually honours (#13320).
+
+    DB-free, because the form is where the defect was and CI must catch its
+    regression without a live engine. The fake rejects the generic forms exactly
+    as graph module 42006 does, so an implementation that issues them cannot
+    satisfy this pin (its index survives, and the assertion below reports it).
+    """
+    _arm(monkeypatch)
+    assert vector_index_retired() is True
+
+    graph = _EngineLikeGraph(drop_accepts="vector")
+    proj = _bare(graph)
+    proj._ensure_indexes()
+
+    expected = vector_index_drop_statement("Point", "embedding")
+    assert expected in graph.drops, (
+        f"the retirement never issued {expected!r} — it issued {graph.drops!r}")
+    assert not any("VECTOR" in str(r[2]).upper() for r in graph._rows), (
+        "the store still reports the VECTOR index after the sweep")
+    assert proj._vector_index_api is None
+    assert proj._vector_indexed_labels == set(), (
+        "the post-drop measurement still reports the retired index as present")
+
+
+def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
+    """Second half of #13320: an index that survives must SAY SO (#13320).
+
+    The shipped sweep failed both DROP statements and logged each at DEBUG, so a
+    production box at INFO recorded nothing at all — the "silently switched
+    backend" shape this repo has a rule about. A survivor now produces a WARNING
+    that names the index, and must NOT produce the "dropped" INFO: a line that
+    claims a removal that did not happen is worse than the silence.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="none")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+
+    assert graph.drops, (
+        "no DROP was even attempted — the gate, not the drop, is being tested")
+
+    warnings = [
+        r.getMessage() for r in caplog.records
+        if r.levelno >= logging.WARNING and "#13320" in r.getMessage()
+    ]
+    assert warnings, (
+        "a VECTOR index survived an ARMED retirement sweep with no line above "
+        f"DEBUG — the box believes the switch is on and nothing changed "
+        f"(records: {[(r.levelname, r.getMessage()[:70]) for r in caplog.records]})")
+    joined = " ".join(warnings)
+    assert "Point.embedding" in joined, (
+        f"the survivor warning must name the index it left in place: {joined!r}")
+    assert "no such index" in joined, (
+        f"the survivor warning must carry the engine's own refusal: {joined!r}")
+    assert not any("dropped the in-graph" in r.getMessage() for r in caplog.records), (
+        "the sweep claimed a drop that did not happen — that is the false PASS "
+        "#13320 was filed on")

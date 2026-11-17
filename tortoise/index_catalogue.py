@@ -32,14 +32,26 @@ the fix that does not leave a third occurrence for the next audit to find.
 
 The match is EXACT on the field name. A stringified ``properties`` cell (an
 engine has been observed to report one) is TOKENISED, never substring-tested.
+
+It also owns the ONE rendering of a VECTOR-index DROP (#13320) — see
+:func:`vector_index_drop_statement`. That function exists for the same reason
+this module does: the restore path had already measured which statement drops a
+VECTOR index and written it down (``graph_key_restore.drop_cypher``), and the
+retirement sweep then re-derived the same statement from an unmeasured guess and
+shipped the guess. One rendering, imported by both.
 """
 from __future__ import annotations
+
+import re
 
 __all__ = [
     "catalogue_cell",
     "index_catalogue_has_field",
     "index_row_has_field",
     "indexed_field_names",
+    "quote_identifier",
+    "vector_index_drop_statement",
+    "vector_index_drop_statements",
 ]
 
 
@@ -133,4 +145,108 @@ def index_catalogue_has_field(rows, field_name: str, *,
     return any(
         index_row_has_field(row, field_name, label=label)
         for row in (rows or ())
+    )
+
+
+# ── The ONE VECTOR-index DROP rendering (#13320) ────────────────────────────
+#
+# A VECTOR index is a different index TYPE to every other kind the catalogue
+# reports, and the generic statement does not reach it. MEASURED (#13320, and
+# again for #7846 before it — ``graph_key_restore.VectorIndexDefinition``):
+# on ``falkordb-server:v4.20.6`` (graph module 42006) a graph whose catalogue
+# reports ``Point  [embedding]  {'embedding': ['VECTOR']}`` answers
+#
+#   DROP INDEX ON :Point(embedding)                → Unable to drop index on
+#   DROP INDEX FOR (p:Point) ON (p.embedding)        :Point(embedding): no such index
+#
+# for BOTH generic forms — while ``DROP VECTOR INDEX FOR (p:Point) ON
+# (p.embedding)`` returns an empty result set and the index is gone from the
+# next ``CALL db.indexes()``. Both generic forms were nonetheless shipped as the
+# retirement's statement list (#11642), so an armed deployment reported
+# ``vector_index_retired() is True`` and kept the index it paid for, with the
+# failures visible only at DEBUG — the shape #13320 was filed on.
+#
+# This is the ``#3441`` lesson applied to a second row: the restore path had
+# already measured and recorded the working form; the retirement path derived
+# its own from prose and got it wrong. So the rendering lives HERE, once, and
+# both callers import it.
+
+#: An identifier that needs no quoting. Anything else is backtick-quoted (with
+#: interior backticks doubled) because a label/property name reaches Cypher by
+#: interpolation and comes from the graph's own schema — i.e. from whatever the
+#: customer wrote there.
+_BARE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+#: The catalogue's entity TYPE tokens, as ``CALL db.indexes()`` cell 6 spells them.
+#: They live HERE because this module is the leaf every catalogue reader imports:
+#: ``graph_key_restore`` aliases these as ``_NODE``/``_RELATIONSHIP`` instead of
+#: restating them, so "what the catalogue calls a relationship" has one definition
+#: (#13320). Only the two a DROP form is known for — a VECTOR index on anything
+#: else gets no rendering guessed for it.
+NODE_ENTITY_TYPE = "NODE"
+RELATIONSHIP_ENTITY_TYPE = "RELATIONSHIP"
+
+
+def quote_identifier(name: str) -> str:
+    """``name`` as a Cypher identifier, backtick-quoted only when it must be.
+
+    ONE quoter (#13320). ``graph_key_restore._quote_identifier`` is the same
+    function under its historical private name, so a label that needs quoting
+    (or, worse, one that CONTAINS a backtick) cannot be escaped two ways.
+    """
+    if _BARE_IDENTIFIER.match(name or ""):
+        return name
+    return "`" + str(name).replace("`", "``") + "`"
+
+
+def vector_index_drop_statement(
+    label: str,
+    property: str,
+    *,
+    entity_type: str = NODE_ENTITY_TYPE,
+    variable: str = "p",
+) -> str:
+    """The statement that ACTUALLY drops a VECTOR index (#13320).
+
+    ⛔ The vector-index form, NOT ``DROP INDEX ON :Label(prop)``: measured on
+    graph module 42006, the plain form answers ``Unable to drop index on
+    :Point(embedding): no such index`` for a vector index that ``CALL
+    db.indexes()`` is reporting a row for. Following that error leaves the index
+    in place — which is exactly what the restore path exists to avoid, and what
+    the retirement path did on every armed deployment until #13320.
+
+    ``entity_type`` is the catalogue's own token (cell 6): a relationship index
+    is written ``()-[p:REL]-()``, a node index ``(p:Label)``.
+    """
+    if entity_type == RELATIONSHIP_ENTITY_TYPE:
+        pattern = f"()-[{variable}:{quote_identifier(label)}]-()"
+    else:
+        pattern = f"({variable}:{quote_identifier(label)})"
+    return (
+        f"DROP VECTOR INDEX FOR {pattern} "
+        f"ON ({variable}.{quote_identifier(property)})"
+    )
+
+
+def vector_index_drop_statements(label: str, property: str) -> tuple[str, ...]:
+    """Ordered DROPs a RETIREMENT sweep may try, the measured form FIRST (#13320).
+
+    The first entry is :func:`vector_index_drop_statement` — the only form
+    measured to drop a VECTOR index. The generic forms follow for an engine that
+    reaches vector indexes through its plain drop; they are CANDIDATES, tried
+    only on a sweep whose catalogue says the vector index is present, so a form
+    the engine rejects costs one failed DDL on the ONE migration sweep and
+    nothing afterwards.
+
+    ⛔ ``graph_key_restore`` deliberately does NOT use this list — it must issue
+    the one measured form and verify it, never "try something and see". This
+    ordering is for a best-effort retirement that must also work on an engine
+    this repo has not measured.
+    """
+    node = quote_identifier(label)
+    prop = quote_identifier(property)
+    return (
+        vector_index_drop_statement(label, property),
+        f"DROP INDEX ON :{node}({prop})",
+        f"DROP INDEX FOR (p:{node}) ON (p.{prop})",
     )
