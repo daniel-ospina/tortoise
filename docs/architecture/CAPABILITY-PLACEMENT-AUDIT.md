@@ -83,9 +83,10 @@ record table** (relevant in §5.2).
 | 14 | `:DeliveryReceipt` (webhook) | `webhook_delivery.py:487` | — | 0 (not exercised) |
 | 15 | `:Batch`, `:PipelineStage`, `:PackInstall`, `:PackSelection` | `mining.py`, `pipeline.py`, `pack_state.py`, `hosted_api:32965` | — | 0 (not exercised) |
 | 16 | `:ContextSubscription` (webhook registration) | `webhook_delivery.py:406` (`CREATE (s:ContextSubscription {…})`) | — | 0 (not exercised) |
-| 17 | **found, NOT censused** — `:Pipeline` (`pipeline.py:525`), `:MeteringRecord` (`metering.py:108`, `:840`, `:1146`, `:1608`), `:MeteringUnmeteredIncrement` (`metering.py:616`), `:WebhookEvent` (`hosted_api.py:47787`), and the tenancy/registry labels `:Team` (`sdk.py:46612`), `:Membership` (`:47262`), `:APIKey` (`:47409`), `:TeamMeta` (`:46671`), `:Graph` (`:46753`), `:SignupToken` (`hosted_api.py:34901`), `:Invitation` (`hosted_api.py:30343`) | sdk / metering / pipeline | — | **not censused — a GAP, see §7** |
+| 17 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:317` (`MERGE (n:OnboardingState {org_id})`), `:322`/`:929` (`MERGE (s:OnboardingStep {org_id, step_id})`), `:324`/`:934` (`MERGE (n)-[:COMPLETED_STEP]->(s)`) | `COMPLETED_STEP` | 0 (not exercised) |
+| 18 | **found, NOT censused** — `:Pipeline` (`pipeline.py:525`), `:MeteringRecord` (`metering.py:108`, `:840`, `:1146`, `:1608`), `:MeteringUnmeteredIncrement` (`metering.py:616`), `:WebhookEvent` (`hosted_api.py:47787`), and the tenancy/registry labels `:Team` (`sdk.py:46612`), `:Membership` (`:47262`), `:APIKey` (`:47409`), `:TeamMeta` (`:46671`), `:Graph` (`:46753`), `:SignupToken` (`hosted_api.py:34901`), `:Invitation` (`hosted_api.py:30343`) | sdk / metering / pipeline | — | **not censused — a GAP, see §7** |
 
-⛔ **Row 17 is a real gap, labelled as one.** This audit read the memory-substrate writers and the bookkeeping
+⛔ **Row 18 is a real gap, labelled as one.** This audit read the memory-substrate writers and the bookkeeping
 labels on their paths; it did **not** classify the billing / tenancy / pipeline substrate. **No placement
 decision on `:Pipeline` or `:MeteringRecord` may be made from this document.** (`:Pipeline` is named
 explicitly because the same module writes the censused `:PipelineStage`.)
@@ -130,12 +131,22 @@ needs none of the five is SQL-shaped and is marked **none**.
 | `tortoise/search_engine.py:6297` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg | **adjacency** |
 | `tortoise/search_engine.py:6656` | `(n:Point)-[r:aboutSubject]->(:Subject)` — typed-degree prior | **adjacency** |
 | `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
-| the vector leg (`vector_write` / search) | HNSW over `Point.embedding` | **vector index** |
-| `tortoise/domain_validators.py:106`–`:244` | `MATCH (req:Point) WHERE req.pointKind IN …` — kind filters, no walk | **none** |
+| `tortoise/search_engine.py:3938` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
+| `tortoise/domain_validators.py:105` | `MATCH (req) WHERE (req:Point OR req:Object) AND req.pointKind IN $req_kinds`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
+| `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
 
-**Verdict: `graph`.** Eleven capability-carrying readers across nine files; a record-backed copy could not answer any of
-them without re-implementing belief propagation, the fulltext index or HNSW in SQL (which is `#13082`
-Phase 2 and its stop condition).
+**Verdict: `graph`.** Thirteen capability-carrying readers across six files (§2.1's table spans
+`projection/propagation.py`, `sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`,
+`domain_validators.py`); a record-backed copy could not answer any of them without re-implementing belief
+propagation, the fulltext index or HNSW in SQL (which is `#13082` Phase 2 and its stop condition).
+
+⚠️ **A correction this census needed against itself.** An earlier draft cited
+`domain_validators.py:106`–`:244` as one "kind filters, no walk" row and quoted a query
+(`MATCH (req:Point) …`) that **does not exist** — the code reads `MATCH (req) WHERE (req:Point OR
+req:Object)`. The range also contains `:241-243`, whose `NOT (n)--()` is an **adjacency** predicate, which
+is the shape's own second capability. Both are fixed above: the cite is split, and the mis-quoted text is
+gone. The error was invisible to a reader who did not open the file, which is exactly the failure this
+document exists to prevent — recorded rather than quietly edited.
 
 ### 2.2 `:Source`
 
@@ -145,6 +156,12 @@ Phase 2 and its stop condition).
 | `tortoise/sdk.py:52878` | `MATCH (s:Source {url:$url})-[:references]->(n)` | **traversal**. |
 | `tortoise/sdk.py:15659` (target side) | `(p:Point)-[:extractedFrom]->(s:Source)` — every claim must reach its source (§9.4 ①) | **traversal** |
 | `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('<label>', $query)` — the index `:3011`'s note says is built on **`Source._searchText` for every Source** | **fulltext index** |
+| `tortoise/session_source_migration.py:432-434` | `SET new.provenance_spans = CASE WHEN coalesce(size(new.provenance_spans),0)=0 THEN $spans ELSE new.provenance_spans END` — a **`SET` that READS the node**, i.e. a reader by §1's rule | **none** |
+
+⚠️ **That last row is the rule that put it here.** §1 says a `SET` expression that reads the node is a
+reader. `provenance_spans` is this audit's own instance of that — and it was **missing from an earlier
+draft**, which is the more instructive failure: a `SET`-that-reads is exactly what a `MATCH`-only grep walks
+past. Capability `none` (a property guard: it fills an absent value and never walks), so the verdict stands.
 
 **Verdict: `graph`.** The link is load-bearing: §9.4 makes "every claim walks up to its Source" a
 mechanism, not a citation nicety.
@@ -171,8 +188,12 @@ mechanism, not a citation nicety.
 
 **Verdict: `graph`.** ⚠️ Its **property families are another matter** — `capture_redactions`,
 `capture_ok`, `capture_extractor`, `machine_id`, `model`, `entity_links_*`, `value_nodes_*` are telemetry
-write-stamps with no Cypher reader of their own (they read back through whole-node reads, §6.2). That is
-a **property-level** question and is listed in §6, not silently folded into this row verdict.
+write-stamps with **no graph-capability reader**: some are named in Cypher predicates and projections
+(`session_schema.py:892` `WHERE s.capture_ok = true`, `:860` and `sdk.py:17082` projecting
+`s.capture_ok`/`s.capture_extractor`), all `none`-capability, and the rest read back through whole-node
+reads (§6.2). ⚠️ An earlier draft called them "no Cypher reader of their own", which is false as written —
+see §6.1 for the correction. That is a **property-level** question and is listed in §6, not silently folded
+into this row verdict.
 
 ### 2.5 `:Object` and `:Subject`
 
@@ -193,6 +214,13 @@ read resolves the node **through the edge** — `sdk.py:28069`
 **endpoint in the graph**, so "the node is only the endpoint label" is not an exemption — it is the
 justification. **Verdict: `graph`.**
 
+| `tortoise/session_source_migration.py:432-434` | `SET new.provenance_spans = CASE WHEN coalesce(size(new.provenance_spans),0)=0 THEN $spans ELSE new.provenance_spans END` — a **`SET` that READS the node**, i.e. a reader by §1's rule | **none** |
+
+⚠️ **This row is the rule that put it here.** §1 says a `SET` expression that reads the node is a reader;
+`provenance_spans` is the audit's own instance of that, and it was **missing from an earlier draft** — which
+is the more interesting failure, because a `SET`-that-reads is exactly what a `MATCH`-only grep walks past.
+Capability `none` (a property guard: it fills an absent value, never walks), so it does not move the verdict.
+
 **Verdict: `graph`** for both.
 
 ### 2.6 `:GraphEvent` — the shape with no graph-capability reader
@@ -203,7 +231,7 @@ justification. **Verdict: `graph`.**
 | `tortoise/event_store.py:557`, `:657` | `MATCH (m:GraphEventMeta) RETURN max(m.last_seq)` — aggregate | **none** |
 | `tortoise/event_store.py:645`, `:1103` | `min(e.seq)` / `max(e.seq)` over `:GraphEvent` — aggregates | **none** |
 | `tortoise/event_store.py:801`, `:879`, `:1043` | per-page key existences and predicate deletes inside the emit/purge paths | **none** |
-| `tortoise/event_store.py:1014` `purge_expired`, `:1038` `purge_overflow` | predicate deletes | **none** |
+| `tortoise/event_store.py:1029` (`purge_expired`) / `:1053` (`purge_overflow`) | predicate deletes — `WHERE n.ts < $cutoff` and `ORDER BY n.seq ASC LIMIT $overflow` + `DETACH DELETE` (the **def** lines are `:1014`/`:1038`) | **none** |
 | `tortoise/hosted_backup.py:842`, `:890`, `:1182`, `:1383` | `max(last_seq), max(first_seq)` and whole-graph export scans — aggregates | **none** |
 | `tortoise/sdk.py:13766` (the `read_after` call inside `poll_events`, `:13642`) | pages the feed | **none** |
 | `tortoise/why_snapshot.py:526` | pages the feed to rebuild a why-snapshot | **none** |
@@ -223,7 +251,7 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 
 | shape | readers (`file:line`) | capability |
 |---|---|---|
-| `:GraphEventMeta` | `event_store.py:491` (MERGE), `:557`, `:657`, `:738`, `:1103`; `hosted_backup.py:842`; `sdk.py:13761` | **none** |
+| `:GraphEventMeta` | `event_store.py:557`, `:657`, `:1103`; `hosted_backup.py:842`; `sdk.py:13761` (reads); `:491`/`:738` are the `MERGE` **RMW** that advances/restores the watermark | **none** |
 | `:EpMeta` | `sdk.py:36069`; `ep.py:473` | **none** |
 | `:Meta` | `residency.py:244`, `:292`, `:298`; `sdk.py:55647` | **none** |
 | `:WhySnapshot` | `why_snapshot.py:237`, `:303`, `:350` | **none** |
@@ -232,9 +260,14 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
 | `:PipelineStage` | `pipeline.py:349`, `:685`, `:731` | **none** |
 | `:PackInstall` / `:PackSelection` | `export.py:126` (`:PackInstall`); `pack_state.py:878-881` (`MATCH (s:PackSelection) RETURN s.revision, s.configured_at, s.updated_by`) | **none** |
-| `:ContextSubscription` | `webhook_delivery.py:406` (CREATE), `:425`, `:435`, `:444`, `:452`, `:461`, `:1113`; `why_snapshot.py:557` | **none** |
+| `:ContextSubscription` | `webhook_delivery.py:425`, `:435`, `:444`, `:452`, `:461`, `:1113`; `why_snapshot.py:557` (reads; `:406` is the `CREATE` named in §1) | **none** |
+| `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:759-763` (`MATCH (n:OnboardingState {org_id:$org_id})-[:COMPLETED_STEP]->(s:OnboardingStep) RETURN s.step_id`) | **adjacency** → **`graph`** (§3 row 11c) — listed here only so the label is not missing from the table |
 
-**Verdict `record_only` for all eleven** (each row cites **readers only** — a `MERGE`/`CREATE` that appears in §1 as the writer is not repeated here) (⚠️ `:Tag` was in this list in an earlier draft and is **`graph`** — see §2.5), with the §5.2 blocker recorded — none has a record table, so none
+**Verdict `record_only` for the eleven above except `:OnboardingState`/`:OnboardingStep`, which is `graph`.**
+Each row cites readers; where a line is a **read-modify-write** it is labelled `RMW` rather than presented as
+a pure read, and the writer itself is the one named in §1. ⚠️ Two labels were moved OUT of this table by
+review: `:Tag` (`graph` — see §2.5) and the onboarding pair (`graph` — row above). §5.2's blocker is
+recorded for the rest — none has a record table, so none
 can be expressed as a tier today. They are cheap *individually* (1–2 nodes per graph) and this document
 does not pretend otherwise: they are listed because the census is complete, not because they are a lever.
 
@@ -253,11 +286,12 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 4 | `:Source` identity + `_searchText` | §2.2 | **yes** — `references`/`extractedFrom`, FTS | **graph** | §9.4 ① makes the link load-bearing |
 | 5 | `:Event` core | §2.3 | **yes** — `aboutObject`/`aboutSubject` | **graph** | lifecycle edges are how status folds |
 | 6 | `:Session` core (`id`, `harness`, counters) | §2.4 | **yes** — `CONTAINS` | **graph** | the session→turn/claim walk is the read path |
-| 7 | `:Session` capture telemetry family | whole-node reads only | **no** | **`record_only`** (property-level; §6.2) | a write stamp, not an edge — but see the blocker |
+| 7 | `:Session` capture telemetry family | whole-node reads + named property predicates (`session_schema.py:860`, `:892`; `sdk.py:17082`) | **no** | **`record_only`** (property-level; §6.2) | a write stamp, not an edge — but see the blocker |
 | 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject` adjacency (`assembly.py:2629`) and the `-[r]->` walk (`sdk.py:34355`) | **graph** | an Event reaches its Object by EDGE; ⚠️ `supersededBy` is a **string matched by equality** (`audit.py:810`), not a walk — SQL-shaped, and an earlier draft wrongly cited it as the reason |
 | 9 | `story_arc` (on **any** label) | **none** — zero Cypher readers | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one reader is `public.session_narrative`; the mechanism CAN deny it, two policy pins currently refuse the entry |
 | 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no record table (§5.2) |
 | 11 | bookkeeping labels (§2.7) | §2.7 | **no** | **`record_only`** ⛔ blocked | key lookups and label scans; no record table (§5.2) |
+| 11c | `:OnboardingState` / `:OnboardingStep` | §2.7 | **yes** — `completed_steps()` walks `COMPLETED_STEP` | **graph** | the docstring is explicit: *"Canonical completed-step ids from the edge set (never a second store)"* — the edge IS the store |
 | 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
 | 12 | `_searchText` on a **non**-episodic `:Source` | FTS | **yes** | **graph** | the fulltext index's field set |
 | 13 | `Source.summary`/`_searchText` on an **episodic** Source | declined already (`#10853`) | **no** | **`record_only`** ✅ already shipped | §9.1's prose rule, per ROW |
@@ -419,9 +453,14 @@ No guessed verdicts. Each of these is a shape the census **cannot** settle from 
 `client_captured_at*`, `entity_links_attempted/created`, `value_nodes_created/held`, `draft_count`,
 `commit_count`.
 
-- **Why it is arguable:** no Cypher reader names any of them — but they **are** returned by whole-node
-  reads (§6.2), so they are not unread, only un-*needed*. Moving them is a **property-level** placement,
-  which the row-level tier cannot express.
+- **Why it is arguable:** they are not **unread** — some are read by name in Cypher, and the rest come
+  back through whole-node reads (§6.2). ⚠️ An earlier draft said "no Cypher reader names any of
+  them", which is **false**: `session_schema.py:892` is `MATCH (s:Session) WHERE s.capture_ok = true RETURN
+  count(s)`, `session_schema.py:860` projects `s.capture_ok, s.capture_extractor, s.harness, s.capture_lane`,
+  and `sdk.py:17082` projects `s.capture_ok`/`s.capture_extractor` into the `session_existed` retry decision.
+  All three are **`none`** — property predicates and projections, no walk — so the `record_only` verdict
+  stands; the *reason* is "read, but by nothing needing the graph", not "unread". Moving them is a
+  **property-level** placement either way, which the row-level tier cannot express.
 - **The question that settles it:** *is there a whole-node read that returns them to a caller who would
   break without them?* If `get_session_detail`/`list_sessions` project them to an API consumer, the
   placement decision is a **contract change**, not a storage move, and belongs to a product ruling; if
@@ -469,7 +508,7 @@ changes nothing.
   **`NOT_PLANNED`** on 2026-11-06, so there is no shipped purge tooling to point at. The legacy copies this
   document declines to fold-delete therefore remain, which is a *stronger* reason for the §5.1 refusal, not a
   weaker one.
-- ⛔ **It is NOT a census of the whole database.** Row 17 of §1 lists the labels found but **not censused**
+- ⛔ **It is NOT a census of the whole database.** Row 18 of §1 lists the labels found but **not censused**
   (`:Pipeline`, the metering substrate, the tenancy/registry labels). Those get no reader census and no
   verdict here, and a placement decision on them must not be made from this document. That is a **gap**, not
   a scope choice dressed as one.

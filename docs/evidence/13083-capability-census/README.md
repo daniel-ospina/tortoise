@@ -115,7 +115,7 @@ honour the entry (`_props_from_row`'s `tail_denied` is the plain forbidden set p
 | `:GraphEvent` | 12,768 | 67 nodes × ~190 B rendered; the §9.1 figure of 801 B/turn includes block overhead |
 | `:Source` | 916 | 2 nodes |
 | `:Event` | 680 | 3 nodes |
-| `:Session` | 303 | 7 nodes — the capture-telemetry family is ~20 B/session |
+| `:Session` | 303 | 7 nodes; the **exercised** capture telemetry is **13 B over 7 sessions** (`capture_redactions` 7 + `capture_ok` 4 + `capture_extractor` 2) ≈ **2 B/session**, not the ~20 an earlier draft claimed |
 | `:Object` | 198 | 2 nodes |
 | `:Subject` | 139 | 2 nodes |
 | `:GraphEventMeta` / `:EpMeta` | 4 | 2 nodes |
