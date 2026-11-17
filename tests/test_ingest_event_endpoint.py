@@ -755,11 +755,16 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     # ⛔ ZERO mutation on BOTH halves of this bundle, not only the Event: the
     # Object PRECEDES the refused Event in this bundle's entity list, so a Phase 1
     # that refused LATE — validation moved behind the first write — leaves
-    # `Object 'Solo'` behind (count 1) and then dies mid-write on
-    # `ValueError: Refused: status={'a': 1} is not writable on an :Event`. That is
-    # the #2422/#7925 partial-mutation class. The same LATE mutant is already caught
-    # by the `'Alpha'` count in the mixed bundle above; this arm is the one that
-    # still catches it when the `:Event` refusal is the bundle's ONLY violation.
+    # `Object 'Solo'` behind (count 1) and then dies mid-write on the Event door's
+    # refusal (`tortoise/live.py::refuse_event_lifecycle_state`, whose message is
+    # `Refused: `status={…}` is not writable on an :Event (<door>). …`). That is the
+    # #2422/#7925 partial-mutation class.
+    # ⚠️ Why THIS arm and not the mixed bundle above: under a LATE mutant the mixed
+    # bundle is stopped earlier and for a different reason — its first write is
+    # `Alpha`, whose dict status the WRITER refuses (`a status must be a plain
+    # string`), so its `'Alpha'` count is never reached. This arm is the one that
+    # pins the partial write when the `:Event` refusal is the bundle's ONLY
+    # violation.
     assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 0
 

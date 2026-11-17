@@ -404,9 +404,13 @@ which is why the two sets differ:
 | `ast_door_calls` | 1567 (its marker said **1565**) | 1569 |
 | `files_scanned` | 297 | 297 (unchanged) |
 
-`tools/cypher_inventory.py --check` was **RC=1** at `534f3e1bee` on six counts — so `05fe46e94e`
-corrected six, not three, and the three above are the ones whose marker had drifted. Re-derived by
-running the tool at both commits; nothing here is arithmetic on the marker values.
+`tools/cypher_inventory.py --check` was **RC=1** at `534f3e1bee` on six counts, so `05fe46e94e`
+corrected six, not three: the three rows above (their stale markers in parentheses) **plus**
+`candidates` (575→576), `shape_plain_read` (575→576) and `non_cypher_door_calls` (257→258).
+(`files` 98→99 did NOT drift: the population stayed at 297 scanned files, and `tortoise/api.py`
+gained its FIRST statement site inside `#12910`'s own diff — a file newly carrying sites, not a
+count that was wrong.) Re-derived by running the tool at both commits and diffing the sets of
+carrying files; nothing here is arithmetic on the marker values.
 
 ⛔ **Appendix A, however, was NOT re-cut by that commit, and this is the defect that keeps
 recurring here:** the pins are 25 SCALARS, so an insertion inside a file that already carries
