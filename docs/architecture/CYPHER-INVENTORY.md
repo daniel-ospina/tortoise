@@ -115,8 +115,9 @@ cannot do. Measured on this tree:
 
 * `rg -o '\.(ro_)?(query|execute)\s*\(' <those 295 files>` → **1,609** across **105** files: exactly the
 tool's number. A bare `rg … tortoise/` gives 1,615 / 106, the 6 extra occurrences living in
-`tortoise/test_*.py` — `--glob '!tortoise/test_*.py'` only excludes the top level, so it does not
-reproduce the exclusion either.
+`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,609 / 105 on this tree, because
+every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
+— they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
 * `rg -io '\b(MATCH|MERGE)\s*\(' <those 295 files>` → **2,313** across **139** files, while the tool
 reports 2,326 / 140. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
 concatenation leaves `MATCH` and its `(` on two lines, one occurrence to the tool and none to `rg`.

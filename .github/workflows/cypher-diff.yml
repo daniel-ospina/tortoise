@@ -46,7 +46,16 @@ jobs:
     timeout-minutes: 20
     services:
       graph:
-        image: falkordb/falkordb:latest
+        # ⛔ PINNED, like every other FalkorDB job in this repo
+        # (`.github/actions/falkordb-provision/action.yml`'s default is the same
+        # tag, and `tools/test_lane.py` REFUSES a floating tag outright). A
+        # floating app-image tag makes this gate's engine a function of the
+        # calendar rather than of the commit: `falkordb/falkordb:latest` resolved
+        # to engine 6.0.x on 2026-11-17 (module `graph` ver 60004) where the pin
+        # is 4.20.x (ver 42006), and the 6.0 family is the one whose
+        # `reply_compact` panics (`#13098` review). A gate whose engine can change
+        # under it cannot attribute a red to a commit.
+        image: falkordb/falkordb-server:v4.20.6
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s
