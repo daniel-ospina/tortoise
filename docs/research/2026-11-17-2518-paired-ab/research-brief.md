@@ -87,8 +87,8 @@ population digest **only in the new artifact schema** — the two committed arti
 **What makes two runs incomparable, from that canon and confirmed here:**
 
 1. **The corpus is live and NOT append-only in effect.** `#11901` measured a re-harvest of the same
-   directory returning **−10.8 % to −11.0 %** fewer distinct names ~2 h later. Measured today, the same
-   directory holds **23 files / 14,225 lines**, against the **14 files** `#13118` recorded on this box —
+   directory returning **−10.8 % to −11.0 %** fewer distinct names ~2 h later. At the measurement the same
+   directory held **23 files / 14,225 lines**, against the **14 files** `#13118` recorded on this box —
    the corpus grew, which is the benign direction and still a different condition.
 2. **The sample is redrawn per run.** `#13118` recorded the population digest differing in *all five* of
    its runs (`2323ddf7…` / `7c08a430…` / `eec5fcf1…` / `81c6ff3d…` / `cd275d71…`) — "a count identity is
@@ -140,7 +140,11 @@ contradicts the 2026-11-10 KEEP ruling (`#11395`), `SEARCH-ARCHITECTURE.md` V1, 
    `aboutObject` to the anchor with `search_keys` — `#2518`'s stated class verbatim: *a same-subject point
    from a session the one-shot top-k starves, whose own E3 keys are its only join surface*
    (`tests/test_entity_key_expansion.py` proves this shape). 500 real corpus records are seeded as
-   competition; 300 anchors + 600 linked points + 500 distractors = 1,100 points.
+   competition; 300 anchors (the query points) **+ 300 targets = the 600 points that carry the**
+   `aboutObject` link, plus 500 distractors = 1,100 points. ⚠️ `anchors` is a SUB-count of
+   `linked_points`, not a third group — `seed_graph` sets `anchors = len(items)` and
+   `linked_points = 2 * len(items)` and merges the link onto both ids per item, so adding the two
+   double-counts the anchors (it would read 1,400, against the artifact's `points_total: 1100`).
 4. **One read per item per arm** at `--read-limit`, so every k is a **prefix** of one ranked list and the
    arms cannot differ by read width.
 5. **Both arms in one process, back to back**: the headline run is bracketed by load **13.09 → 12.55**
@@ -194,7 +198,9 @@ repeat of the OFF side returned the **identical** outcome for every item (determ
   was designed for on the class it targets, and says nothing about the product's recall on real questions.
   `#11901` declared the same residual for its generated variant arm.
 - **The k = 3 delta is BELOW this n's MDE.** Observed +1.67 pp against a 2.08 pp minimum detectable effect
-  ⇒ **no winner at k = 3 is claimable**, and the tool says so rather than reporting the point estimate.
+  ⇒ **no winner at k = 3 is claimable**. ⚠️ The TOOL does not decide that — `_print_summary` prints the
+  point estimate (`delta=`) beside both recalls, the CI and both MDEs, and emits no winner verdict at all;
+  the MDE rule is this brief's, and it is applied to every row below rather than to k = 3 alone.
 - **MDE stated before the verdict, per k**: 2.08 / 2.28 / 3.35 / 3.84 pp — and it **rises with k**,
   because the discordant count rises with k (b = 5 → 6 → 13 → 17), so this design is *most* powered at
   low k. At n = 300 the run **can** resolve a 3 pp effect at k = 3 and k = 5 (MDE 2.08 / 2.28 pp) and
@@ -326,11 +332,13 @@ uv run python tools/paired_expansion_ab_2518.py --snapshot /tmp/snap-2518 \
 # the control (a different sample size is enough — its claim is structural):
 uv run python tools/paired_expansion_ab_2518.py --snapshot /tmp/snap-2518 \
     --population 1000 --sample 60 --distractors 500 --read-limit 30 --arms object \
-    --out /tmp/object-60.json        # exits 3: it REFUSES to publish the blind null
+    --repeat-arm object --out /tmp/object-60.json   # `--repeat-arm` defaults to POINT and never equals
+                                    # `object`, so omitting it emits `repeat_identical: null` and does
+                                    # NOT reproduce this artifact (`repeat_identical: true`)
 ```
 
 ⛔ **A re-run is not byte-reproducible from this repo alone.** The frozen snapshot lived only in a
-box-local `/tmp` and the live corpus has since drifted (23 files at the measurement, 14 now), and the
+box-local `/tmp` and the live corpus has since drifted (23 files at the measurement, 14 before it), and the
 drawn `population-300.json` was never committed — so `items.name_digest` can be checked for CONSISTENCY
 (it equals `population.names_sha256`) but the names behind it cannot be re-derived here. The artifacts say
 so rather than implying otherwise.
