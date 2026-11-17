@@ -17,7 +17,8 @@ aboutObjects: "#11901 candidate-recall instrument, #12295 multi-key blocking, #1
 [#2513](https://github.com/daniel-ospina/tortoise/issues/2513) · **Epic whose inventory row this
 closes or re-states:** [#12186](https://github.com/daniel-ospina/tortoise/issues/12186) lever **A4** ·
 **Harness:** `tools/candidate_recall_11901.py` (reused, not rebuilt) · **Code head:** `8762578f8c70`
-· **Measured:** 2026-11-17, on the `cmux` cell.
+(product code; the REPEAT arm ran at `ade889b487d4` and the composite-off arm at `edf7959b8e37`,
+both docs/test-only commits) · **Measured:** 2026-11-17, on the `cmux` cell.
 
 **Verdict in one paragraph.** The dispatch names a class — *"9.3 % of real nouns (28 of 300) are not
 found at ANY window"* — and asks this lane to attack it with additive entity/fact-augmented
@@ -174,13 +175,35 @@ and `#12295` artifacts), `--population 1000 --sample 300 --captures 20`, corpus
 is empty on this cell because `HOME=/tmp/cell-home`). ⚠️ **Reading files outside the repo** — this is
 the declared corpus the instrument exists to measure; nothing else outside the checkout was read.
 
-**Pairing, and why these runs are comparable.** The corpus is live and moved between runs
-(`harvested_distinct` definite `123 927 → 123 938 → 123 961 → 123 981 → 124 057`, lines
-`10 746 → 10 747`). But `arms.blocking.index_stats` is **identical in all five runs** (`members:
-1000`, `blocks: 8454`, `key_memberships: 11067`, `max_block_size: 102`) — the blocker is a pure
-function of the population, so **the 1000-name population and therefore the stratified 300-name sample
-are the same in every run below**. That is what makes the ON/OFF comparisons paired at the population
-level, not between-run.
+**Pairing — stated as the artifacts show it, because the obvious inference is WRONG.** The corpus is
+live and moved between every run (`harvested_distinct` definite
+`123 927 → 123 938 → 123 961 → 123 981 → 124 057`; `corpus.input.lines` `10 746 → 10 761`). The
+`arms.blocking.index_stats` **counts** are identical in all five runs (`members: 1000`, `blocks: 8454`,
+`key_memberships: 11067`, `max_block_size: 102`) — but a count identity is **not** a member identity:
+`corpus.population_digest` is a sha256 over the population's **names** in their deterministic order
+(`tools/candidate_recall_11901.py`: `pop_digest = sha256("\n".join(r["name"] for r in pop))`, over the
+`build_population` order that breaks ties on the name), so it can only agree when the name *set*
+agrees — and **it differs in all five runs**:
+
+| run | `corpus.population_digest` | `corpus.input.lines` |
+|---|---|---|
+| lexical, composite ON | `2323ddf78bc1b8dd` | 10 746 |
+| lexical, composite OFF | `7c08a430787815ba` | 10 747 |
+| hybrid, HEAD | `eec5fcf19b5bf617` | 10 748 |
+| hybrid, HEAD — REPEAT | `81c6ff3d506a1d2e` | 10 750 |
+| hybrid, composite OFF | `cd275d71459fb39a` | 10 761 |
+
+⛔ **So the ON/OFF comparisons below are BETWEEN RUNS on a drifting corpus, not a paired ablation**,
+and each lever's share in §3.3 is the size of a between-run difference rather than a controlled
+contrast. What makes those differences readable at all is measured, not assumed: the two runs whose
+only difference is the drift (`measurement-hybrid.json`, digest `eec5fcf1…`, vs
+`measurement-hybrid-repeat.json`, digest `81c6ff3d…` — 2 corpus lines and 20 harvested names apart)
+return the **identical row in every cell** (`in_window` 298/299/300/300, `miss_absent_at_max_k` 0,
+`miss_past_k` 2/1/0/0, `rank_sum` 331/335/341/341). Drift of that size moved **no cell at all** in the
+arm that carries the headline, while the ON/OFF deltas are 82 → 0, 20 → 0 and 82 → 20. **The residual
+is named in §7**: the frozen-population five-arm re-run that would make the contrast genuinely paired
+was NOT run, so read the lever shares as between-run differences an order of magnitude larger than
+the one measured instance of drift sensitivity — not as a paired ablation.
 
 | run | artifact | retrieval shape | `window_modes` |
 |---|---|---|---|
@@ -282,8 +305,11 @@ holds.**
 
 ### 3.3 Who closes the class — the dense leg 62, the composite 20, together 82 → 0
 
-Crossing the two axes (dense leg on/off × composite tail on/off) on one population decomposes the
-whole `absent_at_any_k` class **82 → 0**, and each lever's share is measured rather than argued:
+Crossing the two axes (dense leg on/off × composite tail on/off) across the four runs tabulated above
+decomposes the whole `absent_at_any_k` class **82 → 0**. ⚠️ Each cell is that run's OWN measurement,
+and the four runs are NOT one population (§3's pairing note: every run's `population_digest` differs);
+each lever's share below is therefore the size of a between-run difference — large relative to the one
+measured instance of drift sensitivity, and stated as such rather than as a paired contrast:
 
 | shape | `absent_at_any_k` | recall@3 | recall@15 |
 |---|---|---|---|
@@ -292,9 +318,9 @@ whole `absent_at_any_k` class **82 → 0**, and each lever's share is measured r
 | lexical only, composite ON | **0** | 262/300 = 87.3 % | 300/300 = 100 % |
 | **hybrid, HEAD** (composite ON) | **0** | **298/300 = 99.3 %** | 300/300 = 100 % |
 
-- **The dense leg alone removes 62 of the 82** (82 → 20): the mention **is** the stored name, so its
-  embedding is the node's own name vector and the vector leg ranks it into the window — which is why
-  the class is invisible in the production read at HEAD.
+- **The dense leg alone removes 62 of the 82 across those runs** (82 → 20): the mention **is** the
+  stored name, so its embedding is the node's own name vector and the vector leg ranks it into the
+  window — which is why the class is invisible in the production read at HEAD.
 - **The `_`-composite tail removes the remaining 20 in the hybrid shape** (20 → 0) and **all 82 in the
   lexical shape** (82 → 0). Both are deterministic, both are already shipped, neither is an expansion.
 - **Neither lever trades absent misses for past-k misses.** Total k=3 misses fall across the four
@@ -389,10 +415,15 @@ not an expansion one.
 - **Not a production census.** The population is a stratified 300-name sample of **this box's** capture
   corpus (14 files), and `/home/cmux/.tortoise/session-events` is not the population a hosted graph
   holds. Every number here measures the mechanism on a real name distribution, never production.
-- **Not a hybrid-vs-lexical comparison as an effect size.** The three runs share a population
-  (`index_stats` identical) but the corpus is live and the harvest drifted by 34 names
-  (123 927 → 123 961) across the three harvests; the class deltas are large relative to that, and were
-  not designed as a controlled ablation.
+- **Not a hybrid-vs-lexical comparison as an effect size, and NOT a paired ablation.** The five runs
+do **not** share a population: `corpus.population_digest` differs in every run (§3's table). The
+`index_stats` counts agree, which is a count identity and not a member identity — reading it as
+"same 300 names" was the first draft's error, and it is corrected here rather than left standing.
+The corpus is live and the harvest drifted by 130 names (123 927 → 124 057) across the five
+harvests. The only measured instance of that drift's effect on these cells is the hybrid REPEAT
+(different digest, identical row in every cell), which is why the class deltas are read as real —
+but the **frozen-population five-arm re-run** (one `--sessions-dir` snapshot, all five arms against
+it) is the control that would make the contrast paired, and **it was not run**.
 - **Not a measurement of the entity-key expansion.** It was **not exercised** by any arm here (§4.2:
   the mechanism is point-only; the instrument measures the object leg). Its cost bound is quoted from
   code and is **not** a measured latency.
