@@ -1024,6 +1024,16 @@ class TestThePlanPipeline:
         assert "NOT settled" in message, message
         assert "already at" not in message, message
         assert "distinct name" not in message, message
+        # ⛔ The SAME branch is reachable over a PRE-EXISTING position-less holder
+        # (the fall-through re-mentions it), where nothing is created — so the
+        # message must not claim a create (#13100 review round 11).
+        sdk.create_entity("object", "extractor plan",
+                          objectKind=PO.PLAN_PIPELINE_KEY)
+        with pytest.raises(ValueError) as pre_existing:
+            PO.create_plan(sdk, "extractor plan")
+        pre_message = str(pre_existing.value)
+        assert "resolves to" in pre_message, pre_message
+        assert "was created" not in pre_message, pre_message
 
     def test_create_plan_cannot_be_mis_kinded_by_a_caller_prop(self, sdk):
         """The kind is the module's decision, not a `**props` override."""

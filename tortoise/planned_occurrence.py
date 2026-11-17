@@ -293,8 +293,8 @@ def create_plan(sdk, name: str, *, title: str | None = None,
 
     ⛔ The returned node is only a *staged* plan if the advance actually applied.
     A create **name** is a natural key that re-mentions its single live holder
-    (#452), so this call can land on a plan that already exists. FOUR arms, and
-    only the second SUCCEEDS without writing:
+    (#452), so this call can land on a plan that already exists. The outcomes for
+    an existing LIVE holder, and only the second SUCCEEDS without writing:
 
     * **live, open and POSITION-LESS** (the extractor-minted `core:plan`): the
       call falls through the re-mention and STAGES the record — "created" is not
@@ -308,11 +308,15 @@ def create_plan(sdk, name: str, *, title: str | None = None,
       bind** (the bare `plan` kind): also falls through, and the door's
       namespaced `objectKind` REPAIRS the binding — a write, deliberately: a
       success here would hand the caller a plan whose next write refuses;
-    * **a still-LIVE holder that has ENDED** — a terminal stage, or a position
-      that does not resolve: RAISES, naming the stage it is at and the route to a
-      new record.
+    * **a still-LIVE holder at a TERMINAL stage**: RAISES, naming the stage it is
+      at and the route to a new record;
+    * **a still-LIVE holder whose position does not RESOLVE** (a drifted stage id,
+      a cleared or foreign `pipelineStageKey`): RAISES through
+      `_unresolvable_message`, which prescribes the BINDING repair and says the
+      plan is still open — deliberately NOT "a new name", which would be a no-op
+      for that caller's actual problem.
 
-    ⛔ A holder that is ENDED but no longer LIVE is NOT in that last arm: the
+    ⛔ A holder that is ENDED but no longer LIVE is NOT in those arms: the
     re-mention resolve is LIVE-only (``live_only=True``), so a plan settled
     through this module (``isClosed``) or retired with a status word is not a
     holder this call can see — its NAME IS FREE and a NEW plan is minted, which
@@ -526,7 +530,7 @@ def create_plan(sdk, name: str, *, title: str | None = None,
             # give it a distinct name" here would be false about the graph and
             # would mint a second unstaged plan (#13100 review round 10).
             raise ValueError(
-                f"Refused: the plan {name!r} was created at {plan_id!r} but could "
+                f"Refused: the plan {name!r} resolves to {plan_id!r}, which could "
                 f"not be put on {STAGE_SCHEDULED!r} ({move.reason}), and it "
                 f"stores no stage. WHAT TO DO: the stage this move resolves and "
                 f"the stage this read sees disagree — check the graph's "
