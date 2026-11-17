@@ -302,7 +302,7 @@ def test_audit_mcp_mirror(sdk, monkeypatch):
 def test_audit_tool_registry_surface():
     """A13 SC5 surface: the mirror tools are registered, read-only, and
     HTTP-accessible (a read surface)."""
-    from tortoise.tool_registry import RETIRED_USE_INSTEAD, TOOL_REGISTRY, RETIRED_TOOL_REGISTRY
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, RETIRED_USE_INSTEAD, TOOL_REGISTRY
     # ⛔ The property is about the MIRROR, not about which list the name sits in
     # (#11609 door-retirement wave retired `tortoise_list_batch` FORWARD into
     # `tortoise_list_knowledge(kind="batch")`). A retired-forward name is still

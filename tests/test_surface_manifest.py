@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import copy
 import difflib
+import itertools
 import pathlib
 import re
 import subprocess
@@ -312,7 +313,7 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         for a, b in re.findall(r"took the live surface (\d+)\s*→\s*(\d+)", canonical)
     ]
     assert moves, "the canonical doc stopped naming the surface this container lands on"
-    for (start_a, end_a), (start_b, _end_b) in zip(moves, moves[1:]):
+    for (start_a, end_a), (start_b, _end_b) in itertools.pairwise(moves):
         assert end_a == start_b, (
             "canonical-mcp-tools.md records two movements that do NOT compose: "
             f"{start_a} → {end_a} then {start_b} → … — the later wave measured on a base the "
