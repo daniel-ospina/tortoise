@@ -1555,9 +1555,10 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
 
     # Every "A vs B **at COV**" — the pair bound to its OWN trailing coverage, so a
     # coverage token from a later clause cannot be borrowed by an earlier pair.
-    bound = re.findall(r"(\d+\.\d)\s+vs\s+(\d+\.\d)\**\s+at\s+(0\.\d\d)", body)
-    bound_91 = re.findall(r"(\d+\.\d)\s+vs\s+(\d+\.\d)\**\s+at\s+(0\.\d\d)", body_91)
-    assert len(bound) == 4, bound
+    pair_re = re.compile(r"(\d+\.\d)\s+vs\s+(\d+\.\d)\**\s+at\s+(0\.\d\d)")
+    bound = list(pair_re.finditer(body))
+    bound_91 = list(pair_re.finditer(body_91))
+    assert len(bound) == 4, [m.group(0) for m in bound]
     assert bound_91, "§9.1 publishes no `A vs B at COV` pair — did the sentence move?"
 
     present = list(bound) + list(bound_91)
@@ -1569,8 +1570,18 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
     # false-reds. Matching against the metric SET keeps value and direction bound
     # (a swap matches no metric with the right direction) without forcing the test
     # to parse prose labels the section does not consistently carry.
+    #
+    # ⛔ AND WHEN THE PROSE DOES NAME A METRIC, THAT LABEL IS PART OF THE CLAIM.
+    # §9.1 used to read "(`found_deep` 51.7 vs 49.7 at 0.50) and **behind** where
+    # the resident set is small (20.3 vs 25.3 at 0.25)" — the second pair is
+    # `recall@3`, so a reader carrying `found_deep` forward got 23.3, not 20.3, and
+    # nothing red because the metric-set match accepts ANY metric that fits. A
+    # label the clause itself places immediately before the operands is therefore
+    # required to be one of the metrics the pair actually matches.
     metrics = ("recall@3", "found_deep", "recall@5", "recall@10", "recall@15")
-    for a, b, cov in present:
+    label_re = re.compile(r"(recall@\d+|found_deep)[`*)\s]*$")
+    for found in present:
+        a, b, cov = found.group(1), found.group(2), found.group(3)
         k = str(float(cov))          # "0.50" -> "0.5"; arm keys are un-padded
         hits = [
             m for m in metrics
@@ -1585,6 +1596,14 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
             tail = obj[f"tail@{k}"][m]
             rnd = obj[f"random@{k}"][m]
             assert (float(a) > float(b)) == (tail > rnd), (cov, m, a, b, tail, rnd)
+        # …and a metric the clause NAMES beside the operands must be one of them
+        before = found.string[max(0, found.start() - 40):found.start()]
+        named = label_re.search(before)
+        if named:
+            assert named.group(1) in hits, (
+                f"{a} vs {b} at {cov} is labelled `{named.group(1)}`, but those "
+                f"operands are the cell of {hits} — the label sends a reader to "
+                f"the wrong metric")
 
     # The two "buys back" cells, each bound to its own population/arm/metric.
     assert "up to **2.00 pp on `found_deep` at 0.50**" in body
