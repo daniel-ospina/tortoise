@@ -528,12 +528,21 @@ def test_status_does_not_accept_a_bound_it_cannot_apply(monkeypatch, capsys):
     the flag did nothing — a flag that cannot do anything is worse than an absent
     one, so it is a usage error (exit 2), which is a different answer from a
     refusal and says which of the two happened.
+
+    `--allocate` is the third such flag, and it was the one this row could not
+    see (review P2 at `b7a5207b93`): being a `store_true` it takes no value, was
+    registered outside the bounds gate, and `status` never read it — so
+    `status --allocate` exited 0 with byte-identical output. It is folded in here
+    rather than given its own row so that the row's claim is "`status` registers
+    no flag it cannot apply", which is the property, instead of a roster that can
+    go stale in either direction.
     """
     _patched(monkeypatch, checkpoint=Checkpoint(high_seq=39, present=39))
-    for flag in (("--limit", "5"), ("--batch-size", "5")):
+    invocations = (("--limit", "5"), ("--batch-size", "5"), ("--allocate",))
+    for flag in invocations:
         with pytest.raises(SystemExit) as exc:
             main(["status", "--org-id", "o", "--graph-id", "g",
-                  "--journal", str(FIXTURE), flag[0], flag[1]])
+                  "--journal", str(FIXTURE), *flag])
         assert exc.value.code == EXIT_USAGE, flag
 
 

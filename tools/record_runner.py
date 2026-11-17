@@ -962,14 +962,24 @@ def _parser() -> argparse.ArgumentParser:
         # did nothing. A flag that cannot do anything is worse than an absent
         # one, so `status` does not register them and passing one is a usage
         # error (exit 2) — the honest answer to "what does this flag do here?".
+        #
+        # ⛔ AND `--allocate` IS THE SAME DEFECT (review P2 at `b7a5207b93`): it
+        # was registered HERE, outside this block, so `status --allocate` exited 0
+        # and printed output byte-identical to the run without it. `status` does
+        # not take the flag's word for anything — it reads the `record_cursor`
+        # row and derives `allocated` from that fact, which is `#9190`'s point
+        # that the ROW is the fact and the mode is not. So it belongs with the run
+        # verbs that actually plan a batch (`plan` uses it; `apply` registers it
+        # only to REFUSE it by name, which is a better answer than "unrecognised
+        # arguments"), not with `status`.
         if bounds:
             p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
                            dest="batch_size")
             p.add_argument("--limit", type=int, default=None,
                            help="consume at most N events this run")
-        p.add_argument("--allocate", action="store_true",
-                       help="use the ordinal ALLOCATOR (a cut-over graph) instead "
-                            "of the journal's enumeration")
+            p.add_argument("--allocate", action="store_true",
+                           help="use the ordinal ALLOCATOR (a cut-over graph) "
+                                "instead of the journal's enumeration")
         p.add_argument("--salvage", action="store_true",
                        help="read a damaged journal, skipping mid-file damage "
                             "(explicitly NOT a completeness claim)")
