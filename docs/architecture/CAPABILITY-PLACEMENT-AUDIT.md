@@ -51,14 +51,16 @@ squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/
 'refs/pull/13095/head:ccb49741b2ec'`), so every cite below can be opened there. On any later head they
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
-**108 of this document's 215** `file:line` pairs name a different line at `534f3e1bee` (counted as the
+**96 of this document's 218** `file:line` pairs name a different line at `534f3e1bee` (counted as the
 unique `path.py:NNNN` pairs in this file after resolving **every** written path to the module it names
 (a bare `name.py:` is `tortoise/name.py` when that file exists, and the one file of that name
 otherwise — `edges.py` is `tortoise/projection/edges.py`, `propagation.py` is
-`tortoise/projection/propagation.py`; a range cite counts once, by its **start** line), which dedupes the 231 as-written spellings to 215 — 16
+`tortoise/projection/propagation.py`; a range cite counts once, by its **start** line), which dedupes the 315 as-written spellings to 218 — 97
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
-text), and **none of
-the 215 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
+text; of the 218, **187 are comparable at BOTH heads** and the other **31 name a file that does not exist
+at `ccb49741b2ec`** at all — the `#13038`/`#13083` evidence artifacts and the tests added since — so those
+31 sit in neither side of the ratio), and **none of
+the 218 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 ⚠️ **The pin promise was RE-CHECKED, not assumed, in the `#13083` follow-up — and it did not hold.**
 Sixteen superseded line-addresses did not open on the line their row quotes at `ccb49741b2ec`. ⚠️ **The
@@ -78,11 +80,7 @@ file — `search_engine.py` FTS
 `:4097`, label derivation `:2983`, index note `:3050`; `projection/__init__.py` `("Object", ["name"])`
 `:6830`; `sdk.py`'s second `capture_redactions` writer `:2875`; `audit.py`'s carrier probe `:2444`/`:2455`;
 and `mcp_server.py`'s `entity_type` passthrough `:5477` — and the drift figure
-above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so this revision moved it**:
-it **adds 18** resolved pairs and **drops 1** (the `hosted_api.py` commit-state-load cite superseded by the range beside it), a net **+17**;
-**11** of the 18 drift and the dropped pair drifted as well, a net **+10** — 98 (the `main` copy) + 10 = **108** — and
-every one of the **18** was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this
-header holds.
+above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so every revision moves it — and the re-cut onto `main` moved it again, which is why the two figures at the top of this header are MEASURED over this file as it now stands** (315 written spellings → 218 pairs → 96 drifters of the 187 comparable) rather than carried forward by arithmetic from an earlier edition. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of this header) instead of enumerated here.
@@ -284,7 +282,7 @@ mechanism, not a citation nicety.
 
 | reader (`file:line`) | what it does | capability |
 |---|---|---|
-| `tortoise/goal_judgement.py:1119` | `MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator` | **adjacency** |
+| `tortoise/goal_judgement.py:1128` | `MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator` | **adjacency** |
 | `tortoise/search_engine.py:6831` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
 | `tortoise/assembly.py:2629` | `MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event)` | **adjacency** |
 | `tortoise/search_engine.py:3078` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:2983` derives the label from `entity_type`; `sdk.py:52011` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6825` | **fulltext index** |
