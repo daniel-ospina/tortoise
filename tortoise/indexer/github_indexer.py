@@ -12,7 +12,9 @@ and the cursor is NOT advanced past unprocessed items (resume without
 gaps/dupes; idempotent writes make re-processing safe).
 
 Phase 2 (write): entities + lifecycle Events via ``sdk._get_proj().apply()``
-(the projection folds ``Object.status`` from lifecycle event kinds).
+(the projection folds the CONNECTOR lifecycle onto the POSITION axis —
+``pipelineStageId``/``pipelineSlot``/``isClosed`` since #11824 S0 — and never
+writes a lifecycle ``status`` word for these events).
 
 #1844 OBJECT-ONLY: issues no longer materialize as statement Points — the
 1:1 issue↔statement write is removed from the default ingest path (the
@@ -25,7 +27,8 @@ analysis).
 
 Lifecycle decision table (THE rule):
 - close/reopen ON TRANSITION → Event (``github.issue.closed``/``reopened``)
-  + ``Object.status`` projection ONLY (object-only, #1844).
+  + the Object's POSITION projection ONLY (object-only, #1844; S0 moved this fold
+  off ``Object.status``, which stays the four-word lifecycle axis and is NULL).
 - first ingest of an already-closed issue → ``-created`` ONLY (kind carries
   the closed state) — the one-time legacy backfill is the only other source
   of ``-closed`` events (marker-gated, T2-P3).
@@ -57,7 +60,11 @@ import httpx
 from tortoise import github_map
 from tortoise.live import (
     _terminal_excluded,  # #2901 canonical non-current predicate
-    is_position_ended,
+    is_terminal_status,
+)
+from tortoise.pipeline import (
+    CORE_WORK_ITEM_PIPELINE,
+    CORE_WORK_ITEM_PIPELINE_KEY,
 )
 from tortoise.quota import QuotaCheckError, QuotaExceededError
 from tortoise.sdk import UnapprovedKindNamespace  # #5475: a refused kind fails the RUN
@@ -183,10 +190,13 @@ _SANE_ISSUE_NUMBER_MAX = 10_000_000
 # the connector fold). ⛔ Since S0 the connector folds write the POSITION axis
 # (`pipelineStageId`/`pipelineSlot`/`isClosed`), never `Object.status` — a close
 # folds to the terminal stage `done` and `status` stays NULL. So this map is the
-# LEGACY arm only: it reads a row folded by a pre-S0 binary (or replayed from a
-# pre-S0 journal, where `status='completed'` is still in the graph). The live arm
-# is the POSITION read in `_object_state_to_issue_state` below; reading `status`
-# alone returned None for every S0-folded row, which made `prev_state` read as
+# LEGACY arm only: it reads a row a pre-S0 BINARY wrote and that has never been
+# rebuilt. ⛔ NOT "or replayed from a pre-S0 journal" — a rebuild runs TODAY's
+# fold, so a replayed journal produces the POSITION axis and `status` NULL, never
+# `status='completed'` (measured: live and `rebuild_all` both read
+# `[NULL, 'done', 'terminal', True]`). The live arm is the composed `status` +
+# POSITION read in `_object_state_to_issue_state` below; reading `status` alone
+# returned None for every S0-folded row, which made `prev_state` read as
 # "first ingest" and
 # SILENCED every close/reopen transition event (measured: `events_minted: 0` on
 # a close, `tests/test_github_indexer.py::test_close_event_and_object_status`).
@@ -196,6 +206,45 @@ _STATUS_TO_STATE = {
     "live": "open",
     "open": "open",
 }
+
+
+#: Pipeline declarations this reader can resolve a stage id against. The
+#: CONNECTOR's own pipeline is the one the built-in folds write
+#: (`status_folds.BUILTIN_CONNECTOR_PIPELINE`), and it is the only one an indexed
+#: issue Object carries. A pack-declared pipeline key is NOT here — an issue Object
+#: of a pack kind would need that kind's declaration, and the residual is stated at
+#: the call site rather than guessed.
+_PIPELINE_DECLS = {CORE_WORK_ITEM_PIPELINE_KEY: CORE_WORK_ITEM_PIPELINE}
+
+
+def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
+    """The SLOT of ``stage_id`` per its pipeline DECLARATION, or ``None``.
+
+    The fold resolves the Object's current stage by ID through the pipeline's own
+    declaration (`pipeline.apply_stage_fold` → ``pipe.by_id(cur_id)``), so reading
+    the stored ``pipelineSlot`` PROP alone describes a different object than the
+    one the fold refuses to move. ``None`` means "cannot resolve": the caller
+    then answers from the props it has, and the row is not called ended on this
+    arm.
+    """
+    if stage_id is None:
+        return None
+    # An ABSENT key falls back to the CONNECTOR's own declaration, because that is
+    # the only pipeline a fold can put on an indexed issue Object — a pack move
+    # always writes its key (`stage_move_props(pipeline_key, …)` fills
+    # `pipelineStageKey`), so a keyless stage id came from the connector arm or
+    # from a partial hand write. Resolving it against the core declaration is what
+    # lets the read agree with the fold on a row whose `pipelineSlot` PROP was
+    # never written: measured, that row read as OPEN and minted a `-closed` on
+    # every poll (1/1/1) while the fold refused it as terminal.
+    decl = (_PIPELINE_DECLS.get(str(pipeline_key or ""))
+            or _PIPELINE_DECLS.get(CORE_WORK_ITEM_PIPELINE_KEY))
+    if not decl:
+        return None
+    for stage in decl.get("stages") or ():
+        if str(stage.get("id")) == str(stage_id):
+            return stage.get("slot")
+    return None
 
 
 def _current_statement_rows(proj, eid: str) -> list:
@@ -933,7 +982,8 @@ class GitHubIndexer:
                                          "product-implementer"):
                 del obj[_k]
         obj_id = obj["id"]
-        # Previous issue-state from the PRE-EXISTING Object.status — read BEFORE
+        # Previous issue-state from the PRE-EXISTING row's `status` + POSITION —
+        # read BEFORE
         # applying the fresh Object so the probe describes the PREVIOUS
         # incarnation, never the one this call folds. (Since #9974 R1 a
         # status-less birth stores NO status and `_object_state_to_issue_state`
@@ -1011,7 +1061,8 @@ class GitHubIndexer:
             if not _event_in_graph:
                 stats["events_minted"] += 1  # genuine mint only (P2)
         # Transition events — ONLY on a real state change (diff against the
-        # persisted Object.status projection, never the fetch window).
+        # persisted POSITION projection via `_object_state_to_issue_state`, never
+        # the fetch window).
         # Repeated transitions mint monotonic ids (P1-3) so the timeline
         # never loses a close/reopen.
         if prev_state is not None:
@@ -1054,12 +1105,13 @@ class GitHubIndexer:
         """
         rows = proj.g.query(
             "MATCH (o:Object {id:$id}) "
-            "RETURN o.status, o.isClosed, o.pipelineSlot, o.pipelineStageId",
+            "RETURN o.status, o.isClosed, o.pipelineSlot, o.pipelineStageId, "
+            "       o.pipelineStageKey, o.outdated",
             params={"id": obj_id},
         ).result_set
         if not rows:
             return None
-        status, is_closed, slot, stage_id = rows[0]
+        status, is_closed, slot, stage_id, stage_key, outdated = rows[0]
         # The position axis, through the ONE shared predicate (`live.py`) — never
         # a local re-spelling of it. ⛔ A local `is_closed is True` was measured
         # to DISAGREE with the fold that acts on the answer: `isClosed` is stored
@@ -1075,7 +1127,37 @@ class GitHubIndexer:
         # `cancelled` is terminal too, so a cancelled item reads as closed —
         # which is right for THIS question: both mean "not open", and a later
         # `state=open` in GitHub is a transition worth minting either way.
-        if is_position_ended(is_closed=is_closed, stage_slot=slot):
+        # ⛔ Read the answer the FOLD acts on, on BOTH axes — not a subset.
+        # `is_position_ended` alone was measured to disagree with the fold one
+        # guard over: `_fold_object_stage` refuses a row whose LIFECYCLE word is
+        # terminal BEFORE `apply_stage_fold` ever tests the position, so a row at
+        # `status='deprecated'` + active position read as OPEN here while the
+        # fold wrote nothing — the same mint-per-poll loop F1 removed, behind a
+        # different guard (measured through the public door
+        # `update_knowledge(id, status="archived")`: poll1/2/3 each
+        # `events_minted=1`, the row never moves).
+        # `live.is_terminal_status` is the ONE composed Python mirror of the
+        # Cypher predicate (status in the terminal vocab OR `outdated` OR the
+        # position) — the same answer the recall/search legs give.
+        # The position half is resolved the way `apply_stage_fold` resolves the
+        # CURRENT stage: from the DECLARATION, by `pipelineStageId`, not from the
+        # stored `pipelineSlot` alone. A row whose slot prop was never written (or
+        # was cleared) is terminal by id (`done`), and the fold refuses it; a
+        # reader trusting the prop alone called it open and looped.
+        # ⛔ The stored prop is `pipelineStageKey` (`pipeline.py:77` maps it to the
+        # `pipelineKey` DICT key; `stage_move_props` writes the prop at `:433`).
+        # Reading `o.pipelineKey` returns NULL on every row, which silently
+        # reduces the declaration arm below to its connector fallback.
+        # The `outdated` leg is fetched too, so this read is the SAME three-term
+        # predicate as `_terminal_excluded` (the Cypher read the recall/search
+        # legs use) — no writer sets it today (`commit_ops.py:131`: gone from the
+        # WRITE set), but a legacy row carries it and the fold's exclusion does.
+        declared_slot = _declared_stage_slot(stage_key, stage_id)
+        if is_terminal_status(status, outdated, is_closed=is_closed,
+                              stage_slot=slot):
+            return "closed"
+        if is_terminal_status(status, outdated, is_closed=is_closed,
+                              stage_slot=declared_slot):
             return "closed"
         if stage_id is not None or slot is not None:
             return "open"
