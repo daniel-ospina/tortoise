@@ -659,16 +659,20 @@ def test_a_REAL_graph_dir_read_keeps_the_completion_claim(tmp_path, monkeypatch,
     assert payload["journal"]["corrupt_lines"] == 0, payload
 
 
-def test_a_CLEAN_segmented_read_STILL_reports_completion(monkeypatch, capsys):
-    """The other side of the boundary: `--journal <graph dir>`, no damage.
+def test_an_UNMEASURED_counter_does_NOT_void_the_completion_claim(monkeypatch,
+                                                                  capsys):
+    """The other side of the boundary: an UNMEASURED counter does not void a claim.
 
-    A directory IS the segmented arm (`read_journal` marks every graph dir
-    `segmented=True`), so a predicate keyed on `corrupt is None` turned the
-    completion claim off for EVERY documented directory read — measured before
-    this fix: clean dir at completion -> `fully_consumed: None`, while the same
-    records passed as a FILE path gave `True`. The counter is unreported and the
-    render says so (information), but the reader REFUSES damage rather than
-    skipping it, so the claim is supportable and must stay `True`.
+    ⛔ THIS IS THE HAND-BUILT ARM, NOT A SEGMENTED READ (review P3, #13275). A
+    directory IS the segmented arm, and since `read_journal` reports the counters
+    it measures, a real `<graph dir>` read carries `corrupt=0`, not `None` — the
+    real-directory row above asserts exactly that. What survives here is the
+    boundary the `None` value means: `corrupt is None` is a statement about the
+    COUNTER, not about the completion, so it must not withdraw the claim (that
+    regression withdrew it on every documented directory read — measured before
+    #13272: clean dir at completion → `fully_consumed: None`, while the same
+    records passed as a FILE path gave `True`). The unmeasured counter is
+    DISCLOSED — information, not a retraction.
     """
     journal = Journal(path=FIXTURE,
                       records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
@@ -1219,6 +1223,52 @@ def test_apply_folds_ACROSS_BATCHES_and_counts_every_one(monkeypatch, capsys):
     assert conn.committed == 4, "one commit per batch, and there are four batches"
     assert "consumed: 39 events in 4 batch(es)" in out
     assert "seq 1..39" in out
+
+
+def test_the_counters_REACH_plan_and_apply_from_a_real_graph_directory(
+        tmp_path, monkeypatch, capsys):
+    """⛔ P3 (review #13275): the plumbing into `plan`/`apply` was unfenced.
+
+    The rows above fence the RENDERERS (`_render_plan`/`_render_apply` over a
+    hand-built dict), which left the layer between them open: hard-coding
+    `"corrupt_lines": None, "torn_tails": None` in `build_plan`'s journal dict —
+    or `apply_batches`' — left **131 passed**, and the write verb then announced
+    "damage counters NOT REPORTED" over counters the READ had measured (on every
+    clean `apply` too: a false report in the harmless direction, a missing one in
+    the harmful). `status` had the analogous row through its CLI; `plan` and
+    `apply` did not.
+
+    A REAL graph directory with a SIGKILL-truncated tail, so the assertion is
+    about what the read measured reaching the report.
+    """
+    from tortoise import journal_segments
+
+    active = tmp_path / journal_segments.ACTIVE_NAME
+    good = json.dumps({"type": "IngestStarted"})
+    active.write_text(good + "\n" + good + "\n", encoding="utf-8")
+    with active.open("ab") as fh:
+        fh.write(b'{"type": "PointAd')
+
+    rc = main(["plan", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(tmp_path), "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["journal"]["torn_tails"] == 1, (
+        "`plan` reported the counters as unmeasured for a read that measured 1 "
+        f"torn tail: {payload['journal']}")
+    assert payload["journal"]["corrupt_lines"] == 0, payload["journal"]
+
+    # …and the WRITE path's own report, built from a second journal dict.
+    monkeypatch.setattr(_replay_attr(), "replay", _fold_report_for)
+    journal = record_runner.read_journal(tmp_path)
+    assert journal.torn == 1, journal
+    report = record_runner.apply_batches(
+        journal=journal, org_id="o", graph_id="g", conn=_StubConn(),
+        start_at=0, batch_size=10, limit=None, allocate=False,
+        timeout_ms=1000, echo=lambda line: None)
+    assert report.journal["torn_tails"] == 1, (
+        f"`apply`'s report lost the count the read measured: {report.journal}")
+    assert "torn tail: 1 fragment(s)" in record_runner._render_apply(report)
 
 
 def test_the_write_ledger_is_a_MEASUREMENT_the_fold_populates(monkeypatch):
