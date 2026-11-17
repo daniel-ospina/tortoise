@@ -82,6 +82,24 @@ Run (it starts its own throwaway ``pgvector/pgvector:pg16`` container):
 """
 from __future__ import annotations
 
+import sys
+
+# #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before the rest of the
+# imports, so a stale local `python3` fails LOUDLY with a remedy instead of with whichever 3.12-only
+# construct happens to trip first. This guard has now been reported BLOCKING twice on this PR
+# (`6d4c75e6c3`'s F2 and the second round's finding 1) and lost both times, so it is stated here
+# rather than assumed: `tests/test_entry_point_python_guard.py` is a parametrized corpus test over
+# every tracked `tools/**/*.py` that is not a declared exclusion, and this file is in neither
+# exclusion set — its two rows were RED while the PR read as reviewed.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/record_vector_write_cost_11691.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/record_vector_write_cost_11691.py` (the record's "
+        f"driver is not a project dependency: prepend `--with psycopg2-binary` "
+        f"to that command, exactly as the module docstring above shows)"
+    )
+
 import argparse
 import json
 import math
