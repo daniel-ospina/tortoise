@@ -73,6 +73,15 @@ in the order the ruling names them instead (`Object`/`Subject` first) would spen
 work on the two labels with the most still blocking them, and the shortest on the one that is already able
 to answer.
 
+**⇒ And *"armed and working"* is four conditions per label, in this order — it is not one switch:**
+**(1)** the vector is WRITTEN into the row (a writer that fills the payload column), **(2)** the index is
+PRESENT on that column, **(3)** the label is SERVED by the read (`LABEL_SERVED`, with its status predicate if
+the label is in `_STATUS_FILTERED_LABELS`), and **(4)** the cutover SWITCH is on (`cutover_armed`, default
+OFF — and off for a measured reason: the record has no backfill, so switching early drops pre-existing
+material out of the dense pool). **A label missing any one of the four is not armed, however the other three
+read** — which is the shape that produces a confident "done" from four green checks that never covered the
+same label.
+
 **Sibling documents:** `STORAGE-ARCHITECTURE.md` owns authority per layer (§2.0/§3) and the cost model
 (§17.4); `CONSUMPTION-MODEL.md` owns metering; **this document owns where each search leg executes, and
 what the graph engine holds.**
