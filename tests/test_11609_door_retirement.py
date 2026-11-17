@@ -130,6 +130,13 @@ def _create_entity_dispatch_arms() -> tuple[str, ...]:
     it untouched (a false GREEN on exactly the drift these rows exist to catch), and
     adding `"point"` to it alone changes no behaviour (a false RED). The arms are the
     `if t == "<kind>":` / `elif t == "<kind>":` branches at the method's own body indent.
+
+    ⛔ STATED LIMIT (not a gap a future reviewer should re-derive): the arms must stay on
+    ONE line at the body indent. A reflow that splits `if t == "subject":` across two
+    lines drops that arm from the derivation — which the set-equality pin below reds, so
+    the failure is a named FALSE RED on an unrelated refactor, never a false green. The
+    durable alternative is for `create_entity` to carry its arms as DATA; that is a change
+    to a hot write path for the sake of a test, and it is deliberately not made here.
     """
     source = inspect.getsource(TortoiseSDK.create_entity)
     return tuple(
