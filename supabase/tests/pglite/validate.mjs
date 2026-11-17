@@ -3215,17 +3215,75 @@ try {
       + `not per-org`);
     process.exit(1);
   }
+  // ⛔ THE TENANCY POSTURE IS EXECUTED, NOT DECLARED. Dropping `ENABLE ROW LEVEL
+  // SECURITY` or the function's `REVOKE` from the migration both left this
+  // harness green (measured) — and on Supabase an `anon`/`authenticated` default
+  // grant plus RLS-less table means any session reads every org's footprint and
+  // any anon caller can run a SECURITY DEFINER whole-table audit.
+  const posture = await db.query(`SELECT
+    (SELECT relrowsecurity FROM pg_catalog.pg_class
+       WHERE oid = 'public.org_postgres_residency'::regclass) AS rls_on,
+    pg_catalog.has_table_privilege('anon', 'public.org_postgres_residency', 'SELECT')
+      AS anon_select,
+    pg_catalog.has_table_privilege('authenticated', 'public.org_postgres_residency',
+      'SELECT') AS authed_select,
+    pg_catalog.has_function_privilege('anon',
+      'public.postgres_residency_snapshot()', 'EXECUTE') AS anon_exec,
+    pg_catalog.has_function_privilege('service_role',
+      'public.postgres_residency_snapshot()', 'EXECUTE') AS svc_exec`);
+  const p0 = posture.rows[0] || {};
+  if (p0.rls_on !== true) {
+    console.error('✗ #9559: RLS is not ENABLED on org_postgres_residency — every '
+      + 'org\'s stored bytes are readable');
+    process.exit(1);
+  }
+  if (p0.anon_select === true || p0.authed_select === true) {
+    console.error(`✗ #9559: anon/authenticated can SELECT the residency table `
+      + `(anon=${p0.anon_select}, authenticated=${p0.authed_select}) — the figure `
+      + `is per-tenant and a neighbouring org's footprint is not its business`);
+    process.exit(1);
+  }
+  if (p0.anon_exec === true) {
+    console.error('✗ #9559: anon can EXECUTE postgres_residency_snapshot() — a '
+      + 'SECURITY DEFINER whole-table audit reachable by a public caller');
+    process.exit(1);
+  }
+  if (p0.svc_exec !== true) {
+    console.error('✗ #9559: service_role CANNOT execute the refresh — the gauge '
+      + 'could never be updated, so every reading would stay stale and refuse');
+    process.exit(1);
+  }
+
   if (!ga.measured_at) {
     console.error('✗ #9559: the snapshot row carries no measured_at — the gate could '
       + 'not age it, and refuses an unageable reading on a bounded dimension');
     process.exit(1);
   }
-  // The upsert: a second refresh must UPDATE, never append.
+  // The upsert must UPDATE, not append — and "count is still 2" cannot tell
+  // `DO UPDATE` from `DO NOTHING` (measured: swapping them passed). So the DATA
+  // changes between the two refreshes: a DO NOTHING freezes `rows`/`stored_bytes`
+  // at the first run, which after `stale_after_seconds` makes every reading stale
+  // and refuses every gated write PERMANENTLY — fail-closed, and self-inflicted.
+  await db.exec(`
+    INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload)
+      VALUES ('9559-gauge-b', '9559-gauge-graph-b', 2, 'PointCreated',
+              jsonb_build_object('pad', repeat('b', 4000)))
+      ON CONFLICT DO NOTHING;
+  `);
   await db.exec('SELECT * FROM public.postgres_residency_snapshot()');
-  const again = await db.query(`SELECT count(*) AS n FROM public.org_postgres_residency
-     WHERE org_id IN ('9559-gauge-a', '9559-gauge-b')`);
-  if (Number(again.rows[0].n) !== 2) {
-    console.error(`✗ #9559: a re-run APPENDED instead of upserting (rows=${again.rows[0].n})`);
+  const again = await db.query(`SELECT org_id, stored_bytes, rows FROM public.org_postgres_residency
+     WHERE org_id IN ('9559-gauge-a', '9559-gauge-b') ORDER BY org_id`);
+  if (again.rows.length !== 2) {
+    console.error(`✗ #9559: a re-run APPENDED instead of upserting (rows=${again.rows.length})`);
+    process.exit(1);
+  }
+  if (Number(again.rows[1].rows) !== 2 ||
+      Number(again.rows[1].stored_bytes) <= Number(gb.stored_bytes)) {
+    console.error(`✗ #9559: the second refresh did NOT update: org b was 1 row / `
+      + `${gb.stored_bytes} B after a new journal row, and is now `
+      + `${again.rows[1].rows} row(s) / ${again.rows[1].stored_bytes} B — a `
+      + `snapshot that freezes becomes permanently STALE, and the gate then refuses `
+      + `every gated write`);
     process.exit(1);
   }
   // The journal is APPEND-ONLY (a trigger refuses DELETE unless a tenant

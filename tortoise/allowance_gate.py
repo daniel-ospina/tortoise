@@ -623,7 +623,14 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
             "not enforced). What remains is the DECISION, not the instrument: "
             "``product/pricing.json`` records the amounts as DERIVED, NOT "
             "OWNER-CONFIRMED (``billing.storage._included_amounts_status``). "
-            "BLOCKED until the owner confirms those amounts"),
+            "BLOCKED until the owner confirms those amounts. "
+            "⛔ AND ARMING HAS ONE OPERATIONAL PRECONDITION a lane lifting this "
+            "block MUST meet first: ``postgres_residency_snapshot()`` has to run "
+            "on a schedule. Nothing calls it yet, and a wired meter with no "
+            "snapshot row is NO READING — so configuring an allowance before the "
+            "refresh is scheduled would refuse EVERY gated write with a "
+            "no-reading error rather than cap anything. Schedule the refresh, "
+            "verify a row exists for a real org, and only then lift this."),
         release=(
             "per_org_postgres_attribution",
             "postgres_residency_gauge",

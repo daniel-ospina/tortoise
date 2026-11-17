@@ -117,6 +117,16 @@ GRANT EXECUTE ON FUNCTION public.postgres_residency_snapshot()
 -- ============================================================================
 ALTER TABLE public.org_postgres_residency ENABLE ROW LEVEL SECURITY;
 
+-- ⛔ THE GRANT IS THE SECOND LOCK ON THE SAME DOOR (the `node_identity`
+-- convention). RLS alone would filter anon/authenticated to zero rows, but on
+-- Supabase a new `public` table carries a DEFAULT grant, and a table whose only
+-- protection is a policy is one `ALTER TABLE … DISABLE ROW LEVEL SECURITY` away
+-- from exposing every org's footprint. Revoking the privilege means the RLS line
+-- is not the sole thing standing there — measured: with RLS disabled and the
+-- grant intact, anon reads every org's `stored_bytes`.
+REVOKE ALL ON public.org_postgres_residency FROM anon, authenticated, public;
+GRANT SELECT ON public.org_postgres_residency TO service_role;
+
 DROP POLICY IF EXISTS org_postgres_residency_service_role_all
     ON public.org_postgres_residency;
 CREATE POLICY org_postgres_residency_service_role_all

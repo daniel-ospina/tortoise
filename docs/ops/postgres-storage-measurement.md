@@ -253,12 +253,41 @@ owns that decision and receives the figure on `RecordWrite.written_bytes`. The
 purpose (a migration is not usage), and `reconcile` discloses it.
 
 **What the meter does not do.** It measures rows written from the day it lands.
-It does not backfill, does not prune, and does **not** arm `allowance_gate` —
-arming `postgres_storage` needs the `free`/`anon` included amounts decided first,
-**and** a per-org gauge the gate can afford on a write path (neither the audit nor
-the ledger addend is one). Both are declared on the gate itself:
-`allowance_gate.RELEASE_CONDITIONS` (#12762/#9559 is measurement only;
-`product/pricing.json` and the tier boundaries are untouched).
+It does not backfill, does not prune, and does **not** arm `allowance_gate`.
+
+**The gauge the gate reads (`#9559`).** The audit above is a whole-table
+aggregation with a per-row TOAST lookup, so it can never run on a write path —
+which is why `postgres_storage` shipped blocked for want of a figure the gate
+could afford. `#9559` supplies it as a SNAPSHOT: `org_postgres_residency`
+(migration `20261117000001`) holds one row per org with the bytes the audit
+ATTRIBUTED to it and the instant it measured them, refreshed **offline** by
+
+```sql
+select * from public.postgres_residency_snapshot();
+```
+
+The write path does one primary-key lookup — `metering.get_postgres_residency` →
+the gate's `_postgres_stored_bytes` — which is O(1) in the database's size, and
+that affordability is what the block required. **The residual is never
+apportioned**: only the measured per-org figure is stored.
+
+⛔ **The snapshot has an age, and the gate enforces a bound on it.** The dimension
+declares `stale_after_seconds` (24 h, the same evidence-age bound the graph gauge
+uses). A reading older than that, or one with no `measured_at` to age, is
+**refused** — never enforced. And **no row is NO READING, never a zero**, so an
+org that was never snapshotted cannot pass a cap.
+
+⛔ **Nothing schedules the refresh yet.** That is a deploy decision (no migration
+here declares `pg_cron`; an external caller is an operator's choice), and it is
+disclosed rather than assumed: with no snapshot row the gate refuses a configured
+allowance, so an unscheduled snapshot **over-blocks** instead of billing from a
+guess. Schedule it before arming.
+
+**What still blocks arming.** Exactly one thing, and it is the owner's: the
+`free`/`anon` included storage amounts are recorded as `DERIVED, NOT
+OWNER-CONFIRMED` in `product/pricing.json`. The gate declares the live state in
+`allowance_gate.RELEASE_CONDITIONS`; `#12762`/`#9559` are measurement and
+instrument only — `product/pricing.json` and the tier boundaries are untouched.
 
 **Retention.** `#3843`/`#3853` (“no retention window of any length”) bind
 `analytics_events` (migration 0004's immutable trigger). They say nothing about

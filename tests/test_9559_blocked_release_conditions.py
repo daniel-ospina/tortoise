@@ -337,6 +337,45 @@ def test_the_residency_meter_is_the_gauge_and_never_the_addend(monkeypatch):
         "with stale_after_seconds, so it must not become a reading")
 
 
+def test_the_reader_is_fail_closed_on_every_branch(monkeypatch):
+    """★ `get_postgres_residency` must return NO READING on every failure path.
+
+    ⛔ The layer BELOW the meter, and reviewer round 1 measured it as entirely
+    untested: turning the fault branch into `{"stored_bytes": 0, "measured_at":
+    now}` kept the whole suite green. That is the fail-open this dimension's
+    design exists to prevent — a PostgREST fault, an unapplied migration or a
+    broken grant would make EVERY org read 0 bytes and pass any configured cap.
+
+    Three branches, one assertion each, and the third is the one that matters:
+    the control plane RAISING must not become a reading.
+    """
+    # 1. No org context (stdio/operator) — nothing to read.
+    assert metering.get_postgres_residency("") == {
+        "stored_bytes": None, "rows": None, "measured_at": None, "source": None}, (
+        "an empty org_id must be NO READING")
+
+    # 2. The registry/embedded lane has no residency table — still no reading.
+    monkeypatch.setattr(metering, "_supabase_mode", lambda: False, raising=True)
+    assert metering.get_postgres_residency("org_registry")["stored_bytes"] is None, (
+        "outside Supabase mode there is no residency table, so the answer must be "
+        "NO READING — a zero would let every org pass a storage cap there")
+
+    # 3. The read FAULTS — the branch that a `0` would turn into a global pass.
+    monkeypatch.setattr(metering, "_supabase_mode", lambda: True, raising=True)
+
+    class _Boom:
+        def query(self, *_a, **_k):
+            raise RuntimeError("postgrest 503")
+
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: _Boom(),
+        raising=True)
+    faulted = metering.get_postgres_residency("org_fault")
+    assert faulted["stored_bytes"] is None and faulted["measured_at"] is None, (
+        "a read FAULT must be NO READING, never a zero: an unreadable snapshot "
+        f"that reads as 0 bytes passes every cap (got {faulted!r})")
+
+
 def test_a_stale_snapshot_is_refused_rather_than_enforced(monkeypatch):
     """The evidence-age bound: a snapshot older than the bound REFUSES the write.
 
@@ -661,8 +700,16 @@ def test_the_falsified_premise_is_actually_recorded_as_released():
 
 # ── the falsified-premise scan, as a UNIT, so its GRANULARITY is testable ─────
 #
-# Phrasings that assert the per-org byte attribution does NOT exist.
+# Phrasings that assert a RETIRED premise as current. ⛔ EVERY premise this issue
+# has retired, not just the first: reviewer round 1 measured the scan as blind to
+# the SECOND — #9559 wires the residency gauge, and "no per-org RESIDENCY GAUGE"
+# was still asserted as current in two files outside this dict, including the ops
+# doc the gate's own OVERRIDES line cites. A scan that covers one retired premise
+# and not the next is the same defect one round later.
 _RELEASED_ASSERTIONS = (
+    "no per-org RESIDENCY GAUGE",
+    "no per-org gauge exists that is affordable per write",
+    "neither the audit nor",
     "no per-org figure at all",
     "HAS NO PER-ORG BYTE METER",
     "records no per-org byte ownership",
@@ -755,6 +802,54 @@ def test_the_marker_exemption_covers_only_the_sentence_that_asks_for_it():
         f"scan did not fire: {hits!r}")
 
 
+def test_the_two_artifacts_that_named_the_missing_gauge_now_name_it():
+    """The sentence #9559 retires, pinned by FINGERPRINT in the two files that
+    carried it — and pinned POSITIVELY, so the correction cannot be reverted by
+    deleting a paragraph.
+
+    Round 1 of this PR measured the premise scan (above) as blind to the SECOND
+    retired premise: the ops doc the gate's own ``OVERRIDES:`` line cites still
+    said arming needs *"a per-org gauge the gate can afford on a write path
+    (neither the audit nor the ledger addend is one)"*, and the sibling test's
+    docstring still said the block rested on two grounds. Both are the artifact a
+    lane READS before re-deriving — the failure mode this issue exists to stop.
+
+    ⛔ NOT a phrase scan. These files legitimately carry history and negative
+    assertions, so the guard is the positive one: each file must NAME the gauge
+    that now exists, and the retracted fingerprint must be gone.
+
+    Mutation this REDs: revert either text (the ops doc to "neither the audit nor
+    the ledger addend is one", the test docstring to "has no per-org RESIDENCY
+    gauge"), or delete the gauge's name from either.
+    """
+    ops = (_REPO / "docs" / "ops" / "postgres-storage-measurement.md").read_text(
+        encoding="utf-8")
+    flat_ops = " ".join(ops.split())
+    assert "postgres_residency_snapshot" in flat_ops, (
+        "the ops doc does not name the refresh RPC — an operator reading the "
+        "authoritative record cannot schedule what it never mentions")
+    assert "org_postgres_residency" in flat_ops, (
+        "the ops doc does not name the snapshot table the gate reads")
+    assert "neither the audit nor the ledger addend is one" not in flat_ops, (
+        "the ops doc still states the RETIRED position (that no affordable "
+        "per-org figure exists) — #9559 wired one, and this is the artifact the "
+        "gate's OVERRIDES line cites as the record")
+
+    sibling = (_REPO / "tests" / "test_allowance_gate.py").read_text(
+        encoding="utf-8")
+    flat_sib = " ".join(sibling.split())
+    assert "no per-org RESIDENCY gauge" not in flat_sib.replace(
+        "no per-org RESIDENCY gauge existed", ""), (
+        "tests/test_allowance_gate.py still asserts the gauge is missing as "
+        "current (only the HISTORICAL form \"no per-org RESIDENCY gauge "
+        "existed\" is allowed) — a docstring is what the next lane reads before "
+        "editing the assertion below it")
+    assert "#9559" in flat_sib, (
+        "tests/test_allowance_gate.py's docstring does not record that #9559 "
+        "wired the gauge, so the next reader concludes the block still waits on "
+        "it")
+
+
 def test_no_other_surface_still_asserts_a_released_ground_as_current():
     """The scan surface for the falsified premise, beyond ``blocked_reason``.
 
@@ -777,6 +872,14 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
         # is the drift this issue is about.
         "cost_dimensions module docstring": cost_dimensions.__doc__ or "",
     }
+    # ⛔ TWO ARTIFACTS ARE DELIBERATELY NOT IN THIS DICT, and the reason is
+    # measured, not squeamish: `docs/ops/postgres-storage-measurement.md` states
+    # "Postgres records no per-org byte ownership" about the SERVER (still true —
+    # the audit derives the figure from rows) and `tests/test_allowance_gate.py`
+    # ASSERTS the absence of a retracted phrase. A phrase tripwire cannot tell a
+    # true statement or a negative assertion from a restatement, so it false-reds
+    # on both (measured). Their correction is pinned precisely instead, by
+    # ``test_the_two_artifacts_that_named_the_missing_gauge_now_name_it``.
     # Phrasings and the exemption's granularity live in ``_premise_offenders``
     # above, so the GRANULARITY is itself asserted
     # (``test_the_marker_exemption_covers_only_the_sentence_that_asks_for_it``)
