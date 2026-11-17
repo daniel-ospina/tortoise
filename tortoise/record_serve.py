@@ -174,13 +174,14 @@ from typing import Any
 
 __all__ = [
     "ANCHORED_READS",
+    "ENTITY_UNION_JURISDICTION",
+    "ENTITY_UNION_LABELS",
     "MODES",
     "MODE_OFF",
     "MODE_PREFER",
     "MODE_RECORD",
     "NODE_KEY_COLUMN",
     "NOT_SERVED",
-    "ENTITY_UNION_LABELS",
     "READ_ENTITY_UNION_BY_ID",
     "READ_NODE_BY_KEY",
     "READ_POINT_BY_ID",
@@ -359,8 +360,37 @@ READ_ENTITY_UNION_BY_ID = "entity-union-by-id"
 #:
 #: ⚠️ The ORDER is the cache resolver's own precedence (``_RESOLVE_BRANCHES``),
 #: so the union answers with the same label on a cross-label id collision; the
-#: record read is the deterministic first-hit over this tuple.
+#: record read is the deterministic first-hit over this tuple. ⚠️ The CACHE half
+#: of that agreement is NOT itself guaranteed: ``_resolve_entity`` takes
+#: ``resolved[0]`` from a single `` UNION `` query, and neither SQL nor Cypher
+#: promises an order across a UNION's arms — so the order this tuple pins is the
+#: RECORD's. On a genuine cross-label collision the cache's winner is whatever
+#: the planner emits, i.e. pre-existing on the cache side and not introduced by
+#: this read; the record is at least deterministic. Stated rather than claimed
+#: away (#13322 review observation 2).
 ENTITY_UNION_LABELS: tuple[str, ...] = ("Point", "Subject", "Object")
+
+#: The labels a BARE ID handed to this door can NAME — the domain of the
+#: coverage question, and the set :func:`entity_coverage_complete` measures.
+#:
+#: Derived from the cache resolver's own branch table
+#: (``projection._RESOLVE_BRANCHES``: ``Point``/id, ``Subject``/id,
+#: ``Object``/id, ``Source``/id, ``Event``/eventId, ``Source``/url) — the
+#: LABELS, deduped, not the record's table list. ``Session`` is in
+#: ``cache_projection.NODE_TABLES`` but in NO resolve branch (``_get_entity``'s
+#: own note: *"Session/APIKey/Org/Tag nodes are intentionally excluded from
+#: entity resolution"*), so it is not something this door can be handed and
+#: cannot be a coverage gap — measuring ``NODE_TABLES`` instead made the
+#: predicate permanently ``False`` on a blocker (``Session``) that no amount of
+#: parity work can ever clear (#13322 review F2).
+#:
+#: ⛔ DECLARED, NOT IMPORTED. This module imports no graph driver, so it cannot
+#: read ``projection._RESOLVE_BRANCHES`` at runtime; the literal is pinned to
+#: that owner by
+#: ``tests/test_13093_entity_door.py::test_the_coverage_domain_is_the_cache_resolvers_branch_labels``
+#: — which is what keeps a local copy from drifting away from the resolver.
+ENTITY_UNION_JURISDICTION: tuple[str, ...] = (
+    "Point", "Subject", "Object", "Source", "Event")
 
 ANCHORED_READS: dict[str, AnchoredRead] = {
     READ_POINT_BY_ID: AnchoredRead(
@@ -1127,25 +1157,43 @@ def read_point(conn: Any, *, org_id: str, graph_id: str,
 
 
 def entity_coverage_complete() -> bool:
-    """Does the by-id entity union serve EVERY record label such a read can mean?
+    """Does the by-id entity union settle EVERY label a bare id can name?
 
-    `False` whenever any label in ``cache_projection.NODE_TABLES`` is outside
-    :data:`ENTITY_UNION_LABELS`. It is the ONE place the union's coverage is
-    decided, read by :func:`entity_absent_wire` to refuse an absence claim the
-    door cannot support — and by the tests, so the abstention cannot be
-    removed by adding a label to the tuple without noticing.
+    The one question :func:`entity_absent_wire` asks before it calls a miss an
+    absence, and the one :func:`serve_entity`'s ``_miss_reason`` asks before it
+    names that miss — answered over :data:`ENTITY_UNION_JURISDICTION` (the
+    labels the cache resolver can hand this door), NOT over the record's table
+    list.
 
-    ⚠️ A record label list, not the cache's resolution branches: a label the
-    record cannot address at all (``Session`` here, and ``Source`` by ``id``) is
-    not something this door can serve OR abstain FOR differently — it is simply
-    a label whose rows this read never names. The cache-side branch set is
-    ``projection._RESOLVE_BRANCHES`` and is deliberately NOT imported here: this
-    module imports no graph driver, and that tuple is a class attribute of the
-    projection.
+    A label counts as covered only when BOTH hold:
+
+    1. it is in :data:`ENTITY_UNION_LABELS` — declared served at parity, and
+    2. its record CONTRACT KEY is the ``id`` this door is handed
+       (``cache_projection.KEY_PROPERTY``).
+
+    ⛔ CONDITION 2 IS NOT REDUNDANT, and dropping it re-opens #13093 behind a
+    green suite: :func:`read_entity` ``continue``s past any label whose contract
+    key is not ``id`` (``Source`` → ``url``, ``Event`` → ``eventId``), so a
+    future lane that added ``"Event"`` to the tuple on the belief that #9721
+    had landed would flip this predicate to ``True`` while the read still served
+    nothing for an Event — and the door would then answer ``{}`` for an Event
+    the record holds. Covered means *served*, not merely *named*.
+
+    ``False`` today, and honestly so: ``Source`` and ``Event`` are the open
+    #9721 list. ⚠️ The difference from the previous spelling is that this one is
+    REACHABLE — it becomes ``True`` exactly when the union genuinely covers the
+    addressable labels, instead of never, which is what made the falsy ``{}``
+    arm of :func:`entity_absent_wire` dead code and ``_miss_reason``
+    unconditionally ``record-label-not-served``.
+
+    ⚠️ Not the cache's branch set, and deliberately not imported from it: this
+    module imports no graph driver, and ``_RESOLVE_BRANCHES`` is a class
+    attribute of the projection.
     """
-    from .cache_projection import NODE_TABLES
+    from .cache_projection import KEY_PROPERTY
 
-    return set(NODE_TABLES) <= set(ENTITY_UNION_LABELS)
+    return all(label in ENTITY_UNION_LABELS and KEY_PROPERTY.get(label) == "id"
+               for label in ENTITY_UNION_JURISDICTION)
 
 
 def read_entity(conn: Any, *, org_id: str, graph_id: str, id_val: str,

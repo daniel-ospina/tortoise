@@ -59231,6 +59231,7 @@ class TortoiseSDK:
         reader and the cache path cannot drift from the unarmed one.
         """
         from .record_serve import (
+            ENTITY_UNION_LABELS,
             FALLBACK_RECORD_BOUND_MISS,
             FALLBACK_RECORD_TENANT_UNRESOLVED,
             MODE_OFF,
@@ -59253,7 +59254,13 @@ class TortoiseSDK:
             # no attribution, no marker.
             return self._get_entity(id_val)
 
-        coordinate = f"union:{id_val}"
+        # ⛔ ONE COORDINATE SPELLING (#13322 review observation 3).
+        # `record_serve.serve_entity` builds `union:<labels>:<id>`; a second
+        # spelling here attributed a fallback answered through THIS deferred path
+        # to a different coordinate than the same fallback inside `serve_entity`,
+        # so an ops query over the attribution could not join the two. The value
+        # never reaches the wire, so this is attribution hygiene, not a verdict.
+        coordinate = f"union:{'|'.join(ENTITY_UNION_LABELS)}:{id_val}"
         _proj: list = []
 
         def _cache_answer() -> dict | None:
