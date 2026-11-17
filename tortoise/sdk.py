@@ -52658,11 +52658,39 @@ class TortoiseSDK:
         # stores), and `outdated` / a position word is refused with the repair
         # named. `:event` is untouched — an Event has no lifecycle (#11825).
         if t in ("subject", "object"):
+            # ⛔ A write that names `status` TWICE is not a write this door can
+            # reason about, and guessing is a BYPASS — the same refusal the
+            # family WRITE door makes (`_update_entity`, #12786 review rounds
+            # 2-3), so create and update cannot disagree about which bags they
+            # accept. Measured WITHOUT this line, on a bag whose FIRST
+            # rendered value is the `None` delete sentinel:
+            #   create_object(props={K("zzz"): None, "status": "in_progress"})
+            # STORED `status='in_progress'` (and `'garbage'`) — the exemption
+            # below read only the first value, so the second key's word was
+            # never graded and never rewritten, while the identical bag through
+            # `update_entity` was refused as CONFLICTING. A position/junk word
+            # no read leg excludes is exactly the fail-open this door exists to
+            # close (#10371 / #11824), so it fails closed here.
+            if _status_write_is_ambiguous(props):
+                raise ValueError(
+                    f"create_entity refused a CONFLICTING status write for "
+                    f"{name!r}: more than one key in this call renders as "
+                    f"`status`. A `str` subclass whose content and `__str__` "
+                    f"differ is filed under one name by the live write and the "
+                    f"other by the journal, so which word lands cannot be known "
+                    f"here. Pass `status` ONCE, as a plain str, with the word "
+                    f"you mean."
+                )
             _lifecycle_keys = list(keys_rendering_as(props, {"status"}))
             if _lifecycle_keys:
                 # An explicit ``None`` is the DELETE sentinel `_sanitize_props`
                 # documents, not a word to grade — the same exemption the
                 # family write door makes, so create and update agree.
+                # ⛔ The exemption is safe ONLY because the ambiguity refusal
+                # above leaves at most ONE status-rendering key: first-wins on a
+                # bag of one is that key's own value, so a `None` here is the
+                # caller's whole intent (a delete) and nothing else in the bag
+                # can carry an ungraded word.
                 _lifecycle_value = lifecycle_props_by_rendering(
                     props, {"status"})["status"]
                 if _lifecycle_value is not None:
