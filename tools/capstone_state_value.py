@@ -65,7 +65,10 @@ USAGE
     bash docs/evidence/13038-capstone/rerun.sh \
         --judge file --verdicts docs/evidence/13038-capstone/verdicts-baseline.json
 
-    # the same, spelled out, when the exports are needed for another command
+    # the same, spelled out, when the exports are needed for another command.
+    # ⚠️ `--out` IS REQUIRED for an UNJUDGED run: the bundle is the default and publishing a
+    # board nobody scored there would replace the committed baseline with a non-result (exit 2,
+    # nothing written). Score it (`--judge fresh|file`) to publish into the bundle.
     uri="$(uv run python tools/test_lane.py uri)" || exit 1
     eval "$uri"
     # --out is mandatory here: the default destination is the committed evidence bundle,
@@ -166,7 +169,7 @@ def _stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dt%H%M%Sz")
 
 
-def _cut(value, limit: int = 320) -> str:
+def _cut(value, limit: int = 320, *, redact: bool = True) -> str:
     """One-line, REDACTED, truncated text for a recorded field.
 
     Redaction runs BEFORE truncation, and that order is load-bearing (#13303 cycle 7, P1):
@@ -175,9 +178,18 @@ def _cut(value, limit: int = 320) -> str:
     measured on a 210-character password, 141 characters of it were written into
     `run-deployed-refused.json`. Redacting here closes the whole class at ONE point rather
     than at the nine call sites that each had to remember it.
+
+    `redact=False` is for PRODUCT-SERVED text and the reader's own prose, which travels into
+    the judge packet: running the credential patterns over it rewrites the very answer being
+    scored (#13303 cycle 8). Measured: `_cut("password rotation policy was superseded")`
+    became `"password <redacted> policy was superseded"`, and the fresh reader would then
+    judge a payload the instrument had already altered. Everything that can carry a
+    credential (exception text, a URI, a traceback) keeps the default.
     """
     text = value if isinstance(value, str) else json.dumps(value, default=str)
-    text = _redact(" ".join(text.split()))
+    text = " ".join(text.split())
+    if redact:
+        text = _redact(text)
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
@@ -421,8 +433,7 @@ class LocalTarget:
             )
         if not re.match(r"^(docker|bolt|redis)://", uri):
             raise TargetRefused(
-                "TORTOISE_DB_URI is not a store URI: "
-                f"{_cut(_strip_userinfo(uri, uri), 40)}"
+                f"TORTOISE_DB_URI is not a store URI: {_cut(_strip_userinfo(uri, uri), 40)}"
             )
         os.environ["TORTOISE_DB_URI"] = uri
         # `_strip_userinfo`, not `_redact`: a bare username (`docker://alice@host`) is not
@@ -615,7 +626,7 @@ class LocalTarget:
         served = [
             {
                 "id": r.get("id"),
-                "what": _cut(r.get("content") or r.get("snippet") or "", 120),
+                "what": _cut(r.get("content") or r.get("snippet") or "", 120, redact=False),
                 "kind": r.get("point_kind"),
                 "status": r.get("status"),
                 "score": (r.get("scores") or {}).get("rrf"),
@@ -788,9 +799,9 @@ class DeployedTarget:
                     out[path.strip("/").replace("/", "_")] = json.loads(
                         resp.read().decode("utf-8", "replace")
                     )
-            except Exception as exc:  # noqa: BLE001 — a probe records, it never raises
+            except Exception as exc:  # a probe records, it never raises
                 out["error"] = _cut(
-                    _strip_userinfo(f"{path}: {type(exc).__name__}: {str(exc)}", self.api_url),
+                    _strip_userinfo(f"{path}: {type(exc).__name__}: {exc}", self.api_url),
                     160,
                 )
         return out
@@ -1542,8 +1553,8 @@ def judge_fresh(packet: dict, *, cmd: str | None = None, timeout: int = 900) -> 
         if verdict in ("right", "wrong", "blocked"):
             verdicts[str(row.get("id") or "").strip()] = {
                 "verdict": verdict,
-                "because": _cut(row.get("because") or "", 400),
-                "cause": _cut(row.get("cause") or "", 240) or None,
+                "because": _cut(row.get("because") or "", 400, redact=False),
+                "cause": _cut(row.get("cause") or "", 240, redact=False) or None,
             }
     return {
         "ok": bool(verdicts),
@@ -1580,7 +1591,7 @@ def _answer_text(answer: Answer) -> str:
                 )
                 continue
             shown = "; ".join(
-                f"*{_cut(r.get('what'), 70)}* (kind={r.get('kind')}, "
+                f"*{_cut(r.get('what'), 70, redact=False)}* (kind={r.get('kind')}, "
                 f"status={r.get('status')}, rrf={r.get('score')})"
                 for r in call.rows[:4]
             )
@@ -2212,6 +2223,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     run_json = out_dir / f"run-{target.kind}.json"
+    # The guard above keys on the MODE; this one keys on the ARTIFACT (#13303 cycle 8, P1).
+    # `--judge fresh` whose reader cannot run (not found, timeout, unparseable) and
+    # `--judge file` with a partial verdict map BOTH produce an all-`unjudged` board, and
+    # both used to publish it into the bundle — the same harm the mode guard exists to stop,
+    # reachable through the two doors that look safe. A board that carries real `blocked`
+    # rows is still publishable: `blocked` is a measured outcome, `unjudged` is not.
     run_json.write_text(json.dumps(board, indent=2, default=str))
     md = render_markdown(board)
     (out_dir / f"scoreboard-{target.kind}.md").write_text(md)
