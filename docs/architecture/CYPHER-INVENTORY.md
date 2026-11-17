@@ -35,13 +35,13 @@ this document classifies **statements**.
 | `fulltext` | 2 |
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 106 |
-| non-Cypher door calls (excluded from every shape total) | 258 |
-| **AST door calls** = census + non-Cypher | **1569** |
+| non-Cypher door calls (excluded from every shape total) | 260 |
+| **AST door calls** = census + non-Cypher | **1571** |
 
-> **The finding, with its count: 577 of 1310 product statements (44.0 %) need none of the
+> **The finding, with its count: 578 of 1311 product statements (44.1 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
-> not an adjective; it is 577 statements.
+> not an adjective; it is 578 statements.
 
 ---
 
@@ -65,7 +65,7 @@ the box, are:
 
 | mode | statement sites | files | note |
 |---|---|---|---|
-| product surface (this census) | **1310** | **99** | `tortoise/**/*.py`, test modules excluded |
+| product surface (this census) | **1311** | **99** | `tortoise/**/*.py`, test modules excluded |
 | every tracked surface (`--all-surface`) | **8,908** | **805** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement, NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it read 8,791 here, which is no tree this tool can print) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
@@ -97,15 +97,15 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,620 occurrences of the door predicate across 108 files
-2,340 occurrences of the verb predicate across 142 files   (upper-bound shape, see below)
+1,624 occurrences of the door predicate across 108 files
+2,342 occurrences of the verb predicate across 142 files   (upper-bound shape, see below)
 
-1,620  regex door-pattern occurrences
+1,624  regex door-pattern occurrences
   −53  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,567  occurrences on a line carrying a door CALL          [measured]
+= 1,571  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,567  AST door calls
-= 1310  classified Cypher statements + 257 non-Cypher door calls
+= 1,571  AST door calls
+= 1311  classified Cypher statements + 260 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -113,19 +113,19 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,620** across **108** files: exactly the
-tool's number. A bare `rg … tortoise/` gives 1,626 / 109, the 6 extra occurrences living in
-`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,620 / 108 on this tree, because
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,624** across **108** files: exactly the
+tool's number. A bare `rg … tortoise/` gives 1,630 / 109, the 6 extra occurrences living in
+`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,624 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,327** across **141** files, while the tool
-reports 2,340 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,329** across **141** files, while the tool
+reports 2,342 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
 concatenation leaves `MATCH` and its `(` on two lines, one occurrence to the tool and none to `rg`.
-(A bare case-sensitive `rg` gives 2,061, and `-i` without the exclusion 2,399 — which is why the
+(A bare case-sensitive `rg` gives 2,060, and `-i` without the exclusion 2,401 — which is why the
 number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
-the **= 1,565 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+the **= 1,571 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
@@ -239,8 +239,8 @@ The order a campaign should take, derived from §3 rather than chosen:
 | # | class | why here | size |
 |---|---|---|---|
 | 1 | `plain` reads already served by `record_serve` (`point-by-id`, `node-by-key`) | simplest shape (one node, one key) **and** the seam serving it already shipped with a parity rule | 2 reads, measured in §5 |
-| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 575 |
-| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 575 |
+| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 578 |
+| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 578 |
 | 4 | `plain` writes | **not a Cypher→SQL move** — these disappear with the node when `#13083` makes the shape `record_only` | 281 |
 | — | `adjacency` / `traversal` / `ep` / `fulltext` | **do not flip without a reopen on `#4051`** | 329 |
 
@@ -391,6 +391,18 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
+**Where THESE numbers were cut:** `#9559`'s branch, merged with `origin/main` **`9b89696fe4`**, and
+re-derived from that merged tree — not by arithmetic on the markers. The branch adds two non-Cypher
+door calls (`metering.get_postgres_residency`, the per-org residency reader's two control-plane
+reads) and **no** Cypher statement site, so `ast_door_calls` **1569→1571** and
+`non_cypher_door_calls` **258→260** while `sites`/`plain`/`candidates` are unchanged (1311 / 859 /
+578 — the 578 is the `plain` READ half, which is also the migration-candidate count). `files_scanned`
+stays 297 and `files_with_sites` 99: the reader lives in a file that already carries sites. The
+`rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,329 / 1,630 bare / 2,060 / 2,401),
+Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts match`**.
+
+The paragraph below is `main`'s cut, kept as the record of it.
+
 **Where these numbers were last cut:** the PINS by `main`'s **`05fe46e94e`**, re-derived at
 `origin/main` **`b8f56fdec4`**. ⚠️ Both columns below are the CENSUS's own measurements at those two
 commits, not the marker values — the markers `main` carried into the re-cut were themselves stale,
@@ -468,8 +480,8 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_traversal_read = 3 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 106 -->
-<!-- cypher-inventory:non_cypher_door_calls = 258 -->
-<!-- cypher-inventory:ast_door_calls = 1569 -->
+<!-- cypher-inventory:non_cypher_door_calls = 260 -->
+<!-- cypher-inventory:ast_door_calls = 1571 -->
 <!-- cypher-inventory:partial = 314 -->
 
 ---
@@ -994,11 +1006,11 @@ the order was fixed (`#13098` review F8).
 | `tortoise/metering.py:2126` | `get_cohort_spend_usd` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord) WHERE m.org_id IN $ids AND m.period_start <…` |
 | `tortoise/metering.py:2218` | `get_current_usage` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
 | `tortoise/metering.py:2235` | `get_current_usage` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $tid}) RETURN t.tier` |
-| `tortoise/metering.py:2469` | `measure_write_ops` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
-| `tortoise/metering.py:2708` | `_record_graph_storage_reading_locked` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
-| `tortoise/metering.py:2808` | `get_graph_storage_reading` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
-| `tortoise/metering.py:2922` | `record_postgres_bytes_written` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
-| `tortoise/metering.py:2975` | `get_postgres_bytes_written` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
+| `tortoise/metering.py:2474` | `measure_write_ops` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
+| `tortoise/metering.py:2713` | `_record_graph_storage_reading_locked` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
+| `tortoise/metering.py:2813` | `get_graph_storage_reading` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
+| `tortoise/metering.py:2927` | `record_postgres_bytes_written` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
+| `tortoise/metering.py:2980` | `get_postgres_bytes_written` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
 | `tortoise/migrate_db.py:77` | `_count_nodes` | plain | read | candidate:SQL-shaped | `MATCH (n) RETURN count(n)` |
 | `tortoise/migrate_kinds.py:296` | `relabel_legacy_documents` | plain | read | candidate:SQL-shaped | `MATCH (n:Document) RETURN ID(n), n.id, n.url, n.ingestedAt, n.create…` |
 | `tortoise/migrate_kinds.py:309` | `relabel_legacy_documents` | plain | read | candidate:SQL-shaped | `MATCH (n:Document:Source) RETURN ID(n)` |
@@ -1073,7 +1085,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/planned_occurrence.py:468` | `create_plan` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$o}) RETURN properties(o)` |
 | `tortoise/planned_occurrence.py:850` | `_resolve_plan` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$o}) RETURN o.objectKind, o.status, coalesce(o.o…` |
 | `tortoise/planned_occurrence.py:924` | `planned_without_occurrence` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (p:Object) WHERE p.objectKind IN $kinds OPTIONAL MATCH (e:Even…` |
-| `tortoise/postgres_bytes.py:336` | `_meter_statement` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/postgres_bytes.py:344` | `_meter_statement` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/projection/__init__.py:1913` | `read_config_reset` | plain | read | candidate:SQL-shaped | `MATCH (n:Meta {key:$key}) RETURN properties(n)` |
 | `tortoise/projection/__init__.py:1933` | `set_config_reset_marker` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (n:Meta {key:$key}) SET n += $props` |
 | `tortoise/projection/__init__.py:1951` | `clear_config_reset` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (n:Meta {key:$key}) DETACH DELETE n` |
