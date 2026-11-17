@@ -58,6 +58,7 @@ from tortoise.retry import (  # #9532: ONE ownership authority; #7357: ONE "reac
 from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence check
     index_catalogue_has_field,
     index_row_has_field,
+    vector_index_drop_statements,  # #13320: the ONE VECTOR-index DROP rendering
 )
 from tortoise.sparse import (  # #11682: the ONE Point lexical field-set seam
     POINT_INDEX_TEXT_FIELDS,
@@ -701,6 +702,32 @@ def _reset_falkordb_version_cache() -> None:
 _VECTOR_INDEX_GAP_WARNED: set[tuple] = set()
 _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 
+#: #13320: stores whose retirement sweep could NOT remove the in-graph vector
+#: index — latched for the same reason as `_VECTOR_INDEX_GAP_WARNED`.
+#:
+#: The sweep runs on the hosted PER-REQUEST path, and a survivor is a PERMANENT
+#: state (an engine that refuses the drop keeps refusing it), so an unlatched
+#: line would put a WARNING on the stream at request rate for the life of the
+#: deployment — how a real alarm stops being read. Latched on
+#: `(endpoint, graph, KIND)` with the same fallback rule, so a different store
+#: still gets its own warning.
+#: ⛔ `KIND` is not decoration (#13330 review P1). The unable-to-retire arms —
+#: `catalogue-unreadable`, `catalogue-partially-unreadable`,
+#: `removal-unconfirmed` and `index-survived` — share this REGISTER but not one
+#: BUCKET: each kind reports at most once per store per process. (The list is the
+#: call sites'; a new arm adds a KIND rather than sharing a bucket, and this
+#: comment is not a place to keep a count — the `_retirement_failure_is_news(`
+#: calls are.)
+#: With one bucket per store, a TRANSIENT unreadable catalogue
+#: spent the budget, and the sweep that LATER measured the index really present
+#: (the permanent state, and the one line this work exists to guarantee) reported
+#: nothing for the life of the process. The outcome is shared; the diagnosis is
+#: not, and the stronger claim must never be silenced by the weaker one.
+#: ⚠️ Only the LINE is latched: the sweep re-measures the catalogue every setup,
+#: so a store that becomes clean stops warning.
+_VECTOR_INDEX_DROP_FAILED_WARNED: set[tuple] = set()
+_VECTOR_INDEX_DROP_FAILED_LOCK = threading.Lock()
+
 #: #11642 / #4051 V1 — the in-graph vector index is RETIRED, not missing.
 #:
 #: On a store whose REPLACEMENT is armed (a record DSN **and**
@@ -876,19 +903,31 @@ _VECTOR_INDEX_PAIR_LOCK = threading.Lock()
 
 
 def _reset_vector_gap_warnings() -> None:
-    """Test hook: drop BOTH per-`(endpoint, graph)` registers.
+    """Test hook: drop EVERY process-global vector-index register this module keeps.
 
+    Three registers, TWO KEY SHAPES — the headline above says "every" rather than
+    naming a shape, because the shapes differ (#13330 review P3):
     `_VECTOR_INDEX_GAP_WARNED` (the #4997 WARNING latch) and
     `_VECTOR_INDEX_PAIR_REPORTED` (the #11087 pair report's value latch,
-    registered by `_record_vector_index_inventory`) are process-global, so
-    without this a latch entry from one test suppresses the warning — or the
-    REPORT — in the next one on the same (endpoint, graph). Mirrors
-    `_reset_falkordb_version_cache`, which tests/test_falkordb_compat.py
-    already imports."""
+    registered by `_record_vector_index_inventory`) are keyed per
+    `(endpoint, graph)`, while `_VECTOR_INDEX_DROP_FAILED_WARNED` (the #13320
+    "could not retire it" latch) is keyed per `(endpoint, graph, KIND)` — one
+    bucket per kind, because a transient read failure must never spend the
+    permanent survivor verdict's budget. A reader auditing the clear work must not
+    be told one shape applies to all three.
+    All are process-global, so without this a latch entry from one test suppresses the
+    warning — or the REPORT — in the next one on the same (endpoint, graph).
+    ⛔ Adding a register here and NOT to this hook is how a pin becomes
+    order-dependent: #13320's survivor test reds on a second in-process run when
+    only the first two were cleared. Mirrors `_reset_falkordb_version_cache`,
+    which tests/test_falkordb_compat.py already imports.
+    """
     with _VECTOR_INDEX_GAP_LOCK:
         _VECTOR_INDEX_GAP_WARNED.clear()
     with _VECTOR_INDEX_PAIR_LOCK:
         _VECTOR_INDEX_PAIR_REPORTED.clear()
+    with _VECTOR_INDEX_DROP_FAILED_LOCK:
+        _VECTOR_INDEX_DROP_FAILED_WARNED.clear()
 
 # P0 guard (#99): bulk graph-wipe classifier. Restored here in #49 Phase 2 —
 # the guard was lost from this (live) module during the v3.0 ontology rewrite
@@ -11873,6 +11912,20 @@ class FalkorProjection(
         # indexed for what it serves" — an empty `_vector_indexed_labels` with a
         # populated served set is a fully-unindexed store, not an unknown one.
         self._vector_index_served_labels: set[str] | None = None
+        # #13320: the SAME measured catalogue, at PROPERTY granularity.
+        #
+        # `_vector_indexed_labels[_for_reads]` answers "which served labels carry
+        # a VECTOR index" — enough for the #4997 gap report, and NOT enough to
+        # state a claim about ONE index. A label can carry a VECTOR index on a
+        # property other than the one this store retires, and a label-grained
+        # verdict then reports a `Point.embedding` index that never existed (a
+        # false alarm on a healthy store) and, worse, reports a SUCCESSFUL
+        # removal beside a foreign index as a survivor.
+        #
+        # `None` mirrors `_vector_indexed_labels_for_reads`: a catalogue that
+        # answered but could not be INTERPRETED is not a store with no index, and
+        # the retirement verdict must not read it as one.
+        self._vector_index_props: dict[str, frozenset[str]] | None = None
         # #5434: the rows `_schema_is_current()` read, published so the
         # vector-index inventory can reuse them instead of issuing a second
         # `CALL db.indexes()`. Initialised HERE and read via `getattr` at the
@@ -20171,6 +20224,13 @@ class FalkorProjection(
         this is the only one that must discriminate index TYPE, which is why it
         reads column 2 — a column none of the others touch.
         """
+        # ⛔ A measurement describes THIS read (#13330 review). Clear the
+        # property-level verdict BEFORE any early return below, so a lane that
+        # never measures (an embedded store, a <4.x engine) cannot leave a
+        # PREVIOUS setup's answer standing in for a fresh one — a stale "absent"
+        # is exactly what lets the retirement sweep report a removal it did not
+        # measure.
+        self._vector_index_props = None
         # Gate (kept here, not only at the call site, so the method is
         # self-contained and directly testable): embedded redislite has no
         # index API at all, and a <4.x engine has none either. NOTE the
@@ -20211,6 +20271,9 @@ class FalkorProjection(
                 # #13108: the behavioural half follows the reporting half into
                 # the NOT-MEASURED lane — nothing was read, so nothing may act.
                 self._vector_indexed_labels_for_reads = None
+                # #13330: and so does the property-level half, which the
+                # retirement verdict reads.
+                self._vector_index_props = None
                 # #11087: BOTH halves of the pair are None — the pair is never
                 # half-populated, so `served is None` alone means "not measured".
                 self._vector_index_served_labels = None
@@ -20224,6 +20287,11 @@ class FalkorProjection(
 
             served = set(ENTITY_TYPE_LABELS.values())
             measured: set[str] = set()
+            # #13320/#13330: label -> properties carrying a VECTOR index, from the
+            # SAME row walk (one read, two resolutions), plus the count of rows
+            # this store could not interpret.
+            _props: dict[str, set[str]] = {}
+            unparsed_rows = 0
             # #13108: how many rows were INTERPRETABLE as catalogue rows. A
             # non-empty response of which nothing parsed is a catalogue this
             # store could not read, not a store with no index (see
@@ -20232,18 +20300,36 @@ class FalkorProjection(
             for row in rows:
                 try:
                     if len(row) < 3:
+                        unparsed_rows += 1
                         continue
                     label, types = row[0], row[2]
                     if not isinstance(types, dict):
+                        unparsed_rows += 1
                         continue
                     parsed_rows += 1
                     for _field, type_list in types.items():
                         if not isinstance(type_list, (list, tuple, set)):
+                            # ⛔ AN ENTRY THAT DOES NOT PARSE IS AN UNPARSED ROW
+                            # (#13330 review 3, P1). This used to `continue`
+                            # without counting, so a row shaped
+                            # `{"embedding": "VECTOR"}` — the stringified-cell
+                            # shape `index_catalogue` warns about — counted as
+                            # fully parsed, contributed nothing, and published
+                            # `_vector_index_props == {}`: the report then printed
+                            # `confirmed absent` over a catalogue row that says
+                            # VECTOR. The third shape of the same false PASS,
+                            # after a non-dict cell and after "answered, none
+                            # parsed".
+                            unparsed_rows += 1
                             continue
                         if any(str(t).upper() == "VECTOR" for t in type_list):
                             measured.add(label)
+                            _props.setdefault(str(label), set()).add(str(_field))
                 except Exception:
-                    # A malformed row must not abort the scan — skip it.
+                    # A malformed row must not abort the scan — skip it, but COUNT
+                    # it: the retirement verdict is a claim about one index, and a
+                    # row that did not parse may be that index's row.
+                    unparsed_rows += 1
                     continue
 
             self._vector_index_served_labels = served
@@ -20256,6 +20342,21 @@ class FalkorProjection(
             self._vector_indexed_labels_for_reads = (
                 self._vector_indexed_labels
                 if (not rows or parsed_rows)
+                else None
+            )
+            # #13330: publish the PROPERTY-level half on the SAME lane as the
+            # behavioural one, and additionally withhold it when ANY row failed
+            # to parse. The residual the first cut left open: a row list where
+            # some rows parse and the `Point` row is the unparseable one read as
+            # "the index is gone", which is a false PASS in the one place this
+            # change exists to remove. Counting unparsed rows closes it, at the
+            # cost of the UNCONFIRMED arm on a store whose catalogue holds a row
+            # this store cannot interpret — fail-closed, and latched, so it is
+            # loud once rather than silent forever.
+            self._vector_index_props = (
+                {label: frozenset(props) for label, props in _props.items()}
+                if (self._vector_indexed_labels_for_reads is not None
+                    and not unparsed_rows)
                 else None
             )
             # #11087: sort INSIDE the guard. `sorted()` runs the labels'
@@ -20273,6 +20374,8 @@ class FalkorProjection(
             self._vector_indexed_labels = None
             # #13108: a failed read measures nothing, so nothing may act on it.
             self._vector_indexed_labels_for_reads = None
+            # #13330: the retirement verdict is one of those actors.
+            self._vector_index_props = None
             self._vector_index_served_labels = None
             # #11087: as in the answered-`None` lane — an unmeasured store has no
             # pair to have already reported, so the register entry goes.
@@ -21693,13 +21796,33 @@ class FalkorProjection(
         # and the rebuild DEADLOCKED the instance (`#7846`). A retired index is
         # not rebuilt, so the restore stops paying that.
         #
-        # `DROP INDEX ON :Point(embedding)` is issued for EVERY engine version
-        # this store supports: the Cypher form is what the modern client's own
-        # `create_node_vector_index` counterpart emits, and on an engine that
-        # never had the index it raises "no such index"-class text, which is
-        # swallowed. A store that HAS one loses it here, once, on the next setup
-        # — that is the migration for every already-deployed graph, and it is
-        # idempotent because the second run finds nothing to drop.
+        # ⛔ CORRECTED (#13320): the statement is `DROP VECTOR INDEX FOR
+        # (p:Point) ON (p.embedding)`, and the two generic forms this comment
+        # used to justify — `DROP INDEX ON :Point(embedding)` and
+        # `DROP INDEX FOR (p:Point) ON (p.embedding)` — are REFUSED by the engine
+        # even while `CALL db.indexes()` reports the index. An earlier version of
+        # this comment argued the generic Cypher form was "what the modern
+        # client's own `create_node_vector_index` counterpart emits"; measured on
+        # graph module 42006, both answer `Unable to drop index on
+        # :Point(embedding): no such index.`, and the restore path
+        # (`graph_key_restore.VectorIndexDefinition.drop_cypher`) had already
+        # recorded exactly that. The rendering is now ONE function
+        # (`index_catalogue.vector_index_drop_statement`, imported here) shared by
+        # both sites, so a third caller cannot re-derive the guess.
+        # The forms are tried in order (`vector_index_drop_statements`), the
+        # measured one first, so a store with NO index issues no DDL at all (the
+        # gate above read the catalogue first) and a store that HAS it pays one
+        # statement on the migration sweep.
+        # A store whose engine REFUSES the drop is different, and the first cut of
+        # this comment claimed otherwise (#13330 review P2): the gate keeps seeing
+        # the index, so EVERY setup re-issues all three candidates — 3 failed DDL
+        # round trips per setup on a method the hosted path reaches PER REQUEST,
+        # and 2 before this change. That is the #4465 repeated-bootstrap shape the
+        # gate above cites; the latch silences the LINE, not the retries. Stated as
+        # a residual with its measurement; cutting the retries is a follow-up.
+        # A store that HAS the index loses it here, once, on the next setup — that
+        # is the migration for every already-deployed graph, and it is idempotent
+        # because the second run finds nothing to drop.
         #
         # ⚠️ CONSEQUENCE, stated rather than discovered: on an ARMED store
         # `required_embedding_dim` is derived from `_vector_index_api`, so it
@@ -21757,7 +21880,15 @@ class FalkorProjection(
         if not vector_index_retired():
             return self._create_vector_index_api(catalogue_rows)
         self._vector_index_api = None
-        dropped = False
+        #: The statement that reported SUCCESS, or ``None`` when none did. The
+        #: sweep's verdict is made from the MEASUREMENT (the inventory's
+        #: post-drop catalogue read), never from this alone — see the report
+        #: below (#13320).
+        _dropped_with: str | None = None
+        #: ``(statement, error)`` for every candidate the engine REFUSED, so the
+        #: line an operator reads in an incident can name what was tried instead
+        #: of making them reconstruct it from a debug stream they do not have.
+        _drop_refusals: list[tuple[str, BaseException]] = []
         # ⛔ THE DROP IS GATED ON THE CATALOGUE, not attempted blind. An
         # unconditional `DROP INDEX` on an already-clean store is a FAILING DDL
         # round trip on every single setup — and this method is reached from the
@@ -21768,26 +21899,79 @@ class FalkorProjection(
         # ZERO statements: one read that this method already needs.
         _has_vector_index = False
         _rows = None
+        # #13330 review (P2): the unreadable lane is BOTH "the read raised" and
+        # "the catalogue answered with rows none of which could be parsed". The
+        # second half used to fall through as "this store has no vector index" —
+        # no DROP (correct) but NO line at all, while `#4997/#11642` went on to
+        # report the label as "RETIRED, not missing" over an index that was still
+        # there. An unparseable catalogue is not a measurement of absence.
+        _catalogue_unreadable: str | None = None
         try:
             _rows = (catalogue_rows if catalogue_rows is not None
                      else self.g.query("CALL db.indexes()").result_set)
+            _parsed_rows = 0
             for _row in (_rows or ()):
                 try:
                     if len(_row) < 3:
                         continue
                     _label, _types = _row[0], _row[2]
-                    if str(_label) != "Point" or not isinstance(_types, dict):
+                    if not isinstance(_types, dict):
+                        # The reshaped-catalogue shape: a row that IS a row but
+                        # whose `types` cell is not the mapping this store reads.
                         continue
-                    for _type_list in _types.values():
+                    _parsed_rows += 1
+                    if str(_label) != "Point":
+                        continue
+                    # ⛔ THE PROPERTY, not merely the label (#13330 review P2).
+                    # This gate decides whether to ISSUE DDL, and a `Point`
+                    # VECTOR index on a property other than `embedding` armed
+                    # it: three `Point.embedding` DROPs the engine refused on
+                    # every setup of a store that was already in the state this
+                    # sweep wants — the #4465 repeated-bootstrap defect.
+                    for _prop, _type_list in _types.items():
+                        if str(_prop) != "embedding":
+                            continue
                         if isinstance(_type_list, (list, tuple, set)) and any(
                                 str(_t).upper() == "VECTOR" for _t in _type_list):
                             _has_vector_index = True
                             break
                 except Exception:  # noqa: BLE001, RUF100 — a malformed row is skipped
                     continue
+            if _rows is None:
+                # AN ANSWERED `None` IS NOT AN EMPTY CATALOGUE (#13330 review P2).
+                # `_record_vector_index_inventory`'s own contract puts this shape
+                # in NOT-MEASURED ("the call raised, or it answered None"), and a
+                # pinned input shape drives it, but the gate read treated it as
+                # "no vector index here": an ARMED store got no DROP (correct) and
+                # NO LINE above a DEBUG nobody reads — the silence #13320 was filed
+                # on, one input shape over. Routes into the same latched WARNING.
+                _catalogue_unreadable = (
+                    "the catalogue answered with NO row list at all — an empty "
+                    "response, which is not the same as an empty catalogue")
+            elif _rows and not _parsed_rows:
+                _catalogue_unreadable = (
+                    f"the catalogue answered {len(_rows)} row(s) and not one of "
+                    "them parsed as a `CALL db.indexes()` row")
         except Exception as e:  # noqa: BLE001, RUF100 — fail SAFE: do not drop blind
-            _log.debug("#11642: vector-index catalogue read failed (%s) — "
-                       "leaving any in-graph vector index alone this sweep", e)
+            _catalogue_unreadable = str(e)
+        if _catalogue_unreadable is not None:
+            # ⛔ #13320: an ARMED store whose catalogue cannot be read is the
+            # FOURTH state, and it used to be DEBUG-only silence on exactly the
+            # store the issue was filed on (the index may be there and can never
+            # be retired while the read fails). Fail SAFE on the WRITE — no blind
+            # drop — and say so at WARNING, latched, because this method runs on
+            # the hosted PER-REQUEST path.
+            if self._retirement_failure_is_news("catalogue-unreadable"):
+                _log.warning(
+                    "#13320: could not read the index catalogue on %s (%s) — any "
+                    "in-graph Point.embedding vector index was left in place this "
+                    "sweep, because a DROP is never issued blind. This arm "
+                    "cannot say whether arming took effect (LATCHED: reported "
+                    "once per store per process): with no measurement, a store "
+                    "that has no index at all and a store whose index survives "
+                    "are the same reading here — it retries on the next setup",
+                    getattr(self, "_graph_name", "<unknown graph>"),
+                    _catalogue_unreadable)
             _has_vector_index = False
         # ⛔ NO "LEAVING IT IN PLACE" LINE HERE ANY MORE (#11660 review round 7,
         # P2-3). The unarmed case used to fall through to a gate at this point
@@ -21802,15 +21986,26 @@ class FalkorProjection(
         # unarmed store is `main`'s silent success path (#4997 warns when a
         # label really has no index, which is the only thing worth saying).
         if _has_vector_index:
-            for _stmt in (
-                "DROP INDEX ON :Point(embedding)",
-                "DROP INDEX FOR (p:Point) ON (p.embedding)",
-            ):
+            # ⛔ #13320: THE FORM IS THE FIX. A VECTOR index is NOT reachable
+            # through the generic drop — measured on graph module 42006 (and
+            # recorded for #7846 before it): both `DROP INDEX` forms below
+            # answer `Unable to drop index on :Point(embedding): no such index`
+            # while the catalogue reports the index, and only
+            # `DROP VECTOR INDEX FOR (p:Point) ON (p.embedding)` removes it. The
+            # shipped list was the two generic forms, so every ARMED deployment
+            # read a catalogue that said VECTOR, issued DROPs the engine
+            # rejected, and logged each rejection at DEBUG — the index survived,
+            # silently.
+            # ⛔ The rendering is `index_catalogue.vector_index_drop_statements`,
+            # the SAME one `graph_key_restore` drops with, so the two cannot
+            # disagree about the statement again (`#3441`'s rule, second row).
+            for _stmt in vector_index_drop_statements("Point", "embedding"):
                 try:
                     self.g.query(_stmt)
-                    dropped = True
+                    _dropped_with = _stmt
                     break
                 except Exception as e:  # noqa: BLE001, RUF100
+                    _drop_refusals.append((_stmt, e))
                     _log.debug("#11642: %r did not drop the vector index: %s",
                                _stmt, e)
                     continue
@@ -21819,30 +22014,29 @@ class FalkorProjection(
         # that read to the inventory instead of letting it probe again. After a
         # DROP the rows describe a catalogue that no longer exists, so that one
         # case re-reads.
-        if catalogue_rows is None and not dropped:
+        # ⛔ AN AMBIGUOUS ATTEMPT IS A WRITE UNTIL THE CATALOGUE SAYS OTHERWISE
+        # (#13330 review P2) — but a DEFINITIVE REFUSAL IS NOT AN ATTEMPT
+        # (#13330 review 5, P2). `_dropped_with` is set only by a statement that
+        # RETURNED, and a DROP that RAISES may already have applied the DDL (a
+        # transport failure after the server executed it), so that case must
+        # re-read. The engine's own `no such index` answer is NOT that case: it
+        # proves nothing was written, and counting it as a write made the
+        # permanent SURVIVOR store — the state whose WARNING the latch only
+        # silences once per process while the SWEEP still runs per setup, on a
+        # method the hosted path reaches per request — pay a THIRD catalogue read
+        # on top of its three refused DDL round trips. One extra read remains, on
+        # the genuinely ambiguous path only.
+        #
+        # ⚠️ STILL OPEN, measured and NOT fixed here (the peer commit's stated
+        # residual): the three DDL round trips themselves repeat on EVERY setup
+        # of a survivor store. Reducing them needs a per-store negative cache and
+        # is a follow-up, not a read.
+        _ambiguous_write = any(
+            "no such index" not in str(err).lower() for _s, err in _drop_refusals)
+        _attempted = _dropped_with is not None or _ambiguous_write
+        if catalogue_rows is None and not _attempted:
             catalogue_rows = _rows
-        if dropped:
-            # ⛔ SAY WHY THIS SWEEP WAS ALLOWED TO DROP IT (#11660 review round
-            # 4, P2). The gate above is `vector_index_retired()`, which asks BOTH
-            # arming conditions, so the unarmed case never reaches this line —
-            # but the line is emitted ONCE, on the sweep that destroys the only
-            # in-graph ANN index, and an operator reading it in an incident must
-            # not have to reconstruct a predicate to learn what replaced it. (The
-            # pre-gate wording said "the dense leg is served from the Postgres
-            # record" unconditionally, which was FALSE on the default posture:
-            # a DSN without `TORTOISE_RECORD_VECTOR_LEG` still full-scans, and
-            # that is the line the same sweep emitted next to the #4997 warning.)
-            _log.info(
-                "#11642: dropped the in-graph Point.embedding vector index on %s "
-                "— because the replacement is ARMED (TORTOISE_RECORD_VECTOR_LEG="
-                "1 and a record DSN), so the dense leg is served from the "
-                "Postgres record (pgvector) wherever a record tenant resolves; "
-                "an UNARMED store never reaches this line (it keeps the index). "
-                "A graph without the index pays none of the index-bearing "
-                "restore cost #7846 measured (436.5 s at 20k nodes, 191.8 s "
-                "tuned, instance blocked) — for dumps taken AFTER this sweep; a "
-                "dump taken before it still carries the index", self._graph_name)
-        _wrote_index = dropped
+        _wrote_index = _attempted
 
         # #4997: measure what the catalog ACTUALLY has, AFTER the creation
         # attempt above, so a fresh graph reports post-creation state rather
@@ -21868,6 +22062,203 @@ class FalkorProjection(
         self._record_vector_index_inventory(
             None if _wrote_index
             else (_rows if catalogue_rows is None else catalogue_rows))
+
+        # ⛔ SAY WHAT THIS SWEEP DID, AND CLAIM ONLY WHAT THE CATALOGUE CONFIRMS
+        # (#13320). The report is made AFTER the inventory's post-drop read, so
+        # it can distinguish the three states that a `g.query()` that raised
+        # nothing cannot: REMOVED, STILL THERE, and NOT MEASURED. The line that
+        # used to sit here fired on `dropped` alone — and the measured defect
+        # was worse than a wrong message: the sweep's two statements both
+        # FAILED, so nothing logged above DEBUG at all and an armed production
+        # store kept the index while its operator believed the switch was on.
+        # ⛔ The gate above (`vector_index_retired()`) is the UNARMED case, and
+        # it never reaches this code — these lines describe an ARMED sweep only.
+        # The unarmed lane is `main`'s silent success path, unchanged (#11660
+        # review round 7, P2-3).
+        #
+        # ⛔ #13330 review 3 (P1): a PARTIALLY unreadable catalogue used to be
+        # SILENT. The gate flags only "answered and NONE parsed"; the inventory
+        # withholds `_vector_index_props` whenever ANY row failed to parse —
+        # deliberately fail-closed — but this report block requires
+        # `_has_vector_index`, which is False in that state, so the withheld
+        # verdict reached no reader at all. The one line emitted was the
+        # `#4997/#11642` `RETIRED, not missing` INFO, over an index nobody had
+        # measured. A state the sweep could not verify must SAY so (#13330's own
+        # criterion), under its own latch kind so the unreadable-read arm cannot
+        # swallow it.
+        if (not _has_vector_index
+                and getattr(self, "_vector_index_props", None) is None
+                and getattr(self, "_vector_index_served_labels", None) is not None
+                and self._retirement_failure_is_news(
+                    "catalogue-partially-unreadable")):
+            _log.warning(
+                "#13320: the index catalogue on %s could not be fully parsed — "
+                "some rows were readable and at least one was not, so whether an "
+                "in-graph Point.embedding vector index is present could not be "
+                "VERIFIED this sweep. No DROP was issued (never blind), and the "
+                "sweep retries on the next setup (LATCHED: reported once per "
+                "store per process)",
+                getattr(self, "_graph_name", "<unknown graph>"))
+        if _has_vector_index:
+            # ⛔ THE VERDICT IS THE MEASUREMENT, ONE LEVEL DOWN (#13330 review):
+            # `_vector_index_props` — the property the retirement targets — not
+            # the label. The label-grained read reported a `Point.embedding` index
+            # that never existed (a foreign `Point` VECTOR index armed the gate)
+            # and reported a SUCCESSFUL removal beside a foreign index as a
+            # survivor. `None` keeps the NOT-MEASURED lane of the behavioural half
+            # (`_vector_indexed_labels_for_reads`, #13108): a catalogue that was
+            # returned but parsed to nothing, or one with a row that did not
+            # parse, is not evidence that the index is gone — reading it as such
+            # is a false PASS the report itself would print. Residual: none for
+            # the property question; the inventory now counts unparsed rows and
+            # withholds this half when any row failed to parse.
+            _still_indexed = (
+                None if getattr(self, "_vector_index_props", None) is None
+                else "embedding" in self._vector_index_props.get(
+                    "Point", frozenset()))
+            if _still_indexed is False:
+                # SAY WHY THIS SWEEP WAS ALLOWED TO DROP IT (#11660 review round
+                # 4, P2), and with WHAT (#13320) — the line is emitted ONCE, on
+                # the sweep that destroys the only in-graph ANN index, and an
+                # operator reading it in an incident must not have to reconstruct
+                # a predicate or a statement to learn what happened. (The
+                # pre-gate wording said "the dense leg is served from the
+                # Postgres record" unconditionally, which was FALSE on the
+                # default posture: a DSN without `TORTOISE_RECORD_VECTOR_LEG`
+                # still full-scans.)
+                _log.info(
+                    "#11642: dropped the in-graph Point.embedding vector index "
+                    "on %s with %r — confirmed absent from the post-drop "
+                    "catalogue (#13320) — because the replacement is ARMED "
+                    "(TORTOISE_RECORD_VECTOR_LEG=1 and a record DSN), so the "
+                    "dense leg is served from the Postgres record (pgvector) "
+                    "wherever a record tenant resolves; an UNARMED store never "
+                    "reaches this line (it keeps the index). A graph without the "
+                    "index pays none of the index-bearing restore cost #7846 "
+                    "measured (436.5 s at 20k nodes, 191.8 s tuned, instance "
+                    "blocked) — for dumps taken AFTER this sweep; a dump taken "
+                    "before it still carries the index",
+                    self._graph_name,
+                    # ⛔ NOT `%r` of `None` (#13330 review P3): `_wrote_index` is
+                    # an ATTEMPT, so this arm is reachable with no statement
+                    # having RETURNED — every candidate raised, and one of them
+                    # had already applied the DDL. Printing `with None` in the
+                    # line whose whole job is "the operator must not have to
+                    # reconstruct what happened" defeats it.
+                    _dropped_with or (
+                        "(a candidate DROP that raised after the DDL had run)"))
+            else:
+                # ⛔ THE SURVIVOR, OR THE UNCONFIRMED ONE. Both leave the store in
+                # the state #13320 was filed on (paying for the index AND the
+                # pgvector copy), and neither may be silent. The two are DIFFERENT
+                # facts and the line must not merge them (#13330 review P2 x2):
+                # "SURVIVED" is a MEASUREMENT, and it is only made when the
+                # post-drop catalogue actually answered.
+                if _still_indexed is None:
+                    # ⛔ #13330 review (P2): `None` has TWO causes and the line
+                    # must not fabricate the wrong one. The read RAISING is a
+                    # connectivity/auth story; a catalogue that ANSWERED in a
+                    # shape nothing could parse is an engine/catalogue-shape story,
+                    # and the operator's next action differs. The distinguishing
+                    # datum is already on the object: `_vector_index_served_labels`
+                    # is a set whenever the inventory completed, and None only when
+                    # the read itself did not.
+                    _why = (
+                        "the post-drop catalogue read FAILED"
+                        if self._vector_index_served_labels is None
+                        else "the post-drop catalogue answered in a shape this "
+                             "store could not parse"
+                    )
+                    _verdict = (
+                        f"was NOT CONFIRMED removed: {_why}, so nothing measured "
+                        "whether it is still there")
+                else:
+                    _verdict = (
+                        "SURVIVED an ARMED retirement sweep: the post-drop "
+                        "catalogue still reports it")
+                _what_the_engine_did = (
+                    f"the engine accepted {_dropped_with!r} and the index is "
+                    "still in the catalogue — a FALSE PASS, which is why the "
+                    "verdict here is the MEASUREMENT and not the query's return"
+                    if _dropped_with and _still_indexed is not None
+                    else f"the engine accepted {_dropped_with!r}"
+                    if _dropped_with
+                    else "every candidate DROP was refused")
+                # ⛔ "none refused" rather than "none": an ACCEPTED statement is
+                # not a missing one, and this line is precisely where the
+                # accept-vs-refuse distinction is the whole story.
+                _refusals = "; ".join(
+                    f"{stmt!r}: {err}" for stmt, err in _drop_refusals
+                ) or "none refused"
+                # ⛔ THE COST/ARMING SENTENCE IS ALSO A CLAIM (#13330 review P3).
+                # "The store keeps paying … so arming did NOT take effect" is
+                # MEASURED only on the survivor arm. On an UNCONFIRMED arm nothing
+                # measured it — and on the unparseable-row lane the sweep may well
+                # have dropped the index — so the line must say what it does not
+                # know instead of asserting the outcome. It sits here, beside
+                # `_verdict`, because it is the second half of the same diagnosis.
+                _cost_clause = (
+                    "The store keeps paying for the in-graph index AND the "
+                    "pgvector copy, so arming did NOT take effect here"
+                    if _still_indexed is not None
+                    else "Whether it is still paying for the in-graph index "
+                    "AND the pgvector copy is NOT measured by this sweep, so "
+                    "this line cannot say whether arming took effect here")
+                if self._retirement_failure_is_news(
+                        "removal-unconfirmed" if _still_indexed is None
+                        else "index-survived"):
+                    _log.warning(
+                        "#13320: the in-graph Point.embedding vector index on %s "
+                        "%s — %s. Statements refused: %s. %s. Do not hand-run "
+                        "DROP INDEX on "
+                        "production to \"finish\" it: the statement that removes "
+                        "a VECTOR index is `DROP VECTOR INDEX FOR (p:Point) ON "
+                        "(p.embedding)` (index_catalogue."
+                        "vector_index_drop_statement). If the engine accepted it "
+                        "and the index remains, the statement family is not what "
+                        "this engine implements for a VECTOR index — report it "
+                        "rather than masking it",
+                        self._graph_name, _verdict,
+                        _what_the_engine_did, _refusals, _cost_clause)
+
+    def _retirement_failure_is_news(self, kind: str) -> bool:
+        """Is this store's FIRST report of THIS kind of failure? (#13320)
+
+        Latched per `(endpoint, graph, KIND)` on `_stable_endpoint`, the identity
+        every other register in this module keys on, and NOT on the graph name
+        alone: a graph name is unique per ENGINE, not per process, so two servers
+        carrying one graph name would share a bucket and one of them would have
+        its warning withheld. An unidentified store falls back to the ADDRESS
+        lane (a distinct bucket), never to a shared `None`.
+
+        ⛔ `kind` is not decoration (#13330 review P1). The first cut latched ONE
+        key per store, on the argument that the arms are "the same fact to an
+        operator". That argument fails in the direction that costs the finding: a
+        TRANSIENT unreadable catalogue — or an unconfirmable post-drop read —
+        spent the bucket, and the sweep that LATER measured the index really
+        present, which is the permanent state and the one line this change exists
+        to guarantee, reported NOTHING for the life of the process. The outcome
+        is shared; the diagnosis is not, and the stronger claim must never be
+        silenced by the weaker one. Each kind still reports at most once per store
+        per process, so the reason the latch exists (a per-request log storm on
+        the hosted path) is untouched.
+
+        ⛔ Why latch at all: `_ensure_vector_index_api` runs on the hosted
+        PER-REQUEST path (`_data_sdk_offloaded(..., attach_projection=True)`
+        builds a projection per request) and an unable-to-retire store is a
+        PERMANENT state, so an unlatched warning would be a per-request log
+        storm — the reason `_VECTOR_INDEX_GAP_WARNED` is latched too. Only the
+        LINE is latched; every sweep still re-measures the catalogue.
+        """
+        try:
+            bucket: tuple = (self._stable_endpoint(), self._graph_name, kind)
+        except Exception:  # noqa: BLE001, RUF100 — an unidentified store still reports
+            bucket = ("unidentified", getattr(self, "_graph_name", "<unknown>"),
+                      kind)
+        with _VECTOR_INDEX_DROP_FAILED_LOCK:
+            news = bucket not in _VECTOR_INDEX_DROP_FAILED_WARNED
+            _VECTOR_INDEX_DROP_FAILED_WARNED.add(bucket)
+        return news
 
     def _create_vector_index_api(self, catalogue_rows=None) -> None:
         """The PRE-#11642 creation path, kept for the rollback switch (F9).

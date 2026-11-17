@@ -2125,9 +2125,11 @@ def _scalar(value: Any) -> Any:
 #: words) — in a word-delimited script not a CHOSEN transcript slice, though a space-less (CJK) run arrives
 #: as ONE member verbatim (the residual in `sdk._session_source_metadata`) — and it survives; every
 #: non-episodic Source keeps both columns untouched — a document's `summary` is its own metadata and its
-#: `_searchText` is the shared title+summary+topics rule, so a guard that fired on every Source would
-#: un-index every document in the cache. The drop is a **projection** decision: the row is not mutated, so
-#: the record stays the authority for the value.
+#: `_searchText` is filled PER DOOR, never by one rule: a source writer passes `sdk._source_search_text` (the
+#: `title` when present, else the topic lexicon, else the `summary`), while the document fold concatenates
+#: title + summary + topics (`projection.entities._build_search_text`, #125) — so a guard that fired on
+#: every Source would un-index every document in the cache. The drop is a **projection** decision: the row is
+#: not mutated, so the record stays the authority for the value.
 #:
 #: ⚠️ THE THIRD COST, and it is an OBSERVATION instrument, where a permanent
 #: non-clean reads as noise: `python -m tortoise record-reconcile` builds its
