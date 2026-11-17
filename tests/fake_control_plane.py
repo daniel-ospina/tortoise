@@ -2050,17 +2050,39 @@ class FakeControlPlane:
         # SHADOW a subclass's total-aware override: the override becomes dead
         # code and its test stays green while exercising the other branch. That
         # defect was measured once already on this very fake (`test_billing`'s
-        # `_Cp`, which had to grow a `query_all = None` hatch because of it).
-        # No `limit`: the double is uncapped, so one page IS the whole set and
-        # certifying it is the honest answer.
+        # `_Cp`, which had to grow a `query_all: None` hatch because of it).
+        # No `limit`: the double is uncapped, so one page IS the whole set.
         total_aware = getattr(self, "query_with_total", None)
         if callable(total_aware):
-            rows, _total = total_aware(
+            rows, total = total_aware(
                 table, select=select, filters=filters, order=cursor,
                 timeout=timeout, count_exact=True)
-            return list(rows), True
-        return list(self.query(table, select=select, filters=filters,
-                               timeout=timeout)), True
+        else:
+            rows, total = self.query(table, select=select, filters=filters,
+                                     timeout=timeout), None
+        return list(rows), self._certifiable(rows, total, cursor)
+
+    @staticmethod
+    def _certifiable(rows, total, cursor: str) -> bool:
+        """Derive `complete` the way the real walk does — never assert it.
+
+        ``SupabaseControlPlane.query_all`` certifies only when the walk could
+        ADVANCE from every page it saw (a row with no cursor value leaves
+        ``advanceable`` empty, so it breaks with ``exhausted`` False) AND a stated
+        total, if any, was met. The uncapped double reaches the end in one page,
+        so "all rows carry a cursor" IS "the walk could finish" — but a row
+        WITHOUT one is exactly the shape the production walk refuses.
+
+        ⛔ THIS IS LOAD-BEARING, not pedantry: fixtures passed ``graphs`` rows
+        carrying only ``namespace``, which the real walk refuses
+        (``cursors=[None]`` → never certified → ``_org_graph_names`` raises), so
+        three deprovision tests were green only because this double certified
+        unconditionally. The same argument the `cursor`-in-`select` check above
+        makes, applied to the half that actually decides the certificate.
+        """
+        if not all(isinstance(r, dict) and r.get(cursor) for r in rows):
+            return False
+        return total is None or len(rows) >= total
 
     def _query_impl(self, table: str, *, select: list[str] | None = None,
                     filters: list[tuple[str, str, object]] | None = None,

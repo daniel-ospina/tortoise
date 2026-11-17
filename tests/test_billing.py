@@ -3341,17 +3341,18 @@ class TestReconcileSweep:
         org_id = "11111111-1111-4111-8111-111111111111"
 
         class _Cp(FakeControlPlane):
-            """The fake reports NO stated total (``total=None``), which the
-            enumeration correctly refuses — so this double states one, the
-            only thing a server-side count can supply (#5388).
+            """Pins that the enumeration DISPATCHES THROUGH `query_with_total`.
 
-            ⛔ This test exercises the TOTAL-AWARE leg. ``_enumerate_billed_orgs``
-            prefers ``query_all`` whenever the seam has it, and ``FakeControlPlane``
-            gained that method for #13205 — so ``query_all`` READS THROUGH
-            ``query_with_total`` when it is callable (mirroring the real walk at
-            ``supabase_control.py:679``). Without that dispatch the override below
-            was dead code and this test stayed green while testing the other
-            branch."""
+            ⛔ The base fake certifies a total-less walk through `query_all`, and
+            `query_all` reads through this method when it is callable — so what
+            this double exists for is the DISPATCH, not a stated total: the
+            ``len(rows)`` it returns is inert (``query_all`` re-derives the
+            certificate, and one uncapped page is the whole set either way).
+            Before #13205 the seam preferred `query_with_total` and this override
+            was the only path; after it, without the dispatch, this override
+            became dead and the test stayed green while walking the other arm.
+            The assertion on `total_aware_calls` below is what makes that
+            visible."""
 
             def query_with_total(self, table, **kw):
                 total_aware_calls.append(table)

@@ -162,7 +162,16 @@ class TestDeprovisionOnDelete:
                 # real store refuses.
                 assert kw.get("cursor") == "id", kw.get("cursor")
                 assert "id" in (kw.get("select") or []), kw.get("select")
-                return (graphs or []), complete
+                # The certificate is DERIVED, not taken on trust: the real walk
+                # cannot advance from a row carrying no cursor value, so a fixture
+                # that omits `id` is a page production would REFUSE — and
+                # `_org_graph_names` then raises. Three fixtures here used to omit
+                # it and were green only because this double certified
+                # unconditionally. `complete` still lets a test SAY "this walk was
+                # truncated" (`test_a_truncated_graphs_walk_…`).
+                rows = graphs or []
+                certified = all(isinstance(r, dict) and r.get("id") for r in rows)
+                return rows, bool(complete and certified)
         return _CP()
 
     def test_every_graph_the_org_owns_is_in_the_deprovision_list(self, monkeypatch):
@@ -176,7 +185,7 @@ class TestDeprovisionOnDelete:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "org_o1"}],
-                                graphs=[{"org_id": "o1", "namespace": "org_o1_g_abc"}]))
+                                graphs=[{"id": "g_abc", "org_id": "o1", "namespace": "org_o1_g_abc"}]))
         names = ha._org_graph_names("o1", "org_o1")
         assert "team_o1" in names            # pre-#3543 spelling, still on disk
         assert "org_o1_g_abc" in names       # the custom graph: the actual leak
@@ -203,8 +212,8 @@ class TestDeprovisionOnDelete:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "team_o1"}],
-                                graphs=[{"org_id": "o1", "namespace": "org_o1_g_1"},
-                                        {"org_id": "o1", "namespace": "org_o1_g_2"}]))
+                                graphs=[{"id": "g_1", "org_id": "o1", "namespace": "org_o1_g_1"},
+                                        {"id": "g_2", "org_id": "o1", "namespace": "org_o1_g_2"}]))
         names = ha._org_graph_names("o1", "team_o1")
         assert names[-1] == "org_o1", names
         assert names.count("org_o1") == 1, names
@@ -221,9 +230,9 @@ class TestDeprovisionOnDelete:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "org_o1"}],
-                                graphs=[{"org_id": "o1", "namespace": "org_o2"},
-                                        {"org_id": "o1", "namespace": "org_o1x_g_1"},
-                                        {"org_id": "o1", "namespace": None}]))
+                                graphs=[{"id": "g_a", "org_id": "o1", "namespace": "org_o2"},
+                                        {"id": "g_b", "org_id": "o1", "namespace": "org_o1x_g_1"},
+                                        {"id": "g_c", "org_id": "o1", "namespace": None}]))
         names = ha._org_graph_names("o1", "org_o1")
         assert names == ["team_o1", "org_o1"], names
 
