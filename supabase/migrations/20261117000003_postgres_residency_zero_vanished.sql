@@ -57,9 +57,16 @@
 --     indistinguishable HERE, so the fail-CLOSED one wins: leave the rows alone
 --     (their `measured_at` then ages out under the gate's bound, which refuses
 --     rather than serving a zero it cannot defend) and RAISE WARNING, so an
---     operator sees it. `jsonb_array_length(NULL)` is NULL, so a malformed audit
---     takes the same safe branch. The single-org erasure (1) still zeroes — that
---     is the case the harness asserts.
+--     operator sees it. A MISSING `orgs` key — or a SQL NULL — measures NULL
+--     through `jsonb_array_length`, so it takes the same safe branch. (MEASURED,
+--     PGlite 0.5: `jsonb_array_length(NULL::jsonb)` and
+--     `jsonb_array_length('{}'::jsonb -> 'orgs')` are both NULL. A PRESENT but
+--     NON-ARRAY `orgs` never reaches this arm at all — `jsonb_array_elements` in
+--     the INSERT above RAISES on a scalar or an object first, which aborts the
+--     whole statement before any row is written. That is the same fail-closed
+--     direction by a different mechanism, and it is why this sentence names a
+--     MISSING key rather than "a malformed audit".) The single-org erasure (1)
+--     still zeroes — that is the case the harness asserts.
 --
 -- Asserted in `supabase/tests/pglite/validate.mjs`'s `#9559` block: the vanished
 -- org KEEPS its row, carries 0 bytes / 0 rows, is stamped with THIS refresh's

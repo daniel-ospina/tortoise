@@ -571,6 +571,14 @@ _MIGRATION_COUNT_OF_RE = re.compile(
 _COUNT_OF_DOCS = (
     REPO_ROOT / "docs" / "00_index.md",
     REPO_ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md",
+    #: The SIXTH home (#13315 review, P3): the storage picture restated the same
+    #: denominator in a form no pattern reached — *"86 migrations, `pgvector` in
+    #: 1"* — so the next migration would have left it stale while this suite
+    #: stayed green. That is the recurrence of the failure this file's own
+    #: docstring names ("a count is only pinned where a pattern reaches it"), so
+    #: the row was restated in the pinned `<occurrences> of <N> migrations` form
+    #: AND added here: a denominator with no reader is a false PASS waiting.
+    REPO_ROOT / "docs" / "architecture" / "STORAGE-PICTURE-2026-11-17.md",
 )
 #: The `narrative|raw_turn|raw_text|transcript` census command's own terms —
 #: the alternation the two "N lines" claims were taken with.
