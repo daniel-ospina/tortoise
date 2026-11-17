@@ -1059,6 +1059,14 @@ surfaces:
   # `.github/actions/falkordb-provision` uses — and the tier-2 shape of `test` runs it too;
   # where that seam has no server behind it the arm SKIPS (measured with the seam unset:
   # `TORTOISE_TEST_CARVE_OUT=1` -> 23 passed, 90 skipped).
+  # through the `TORTOISE_TEST_DOCKER_PORT` seam (every `python-ci` job that RUNS THIS FILE
+  # provisions one and exports it — the `test` and `test-slow` legs, tier-2 included), and
+  # SKIPS only where that seam has no server behind it (measured with the seam unset:
+  # `TORTOISE_TEST_CARVE_OUT=1` -> 23 passed, 90 skipped). ⛔ NOT "every test job":
+  # `test-carve-out`, `test-d14-hosted-api`, `test-record-postgres` and `canary-streak` have
+  # no provision step and no port, by design (the first three set job-level
+  # `TORTOISE_TEST_CARVE_OUT=1`) — they never run this file, so their shape does not bear on
+  # it, but a universal would invite the wrong conclusion if one ever did.
   # ⛔ NOT on "any URI-less leg": the two URI conditions part company here. With NO
   # `TORTOISE_DB_URI` the P4 session gate REFUSES the run before a test starts UNLESS
   # `TORTOISE_TEST_CARVE_OUT` is set — and the tier-2 legs and the carve-out job BOTH set it
@@ -5253,6 +5261,16 @@ surfaces:
   # DELIBERATELY unset) and `test-record-postgres` (Postgres, not FalkorDB) have no FalkorDB
   # provision step, so a DB-armed file registered in `carve_out` would skip silently there —
   # this file is in neither `carve_out` nor `slow_files`, so it never runs in them.
+  # itself). ⛔ The SEAM decides execution, and every `python-ci` job that RUNS THIS FILE sets
+  # it: the provision step on `test` / `test-slow` carries no `if:`, it writes the assigned
+  # port into `$GITHUB_ENV`, and the
+  # module probe builds its URI from it — so the TIER-2 PR legs run these four classes too
+  # (measured against a passworded container built as `provision.sh` builds it: 113 passed, 0
+  # skipped). The 23-skipped reading is the NO-DOCKER shape, not the tier-2 leg's.
+  # ⛔ NOT a universal across `python-ci`: `test-carve-out`, `test-d14-hosted-api`,
+  # `test-record-postgres` and `canary-streak` provision nothing and export no port (the first
+  # three are the no-docker shape by design). They do not run this file; the claim above is
+  # scoped to the legs that do.
   # ⛔ Not "any URI-less leg", and the two conditions part company: with NO `TORTOISE_DB_URI`
   # the P4 session gate REFUSES the run UNLESS `TORTOISE_TEST_CARVE_OUT` is set
   # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`);
