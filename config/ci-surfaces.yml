@@ -2508,6 +2508,21 @@ surfaces:
   - test_13084_demand_census.py
   - test_13084_ram_cap.py
   - test_13084_ram_window_census.py
+  # #13034: the currency rule reads BOTH axes (`status`'s terminal word AND the
+  # POSITION axis — `isClosed` / a `terminal` pipeline stage), and five consumers
+  # stop deciding it for themselves. `core`: its subjects (`tortoise/live.py`,
+  # `tortoise/pipeline.py`, `tortoise/derived_invalidation.py`,
+  # `tortoise/entity_identity.py`) fall through to `core` — measured:
+  # `--changed-files tortoise/live.py,tortoise/pipeline.py,
+  # tortoise/derived_invalidation.py,tortoise/entity_identity.py,
+  # tortoise/topic_summarization.py` -> `surfaces: ["core"]`. The commit also
+  # touched `hosted_api.py`/`sdk.py`, but those are `SHARED_MODULE`s, so a diff
+  # there forces the FULL matrix and selects this file regardless of any row.
+  # ⛔ Registered HERE because it landed on `main` UNREGISTERED (#13034's PR):
+  # `manifest-integrity` (a `python-ci-gate` prerequisite) was red for the whole
+  # tree — measured: the file is present at `origin/main` and absent from
+  # `origin/main`'s manifest, so nothing could merge on top of it.
+  - test_13034_currency_rule_reads_position.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
