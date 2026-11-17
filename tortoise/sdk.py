@@ -54821,8 +54821,8 @@ class TortoiseSDK:
                 wire_holds_role(self, _role_holder, _subject_id)
         elif t == "object":
             # ⛔ #12869: this arm was the row's MINTING door and carried NO status
-            # check at all — not a vocabulary one (correctly: §4.3 leaves the word
-            # set OPEN per kind, #10371) and not even a TYPE one. So
+            # check at all — neither a vocabulary one nor a TYPE one.
+            # MEASURED, `#12869`'s own report:
             # `create_object('Held', status=['live'])` stored the list verbatim on
             # a live row, and EVERY later lifecycle write on that row raised
             # `TypeError: unhashable type: 'list'` out of the guard instead of
@@ -54833,11 +54833,11 @@ class TortoiseSDK:
             #
             # §4.3 declares the property's type as `string`, so a NON-STRING is the
             # one value undeclared for EVERY kind. ⛔ This is NOT an "open
-            # vocabulary" claim: `#11824` S0 closed the word set, so an undeclared
-            # WORD (`status="banana"`) is itself REFUSED by name at this door —
-            # what stays open is which words each kind may hold, and the type is
-            # `string` for all of them. `None` stays legal (an absent status reads
-            # live, `#9974` R1).
+            # vocabulary" claim: `#11824` S0 CLOSED the word set, so an undeclared
+            # WORD refuses by name at this door — MEASURED:
+            # `create_object(name, kind, status="banana")` answers
+            # `it is not a lifecycle word for :Object`. ONE four-word set for
+            # every knowledge kind; pack words are STAGES. `None` stays legal, `#9974` R1.
             #
             # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT
             # (`lifecycle_props_by_rendering`), the same one the update door's
@@ -54849,8 +54849,8 @@ class TortoiseSDK:
             # ⛔ `type` IS A PARAMETER HERE (`type: str`), so `type(x)` would call
             # the string; `_refusal_type_name(x)` is shadow-free AND hostile-safe.
             # ⚠️ AND THE HELPER'S OWN AMBIGUITY RAISE IS UNREACHABLE FROM ALL THREE
-            # CALLERS at this head — each door's inline arm answers first.
-            #
+            # CALLERS, though not by one shared arm — the create doors' INLINE arm
+            # answers, `add_object` is stopped earlier, `update` by its own guards.
             # ⛔ WHERE THIS GUARD SITS, MEASURED — do not restate the ladder from
             # memory. `#11824` S0's TYPE check runs INLINE in `create_entity` (its
             # `_read_caller_status` call), NOT in `_validate_bundle` (which returns
@@ -54861,29 +54861,29 @@ class TortoiseSDK:
             # `create_object(name, kind, status=['retracted'])` returns
             # `a status must be a plain string` on each of the three, never this
             # helper's `refused a non-string status`.
-            # ⛔ SO THE LANDING QUESTION IS UNOBSERVABLE AT THIS DOOR, and this
-            # comment may not imply otherwise: the `lands` thunk below never gets
-            # to answer for a non-`str`. The recorded `#7925` round-4 decision it
-            # encodes ("refuse only where the value would LAND") is real, and it
-            # is answered by the ONE caller with no shared type door above it —
-            # `EventAPI.add_object` (`tortoise/api.py:2927`, the journal lane),
-            # where a declared status on a merge is dropped rather than refused.
+            # ⛔ SO THE `lands` THUNK NEVER ANSWERS FOR A NON-`str` HERE — and that
+            # is ALL this comment may claim. The exemption is NOT dead at this
+            # door: it is LIVE for the one shape S0 does not answer first, a plain
+            # `str` word, pinned at `tests/test_status_projection.py:2262`
+            # (`test_the_CREATE_guard_is_a_LANDING_test_not_a_presence_test`: a
+            # re-create of a held name leaves the merged row byte-identical — MERGE
+            # and id-less ADOPT alike). `tortoise/api.py:2927` still relies on it.
             # The same helper also refuses a two-key AMBIGUITY write; here S0's
             # inline check answers first (measured: the `{status: None,
             # KHash('status'): …}` spelling returns `refused a CONFLICTING status
             # write` from `create_entity`'s own ambiguity arm, not from here).
             #
-            # ⛔ THE TESTS THAT PIN THIS DOOR ARE THE INVERTED ONES. S0 renamed and
-            # INVERTED both arms an earlier draft of this comment cited, so those
-            # old names exist nowhere:
-            # `…_CREATE_guard_is_a_LANDING_test_not_a_presence_test` and
-            # `…_NON_PERSISTABLE_status_is_still_DROPPED_not_refused` are now
-            # `TestNonScalarStatus12869.test_a_MERGE_or_ADOPT_holder_cannot_take_a_non_string_status`
-            # (it asserts the refusal ON the merge and adopt shapes — the landing
-            # exemption is gone, not re-scoped) and
-            # `…test_a_NON_PERSISTABLE_status_is_REFUSED_not_dropped`. A future
-            # reader who restores a "refuse only what lands" claim HERE must move
-            # those arms back with it, or the two disagree silently.
+            # ⛔ ONLY THE NON-PERSISTABLE ARM WAS INVERTED — not the landing one.
+            # `…_NON_PERSISTABLE_status_is_still_DROPPED_not_refused` is now
+            # `test_a_NON_PERSISTABLE_status_is_REFUSED_at_both_doors`, whose
+            # docstring RECORDS the reversal (`#11824 S0` supersedes `#7925`
+            # round 4 there: the four shapes are refused at BOTH doors). A reader
+            # who restores "a non-persistable status is dropped, not refused"
+            # must move that arm back with it, or the two disagree silently.
+            # ⛔ And do NOT generalise the reversal to the landing question: that
+            # arm was NOT inverted, it is live at `:2262` above, and its own
+            # docstring still credits the `lands=` thunk. An earlier draft of
+            # this note claimed both were renamed AND inverted — that was FALSE.
             # ⛔ AND NO BUNDLE-LEVEL NAME PINS THIS ARM. The pair an earlier draft
             # cited (`…_object_item_status_is_accepted_when_a_holder_owns_the_name`,
             # `…_second_same_name_item_declaring_array_is_dropped`) also exists
