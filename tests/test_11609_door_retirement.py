@@ -91,6 +91,7 @@ PROTECTED = {
     "tortoise_create_point": "create_entity has no point arm",
     "tortoise_diary_write": "create_entity has no diary arm",
     "tortoise_compute_confidence": "check_confidence does not recompute",
+    "tortoise_recall": "check_confidence has no recall arm",
 }
 
 

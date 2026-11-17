@@ -2780,7 +2780,11 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #   · `create_point`, `diary_write` — `create_entity` has NO `point`/`diary`
     #     arm (its types are subject|object|event|document), so retiring either
     #     would remove the WRITE, not the name. `compute_confidence` is the same
-    #     shape at `check_confidence`, whose own docstring says so.
+    #     shape at `check_confidence`, whose own docstring says so. `recall` is the
+    #     same shape one step further out: the canonical target (row 3) names
+    #     `recall_beliefs` as its absorber, that container is not live yet, and its
+    #     bridge-table destination `check_confidence` has no `recall` arm — so
+    #     retiring it today would delete the read, not fold it.
     #   · `delete`/`delete_point`/`delete_entity`, `create_edge`/`create_operator`,
     #     `events_poll`, `org_create`, `ingest`, `list_graphs` — their destinations
     #     (`delete_knowledge`, `link_entities`, `poll_events`, the tenancy pair and
@@ -2789,7 +2793,10 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #
     # The seven below are the residue: `-> dict`, no `rest_spec`, no envelope
     # repair, and a destination arm that exists and delegates to the very method
-    # the door calls. ⛔ ONE HOP to a live name in every pointer (GitHub's own
+    # the door calls. The names above are 25 of the 25 live names off the 27-target —
+    # if you find a live name that is not on the target and not in that list, the
+    # list is incomplete and that name is NOT safe to retire.
+    # ⛔ ONE HOP to a live name in every pointer (GitHub's own
     # `DeprecatedToolAliases` states the limit: aliases are not transitive).
     # Arguments are named where dropping one changes the operation — `type=` and
     # `kind=` are the targets' OWN discriminators (bridge table Part A), the rule

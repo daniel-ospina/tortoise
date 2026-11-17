@@ -374,7 +374,8 @@ Three consequences for readers of the paragraph below, which is left as written 
 the 2026-10-27 ruling, not the current state:
 
 1. The count there (**18**) and its `18 of 18 verified` are that day's measurement. The population is
-   **23** now, and it is still 23 of 23 verified — every pointer names a call that resolves.
+   **60** now (the composition this document works out below), and it is still 60 of 60 verified —
+   every pointer names a call that resolves.
 2. `tortoise_health` no longer redirects to `tortoise_overview`: that name is itself retired, and
    `RETIRED_USE_INSTEAD` resolves ONE hop (aliases are not transitive — the same limit GitHub's own
    `DeprecatedToolAliases` records). The pointer is `tortoise_graph_overview(section="health")`, and

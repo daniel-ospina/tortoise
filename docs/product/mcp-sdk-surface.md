@@ -224,7 +224,7 @@ not recorded here has no approval behind it, and the carve-out does not cover it
 
 | Tool | Does | Reaches | Used by | Recomm. | Status and rationale |
 |---|---|---|---|---|---|
-| `tortoise_query` | Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag merged in). BOTH the stru… | paginated_query | never called, tooling, docs | **keep** | group: `query` · never called — not called over MCP, but used by tooling — removing it would break that |
+| `tortoise_query` | Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag merged in). BOTH the stru… | paginated_query | agents, tooling, docs | **keep** | group: `query` · in use — called by agents |
 | `tortoise_expand_relationships` | Full relationship payload for ONE Point, incl. each related point's content (the expand side of the #1353 list/expand split — search returns bounded state entries; use this to r… | handler-served | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_recall` | Epistemic recall — four intents via mode (preset + override). mode='state' (UC1): current high-confidence state — multiplicative confidence gate (score = relevance^a × confidenc… | recall_state | never called, eval-harness, tooling, docs | **keep** | never called — not called over MCP, but used by eval-harness, tooling — removing it would break that |
 | `tortoise_search` | Hybrid semantic search — FTS + vector + structural RRF fusion with EP confidence annotation. Use when matching by MEANING (natural-language query); for exact structural/filter q… | tortoise_fts_query | never called, eval-harness, tooling, docs | **keep** | never called — not called over MCP, but used by eval-harness, tooling — removing it would break that |
@@ -580,13 +580,14 @@ contradict.**
 So this is a live question, and the honest thing is to argue it rather than drop it. Here is the
 argument, both ways, with the weak parts named.
 
-**The case for pinning a small advertised set.** 46 of the 48 tools we advertise have no
+**The case for pinning a small advertised set.** 45 of the 48 tools we advertise have no
 call in our own tool-call log. Mainstream clients cap the tools they will show — a
 reported 40 in Cursor — so a client that caps there sees at most 40 of these 48, while we
 pay context for all of them on every turn. Every comparable we studied pins a smaller set,
 and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and
-`tortoise_get_entity` already absorbed five of the six fetch-by-id getters — the sixth,
-`tortoise_get_session`, is proposed for merge. Deferring the rest keeps all 48 callable.
+`tortoise_get_entity` already absorbed all six fetch-by-id getters — the last,
+`tortoise_get_session`, answers as `tortoise_get_entity(id, type="session")` and is retired FORWARD in
+this change rather than dropped. Deferring the rest keeps all 48 callable.
 
 **The case against, which is real and not a formality.** Tortoise is genuinely broader than the
 comparables — a graph memory *and* a reasoning engine with sessions, sources and mining — so some

@@ -68,8 +68,11 @@ def _registry_pairs() -> list[tuple[str, str]]:
     # method). The threshold keeps slack on purpose: it is a scan-sanity floor ("did the
     # scan reach the registry at all?"), not a pin on the surface — a floor left at the
     # pre-consolidation number would red on a CORRECT retirement, which is exactly what
-    # the previous `> 40` did when the seventh door left.
-    assert len(pairs) > 30, f"registry scan found only {len(pairs)} rows — the scan is broken"
+    # the previous `> 40` did when the seventh door left. But the slack is the margin it
+    # ALWAYS had — four rows, not a number chosen after the run: `> 40` sat 4 under 44, so
+    # `> 33` sits 4 under 37. A floor that drifts down by as much as the surface does
+    # (`> 30`) stops noticing a scan that has lost an arm of its own.
+    assert len(pairs) > 33, f"registry scan found only {len(pairs)} rows — the scan is broken"
     return pairs
 
 
@@ -273,14 +276,19 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # the surface: `tortoise_list_dedup_candidates` left the pass-through population
     # when its SDK method retired into `review_link_candidates` (#11609 Phase 2,
     # which returns `Any` and so owes no list type), and the three doors named above
-    # left it with the WRITE/MUTATE containers. 16 -> 9 with #11609's door-retirement
-    # wave, which retired seven doors that were pass-throughs themselves
-    # (`get_session`, `list_batch`, `find_cross_lens_candidates` and the four
-    # `create_*` aliases): 16 − 7 = 9. The floor moves DOWN with the surface; it is
-    # not lowered to whatever a green run last produced, and the two guards ABOVE
-    # (`checked > 0`, and `checked + reshaped == len(pairs)`) are what still make a
-    # vacuous scan impossible — this one only keeps slack under them.
-    assert checked >= 9, (
+    # left it with the WRITE/MUTATE containers. 16 -> 13 with #11609's door-retirement
+    # wave: THREE of its seven doors were pass-through wrappers and left this
+    # population with them (`get_session`, `list_batch`, `find_cross_lens_candidates`);
+    # the four `create_*` aliases were NOT pass-throughs — they reshaped, so they are
+    # counted by the `reshaped` term above and subtract nothing here: 16 − 3 = 13.
+    # (An earlier cut of this comment claimed all seven subtracted — 16 − 7 = 9 — and
+    # that arithmetic put the floor four rows under the population the scan actually
+    # produces, which is slack on the one guard whose job is to notice a collapse.)
+    # The floor moves DOWN with the surface, exactly ON the measurement (0 slack, as
+    # at 16); it is not lowered to whatever a green run last produced, and the two
+    # guards ABOVE (`checked > 0`, and `checked + reshaped == len(pairs)`) are what
+    # still make a vacuous scan impossible.
+    assert checked >= 13, (
         f"only {checked} pass-through wrappers were found — the scan is not "
         f"reaching the registry, so a clean result here would be vacuous")
     assert not offenders, (

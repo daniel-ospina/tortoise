@@ -4656,8 +4656,9 @@ def test_the_render_reports_only_what_it_can_observe_when_no_row_is_measured(
         f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {total}, while we\n"
         "pay context for all of them on every turn. Every comparable we studied pins a smaller set,\n"
         "and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and\n"
-        "`tortoise_get_entity` already absorbed five of the six fetch-by-id getters — the sixth,\n"
-        "`tortoise_get_session`, is proposed for merge. Deferring the rest keeps all " + f"{total} callable."
+        "`tortoise_get_entity` already absorbed all six fetch-by-id getters — the last,\n"
+        "`tortoise_get_session`, answers as `tortoise_get_entity(id, type=\"session\")` and is retired FORWARD in\n"
+        "this change rather than dropped. Deferring the rest keeps all " + f"{total} callable."
     )
     assert _paragraph(text) == expected, (
         "the no-measurement paragraph changed — it may report only the observation, name no "
