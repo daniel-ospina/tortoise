@@ -402,20 +402,45 @@ def test_confidence_order_over_objects_uses_the_mean_claim_belief(sdk):
     ``GraphRanker._fetch_signals(..., entity_type)[id]["confidence"]``
     (``sdk.py``'s confidence sort). Before #12184 that read answered a POINT
     signal for an object id — the Object's own (absent) belief, i.e. ``None``
-    for every Object — so every Object fell to the unmeasured tier and kept RRF
-    order. The entity read answers the MEAN CLAIM BELIEF, so an Object whose
-    claims carry beliefs now sorts AHEAD of an Object with none. That is an
-    improvement and it is a product-path change; it is pinned here rather than
-    left undisclosed, and the assertion is on the ORDER, not on an internal.
+    for every Object — so every Object fell to the unmeasured tier
+    (``_confidence_key`` → ``(1, 0.0)``) and kept RRF order. The entity read
+    answers the MEAN CLAIM BELIEF, so an Object whose claims carry beliefs now
+    sorts AHEAD of an Object with none. That is an improvement and it is a
+    product-path change; it is pinned here rather than left undisclosed.
+
+    ⚠️ NON-VACUITY (round-2 review F2). The first version of this test could
+    pass on the pre-fix code: the belief-carrying Object also happened to win
+    RRF (it was created first and its name WAS the query), so the pre-fix tie
+    — both keys ``(1, 0.0)``, a stable sort preserving pool order — coincidentally
+    reproduced the expected order. Two changes make the pin discriminate:
+
+      1. the fixture is INVERTED — the belief-LESS Object carries the query
+         verbatim and the belief-carrying one a longer name, so fused retrieval
+         puts the wrong row first and only the belief key can flip it;
+      2. the sort KEY is asserted as a VALUE on the same read the SDK consumes,
+         which the pre-fix point read cannot answer.
     """
     name = f"conf-order-object-{uuid.uuid4().hex[:8]}"
-    measured = sdk.create_object(name, objectKind="core:other")["id"]
-    bare = sdk.create_object(f"{name} bare", objectKind="core:other")["id"]
+    # ⚠️ inverted on purpose: `bare` gets the query VERBATIM so it wins fused
+    # retrieval; `measured` sorts first only if its belief is read.
+    bare = sdk.create_object(name, objectKind="core:other")["id"]
+    measured = sdk.create_object(f"{name} measured", objectKind="core:other")["id"]
     for i in range(2):
         pid = sdk.create_point(
             "statement", f"a confident claim {i} about {name}", status="live")["id"]
         sdk.set_point_baseline(pid, 9.0, 1.0)      # mean 0.9
         sdk.create_edge("aboutObject", pid, measured)
+
+    # The sort KEY itself, read through the same call the SDK's
+    # ``order_by="confidence"`` branch makes. Asserted as a VALUE because an
+    # order assertion alone can be satisfied by the pool order the tie keeps.
+    read = GraphRanker(sdk._get_proj())._fetch_signals([measured, bare], "object")
+    assert read[measured]["confidence"] == pytest.approx(0.9), (
+        "an Object's confidence key must be the MEAN BELIEF OF ITS CLAIMS — if "
+        "this is None, the read is still the pre-#12184 point read (an Object "
+        "has no belief of its own)")
+    assert read[bare]["confidence"] is None, (
+        "the belief-less Object must answer ABSENT, not a fabricated neutral")
 
     rows = sdk.tortoise_fts_query(name, entity_type="object",
                                   order_by="confidence", limit=10)
@@ -423,6 +448,7 @@ def test_confidence_order_over_objects_uses_the_mean_claim_belief(sdk):
     assert measured in ids and bare in ids, (
         f"both seeded Objects must be in the window: {ids}")
     assert ids.index(measured) < ids.index(bare), (
-        "the row whose CLAIMS carry a measured belief must sort first — if it "
-        "does not, `order_by='confidence'` is still reading the Object's own "
+        "the row whose CLAIMS carry a measured belief must sort first even "
+        "though the belief-less row names the query verbatim — if it does "
+        "not, `order_by='confidence'` is still reading the Object's own "
         "absent belief (the pre-#12184 point read)")

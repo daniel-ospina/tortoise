@@ -715,10 +715,16 @@ def _parse_iso(value) -> datetime | None:
 #     cannot produce: a Point's degree is its operator connectivity, an
 #     entity's is its USE.
 #   * ``identity`` — computed in ``rerank`` from the row against the query,
-#     not here: exact normalised-name equality is the identity ladder's own
-#     verdict (``entity_resolver.normalize_entity_name``), and for an
-#     entity row the name IS the row's whole surface (a Point carries
-#     ``content`` instead). See ``_identity_match``.
+#     not here: exact equality under ``entity_resolver.normalize_entity_name``
+#     is the identity ladder's own verdict, and for an entity row the name IS
+#     the row's whole surface (a Point carries ``content`` instead). See
+#     ``_identity_match``. ⚠️ The surface READ is the row's ``content``, not a
+#     ``name`` key: the ranker sees ``SearchResult.to_dict()``, which has no
+#     ``name``. For ``:Object``/``:Subject`` that content IS the entity's name,
+#     so the term is exact. For ``source``/``document`` the FTS leg indexes
+#     ``_searchText`` (title+summary+topics), so there the term is effectively
+#     INERT rather than wrong — stated, not claimed as an identity verdict it
+#     cannot make.
 #   * ``created`` — the row's timestamp, for the existing recency term.
 #
 # ``operator`` routes to the POINT fetch on purpose and is not a fallback: an
@@ -1008,7 +1014,13 @@ class GraphRanker:
                 (sig.get("degree") or 0) > 0 or sig.get("confidence") is not None
                 for sig in signals.values())
             if not self.signals_informative:
-                logger.warning(
+                # INFO, not WARNING (round-2 review N2): this is the steady
+                # state of ANY claim-less entity corpus — e.g. the committed
+                # eval graph, or a freshly-created Object store — so on a
+                # product path a WARNING would fire once per request. The
+                # finding is real and it is reported by the field; the log
+                # level is for the operator, not for the alarm.
+                logger.info(
                     "entity signal read answered with no structure for %d %r "
                     "row(s) — the order is relevance-only (signals_informative"
                     "=False)", len(signals), entity_type)
@@ -1122,6 +1134,12 @@ class GraphRanker:
         (normalized incident IMPL/NAND edge count).
         Events/Sessions: 0.6·aboutObject count (Objects referenced) +
         0.4·mean EP confidence of produced Points.
+        Entities (Object/Subject/Source/Document, ``signals["is_entity"]``):
+        0.5·MEAN BELIEF OF THE INBOUND CLAIMS + 0.5·normalized INBOUND CLAIM
+        COUNT — the entity's own belief does not exist and its operator edges
+        are not what refers to it, so the point inputs this arm used to be fed
+        (#12184) measured nothing. The ``use_degree`` ablation (#1348)
+        neutralizes the degree term here exactly as it does for points.
 
         #11702 — an ABSENT belief contributes NO term. When the read answered
         ``confidence: None`` (nothing that yields a mean — nothing persisted, a
