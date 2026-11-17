@@ -549,6 +549,56 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
         f"its reopen exactly once ({mints}) — `None` for EVERYTHING is not the fix")
 
 
+def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
+    """#13288 review R2/F1, the half that had no pin: `isClosed=0`.
+
+    `create_object(..., isClosed=1)` is documented at the truthy pin above; the
+    FALSY half is reachable through the other door, `update_knowledge(id,
+    isClosed=0)`, which stores the INTEGER `0` (measured on the merged head:
+    `typeof(o.isClosed)` → `['Integer']`). The two sides then disagree
+    irreconcilably: this module reads it by `bool()` (→ live), while the fold's
+    live-holder probe compares `coalesce(n.isClosed, false) = false` in Cypher,
+    where `0 = false` is FALSE under FalkorDB's strict types (measured:
+    `RETURN 0 = false, typeof(0)` → `[False, 'Integer']`). So the row has NO live
+    holder, no fold reaches it, and — unlike the truthy half — nothing repairs it.
+
+    Measured pre-fix on the merged head, four polls of a CLOSED issue: mints
+    `[1, 1, 1, 1]`, four permanent `-closed` Events, the row byte-identical. The
+    read now answers `None` (unplaceable) for a falsy non-boolean marker, which
+    gates the transition arm off; the cost is one lost transition on a row no
+    in-contract writer produces, against an unbounded journal mint.
+    """
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    # The PUBLIC DOOR, exactly as a caller reaches it — not a raw query.
+    sdk.update_knowledge("github-issue-acme/repo1-1", isClosed=0)
+    stored = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
+        "RETURN o.isClosed, typeof(o.isClosed), o.pipelineSlot"
+    ).result_set[0]
+    assert stored[0] == 0 and stored[1] == "Integer", (
+        "the door did not store the uncoerced integer this pin is about: "
+        f"{stored!r}")
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(4)]
+    kinds = sorted(r[0] for r in proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-issue-acme/repo1-1' "
+        "RETURN e.eventKind").result_set)
+    row_after = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
+        "RETURN o.isClosed, o.pipelineSlot").result_set[0]
+    assert mints == [0, 0, 0, 0], (
+        "`isClosed=0` has no live holder, so no fold can ever run on it — but it "
+        f"was read as OPEN and every poll minted another close ({mints}); events "
+        f"now {kinds}")
+    assert kinds == ["github.issue.open"], f"a false close was minted: {kinds}"
+    assert row_after == [0, stored[2]], (
+        f"the row must be untouched by the polls: {row_after!r}")
+
+
 def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
     """#13222 review round 2, finding 1 (P1): reading a SUBSET of the fold's decision.
 
