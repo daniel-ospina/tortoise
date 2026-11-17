@@ -47,10 +47,10 @@ sys.path.insert(0, str(ROOT))
 
 from tools.window_quality_m2 import (  # noqa: E402
     DEEP_LIMIT,
-    _signal_available,
     EVICT_SEED_OFFSET,
     ID_PREFIX,
     KS,
+    _signal_available,
     build_point_population,
     classify_rows,
     eviction_order,
@@ -603,7 +603,14 @@ def test_the_artifact_records_the_point_population_drop_funnel(artifact):
 
     lost = pb["requested"] - pb["built"]
     filters = ("too_short", "no_span", "sanitised_out", "duplicate_span")
-    if pb["split_recorded"]:
+    # ⛔ The CURRENT instrument emits the four counters and no `split_recorded`
+    # key, so `pb["split_recorded"]` made the documented regeneration path
+    # (`README.md`: "a run of the current instrument reports the four counts
+    # instead") produce an artifact this pin rejected with a KeyError — the
+    # instrument→artifact→pin loop was not closed (#13126 round 5). The key is
+    # read with a default, and the funnel is verified from whichever shape the
+    # block has.
+    if pb.get("split_recorded"):
         assert all(f in pb for f in filters), (
             "split_recorded is true but the four filter counts are not all present")
         assert sum(pb[f] for f in filters) == lost, (
@@ -1683,7 +1690,8 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
 
     clause = re.search(
         r"cold-tail arm loses\s+\*\*(\d+\.\d) to (\d+\.\d) points\*\*\s+"
-        r"to the eviction and the random control\s+\*\*(\d+\.\d) to (\d+\.\d)\*\*",
+        r"to the eviction(?:\s+at the target size)?\s+and the random control\s+"
+        r"\*\*(\d+\.\d) to (\d+\.\d)\*\*",
         body,
     )
     assert clause is not None, "the loss-range clause is not in its expected form"
@@ -1788,6 +1796,11 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
     mode = artifact["retrieval"]["mode"]
     assert artifact["retrieval"]["has_embedder"] is False, artifact["retrieval"]
     assert artifact["retrieval"]["legs_seen"]["vector"] is False, artifact["retrieval"]
+    # the OTHER three legs DID run, which the header must not understate: a reader
+    # deciding whether route 1 ("move the text index") is enough needs to know the
+    # candidate set also carried a graph-side kind-scan the move does not shift.
+    legs = artifact["retrieval"]["legs_seen"]
+    assert legs == {"fallback": True, "fts": True, "structural": True, "vector": False}, legs
 
     # the three tail-vs-random cells the README contrasts, in ITS order (tail first)
     trio = ", ".join(
@@ -1894,6 +1907,10 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
          "the provenance block is a drift control, not production evidence"),
         (readme, f"--seed` ({params['seed']})",
          "artifact.params.seed (the recipe's own seed)"),
+        (readme, "plus the structural kind-scan",
+         "retrieval.legs_seen.structural (the header must state the LEG SET)"),
+        (readme, "with the degraded snapshot tier serving some",
+         "retrieval.legs_seen.fallback"),
         # ── round 4 ────────────────────────────────────────────────────────
         (readme, f"`found_deep_of_demoted` is **{demoted}** in every **windowed**",
          "every windowed arm's found_deep_of_demoted"),

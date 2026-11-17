@@ -12,7 +12,9 @@ aboutObjects: "#12186, SEARCH-ARCHITECTURE.md §7, SEARCH-ARCHITECTURE.md §9, #
 # M2 — retrieval quality under a windowed vs complete graph (2026-11-17)
 
 **Verdict: §7's window is NOT SAFE AS SPECIFIED — it must not be armed.**
-On the **text leg** — the one §6.2 keeps in the graph, and the only leg this run exercised — the
+On the **text leg** — the one §6.2 keeps in the graph, and the read this run exercised: the
+`db.idx.fulltext` leg plus the structural kind-scan, with the degraded snapshot tier serving some
+queries; the **vector** leg did not run — the
 window's retrieval cost is **the eviction itself, with nothing compensating**: in a run that invalidates
 the degraded snapshot after each demotion, a demoted node is never
 handed back as a candidate at any rank, the caller is never told a store was partial, and on the claim
@@ -274,7 +276,7 @@ at 0.25, **8.7 vs 12.0** at 0.10, that 5.0-point gap being 5× the 1.0 pp `recal
 It is ahead on a few cells by more than the noise: up to **2.00 pp on `found_deep` at 0.50** (that
 metric's band is 0.33 pp) and **2.33 pp on `:Point` `recall@10` at 0.90**. What makes the policy choice
 irrelevant is the SCALE of the alternative, not an absence of difference: the cold-tail arm loses
-**42.3 to 48.3 points** to the eviction and the random control **42.0 to 50.3** — so a 5.0-point edge is
+**42.3 to 48.3 points** to the eviction at the target size and the random control **42.0 to 50.3** — so a 5.0-point edge is
 barely a tenth of the loss and changes nothing
 about whether a demoted node is retrievable — it is not, whichever reason selected it. Per resident
 query the two are 87.1 % vs 100.0 % at 0.25, and `recall@k` is bounded by the resident share in every
