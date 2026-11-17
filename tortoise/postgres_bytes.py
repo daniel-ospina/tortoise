@@ -68,13 +68,21 @@ is exactly what #4492 refused. They travel in :attr:`PerOrgPostgresBytes.
 residual` and never touch a per-org number.
 
 ⛔ THIS MEASURES; IT DOES NOT PRICE OR ARM. Nothing here prices, tiers, caps or
-refuses, and nothing here is wired into ``allowance_gate``: arming
-``postgres_storage`` needs the ``free``/``anon`` included amounts decided
-(a separate, owner-gated change) AND a per-org figure the gate can read on a
-write path — this module's audit is not one (a whole-table aggregation with a
-per-row TOAST lookup, per call) and the ledger reader is the window addend.
-Both are the gate's declared release conditions; see
-``allowance_gate.RELEASE_CONDITIONS``.
+refuses. Arming ``postgres_storage`` still needs the ``free``/``anon`` included
+amounts decided (a separate, owner-gated change) — the ONLY condition left
+outstanding, and it is the owner's decision, not an instrument gap.
+
+⛔ THE THIRD ARTEFACT IS ELSEWHERE, AND THIS PARAGRAPH USED TO SAY IT WAS
+MISSING. The gate can also not read this module's whole-table audit on a write
+path (a per-row TOAST lookup per call), and the ledger reader is the window
+addend rather than the stored footprint — so for a while ``postgres_storage``
+was blocked on a per-org RESIDENCY gauge as well. #9559 wires one:
+``org_postgres_residency`` (migration ``20261117000001``) is refreshed OFFLINE
+from :func:`per_org_bytes` by ``postgres_residency_snapshot()``, and the gate
+reads one row by primary key through ``metering.get_postgres_residency``. The
+divide is deliberate: this module stays the MEASUREMENT, ``metering`` owns every
+dimension's READING, and ``allowance_gate`` owns the cap. The gate's own
+``RELEASE_CONDITIONS`` states the state; do not restate a different one here.
 
 FAIL-SOFT. :func:`measure_written_rows` and :func:`per_org_bytes` are
 TOTAL on the live path — never raise, never change a write's outcome; a fault
