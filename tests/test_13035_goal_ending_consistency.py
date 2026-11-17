@@ -49,6 +49,7 @@ from tortoise.derived_invalidation import (
 )
 from tortoise.goal_judgement import GOAL_STATE_CACHE, Target, judge_and_record
 from tortoise.ids import ulid
+from tortoise.lifecycle_vocabulary import LIFECYCLE_STATUS_SYNONYMS
 from tortoise.sdk import (
     GOAL_ENDING_STATES,
     GOAL_LIVE_STATES,
@@ -58,15 +59,17 @@ from tortoise.sdk import (
 
 REPO = Path(__file__).resolve().parent.parent
 
-#: ⛔ The word the STORE keeps for an ended row, after #11824 S0.
+#: The ONE word `#11824` S0 STORES for ``archived`` and ``retracted``: both mean
+#: *ended, and nothing replaced it*, which is exactly ``deprecated``, so the door
+#: canonicalises them to it. Read from the door's OWN mapping rather than
+#: re-spelled here, so this file cannot drift from what the door stores
+#: (``tortoise/lifecycle_vocabulary.py``, "a declared synonym", outcome 2).
 #:
-#: S0 canonicalises the two synonyms ON WRITE: a door accepts `archived` or
-#: `retracted` (and `deprecated` itself), and the node is stored as `deprecated`
-#: — its own refusal message states the mapping ("`archived` / `retracted`, which
-#: are stored as `deprecated`", ONTOLOGY §3). Every row below that reads a stored
-#: word back is asserting what the STORE KEEPS, so it asserts this; the synonym a
-#: caller may TYPE is a property of the door and is asserted at the doors.
-_CANONICAL_ENDED = "deprecated"
+#: `live.is_terminal_status(...)` is NOT used in place of it (#13217):
+#: ``TERMINAL_EXCLUDED_STATUSES`` holds ``superseded`` too ("something replaced
+#: it"), which is the opposite claim for the arms that assert the ending SURVIVED
+#: untouched.
+_CANONICAL_ENDED = LIFECYCLE_STATUS_SYNONYMS["archived"]
 
 
 @pytest.fixture
@@ -151,7 +154,7 @@ def test_a_STATUS_ending_over_a_live_goal_state_is_refused_too(sdk):
     # ...and the paired write is what lands it
     sdk.update_knowledge(goal["id"], status="deprecated", goalState="abandoned")
     node = sdk.get_entity(goal["id"])
-    assert node["status"] == "deprecated" and node["goalState"] == "abandoned"
+    assert node["status"] == _CANONICAL_ENDED and node["goalState"] == "abandoned"
 
 
 def test_the_two_endings_are_not_interchangeable(sdk):
@@ -235,7 +238,11 @@ def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
     # node does not exist, the probe answers `{}`, and the same write lands
     fresh = sdk.create_point("goal", "GOAL - fresh [create-door]",
                              id=ulid(), status="archived")
-    assert fresh["status"] == _CANONICAL_ENDED
+    # ⛔ the ending LANDED, which is this arm's claim — not the caller's spelling.
+    # `#11824` S0 stores `archived` as its declared synonym `deprecated`, so the
+    # comparison is against the ONE name this file keeps for that word rather
+    # than a literal repeated per assertion (#13217).
+    assert fresh["status"] == _CANONICAL_ENDED, fresh
 
     # ⛔ THE FALSE-REFUSAL ARM: this write LANDS ``status="live"`` (the create
     # default, which the caller never names), so the pair it leaves is
@@ -315,7 +322,13 @@ def test_the_create_door_grades_the_DEFAULT_status_of_an_EXPLICIT_id(sdk):
     # read it the same way
     after = sdk.get_point(goal["id"])
     assert after["goalState"] == "abandoned"
-    assert after["status"] == _CANONICAL_ENDED
+    # ⛔ asserted against the STORED word rather than the `archived` the write
+    # named: `#11824` S0 canonicalises that synonym (#13217). The pair check two
+    # lines down is the semantic half and reads the row through
+    # `live.is_terminal_status`; this arm keeps the exact word, because
+    # `TERMINAL_EXCLUDED_STATUSES` also holds `superseded` ("something replaced
+    # it") and the predicate cannot tell the two endings apart.
+    assert after["status"] == _CANONICAL_ENDED, after
     assert (after["goalState"] in RETIRED_GOAL_STATES) != (
         not live.is_terminal_status(after.get("status"),
                                     bool(after.get("outdated"))))
@@ -522,7 +535,7 @@ def test_an_ending_is_FINAL_so_a_live_word_cannot_be_revived_over_it(sdk):
     # that clears the ending it lifts (`goalState=None` states nothing)
     sdk.update_knowledge(goal["id"], goalState=None)
     node = sdk.get_entity(goal["id"])
-    assert node.get("goalState") is None and node["status"] == "deprecated"
+    assert node.get("goalState") is None and node["status"] == _CANONICAL_ENDED
 
 
 # ── 3. `guideline` is gone, and nothing still expects it ──────────────────
@@ -917,18 +930,56 @@ def test_an_UNHASHABLE_stored_status_reaches_the_documented_ValueError(sdk):
     reverted, because the fixture no longer depends on the door it is bypassing.
     """
     goal = _goal(sdk, tag="unhashable")
-    # ⛔ #11824 S0 CLOSED THE PUBLIC ROUTE for this shape (`a status must be a
-    # plain string, and list is not one`), so the unhashable value can no longer
-    # be written through a door — and the STORED-side hazard this test exists for
-    # is therefore reachable only BELOW the doors, which is where a legacy row
-    # sits. Injected raw, exactly as the legacy-row arms above do.
+    # ⛔ minted by a RAW write, not the public door: since `#12869` the door
+    # REFUSES a non-string `status` outright (`_read_caller_status`,
+    # `tortoise/lifecycle_vocabulary.py` — "A NON-STRING IS REFUSED, not
+    # coerced"), so the unhashable shape this arm grades can no longer be
+    # produced through it. The claim under test is the STORED side, so the row is
+    # minted the way this file's other legacy half-shapes are (#13217) — see the
+    # docstring above.
+    #
+    # ⛔ THE LIST IS INLINE IN THE CYPHER, deliberately — not passed as a bound
+    # `$s` parameter. The stored value is the whole premise of this arm, so it is
+    # spelled where nothing between the caller and the row can re-shape it.
     sdk._get_proj().g.query(
         "MATCH (n {id:$id}) SET n.status = ['live']", params={"id": goal["id"]})
     with pytest.raises(ValueError) as exc:              # NOT TypeError
         sdk.update_knowledge(goal["id"], goalState="abandoned")
     assert isinstance(exc.value, ValueError)
     assert not isinstance(exc.value, TypeError)
-    assert "leaves it running" in str(exc.value), str(exc.value)
+    # ⛔ what this arm grades is the CLASS and that the refusal names the OFFENDER
+    # — a performable repair — never the door's sentence as a whole. The stored
+    # `['live']` appearing in the message is what proves the STORED half was
+    # consulted at all: the caller passed only `goalState` here, so a refusal
+    # that never read the row's own `status` could not name it.
+    #
+    # ⛔ MEASURED, so the next reader does not re-apply the correction an earlier
+    # pass made on a false premise: this row does NOT fail on the sentence. At
+    # `main@2060c92fd3` the red here was the FIXTURE — the old form minted through
+    # the public door (`update_knowledge(goal, status=["live"])`), which `#12869`
+    # now refuses outright — never the message. `main`'s `05fe46e94e` minted it raw
+    # and the row is green on the current base; with either mint the stored arm
+    # reaches its own wording, `... but status=['live'] leaves it running
+    # (through _sanitize_props)`. A `"list" in msg and "string" in msg` form was
+    # applied once on the belief that S0 re-routes the STORED value through
+    # `lifecycle_vocabulary` by TYPE, and it can never pass here.
+    #
+    # ⛔ BOTH assertions are kept, not either one: `['live']` proves the stored
+    # half was CONSULTED (the non-vacuity claim this arm exists for), while
+    # `leaves it running` pins the repair it promises the caller. Dropping the
+    # second would revert the sentence `main` landed; dropping the first would
+    # let the arm pass on a refusal that never read the row.
+    #
+    # ⚠️ THE `['live']` MATCH IS COUPLED TO THE DOOR'S RENDERING, deliberately:
+    # it is `{status!r}` in the refusal at `tortoise/sdk.py:6619`, so a reword
+    # that stops repr-ing the stored value reds this line. That coupling is the
+    # PRICE of the proof — no other form can show the stored half was read, since
+    # the caller passes only `goalState` and a status-less row reads `None`. A
+    # reword therefore UPDATES this assertion (to whatever form still names the
+    # stored offender); it does not delete it.
+    msg = str(exc.value)
+    assert "['live']" in msg, msg
+    assert "leaves it running" in msg, msg
 
 
 def test_a_goal_retired_by_the_LEGACY_outdated_flag_refuses_a_LIVE_word(sdk):
@@ -1166,6 +1217,8 @@ def test_judging_a_RETIRED_goal_writes_no_cache_and_keeps_its_ending(sdk):
     assert made["goalState"] is None, made          # the cache was NOT written
     node = sdk.get_entity(goal["id"])
     assert node["goalState"] == "abandoned", node   # the human's ending survived
+    # ⛔ "survived" — and the word that survives is S0's canonical one, not the
+    # `archived` this test wrote (`#13217`).
     assert node["status"] == _CANONICAL_ENDED, node
 
 
@@ -1254,6 +1307,11 @@ def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
     sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
     node = sdk.get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
+    # ⛔ both fields landed; the status half reads back as S0's canonical word for
+    # the `retracted` the repair names (#13217). A per-site LITERAL pin is what
+    # made this row red on `main@2060c92fd3` — that cut pinned the synonym
+    # `retracted`, which S0 no longer stores — and it is why the word is named
+    # once, in `_CANONICAL_ENDED`, instead of inline at this call site.
     assert node["status"] == _CANONICAL_ENDED, node
 
 
@@ -1838,6 +1896,9 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
     sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
     node = sdk.get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
+    # ⛔ stored as S0's canonical word for the `retracted` the repair names; the
+    # rule this arm serves ("both surfaces agree the goal is over") is measured
+    # by the predicate on the next line anyway (#13217).
     assert node["status"] == _CANONICAL_ENDED, node
     # both surfaces agree the goal is over — the rule the message serves
     assert (node["goalState"] in RETIRED_GOAL_STATES,
@@ -1868,4 +1929,6 @@ def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
     # the ending survived the refused write
     after = sdk.get_point(ended["id"])
     assert after["goalState"] == "abandoned", after
+    # ⛔ survived = still carrying S0's canonical word, which is what "untouched"
+    # reads as at this head (`retracted` is a declared synonym, #13217).
     assert after["status"] == _CANONICAL_ENDED, after
