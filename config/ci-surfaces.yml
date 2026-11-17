@@ -1064,8 +1064,11 @@ surfaces:
   # and its own docstring names "carve-out job, tier-2 legs, e2e surfaces"). MEASURED on the
   # default lane with no opt-in: 113 errors,
   # `Failed: default pytest requires TORTOISE_DB_URI` / `no … database could be reached` —
-  # and the carve-out job runs the `carve_out` set, which this file is NOT in. So the skip
-  # is one lane's shape, never a green a no-DB leg can produce (#1436's skip half, whose
+  # so the refusal is the DEFAULT lane's shape, NOT what a URI-less leg always does. ⛔ And
+  # the skip is not the carve-out JOB's private shape either: this file is not in the
+  # `carve_out` set, yet every non-`full` PR leg sets the flag and runs it URI-less, so the
+  # TIER-2 legs are where the 23-passed/90-skipped reading comes from — green-with-skips by
+  # design (#1436's skip half, whose
   # container half is #5084 — the pair this file already uses for
   # `test_live_storage_fail_closed.py` below; ⛔ NOT #1349, which is this file's silent-DROP
   # citation, not its skip one).
@@ -1080,8 +1083,8 @@ surfaces:
   # is the opposite, and the audit never said otherwise.
   # ⛔ `test_12592_supersede_door.py` is NOT noise either: it is a PRE-EXISTING gap of the
   # same class on main — registered `core` only, imports the same `mcp_auth` names, and NOT
-  # selected on a `mcp_auth.py`-only diff (measured: `selected: False`). Reported, not fixed
-  # here; this row's job is #13034.
+  # selected on a `mcp_auth.py`-only diff (measured: `selected: False`). Reported as a
+  # follow-up in its own right (filed: #13150), not fixed here; this row's job is #13034.
   - test_13034_currency_rule_reads_position.py
   # #12477/#2876: the health surfaces must not read green over a failing data plane. Added
   # to `main` by `ea5d476e9b` (#12488) WITHOUT a manifest row, so `--integrity` reported it
@@ -5218,8 +5221,11 @@ surfaces:
   # `TORTOISE_TEST_CARVE_OUT` is set — the tier-2 legs and the carve-out job BOTH set it
   # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`);
   # measured on the default lane with no opt-in: 113 errors,
-  # `Failed: default pytest requires TORTOISE_DB_URI`, and the carve-out job runs the
-  # `carve_out` set, which this file is NOT in — so no no-DB leg can read this green.
+  # `Failed: default pytest requires TORTOISE_DB_URI` — so the refusal is that DEFAULT
+  # lane's shape, not every URI-less one. ⛔ The skip is not the carve-out JOB's private
+  # shape: this file is not in `carve_out`, yet every non-`full` PR leg opts in by flag and
+  # runs it URI-less, so those TIER-2 legs read it green-with-skips BY DESIGN (measured 23
+  # passed / 90 skipped), and the full legs are where the four DB arms execute.
   # The predicate-matrix and census classes are pure Python. The weight below is still the
   # flat default, and the reading shows COST, never the skip.
   # ⛔ Neither registration makes the DB half EXECUTE: the `api` row's motivating arm is a
