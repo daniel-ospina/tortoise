@@ -97,6 +97,7 @@ Static, stdlib-only, no network / DB / graph.
 
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -384,16 +385,31 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
     # reddened `main`. What this asserts is that the constant reaches a
     # `"|".join(`, in either shape: a dead constant (joined nowhere) still
     # reddens it, which is the failure the assertion exists to catch.
-    # STATED LIMIT, unchanged in kind: this is a shape test on the source text,
-    # so a comment line naming both would satisfy it. `ranking.py` has exactly
-    # one such line, and the quote grep above already refuses the constant's
-    # value going missing.
-    joined = [
-        line
-        for line in ranking.splitlines()
-        if '"|".join(' in line and "ABOUT_EDGE_TYPES" in line
-    ]
-    assert joined, (
+    # ⛔ AND IT IS READ FROM THE PARSE, NOT FROM THE LINES (#13387 review P2).
+    # A line scan replaced one false red with a narrower one: wrapping the SAME
+    # expression over three lines is valid Python with unchanged semantics, and
+    # the scan refused it. The AST has no formatting, so a reflow cannot redden
+    # this, while every revert still does — dropping `+ tuple(ABOUT_EDGE_TYPES)`,
+    # deleting the join, or composing the alternation from literals all leave no
+    # `"|".join(...)` call whose argument mentions the constant.
+    # STATED LIMIT, unchanged in kind: this is a shape test on the parse, so a
+    # DIFFERENT `"|".join` that mentions `ABOUT_EDGE_TYPES` would satisfy it
+    # (the same limit the substring had); the quote grep above already refuses
+    # the constant's value going missing.
+    joins_the_constant = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and isinstance(node.func.value, ast.Constant)
+        and node.func.value.value == "|"
+        and any(
+            isinstance(sub, ast.Name) and sub.id == "ABOUT_EDGE_TYPES"
+            for arg in node.args
+            for sub in ast.walk(arg)
+        )
+        for node in ast.walk(ast.parse(ranking))
+    )
+    assert joins_the_constant, (
         "`ABOUT_EDGE_TYPES` is no longer joined into a Cypher alternation, so "
         "`ranking.py` no longer reads the edge THROUGH it — the reason the claim "
         "gives for a literal grep missing these reads no longer holds"
