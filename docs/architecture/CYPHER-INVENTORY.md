@@ -391,7 +391,24 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where these numbers were last cut:** `origin/main` **`97fd713ffb`** — `sites` 1306→1308, `plain`
+**Where these numbers were last cut:** the PINS by `main`'s **`05fe46e94e`**, re-derived at
+`origin/main` **`b8f56fdec4`** — `sites` 1308→1311, `files` 98→99, `shape_plain` 857→859,
+`ast_door_calls` 1567→1569, `files_scanned` 297 unchanged.
+
+⛔ **Appendix A, however, was NOT re-cut by that commit, and this is the defect that keeps
+recurring here:** the pins are 25 SCALARS, so an insertion inside a file that already carries
+sites moves the `file:line` rows and moves no count. Measured at `b8f56fdec4`: `--check` prints
+`25 pinned counts match` while **6 appendix rows name lines that no longer carry their statement** —
+five in `tortoise/metering.py` (`measure_write_ops`, `_record_graph_storage_reading_locked`,
+`get_graph_storage_reading`, `record_postgres_bytes_written`, and the reading writer below them)
+and one in `tortoise/postgres_bytes.py`. This change regenerates Appendix A with `--markdown` at
+that head (verified byte-identical to a fresh run) and adds
+`tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` so the next
+main-move cannot repeat it — which is step 1 of the procedure above enforced instead of trusted.
+
+<details><summary>the previous cut (kept as history)</summary>
+
+`origin/main` **`97fd713ffb`** — `sites` 1306→1308, `plain`
 854→856 (read 573→575; the 281 write half is unchanged), `candidates` 573→575, `files_scanned`
 296→297, `ast_door_calls` 1563→1565, the `rg` reconciliation in §1 re-measured on this tree, and
 Appendix A regenerated with `--markdown`.
@@ -403,7 +420,9 @@ the pin it inherited (`1302` + its own four) instead of re-deriving from the mer
 measured on `7c1df6e7d6` — stayed absorbed only on paper. Measured, not inferred: `--json` at
 `7c1df6e7d6` reports 1304 sites with 0 in `tortoise/planned_occurrence.py`; at `97fd713ffb` it reports
 1308 with that one file carrying exactly 4, and `tortoise/projection/entities.py` reads 54 at BOTH.
-The numbers above are re-derived from `97fd713ffb`'s tree; this PR adds no statement site of its own.
+The numbers above are re-derived from `97fd713ffb`'s tree; that PR added no statement site of its own.
+
+</details>
 
 `.github/workflows/cypher-diff.yml` runs the **differential harness steps first and this census step
 LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers are then wrong), but
