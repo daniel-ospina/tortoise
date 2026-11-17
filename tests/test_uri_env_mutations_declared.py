@@ -486,15 +486,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # position/currency assertions cannot see a neighbour's residue. Nothing leaks
     # into a later docker-lane test: the probe restores in a `finally` at import
     # and the fixture restores after its `yield`. Raw `os.environ` sites only —
-    # this file has no `monkeypatch` mutation to declare.
-    # ⛔ NO `del` arm here, unlike the sibling rows above: the form
+    # this file has no `monkeypatch` mutation OF THE URI to declare (the
+    # `monkeypatch.setattr` at `:542` stubs an SDK getter, not the URI).
+    # ⛔ NO `del` arm here — and none on ANY row of this table: the 32 sibling rows
+    # that used to carry one lost it in #13146 F4, because the form
     # `os\.environ(?:…|del\s+os\.environ\[…\])` puts the del alternative AFTER the
     # literal `os\.environ`, so it can only match `os.environdel os.environ[…` —
-    # measured unreachable, and this file has no `del` site to declare. A future
-    # `del` reds as undeclared instead, which is the honest, file-scoped,
-    # fail-closed answer; `test_a_declaration_that_claims_del_can_match_del` keeps
-    # the dead arm from being copied back. The same inert arm was deleted from the
-    # 32 sibling rows that carried it (#13146 F4) — it matched nothing anywhere.
+    # measured unreachable (it matched nothing in the census, before or after; the
+    # site set was byte-identical at 602 either way), and this file has no `del`
+    # site to declare. A future `del` reds as undeclared instead, which is the
+    # honest, file-scoped, fail-closed answer;
+    # `test_a_declaration_that_claims_del_can_match_del` keeps the dead arm from
+    # being copied back.
     "test_13034_currency_rule_reads_position.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
