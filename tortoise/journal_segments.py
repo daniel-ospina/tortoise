@@ -18,7 +18,11 @@ reversible and removes no byte:
 
 * :func:`discover`, :func:`verify`, :func:`reconstruction_scope`,
   :func:`assert_full_reconstruction`, :func:`read_all_segments`,
-  :func:`plan_rotation` and :func:`summarise` are **READ-ONLY**.
+  :func:`read_all_segments_reporting_damage`, :func:`plan_rotation` and
+  :func:`summarise` are **READ-ONLY**. The `…_reporting_damage` form is the same
+  read with its two counters returned (`#13275` F2): they were computed per
+  segment here and discarded, which left every caller reporting the counts as
+  "not returned".
 * :func:`seal_active`, :func:`record_disposition` and :func:`adopt_crashed_seal`
   are the only writers. They are gated behind :data:`ENV_FLAG` (default OFF),
   they **rename**, **record** and (the repair verb) **append one row** — they
