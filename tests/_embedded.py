@@ -714,6 +714,16 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
     # tests/test_markers.py::test_no_redirect_stems_registry_exact.
     "test_10121_recency_tie",
+    # #13224: the cold-embedder WRITE BOUND. Every case builds its own
+    # `TortoiseSDK(<tmp_path>)` path store and reads the `Subject` row (and its
+    # `embedding IS NOT NULL` shape) back off it, and the end-to-end arm drives
+    # `tests.test_hosted_api.client` — whose registry is seeded EMBEDDED. A URI-set
+    # lane would redirect those constructions onto the shared server and grade a graph
+    # the test never seeded, so the file is a carve-out member. Registered with the
+    # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality) and DECLARED in
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact.
+    "test_13224_cold_embedder_write_bound",
 )
 
 _HAS_FALKOR: bool | None = None

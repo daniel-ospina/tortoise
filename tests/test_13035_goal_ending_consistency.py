@@ -58,6 +58,16 @@ from tortoise.sdk import (
 
 REPO = Path(__file__).resolve().parent.parent
 
+#: ⛔ The word the STORE keeps for an ended row, after #11824 S0.
+#:
+#: S0 canonicalises the two synonyms ON WRITE: a door accepts `archived` or
+#: `retracted` (and `deprecated` itself), and the node is stored as `deprecated`
+#: — its own refusal message states the mapping ("`archived` / `retracted`, which
+#: are stored as `deprecated`", ONTOLOGY §3). Every row below that reads a stored
+#: word back is asserting what the STORE KEEPS, so it asserts this; the synonym a
+#: caller may TYPE is a property of the door and is asserted at the doors.
+_CANONICAL_ENDED = "deprecated"
+
 
 @pytest.fixture
 def sdk(sdk_factory):
@@ -225,7 +235,7 @@ def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
     # node does not exist, the probe answers `{}`, and the same write lands
     fresh = sdk.create_point("goal", "GOAL - fresh [create-door]",
                              id=ulid(), status="archived")
-    assert fresh["status"] == "deprecated"   # #11824 S0: `archived`/`retracted` are declared synonyms and store as `deprecated`
+    assert fresh["status"] == _CANONICAL_ENDED
 
     # ⛔ THE FALSE-REFUSAL ARM: this write LANDS ``status="live"`` (the create
     # default, which the caller never names), so the pair it leaves is
@@ -305,7 +315,7 @@ def test_the_create_door_grades_the_DEFAULT_status_of_an_EXPLICIT_id(sdk):
     # read it the same way
     after = sdk.get_point(goal["id"])
     assert after["goalState"] == "abandoned"
-    assert after["status"] == "deprecated"
+    assert after["status"] == _CANONICAL_ENDED
     assert (after["goalState"] in RETIRED_GOAL_STATES) != (
         not live.is_terminal_status(after.get("status"),
                                     bool(after.get("outdated"))))
@@ -907,9 +917,13 @@ def test_an_UNHASHABLE_stored_status_reaches_the_documented_ValueError(sdk):
     reverted, because the fixture no longer depends on the door it is bypassing.
     """
     goal = _goal(sdk, tag="unhashable")
+    # ⛔ #11824 S0 CLOSED THE PUBLIC ROUTE for this shape (`a status must be a
+    # plain string, and list is not one`), so the unhashable value can no longer
+    # be written through a door — and the STORED-side hazard this test exists for
+    # is therefore reachable only BELOW the doors, which is where a legacy row
+    # sits. Injected raw, exactly as the legacy-row arms above do.
     sdk._get_proj().g.query(
-        "MATCH (n {id:$i}) SET n.status = $s",
-        params={"i": goal["id"], "s": ["live"]})
+        "MATCH (n {id:$id}) SET n.status = ['live']", params={"id": goal["id"]})
     with pytest.raises(ValueError) as exc:              # NOT TypeError
         sdk.update_knowledge(goal["id"], goalState="abandoned")
     assert isinstance(exc.value, ValueError)
@@ -1152,7 +1166,7 @@ def test_judging_a_RETIRED_goal_writes_no_cache_and_keeps_its_ending(sdk):
     assert made["goalState"] is None, made          # the cache was NOT written
     node = sdk.get_entity(goal["id"])
     assert node["goalState"] == "abandoned", node   # the human's ending survived
-    assert node["status"] == "deprecated", node
+    assert node["status"] == _CANONICAL_ENDED, node
 
 
 class _UnreadableSdk:
@@ -1240,7 +1254,7 @@ def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
     sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
     node = sdk.get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
-    assert node["status"] == "deprecated", node
+    assert node["status"] == _CANONICAL_ENDED, node
 
 
 def test_the_DRY_RUN_reports_None_for_the_goal_it_is_about_to_CLEAR(sdk):
@@ -1824,7 +1838,7 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
     sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
     node = sdk.get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
-    assert node["status"] == "deprecated", node
+    assert node["status"] == _CANONICAL_ENDED, node
     # both surfaces agree the goal is over — the rule the message serves
     assert (node["goalState"] in RETIRED_GOAL_STATES,
             not live.is_terminal_status(node.get("status"),
@@ -1854,4 +1868,4 @@ def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
     # the ending survived the refused write
     after = sdk.get_point(ended["id"])
     assert after["goalState"] == "abandoned", after
-    assert after["status"] == "deprecated", after
+    assert after["status"] == _CANONICAL_ENDED, after

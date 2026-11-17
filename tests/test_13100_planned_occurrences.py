@@ -931,13 +931,17 @@ class TestThePlanPipeline:
                   "RETURN count(*)")
         with pytest.raises(ValueError, match="already settled") as exc:
             PO.record_occurrence(sdk, "Retired plan")
-        # ⛔ The word the refusal quotes is the one the RECORD holds, and since
-        # `#11824` S0 the synonyms are normalised on write: `archived` and
-        # `retracted` are STORED as `deprecated` (`lifecycle_vocabulary`), so
-        # asserting the input spelling pinned the writer's old vocabulary rather
-        # than this gate. The claim here is that the gate FIRED and named the
-        # status it decided on.
-        assert "deprecated" in str(exc.value), exc.value
+        # ⛔ PIN THE WORD THE ROW ACTUALLY HOLDS, not the word the caller passed.
+        # `#11824`/`#13143` S0 put a synonym fold on the one lifecycle door
+        # (`archived` -> `deprecated`: the store gets the CANONICAL word and the
+        # caller gets no receipt), so after S0's merge the row holds `deprecated`
+        # while `archived` is still an ENDED word to this PR's own gate. Reading the
+        # value back keeps the assertion discriminating under BOTH models; deleting
+        # it would leave the gate pinned only by `match="already settled"`, which
+        # every status ending shares.
+        assert repr(sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$o}) RETURN o.status",
+            params={"o": plan["id"]}).result_set[0][0]) in str(exc.value)
         with pytest.raises(ValueError, match="already settled"):
             PO.settle_plan(sdk, "Retired plan", PO.STAGE_CANCELLED)
         assert sdk._get_proj().g.query(
