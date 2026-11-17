@@ -46,7 +46,7 @@ mechanism is an `embedding_vec` column plus a pgvector index on the table that o
 the FalkorDB question** (four more HNSW structures, five total, on provisioned RAM with no eviction —
 `STORAGE-ARCHITECTURE.md` §12.1c) **and does not reach a pgvector index.** ✅ **The 2026-11-10 KEEP ruling's prohibition is what binds today** (owner, `#11395` comment `6781921075`): `:Object`/`:Subject`
 keep their stored embedding and **no pass may remove it or stop writing it**. The 2026-11-17 ruling below decides the
-**INDEX** half — yes, in Postgres — and its state is **decided, implementation in flight — `#13220`**; ⚠️ **and the ruling that governs removal is the same day's SECOND one, which
+**INDEX** half — yes, in Postgres — and its state is **decided, implementation in flight (the decision is recorded at `#13220`)**; ⚠️ **and the ruling that governs removal is the same day's SECOND one, which
 supersedes the KEEP ruling for the GRAPH COPY only** (`#11395` comment `6956793300`, `OVERRIDES:` recorded there): that graph copy's removal becomes permissible only once the
 record holds **and** indexes that label — record first (`#13220`'s step 1), graph removal second, **in a later release and
 never in the same one** — a condition not met while implementation is
