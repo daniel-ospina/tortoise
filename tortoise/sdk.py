@@ -49422,12 +49422,14 @@ class TortoiseSDK:
                     props, label=_carrier_label, surface="update_entity",
                     stored_status=_carrier_rows[0][0])
                 break
-        # ── #11825: an `:Event` target, BEFORE the first write ──
+        # ── #11825 → #13100: an `:Event` target, BEFORE the first write ──
         # ⛔ THIS BLOCK MUST PRECEDE the Point status arm below, which WRITES
         # (`SET n += $s`) and only THEN drops the key from `props`. It used to sit
         # after that arm, so on a node carrying BOTH `:Point` and `:Event` the
         # Point arm consumed and cleared `status` before this guard ran — the
-        # guard then saw no declaration at all and the terminal status stood.
+        # guard then saw no declaration at all and the terminal status stood. The
+        # same ordering is what makes #13100's widened refusal (EVERY non-`None`
+        # `status`, not just the terminal half) atomic on that hybrid.
         # Measured (review cycle 9, P1): `update_entity(<:Point:Event>,
         # status="superseded")` was ACCEPTED, the node ended with
         # `status='superseded'` on an `:Event`, and the record (label="Point")
@@ -49471,12 +49473,17 @@ class TortoiseSDK:
                 params={"id": id_val},
         ).result_set[0][0]:
             refuse_event_lifecycle_state(props, door="update_entity")
-            # ⛔ No `props` surgery here on purpose: a non-`None` `status` on an
-            # `:Event` target is now REFUSED outright (#13100 — the non-terminal
-            # allowance #2788 declared is gone), and on a multi-label node the
-            # property is shared, so there is no "Point side" to keep it away
-            # from. The guard's whole job is the key, and it has it; `status=None`
-            # (the legacy clear) rides through as an ordinary Point-side write.
+            # ⛔ No `props` surgery here on purpose. #13100 retired #2788's
+            # non-terminal prop lane, so this guard now refuses EVERY
+            # non-`None` `status` and returns only for a CLEAR (`status=None`,
+            # the documented un-mark route for a legacy row). On a multi-label
+            # node the property is SHARED, so there is no "Point side" to keep
+            # it away from — dropping the key here would turn that clear into a
+            # silent no-op instead of a `SET n += {status:null}` that removes the
+            # word, which is why it is left to the write arms below. (One shape
+            # cannot reach the clear route: a `:Point:Event` hybrid, whose Point
+            # arm refuses `None` as a non-vocabulary word — `Invalid status
+            # None`, a pre-existing Point-side behaviour, unchanged here.)
 
         # ── #9649: this door consults the lifecycle guard (#2498/#7819) ───────
         # Measured on the pre-change tree (issue #9649, comment `6839154493`, at
@@ -49724,16 +49731,14 @@ class TortoiseSDK:
                 and _pt_statuses_exact == (_rendered_status_exact,))
             for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
                 try:
-                    # ⛔ `refuse_event_terminalization=False` (#11825 merge): this
-                    # door writes a WINDOW or a non-terminal prop as often as it
-                    # writes a terminal status, so the guard's label-only `:Event`
-                    # arm is the wrong question here — it refused `draft -> live`
-                    # on a hybrid (the prop lane #2788 pins). The Event half is
-                    # answered ABOVE, by the props-aware
-                    # `refuse_event_lifecycle_state`, which refuses EVERY
-                    # non-`None` `status` since #13100 (the terminal-only boundary
-                    # was #11825's interim one) and lets `None` through as the
-                    # legacy clear.
+                    # ⛔ `refuse_event_terminalization=False` (#11825 merge): the
+                    # label-only `:Event` arm is the wrong QUESTION at this site —
+                    # it answered for the label where the door's question is the
+                    # caller's DECLARATION, and it was the prop lane #2788 used to
+                    # pin here that made the difference visible. (That lane is
+                    # retired: #13100 refuses any non-`None` `status` on an
+                    # `:Event` at the door, above.) The Event half is answered
+                    # ABOVE, by the props-aware `refuse_event_lifecycle_state`.
                     self._assert_lifecycle_guard(
                         _lifecycle_id, method="update_entity", missing_ok=True,
                         allow_operator=True,
