@@ -441,10 +441,23 @@ def test_every_construction_site_passes_a_budget():
     A site that drifts back to the bare call is a read whose record leg is on
     the door's 15 s again, and nothing at runtime would say so — the leg would
     look armed and healthy while it quietly outlived the read.
+
+    ⛔ THE VALUE, NOT THE SPELLING (#11691 second review, finding 1). This pin
+    used to reject only an ABSENT keyword and an explicit `None` constant, so
+    `timeout_ms=15000` at any site — or a mutation of `_budget_ms =
+    VECTOR_LEG_BUDGET_MS` to `_budget_ms = 15000` — left every arm in this file
+    GREEN. Measured at `f0da22b90f`: with `timeout_ms=15000` at the
+    `_cross_lens_pairs` site (`sdk.py:35507`), all 12 tests here passed. The
+    sibling pins cannot see it either: `test_the_dense_pass_default_…` pins a
+    different function's DEFAULT, `test_the_expansion_pass_…` pins the OTHER
+    end of the budget, and `test_no_leg_in_the_fused_read_…` pins a different
+    expression shape (`int(_elevated_timeout_ms or X)`). So the pin now follows
+    the value one hop: every site must reach `VECTOR_LEG_BUDGET_MS`.
     """
     source = pathlib.Path(sdk_module_file()).read_text()
+    tree = ast.parse(source)
     sites = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "_record_vector_searcher"):
@@ -452,6 +465,10 @@ def test_every_construction_site_passes_a_budget():
     assert len(sites) == 3, (
         f"expected the three known construction sites, found {len(sites)} — "
         f"a new one must pass the read's budget too")
+    # The values the sites bind are LOCALS, so this pin needs one hop of
+    # resolution or it grades the spelling instead of the value (see the
+    # measured counter-example in this test's docstring).
+    assigned = _single_assignments(tree)
     for node in sites:
         keyword = next((kw for kw in node.keywords if kw.arg == "timeout_ms"), None)
         assert keyword is not None, (
@@ -464,10 +481,108 @@ def test_every_construction_site_passes_a_budget():
         # `or VECTOR_LEG_BUDGET_MS` expression whose left side is always None)
         # would satisfy a presence-only pin while the leg is unbounded again.
         bound = next(kw.value for kw in node.keywords if kw.arg == "timeout_ms")
-        assert not (isinstance(bound, ast.Constant) and bound.value is None), (
-            f"the call at sdk.py:{node.lineno} binds `timeout_ms=None`, which "
-            f"leaves the record leg on the door's {DOOR_MS} ms bound — pass the "
-            f"read's budget instead")
+        # ⛔ …AND A NUMBER IS NOT BINDING EITHER (second review, finding 1).
+        # Measured: with `timeout_ms=15000` at the `_cross_lens_pairs` site,
+        # every arm in this file stayed GREEN — the old guard rejected only the
+        # `None` constant. A literal is precisely the defect (the hardcoded leg
+        # bound), so reject the whole `Constant` shape rather than enumerating
+        # which constants are bad.
+        assert not isinstance(bound, ast.Constant), (
+            f"the call at sdk.py:{node.lineno} binds `timeout_ms=` a literal "
+            f"({ast.unparse(bound)}).  A `None` leaves the record leg on the "
+            f"door's {DOOR_MS} ms bound and a NUMBER is the hardcoded leg this "
+            f"PR removed — a literal is never the read's budget")
+        assert _binds_the_read_budget(bound, assigned, tree), (
+            f"the call at sdk.py:{node.lineno} binds `timeout_ms=` "
+            f"{ast.unparse(bound)}, which does not reach `VECTOR_LEG_BUDGET_MS` "
+            f"directly or through the single assignment of the name it uses — "
+            f"so a mutation of that assignment to a number silently unbounds "
+            f"this leg while every other arm stays green (measured)")
+
+
+def _single_assignments(tree: ast.Module) -> dict[str, list[ast.expr]]:
+    """Every `<name> = <value>` / `<name>: <ann> = <value>` value in a module.
+
+    The one hop the construction-site pin needs: the sites pass LOCALS
+    (`_budget_ms`, `_leg_budget_ms`), so a pin that only reads the call's own
+    arguments cannot see the assignment those locals come from — and mutating
+    `_budget_ms = VECTOR_LEG_BUDGET_MS` to `_budget_ms = 15000` is the same
+    defect one level up.
+    """
+    out: dict[str, list[ast.expr]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    out.setdefault(target.id, []).append(node.value)
+        elif (isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.value is not None):
+            out.setdefault(node.target.id, []).append(node.value)
+    return out
+
+
+def _param_default_names_the_budget(tree: ast.Module, name: str) -> bool:
+    """Is `name` some function's parameter, defaulting to the constant?
+
+    The third construction site passes its OWN parameter (`timeout_ms=timeout_ms`
+    inside `_entity_key_dense_pass`), so its value is the CALLER's and no
+    module-level assignment to resolve. That shape's bound is pinned by
+    `test_the_dense_pass_default_is_the_one_budget_not_a_literal` (the default)
+    and by `test_the_expansion_pass_binds_the_constant_not_a_literal` (the call
+    site), so this pin accepts it only when that default really names the
+    constant — the short-circuit is earned, not assumed.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        # Positional defaults align to the TAIL of `args`; kwonly defaults align
+        # 1:1 with `kwonlyargs` and may be `None` ("required"). Zipping them in
+        # one list is how a pin silently anchors on the wrong parameter.
+        positional = node.args.args[len(node.args.args) - len(node.args.defaults):]
+        pairs: list[tuple[ast.arg, ast.expr | None]] = [
+            *zip(positional, node.args.defaults, strict=False),
+            *zip(node.args.kwonlyargs, node.args.kw_defaults, strict=False),
+        ]
+        for param, default in pairs:
+            if (param.arg == name and default is not None
+                    and _names_the_budget(default)):
+                return True
+    return False
+
+
+def _binds_the_read_budget(
+        expr: ast.expr,
+        assigned: dict[str, list[ast.expr]],
+        tree: ast.Module) -> bool:
+    """Does this bound reach `VECTOR_LEG_BUDGET_MS` — directly, or one hop?
+
+    DIRECT: the expression reads the constant (`_names_the_budget`).
+    ONE HOP: it mentions a name whose EVERY assignment in `sdk.py` names the
+    constant (`_budget_ms = VECTOR_LEG_BUDGET_MS`,
+    `_leg_budget_ms = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)`).
+    ALL, not ANY: a name assigned twice — once to the constant and once to a
+    number — is still a site that can run on the number, so `any` would be the
+    wrong quantifier here.
+    PARAMETER: a name that is a function parameter whose default names the
+    constant (see `_param_default_names_the_budget`).
+
+    Anything else — a literal (rejected earlier), an attribute of another
+    module (`record_serve.RECORD_STATEMENT_TIMEOUT_MS`), a name with no
+    assignment — is FALSE, which is what makes a mutation of the assignment
+    RED instead of invisible.
+    """
+    if _names_the_budget(expr):
+        return True
+    for node in ast.walk(expr):
+        if not isinstance(node, ast.Name):
+            continue
+        values = assigned.get(node.id)
+        if values and all(_names_the_budget(value) for value in values):
+            return True
+        if _param_default_names_the_budget(tree, node.id):
+            return True
+    return False
 
 
 def _names_the_budget(node: ast.expr) -> bool:
@@ -723,3 +838,25 @@ def test_the_index_split_re_derives_from_the_shapes_that_were_measured():
         f"the corpus field describes {corpus['rows']} rows, not the 1,200 the "
         "write phase consumes")
     assert 3_500 < corpus["text_bytes_per_row_mean"] < 3_700, corpus
+
+    # ── the two "of which" rows of the volume table are a DERIVED SPLIT ────
+    # (second review, finding 2). The README publishes 69.0 MB / 1.9 MB, which
+    # are NOT fields — they are `production_index_bytes` apportioned by the
+    # measured shape's own index sizes, and the README now says so with the
+    # formula and its inputs. What this arm adds is that the stated derivation
+    # is the one the artifact supports: the measured index set must apportion
+    # `scale.index_bytes` EXACTLY (no index left over, none invented), so the
+    # split sums back to the aggregate rather than to something near it — the
+    # shape that makes a published per-index figure checkable at all.
+    scale_indexes = art["scale"]["indexes"]
+    pv_index_bytes = art["production_volume"]["production_index_bytes"]
+    assert sum(scale_indexes.values()) == art["scale"]["index_bytes"], (
+        "the measured index set does not add up to `scale.index_bytes`, so the "
+        "README's apportionment formula does not describe the artifact: "
+        f"{scale_indexes} vs {art['scale']['index_bytes']}")
+    split = {name: round(pv_index_bytes * size
+                         / art["scale"]["index_bytes"])
+             for name, size in scale_indexes.items()}
+    assert round(split[full] / 1e6, 1) == 69.0, split
+    assert round(split["point_pkey"] / 1e6, 1) == 1.9, split
+    assert sum(split.values()) == pv_index_bytes, split
