@@ -67,6 +67,7 @@ the box, are:
 |---|---|---|---|
 | product surface (this census) | **1313** | **99** | `tortoise/**/*.py`, test modules excluded |
 | every tracked surface (`--all-surface`) | **9,055** | **820** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
+
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
 with a count that is regenerated and *pinned* (§7), so the next lane does not have to guess which of
@@ -141,7 +142,8 @@ exclusion dropped they read **2,063** and **2,333**. The 69-occurrence 2,333→2
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
-The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** andthe **= 1,571 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** and
+the **= 1,571 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
