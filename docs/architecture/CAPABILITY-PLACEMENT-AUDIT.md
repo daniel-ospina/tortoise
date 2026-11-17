@@ -51,14 +51,14 @@ squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/
 'refs/pull/13095/head:ccb49741b2ec'`), so every cite below can be opened there. On any later head they
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
-**106 of this document's 213** `file:line` pairs name a different line at `534f3e1bee` (counted as the
+**107 of this document's 214** `file:line` pairs name a different line at `534f3e1bee` (counted as the
 unique `path.py:NNNN` pairs in this file after resolving **every** written path to the module it names
 (a bare `name.py:` is `tortoise/name.py` when that file exists, and the one file of that name
 otherwise — `edges.py` is `tortoise/projection/edges.py`, `propagation.py` is
-`tortoise/projection/propagation.py`; a range cite counts once, by its **start** line), which dedupes the 229 as-written spellings to 213 — 16
+`tortoise/projection/propagation.py`; a range cite counts once, by its **start** line), which dedupes the 230 as-written spellings to 214 — 16
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
 text), and **none of
-the 213 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
+the 214 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 ⚠️ **The pin promise was RE-CHECKED, not assumed, in the `#13083` follow-up — and it did not hold.**
 Sixteen superseded line-addresses did not open on the line their row quotes at `ccb49741b2ec`. ⚠️ **The
@@ -79,8 +79,8 @@ file — `search_engine.py` FTS
 `:6830`; `sdk.py`'s second `capture_redactions` writer `:2705`; `audit.py`'s carrier probe `:2445`/`:2456`;
 and `mcp_server.py`'s `entity_type` passthrough `:5475` — and the drift figure
 above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so this revision moved it**:
-it contributes **15** resolved pairs, **8** of which drift — 98 (the `main` copy) + 8 = **106** — and every one of
-the 15 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
+it contributes **16** resolved pairs, **9** of which drift — 98 (the `main` copy) + 9 = **107** — and every one of
+the 16 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of §0) instead of enumerated here.
@@ -109,7 +109,7 @@ nothing else; row 15 gives bare module names beside `hosted_api.py:32965` and on
 five are *at risk* of drifting silently: no symbol will be there to re-find — for them the number IS the
 citation — so an insert above a cited site is undetectable from the row alone. The risk has already begun
 to bite: of the line-numbered cites in these five rows, **ten no longer name the same line at `main`**
-(counted at `534f3e1bee`, the same head the 106-of-213 figure above is measured at) — row 15's `hosted_api.py:32965`, whose
+(counted at `534f3e1bee`, the same head the 107-of-214 figure above is measured at) — row 15's `hosted_api.py:32965`, whose
 `MERGE (p:PackInstall …)` is at `:33539` there, and 9 of row 18's 16 — while rows 10, 11 and 14 and row
 15's `pack_manifest_store.py:467` still do. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
 Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
@@ -382,7 +382,9 @@ MIXED set, and precision here is the point — it is not one claim:
   columns** of two walks — the retrofit audit's short-turns query (`session_schema.py:855-861`, whose own
   comment at `:852-853` says they are *"reported beside it"*) and `list_sessions`
   (`hosted_api.py:23938-23970`) — and of the session-detail **point lookup** (`sdk.py:52227-52251`, no walk in
-  the statement at all); **`actor_user_id`** is a sibling in that same LIST row (`hosted_api.py:23958`), a filter
+  the statement at all); **`actor_user_id`** is a sibling in that same LIST row (`hosted_api.py:23958`) and in the
+  session-detail endpoint's OWN point lookup, which has no `CONTAINS` walk either
+  (`hosted_api.py:24316-24335`, `RETURN s.harness` at `:24319`), a filter
   in the endpoint's own conditions (`:49836`, `s.actor_user_id = $uid`) and carries its own `:Session` index
   (`projection/__init__.py:21185`) — sibling, filter, index, and no walk, so `none` like its neighbours;
   `entity_links_attempted` is a sibling column of the entity-link walk
@@ -452,7 +454,7 @@ justification. **Verdict: `graph`.**
 | `tortoise/event_store.py:801`, `:879` | per-page key existences inside the emit path | **none** |
 | `tortoise/event_store.py:1043` | `MATCH (n:GraphEvent) RETURN count(n)` — the overflow path's whole-label total, counted BEFORE `purge_overflow` (`:1038`) decides the excess. An aggregate, not a key existence and not a delete; the two purge deletes are `:1029`/`:1053`, on the row below | **none** |
 | `tortoise/event_store.py:1029` (`purge_expired`) / `:1053` (`purge_overflow`) | predicate deletes — `WHERE n.ts < $cutoff` and `ORDER BY n.seq ASC LIMIT $overflow` + `DETACH DELETE` (the **def** lines are `:1014`/`:1038`) | **none** |
-| `tortoise/hosted_backup.py:890`, `:1182`, `:1383` | `:890` is `MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)`; `:1182`/`:1383` are whole-graph export scans (`MATCH (n) RETURN labels(n), properties(n)`) — aggregates. ⚠️ **Three sites named `:GraphEventMeta` were removed from this table, and the rule that removed them is stated here because nothing else in it states one**: a statement whose pattern names only the SIBLING label is a reader of that label, not of `:GraphEvent`, so it belongs to §2.7's `:GraphEventMeta` row and not to this one — `hosted_backup.py:842` (`MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)`) and, for the identical shape, `event_store.py:557` / `:657` (`MATCH (m:GraphEventMeta) RETURN max(m.last_seq)`), all three of which §2.7 cites. Earlier drafts attributed `:842`'s columns to this row and left `:557`/`:657` here beside it, which is why the rule is written down rather than implied. ⛔ **The one statement that IS censused in both tables is `event_store.py:1103-1110`** — cited here by its `:1105` `min(e.seq)` line and in §2.7 by its `:1103` start, because `MATCH (m:GraphEventMeta) OPTIONAL MATCH (e:GraphEvent) … min(e.seq) … SET m.first_seq` reads BOTH labels: it is an RMW on `:GraphEventMeta` whose floor is computed from `:GraphEvent`. Its `:1103` address belongs to §2.7 and its `:1105` to this row, which is the distinction the two tables draw. | **none** |
+| `tortoise/hosted_backup.py:890`, `:1182`, `:1383` | `:890` is `MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)`; `:1182`/`:1383` are whole-graph export scans (`MATCH (n) RETURN labels(n), properties(n)`) — aggregates. ⚠️ **Three sites named `:GraphEventMeta` were removed from this table, and the rule that removed them is stated here because nothing else in it states one**: a statement whose pattern names only the SIBLING label is a reader of that label, not of `:GraphEvent`, so it belongs to §2.7's `:GraphEventMeta` row and not to this one — `hosted_backup.py:842` (`MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)`) and, for the identical shape, `event_store.py:557` / `:657` (`MATCH (m:GraphEventMeta) RETURN max(m.last_seq)`), all three of which §2.7 cites. Earlier drafts attributed `hosted_backup.py:842`'s columns to this row and left `event_store.py:557`/`:657` here beside it, which is why the rule is written down rather than implied. ⛔ **The one statement that IS censused in both tables is `event_store.py:1103-1110`** — cited here by its `:1105` `min(e.seq)` line and in §2.7 by its `:1103` start, because `MATCH (m:GraphEventMeta) OPTIONAL MATCH (e:GraphEvent) … min(e.seq) … SET m.first_seq` reads BOTH labels: it is an RMW on `:GraphEventMeta` whose floor is computed from `:GraphEvent`. Its `:1103` address belongs to §2.7 and its `:1105` to this row, which is the distinction the two tables draw. | **none** |
 | `tortoise/sdk.py:13766` (the `read_after` call inside `poll_events`, `:13642`) | pages the feed | **none** |
 | `tortoise/why_snapshot.py:526` | pages the feed to rebuild a why-snapshot | **none** |
 | `tortoise/webhook_delivery.py:1041` (`event_head_seq`) | `max(e.seq)` — aggregate | **none** |
@@ -865,9 +867,9 @@ contrast.)
 retrofit audit alone:
   the session LIST (`hosted_api.py:23958`, `:23959`, `:23965`, `:23969`), the retrofit audit
   (`session_schema.py:860-861`, `:916-917`) and the session-DETAIL point lookup (`sdk.py:52227-52251`);
-  `harness`'s NAMED readers are the filter-and-counts at `hosted_api.py:25703`/`:25708` **plus two id-keyed
-  point lookups** (`:10132`, `:25822`) — plus the three sibling projections named just above
-  (`hosted_api.py:23958`, `sdk.py:52229`, `session_schema.py:861`).
+  `harness`'s NAMED readers are the filter-and-counts at `hosted_api.py:25703`/`:25708` **plus four id-keyed
+  point lookups** (`:10132`, `:12693`, `:24319`, `:25822`) — plus the three sibling projections named just
+  above (`hosted_api.py:23958`, `sdk.py:52229`, `session_schema.py:861`).
   Every one is a point lookup, a property guard or a sibling column — capability **`none`** — which is why
   the verdict is `record_only` on the CAPABILITY rule, never on the false premise "unread". Moving them is a
   **property-level** placement, which the row-level tier cannot express.
