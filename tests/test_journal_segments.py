@@ -38,6 +38,7 @@ from tortoise.journal_segments import (
     discover,
     plan_rotation,
     read_all_segments,
+    read_all_segments_reporting_damage,
     read_manifest,
     reconstruction_scope,
     record_disposition,
@@ -686,6 +687,42 @@ def test_a_damaged_record_makes_the_strict_read_REFUSE(graph_dir: Path):
 
     salvaged = read_all_segments(graph_dir, salvage=True)   # explicit choice
     assert [r["id"] for r in salvaged] == ["a0", "a2"]
+
+    # ⛔ THE COUNT IS THE READER'S, AND IT LEAVES THE READER (review F2, #13275).
+    # It was computed per segment here and then DISCARDED, so the only caller that
+    # had to render it (`tools/record_runner.read_journal`) reported `corrupt=None`
+    # = "unmeasurable" for EVERY segmented layout — i.e. for every graph directory.
+    # A count that is measured and then thrown away is a reporting defect, not a
+    # state of the journal.
+    salvaged_records, corrupt, torn = read_all_segments_reporting_damage(
+        graph_dir, salvage=True)
+    assert [r["id"] for r in salvaged_records] == ["a0", "a2"]
+    assert corrupt == 1, f"the mid-file skip must be COUNTED, got {corrupt!r}"
+    assert torn == 0, torn
+
+    # …and the STRICT read refuses, so `corrupt is None` was never the reason a
+    # non-salvage segmented read is trustworthy: it cannot skip a line at all.
+    with pytest.raises(JournalLayoutError):
+        read_all_segments_reporting_damage(graph_dir)
+
+
+def test_a_TORN_FRAGMENT_is_counted_but_is_not_mid_file_damage(graph_dir: Path):
+    """The two classes are reported SEPARATELY, because they mean different things.
+
+    A torn fragment was never a complete record (a SIGKILL mid-append), so it
+    shifts no position; a mid-file skip was a record the journal held and lost.
+    One counter for both let a caller conflate them — which is how a completion
+    claim came to be withdrawn from the commonest damage case (review F2, #13275).
+    """
+    write_journal(graph_dir, records(3, "a"))
+    path = graph_dir / ACTIVE_NAME
+    with path.open("ab") as fh:
+        fh.write(b'{"id": "a3", "ty')            # SIGKILL mid-append, no newline
+
+    kept, corrupt, torn = read_all_segments_reporting_damage(graph_dir)
+    assert [r["id"] for r in kept] == ["a0", "a1", "a2"]
+    assert corrupt == 0, "a torn tail is not a mid-file skip"
+    assert torn == 1, f"the reader stopped counting torn tails: {torn!r}"
 
 
 # ---------------------------------------------------------------------------

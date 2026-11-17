@@ -752,7 +752,44 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     assert any("declares status" in m and ":Event" in m for m in ev_msgs), ev_msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(event_only)
+    # ⛔ ZERO mutation on BOTH halves of this bundle, not only the Event: the
+    # Object PRECEDES the refused Event in this bundle's entity list, so a Phase 1
+    # that refused LATE — validation moved behind the first write — leaves
+    # `Object 'Solo'` behind (count 1) and then dies mid-write on the Event door's
+    # refusal (`tortoise/live.py::refuse_event_lifecycle_state`, whose message is
+    # `Refused: `status={…}` is not writable on an :Event (<door>). …`). That is the
+    # #2422/#7925 partial-mutation class.
+    # ⚠️ Why THIS arm and not the mixed bundle above: under a LATE mutant the mixed
+    # bundle is stopped earlier and for a different reason — its first write is
+    # `Alpha`, whose dict status the WRITER refuses (`a status must be a plain
+    # string`), so its `'Alpha'` count is never reached. This arm is the one that
+    # pins the partial write when the `:Event` refusal is the bundle's ONLY
+    # violation.
+    assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 0
+
+    # …and the arm is NOT "refuse every entity that declares a status". The
+    # status-less `:Event` half is already pinned in this file, in the Event-only
+    # sibling `test_direct_route_live_event_status_is_refused`; what nothing pinned
+    # is this COMBINATION end-to-end — the documented clear route (a status-less
+    # `:Event`) beside a VALID lifecycle word on an `:Object` in ONE bundle is
+    # ACCEPTED and BOTH nodes land. An over-rejecting Phase 1 reds this without
+    # touching either refusal arm above.
+    # ⚠️ Scope, so this arm cannot be read wider than it is: the contrast is
+    # VALUE-scoped for the `:Object` arm only. The `:Event` refusal is a **KEY**
+    # refusal — `tortoise/live.py::refuse_event_lifecycle_state` says so outright
+    # ("any non-`None` status is refused, whatever its type") — so a VALID word on
+    # an `:Event` is still refused; that is pinned by
+    # `test_direct_route_live_event_status_is_refused`, not by this arm.
+    ok = {"entities": [
+        {"ref": "o", "type": "object", "name": "Solo", "status": "live"},
+        {"ref": "e1", "type": "event", "name": "OnlyEvent",
+         "eventKind": "sessionCaptured"},
+    ]}
+    assert sdk._validate_bundle(ok) == []
+    sdk.ingest(ok)
+    assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 1
+    assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 1
 
 
 @pytest.mark.parametrize("spelling", ["top", "nested"])

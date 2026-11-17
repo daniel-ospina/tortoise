@@ -6542,13 +6542,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # forward merge of `main` `aa8413ca38` into `#12592`: `#12592`'s OWN `sdk.py`-adjacent
         # insertions moved `hosted_api.py` by +102 at BOTH ends, and the three offsets above
         # still hold EXACTLY at the new START, so the START is confirmed by structure rather
-        # than assumed from one bumped number:
+        # than assumed from one bumped number — and ⛔ RE-DERIVED ONCE MORE at the rebase onto
+        # `main` @ `b8f56fdec4`, where the three offsets STILL hold at the new START, so the
+        # START is again confirmed by structure rather than by a bumped number:
         # ⛔ RE-DERIVED AGAIN at the `#13102` merge of `origin/main` `b8f56fdec4` (13 main
         # commits past `97fd713ffb`, which had already moved the span to 14896-14973): the span
         # start is now 15180 and the END — the blank line before `return OrgInfoResponse(` — is
         # 15257 (the call itself is `:15258`). The three offsets (+29 `nodes_used`, +39
         # `max_nodes`, +77 END) still hold EXACTLY at the new START, which is how the figures
-        # below were re-derived rather than nudged. Measured on the merged tree:
+        # below were re-derived rather than nudged. Measured on the merged tree, and re-measured
+        # again after the merge resolved — the two sides of the conflict printed the SAME three
+        # figures, which is what made keeping them a verification rather than a side-pick:
         # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15180`,
         # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15209` (inside the span),
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
@@ -6689,8 +6693,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # true for any end at or beyond `:15219` (both needles are the file's only occurrences —
     # `:15209` and `:15219` — so a later end cannot change the sum). Ends below `:15219` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15180`-`:15218` gives a non-empty window that lacks the second needle, and an
-    # end below `:15180` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15180`-`:15218` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15180` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
