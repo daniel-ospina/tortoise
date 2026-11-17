@@ -1864,6 +1864,18 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # around it. Pinned by
              # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
              "tools/dod_5090_probe.py",
+             # #13108/#13121 review F4: tools/dense_leg_probe_13108.py owns
+             # tests/test_dense_leg_probe_13108.py (registered `core`), and the
+             # same flat `tools/` swallow applies: a probe-only change filters to
+             # `changed == []`, takes the docs-only early return and runs tier-1
+             # smoke, where that file is NOT registered. That matters here for the
+             # reason it matters for the entry directly above — this instrument's
+             # deliverable is the latency/mechanism table `#13108` reopens
+             # `STORAGE-ARCHITECTURE.md` §14.3 V3 on, so a diff that hard-wires
+             # `over_budget` or drops `percentile`'s `None`-for-empty would merge
+             # with every pin that catches it asleep. Pinned by
+             # tests/test_dense_leg_probe_13108.py::test_a_tool_only_diff_selects_this_pin.
+             "tools/dense_leg_probe_13108.py",
              # #12926: the pre-merge deployment-config check. `tools/` is in
              # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a
              # tool-only diff answers with `surfaces: []` — measured before this entry:

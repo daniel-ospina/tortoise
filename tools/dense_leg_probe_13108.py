@@ -37,6 +37,15 @@ outside the 500 ms cap by construction and cannot be what trips it. This tool pa
 vector that is already in the corpus, which removes the encoder from the sample entirely —
 that is the point, not a shortcut: it isolates the STORE half of the leg.
 
+AN ARM THAT DOES NOT COMPLETE IS REFUSED, NOT PUBLISHED SHORT
+-------------------------------------------------------------
+A sample the shipped read reports under a mechanism this tool has never seen
+(:data:`MECHANISMS`), or any other failure that escapes a worker, REFUSES the
+whole arm (:class:`UnknownMechanism` -> :func:`arm_integrity`). It is never
+summarised from the survivors: ``over 500ms: 37/100`` on an arm that ran 100
+reads is a wrong number that reads as a measured one, which is the failure
+class this file's ``UNMEASURED``-is-never-``0`` rule exists to refuse.
+
 THE ONE THING THE SEED DOES NOT DO
 ----------------------------------
 Both labels are seeded with **the same names and the same vectors** (real names harvested by
@@ -68,13 +77,25 @@ matters is CPU rather than the store.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first, and the operator would get an
+# unattributed traceback instead of this sentence (the `tools/` entry-point
+# contract; `tests/test_entry_point_python_guard.py` pins it for the corpus).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/dense_leg_probe_13108.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/dense_leg_probe_13108.py`"
+    )
+
 import argparse
 import collections
 import json
 import os
 import statistics
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -86,9 +107,27 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import-path bootstrap
 #: The production budget this issue is about (`search_engine.py`:2832 / :4673).
 DEFAULT_TIMEOUT_MS = 500
 
-#: `#4999`'s mechanism vocabulary, restated here as the CLOSED set a sample may report —
-#: so a mechanism this tool has never seen is a loud KeyError, not a silent bucket.
+#: `#4999`'s mechanism vocabulary, restated here as the CLOSED set a sample may
+#: report — so a mechanism this tool has never seen REFUSES the arm
+#: (:class:`UnknownMechanism`) instead of joining a silent bucket.
 MECHANISMS = ("index", "scan", "scan_fallback", "pgvector")
+
+
+class UnknownMechanism(RuntimeError):
+    """A sample reported a mechanism outside `#4999`'s declared vocabulary.
+
+    ⛔ Deliberately NOT a `SystemExit` raised from inside the worker: CPython's
+    default :func:`threading.excepthook` **silently ignores** an uncaught
+    ``SystemExit`` raised by a thread (``docs.python.org/3/library/threading.html``;
+    reproduced on 3.12.3 — no message, no traceback, the process continues). A
+    guard written that way is neither loud nor fatal: the thread dies quietly,
+    every sample it had already collected is discarded with it, and the arm is
+    published from the survivors with nothing marking it truncated — the exact
+    failure mode this instrument exists to prevent (`#13121` review F2).
+
+    This class is caught by :func:`measure` on the worker's own thread, recorded,
+    and turned into a refused arm (:func:`arm_integrity`).
+    """
 
 
 # ── statistics (pure, and pinned by the tests) ──────────────────────────────
@@ -146,6 +185,29 @@ def summarise(samples: list[dict]) -> dict:
     }
 
 
+def arm_integrity(entity_type: str, concurrency: int, reads: int,
+                  arrived: int, failures: list[str]) -> str | None:
+    """The refusal message for an arm that did not COMPLETE, else ``None``.
+
+    ⛔ An incomplete arm is not a short measurement, it is NO measurement: the
+    samples a dead worker had already collected are discarded with it
+    (:func:`measure`'s worker extends the shared list only once its loop is
+    done), so summarising the survivors would publish e.g. ``over 500ms: 0/0``
+    — or ``37/100`` — for an arm that ran, with nothing marking it truncated.
+
+    Pure, so the rule is pinned by the tests without a thread.
+    """
+    if not failures and arrived == reads:
+        return None
+    detail = f"{arrived}/{reads} reads arrived"
+    if failures:
+        detail += f"; {len(failures)} worker(s) raised — first: {failures[0]}"
+    return (f"REFUSED: the {entity_type}@{concurrency} arm did not complete — "
+            f"{detail}. A partial sample is not a measurement (the same rule "
+            "this module applies to an empty one); re-run the arm rather than "
+            "quoting it.")
+
+
 # ── seeding ─────────────────────────────────────────────────────────────────
 
 def _import_instrument():
@@ -158,11 +220,20 @@ def seed(sdk, population: int, sessions_dir: str) -> dict:
     """Write the SAME ``population`` names + vectors to ``:Object`` (unindexed) and
     ``:Point`` (indexed), and report what landed.
 
-    Returns ``{"names": [...], "objects": n, "points": n, "vectors": n}``.
+    Returns ``{"names": [...], "objects": n, "points": n, "vectors": n,
+    "harvest_stats": {...}}``.
+
+    ``harvest_stats`` is ``harvest``'s OWN input accounting (``files``,
+    ``lines``, ``parse_errors``, ``records_without_text``). It is carried into
+    the report because the alternative is an artifact that cannot distinguish
+    "the corpus lost names" from "the harness stopped parsing records" — the
+    distinction `tools/candidate_recall_11901.py::harvest` documents on its own
+    ``stats`` argument and drops both records silently without.
     """
     harvest, build_population = _import_instrument()
     sessions = Path(os.path.expanduser(sessions_dir))
-    harvested = harvest(sessions)
+    harvest_stats: dict = {}
+    harvested = harvest(sessions, harvest_stats)
     pop = build_population(harvested, population)
     if not pop:
         raise SystemExit("REFUSED: the harvest produced no names")
@@ -193,7 +264,8 @@ def seed(sdk, population: int, sessions_dir: str) -> dict:
             params={"id": pid, "name": name, "e": list(emb)})
         written += 1
     return {"names": [r["name"] for r in pop], "objects": len(rows),
-            "points": written, "vectors": vectors}
+            "points": written, "vectors": vectors,
+            "harvest_stats": dict(harvest_stats)}
 
 
 def probe_index_attempt(graph, query_vec, label: str, limit: int,
@@ -231,6 +303,8 @@ def probe_index_attempt(graph, query_vec, label: str, limit: int,
     attempts: list[dict] = []
     outcome = "ok"
     answered: str | None = None
+    aborted_reason: str | None = None
+    aborted_at: str | None = None
     for name, cypher in forms.items():
         a0 = time.monotonic()
         try:
@@ -245,6 +319,16 @@ def probe_index_attempt(graph, query_vec, label: str, limit: int,
             if "invalid arguments" in low or "not registered" in low \
                     or "unknown procedure" in low or "type mismatch" in low:
                 continue
+            # ⛔ NOT a signature refusal: this exception ended the sequence with
+            # the OTHER form never tried, so this run measured ONE signature, not
+            # both. The likely trigger is the probe query ITSELF hitting
+            # ``--timeout-ms`` on a loaded box — the very condition this tool is
+            # built to study. Reported under its own outcome (#13121 review F3),
+            # with the reason, so the record cannot contradict its own attempts
+            # array.
+            aborted_at = name
+            aborted_reason = (f"signature {name} raised {msg[:300]} — the "
+                              "remaining signature(s) were never tried")
             break
         attempts.append({"signature": name, "outcome": "ok",
                          "elapsed_ms": round((time.monotonic() - a0) * 1000.0, 2),
@@ -252,12 +336,16 @@ def probe_index_attempt(graph, query_vec, label: str, limit: int,
         outcome, answered = "ok", name
         break
     if answered is None:
-        # ⛔ NOT named a cause: message-wise this engine says the same thing for an
-        # unindexed label as for a bad argument order (see the docstring). The
-        # census, printed beside this record, is what separates them.
-        outcome = "refused-both-signatures"
+        if aborted_at is not None:
+            outcome = f"aborted_at_signature_{aborted_at.lower()}"
+        else:
+            # ⛔ NOT named a cause: message-wise this engine says the same thing
+            # for an unindexed label as for a bad argument order (see the
+            # docstring). The census, printed beside this record, is what
+            # separates them.
+            outcome = "refused-both-signatures"
     return {"label": label, "outcome": outcome, "answered_signature": answered,
-            "attempts": attempts,
+            "aborted_reason": aborted_reason, "attempts": attempts,
             "elapsed_ms": round((time.monotonic() - start) * 1000.0, 2)}
 
 
@@ -315,8 +403,11 @@ def _vector_query_once(graph, query_vec, entity_type: str, limit: int,
     elapsed = (time.monotonic() - start) * 1000.0
     entry = trace[0] if trace else {}
     mech = entry.get(VECTOR_MECHANISM_KEY)
-    if mech is not None and mech not in MECHANISMS:  # pragma: no cover - guard
-        raise SystemExit(f"UNKNOWN mechanism {mech!r} — not in {MECHANISMS}")
+    if mech is not None and mech not in MECHANISMS:
+        raise UnknownMechanism(
+            f"UNKNOWN mechanism {mech!r} — not in {MECHANISMS} "
+            f"(entity_type={entity_type!r})"
+        )
     return {
         "entity_type": entity_type,
         "elapsed_ms": round(elapsed, 2),
@@ -340,6 +431,7 @@ def measure(graph, query_vec, entity_type: str, reads: int, concurrency: int,
     not a synthetic CPU burn.
     """
     samples: list[dict] = []
+    failures: list[str] = []
     lock = threading.Lock()
     barrier = threading.Barrier(concurrency)
     per_thread = [reads // concurrency + (1 if i < reads % concurrency else 0)
@@ -348,11 +440,19 @@ def measure(graph, query_vec, entity_type: str, reads: int, concurrency: int,
     def worker(n: int) -> None:
         barrier.wait()
         local: list[dict] = []
-        for _ in range(n):
-            local.append(_vector_query_once(graph, query_vec, entity_type,
-                                            limit, timeout_ms))
-        with lock:
-            samples.extend(local)
+        try:
+            for _ in range(n):
+                local.append(_vector_query_once(graph, query_vec, entity_type,
+                                                limit, timeout_ms))
+        except BaseException as e:
+            # ⛔ A raised sample is recorded on the worker's own thread and turned
+            # into a refused arm below. Letting anything escape a thread is how
+            # this guard dies silently (see `UnknownMechanism`).
+            with lock:
+                failures.append(f"{type(e).__name__}: {e}")
+        finally:
+            with lock:
+                samples.extend(local)
 
     threads = [threading.Thread(target=worker, args=(per_thread[i],),
                                 daemon=True)
@@ -361,6 +461,12 @@ def measure(graph, query_vec, entity_type: str, reads: int, concurrency: int,
         t.start()
     for t in threads:
         t.join()
+    # ⛔ Integrity BEFORE the summary: an arm that did not complete is never
+    # published as a short one.
+    refusal = arm_integrity(entity_type, concurrency, reads, len(samples),
+                            failures)
+    if refusal is not None:
+        raise SystemExit(refusal)
     out = summarise(samples)
     out["entity_type"] = entity_type
     out["concurrency"] = concurrency

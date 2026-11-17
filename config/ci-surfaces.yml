@@ -3126,6 +3126,18 @@ surfaces:
   # NON_PYTHON_PREFIXES before the `core` fallback runs). Pinned by
   # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
   - test_dod_5090_probe.py
+  # #13108/#13121: the dense-leg probe (`tools/dense_leg_probe_13108.py`) is the
+  # INSTRUMENT `#13108` reopens `STORAGE-ARCHITECTURE.md` §14.3 V3 on, so the
+  # numbers it publishes are the evidence — and the PR that added it shipped them
+  # with no pin at all while the tool's own comment claimed they were "pinned by
+  # the tests" (review F4). `core` for the same reason as the row above: its
+  # subjects are `tortoise/search_engine.py` (`run_vector_query`, the mechanism
+  # vocabulary) plus the probe itself. ⚠️ NOT enough on its own — `tools/` is a
+  # flat `NON_PYTHON_PREFIXES` entry, so a probe-only diff selects NO surface and
+  # falls back to tier-1 smoke; the `CORE_ALSO` row in `tools/ci_selection.py` is
+  # what makes the diff select `core`, pinned by
+  # tests/test_dense_leg_probe_13108.py::test_a_tool_only_diff_selects_this_pin.
+  - test_dense_leg_probe_13108.py
   # #10687: `tools/attest_census.py` owns its own suite — the hermetic arms pin the
   # RESTORE/RE-REVIEW partition (repair separated from fabrication), the 0/2-never-1
   # exit contract, and the report shape the REQUIRED `docs` check lints whole. `core`
