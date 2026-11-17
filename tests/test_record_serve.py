@@ -179,19 +179,15 @@ def test_the_registry_serves_the_anchored_surface_and_nothing_else():
     }
 
 
-#: A served read whose boundary is a UNION over labels has no ONE
-#: ``(label, property)`` coordinate, and minting a placeholder pair for it would
-#: hand `declared_key(*coordinate)` a coordinate no store can resolve. These reads
-#: carry ``coordinate=None`` and state their shape in ``cypher``/``reason`` instead
-#: — pinned below, so an exception cannot be claimed silently.
-MULTI_COORDINATE_READS: frozenset[str] = frozenset({rs.READ_ENTITY_UNION_BY_ID})
-
-#: A read that IS a template over labels carries a template coordinate on
-#: purpose: ``node-by-key`` answers ANY record label by its interface-E
-#: coordinate, so ``("Label", "interface-E key")`` is its real shape, not a
-#: placeholder standing where a name should be. Named here so the distinction from
-#: the union's ``None`` is explicit rather than asserted away.
-TEMPLATE_COORDINATE_READS: frozenset[str] = frozenset({rs.READ_NODE_BY_KEY})
+#: A served read whose boundary is a UNION over labels, or a TEMPLATE over labels,
+#: has no ONE ``(label, property)`` coordinate — and minting a placeholder pair for
+#: it would hand `declared_key(*coordinate)` a coordinate no store can resolve
+#: (``"Label"`` is not a ``node_label``; ``"interface-E key"`` is not a property).
+#: These reads carry ``coordinate=None`` and state their shape in
+#: ``cypher``/``reason`` instead — pinned here, so the exception cannot be claimed
+#: silently, and so there is ONE rule rather than an exemption carved out of it.
+MULTI_COORDINATE_READS: frozenset[str] = frozenset(
+    {rs.READ_ENTITY_UNION_BY_ID, rs.READ_NODE_BY_KEY})
 
 
 def test_every_served_read_carries_its_parity_rule_and_its_coordinate():
@@ -204,15 +200,16 @@ def test_every_served_read_carries_its_parity_rule_and_its_coordinate():
                 f"{name} declares no coordinate and is not a declared union read — "
                 f"every served read either carries a real (label, property) pair "
                 f"or says here why it cannot")
-            assert "union" in read.cypher.lower(), name
+            assert read.cypher and read.reason, name
         else:
             label, prop = read.coordinate
             assert label and prop, name
-            assert label not in {"Label", "union"} or name in TEMPLATE_COORDINATE_READS, (
+            assert label not in {"Label", "union"}, (
                 f"{name}'s coordinate label {label!r} is a PLACEHOLDER — it names "
                 f"no stored label, so declared_key(*coordinate) mints a coordinate "
-                f"nobody can resolve (#13353 review, finding 6). A read that really "
-                f"IS a template over labels says so in TEMPLATE_COORDINATE_READS.")
+                f"nobody can resolve (#13353 review, finding 6). A read that is a "
+                f"template or a union has no one coordinate: give it `None` and "
+                f"declare it in MULTI_COORDINATE_READS.")
 
 
 def test_every_exclusion_names_who_else_answers_the_same_read():

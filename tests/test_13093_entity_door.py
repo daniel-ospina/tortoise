@@ -289,8 +289,9 @@ def test_SDK_an_EVENT_is_not_hot_and_never_an_empty_answer(armed):
     """#9721 is the named dependency, and it is NOT silently widened here.
 
     A record-sourced `:Event` loses SEVEN fold-written `ON CREATE` properties
-    (`id`, `eventKind`, `subject`, `object`, `startedAt`, `classificationLevel`,
-    `format`, `participants`) and `FOLD_ON_CREATE_DEFAULTS` has no `Event` row —
+    (`id`, `subject`, `object`, `startedAt`, `classificationLevel`, `format`,
+    `participants` — #9721's measured set) plus an eighth, `eventKind`, when the
+    producer omitted it, and `FOLD_ON_CREATE_DEFAULTS` has no `Event` row —
     so `parity_difference(label='Event')` reports them UNEXPLAINED. Serving it
     would ship a silent parity gap (a lost `id`) through the door whose whole
     purpose is honest reads; answering `{}` would claim it does not exist. The
@@ -842,11 +843,24 @@ def test_the_served_labels_are_the_ones_with_measured_parity():
     assert "Event" not in FOLD_ON_CREATE_DEFAULTS, (
         "if #9721 lands, revisit ENTITY_UNION_LABELS — the abstention is caused "
         "by THIS gap")
-    # Every served label must be addressable by the bare id this door is handed.
+    # ⛔ EVERY SERVED LABEL MUST BE ADDRESSABLE — MEASURED, NOT ASSERTED AS
+    # `KEY_PROPERTY == "id"` (#13353 review cycle 4, finding 1). That spelling is
+    # the conflation this PR removed: `Event` IS addressable by a bare id while its
+    # key is `eventId` (that is #13347's finding), so the literal would redden at
+    # exactly the repair state #9721 produces — and its message ("a bare id cannot
+    # address it") would tell the next lane the opposite of the fix.
+    # What addressability actually means: every cache branch the resolver takes for
+    # the label is a property the record's `node_key` can carry, i.e. it has no
+    # branch whose property differs from the label's contract key.
+    from tortoise.projection import FalkorProjection
+
     for label in rs.ENTITY_UNION_LABELS:
-        assert KEY_PROPERTY.get(label) == "id", (
-            f"{label} is keyed by {KEY_PROPERTY.get(label)!r} in the record, so "
-            "a bare id cannot address it — that is Source's own exclusion")
+        branch_props = {prop for lab, prop in FalkorProjection._RESOLVE_BRANCHES
+                        if lab == label}
+        assert branch_props == {KEY_PROPERTY.get(label)}, (
+            f"{label} has cache branches {sorted(branch_props)} but the record "
+            f"addresses it by {KEY_PROPERTY.get(label)!r}: a label with a second "
+            f"branch is the address residual, not a served label")
 
 
 # ── 5. the internal accessor stays cache-only ──────────────────────────────
