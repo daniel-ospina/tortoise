@@ -40,6 +40,7 @@ NO DATABASE IS NEEDED. The pgTAP half (RLS, PK/FK, the CHECKs firing) is
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -1918,13 +1919,85 @@ _PROPS_BAN_PIN_HEADER_RE = re.compile(
 _PROPS_BAN_EXPR_RE = re.compile(r"\(\s*NOT\s*\(\s*props\s*\?\|", re.I)
 #: The refused-name list: `NOT (props ?| ARRAY['embedding', 'status'])`.
 _PROPS_BAN_NAMES_RE = re.compile(r"ARRAY\s*\[([^\]]*)\]", re.I)
+#: A `DROP CONSTRAINT` is an EVENT: a drop with no later re-declaration leaves NO
+#: ban in force, and a reader that only collects declarations cannot see that
+#: (round 4 N3, measured: a dropped ban left every Python pin green).
+_PROPS_BAN_DROP_RE = re.compile(
+    r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?chk_(\w+)_props_no_derived",
+    re.I,
+)
 #: Only for the diagnostic snippet attached to a finding; NOT read by any pin.
 _PROPS_BAN_SNIPPET_CHARS = 400
 _PROPERTY_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: SQL comments are NOT code, and two measured false passes came from reading
+#: them (round 3): a comment's `ARRAY['embedding', …]` was taken as an
+#: expression, and a comment BETWEEN the constraint NAME and `CHECK` stopped the
+#: header matching at all — silently demoting the in-force read to an older
+#: declaration. Stripping them before any matching closes both, and it also means
+#: a CHECK whose expression carries a comment still parses (instead of failing
+#: closed on a legal spelling). Replaced by a space so token adjacency cannot
+#: change.
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
+
+
+def _strip_sql_comments(text: str) -> str:
+    """The text with SQL comments removed — what every parse below reads."""
+    return _SQL_COMMENT_RE.sub(" ", text)
+
+
+@dataclass(frozen=True)
+class PropsBanEvent:
+    """One event in a table's props-ban history, at `position` in the source."""
+
+    position: int
+    kind: str                 # "declare" | "drop"
+    table: str
+    is_redeclaration: bool
+    names: frozenset[str]
+    snippet: str
+
+
+def props_ban_events(text: str) -> list[PropsBanEvent]:
+    """Every props-ban event (declaration OR drop), in source order.
+
+    Comments are stripped first, so a declaration is found even when a comment
+    sits between its NAME and `CHECK`, and a comment's `ARRAY[…]` is never read as
+    the constraint's expression.
+    """
+    clean = _strip_sql_comments(text)
+    headers = list(_PROPS_BAN_PIN_HEADER_RE.finditer(clean))
+    drops = list(_PROPS_BAN_DROP_RE.finditer(clean))
+    events: list[PropsBanEvent] = []
+    for index, match in enumerate(headers):
+        # A declaration's span ends at the NEXT event of any kind, so its names
+        # can never come from a later constraint or a later DROP.
+        stop = len(clean)
+        later = [m.start() for m in headers[index + 1:] if m.start() > match.start()]
+        later += [m.start() for m in drops if m.start() > match.start()]
+        if later:
+            stop = min(later)
+        span = clean[match.end():stop]
+        names: frozenset[str] = frozenset()
+        anchor = _PROPS_BAN_EXPR_RE.search(span)
+        if anchor is not None:
+            semicolon = span.find(";", anchor.end())
+            array = _PROPS_BAN_NAMES_RE.search(
+                span, anchor.end(), len(span) if semicolon < 0 else semicolon)
+            if array is not None:
+                names = frozenset(_PROPERTY_NAME_RE.findall(array.group(1)))
+        events.append(PropsBanEvent(
+            match.start(), "declare", match.group(2), bool(match.group(1)), names,
+            span[:_PROPS_BAN_SNIPPET_CHARS]))
+    for drop in drops:
+        events.append(PropsBanEvent(
+            drop.start(), "drop", drop.group(1), False, frozenset(),
+            clean[drop.start():drop.end()]))
+    events.sort(key=lambda event: event.position)
+    return events
 
 
 def props_ban_pins(text: str) -> dict[str, list[tuple[bool, frozenset[str], str]]]:
-    """Every `props_no_derived` CHECK, per table, in declaration order.
+    """Every `props_no_derived` DECLARATION, per table, in declaration order.
 
     Each entry is `(is_redeclaration, refused_names, snippet)`:
 
@@ -1939,24 +2012,29 @@ def props_ban_pins(text: str) -> dict[str, list[tuple[bool, frozenset[str], str]
       so text outside the CHECK cannot answer and a CHECK this pattern cannot
       parse yields the EMPTY set (a loud failure, never a passing guess);
     * `snippet` — the following text, capped, for failure messages only.
+
+    ⛔ THIS VIEW OMITS DROPS, which is why `props_ban_in_force` exists: a reader
+    that asks "what is in force?" must see a DROP, not just the last declaration.
     """
-    headers = list(_PROPS_BAN_PIN_HEADER_RE.finditer(text))
     pins: dict[str, list[tuple[bool, frozenset[str], str]]] = {}
-    for index, match in enumerate(headers):
-        stop = (headers[index + 1].start() if index + 1 < len(headers)
-                else len(text))
-        span = text[match.end():stop]
-        names: frozenset[str] = frozenset()
-        anchor = _PROPS_BAN_EXPR_RE.search(span)
-        if anchor is not None:
-            semicolon = span.find(";", anchor.end())
-            array = _PROPS_BAN_NAMES_RE.search(
-                span, anchor.end(), len(span) if semicolon < 0 else semicolon)
-            if array is not None:
-                names = frozenset(_PROPERTY_NAME_RE.findall(array.group(1)))
-        pins.setdefault(match.group(2), []).append(
-            (bool(match.group(1)), names, span[:_PROPS_BAN_SNIPPET_CHARS]))
+    for event in props_ban_events(text):
+        if event.kind == "declare":
+            pins.setdefault(event.table, []).append(
+                (event.is_redeclaration, event.names, event.snippet))
     return pins
+
+
+def props_ban_in_force(text: str, table: str) -> tuple[str, frozenset[str]]:
+    """What the database enforces on `table` today: `(kind, refused_names)`.
+
+    `kind` is `"declare"` (a ban exists — `refused_names` is what it refuses),
+    `"drop"` (the last event removed the ban: NOTHING is refused) or `"none"`
+    (no declaration and no drop anywhere).
+    """
+    events = [event for event in props_ban_events(text) if event.table == table]
+    if not events:
+        return ("none", frozenset())
+    return (events[-1].kind, events[-1].names)
 
 
 def all_migration_text() -> str:
@@ -2016,15 +2094,18 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
     # `test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one`
     # below, so the regex that defines "a declaration" has a single home rather
     # than a second copy that can drift from this one.
-    definitions = [names for _is_redecl, names, _snippet in
-                   props_ban_pins(all_migration_text()).get(table, [])]
-    assert definitions, (
+    kind, refused = props_ban_in_force(all_migration_text(), table)
+    assert kind != "none", (
         f"chk_{table}_props_no_derived has no DDL definition anywhere under "
         f"{_MIGRATIONS_DIR.relative_to(REPO_ROOT)} — the props ban has no home")
-    assert col in definitions[-1], (
+    assert kind == "declare", (
+        f"the IN-FORCE state of chk_{table}_props_no_derived is {kind!r}: the last "
+        f"event is a DROP, so NOTHING is refused on {table} and {col!r} is open to "
+        "a payload. A reader that only collects declarations cannot see this")
+    assert col in refused, (
         f"the LAST re-declaration of chk_{table}_props_no_derived no longer names "
         f"{col!r} — a later migration re-opened the name even though the column "
-        f"now exists. Names read: {sorted(definitions[-1])}")
+        f"now exists. Names read: {sorted(refused)}")
 
 
 def test_a_redeclaration_that_FOLLOWS_another_closely_is_STILL_READ():
@@ -2118,6 +2199,38 @@ def test_the_props_ban_pin_reads_the_CHECKS_own_expression_not_the_tail():
     assert props_ban_pins(shrunk)["subject"][-1][1] == frozenset({"status"}), (
         "the anchor over-narrowed: the literal INSIDE the CHECK's own expression "
         "must still be read")
+
+
+    # ROUND 3 vehicle A — a comment carrying the OLD `ARRAY[…]`, INSIDE the CHECK.
+    comment_array = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived CHECK (\n"
+        "  -- was: NOT (props ?| ARRAY['embedding', 'status']::text[])\n"
+        "  NOT (props ?| ARRAY['status']::text[]));\n")
+    kind, names = props_ban_in_force(comment_array, "subject")
+    assert (kind, names) == ("declare", frozenset({"status"})), (
+        f"a comment's ARRAY[...] was read as the refused names: {sorted(names)}")
+
+    # ROUND 3 vehicle B — a comment between the constraint NAME and `CHECK`. Legal
+    # SQL, and how a migration narrating a narrowing reads; it used to hide the
+    # declaration entirely, so the in-force read fell back to an OLDER one.
+    name_comment = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  -- narrowed: only status from here on\n"
+        "  CHECK (NOT (props ?| ARRAY['status']::text[]));\n")
+    kind, names = props_ban_in_force(name_comment, "subject")
+    assert (kind, names) == ("declare", frozenset({"status"})), (
+        "a comment between the constraint name and CHECK hid the declaration, so "
+        f"the read fell back to nothing or to an older one: {(kind, sorted(names))}")
+
+    # ROUND 3 vehicle C — a DROP with no later re-declaration leaves NO ban.
+    dropped = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n"
+        "ALTER TABLE public.subject DROP CONSTRAINT chk_subject_props_no_derived;\n")
+    kind, names = props_ban_in_force(dropped, "subject")
+    assert (kind, names) == ("drop", frozenset()), (
+        "a DROP after the last declaration was not seen, so the read keeps "
+        f"certifying a ban the database no longer has: {(kind, sorted(names))}")
 
 
 def test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one():
