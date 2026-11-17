@@ -472,10 +472,17 @@ def test_an_impossible_bound_is_refused_BEFORE_any_record_is_read(monkeypatch, c
     nothing was read, so nothing can be claimed. This also covers the `plan` arm,
     which reached the same refusal only indirectly — through `build_plan` →
     `batch_slices` — so its sentence and its cost were a side effect of planning.
+
+    ⛔ `read_journal` IS PATCHED TOO, and that is the assertion this test was
+    missing (review P2): with only `open_record` and `replay` guarded, a guard
+    moved to sit AFTER `read_journal(...)` was invisible to every test in the
+    suite (measured: the reordered guard left 866 passed, 2 skipped). "Before any
+    record is read" must mean the JOURNAL read as well as the connection.
     """
     def boom(*a, **k):  # pragma: no cover - must never run
         raise AssertionError("an impossible bound opened a record connection")
     monkeypatch.setattr(record_runner, "open_record", boom)
+    monkeypatch.setattr(record_runner, "read_journal", boom)
     monkeypatch.setattr(_replay_attr(), "replay", _must_not_run)
 
     for argv in (
@@ -489,6 +496,29 @@ def test_an_impossible_bound_is_refused_BEFORE_any_record_is_read(monkeypatch, c
                   "--journal", str(FIXTURE), *argv[1:]])
         assert exc.value.code == EXIT_USAGE, argv
         assert "must be >= 1" in capsys.readouterr().err, argv
+
+
+def test_a_LEGITIMATE_bound_still_runs_bounded(monkeypatch, capsys):
+    """⛔ The other side of the guard: `>= 1` must not become `> 1` (review P2).
+
+    Every bound test above is a below-1 case, so the guard could have been
+    tightened to `<= 1` — refusing a perfectly legal `--limit 1` / `--batch-size 1`
+    — and the whole suite stayed green (measured: 866 passed, 2 skipped). The
+    legitimate boundary is a behaviour this tool must keep, so it is pinned.
+    """
+    conn = _patched(monkeypatch, checkpoint=Checkpoint())
+    monkeypatch.setattr(_replay_attr(), "replay", _fold_report_for)
+    rc = main(["apply", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--limit", "5", "--acknowledge-plan", "5"])
+    assert rc == EXIT_OK, rc
+    out = capsys.readouterr().out
+    assert "consumed: 5 events" in out
+    assert conn.committed == 1
+
+    for flag in (("--limit", "1"), ("--batch-size", "1")):
+        rc = main(["plan", "--org-id", "o", "--graph-id", "g",
+                   "--journal", str(FIXTURE), flag[0], flag[1]])
+        assert rc == EXIT_OK, (flag, rc)
 
 
 def test_status_does_not_accept_a_bound_it_cannot_apply(monkeypatch, capsys):

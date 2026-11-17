@@ -116,9 +116,11 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     # #4053: an old interpreter is an ENVIRONMENT failure, not this tool's own
     # verdict. Exit 1 is REFUSED, which a consumer reads as "the record must not
     # be applied" — a claim about the record, when the truth is about the box.
-    # `main()` never returns 2 (only `_UsageParser.error` raises EXIT_USAGE), so
-    # 2 is the one code in this tool's set that cannot wear a verdict. The
-    # constants are defined below the imports, hence the literal here.
+    # `main()` never RETURNS 2 — `_UsageParser.error` and
+    # `_refuse_impossible_bounds` raise it, while `main()` turns a `RunnerError`
+    # into 1. So 2 is the one code in this tool's set that cannot wear a verdict
+    # about the record. The constants are defined below the imports, hence the
+    # literal here.
     print(
         f"record_runner: requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
