@@ -105,7 +105,7 @@ extends to the retirement path, and the gate is on the WORD IN THE CACHE — not
 why the judgement went. A cache holding a word this engine wrote
 (:data:`DERIVED_GOAL_STATES`) is reconciled to what still stands, or cleared when
 nothing does; a cache holding ANY OTHER word (``active``, ``blocked``,
-``guideline``, ``superseded``, ``abandoned``) is a decision nobody measured, so it
+``superseded``, ``abandoned``) is a decision nobody measured, so it
 is preserved and reported. Gating on the REASON instead fails in both directions
 and is what a review measured: a goal retired by its ``status`` kept ``met``
 forever (the ``goal-retired`` arm reconciled nothing), while a ``blocked`` goal
@@ -172,8 +172,12 @@ STALE_REASONS = (
 #: The ``goalState`` words that mean the goal is no longer a pursued commitment.
 #: A SUBSET of the closed #7856 vocabulary (``sdk.GOAL_STATE_VALUES``) and pinned
 #: as such by a test — ``met``/``unmet``/``blocked``/``active`` are states OF a
-#: live commitment and must never be read as its retirement, and ``guideline`` is
-#: a demoted target (#6792), not a retired goal.
+#: live commitment and must never be read as its retirement. (§5 of
+#: ``docs/plans/2026-11-15-state-lifecycle-and-pipelines.md``: these are the
+#: lifecycle's endings spelled on the achievement axis, and since #13035 the SDK
+#: write boundary refuses a goal whose ``goalState`` ending and ``status`` ending
+#: disagree — so this arm and the readers that ask ``status`` now answer about
+#: the same goals.)
 RETIRED_GOAL_STATES = frozenset({"superseded", "abandoned"})
 
 #: The only ``goalState`` words :func:`goal_judgement.record_judgement` can write
@@ -1027,6 +1031,20 @@ def invalidate(
     return result
 
 
+def _retired_by_status(goal: dict) -> bool:
+    """Is this STORED goal retired on its ``status`` axis?
+
+    #13065 review finding 1. The type-first test is the same one the write
+    guard applies (``_is_lifecycle_word``): a membership test over a raw value
+    raises ``TypeError`` on an unhashable one, and a repair route that raises is
+    not a repair route.
+    """
+    status = goal.get("status")
+    ended_on_status = (issubclass(type(status), str)
+                       and str.__str__(status) in TERMINAL_EXCLUDED_STATUSES)
+    return ended_on_status or bool(goal.get("outdated"))
+
+
 def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     """Point a goal's ``goalState`` cache at what still stands, or clear it.
 
@@ -1039,7 +1057,7 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     getting that wrong fails in BOTH directions, which is why it is stated as a
     rule rather than a special case. :data:`DERIVED_GOAL_STATES` names the only
     two words :func:`goal_judgement.record_judgement` can write. Everything else
-    on a goal (``active``, ``blocked``, ``guideline``, ``superseded``,
+    on a goal (``active``, ``blocked``, ``superseded``,
     ``abandoned``) was put there by a human or by the create door, so it must be
     LEFT ALONE: clearing it would erase a decision nobody measured, and rewriting
     it would be worse still. Two failures the reason-keyed version had, both
@@ -1124,6 +1142,24 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     if current is not None and current not in DERIVED_GOAL_STATES:
         return {"checked": True, "goalState": current, "preserved": True,
                 "from": None, "cleared": False}
+    if _retired_by_status(goal):
+        # ⛔ #13065 review finding 1: this reconcile is the PUBLIC, idempotent,
+        # documented repair route, so it must never raise — and a goal retired on
+        # its `status` keeps NO derived word (the retirement arm above asserts
+        # exactly that: `goalState` → ``None``). Writing the live word back onto
+        # a status-retired goal is the very pair the write boundary now refuses,
+        # so before this arm the repair RAISED and a legacy row could never be
+        # reconciled. The rule the module already settled is applied here: CLEAR
+        # the derived word, never restamp it on a retired goal.
+        if current is None:
+            return {"checked": True, "goalState": None, "from": None,
+                    "cleared": False,
+                    "reason": "goal retired by status — no derived word to clear"}
+        sdk.update_knowledge(goal_id, goalState=None)
+        return {"checked": True, "goalState": None, "from": None,
+                "cleared": True,
+                "reason": "goal retired by status — the derived word is cleared, "
+                          "never restamped"}
     remaining = latest_judgement(sdk, goal_id=goal_id)
     if remaining:
         state = remaining.get("judgementState")
@@ -1188,7 +1224,9 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
 #: two scans is counted, reported and repaired twice.
 _GOAL_STATE_CANDIDATES = (
     "MATCH (n) WHERE NOT n:Point AND toStringOrNull(n.goalState) IN $words "
-    "RETURN n.id AS id, n.goalState AS word ORDER BY n.id LIMIT $lim"
+    "RETURN n.id AS id, n.goalState AS word, n.status AS status, "
+    "n.outdated AS outdated "
+    "ORDER BY n.id LIMIT $lim"
 )
 
 #: Asked of the graph when the door answers ``gone`` — see :data:`GONE_UNPROVEN`.
@@ -1414,7 +1452,7 @@ def reconcile_goal_states(
 
     ⛔ THE GATE IS ON THE WORD, AT BOTH ENDS. Only a goal holding a word in
     :data:`DERIVED_GOAL_STATES` is even a candidate (so a human's ``active``,
-    ``blocked``, ``guideline``, ``superseded`` or ``abandoned`` is not scanned, let
+    ``blocked``, ``superseded`` or ``abandoned`` is not scanned, let
     alone rewritten), and a word APPEARING BETWEEN THE SCAN AND THE DOOR'S READ
     that is outside :data:`DERIVED_GOAL_STATES` is PRESERVED and reported — never
     cleared, never rewritten. ⚠️ The precise scope of that promise: the door's
@@ -1467,6 +1505,10 @@ def reconcile_goal_states(
     ``consistent`` writes nothing and DOES carry ``to`` (the word that already
     stood), as do ``would-clear``/``would-rewrite``, so a consumer must branch on
     ``action`` and must never infer a write from the mere presence of ``to``.
+    ⛔ ``to`` is always the word that will STAND afterwards, so it is ``None`` for
+    every CLEARING outcome — the live ``cleared`` arm and a ``would-clear`` that
+    clears a row retired on its ``status`` (``expected`` may hold a word there and
+    still be cleared; #13065 review round 13, finding 5).
     ``unaddressable``'s
     ``reason`` is the SWEEP's own :data:`GONE_UNPROVEN`, not the door's: the door
     reported ``gone``, and this arm is the sweep saying it does not believe a
@@ -1490,8 +1532,8 @@ def reconcile_goal_states(
     * ``consistent`` — the word already matched, and NOTHING was written (a
       re-write per goal per run would journal a revision for work not done);
     * ``preserved`` — a word appearing between the scan and the door's read that is
-      NOT in :data:`DERIVED_GOAL_STATES` (a human's ``active``/``blocked``/
-      ``guideline``) was left alone and reported, so a sweep cannot read clean over
+      NOT in :data:`DERIVED_GOAL_STATES` (a human's ``active``/``blocked``) was
+      left alone and reported, so a sweep cannot read clean over
       a goal it refused to touch. ⚠️ Scoped by VALUE for the same reason the gate
       above is: a human ``met``/``unmet`` in that window IS overwritten;
     * ``gone`` — the goal node is GONE, so there is no cache to reconcile. The
@@ -1536,8 +1578,9 @@ def reconcile_goal_states(
         _GOAL_STATE_CANDIDATES,
         params={"words": words, "lim": limit + 1},
     ).result_set or []
-    rows: list[tuple[str, str]] = [(row[0], row[1]) for row in result
-                                  if row and row[0]]
+    rows: list[tuple[str, str, Any, Any]] = [
+        (row[0], row[1], row[2], row[3])
+        for row in result if row and row[0]]
     # A matched node with no `id` cannot be named to the entity surface, so it is
     # not repairable here — and it is COUNTED rather than filtered away: a
     # candidate that matched the scan and then vanished from the payload is the
@@ -1576,9 +1619,29 @@ def reconcile_goal_states(
               "consistent": 0, "preserved": 0, "gone": 0, "failed": 0,
               "wouldRepair": 0, "notDurable": not_durable,
               "unaddressable": unaddressable}
-    for goal_id, word in rows:
+    for goal_id, word, stored_status, stored_outdated in rows:
         counts["scanned"] += 1
         record: dict[str, Any] = {"goalId": goal_id, "from": word}
+        # ⛔ #13065 review round 5, finding 2: "the word already stands" is NOT
+        # the same question as "the cache is right". A goal RETIRED ON ITS
+        # `status` while its claim is still live is exactly `expected == word`
+        # (`met`/`met`), and short-circuiting there reported `consistent` over the
+        # pair `_retired_by_status`'s arm exists to CLEAR — a false PASS on the
+        # divergent legacy row the arm was written for (measured: a sweep over
+        # `status='archived', goalState='met'` answered `consistent: 1`, wrote
+        # nothing, and left the word standing, while the door called directly
+        # cleared it and named the reason). The retirement is read from the SAME
+        # predicate the door uses, on the `status` this scan now returns, so the
+        # sweep and the door cannot disagree about what the goal IS.
+        # ⛔ #13065 review round 6 finding 4 (P2): BOTH halves of the predicate.
+        # Round 5 fed this the stored `status` but not the legacy `outdated`
+        # flag, which `_retired_by_status` treats as the OTHER half of the same
+        # retirement (`ended_on_status or bool(goal.get("outdated"))`) — so the
+        # short-circuit still reported `consistent` over a flag-retired goal the
+        # door clears (measured: `SET n.outdated = true` + a `met` cache ⇒
+        # `consistent: 1`, word left standing, door answers `cleared: True`).
+        retired = _retired_by_status({"status": stored_status,
+                                      "outdated": stored_outdated})
         try:
             standing = latest_judgement(sdk, goal_id=goal_id)
             state = standing.get("judgementState") if standing else None
@@ -1592,7 +1655,7 @@ def reconcile_goal_states(
             counts["failed"] += 1
             goals.append(record)
             continue
-        if expected == word:
+        if expected == word and not retired:
             # ⛔ NOTHING IS WRITTEN HERE, and that is the point of the branch: the
             # word already stands, so re-writing it would journal a revision per
             # goal per sweep and report "repaired" for work not done.
@@ -1601,8 +1664,17 @@ def reconcile_goal_states(
             goals.append(record)
             continue
         if dry_run:
-            record.update(action="would-clear" if expected is None
-                          else "would-rewrite", to=expected)
+            # ⛔ #13065 review round 13, finding 5 (P3): `to` reports the OUTCOME —
+            # the word that will STAND once this sweep is done — so a row the
+            # preview is about to CLEAR names `None`, exactly as the live arm
+            # reports `cleared`/`to=None` for the same goal (`:1705-1707`, and the
+            # door answers `goalState: None`). The `or retired` disjunct below is
+            # what made `action='would-clear'` reachable with `expected` still
+            # holding a word, so the preview named the very word it was about to
+            # lose while the run it previewed reported the opposite.
+            record.update(action="would-clear" if (expected is None or retired)
+                          else "would-rewrite",
+                          to=(None if (expected is None or retired) else expected))
             counts["wouldRepair"] += 1
             goals.append(record)
             continue
