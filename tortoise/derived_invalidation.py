@@ -1198,7 +1198,8 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
 #: two scans is counted, reported and repaired twice.
 _GOAL_STATE_CANDIDATES = (
     "MATCH (n) WHERE NOT n:Point AND toStringOrNull(n.goalState) IN $words "
-    "RETURN n.id AS id, n.goalState AS word ORDER BY n.id LIMIT $lim"
+    "RETURN n.id AS id, n.goalState AS word, n.status AS status "
+    "ORDER BY n.id LIMIT $lim"
 )
 
 #: Asked of the graph when the door answers ``gone`` — see :data:`GONE_UNPROVEN`.
@@ -1546,8 +1547,8 @@ def reconcile_goal_states(
         _GOAL_STATE_CANDIDATES,
         params={"words": words, "lim": limit + 1},
     ).result_set or []
-    rows: list[tuple[str, str]] = [(row[0], row[1]) for row in result
-                                  if row and row[0]]
+    rows: list[tuple[str, str, Any]] = [(row[0], row[1], row[2])
+                                        for row in result if row and row[0]]
     # A matched node with no `id` cannot be named to the entity surface, so it is
     # not repairable here — and it is COUNTED rather than filtered away: a
     # candidate that matched the scan and then vanished from the payload is the
@@ -1586,9 +1587,21 @@ def reconcile_goal_states(
               "consistent": 0, "preserved": 0, "gone": 0, "failed": 0,
               "wouldRepair": 0, "notDurable": not_durable,
               "unaddressable": unaddressable}
-    for goal_id, word in rows:
+    for goal_id, word, stored_status in rows:
         counts["scanned"] += 1
         record: dict[str, Any] = {"goalId": goal_id, "from": word}
+        # ⛔ #13065 review round 5, finding 2: "the word already stands" is NOT
+        # the same question as "the cache is right". A goal RETIRED ON ITS
+        # `status` while its claim is still live is exactly `expected == word`
+        # (`met`/`met`), and short-circuiting there reported `consistent` over the
+        # pair `_retired_by_status`'s arm exists to CLEAR — a false PASS on the
+        # divergent legacy row the arm was written for (measured: a sweep over
+        # `status='archived', goalState='met'` answered `consistent: 1`, wrote
+        # nothing, and left the word standing, while the door called directly
+        # cleared it and named the reason). The retirement is read from the SAME
+        # predicate the door uses, on the `status` this scan now returns, so the
+        # sweep and the door cannot disagree about what the goal IS.
+        retired = _retired_by_status({"status": stored_status})
         try:
             standing = latest_judgement(sdk, goal_id=goal_id)
             state = standing.get("judgementState") if standing else None
@@ -1602,7 +1615,7 @@ def reconcile_goal_states(
             counts["failed"] += 1
             goals.append(record)
             continue
-        if expected == word:
+        if expected == word and not retired:
             # ⛔ NOTHING IS WRITTEN HERE, and that is the point of the branch: the
             # word already stands, so re-writing it would journal a revision per
             # goal per sweep and report "repaired" for work not done.
@@ -1611,7 +1624,7 @@ def reconcile_goal_states(
             goals.append(record)
             continue
         if dry_run:
-            record.update(action="would-clear" if expected is None
+            record.update(action="would-clear" if (expected is None or retired)
                           else "would-rewrite", to=expected)
             counts["wouldRepair"] += 1
             goals.append(record)

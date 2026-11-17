@@ -705,3 +705,99 @@ def test_DUPLICATE_ids_that_disagree_refuse_rather_than_answer_from_one(sdk):
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(goal["id"], goalState="abandoned")
     assert "more than one node" in str(exc.value), str(exc.value)
+
+
+# ── 10. review round 5: findings 1-3, one test per bypass ────────────────────
+
+
+def test_a_RE_MENTION_create_cannot_land_HALF_an_ending(sdk):
+    """#13065 review round 5, finding 1 (P1) — the create funnel's ON-MATCH fold
+    writes ``status`` at CREATION only, so a coherent ENDING pair lands half.
+
+    MEASURED before the fix: ``create_object(name=<an existing live goal>,
+    status='archived', goalState='abandoned')`` was ADMITTED (both endpoints
+    agree in the bag, and a create ran no stored probe) and the fold left
+    ``status=None`` (reads LIVE) beside ``goalState='abandoned'`` — retired to
+    ``derived_invalidation`` and served as CURRENT by every ``status`` reader, the
+    issue's own headline through a door the cross-product sweep cannot mint from
+    (every create in that sweep starts from a fresh holder).
+    """
+    goal = _goal(sdk, tag="re-mention")          # goalState='active', status absent
+    with pytest.raises(ValueError) as exc:
+        sdk.create_object("CI is fast [re-mention]", objectKind="goal",
+                          status="archived", goalState="abandoned")
+    msg = str(exc.value)
+    assert "REFUSED" in msg
+    assert "RE-MENTION" in msg, msg
+    assert "update_knowledge" in msg, msg        # repair 1 names the door that works
+    # nothing landed: the refusal is before the first write
+    node = sdk.get_entity(goal["id"])
+    assert node["goalState"] == "active"
+    assert not live.is_terminal_status(node.get("status"),
+                                       bool(node.get("outdated")))
+    # ...and the named repair really does end it on both fields
+    sdk.update_knowledge(goal["id"], status="archived", goalState="abandoned")
+    node = sdk.get_entity(goal["id"])
+    assert node["goalState"] == "abandoned"
+    assert live.is_terminal_status(node.get("status"),
+                                  bool(node.get("outdated")))
+
+
+def test_an_UNHASHABLE_stored_status_reaches_the_documented_ValueError(sdk):
+    """#13065 review round 5, finding 3 (P2) — the STORED side, not just the bag.
+
+    The write side was made type-safe (``_is_lifecycle_word``); the stored side
+    still built a SET from the raw ``status``/``goalState``, so an unhashable
+    stored value — storable through the public door — raised ``TypeError:
+    unhashable type: 'list'`` from inside ``_sanitize_props`` on any write that
+    needed the stored half, where the doors promise the documented ``ValueError``.
+    """
+    goal = _goal(sdk, tag="unhashable")
+    sdk.update_knowledge(goal["id"], status=["live"])   # the shape is storable
+    with pytest.raises(ValueError) as exc:              # NOT TypeError
+        sdk.update_knowledge(goal["id"], goalState="abandoned")
+    assert isinstance(exc.value, ValueError)
+    assert not isinstance(exc.value, TypeError)
+    assert "leaves it running" in str(exc.value), str(exc.value)
+
+
+def test_the_SWEEP_clears_a_goal_retired_on_its_status(sdk):
+    """#13065 review round 5, finding 2 (P2) — ``expected == word`` is not
+    "the cache is right".
+
+    MEASURED before the fix: a goal carrying ``status='archived'`` (ended) and
+    ``goalState='met'`` (a word that still stands) answered the sweep with
+    ``consistent: 1``, wrote nothing, and left the word standing — a false PASS
+    over exactly the pair the retired-by-status arm exists to CLEAR, while the
+    door called directly cleared it.
+    """
+    from tortoise.derived_invalidation import reconcile_goal_states
+
+    goal = _goal(sdk, tag="sweep-retired")
+    # ⛔ A LIVE judgement that maps to the cached word is what makes this test
+    # able to fail: without one, `expected` is already None and the sweep would
+    # reach the repair no matter what — the vacuous-arm class review finding 8
+    # named (measured: the first version of this test PASSED with the
+    # `expected == word` short-circuit restored, i.e. it proved nothing).
+    indicator = sdk.create_object("CI pipeline duration [sweep-retired]",
+                                 objectKind="workflow")
+    target = sdk.create_object("CI <= 10m [sweep-retired]", objectKind="target",
+                              comparator="<=", threshold=10.0, dwell=1)
+    sdk.create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
+                     unit="minutes", startedAt="2026-11-11T10:00:00Z",
+                     aboutObject=indicator["id"])
+    made = judge_and_record(sdk, goal_id=goal["id"],
+                            indicator_id=indicator["id"],
+                            target=Target.from_node(target))
+    assert made["goalState"] == "met", made        # the cache word STANDS
+    # ...and the goal is then ENDED on its status, which is the legacy row the
+    # retired-by-status arm exists for (the door refuses this pair; a legacy row
+    # predates the door, so it is written raw)
+    sdk._get_proj().g.query(
+        "MATCH (n {id:$id}) SET n.status='archived'", params={"id": goal["id"]}
+    )
+    out = reconcile_goal_states(sdk)
+    assert out["counts"]["consistent"] == 0, out["counts"]
+    assert out["counts"]["cleared"] >= 1, out["counts"]
+    node = sdk.get_entity(goal["id"])
+    assert node.get("goalState") in (None, ""), node.get("goalState")

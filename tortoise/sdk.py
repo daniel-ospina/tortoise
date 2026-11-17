@@ -5980,9 +5980,17 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
     the caller supplies one, otherwise the node's STORED value — the #2782
     posture the sibling money gate already applies. ``goal_ending`` is the
     caller's ZERO-ARG PROBE for that stored side (``{"status", "goalState",
-    "successor"}``) and it is called AT MOST ONCE, and only when the write alone
-    cannot answer: a bag naming both fields never pays for a read, which matters
-    because this runs on every SDK write. ``None`` means the CREATE reading,
+    "successor"}``) and it is called AT MOST ONCE — but ⛔ NOT only when the bag
+    alone cannot answer. On the two UPDATE doors it is read only when the write
+    cannot answer by itself (a bag naming both fields pays nothing there, which
+    matters because this runs on every SDK write); on a door that can land on an
+    ALREADY EXISTING node (``may_target_existing_node``) it is read
+    UNCONDITIONALLY, because there a stored ending can end the goal no matter
+    what the bag names. ⛔ Round-3 finding 4 superseded the "a bag naming both
+    fields never pays for a read" claim that stood here; it was corrected at the
+    ``create_point`` call site and left standing in this docstring (#13065
+    review round 5, P3 — measured: 1 stored read on a both-fields explicit-id
+    create). ``None`` means the CREATE reading,
     where the node does not exist yet — so an absent ``status`` really is the
     ordinary LIVE birth state and an absent ``goalState`` really is no claim.
 
@@ -6196,6 +6204,81 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
         )
 
 
+def _ending_key(value: object) -> str:
+    """A hashable, forgery-proof KEY for one stored lifecycle value.
+
+    #13065 review round 5, finding 3. Two jobs, and the ORDER is the same one
+    :func:`_is_lifecycle_word` applies: a real ``str`` is normalised with
+    ``str.__str__`` (cannot consult an override, returns a PLAIN ``str``), so a
+    ``str`` SUBCLASS whose content differs — or which nulls ``__hash__`` — cannot
+    answer for a word it does not spell nor raise here; anything else is keyed by
+    its ``repr`` (guarded: a hostile ``__repr__`` falls back to the type name)
+    rather than by hashing the value, which is what raised ``TypeError``.
+    """
+    if issubclass(type(value), str):
+        return "s:" + str.__str__(value)
+    try:
+        return "r:" + repr(value)
+    except Exception:  # a hostile `__repr__` is still only a VALUE here
+        kind = type(value)
+        return "t:" + str(getattr(kind, "__module__", "?")) + "." + str(
+            getattr(kind, "__qualname__", "?"))
+
+
+def _refuse_ending_dropped_by_a_re_mention(proj, id_val: str, props: dict, *,
+                                           label: str, surface: str) -> None:
+    """Refuse a re-mention CREATE that would land HALF an ending.
+
+    #13065 review round 5, finding 1 (P1). The Object/Subject fold MERGEs on the
+    id, so a create that resolves to an EXISTING holder re-uses that node — and
+    the projection writes ``status`` ON CREATE only
+    (``projection/entities.py``: ``o.status=$st`` in the ON CREATE clause), while
+    caller props land through the generic ``SET n += $prop`` on BOTH paths. So the
+    coherent pair ``status='archived', goalState='abandoned'`` passed
+    :func:`_refuse_inconsistent_goal_ending` unchanged (both endpoints agree in
+    the bag, and a CREATE runs no stored probe) and the fold applied ONE half:
+    ``goalState='abandoned'`` landed, ``status`` stayed absent (which reads LIVE).
+    That is the issue's own headline pair — retired to ``derived_invalidation``,
+    served as CURRENT by every ``status`` reader — through the one create door
+    :func:`test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing` cannot mint
+    from (every create in its sweep starts from a fresh holder).
+
+    ⛔ Deliberately NARROW. It refuses only when the bag names ``goalState`` as an
+    ENDING and the node that already holds this id is NOT ended on its stored
+    ``status`` — the one shape where the field that LANDS diverges from the field
+    that silently does not. A bag that names no ``goalState`` ending cannot create
+    a divergence here (a dropped ``status`` leaves no ending behind), so it is not
+    refused; a node already ended on ``status`` keeps a coherent state, so it is
+    not refused either; and a fresh id is not refused, because there the CREATE
+    writes ``status`` and the pair lands whole.
+    """
+    goal_state = props.get("goalState")
+    if not _is_lifecycle_word(goal_state, GOAL_ENDING_STATES):
+        return
+    view = _stored_goal_ending_view(proj, id_val, label=label) or {}
+    if not view or view.get("conflict"):
+        # A fresh id writes both fields; a duplicate-id disagreement is the
+        # guard's own `conflict` arm, which is where that verdict belongs.
+        return
+    if _is_lifecycle_word(view.get("status"), TERMINAL_EXCLUDED_STATUSES):
+        return
+    raise ValueError(
+        f"REFUSED: goalState={goal_state!r} would end the goal on a RE-MENTION "
+        f"create (through {surface}). #13035: `{surface}` folds onto the node "
+        f"that already holds this id, and that fold writes `status` at CREATION "
+        f"only — so this write lands the ending on `goalState` and leaves "
+        f"`status`={view.get('status')!r} (which reads LIVE) in place. The goal "
+        f"would be retired to `derived_invalidation` and served as CURRENT by "
+        f"every reader that asks about its status.\n"
+        f"Two ways to fix it, either is accepted:\n"
+        f"  1. end the existing node through the UPDATE door — "
+        f"`update_knowledge(<id>, status='archived', goalState='abandoned')` — "
+        f"which writes BOTH fields;\n"
+        f"  2. drop the ending from this create — a re-mention does not carry a "
+        f"lifecycle ending, and the node keeps the state it already had."
+    )
+
+
 def _stored_goal_ending_view(proj, id_val: str, *,
                             label: str | None = None) -> dict:
     """The goal-ending view a node ALREADY holds: ``status``/``goalState``/a
@@ -6229,7 +6312,18 @@ def _stored_goal_ending_view(proj, id_val: str, *,
     # duplicates, where two identical statements in one process returned the
     # rows in different orders. Disagreement is reported instead of picked: the
     # guard refuses (see its `conflict` arm) rather than answer from one row.
-    endings = {(row[0], row[1]) for row in rows}
+    # ⛔ #13065 review round 5, finding 3: the SET must not be built from the raw
+    # values. `{(row[0], row[1]) …}` hashes them, so an unhashable STORED value
+    # (`status=["live"]`, storable through the public door — `test_status_
+    # projection` records `status=["live"] STORED as-is`) raised
+    # `TypeError: unhashable type: 'list'` from inside `_sanitize_props`, on any
+    # write that needs the stored half, where the doors promise the documented
+    # `ValueError`. The write side was made type-safe for exactly this reason
+    # (`_is_lifecycle_word`); the STORED side is normalised by the same
+    # type-first rule and turned into a PLAIN `str` key, so nothing here hashes
+    # the raw value and a `str` SUBCLASS cannot forge one either.
+    endings = {_ending_key(row[0]) + "\x00" + _ending_key(row[1])
+               for row in rows}
     status, goal_state, carrier, corrects = rows[0][:4]
     named = carrier if carrier not in (None, "") else None
     if named is None and corrects:
@@ -48218,6 +48312,16 @@ class TortoiseSDK:
             _refuse_bare_lifecycle_carrier(
                 props, label=label, surface="create_entity")
         proj = self._get_proj()
+        # #13065 review round 5, finding 1 (P1): the fold behind this funnel
+        # MERGEs on the id, so a re-mention CREATE re-uses an EXISTING node — and
+        # that fold writes `status` at CREATION only while caller props land on
+        # both paths. A coherent ENDING pair therefore lands one half here and
+        # leaves the node retired on `goalState` / live on `status`. Refused
+        # before any write; see the helper for why the arm is this narrow.
+        if label in ("Object", "Subject"):
+            _refuse_ending_dropped_by_a_re_mention(
+                proj, id_val, props, label=label,
+                surface=f"create_{label.lower()}")
         # Build event dict. (#2296 review) The ENVELOPE owns `type`: the
         # `**props` splat would otherwise let a caller prop of that name become
         # the type BOTH the live fold and the journal record dispatch on —
