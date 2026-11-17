@@ -6403,7 +6403,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19716", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:19589` (`19558` when this note was written, the same guard read at an older head), so it is
+        # re-states `hosted_api.py:19691` (`19589` when this note was written, the same guard read at an older head), so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
         # merger to re-point line 82, which is exactly how 236 comes to assert the old
         # number while 82 moves. Unpinned until the review reverted it green. Only the
@@ -6441,8 +6441,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("1418", "| **D6** | **Two distinct connection sets**"),
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
-        # count that hid one of them. D5's row states NINE distinct this-head numbers: `19482`,
-        # `19589`, `10326`, `10353`, `10406`, `1186`, `1194`, `1400`, `1418` (an earlier cut
+        # count that hid one of them. D5's row states NINE distinct this-head numbers: `10748`,
+        # `10775`, `10828`, `19584`, `19691`, `1186`, `1194`, `1400`, `1418` (an earlier cut
         # listed a pre-move `sdk.py` triple instead — `10225`/`10252`/`10305` — which the doc no
         # longer states anywhere: `grep -c` over `05-verify.md` -> 0 for each. A count taken over
         # the doc must read the current values off the pins, not off this list). The
@@ -6665,7 +6665,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-tense one is re-pointed wrongly (measured: 413 passed). `:10353`/`:10406`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
-        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` on `main`'s numbering) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which resolve at NO head this row names: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
+        "`sdk.py:10775`/`:10828` at THIS head (the pair's ladder, each measured with `grep -n 'subject_binding_available,' tortoise/sdk.py` and `grep -n 'and not subject_binding_available(graph):' tortoise/sdk.py`: `:10353`/`:10406` at the merge base `c4f6170cc3` — the SAME pair the branch head `2584a86ec1` carried — `:10399`/`:10452` on `origin/main` `aa8413ca38`, `:10522`/`:10575` on `55ec2c71b1`, `:10606`/`:10659` at this branch's pre-merge head `fbd3feb8ff`, so this merge moves them by BOTH sides' insertions — ⚠️ an earlier cut printed `:10271`/`:10324`, which resolve at NO head this row names: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
         "(the same pair at the branch head `2584a86ec1`, `:10353`/`:10406` at the MERGE head)",
     ):
         assert _d5.count(_spelling) == 1, (
