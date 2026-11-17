@@ -6542,11 +6542,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # forward merge of `main` `aa8413ca38` into `#12592`: `#12592`'s OWN `sdk.py`-adjacent
         # insertions moved `hosted_api.py` by +102 at BOTH ends, and the three offsets above
         # still hold EXACTLY at the new START, so the START is confirmed by structure rather
-        # than assumed from one bumped number:
-        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:14849`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14737` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:14888` (inside it), and `:14926` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:14927`.
+        # than assumed from one bumped number — and ⛔ RE-DERIVED ONCE MORE at the rebase onto
+        # `main` @ `534f3e1bee`, where the three offsets STILL hold at the new START, so the
+        # START is again confirmed by structure rather than by a bumped number:
+        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15180`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15209` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
+        # the blank line immediately before `return OrgInfoResponse(` at `:15258`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("15180", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
@@ -6675,16 +6677,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15299-15376`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:15180-15257`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:14747` (both needles are the file's only occurrences —
-    # `:14737` and `:14747` — so a later end cannot change the sum). Ends below `:14747` fail
+    # true for any end at or beyond `:15219` (both needles are the file's only occurrences —
+    # `:15209` and `:15219` — so a later end cannot change the sum). Ends below `:15219` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:14849`-`:14887` gives a non-empty window that lacks the second needle, and an
-    # end below `:14849` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15180`-`:15218` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15180` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")

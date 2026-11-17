@@ -752,7 +752,37 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     assert any("declares status" in m and ":Event" in m for m in ev_msgs), ev_msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(event_only)
+    # ⛔ ZERO mutation on BOTH halves of this bundle, not only the Event: Phase 1
+    # aborts before the first write, so the Object that PRECEDES the refused Event
+    # must not land either. Measured that this is the discriminating half — a
+    # Phase-1 list that filters the `:Event` violation out lands `Object 'Solo'`
+    # (count 1) and then dies mid-write on
+    # `ValueError: Refused: status={'a': 1} is not writable on an :Event`, which is
+    # the #2422/#7925 partial-mutation class this arm exists to prevent and which
+    # the Event count alone cannot see.
+    assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 0
+
+    # …and the arm is NOT "refuse every entity that declares a status" — the half
+    # the docstring above asserts and, until here, nothing pinned. The documented
+    # clear route (a status-less `:Event`) beside a VALID lifecycle word on an
+    # `:Object` is ACCEPTED and both nodes land; an over-rejecting Phase 1 reds
+    # this without touching either refusal arm above.
+    # ⚠️ Scope, so this arm cannot be read wider than it is: the contrast is
+    # VALUE-scoped for the `:Object` arm only. The `:Event` refusal is a **KEY**
+    # refusal — `tortoise/live.py::refuse_event_lifecycle_state` says so outright
+    # ("any non-`None` status is refused, whatever its type") — so a VALID word on
+    # an `:Event` is still refused; that is pinned by
+    # `test_direct_route_live_event_status_is_refused`, not by this arm.
+    ok = {"entities": [
+        {"ref": "o", "type": "object", "name": "Solo", "status": "live"},
+        {"ref": "e1", "type": "event", "name": "OnlyEvent",
+         "eventKind": "sessionCaptured"},
+    ]}
+    assert sdk._validate_bundle(ok) == []
+    sdk.ingest(ok)
+    assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 1
+    assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 1
 
 
 @pytest.mark.parametrize("spelling", ["top", "nested"])
