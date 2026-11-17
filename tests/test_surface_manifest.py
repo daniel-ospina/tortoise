@@ -3073,10 +3073,11 @@ def test_no_per_row_comment_quotes_a_stale_surface_count():
     }
 
     # ⛔ THE POSITIVE CONTROL, FIRST — it is what stops this arm from going inert again.
-    # Every value is derived from `live` HERE, and both offsets are above BOTH live counts,
-    # so neither can collide with the other's live value and quietly stop being stale (a
-    # fixed `+7` / `+9` pair could: at `tools=48`, `48+46` is `sdk_methods=94`, which reds
-    # this control pointing at innocent code). Whatever the counts are, these two disagree.
+    # The two numbers are derived above BOTH live counts, so the control text cannot equal a
+    # live count for any surface size and the expected pair below cannot be tuned to today's.
+    # (`_stale_surface_count_claims` compares per kind, so a fixed offset was never colliding
+    # with the OTHER kind's count — an earlier revision of this comment claimed it could, and a
+    # reviewer measured that it cannot. The offset derivation is belt-and-braces, not a repair.)
     stale_tools = max(live.values()) + 1
     stale_sdk = max(live.values()) + 2
     control = (
