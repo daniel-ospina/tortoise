@@ -45,6 +45,13 @@ ratio the budget is sized against. See §8 for what was taken from outside and w
 same for **stored shapes**, and it states its population and its commands so a later head can re-derive
 every number rather than trust it.
 
+**Every `file:line` below is valid at ONE head: `ccb49741b2ec`** — this branch's merge of `origin/main`
+`c4f6170cc302`. Open them there. On any later head they drift **by construction**: a `main` integration
+that inserts a line above a cited site moves every cite below it, with no symbol having changed, so
+re-derive the line from the symbol rather than trusting the number — the rule §9.1 of
+`STORAGE-ARCHITECTURE.md` applies to its own cites. The **byte** figures do not drift this way: they
+are re-derivable from the committed JSON arms at any head (§1.1, §4).
+
 ---
 
 ## 1. The population — enumerated from the WRITERS

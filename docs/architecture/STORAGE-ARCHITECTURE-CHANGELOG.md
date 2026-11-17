@@ -2276,3 +2276,17 @@ pin reds the completeness arm — the register is held from BOTH sides on purpos
 derivation lost exactly one symbol key and one walk with it (28 keys / 42 rows → **27 / 41**), which is
 a re-derivation from the tree, not a retyped total. The gap at 32 is left as a gap rather than
 renumbering the tail, exactly as the gap at 36 was.
+
+**2026-11-17 — `#13083`.** §9.1(b)'s `:Point` passthrough bullet carried a wrong mechanism for why a
+point deny set is the wrong instrument for `story_arc`: it said adding the key "would make a
+`rebuild_all` DELETE the property from every legacy `:Point`, which is a graph-side `REMOVE n.story_arc`
+that NO instrument ships today". `_POINT_DENY` is a skip set consumed by `_persist_extra_props`, which
+omits denied keys and issues only `SET n += $extra` — nothing derives a `REMOVE`/`DELETE` from it. The
+mechanism the bullet now states: a deny set cannot bound the destruction this tree documents (the
+whole-graph restore wipe), while a graph-side clear **does** ship, row-scoped —
+`update_point(<id>, story_arc=None)` (`#11325`). The bullet's citations were `file.py:NNNN`, the form
+§9.1 retired when its lines rotted inside one integration; they are symbol-keyed now
+(`_persist_extra_props`, `_wipe_all_nodes`, `TortoiseSDK.update_point`), so both §9.1 guards hold again
+(`test_section_9_1_cites_symbols_not_lines_and_its_symbols_resolve`,
+`test_the_design_documents_carry_no_issue_state_or_change_narration`). The census that measured the
+mechanism is `docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` §5.1.
