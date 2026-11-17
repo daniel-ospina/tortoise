@@ -461,6 +461,25 @@ class TestReaperRefusesRatherThanGuesses:
         assert index["org_agent-1_g_abc"]["gid"] == "g_abc"
         assert index["org_agent-1"]["gid"] is None
 
+    def test_a_promoted_default_keeps_its_gid(self):
+        """⛔ The gid must survive a DOUBLE claim by the SAME org (round-3 review).
+
+        A promoted (or repaired) org's ``organizations.graph_name`` IS a custom
+        ``org_{id}_{gid}`` namespace, so the namespace is claimed twice: once by
+        the org row (no gid) and once by its ``graphs`` row (with the gid).
+        `setdefault` kept the first claim, so the report carried ``gid: None``,
+        `reap()` skipped the ACL drop — and the global ``tenant_<gid>`` credential
+        outlived the graph, which is precisely what the ACL gate exists to stop.
+        """
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1_g_9"}],
+            graphs=[{"id": "g_9", "org_id": "agent-1",
+                     "namespace": "org_agent-1_g_9"}])
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1_g_9"]["gid"] == "g_9", index
+        assert index["org_agent-1_g_9"]["org"]["id"] == "agent-1"
+
     def test_dry_run_is_the_default_and_deletes_nothing(self, monkeypatch, capsys):
         """The flag changes ONLY the last step: without ``--execute`` the same
         classification runs and mutates nothing."""

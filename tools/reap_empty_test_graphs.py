@@ -196,10 +196,20 @@ def _namespace_index(cp) -> dict[str, dict]:
         if not isinstance(namespace, str) or not namespace:
             return
         held = claims.get(namespace)
-        if held is not None and held["org"].get("id") != org.get("id"):
-            ambiguous.add(namespace)
+        if held is not None:
+            if held["org"].get("id") != org.get("id"):
+                ambiguous.add(namespace)
+                return
+            # SAME org, claimed twice: the org row's `graph_name` claims first
+            # with no gid, so a later `graphs` row for that SAME namespace must
+            # still contribute its gid — otherwise a PROMOTED default (whose
+            # `graph_name` IS a custom `org_{id}_{gid}` namespace) would reap the
+            # graph while `reap()` skipped its ACL drop for want of a gid, leaving
+            # the global `tenant_<gid>` credential live forever (round-3 review).
+            if gid and not held.get("gid"):
+                held["gid"] = gid
             return
-        claims.setdefault(namespace, {"org": org, "gid": gid})
+        claims[namespace] = {"org": org, "gid": gid}
 
     by_id: dict[str, dict] = {}
     for row in orgs:
