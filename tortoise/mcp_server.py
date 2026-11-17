@@ -37,6 +37,7 @@ from tortoise import code_freshness as _code_freshness
 # ``create_direct_edge`` / 2a-DIRECT transfer probe it in this exact order) —
 # imported, never re-listed, so the preview cannot drift from the write.
 from tortoise.live import EPISTEMIC_LABELS
+from tortoise.live import is_terminal_status as _is_terminal_status  # #12502/#13034
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
@@ -476,7 +477,8 @@ def _hold_mcp_dispatch_after_request(task) -> None:
 
 
 def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
-                                         name: str) -> None:
+                                         name: str,
+                                         stages: dict | None = None) -> None:
     """Schedule the shared breach writer OFF the event loop (#3834 G1).
 
     The writer is ``hosted_api._emit_wait_bound_breach`` — the SAME single emit
@@ -535,7 +537,8 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
         try:
             from tortoise import hosted_api as _ha
             _ha._emit_wait_bound_breach(
-                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name)
+                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name,
+                stages=stages)
         except Exception:  # telemetry must never turn a refusal into an error
             _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
 
@@ -1419,7 +1422,8 @@ def _write_retry_safety(name: str, arguments=None) -> bool:
 
 
 def _wait_bound_refusal_result(name: str | None = None,
-                               arguments=None, *, dispatched: bool = True) -> ToolResult:
+                               arguments=None, *, dispatched: bool = True,
+                               stages: dict | None = None) -> ToolResult:
     """The ONE refusal result both wait-bound paths return.
 
     The message and the advertised delay come from the single module both
@@ -1511,6 +1515,16 @@ def _wait_bound_refusal_result(name: str | None = None,
     default, because there the dispatch really was started and abandoned.
     """
     data: dict = {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}
+    if stages:
+        # #10893: ADDITIVE, and only when a timeline was bound — the envelope
+        # (`code` + the exact neutral `message`) is the refusal's IDENTITY for
+        # `tests/_verdict.py::is_transport_wait_bound_refusal` and does not move.
+        # ⛔ It rides BOTH arms deliberately, including the `committed: "none"`
+        # write arm: "which stage was it in" is a fact about the WAIT, not a
+        # claim about the write, so it cannot contradict `committed`.
+        data["stage"] = stages.get("stage")
+        if stages.get("stages_ms"):
+            data["stages_ms"] = stages["stages_ms"]
     # The human channel. Not in the write set, so the shape it always had stands.
     # NOT a claim that nothing was mutated: non-write-set tools can write (see the
     # docstring's `_cas_write_onboarding_state` case).
@@ -1797,6 +1811,19 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     # its route path for. Escape it for the log line (the analytics sink
     # sanitizes its own copy).
     safe_name = _mcp_auth._sanitize_for_log(name)
+    # #10893: WHICH read stage the budget went to — read from the timeline the
+    # REST middleware bound around this request (this dispatch task inherits it),
+    # so the MCP refusal and the REST refusal of the SAME request cannot describe
+    # the same stall two different ways. Two views, on purpose: `stages_view`
+    # (telemetry + log, ALWAYS when a timeline is bound) and `wire_stages`
+    # (the refusal body, only once the read actually started — see
+    # `read_stages.ReadStages.wire_snapshot`). ``None`` when nothing is bound
+    # (stdio MCP, an in-process SDK call): both calls below then add nothing,
+    # keeping those refusals byte-identical to the pre-#10893 shape.
+    from tortoise.read_stages import stage_view as _read_stage_view
+    from tortoise.read_stages import stage_wire_view as _read_stage_wire_view
+    stages_view = _read_stage_view()
+    wire_stages = _read_stage_wire_view()
     # #3834 F-2 / #9762: RE-READ the flag here, not only at entry. The entry
     # short-circuit only sees a refusal that already happened; a transport that
     # does not start its response before dispatching (fastmcp's
@@ -1817,11 +1844,13 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # a ``hosted_api`` import, and neither must the breach path, where that
         # import froze the loop and delivered the refusal seconds late.
         _emit_mcp_wait_bound_breach_off_loop(
-            _current_org_id.get() or "", latency_ms, name)
+            _current_org_id.get() or "", latency_ms, name, stages=stages_view)
+        from tortoise.read_stages import log_suffix as _stage_log_suffix
         _log.warning(
             "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
-            "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
-    return _wait_bound_refusal_result(name, arguments)
+            "refusing legibly%s", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name,
+            _stage_log_suffix(stages_view))
+    return _wait_bound_refusal_result(name, arguments, stages=wire_stages)
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -4467,10 +4496,14 @@ def tortoise_query(kind: str | None = None,
       nothing else, and tag mode reads EVERY kind of tagged Point, so a named
       kind narrows nothing while looking like it did.
     - include_retracted=True surfaces tombstones on every path (structural,
-      paginated, text, and tag modes); default False excludes them. Known gap, tracked
-      in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
-      it still serves superseded/archived/outdated/deprecated rows by default,
-      where the structural and fts arms exclude the whole terminal vocabulary.
+      paginated, text, and tag modes); default False excludes them. The TAG
+      arm excluded only `status != "retracted"` until #13034 — a narrower
+      vocabulary that served superseded/archived/outdated/deprecated rows as
+      current on the one arm whose contract says otherwise (the gap #12502
+      filed). It now asks the same shared predicate as the structural and fts
+      arms (`live.is_terminal_status`), so every mode excludes the whole
+      terminal vocabulary plus the position axis (a closed Object, or one in a
+      `terminal` pipeline stage).
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
     a structured error dict. A `kind` that is SET but not a string (`True`, `1`,
@@ -4967,9 +5000,11 @@ def tortoise_query(kind: str | None = None,
     # `filters` into its own parameter above, and the `text=` arm now forwards it
     # as the fts leg's `include_terminal`. Refusing a name that is not a property
     # filter would be a false block; leaving it unapplied was the same defect one
-    # level down. NOTE the `tag=` arm APPLIES the flag but with a narrower
-    # vocabulary than the other arms (`status != "retracted"` only) — a real gap
-    # filed as #12502, and the reason this comment does not say the arms agree.
+    # level down. NOTE the `tag=` arm APPLIES the flag through the SAME shared
+    # predicate the other arms use (#12502, closed by #13034): it used to carry
+    # its own `status != "retracted"` test — a narrower vocabulary than every
+    # sibling arm — and now asks `live.is_terminal_status`, position axis
+    # included.
     if filters and (text or tag is not None):
         _arm = "tag=" if tag is not None else "text="
         # A caller who set BOTH must drop both to reach the structural path —
@@ -4998,10 +5033,22 @@ def tortoise_query(kind: str | None = None,
         rows = _safe(_get_org_sdk().query_points_by_tag, tag, _record_reads=False)
         if not isinstance(rows, list):
             return rows
-        # query_points_by_tag has no retracted exclusion in the SDK — mirror
-        # the tombstone contract of the other paths here (Epic #888).
+        # #12502: this arm used to carry its OWN tombstone test
+        # (``status != "retracted"``) — a hand-written SUBSET of the terminal
+        # vocabulary, so a superseded / deprecated / archived / ``outdated``
+        # row was served as current on the one arm whose docstring promises
+        # tombstones on every path. #13034: it now asks the ONE shared predicate
+        # (``live.is_terminal_status``) instead of re-spelling a status set, and
+        # passes the POSITION axis too — the rows are full ``properties(p)``
+        # dicts, so a closed Object (``isClosed``) or one parked in a
+        # ``terminal`` pipeline stage is excluded like any other ended record.
+        # ``include_retracted`` is still the escape hatch: an audit caller
+        # asking for tombstones gets every ended row.
         if not include_retracted:
-            rows = [r for r in rows if r.get("status") != "retracted"]
+            rows = [r for r in rows if not _is_terminal_status(
+                r.get("status"), bool(r.get("outdated")),
+                is_closed=r.get("isClosed"),
+                stage_slot=r.get("pipelineSlot"))]
         if not paginated:
             # #10602 review 3: a lone `limit=` used to be ignored HERE too, so a caller
             # asking for 2 rows of a large tag got the whole tagged population back —
@@ -5975,18 +6022,38 @@ def tortoise_invalidate(id: str, corrected_by_id: str,
     return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
-def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True,
+def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool | None = None,
                        dry_run: bool = False) -> dict:
-    """Atomically replace old Point with new — CORRECTS edge + outdated flag.
+    """Replace a node with a successor, keeping the history — the arm follows the OLD node's label.
 
-    transfer_edges=True (default): full supersede — all edges move from old to
-    new. transfer_edges=False: invalidate behavior — mark old outdated with a
-    CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
-    Returns {invalidated, id, corrected_by} (+ edges_transferred when
-    transfer_edges=True).
+    A Point gets the full supersede: CORRECTS edge + outdated flag + edge transfer.
+    An Object/Subject gets the family supersede: status + successor NAME + instant,
+    with no edge transfer.
 
-    dry_run=True previews exactly which edges would transfer and changes
-    nothing; dry_run=False (default) applies the supersede.
+    transfer_edges=None (default, NOT SUPPLIED): the SDK picks the arm by the
+    OLD node's label. transfer_edges=True: full supersede — all edges move from
+    old to new. transfer_edges=False: invalidate behavior — mark old outdated
+    with a CORRECTS edge only (no edge transfer). Both explicit values are
+    POINT-ONLY and are REFUSED on an Object/Subject. Absorbs tortoise_invalidate.
+    Returns {invalidated, id, corrected_by} (+ edges_transferred when the
+    supersede arm ran) for a Point, {superseded, id, label, superseded_by,
+    superseded_at} for an Object/Subject.
+
+    ⛔ The default is `None`, not `True` (#12914 review P3 + re-review finding 2):
+    passing `True` is a CALLER CHOICE the Object/Subject arm cannot honour, so it
+    is REFUSED there rather than silently dropped — and this container must not
+    manufacture that choice on the caller's behalf by defaulting to it. It passes
+    the value through UNCHANGED; the SDK owns the one dispatch rule.
+
+    dry_run=True previews what would change — the same arm and the same FAMILY-ARM
+    checks, nothing written — and reports the node count the write would touch.
+    ⛔ It is NOT refusal parity with the write on every shape: the write continues
+    into `update_knowledge` -> `_update_entity`, whose label-surface guards an
+    `:Event` row and a `:Source` row fail, and the preview does not run those. On
+    the hybrid shapes `:Object:Event` / `:Subject:Event` / `:Object:Source` /
+    `:Subject:Source` the preview says "would supersede" and the write refuses
+    (fail-closed, nothing written; tortoise#13114). dry_run=False (default)
+    applies the supersede.
     """
     if dry_run:
         return _safe(_preview_supersede, _get_org_sdk(),
@@ -8147,21 +8214,38 @@ def tortoise_update_knowledge(id: str, props: Any = None,
 
 
 def tortoise_supersede_knowledge(old_id: str, new_id: str,
-                                 transfer_edges: bool = True,
+                                 transfer_edges: bool | None = None,
                                  dry_run: bool = False) -> dict:
     """Replace a node with a successor — dispatching on the LINK POLICY (#4282 row 23).
 
-      transfer_edges=True  (default) → FULL SUPERSEED. CORRECTS edge, outdated flag,
-                                       and every edge moves from old to new.
-                                       Was `tortoise_supersede`.
-      transfer_edges=False           → INVALIDATE ONLY. Outdated flag + a CORRECTS
-                                       edge; nothing is transferred. This is the
-                                       whole of `tortoise_invalidate`, so that door
-                                       retires here rather than into a fourth verb.
+      transfer_edges=None (default, NOT SUPPLIED) → the SDK picks the arm by the
+                                       OLD node's label: a full supersede for a
+                                       :Point, the family supersede for an
+                                       :Object/:Subject.
+      transfer_edges=True            → FULL SUPERSEED (Point only). CORRECTS edge,
+                                       outdated flag, and every edge moves from
+                                       old to new. Was `tortoise_supersede`.
+      transfer_edges=False           → INVALIDATE ONLY (Point only). Outdated flag
+                                       + a CORRECTS edge; nothing is transferred.
+                                       This is the whole of `tortoise_invalidate`,
+                                       so that door retires here rather than into a
+                                       fourth verb.
 
-    dry_run=True previews the transition — which edges would move — and changes
-    nothing; it runs the same guards, so a rejected input is rejected in the
-    preview too.
+    ⛔ The default is `None`, not `True` (#12914 re-review finding 2): either
+    boolean is a Point-arm choice the family arm refuses, so defaulting to `True`
+    made every Object/Subject call here hit that refusal — a regression on the
+    only public route for a family supersede. The value is passed through
+    UNCHANGED; the SDK owns the one dispatch rule.
+
+    dry_run=True previews what would change — the same arm and the same FAMILY-ARM
+    checks, nothing written — and reports the node count the write would touch (and
+    the rows it would bind on the family arm, which transfers no edges).
+    ⛔ It is NOT refusal parity with the write on every shape: the write continues
+    into `update_knowledge` -> `_update_entity`, whose label-surface guards an
+    `:Event` row and a `:Source` row fail, and the preview does not run those. On
+    the hybrid shapes `:Object:Event` / `:Subject:Event` / `:Object:Source` /
+    `:Subject:Source` the preview says "would supersede" and the write refuses
+    (fail-closed, nothing written; tortoise#13114).
     """
     return tortoise_supersede(old_id, new_id, transfer_edges=transfer_edges,
                               dry_run=dry_run)
@@ -10948,12 +11032,62 @@ def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
     )
 
 
+def _preview_family_supersede(sdk, label: str, old_id: str, new_id: str) -> dict:
+    """Preview the `:Object`/`:Subject` arm of `tortoise_supersede` (#12914).
+
+    The guards are NOT restated here: this calls ``_supersede_entity(dry_run=True)``,
+    which runs every FAMILY-ARM check — same family, not self, source not already
+    terminal, successor current + named + unambiguous, no stranded sibling label —
+    and skips only the write. A preview that restated them would be the second
+    source of truth this lane exists to remove, and a preview that restated them
+    WRONG is exactly what the round-3 finding measured (it refused a supersede the
+    write accepted).
+
+    ⛔ RESIDUAL (#12914 round-4 P1, filed not fixed): the family WRITE continues
+    into ``update_knowledge`` -> ``_update_entity``, whose label-surface guards
+    (``refuse_terminal_event_state`` on an ``:Event`` row, the ``:Source``
+    closed-surface refusal) are NOT part of ``_supersede_entity``'s own checks. On
+    the HYBRID shapes ``:Object:Event`` / ``:Subject:Event`` / ``:Object:Source`` /
+    ``:Subject:Source`` this preview therefore answers `would supersede` and the
+    write refuses. Fail-closed (nothing is written), single-label rows unaffected.
+
+    ``superseded_at`` is the instant the write WOULD stamp; the real write mints its
+    own, so a caller must not reserve this value.
+    """
+    out = sdk._supersede_entity(label, old_id, new_id, dry_run=True)
+    return _preview_result(
+        "tortoise_supersede", f"family supersede ({label}: status + successor name)",
+        found=True, superseded=True, label=label,
+        target={"id": old_id, "superseded_by": out["superseded_by"]},
+        # ⛔ NOT a hardcoded 1 (#12914 round-4 P2): the family write is a bare
+        # `MATCH (n:<label> {id:$id}) SET n += $props`, which binds EVERY row the
+        # id names — the same fan-out the Point preview above mirrors instead of
+        # hardcoding. Measured on the round-4 head: two `:Object` rows sharing one
+        # id, preview said `nodes_affected: 1`, and the write terminalized BOTH.
+        nodes_affected=out["rows"], edges_removed=0, edges_added=0,
+        superseded_at=out["superseded_at"],
+    )
+
+
 def _preview_supersede(sdk, old_id: str, new_id: str,
-                       transfer_edges: bool = True) -> dict:
+                       transfer_edges: bool | None = None) -> dict:
     """Preview `tortoise_supersede`.
 
-    transfer_edges=False is the invalidate behaviour and reuses that preview.
-    transfer_edges=True enumerates the edges the writer repoints, leg by leg:
+    ⛔ THE ARM IS CHOSEN BY THE OLD NODE'S LABEL, EXACTLY AS THE WRITE CHOOSES IT
+    (#12914 round-3 finding 2). An `:Object`/`:Subject` takes
+    `_preview_family_supersede`; a `:Point` takes the edge walk below. Before this
+    the preview was Point-only, so `dry_run=True` refused — with the Point doors'
+    `No point <id>` — the very family supersede the write accepts, and the `dry_run`
+    contract two functions up ("it runs the same guards, so a rejected input is
+    rejected in the preview too") was false in the OTHER direction.
+
+    `transfer_edges=None` (the not-supplied default) is the only value that takes
+    either arm; every supplied value keeps its meaning — `False` is the invalidate
+    behaviour and reuses that preview, and on a family node anything else is
+    REFUSED through the write's own helper rather than restated here.
+
+    On a `:Point`, `transfer_edges=True` enumerates the edges the writer repoints,
+    leg by leg:
       * 2a operator -> old, EXCEPT `alreadyDecided` (kept on the dead prior).
         The writer MERGEs (idx-keyed; an idx-less edge merges on the bare
         pattern — #6180): a pre-existing edge at the successor is
@@ -11017,7 +11151,17 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     `edges_already_present_at_new` names those no-ops; both are multiplied by
     `successor_nodes` when a duplicate successor id fans the writer out.
     """
-    if not transfer_edges:
+    # ⛔ THE FAMILY ARM IS DECIDED FIRST, BEFORE THE INVALIDATE SHORTCUT (#12914
+    # round-3 finding 2). `_preview_invalidate` is a POINT writer, so routing a
+    # family node through it answers a Point refusal (`No point <id>`) for an
+    # Object the write accepts. The label read is the SAME one the write dispatches
+    # on (`_supersession_label`, Point wins a #3311 hybrid tie), and the keyword
+    # refusal is the write's OWN helper — never a restatement of its message.
+    label = sdk._supersession_label(old_id)
+    if label in ("Object", "Subject"):
+        sdk._refuse_family_transfer_edges(label, old_id, transfer_edges)
+        return _preview_family_supersede(sdk, label, old_id, new_id)
+    if transfer_edges is not None and not transfer_edges:
         out = _preview_invalidate(sdk, old_id, new_id)
         out["tool"] = "tortoise_supersede"
         out["would"] = "invalidate (transfer_edges=false)"
