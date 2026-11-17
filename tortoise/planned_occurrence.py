@@ -265,6 +265,14 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     certain of is that it has not happened. The advance goes through
     ``pipeline.advance_stage``, i.e. through ``update_knowledge``, so the move is
     journaled (``EntityMutated``) and replayed.
+
+    ⛔ The returned node is only a *staged* plan if the advance actually applied.
+    A create **name** is a natural key that re-mentions its single live holder
+    (#452), so this call can land on a plan that already exists — and a plan that
+    is settled cannot be restaged. That case RAISES, naming the stage it is
+    actually at and the route to a new record; an existing plan that is already
+    ``scheduled`` and open is a no-op success, because that is exactly what was
+    asked for.
     """
     from . import pipeline
 
@@ -320,10 +328,40 @@ def create_plan(sdk, name: str, *, title: str | None = None,
         # A plan born with NO position reads as "unknown" to every reader, so a
         # create that could not stage it must say so rather than return a
         # success-shaped record.
+        #
+        # ⛔ AND IT MUST SAY SOMETHING TRUE. "…a fresh plan carries none" was not
+        # true on the reachable path: a create NAME is the idempotent natural key
+        # (#452), so `create_entity` re-mentions the single LIVE holder — and
+        # "live" there is the `status`/`outdated` vocabulary
+        # (`live._terminal_excluded`), which does not read the
+        # `pipelineSlot`/`isClosed` axis a plan's ending is written to. So
+        # `settle_plan(..., "missed")` followed by `create_plan(<same name>)`
+        # lands on the SETTLED plan and hits the terminal guard: the caller was
+        # told to inspect the stage props of "a fresh plan" that does not exist,
+        # and given no route out. REFUSED rather than reopened, deliberately —
+        # `reopen=True` would restate a recorded ending as upcoming, which §8
+        # forbids ("a later event does not rewrite an earlier one").
+        cur = pipeline.current_stage(sdk._get_proj().g, plan_id) or {}
+        pos = plan_position(
+            cur.get("stageId"), cur.get("slot"), cur.get("outcome"),
+            is_closed=bool(cur.get("isClosed")),
+            pipeline_key=cur.get("pipelineKey"))
+        if (pos["stageId"] == STAGE_SCHEDULED and not pos["ended"]
+                and not pos["unresolvable"]):
+            # The ONE unapplied move that is not a lie: the name resolved to a
+            # plan already on `scheduled` and open, so the contract — "a
+            # scheduled, not-yet-happened plan exists under this name" — holds.
+            # This is the stale-`at` re-mention, and it is not an error.
+            return node
         raise ValueError(
-            f"Refused: the plan {plan_id!r} was created but could not be put on "
-            f"{STAGE_SCHEDULED!r} ({move.reason}). WHAT TO DO: inspect the "
-            f"Object's current stage props — a fresh plan carries none.")
+            f"Refused: the plan {name!r} resolves to {plan_id!r}, which is "
+            f"already at {pos['stageId']!r}"
+            f"{' (closed marker set)' if cur.get('isClosed') else ''}"
+            f"{' and its position does not resolve' if pos['unresolvable'] else ''}"
+            f", so this create cannot put it on {STAGE_SCHEDULED!r} "
+            f"({move.reason}). WHAT TO DO: a settled plan is a closed record, "
+            f"and a create does not reopen or restate one — a new incarnation is "
+            f"a NEW plan, so give it a distinct name.")
     return node
 
 

@@ -31,6 +31,7 @@ write goes through the journaled ``EntityMutated`` path.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -60,6 +61,50 @@ def sdk():
 
 def _stage(sdk, plan_id):
     return pipeline.current_stage(sdk._get_proj().g, plan_id)
+
+
+#: The ingest states an ``eventStatus`` write may carry (#13100 §8): ``pending``
+#: when the record arrives, ``indexed`` when it reaches the index. A lifecycle
+#: word here is the retired third case wearing the marker's name.
+INGEST_EVENT_STATES = frozenset({"pending", "indexed"})
+
+#: The Cypher half of the pin above ``_event_status_writes``:
+#: ``e.eventStatus='pending'`` / ``eventStatus = 'indexed'`` inside a query
+#: string. The AST readers are the structural half (kwargs and dict literals).
+_EVENT_STATUS_LITERAL = re.compile(
+    r"eventStatus[\"']?\s*[:=]\s*[\"']([A-Za-z_][\w-]*)[\"']")
+
+
+def _event_status_writes(source: str) -> list[tuple[int, str]]:
+    """``(lineno, value)`` for every LITERAL ``eventStatus`` write in ``source``.
+
+    Three spellings, because the tree uses all three: a **kwarg**
+    (``eventStatus="indexed"``), a **dict literal**
+    (``{"eventStatus": "indexed"}``) and a **Cypher string**
+    (``e.eventStatus='pending'``). The first two are read from the AST, so a
+    fourth Python spelling cannot defeat the pin; the third is text inside a
+    query, so the regex reads it. Results are de-duplicated, since a kwarg is
+    matched by both readers.
+    """
+    import ast
+
+    found: set[tuple[int, str]] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if (kw.arg == "eventStatus"
+                        and isinstance(kw.value, ast.Constant)
+                        and isinstance(kw.value.value, str)):
+                    found.add((kw.value.lineno, kw.value.value))
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if (isinstance(key, ast.Constant) and key.value == "eventStatus"
+                        and isinstance(value, ast.Constant)
+                        and isinstance(value.value, str)):
+                    found.add((value.lineno, value.value))
+    for match in _EVENT_STATUS_LITERAL.finditer(source):
+        found.add((source.count("\n", 0, match.start()) + 1, match.group(1)))
+    return sorted(found)
 
 
 # ── acceptance 1: a plan advances through its stages, terminal + outcome ─────
@@ -140,6 +185,50 @@ class TestThePlanPipeline:
         plan = PO.create_plan(sdk, "Held with no fact")
         with pytest.raises(ValueError, match="not a no-occurrence ending"):
             PO.settle_plan(sdk, plan["id"], PO.STAGE_HELD)
+
+    def test_create_plan_on_a_SETTLED_name_names_the_stage_and_the_route(
+            self, sdk):
+        """⛔ A create that lands on a settled plan must not read as a create.
+
+        A create NAME is the idempotent natural key (#452): ``create_entity``
+        re-mentions the single live holder, and "live" is the
+        ``status``/``outdated`` vocabulary, which does not read the
+        ``pipelineSlot``/``isClosed`` axis a plan's ending is written to. So the
+        second create lands on the SETTLED plan and ``advance_stage`` answers
+        ``applied=False`` (terminal guard) — a NORMAL return. Handing back that
+        id read as "a scheduled, upcoming plan exists"; it does not.
+
+        The refusal has to be usable, which is what this pins: it names the stage
+        the plan is ACTUALLY at and the only working route (a new record) — the
+        first version said "a fresh plan carries none", about a plan that is not
+        fresh, leaving no way out (#13100 review F1).
+        """
+        plan = PO.create_plan(sdk, "Weekly board review")
+        PO.settle_plan(sdk, plan["id"], PO.STAGE_MISSED)
+
+        with pytest.raises(ValueError, match="already at 'missed'") as exc:
+            PO.create_plan(sdk, "Weekly board review")
+        assert "distinct name" in str(exc.value)
+        assert "fresh plan carries none" not in str(exc.value)
+        # …and it did not quietly restage the settled record (§8: a later
+        # mention does not rewrite an earlier ending).
+        cur = _stage(sdk, plan["id"])
+        assert cur["stageId"] == "missed"
+        assert cur["isClosed"] is True
+
+    def test_create_plan_re_mentioning_an_UPCOMING_plan_is_not_a_refusal(
+            self, sdk):
+        """The other half: the refusal must not become a false block.
+
+        When the name resolves to a plan that is ALREADY ``scheduled`` and open,
+        the create's contract ("a scheduled, not-yet-happened plan exists under
+        this name") is satisfied — the stale-``at`` re-mention moves nothing and
+        must not raise.
+        """
+        plan = PO.create_plan(sdk, "Standing sync")
+        again = PO.create_plan(sdk, "Standing sync", at="2020-01-01T00:00:00Z")
+        assert again["id"] == plan["id"]
+        assert _stage(sdk, plan["id"])["stageId"] == "scheduled"
 
     def test_an_unknown_plan_reference_is_refused(self, sdk):
         with pytest.raises(ValueError, match="no plan Object"):
@@ -712,13 +801,41 @@ class TestTheIngestMarkerIsNotAnOccurrence:
         assert PO.planned_without_occurrence(g) == []
 
     def test_no_in_tree_writer_emits_a_lifecycle_shaped_ingest_word(self):
-        """The ingest vocabulary is pinned where the writers are declared."""
+        """The ingest vocabulary is pinned at EVERY writer, in every spelling.
+
+        ``eventStatus`` is ingest BOOKKEEPING (``pending`` -> ``indexed``); a
+        lifecycle word in it is the #13100 defect wearing the marker's name —
+        it would represent a not-yet-happened thing as an ``:Event``.
+
+        ⛔ The pin reads the VALUE, not a spelling. Its first version matched a
+        contiguous ``eventStatus=``/``eventStatus='`` and so could not see the
+        dict-literal spelling ``"eventStatus": "indexed"`` — which is how five
+        of the seven writers in the tree are written, so reverting one of them
+        to ``completed`` left this pin GREEN (#13100 review F2).
+        """
         import inspect
 
         from tortoise import hosted_api, sdk, session_indexer
 
+        writes = []
         for module in (sdk, hosted_api, session_indexer):
-            source = inspect.getsource(module)
-            for word in ("eventStatus='scheduled'", 'eventStatus="scheduled"',
-                         "eventStatus='completed'", 'eventStatus="completed"'):
-                assert word not in source, (module.__name__, word)
+            writes += [(module.__name__, line, value)
+                       for line, value in _event_status_writes(
+                           inspect.getsource(module))]
+
+        bad = [(m, line, value) for m, line, value in writes
+               if value not in INGEST_EVENT_STATES]
+        assert not bad, (
+            "a writer stamps a lifecycle-shaped ``eventStatus``: "
+            f"{bad} — the ingest marker takes {sorted(INGEST_EVENT_STATES)} "
+            "only; a not-yet-happened thing is a PLAN (#13100 §8)")
+
+        # ⛔ NON-VACUITY (agent-infra#3442): a pin that enumerates nothing is
+        # green for ever. The tree has SEVEN literal sites at this head; if the
+        # readers stop seeing them, a spelling changed and the pin must be
+        # taught it — not silently pass.
+        assert len(writes) >= 7, (
+            "the pin enumerated only "
+            f"{len(writes)} eventStatus writer(s) — fewer than the 7 in-tree "
+            "literal sites, so a spelling escaped the readers; extend "
+            "_event_status_writes")
