@@ -411,7 +411,9 @@ is this document's generalisation, recorded in the same thread (comment
 [`6712718679`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6712718679)), and the
 thresholds for those two tiers are therefore a derivation, not a quotation.
 
-**⚠️ Why it is nonetheless NOT armed at private-beta (§1.5):** it is unmeasured. The bounded-cache
+**⚠️ Why it is nonetheless NOT armed at private-beta (§1.5):** private-beta runs the graph **complete** by
+phase rule, so nothing decides the beta here; §9's M2 measurement is what gates the **post-measurement**
+phase, and it does not arm the window (§9.1). The bounded-cache
 literature measures latency and hit rate, not answer quality, and the best trace-aware policy reached ~54 %
 hit rate for 2-hop expansions — so arming it on a guess is exactly the quality risk this document ranks
 first. Private-beta therefore runs **complete** and **above the 30 % target, knowingly** — **193 % of it on the
@@ -471,8 +473,9 @@ may keep, however it is denominated"*, and it is not this.
 
 ⚠️ **The honesty item:** the bounded-cache literature measures **latency and hit rate, not answer
 quality**, and the best trace-aware policy reached ~54 % hit rate for 2-hop expansions. **Whether a
-windowed graph harms retrieval quality is unmeasured anywhere** — which is why §9 measures it before the
-window is trusted, and why **private-beta** runs the graph **complete** (§1.5).
+windowed graph harms retrieval quality is answered nowhere in that literature** — §9 M2 measures it for
+our graph, and its result is §9.1. Private-beta runs the graph **complete** (§1.5) regardless: §9.1's
+measurement is what gates the post-measurement phase, not what gates the beta.
 
 ---
 
@@ -568,10 +571,72 @@ prints it.
 | # | measurement | decides |
 |---|---|---|
 | **M1** | vector move: recall@10 vs exact ground truth, p95, **and the shortfall rate at 1 % / 10 % / 50 % selectivity** | whether the move ships — a recall-only test is not sufficient (§6.1) |
-| **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the gate that ARMS §7 (post-measurement) — the literature has no answer |
+| **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the gate that ARMS §7 (post-measurement) — the literature has no answer; the result is §9.1 |
 | **M3** | text ranking: a BM25-capable Postgres option vs the current `db.idx.fulltext` scores, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
 | **M4** | rebuild peak memory and latency per tenant at the real window size, **and whether a KEPT `db.idx.fulltext` or range index blocks a restore the way the removed vector index did (§7)** | the 6× headroom (§7), the #1 risk — and whether §7's window is a feasibility question after all |
 | **M5** | the **miss rate** per tenant (a DIFFERENT M5 from `STORAGE-ARCHITECTURE.md` §15's, which asks where the vector index lives and was answered 2026-11-07) | the compute/IOPS/egress tier |
+
+### 9.1 M2 — measured, and it does not arm the window
+
+The record is `docs/evidence/12186-m2-windowed-quality/` (README + artifact + the instrument
+`tools/window_quality_m2.py`). Its result is a **design input**, so it is stated here and not only there.
+
+**The cost is exactly the eviction, and nothing compensates.** On the capture-prior population
+(`:Object`, 1000 nodes, 300 fixed queries, lexical leg) `found@deep` **equals** the resident share in
+every arm — 91.3 / 77.3 / 51.7 / 23.3 / 8.7 at coverage 0.90 / 0.75 / 0.50 / 0.25 / 0.10 — so on that
+population a node the window keeps is always still findable at depth 50, and a demoted node is never
+returned at any rank (`found_deep_of_demoted` is 0.0 in every arm). ⛔ That equality is `:Object`-only.
+On `:Point` it does **not** hold: keeping 52.7 % of claims finds only 41.0 %, because the claim leg has its
+own ceiling (below) — so on claims the loss is the eviction **plus** a ranking weakness the window did not
+cause, and the two must not be added into one number. At §8's own solo target (≈77 MB against an ≈150 MB
+complete graph, i.e. about half) **recall@3 falls 88.3 % → 46.0 %** and the top-1-is-a-different-node
+rate **rises 27.7 % → 41.0 %**. On the claim population (`:Point`) `found@deep` falls **71.3 % → 41.0 %**
+and the wrong-answer rate per demoted query is **100 %**: a demoted claim query returns another claim,
+never an empty answer. A miss costs a new node; a wrong top-1 is how the duplicate the epic exists to
+prevent is minted.
+
+**No eviction policy protects the quality.** The cold-tail (recency/frequency) policy and a seeded random
+control agree at every coverage — recall@3 46.0 vs 46.3 at 0.50, 81.0 vs 81.7 at 0.90 — because a demoted
+node is unretrievable whatever reason selected it. The policy table's *"recency beats static degree
+ranking"* is a **hit-rate** result and does not carry to retrieval quality.
+
+**The loss carries no signal.** `extractor_v2._fts_rows` — the capture path — requests neither
+`read_status_out` nor `_truncation_out`; `TORTOISE_RESIDENCY` is off; and **no code path emits** this
+section's two reason strings (`truncated_boundary`, `insufficient_graph` — specified here and in §1.5, and
+nowhere in the read path). So §5's **Q2 (*"Nothing is silently invisible")** is violated for each silent
+loss, and the demotion converts to a prior through `coalesce(ep_alpha, 1.0)` where a neighbour is gone —
+§5's Q1.
+
+**The leg that decides it is the text leg, and it is the one §6.2 keeps in the graph.** A
+`db.idx.fulltext` index covers the nodes the graph holds; the record does not serve set-shaped reads
+(`record_serve.ANCHORED_READS` marks `whole-graph` and `anchored-neighbours` as not served). §7's
+seed-materialisation repair therefore cannot reach a demoted candidate: the index cannot mint an id for a
+node it does not index, so there is nothing to materialise. The repair is sound only for a candidate
+generator that reads the record — which the vector leg becomes when it moves (§3) and the text leg does
+not.
+
+**One mechanism a window must drive, found by this measurement:** `fallback_snapshot`'s 60 s in-memory
+corpus is invalidated by `SDK._mark_dirty` and **not** by a bare Cypher `DELETE`, so a demotion performed
+outside the write surfaces leaves the degraded path serving the demoted corpus — measured as recall
+above the arm's own resident share. Any operator that demotes must invalidate it.
+
+⚠️ **What §9.1 does NOT settle.** The **vector** leg is not bounded once it moves to Postgres, and this
+run did not exercise it — `record_vector.ARMING_ENV` is unarmed and the artifact records
+`retrieval.mode = "keyword_only"`, so every figure is the **lexical** leg's. Coverage here is a NODE
+share, while §8 budgets BYTES. And the lexical leg's own ceiling is low on claims even complete
+(recall@3 15.7 %, `found@deep` 71.3 %) — the ranking matter **M3** owns, not a window effect. And the
+record carries its own reproducibility bound, in the artifact: across three runs of identical input
+`found@deep` moved by at most 0.33 points, `recall@k` by at most 1.0, and the tie-counting rates by at
+most 9.9 — every conclusion rests on a gap of 13 to 43 points, and the two quantities the verdict turns
+on (`found@deep == resident_share`, and `found_deep_of_demoted == 0`) held in every arm of every run.
+
+**Consequence for §7.** Arming needs a decision this measurement cannot make on its own, and §10 names
+its shape: if the window is to be armed, one of three things must be true — the text index moves with the
+vectors, which **contradicts §6.2's decision item 2** and is therefore a **reopen** in that item's own
+home argued with this evidence, never a silent adoption; or the window excludes the search-indexed labels
+and is sized against §8's target on that basis; or every demoted answer is labelled with a reason and
+repaired from the record, which needs a record-served set read the record does not have.
+
 
 ---
 

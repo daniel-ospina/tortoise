@@ -191,3 +191,39 @@ to the record. The reopen, if any, is argued on `#4051` / `#13082` phase 2 with 
 `ts_rank` is built-in — no extension, no worker, no restart-level config, a **64 KB** GIN index.
 `pg_search` needs `shared_preload_libraries`, is **AGPL-3.0-or-later**, and its index is **3.13 MB**
 (48×) for no head-quality gain over `ts_rank`. Evidence: `docs/evidence/13099-text-gate/`.
+
+---
+
+## `#12186` — M2 measured: the window's cost is its eviction, and it is silent
+
+§9 M2 asks whether a windowed graph loses retrieval quality, and §7 arms the window only on its answer.
+The measurement is `docs/evidence/12186-m2-windowed-quality/` — instrument `tools/window_quality_m2.py`,
+1000 `:Object` names and 786 `:Point` claims from this box's capture corpus, 300 fixed queries per arm,
+five coverages under two eviction policies.
+
+**On entity names the cost is exactly the eviction share and nothing compensates.** `found@deep` equals
+the resident share in every `:Object` arm (91.3 / 77.3 / 51.7 / 23.3 / 8.7), so what the window keeps it can
+still find, and what it demotes it never returns (`found_deep_of_demoted` is 0.0 in every arm of both
+populations). The identity is `:Object`-only: on `:Point` keeping 52.7 % finds only 41.0 %, because the
+claim leg has a ceiling of its own — the loss there is the eviction PLUS a ranking weakness the window did
+not cause. At §8's own solo target — about
+half the complete graph — `recall@3` falls 88.3 % → 46.0 % and the top-1-is-wrong rate rises
+27.7 % → 41.0 %. On the claim population every demoted query returns **another claim**, never an empty
+answer.
+
+**Why the answer is architectural rather than statistical.** A `db.idx.fulltext` index covers only the
+nodes the graph holds, and the record does not serve set-shaped reads — `record_serve.ANCHORED_READS` marks
+`whole-graph` and `anchored-neighbours` as not served. So §7's seed-materialisation repair has nothing to
+work on for a demoted candidate. The vector leg escapes this once it moves to Postgres (§3); the text leg
+does not, because §6.2's decision item 2 keeps it in the graph.
+
+**Two things the measurement changed that are not numbers.** The eviction policy does not matter — the
+cold-tail/recency policy and a random control agree at every coverage — so the policy table's hit-rate
+result does not carry to retrieval quality (the two policies read 46.0 vs 46.3 at the target size). And a
+demotion must invalidate `fallback_snapshot`, whose 60 s
+corpus is cleared by `SDK._mark_dirty` but not by a bare Cypher `DELETE`: without it the degraded path keeps
+serving the demoted corpus, which this instrument caught as recall above the arm's own resident share.
+
+What this does **not** decide: the vector leg (unarmed in this run, so every figure is the lexical leg's),
+the byte-vs-node question (§8 budgets bytes, coverage here is a node share), and the lexical leg's own low
+ceiling on claims — M3's ranking matter, measured there and not re-run here.

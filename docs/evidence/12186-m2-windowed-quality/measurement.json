@@ -1,0 +1,616 @@
+{
+  "cleanup": {
+    "graphs_created": 22,
+    "graphs_dropped": 0,
+    "note": "each arm is measured on its own graph (params.graph_prefix); nodes are cleared after each population, but the graphs themselves are left behind. On a lane container `test_lane.py down` disposes of them, which is the intended path \u2014 a shared server accumulates one set per run"
+  },
+  "corpus": {
+    "corpus": {
+      "files": 22,
+      "files_contributed": 22,
+      "lines": 653,
+      "parse_errors": 1,
+      "records_without_text": 0
+    },
+    "names_harvested": {
+      "definite": 138578,
+      "ident": 12557,
+      "path": 5314
+    }
+  },
+  "document": "docs/architecture/SEARCH-ARCHITECTURE.md \u00a79",
+  "gate_for": "\u00a77 \u2014 arming the cache window",
+  "generated_at": "2026-11-17T02:13:37Z",
+  "git_head": "8762578f8c70e817875f66876f8ecebe3f798206",
+  "issue": 12186,
+  "measurement": "M2",
+  "params": {
+    "coverages": [
+      1.0,
+      0.9,
+      0.75,
+      0.5,
+      0.25,
+      0.1
+    ],
+    "deep_limit": 50,
+    "evict_seed_offset": 1000003,
+    "graph_prefix": "m2win_1794881442_2577243",
+    "ks": [
+      3,
+      5,
+      10,
+      15
+    ],
+    "objects": 1000,
+    "point_text_limit": 1200,
+    "points": 900,
+    "policies": [
+      "tail",
+      "random"
+    ],
+    "sample": 300,
+    "seed": 11901
+  },
+  "populations": {
+    "object": {
+      "arms": {
+        "complete": {
+          "demoted_queries": 0,
+          "empty": 0.0,
+          "found_deep": 1.0,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.27666666666666667,
+          "queries": 300,
+          "recall@10": 0.9633333333333334,
+          "recall@15": 0.9866666666666667,
+          "recall@3": 0.8833333333333333,
+          "recall@5": 0.95,
+          "resident_queries": 300,
+          "resident_share": 1.0,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 0.0
+        },
+        "random@0.1": {
+          "coverage_delivered": 0.1,
+          "coverage_requested": 0.1,
+          "demoted_queries": 264,
+          "empty": 0.51,
+          "found_deep": 0.12,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.37,
+          "queries": 300,
+          "recall@10": 0.12,
+          "recall@15": 0.12,
+          "recall@3": 0.12,
+          "recall@5": 0.12,
+          "resident_queries": 36,
+          "resident_share": 0.12,
+          "silent_zero": 0.5795454545454546,
+          "wrong_not_miss": 0.42045454545454547
+        },
+        "random@0.25": {
+          "coverage_delivered": 0.25,
+          "coverage_requested": 0.25,
+          "demoted_queries": 224,
+          "empty": 0.34,
+          "found_deep": 0.25333333333333335,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.4266666666666667,
+          "queries": 300,
+          "recall@10": 0.25333333333333335,
+          "recall@15": 0.25333333333333335,
+          "recall@3": 0.25333333333333335,
+          "recall@5": 0.25333333333333335,
+          "resident_queries": 76,
+          "resident_share": 0.25333333333333335,
+          "silent_zero": 0.45535714285714285,
+          "wrong_not_miss": 0.5446428571428571
+        },
+        "random@0.5": {
+          "coverage_delivered": 0.5,
+          "coverage_requested": 0.5,
+          "demoted_queries": 151,
+          "empty": 0.18333333333333332,
+          "found_deep": 0.49666666666666665,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.43,
+          "queries": 300,
+          "recall@10": 0.49333333333333335,
+          "recall@15": 0.49666666666666665,
+          "recall@3": 0.4633333333333333,
+          "recall@5": 0.48,
+          "resident_queries": 149,
+          "resident_share": 0.49666666666666665,
+          "silent_zero": 0.36423841059602646,
+          "wrong_not_miss": 0.6357615894039735
+        },
+        "random@0.75": {
+          "coverage_delivered": 0.75,
+          "coverage_requested": 0.75,
+          "demoted_queries": 71,
+          "empty": 0.07333333333333333,
+          "found_deep": 0.7633333333333333,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.3333333333333333,
+          "queries": 300,
+          "recall@10": 0.75,
+          "recall@15": 0.76,
+          "recall@3": 0.7066666666666667,
+          "recall@5": 0.7333333333333333,
+          "resident_queries": 229,
+          "resident_share": 0.7633333333333333,
+          "silent_zero": 0.30985915492957744,
+          "wrong_not_miss": 0.6901408450704225
+        },
+        "random@0.9": {
+          "coverage_delivered": 0.9,
+          "coverage_requested": 0.9,
+          "demoted_queries": 25,
+          "empty": 0.03666666666666667,
+          "found_deep": 0.9166666666666666,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.29,
+          "queries": 300,
+          "recall@10": 0.8833333333333333,
+          "recall@15": 0.9066666666666666,
+          "recall@3": 0.8166666666666667,
+          "recall@5": 0.8633333333333333,
+          "resident_queries": 275,
+          "resident_share": 0.9166666666666666,
+          "silent_zero": 0.44,
+          "wrong_not_miss": 0.56
+        },
+        "tail@0.1": {
+          "coverage_delivered": 0.1,
+          "coverage_requested": 0.1,
+          "demoted_queries": 274,
+          "empty": 0.49,
+          "found_deep": 0.08666666666666667,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.44,
+          "queries": 300,
+          "recall@10": 0.08666666666666667,
+          "recall@15": 0.08666666666666667,
+          "recall@3": 0.08666666666666667,
+          "recall@5": 0.08666666666666667,
+          "resident_queries": 26,
+          "resident_share": 0.08666666666666667,
+          "silent_zero": 0.5364963503649635,
+          "wrong_not_miss": 0.4635036496350365
+        },
+        "tail@0.25": {
+          "coverage_delivered": 0.25,
+          "coverage_requested": 0.25,
+          "demoted_queries": 230,
+          "empty": 0.38666666666666666,
+          "found_deep": 0.23333333333333334,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.46,
+          "queries": 300,
+          "recall@10": 0.23,
+          "recall@15": 0.23333333333333334,
+          "recall@3": 0.20333333333333334,
+          "recall@5": 0.21666666666666667,
+          "resident_queries": 70,
+          "resident_share": 0.23333333333333334,
+          "silent_zero": 0.5043478260869565,
+          "wrong_not_miss": 0.4956521739130435
+        },
+        "tail@0.5": {
+          "coverage_delivered": 0.5,
+          "coverage_requested": 0.5,
+          "demoted_queries": 145,
+          "empty": 0.22666666666666666,
+          "found_deep": 0.5166666666666667,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.41,
+          "queries": 300,
+          "recall@10": 0.5133333333333333,
+          "recall@15": 0.5133333333333333,
+          "recall@3": 0.46,
+          "recall@5": 0.48333333333333334,
+          "resident_queries": 155,
+          "resident_share": 0.5166666666666667,
+          "silent_zero": 0.4689655172413793,
+          "wrong_not_miss": 0.5310344827586206
+        },
+        "tail@0.75": {
+          "coverage_delivered": 0.75,
+          "coverage_requested": 0.75,
+          "demoted_queries": 68,
+          "empty": 0.11333333333333333,
+          "found_deep": 0.7733333333333333,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.3433333333333333,
+          "queries": 300,
+          "recall@10": 0.76,
+          "recall@15": 0.7633333333333333,
+          "recall@3": 0.6933333333333334,
+          "recall@5": 0.7166666666666667,
+          "resident_queries": 232,
+          "resident_share": 0.7733333333333333,
+          "silent_zero": 0.5,
+          "wrong_not_miss": 0.5
+        },
+        "tail@0.9": {
+          "coverage_delivered": 0.9,
+          "coverage_requested": 0.9,
+          "demoted_queries": 26,
+          "empty": 0.04,
+          "found_deep": 0.9133333333333333,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.29,
+          "queries": 300,
+          "recall@10": 0.89,
+          "recall@15": 0.9,
+          "recall@3": 0.81,
+          "recall@5": 0.8633333333333333,
+          "resident_queries": 274,
+          "resident_share": 0.9133333333333333,
+          "silent_zero": 0.46153846153846156,
+          "wrong_not_miss": 0.5384615384615384
+        }
+      },
+      "nodes": 1000,
+      "queries": 300,
+      "recall_gap_vs_complete": {
+        "random@0.1": {
+          "recall_drop@10": 0.843333,
+          "recall_drop@15": 0.866667,
+          "recall_drop@3": 0.763333,
+          "recall_drop@5": 0.83
+        },
+        "random@0.25": {
+          "recall_drop@10": 0.71,
+          "recall_drop@15": 0.733333,
+          "recall_drop@3": 0.63,
+          "recall_drop@5": 0.696667
+        },
+        "random@0.5": {
+          "recall_drop@10": 0.47,
+          "recall_drop@15": 0.49,
+          "recall_drop@3": 0.42,
+          "recall_drop@5": 0.47
+        },
+        "random@0.75": {
+          "recall_drop@10": 0.213333,
+          "recall_drop@15": 0.226667,
+          "recall_drop@3": 0.176667,
+          "recall_drop@5": 0.216667
+        },
+        "random@0.9": {
+          "recall_drop@10": 0.08,
+          "recall_drop@15": 0.08,
+          "recall_drop@3": 0.066667,
+          "recall_drop@5": 0.086667
+        },
+        "tail@0.1": {
+          "recall_drop@10": 0.876667,
+          "recall_drop@15": 0.9,
+          "recall_drop@3": 0.796667,
+          "recall_drop@5": 0.863333
+        },
+        "tail@0.25": {
+          "recall_drop@10": 0.733333,
+          "recall_drop@15": 0.753333,
+          "recall_drop@3": 0.68,
+          "recall_drop@5": 0.733333
+        },
+        "tail@0.5": {
+          "recall_drop@10": 0.45,
+          "recall_drop@15": 0.473333,
+          "recall_drop@3": 0.423333,
+          "recall_drop@5": 0.466667
+        },
+        "tail@0.75": {
+          "recall_drop@10": 0.203333,
+          "recall_drop@15": 0.223333,
+          "recall_drop@3": 0.19,
+          "recall_drop@5": 0.233333
+        },
+        "tail@0.9": {
+          "recall_drop@10": 0.073333,
+          "recall_drop@15": 0.086667,
+          "recall_drop@3": 0.073333,
+          "recall_drop@5": 0.086667
+        }
+      }
+    },
+    "point": {
+      "arms": {
+        "complete": {
+          "demoted_queries": 0,
+          "empty": 0.0,
+          "found_deep": 0.7133333333333334,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.93,
+          "queries": 300,
+          "recall@10": 0.33,
+          "recall@15": 0.4066666666666667,
+          "recall@3": 0.15666666666666668,
+          "recall@5": 0.22,
+          "resident_queries": 300,
+          "resident_share": 1.0,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 0.0
+        },
+        "random@0.1": {
+          "coverage_delivered": 0.1005089058524173,
+          "coverage_requested": 0.1,
+          "demoted_queries": 267,
+          "empty": 0.0,
+          "found_deep": 0.11,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.9733333333333334,
+          "queries": 300,
+          "recall@10": 0.1,
+          "recall@15": 0.1,
+          "recall@3": 0.05333333333333334,
+          "recall@5": 0.06333333333333334,
+          "resident_queries": 33,
+          "resident_share": 0.11,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        },
+        "random@0.25": {
+          "coverage_delivered": 0.24936386768447838,
+          "coverage_requested": 0.25,
+          "demoted_queries": 225,
+          "empty": 0.0,
+          "found_deep": 0.23666666666666666,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.9566666666666667,
+          "queries": 300,
+          "recall@10": 0.15,
+          "recall@15": 0.17333333333333334,
+          "recall@3": 0.08666666666666667,
+          "recall@5": 0.11,
+          "resident_queries": 75,
+          "resident_share": 0.25,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        },
+        "random@0.5": {
+          "coverage_delivered": 0.5,
+          "coverage_requested": 0.5,
+          "demoted_queries": 152,
+          "empty": 0.0,
+          "found_deep": 0.4,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.9433333333333334,
+          "queries": 300,
+          "recall@10": 0.19333333333333333,
+          "recall@15": 0.24,
+          "recall@3": 0.1,
+          "recall@5": 0.14,
+          "resident_queries": 148,
+          "resident_share": 0.49333333333333335,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        },
+        "random@0.75": {
+          "coverage_delivered": 0.7506361323155216,
+          "coverage_requested": 0.75,
+          "demoted_queries": 82,
+          "empty": 0.0,
+          "found_deep": 0.55,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.93,
+          "queries": 300,
+          "recall@10": 0.25666666666666665,
+          "recall@15": 0.31666666666666665,
+          "recall@3": 0.12333333333333334,
+          "recall@5": 0.17666666666666667,
+          "resident_queries": 218,
+          "resident_share": 0.7266666666666667,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        },
+        "random@0.9": {
+          "coverage_delivered": 0.8994910941475827,
+          "coverage_requested": 0.9,
+          "demoted_queries": 44,
+          "empty": 0.0,
+          "found_deep": 0.6366666666666667,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.9266666666666666,
+          "queries": 300,
+          "recall@10": 0.2866666666666667,
+          "recall@15": 0.37,
+          "recall@3": 0.14666666666666667,
+          "recall@5": 0.21333333333333335,
+          "resident_queries": 256,
+          "resident_share": 0.8533333333333334,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        },
+        "tail@0.1": {
+          "coverage_delivered": 0.1005089058524173,
+          "coverage_requested": 0.1,
+          "demoted_queries": 270,
+          "empty": 0.0,
+          "found_deep": 0.09666666666666666,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.9733333333333334,
+          "queries": 300,
+          "recall@10": 0.08333333333333333,
+          "recall@15": 0.08333333333333333,
+          "recall@3": 0.06666666666666667,
+          "recall@5": 0.07666666666666666,
+          "resident_queries": 30,
+          "resident_share": 0.1,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        },
+        "tail@0.25": {
+          "coverage_delivered": 0.24936386768447838,
+          "coverage_requested": 0.25,
+          "demoted_queries": 226,
+          "empty": 0.0,
+          "found_deep": 0.22,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.9866666666666667,
+          "queries": 300,
+          "recall@10": 0.11,
+          "recall@15": 0.13333333333333333,
+          "recall@3": 0.05,
+          "recall@5": 0.08,
+          "resident_queries": 74,
+          "resident_share": 0.24666666666666667,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        },
+        "tail@0.5": {
+          "coverage_delivered": 0.5,
+          "coverage_requested": 0.5,
+          "demoted_queries": 142,
+          "empty": 0.0,
+          "found_deep": 0.41,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.9566666666666667,
+          "queries": 300,
+          "recall@10": 0.21666666666666667,
+          "recall@15": 0.25666666666666665,
+          "recall@3": 0.08333333333333333,
+          "recall@5": 0.13333333333333333,
+          "resident_queries": 158,
+          "resident_share": 0.5266666666666666,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        },
+        "tail@0.75": {
+          "coverage_delivered": 0.7506361323155216,
+          "coverage_requested": 0.75,
+          "demoted_queries": 77,
+          "empty": 0.0,
+          "found_deep": 0.5533333333333333,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.9433333333333334,
+          "queries": 300,
+          "recall@10": 0.25333333333333335,
+          "recall@15": 0.32666666666666666,
+          "recall@3": 0.11333333333333333,
+          "recall@5": 0.16,
+          "resident_queries": 223,
+          "resident_share": 0.7433333333333333,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        },
+        "tail@0.9": {
+          "coverage_delivered": 0.8994910941475827,
+          "coverage_requested": 0.9,
+          "demoted_queries": 30,
+          "empty": 0.0,
+          "found_deep": 0.6466666666666666,
+          "found_deep_of_demoted": 0.0,
+          "misbind_at_1": 0.9433333333333334,
+          "queries": 300,
+          "recall@10": 0.31,
+          "recall@15": 0.3933333333333333,
+          "recall@3": 0.12666666666666668,
+          "recall@5": 0.18,
+          "resident_queries": 270,
+          "resident_share": 0.9,
+          "silent_zero": 0.0,
+          "wrong_not_miss": 1.0
+        }
+      },
+      "nodes": 786,
+      "queries": 300,
+      "recall_gap_vs_complete": {
+        "random@0.1": {
+          "recall_drop@10": 0.23,
+          "recall_drop@15": 0.306667,
+          "recall_drop@3": 0.103333,
+          "recall_drop@5": 0.156667
+        },
+        "random@0.25": {
+          "recall_drop@10": 0.18,
+          "recall_drop@15": 0.233333,
+          "recall_drop@3": 0.07,
+          "recall_drop@5": 0.11
+        },
+        "random@0.5": {
+          "recall_drop@10": 0.136667,
+          "recall_drop@15": 0.166667,
+          "recall_drop@3": 0.056667,
+          "recall_drop@5": 0.08
+        },
+        "random@0.75": {
+          "recall_drop@10": 0.073333,
+          "recall_drop@15": 0.09,
+          "recall_drop@3": 0.033333,
+          "recall_drop@5": 0.043333
+        },
+        "random@0.9": {
+          "recall_drop@10": 0.043333,
+          "recall_drop@15": 0.036667,
+          "recall_drop@3": 0.01,
+          "recall_drop@5": 0.006667
+        },
+        "tail@0.1": {
+          "recall_drop@10": 0.246667,
+          "recall_drop@15": 0.323333,
+          "recall_drop@3": 0.09,
+          "recall_drop@5": 0.143333
+        },
+        "tail@0.25": {
+          "recall_drop@10": 0.22,
+          "recall_drop@15": 0.273333,
+          "recall_drop@3": 0.106667,
+          "recall_drop@5": 0.14
+        },
+        "tail@0.5": {
+          "recall_drop@10": 0.113333,
+          "recall_drop@15": 0.15,
+          "recall_drop@3": 0.073333,
+          "recall_drop@5": 0.086667
+        },
+        "tail@0.75": {
+          "recall_drop@10": 0.076667,
+          "recall_drop@15": 0.08,
+          "recall_drop@3": 0.043333,
+          "recall_drop@5": 0.06
+        },
+        "tail@0.9": {
+          "recall_drop@10": 0.02,
+          "recall_drop@15": 0.013333,
+          "recall_drop@3": 0.03,
+          "recall_drop@5": 0.04
+        }
+      }
+    }
+  },
+  "provenance": {
+    "tool_sha256": "cdd29c7199c8b0e4ac2073f52098b547696850c34e258e8fea9dc4223114bcf4"
+  },
+  "reproducibility": {
+    "conclusions_rest_on_gap_pp": "13 to 43",
+    "found_deep_max_delta_pp": 0.33,
+    "invariants_held_in_every_run": [
+      "found_deep == resident_share in every :Object arm",
+      "found_deep_of_demoted == 0.0 in every arm of both populations"
+    ],
+    "recall_at_k_max_delta_pp": 1.0,
+    "runs_compared": 3,
+    "tie_counting_max_delta_pp": 9.85,
+    "tie_counting_metric": "silent_zero (object tail@0.9)",
+    "why": "Near-ties in the lexical leg break on engine-internal document ids. Each arm is measured on its own fresh graph so an arm is a describable graph state, but a re-run still re-mints that graph and the tie order moves. The gate metrics are stable (found@deep <=0.33 pp, recall@k <=1.0 pp); the tie-counting rates are not (<=9.85 pp), so only their DIRECTION and ORDERING are quoted in the record, never a single-run magnitude."
+  },
+  "retrieval": {
+    "has_embedder": false,
+    "legs_seen": {
+      "fallback": true,
+      "fts": true,
+      "structural": true,
+      "vector": false
+    },
+    "mode": "keyword_only"
+  },
+  "signal": {
+    "capture_prior_read_status": false,
+    "capture_prior_truncation": false,
+    "residency_marker_armed": false
+  }
+}
