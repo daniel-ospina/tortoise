@@ -37,7 +37,7 @@ so a reader can disagree with the ranking explicitly rather than inherit it.
 **Decision (owner, 2026-11-17) — the embeddings of every label the search serves belong in Postgres, including the ones that carry no index today, and the search is to
 be aligned with that** (`#13220`). The owner's words: *"if indexing improves search for
 Object/Subject/Event of course we want that, and we just need it in Postgres and the search aligned with
-that and everything armed and working"* … *"we should likely also index source also in postgres"*. **This
+that and everything armed and working"* … *"we should likely also index source also in postgres"*. ⚠️ **Note the owner's own hedge — *"likely"* — and that this document records it as ANSWERED anyway:** no alternative was named, and the mechanism is identical to the labels decided without a hedge, so the word is read as pacing (*"we should probably do this too"*) rather than as doubt about whether. What stays open is not **whether** a `Source` gets a vector but **which text** one with no session narrative embeds — V2's remaining design choice, named in the `STORAGE-ARCHITECTURE.md` §14.3 V2 row this sentence cites next. A reader who takes *"likely"* as real doubt should reopen that choice, not this decision. **This
 answers the two questions that were still open in `STORAGE-ARCHITECTURE.md` §14.3:** **V2** — a `:Source`
 gets one — and **V3's remaining half** — `:Object`/`:Subject` get one, with `:Event` named
 beside them. ⚠️ **It is a PLACEMENT ruling, and placement is what makes it cheap:** the record's
