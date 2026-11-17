@@ -3182,6 +3182,16 @@ class TestNonScalarStatus12869:
             assert "RaisingReprStr" in str(ei.value), (
                 "the Subject door's ambiguity refusal did not use "
                 "`_refusal_repr` on its name: " + str(ei.value))
+            # ⛔ THE MECHANISM, NOT ONLY THE OPERAND (#12910 fix lane). Deleting
+            # the ambiguity guard leaves the NEXT check raising `ValueError`
+            # (`Invalid status None for a :Subject`) — MEASURED — so the name
+            # assertion above covers that mutation only by accident: it reds
+            # because that message happens not to name the operand. Naming the
+            # raise makes the discriminator explicit and independent of the
+            # fallback message's wording.
+            assert "CONFLICTING status write" in str(ei.value), (
+                "the Subject door's ambiguity GUARD did not fire: "
+                + str(ei.value))
             assert "repr-boom" not in str(ei.value)
             assert _carrier_row(sdk, "Subject", "rr-subj-amb") is None, (
                 "a refused Subject create left a node behind")
