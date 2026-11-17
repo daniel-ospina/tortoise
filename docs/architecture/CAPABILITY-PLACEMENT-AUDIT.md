@@ -78,11 +78,7 @@ file — `search_engine.py` FTS
 `:3938`, label derivation `:2944`, index note `:3011`; `projection/__init__.py` `("Object", ["name"])`
 `:6830`; `sdk.py`'s second `capture_redactions` writer `:2705`; `audit.py`'s carrier probe `:2445`/`:2456`;
 and `mcp_server.py`'s `entity_type` passthrough `:5475` — and the drift figure
-above was re-measured afterwards. ⚠️ **That figure's population is the pass that measured it**: this revision
-adds `search_engine.py:6351` (§2.1) and `sdk.py:3499` (§2.4), which are the two cites here whose drift is NOT
-re-counted — both were opened at `ccb49741b2ec` before they were written, which is the standard the rest of this
-header holds. Re-running the stated method over this file is what would extend the figure; asserting a new one
-without re-running it is the failure the paragraph below names. A cite that cannot be opened on the line its row quotes is worse than
+above was re-measured afterwards. ⚠️ **That figure's population is the pass that measured it**: this revision adds cites that are NOT in it — `search_engine.py:6351` (§2.1), `sdk.py:3499`/`:34332`/`:3524` (§2.4/§2.5), the six whole-node `:Event` reads (§2.3), `hosted_api.py:23661-23668` and the `harness`/`actor_user_id` sibling readers (§2.4/§6.1), and row 13's two `probe_shape_bytes.py` cites — and the drift of none of them is re-counted. ⛔ **The count is deliberately NOT stated as "two":** an earlier draft of this very paragraph said exactly that, which is the same omission class §2.3 records one section down ("asserted completeness for exactly two"), and it undercounted by an order of magnitude. Every added cite was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds. Re-running the stated method over this file is what would extend the figure; asserting a new one without re-running it is the failure the paragraph below names. A cite that cannot be opened on the line its row quotes is worse than
 no cite: the handle beside it then reads as corroboration of a line nobody read.
 
 ⛔ **A later pass found the remaining species of the same defect: a PROXIMITY claim, not a line number.**
@@ -778,7 +774,7 @@ eviction policy — that is `#13084` and P0-c.
 |---|---|---|
 | **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the eleven other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
 | **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` **and** `Point.mentions` (§3 row 14) — ONE precondition, TWO shapes | `#10429`: widen the completeness pin with a tail-only category (§5.1). ⚠️ The pin asserts the WHOLE dict (`tests/test_cache_projection.py:186-195` compares `{source, event}` to `CACHE_FORBIDDEN_COLUMNS`), so it refuses any new entry regardless of label — which is why it blocks both shapes and why naming only `story_arc` here was an error |
-| **a record table but no tier COLUMN** → having a row is not having a tier | every non-`:Point` label whose move is **whole-label** (none in this census — §3 rows 1/4/5/6/8 are `graph`; the §1 reading is false, see §3's preamble) | a `cache_tier` column (one migration per label) **plus** the `if table == "point"` arm at `cache_projection.py:3633` widened; ⚠️ this does **not** unblock row 7b, which is a **property-level** move the row-level tier cannot express (§6.1) |
+| **a record table but no tier COLUMN** → having a row is not having a tier | every non-`:Point` label whose move is **whole-label** (none in this census — §3 rows 1/4/5/6/8 all read a capability and are all `graph`; §1's record-table column is NOT a move criterion, and reading it as one is the error this cell corrects) | a `cache_tier` column (one migration per label) **plus** the `if table == "point"` arm at `cache_projection.py:3633` widened; ⚠️ this does **not** unblock row 7b, which is a **property-level** move the row-level tier cannot express (§6.1) |
 
 None of these is a census failure. Each is the mechanism's **precondition**, named so the next slice is executable
 instead of another audit.
