@@ -409,6 +409,12 @@ pretend*:
   ⚠️ Its first cut answered "no born-uncut graphs" on a real org: an unscoped connection returns zero
   rows under RLS, and a false CLEAN is the worst answer a pre-flight can give. The DB-backed leg
   caught it; `record_allocator.scope_tenant` is the fix.
+  ⛔ **And it reports only what it read.** The per-graph number is `journal_max_seq` — `MAX(seq)`, named
+  for the aggregate it is — and `floor_is_the_journals_count` is answered only where an enumeration
+  exists (`--journal` counted here, or `--enumerated-floor`); otherwise it is `null` beside the reason.
+  The first cut printed `true` as a literal and, worse, read the journal AFTER a `rollback()` had ended
+  the transaction carrying the transaction-local tenant GUC, so every entry said `0`. A single
+  `--enumerated-floor` on a sweep that finds more than one graph is REFUSED — the floor is per graph.
   ⛔ **What it cannot see, stated on the verb itself:** a graph that has never been written (no
   `journal_event` row) — the record role has no grant on `public.graphs`. Such a graph has lost
   nothing yet; the first append is the moment it becomes visible and actionable.
