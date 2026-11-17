@@ -31280,7 +31280,7 @@ class TortoiseSDK:
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] would store status "
-                           f"{_mint!r} on the {_elabel} — an array is stored "
+                           f"{_refusal_repr(_mint)} on the {_elabel} — an array is stored "
                            f"verbatim and the direct-edge terminal check "
                            f"cannot evaluate it (it raises mid-write), so "
                            f"the bundle is rejected at validation (#7925)",
