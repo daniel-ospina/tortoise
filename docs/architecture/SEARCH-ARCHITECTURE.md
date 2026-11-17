@@ -78,7 +78,9 @@ to answer.
 PRESENT on that column, **(3)** the label is SERVED by the read (`LABEL_SERVED`, with its status predicate if
 the label is in `_STATUS_FILTERED_LABELS`), and **(4)** the cutover SWITCH is on (`cutover_armed`, default
 OFF — and off for a measured reason: the record has no backfill, so switching early drops pre-existing
-material out of the dense pool). **A label missing any one of the four is not armed, however the other three
+material out of the dense pool — and it is the one condition this document cannot schedule: arming is
+**downstream of `#11691`'s arming gate and `#13082` P0-b's RAM cap**, not parallel to them, so "the code is
+ready" is not "we may flip it"). **A label missing any one of the four is not armed, however the other three
 read** — which is the shape that produces a confident "done" from four green checks that never covered the
 same label.
 
