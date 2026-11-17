@@ -204,7 +204,12 @@ five coverages under two eviction policies.
 **On entity names the cost is exactly the eviction share and nothing compensates.** `found@deep` equals
 the resident share in every `:Object` arm (91.3 / 77.3 / 51.7 / 23.3 / 8.7), so what the window keeps it can
 still find, and what it demotes it never returns (`found_deep_of_demoted` is 0.0 in every arm of both
-populations). The identity is `:Object`-only: on `:Point` keeping 52.7 % finds only 41.0 %, because the
+populations).
+⛔ Those `:Object` figures describe `#11901`'s deliberately class-stratified oversample (60 % `definite`,
+30 % `ident`, 10 % `path`) against a real mix the artifact holds at ~8.0 % / ~3.4 % — the shapes
+`#11901` chose to make the curve readable, **not** a weighted estimate of production entity-name
+retrieval. The bundle weights nothing and no row here is a production rate.
+The identity is `:Object`-only: on `:Point` keeping 52.7 % finds only 41.0 %, because the
 claim leg has a ceiling of its own — the loss there is the eviction PLUS a ranking weakness the window did
 not cause. At §8's own solo target — about
 half the complete graph — `recall@3` falls 88.3 % → 46.0 % and the top-1-is-wrong rate rises
@@ -218,8 +223,9 @@ work on for a demoted candidate. The vector leg escapes this once it moves to Po
 does not, because §6.2's decision item 2 keeps it in the graph.
 
 **Two things the measurement changed that are not numbers.** The eviction policy does not matter — the
-cold-tail/recency policy and a random control agree at every coverage — so the policy table's hit-rate
-result does not carry to retrieval quality (the two policies read 46.0 vs 46.3 at the target size). And a
+cold-tail/recency policy and a random control are not separated at any coverage — so the policy table's hit-rate
+result does not carry to retrieval quality (the two policies read 46.0 vs 46.3 at the target size, though
+they diverge at the lowest coverages where the realized resident share differs too). And a
 demotion must invalidate `fallback_snapshot`, whose 60 s
 corpus is cleared by `SDK._mark_dirty` but not by a bare Cypher `DELETE`: without it the degraded path keeps
 serving the demoted corpus, which this instrument caught as recall above the arm's own resident share.

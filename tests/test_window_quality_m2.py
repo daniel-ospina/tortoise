@@ -299,12 +299,22 @@ def test_the_artifact_records_that_the_loss_carries_no_signal(artifact):
 
 
 def test_no_arm_returns_a_demoted_node(artifact):
-    """INVARIANT 1, re-derived from the artifact rather than trusted.
+    """INVARIANT 1 **and** INVARIANT 2, re-derived from the artifact.
 
     A demoted node cannot be returned, so both axes are bounded by the resident
     share. The instrument refuses a run that violates this; this asserts the
     COMMITTED artifact satisfies it, so an artifact regenerated on a broken graph
     reds instead of being quoted.
+
+    ⛔ The per-demoted rate is checked on EVERY arm of BOTH populations, and that
+    is the load-bearing half (#12186 review P1-2). The aggregate `found_deep`
+    bound is only as strong as the population's ceiling: on `:Object` the
+    complete-graph rate is 1.0 so a leak must break it, but on `:Point` it is
+    0.410 against a resident share of 0.5267, so up to ~35 leaked demoted queries
+    (11.7 % of the set) pass the bound. Pinning the aggregate alone, or the
+    per-demoted rate on the single `object/tail@0.5` arm, left the record's
+    "no compensating leg" claim unverified on the population a wrong answer
+    actually costs a duplicate on.
     """
     for kind, pop in artifact["populations"].items():
         for arm, data in pop["arms"].items():
@@ -315,6 +325,10 @@ def test_no_arm_returns_a_demoted_node(artifact):
             assert data["found_deep"] <= bound, f"{kind}/{arm} found_deep"
             for k in KS:
                 assert data[f"recall@{k}"] <= bound, f"{kind}/{arm} recall@{k}"
+            # INVARIANT 2 — the strong form, unconditional on the ceiling.
+            assert data["found_deep_of_demoted"] == pytest.approx(0.0), (
+                f"{kind}/{arm}: a demoted node was returned at depth — the loss "
+                f"is then NOT purely the eviction")
 
 
 def test_every_arm_holds_really_holds_the_coverage_it_names(artifact):
@@ -349,6 +363,71 @@ def test_the_artifact_holds_both_populations_at_the_declared_sizes(artifact):
 
 
 # ── 4. the record against the artifact ───────────────────────────────────────
+
+def _load_tool():
+    """Import the instrument by PATH, so its constants are the shipped bytes."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_wqm2_tool", TOOL)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_artifact_binds_its_own_provenance(artifact):
+    """The three provenance blocks are PRESENT and actually self-consistent.
+
+    ⛔ This is the pin `config/ci-surfaces.yml` claims and did not have (#12186
+    review P1-1): the row said it pinned "the artifact's own `reproducibility` /
+    `provenance` / `cleanup` blocks being present and self-consistent", and no
+    test in this module read any of them. Measured then: setting
+    `provenance.tool_sha256` to 64 zeros, `reproducibility.runs_compared` to 11
+    and `found_deep_max_delta_pp` to 99.0, and `params.points` to 12 all left the
+    suite green.
+
+    The first assertion is the one that would have caught the real defect: the
+    artifact's `reproducibility` block described 3 runs at 0.33 / 1.0 / 9.85
+    while the bytes its `tool_sha256` named emitted 2 runs at 0.0 / 2.94 and a
+    "17-43" gap — so the provenance claim bound the artifact to an instrument
+    that did not produce it (#12186 review P0-1).
+    """
+    import hashlib
+
+    tool = _load_tool()
+
+    # (1) the block in the artifact IS the block the instrument emits.
+    assert artifact["reproducibility"] == tool.REPRODUCIBILITY_BOUND, (
+        "the artifact's `reproducibility` block is not the one the instrument "
+        "emits — the provenance binding is then an assertion, not a measurement")
+
+    # (2) the hash names THESE bytes.
+    digest = hashlib.sha256(TOOL.read_bytes()).hexdigest()
+    assert artifact["provenance"]["tool_sha256"] == digest, (
+        "provenance.tool_sha256 does not name the shipped instrument — "
+        "regenerate the artifact (or update the hash) after editing tools/")
+
+    # (3) the bound is internally coherent: the deltas it claims to have
+    #     measured are positive numbers, and the gap it leans on is real.
+    rep = artifact["reproducibility"]
+    assert rep["runs_compared"] >= 2, "a reproducibility bound needs >= 2 runs"
+    for key in ("found_deep_max_delta_pp", "recall_at_k_max_delta_pp",
+                "tie_counting_max_delta_pp"):
+        assert isinstance(rep[key], (int, float)) and rep[key] >= 0.0, key
+    low, _, high = rep["conclusions_rest_on_gap_pp"].partition(" to ")
+    assert float(low) < float(high), "the recorded gap range is not a range"
+    # the tie band must not be presented as small against that gap
+    assert rep["tie_counting_max_delta_pp"] <= float(high)
+
+    # (4) `cleanup` accounts for the graphs the run minted. Every arm is
+    #     measured on its own graph and NONE is dropped by this tool — that is
+    #     the documented design (`test_lane.py down` disposes of them), so a
+    #     non-zero `graphs_dropped` means the note and the behaviour diverged.
+    cleanup = artifact["cleanup"]
+    assert cleanup["graphs_created"] > 0
+    assert cleanup["graphs_dropped"] == 0, (
+        "the tool drops no graph; if that is now false, the note must say so")
+
 
 def _arms(artifact: dict, kind: str) -> dict:
     return artifact["populations"][kind]["arms"]
@@ -441,8 +520,12 @@ def test_the_claim_population_ceiling_matches_the_record(artifact):
 _NON_ARTIFACT_FIGURES = {
     # §8's sizing (a budget in MB, quoted to bound the target size)
     "77", "150", "50",
-    # the corpus mix (#11901's own audit, not this run)
-    "8.6", "3.6", "60", "30", "10", "22", "653", "786", "1000", "300", "11901",
+    # the corpus mix (#11901's own audit, not this run) — DERIVED from
+    # `corpus.names_harvested`, so it re-states the artifact rather than
+    # inventing a figure: ident 12,557 / 156,449 = 8.03 %, path 5,314 = 3.40 %.
+    "8.0", "3.4", "60", "30", "10", "22", "653", "786", "1000", "300", "11901",
+    # the recall@3-realized-per-resident rate at object/tail@0.25 (0.2033/0.2333)
+    "87.1",
     # §7's literature figure and §5's threshold
     "54", "1.0",
     # the rule comparison the instrument's docstring records (a superseded rule)
@@ -453,7 +536,27 @@ _NON_ARTIFACT_FIGURES = {
     "0.33", "9.9", "9.85", "13", "43",
     # §9's own M-numbering and the other measurements' figures
     "90", "900",
+    # the complete-graph share a windowed arm is a fraction OF (100 %)
+    "100",
+    # the misbind gap the record quotes as a magnitude in POINTS (27.7 -> 41.0)
+    "13.3",
+    # §8.1's budget overshoot that motivates the window (193 % of the 30 % budget)
+    "193",
+    # the ceiling the FIRST-window rule costs against the adopted one (19.0 - 15.7),
+    # quoted as an approximation ("~3 points") and not an artifact rate
+    "3",
 }
+
+
+#: ⛔ A figure followed by a UNIT is a claim about the measurement whatever the
+#: unit is spelled as, and the first cut of this scan only saw `%` (#12186 review
+#: P0-2/P1-3). Measured then: rewriting `2.9 -> 0.9` and `Two runs -> Eleven
+#: runs` in the README's reproducibility paragraph left the suite green, because
+#: the band is quoted in `percentage points` and `points` carries no `%` at all —
+#: so the two sentences a re-run most easily stales were the two nothing checked.
+#: The integer alternative closes the same hole for `19-58 %`.
+_DOC_FIGURE_RE = re.compile(
+    r"(?<![\d.])(\d+(?:\.\d+)?)\s*(?:%|pp\b|(?:percentage\s+)?points?\b)")
 
 
 def _arms_as_table_rows(arms):
@@ -557,11 +660,17 @@ def test_no_doc_states_a_percentage_the_artifact_does_not_hold():
     arch_91 = ARCH.read_text(encoding="utf-8")
     start = arch_91.index("### 9.1 M2")
     end = arch_91.index("\n---", start)
+    bad = []
     for name, text in (("README", readme), ("§9.1", arch_91[start:end])):
-        for figure in re.findall(r"(?<![\d.])(\d+\.\d)\s*%", text):
-            assert figure in allowed, (
-                f"{name} states {figure} %, which the artifact does not hold — "
-                f"a stale figure left behind by a re-run")
+        for m in _DOC_FIGURE_RE.finditer(text):
+            figure = m.group(1)
+            if figure not in allowed:
+                line = text[: m.start()].count("\n") + 1
+                bad.append(f"{name}:{line} states {figure} ({m.group(0)!r})")
+    assert not bad, (
+        "these figures are stated with a unit but the artifact does not hold "
+        "them — a stale number left behind by a re-run, or a number that was "
+        "never the artifact's:\n  " + "\n  ".join(bad))
 
 
 def test_the_tool_refuses_without_a_live_graph():

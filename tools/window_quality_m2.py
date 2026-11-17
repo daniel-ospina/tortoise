@@ -227,6 +227,45 @@ ID_PREFIX = {"point": "pt-12186", "object": "obj-11901"}
 #: stream only, so the query set stays fixed across both policies.
 EVICT_SEED_OFFSET = 1_000_003
 
+#: ⛔ THE REPRODUCIBILITY BOUND — the instrument's own output, measured across
+#: THREE runs of identical input, and the single source `run()` copies into the
+#: artifact. It is module-level so the record's pins can import it: see
+#: `tests/test_window_quality_m2.py::test_the_artifact_binds_its_own_provenance`.
+#:
+#: What it says, and how to read it. The GATE metrics are stable — `found@deep`
+#: moved by at most 0.33 pp and `recall@k` by at most 1.0 pp — so a single-run
+#: value of either may be quoted as a magnitude. The TIE-COUNTING rates are not:
+#: they moved by up to 9.85 pp, because near-ties in the lexical leg break on
+#: engine-internal document ids and a re-run re-mints the graph. So a
+#: tie-counting conclusion is quoted as a DIRECTION and an ORDERING only, never
+#: as a single-run magnitude.
+#:
+#: ⚠️ And the honest ratio: every conclusion in the record rests on a gap of 13
+#: to 43 points, so the tie band is up to ~3/4 of the SMALLEST gap — not a small
+#: fraction of it. The 27.7 % -> 41.0 % misbind move is a tie-counting rate, so
+#: its 13.3-point gap carries a ~9.9-point band; the verdict survives because
+#: `found_deep_of_demoted == 0` and `recall <= resident_share` are NOT
+#: tie-counting quantities and are stable in every arm.
+REPRODUCIBILITY_BOUND: dict[str, object] = {
+    "runs_compared": 3,
+    "found_deep_max_delta_pp": 0.33,
+    "recall_at_k_max_delta_pp": 1.0,
+    "tie_counting_max_delta_pp": 9.85,
+    "tie_counting_metric": "silent_zero (object tail@0.9)",
+    "conclusions_rest_on_gap_pp": "13 to 43",
+    "invariants_held_in_every_run": [
+        "found_deep == resident_share in every :Object arm",
+        "found_deep_of_demoted == 0.0 in every arm of both populations",
+    ],
+    "why": "Near-ties in the lexical leg break on engine-internal document "
+           "ids. Each arm is measured on its own fresh graph so an arm is a "
+           "describable graph state, but a re-run still re-mints that graph "
+           "and the tie order moves. The gate metrics are stable (found@deep "
+           "<=0.33 pp, recall@k <=1.0 pp); the tie-counting rates are not "
+           "(<=9.85 pp), so only their DIRECTION and ORDERING are quoted in "
+           "the record, never a single-run magnitude.",
+}
+
 #: A Point's indexed text, capped. The Point index covers content/search_keys/
 #: quote; a captured turn can run to tens of KB and the population is meant to
 #: model many claims, not a few huge ones.
@@ -847,9 +886,18 @@ def run(args: argparse.Namespace) -> int:
 
                 # ⛔ INVARIANT 1 — a demoted node cannot be returned, so neither
                 # the deep axis nor any recall@k can exceed the resident share.
-                # The deep axis is the STRONGER form: it fails for any demoted
-                # node surfaced at any rank, where recall@k would miss a leak
-                # beyond rank k.
+                #
+                # ⚠️ This aggregate bound is NOT the verdict's load-bearing claim,
+                # and on its own it cannot enforce it (#12186 review P1-2).
+                # `found_deep` is a rate over ALL queries, so on a population
+                # whose complete-graph ceiling is below 1.0 (`:Point` on this
+                # corpus: 0.410 vs resident 0.5267) a leak of demoted queries
+                # sits UNDER the bound and passes. The comment here used to claim
+                # the opposite — that it "fails for any demoted node surfaced at
+                # any rank" — which was only true on `:Object`, where the
+                # ceiling is 1.0. INVARIANT 2 below is the per-demoted detector
+                # and is the one the record's "no demoted node is returned"
+                # sentence rests on.
                 for name in [f"recall@{k}" for k in KS] + ["found_deep"]:
                     if arm[name] > arm["resident_share"] + 1e-9:
                         raise RuntimeError(
@@ -857,6 +905,20 @@ def run(args: argparse.Namespace) -> int:
                             f"{arm[name]:.4f} exceeds resident_share="
                             f"{arm['resident_share']:.4f} — a demoted node was "
                             f"returned, so the eviction did not take effect")
+
+                # ⛔ INVARIANT 2 — no demoted node is returned at any rank. This
+                # is the strong form and the one the verdict turns on, so it is
+                # asserted unconditionally on EVERY arm of BOTH populations: it
+                # does not depend on the ceiling, and an `:Object`-only or
+                # single-arm check would let the one claim the record makes
+                # about `:Point` go unverified.
+                if arm["found_deep_of_demoted"] != 0.0:
+                    raise RuntimeError(
+                        f"{kind}/{policy}@{coverage:g}: "
+                        f"found_deep_of_demoted="
+                        f"{arm['found_deep_of_demoted']:.4f} — a demoted node "
+                        f"was returned at depth, so the loss is NOT purely the "
+                        f"eviction")
                 arms[f"{policy}@{coverage:g}"] = arm
                 print(f"  {kind:6s} {policy}@{coverage:<5g} resident "
                       f"{arm['resident_share']:6.1%}  r@3 {arm['recall@3']:6.1%}  "
@@ -913,23 +975,17 @@ def run(args: argparse.Namespace) -> int:
             #: and which a later re-run could never re-verify.
             "tool_sha256": _sha256_file(Path(__file__).resolve()),
         },
-        #: ⛔ Measured, and NOT a second copy of this record. Two development runs
-        #: of identical input agreed EXACTLY on the gate metrics and moved by up
-        #: to 2.9 pp on the tie-counting rates; this artifact is a later run, so
-        #: the bound below is a property of the INSTRUMENT, and a reader
-        #: reproducing on their own box should expect the same split. Every
-        #: conclusion in the record rests on a gap of 17-43 points.
-        "reproducibility": {
-            "runs_compared": 2,
-            "gate_metrics_identical": True,
-            "gate_metric_max_delta_pp": 0.0,
-            "tie_counting_max_delta_pp": 2.94,
-            "tie_counting_metric": "silent_zero (object tail@0.75)",
-            "why": "near-ties in the lexical leg break on engine-internal "
-                   "document ids, which is why each arm is measured on its own "
-                   "fresh graph; the gate metrics (recall@k, found_deep) are "
-                   "stable and the tie-counting rates are not",
-        },
+        #: ⛔ Measured, and NOT a second copy of this record. It lives at MODULE
+        #: level (`REPRODUCIBILITY_BOUND`) so `tests/test_window_quality_m2.py`
+        #: can import the block the instrument EMITS and pin the committed
+        #: artifact's block EQUAL to it. That equality is what the artifact's
+        #: `provenance.tool_sha256` claims, and without the pin the binding is an
+        #: assertion about bytes that may no longer emit these keys — which is
+        #: exactly what had happened here (#12186 review P0-1): the artifact
+        #: carried 3 runs / 0.33 / 1.0 / 9.85 while these bytes emitted
+        #: 2 / 0.0 / 2.94 and a "17-43" gap, so a reproducer following the
+        #: README would have reported a diff that was not a measurement.
+        "reproducibility": dict(REPRODUCIBILITY_BOUND),
         "cleanup": {
             "graphs_created": len(graphs),
             "graphs_dropped": 0,

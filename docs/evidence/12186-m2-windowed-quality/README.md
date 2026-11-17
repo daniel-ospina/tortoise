@@ -71,7 +71,7 @@ Two populations, because the window does not demote one kind of node:
   (imported, not copied), the capture-prior population `#11901` measured.
   ⚠️ **This is `#11901`'s deliberately class-stratified oversample** — 60 % `definite`, 30 %
   `ident`, 10 % `path` — built so the minority shapes have enough names to measure, while this
-  corpus's real mix is ~8.6 % ident and ~3.6 % path. `build_population`'s own docstring says the
+  corpus's real mix is ~8.0 % ident and ~3.4 % path (`names_harvested`: 12,557 and 5,314 of 156,449). `build_population`'s own docstring says the
   composite "is **not** an estimate of the production mix", and that carries here: the `:Object`
   figures below are the shape `#11901` chose, not a weighted estimate of production entity-name
   retrieval. Nothing in this bundle weights them, and no row is presented as a production rate. It is
@@ -202,13 +202,20 @@ all 11 arms, `complete` included**, so `silent_zero ≡ 0` and — given `found_
 that always returns at least one row, not a window effect. The claim they support is still the
 important one and it survives: a caller asking for a demoted claim is **wrong**, never told so. But the
 same sentence could be written about the complete graph (93.0 % `misbind@1`), so it must not be
-presented as a difference the window makes. On `:Object`, where `empty` ranges 19–58 %, the same two
-rates *are* informative.
+presented as a difference the window makes. On `:Object`, where `empty` ranges **3.7–51.0 %**, the same
+two rates *are* informative.
 
 ### 4. No eviction policy protects retrieval quality
 
-`tail` (evict the least-referenced/most-boilerplate first) is **indistinguishable from `random`** at
-every coverage: recall@3 **46.0 vs 46.3** at 0.50, 81.0 vs 81.7 at 0.90.
+`tail` (evict the least-referenced/most-boilerplate first) is **not separated from `random`** by this
+measurement at any coverage: recall@3 **46.0 vs 46.3** at 0.50 and 81.0 vs 81.7 at 0.90 — but ⚠️ the two
+diverged by more at the LOW coverages, where the realized resident share itself differs: 20.3 vs 25.3 at
+0.25 and 8.7 vs 12.0 at 0.10, i.e. a 5.0-point gap that is 5× the artifact's own `recall@k`
+reproducibility bound of 1.0 pp. Per resident query the two policies are 87.1 % vs 100.0 % at 0.25, so
+the point stands where the verdict needs it: **a demoted node is unretrievable whatever reason selected
+it**, and `recall@k` is bounded by the resident share in every arm of both policies. What the numbers do
+**not** license is the stronger sentence "the policies agree at every coverage" — see the
+direction-only discipline the reproducibility bound imposes.
 
 ⛔ **What `tail` actually orders on, stated precisely, because it bounds this finding.** It is a
 **static popularity count**, not recency: for an `:Object`, the number of session records its name
@@ -328,15 +335,28 @@ state that can be described rather than a residue of the previous one. A run tha
 invariant **refuses** (exit 3) instead of publishing a rate for a graph state that did not exist.
 
 ⚠️ **The reproducibility bound, measured, not assumed — and it is IN the artifact**, at
-`reproducibility` in `measurement.json` (`runs_compared`, `gate_metric_max_delta_pp`,
-`tie_counting_max_delta_pp`, and `why`). Two runs of identical input agree **exactly** on the gate
-metrics — `recall@k` and `found@deep` — and differ by up to **2.9 percentage points** on the
-tie-counting rates (`empty`, `misbind_at_1`, `wrong_not_miss`, `silent_zero`), because those count the
-handful of queries whose *order among irrelevant rows* the leg breaks differently on engine-internal
-document ids. That is why every arm is measured on its own fresh graph, and why the band is barely 1/8
-of the smallest gap any conclusion rests on. A reader comparing two runs of their own should expect the
-same split — the bound is a property of the instrument, and the artifact records it rather than
-assuming it.
+`reproducibility` in `measurement.json` (`runs_compared`, `found_deep_max_delta_pp`,
+`recall_at_k_max_delta_pp`, `tie_counting_max_delta_pp`, `conclusions_rest_on_gap_pp`, and `why`).
+**Three** runs of identical input were compared. The GATE metrics are stable — `found@deep` moved by at
+most **0.33 pp** and `recall@k` by at most **1.0 pp** — so a single-run value of either may be quoted as
+a magnitude. The TIE-COUNTING rates are **not** — they moved by up to **9.85 pp** (`empty`,
+`misbind_at_1`, `wrong_not_miss`, `silent_zero`), because those count the handful of queries whose
+*order among irrelevant rows* the leg breaks differently on engine-internal document ids. That is why
+every arm is measured on its own fresh graph, and why **a tie-counting result is quoted as a direction
+and an ordering only, never as a single-run magnitude**.
+
+⛔ **The ratio, stated honestly, because the first version of this paragraph flattered it.** The
+smallest gap any conclusion rests on is **13 points** (the artifact records the range as `13 to 43`), so
+the tie band is up to **~3/4 of the smallest gap** — *not* the "barely 1/8" an earlier cut claimed. The
+27.7 % → 41.0 % misbind move is exactly such a tie-counting rate: its 13.3-point gap carries a
+~9.9-point band. **The verdict does not depend on it** — `found_deep_of_demoted == 0` and
+`recall@k <= resident_share` are *not* tie-counting quantities, they held in every arm of every run, and
+they are what make the loss equal to the eviction. A reader comparing two runs of their own should
+expect the same split — the bound is a property of the instrument, and the artifact records it rather
+than assuming it. And a reproducer should get the artifact's own block back: `tools/window_quality_m2.py`
+emits it from `REPRODUCIBILITY_BOUND`, and `tests/test_window_quality_m2.py` pins the committed
+artifact's block **equal** to that constant, so the `provenance.tool_sha256` binding is checked rather
+than asserted.
 
 The artifact also carries `provenance.tool_sha256`, binding these figures to the instrument's bytes,
 and a `cleanup` block that declares how many graphs a run leaves behind (they are **not** dropped; on a

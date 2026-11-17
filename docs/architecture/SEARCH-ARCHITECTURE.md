@@ -27,7 +27,7 @@ comment [`6713838871`](https://github.com/daniel-ospina/tortoise/issues/4051#iss
 2. **The text index stays in FalkorDB for now.** Moving it to a Postgres ranker is a *measured*
    regression (§6.2), so it is deferred behind a measurement, not adopted on a hunch.
 3. **Traversal, writes and EP stay in FalkorDB.** The Cypher surface — an order-of-magnitude **~1,900 statements**, an estimate rather than a census — is untouched.
-4. **The graph stays complete for private-beta and becomes a bounded window only after M2 measures it**, sized by the tier's cost budget — §1.5, §7. The cost during private-beta is **knowingly above** the 30 % target (§8).
+4. **The graph stays complete for private-beta and becomes a bounded window only after M2 measures it AND a decision it cannot make on its own is taken**, sized by the tier's cost budget — §1.5, §7. ⛔ M2 has now been measured and it does **not** arm the window: the measurement says the cost is its eviction, and arming needs a decision §9.1/§10 name and this document does not make. The cost during private-beta is **knowingly above** the 30 % target (§8).
 
 **The product goal, as this document records it:** a high quality search system with manageable cost, where
 speed matters but is **not** the top criterion. That ranking is **this document's rationale, not a quoted
@@ -418,7 +418,7 @@ literature measures latency and hit rate, not answer quality, and the best trace
 hit rate for 2-hop expansions — so arming it on a guess is exactly the quality risk this document ranks
 first. Private-beta therefore runs **complete** and **above the 30 % target, knowingly** — **193 % of it on the
 total per-tenant basis, §8.1** (the RAM line alone is 154 %, and it is also above the older <\$9 total-cost
-ceiling) — bounded by a small known tenant count, and the window is armed when M2 says it is safe. **The guardrails that make it
+ceiling) — bounded by a small known tenant count, and the window is armed only when M2 says it is safe — which it does not: §9.1 measures the cost as exactly the eviction, so arming additionally needs a decision §10 names and no measurement can make. **The guardrails that make it
 safe ship before private-beta regardless**, so the eventual switch is a configuration change with measured
 justification, not a redesign in front of customers.
 
@@ -523,7 +523,7 @@ tenants per 8 GB instance   = 8000 ÷ p                      # this also sets th
 cell above is a **TOTAL per tenant** — RAM **plus** the shared project line **plus** the record — because a
 per-byte cost compared against the whole budget is an error this document has already had to fix. The
 **window target** column is a **budget-derived target, not a measurement**: no windowed graph exists, and the
-window is armed only after M2 (§1.5, §7). And **the 150 MB graph figure those targets scale from is an
+window is armed only after M2 (§1.5, §7), and M2's answer is that it must not be armed as specified (§9.1). And **the 150 MB graph figure those targets scale from is an
 ESTIMATE** from `GRAPH.MEMORY USAGE` — a sampling instrument — so it is a dated estimate, not a bound. ⚠️ **Its
 known omissions bias ONE way:** `STORAGE-ARCHITECTURE.md` §2.1 records that it is blind to the HNSW `vectorset`
 (measured 8.5×–21.7× under-report on the index share, ~2× on the total) and excludes per-graph/Redis-key
@@ -585,7 +585,13 @@ The record is `docs/evidence/12186-m2-windowed-quality/` (README + artifact + th
 (`:Object`, 1000 nodes, 300 fixed queries, lexical leg) `found@deep` **equals** the resident share in
 every arm — 91.3 / 77.3 / 51.7 / 23.3 / 8.7 at coverage 0.90 / 0.75 / 0.50 / 0.25 / 0.10 — so on that
 population a node the window keeps is always still findable at depth 50, and a demoted node is never
-returned at any rank (`found_deep_of_demoted` is 0.0 in every arm). ⛔ That equality is `:Object`-only.
+returned at any rank (`found_deep_of_demoted` is 0.0 in every arm of both populations).
+⛔ **Read every `:Object` figure below as the shape `#11901` CHOSE, not as a production rate.** That
+population is a deliberately class-stratified oversample — 60 % `definite`, 30 % `ident`, 10 % `path` —
+while this corpus's real mix is ~8.0 % / ~3.4 % on the two minority classes (`names_harvested`: 12,557
+and 5,314 of 156,449), and `build_population`'s own docstring says the composite "is **not** an estimate
+of the production mix". Nothing in the bundle weights it; it is kept because it makes M2's curve
+comparable with the recall figures the epic already carries. ⛔ That equality is `:Object`-only.
 On `:Point` it does **not** hold: keeping 52.7 % of claims finds only 41.0 %, because the claim leg has its
 own ceiling (below) — so on claims the loss is the eviction **plus** a ranking weakness the window did not
 cause, and the two must not be added into one number. At §8's own solo target (≈77 MB against an ≈150 MB
@@ -595,10 +601,20 @@ and the wrong-answer rate per demoted query is **100 %**: a demoted claim query 
 never an empty answer. A miss costs a new node; a wrong top-1 is how the duplicate the epic exists to
 prevent is minted.
 
-**No eviction policy protects the quality.** The cold-tail (recency/frequency) policy and a seeded random
-control agree at every coverage — recall@3 46.0 vs 46.3 at 0.50, 81.0 vs 81.7 at 0.90 — because a demoted
-node is unretrievable whatever reason selected it. The policy table's *"recency beats static degree
-ranking"* is a **hit-rate** result and does not carry to retrieval quality.
+⚠️ **"Never returned at any rank" is a statement about this configuration, not a law.** Demotion here is
+`DETACH DELETE`, and the only tier that could still serve a deleted node — `fallback_snapshot`'s 60 s
+in-memory corpus — is invalidated explicitly by the instrument. So the zero is evidence for the
+invalidation hook (Finding 6, `#13123`), not proof that no compensating leg could ever exist. The
+stronger reading would need a run in which a demotion is performed WITHOUT that invalidation.
+
+**No eviction policy protects the quality.** The cold-tail (recency/frequency) policy is **not separated
+from a seeded random control** by this measurement — recall@3 46.0 vs 46.3 at 0.50 and 81.0 vs 81.7 at
+0.90 — because a demoted node is unretrievable whatever reason selected it. ⚠️ The two are not identical
+at the low coverages (20.3 vs 25.3 at 0.25, 8.7 vs 12.0 at 0.10), where the realized resident share
+differs too, so "agree at every coverage" overstates it; the verdict does not rest on that agreement but
+on `recall@k <= resident_share` and `found_deep_of_demoted == 0`, which hold in every arm of both
+policies. The policy table's *"recency beats static degree ranking"* is a **hit-rate** result and does
+not carry to retrieval quality.
 
 **The loss carries no signal.** `extractor_v2._fts_rows` — the capture path — requests neither
 `read_status_out` nor `_truncation_out`; `TORTOISE_RESIDENCY` is off; and **no code path emits** this
