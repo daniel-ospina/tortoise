@@ -911,6 +911,10 @@ def test_s91_headline_series_is_pinned_per_position(artifact):
     have caught them either.
 
     Parse the sentences' own shape and compare each slot to the arm it names.
+    ⛔ BOTH series are pinned. The first revision of this test matched only the
+    `tail` series (the only one followed by "at coverage"), so the `random` series
+    `91.7 / 76.3 / 49.7 / 25.3 / 12.0` was still invisible — mutating it to `92.7`
+    reds nothing. The guard must cover every series the section publishes.
     """
     arch = ARCH.read_text(encoding="utf-8")
     start = arch.index("### 9.1 M2")
@@ -935,6 +939,22 @@ def test_s91_headline_series_is_pinned_per_position(artifact):
         # the sentence's CLAIM is that found@deep EQUALS the resident share
         assert fig == f"{data['resident_share'] * 100:.1f}", (
             f"{fig} != the resident share at coverage {cov}")
+
+    # …and the `random` series, which the first revision of this test could not see
+    m = re.search(
+        r"`random` arms equal\s*\*{0,2}their own\*{0,2}\s*resident shares\s+"
+        r"((?:\d+\.\d\s*/\s*){4}\d+\.\d)",
+        section,
+    )
+    assert m, "§9.1 no longer states the random-arm series in the pinned shape"
+    rand_figs = [f.strip() for f in m.group(1).split("/")]
+    for fig, cov in zip(rand_figs, coverages, strict=True):
+        data = obj[f"random@{float(cov):g}"]
+        assert fig == f"{data['found_deep'] * 100:.1f}", (
+            f"§9.1 states {fig} for random@{cov}; the artifact holds "
+            f"{data['found_deep'] * 100:.1f}")
+        assert fig == f"{data['resident_share'] * 100:.1f}", (
+            f"random {fig} != the resident share at coverage {cov}")
 
 
 def test_s91_arrow_pairs_are_derived_per_metric(artifact):
@@ -1003,19 +1023,27 @@ def test_no_record_counts_the_degenerate_complete_arm_as_an_observation():
     section = arch[start:arch.index("\n---", start)]
     readme = README.read_text(encoding="utf-8")
     chg = (ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE-CHANGELOG.md").read_text(encoding="utf-8")
-    for name, text in (("§9.1", section), ("README", readme), ("CHANGELOG", chg)):
-        # ⛔ Require "windowed" to sit IMMEDIATELY after "in every", not merely
-        # somewhere nearby: a 220-char window passes on the corrective sentence
-        # that follows ("Scoped to the windowed arms deliberately: ..."), which
-        # re-supplies the word even after the claim itself is de-scoped.
+    art_text = ARTIFACT.read_text(encoding="utf-8")
+    for name, text in (("§9.1", section), ("README", readme), ("CHANGELOG", chg),
+                       ("measurement.json", art_text)):
+        # ⛔ Two revisions of this scan were too weak, each measured:
+        #   * a 220-char window let the CORRECTIVE sentence that follows re-supply
+        #     the word "windowed";
+        #   * requiring the literal `0.0` missed `== 0` and the artifact's own
+        #     `== 0.0 in every arm of both populations`, and the artifact was not
+        #     read at all — so the degenerate claim survived in the PRIMARY
+        #     artifact while this test was green.
+        # So: bind on "in every <X> arm" regardless of how the zero is spelled, and
+        # read the artifact too.
         for m in re.finditer(r"found_deep_of_demoted", text):
-            claim = text[m.start(): m.start() + 220]
-            if "0.0" not in claim:
+            claim = text[m.start(): m.start() + 260]
+            if not re.search(r"(?:==|is)\s*\**\s*0(?:\.0)?\b", claim):
                 continue
-            assert re.search(r"0\.0\**\s+in every\s+\**windowed", claim), (
-                f"{name} claims found_deep_of_demoted is 0.0 without scoping it "
+            scoped = re.search(r"in every\s+\**windowed", claim)
+            assert scoped, (
+                f"{name} claims found_deep_of_demoted is zero without scoping it "
                 f"to the windowed arms — the complete arm has no demoted "
-                f"queries, so its 0.0 is a degenerate denominator")
+                f"queries, so its zero is a degenerate denominator")
 
 
 def test_s91_records_that_the_s10_reopen_trigger_fired():
@@ -1039,6 +1067,16 @@ def test_s91_records_that_the_s10_reopen_trigger_fired():
     assert "M2 showing a windowed graph loses retrieval quality" in tail, (
         "§10 no longer carries the trigger §9.1 cites")
 
+    # ⛔ The same dead pointer also lived OUTSIDE §9.1 — in §7 ("arming
+    # additionally needs a decision §10 names") and §1.5. §10 lists TRIGGERS, so a
+    # decision attributed to it cannot be found there. Check the WHOLE document,
+    # not just the section, or the repair cannot see the copies it left behind.
+    assert "decision §10 names" not in arch, (
+        "a decision is still attributed to §10, which lists triggers, not shapes — "
+        "the shapes live in §9.1")
+    assert re.search(r"§9\.1 names the\s+three shapes", arch), (
+        "§7 must point at §9.1 for the shapes and §10 only for the trigger")
+
 
 def test_the_tool_declares_the_invariants_it_actually_asserts():
     """The header must not claim an assertion `run()` does not make.
@@ -1059,18 +1097,46 @@ def test_the_tool_declares_the_invariants_it_actually_asserts():
 
 
 def test_the_cleanup_note_says_the_graphs_are_populated(artifact):
-    """`reset()` empties only the last arm's graph per population — not all of them."""
-    note = artifact["cleanup"]["note"]
+    """`reset()` empties only the last arm's graph per population — not all of them.
+
+    ⛔ The COUNT is asserted, not the adjective. The first revision checked only
+    that the word `POPULATED` appeared and that `graphs_dropped == 0`, so editing
+    "20 of 22" to "18 of 22" stayed green — the one figure the note exists to
+    correct was unenforced. And the formula first written here was arithmetically
+    wrong: `params.coverages` holds SIX values (`1.0` included) while `run()` skips
+    `coverage >= 1.0`, so `2 * (1 + policies * coverages) - 2` is 24, not 22.
+    """
+    cleanup = artifact["cleanup"]
+    pop = artifact["params"]
+    per_pop = len(_arms(artifact, "object"))
+    created = len(artifact["populations"]) * per_pop
+    assert cleanup["graphs_created"] == created, (cleanup["graphs_created"], created)
+    assert cleanup["graphs_dropped"] == 0
+
+    # the derived count the note must state: ONE graph emptied per population
+    emptied = len(artifact["populations"])
+    populated = created - emptied
+    note = cleanup["note"]
     assert "POPULATED" in note, (
         "the cleanup note must say the surviving graphs are POPULATED; "
         "'nodes are cleared after each population' reads as 22 empty graphs")
-    assert artifact["cleanup"]["graphs_dropped"] == 0
-    # the tool's note is CONCATENATED literals — scan the region, not one token
+    assert f"{populated} of {created}" in note, (
+        f"the note states the wrong count; the artifact implies "
+        f"{populated} of {created} still populated")
+    # …and the note's own arithmetic must close, not just its total:
+    # `coverages` includes 1.0, which `run()` skips, so the arm count per
+    # population is 1 + policies x (len(coverages) - 1).
+    assert per_pop == 1 + len(pop["policies"]) * (len(pop["coverages"]) - 1), (
+        "per-population arm count != 1 complete + policies x WINDOWED coverages "
+        "(coverages includes 1.0, which run() skips)")
+
     src = TOOL.read_text(encoding="utf-8")
     anchor = src.find('"note": "each arm is measured on its own graph')
     assert anchor != -1, "the tool no longer emits a cleanup note"
-    assert "POPULATED" in src[anchor: anchor + 900], (
-        "the tool still emits the misleading cleanup note")
+    region = src[anchor: anchor + 1100]
+    assert "POPULATED" in region, "the tool still emits the misleading cleanup note"
+    assert f"{populated} of {created}" in region, (
+        "the tool's note states a count the artifact does not imply")
 
 
 def test_the_tool_refuses_without_a_live_graph():
