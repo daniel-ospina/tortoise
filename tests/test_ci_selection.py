@@ -22601,6 +22601,23 @@ def test_purge_legacy_turns_guard_runs_on_a_tools_only_change():
     assert "test_10017_purge_guard.py" in r["test_files"], r
 
 
+def test_rewrite_object_status_suite_runs_on_a_tools_only_change():
+    # #12855: `tests/test_12855_outdated_rewrite.py` (registered `core`) is the
+    # ONLY thing that measures `tools/rewrite_object_status.py`'s durability gate
+    # — that a live-only status write is reverted by `rebuild_all` unless the
+    # journal record landed. Same hole as the purge tool above, and the same
+    # mechanism: `tools/` is a flat NON_PYTHON_PREFIXES entry, the tool matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a tool-only diff was
+    # filtered out BEFORE the "not matched -> core" fallback and selected NO
+    # surface: `surfaces == []`, suite absent. The unguarded change would then be
+    # a silent durability regression on a tool that rewrites stored rows.
+    # Mutation check: removing the CORE_ALSO entry fails every arm below.
+    r = _sel(["tools/rewrite_object_status.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_12855_outdated_rewrite.py" in r["test_files"], r
+
+
 def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
     # #5612: `tests/test_journal_growth.py` (registered `core`) pins the
     # accounting of `tools/journal_growth.py` — the measurement §5.1 recorded as

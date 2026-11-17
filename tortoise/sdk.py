@@ -302,6 +302,15 @@ try:
 except Exception:  # observability never denies a usable graph
     _note_local_cache = None
 
+# #12943 (reopened): the TENANT/CACHE-GRAPH grading half, imported under the same
+# guard and for the same reason (`_bind_record_tenant` is on the hosted write
+# path, and a broken observability seam must not refuse a request that could be
+# served).
+try:
+    from .cache_leg import note_tenant_graph as _note_tenant_graph
+except Exception:  # observability never denies a usable graph
+    _note_tenant_graph = None
+
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
 register_kind("checkpoint-item")
@@ -12357,6 +12366,23 @@ def canonical_org_graph_name(tenant: str) -> str:
     return f"org_{bare_tenant_id(tenant)}"
 
 
+def _uri_graph_name(db_uri: str | None) -> str | None:
+    """The URI's own graph name, or ``None`` for an embedded construction.
+
+    The `urlparse(...).path.lstrip("/") or "tortoise"` step had THREE verbatim
+    copies in this module (`_get_proj`, `_graph_census`'s read, and
+    `_cache_graph_name`) — and `_derive_graph_name`'s own docstring exists
+    because a caller that names a graph outside a projection must derive it
+    IDENTICALLY. A drift in this step makes a caller compare against a name the
+    projection never opens (a false mismatch, or a missed one), so it is one
+    function now, used by all three.
+    """
+    if db_uri is None:
+        return None
+    from urllib.parse import urlparse
+    return urlparse(db_uri).path.lstrip("/") or "tortoise"
+
+
 def _derive_graph_name(*, namespace: str | None,
                        graph_name: str | None,
                        uri_graph: str | None = None) -> str:
@@ -15174,10 +15200,7 @@ class TortoiseSDK:
             # Resolve the URI's own graph name first (used as the fallback
             # when no namespace is set — preserves the conftest per-session
             # test graph, #221).
-            uri_graph: str | None = None
-            if self._db_uri is not None:
-                from urllib.parse import urlparse
-                uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
+            uri_graph = _uri_graph_name(self._db_uri)
 
             graph_name = _derive_graph_name(
                 namespace=self._namespace, graph_name=self._graph_name,
@@ -16193,6 +16216,34 @@ class TortoiseSDK:
                 f"(got {org_id!r}, {graph_id!r})"
             )
         self._record_tenant = (org_id, graph_id)
+        # #12943 (reopened): the tenant and the CACHE graph are two answers, and
+        # until this line nothing compared them. The hosted REST lane takes both
+        # from one credential, so they cannot drift THERE — but this method is
+        # also the seam any other lane binds through (a script, a maintenance
+        # job, a future door), and a tenant that names a graph this SDK does not
+        # fold into files the record row under one graph and the cache node in
+        # another: the write lands, `record-reconcile` reports the whole tenant
+        # missing, and every counter reads healthy (the measured shape of the
+        # issue's 8 objects / 0 nodes). Graded HERE, at the binding, because
+        # this is the moment both values exist — see
+        # `tortoise.cache_leg.tenant_graph_reason` for the three shapes it
+        # deliberately does NOT grade and why silence is the right answer there.
+        # Cheap: a name derivation that opens nothing (no projection, no
+        # socket) plus one regex on the name.
+        if _note_tenant_graph is not None:
+            _note_tenant_graph(cache_graph=self._cache_graph_name(),
+                               org_id=org_id, graph_id=graph_id)
+
+    def _cache_graph_name(self) -> str:
+        """The cache graph this SDK WILL fold into — derived, never opened.
+
+        The projection's own derivation (`_derive_graph_name`), so a caller can
+        name the graph without paying a connect, a version probe or an index
+        check. Used by `_bind_record_tenant`'s tenant/cache grading (#12943).
+        """
+        return _derive_graph_name(namespace=self._namespace,
+                                  graph_name=self._graph_name,
+                                  uri_graph=_uri_graph_name(self._db_uri))
 
     def _record_write_failure(self, reason: str, exc: BaseException) -> None:
         """Count and report one armed record write that did not happen (#9188).
@@ -59165,8 +59216,177 @@ class TortoiseSDK:
             "outcomes": outcomes[:20],  # cap for readability
         }
 
-    def get_entity(self, id_val: str) -> dict:
-        return self._get_entity(id_val)
+    def get_entity(self, id_val: str, *, cache_only: bool = False) -> dict:
+        """Get any entity by ID, eventId or url (Point · Subject · Object ·
+        Source · Event). Returns the node's properties, or ``{}`` when absent.
+
+        ⚠️ ARMED MODES (``TORTOISE_RECORD_SERVE``) change what an ABSENT answer
+        looks like, in one direction only — and on THIS door the absent answer
+        has a third shape, because the door is a UNION (#13093, #7952):
+
+        * found → the node's properties, plus the attribution merged AFTER
+          them, so a stored property of the same name cannot forge a fallback
+          (``servedFrom`` / ``fallbackReason``).
+        * an absence a store that could SEE the coordinate established →
+          ``{}`` — FALSY, because a verifier written as ``if out:`` must not read
+          an absence as a success (#12941 review P0-1).
+        * ``{"residency": "not-hot", …}`` — nobody who could see the node was
+          consulted. That is the case this door answers more often than a
+          single-label read does: it resolves across FIVE labels while only
+          ``record_serve.ENTITY_UNION_LABELS`` are served at parity, so a
+          record `no row` settles those labels and NOT an ``Event``'s or a
+          ``Source``'s (#9721). The verdict is ``record_serve.entity_absent_wire``'s,
+          one home for the coverage rule.
+
+        ⛔ `cache_only=True` IS THE INTERNAL ACCESSOR MODE, and the internal
+        read paths pass it: `derived_invalidation` (a mid-write sweep) and
+        `goal_judgement` must see the CACHE's answer and must not be handed a
+        TRUTHY `{"residency": …}` where they test `or MISSING`. The flag
+        forwards to `_get_entity`, which stays the one cache-only accessor —
+        it is a call-site DECLARATION, not a second implementation, and it is
+        deliberately a keyword on this method rather than a second method name:
+        an interception by name (`sdk.get_entity` patched to fail a read) is
+        how the internal-reader tests pin those arms, and their contract says
+        the interception must work `regardless of how it is spelled`.
+
+        ``off`` — the default — is byte-identical to the pre-#13093 call: one
+        cache query through the accessor, no record consult, no added key, and
+        no residency marker (this door does not read the ``partial``
+        declaration; the point door's ``off`` arm does, and the difference is
+        deliberate — the union cannot name a label for a node it did not find,
+        and the marker's key is a LABEL-SCOPED coordinate).
+
+        ⛔ ``_get_entity`` IS NOT THIS METHOD. It is the SDK's internal accessor
+        and it stays cache-only: the write paths echo through it
+        (``_update_entity``'s ``return self._get_entity(...)``, and the create
+        path's ``_echo_written``) and so do the internal read paths
+        (``derived_invalidation``, ``goal_judgement``), which must not read a
+        store a write has not finished projecting. Serving it would also hand
+        them a TRUTHY ``{"residency": …}`` where they test ``or MISSING`` / ``or
+        {}`` and read it as a found node. This is the same internal-vs-caller
+        split ``get_point``'s opt-in ``served_out`` sink makes; here it is a
+        method split because a bare ``get_entity`` caller carries no parameter by
+        which a mid-write one could be told apart.
+        """
+        if cache_only:
+            return self._get_entity(id_val)
+        return self._get_entity_served(id_val)
+
+    def _get_entity_served(self, id_val: str) -> dict:
+        """The caller-facing by-id entity read, with the record seam applied.
+
+        :meth:`get_point`'s armed arms, one coordinate class over: the same
+        mode parser, the same tenant resolution, the same wall-clock bound and
+        named fallbacks (:func:`record_serve.serve_entity_bounded`), the same
+        LAZY cache handle — in ``record`` mode this read must answer with the
+        graph engine stopped, so the handle is built on first use and never in
+        that mode.
+
+        ⛔ THE CACHE ANSWER IS THE ACCESSOR'S, not a second resolution: the
+        union's cache side is exactly ``_get_entity`` (the index-backed
+        ``_resolve_entity`` union), so the two stores are compared through one
+        reader and the cache path cannot drift from the unarmed one.
+        """
+        from .record_serve import (
+            ENTITY_UNION_LABELS,
+            FALLBACK_RECORD_BOUND_MISS,
+            FALLBACK_RECORD_TENANT_UNRESOLVED,
+            MODE_OFF,
+            MODE_PREFER,
+            MODE_RECORD,
+            READ_ENTITY_UNION_BY_ID,
+            CacheAnswerRequired,
+            RecordReadBoundMiss,
+            RecordServeError,
+            RecordUnavailable,
+            answered_by_cache,
+            entity_absent_wire,
+            serve_entity_bounded,
+            serve_mode,
+        )
+
+        mode = serve_mode()
+        if mode == MODE_OFF:
+            # The pre-#13093 shape, byte for byte: one cache query, no consult,
+            # no attribution, no marker.
+            return self._get_entity(id_val)
+
+        # ⛔ ONE COORDINATE SPELLING (#13322 review observation 3).
+        # `record_serve.serve_entity` builds `union:<labels>:<id>`; a second
+        # spelling here attributed a fallback answered through THIS deferred path
+        # to a different coordinate than the same fallback inside `serve_entity`,
+        # so an ops query over the attribution could not join the two. The value
+        # never reaches the wire, so this is attribution hygiene, not a verdict.
+        coordinate = f"union:{'|'.join(ENTITY_UNION_LABELS)}:{id_val}"
+        _proj: list = []
+
+        def _cache_answer() -> dict | None:
+            if not _proj:
+                # Exactly the accessor's own read — no second implementation.
+                _proj.append(self._get_entity(id_val) or None)
+            return _proj[0]
+
+        # The tenant is the SDK's OWN carried pair first and the ambient scope
+        # second — the same resolution the record WRITE seam uses
+        # (`record_tenant_effective`), so a read cannot be scoped to a tenant
+        # the write was not filed under.
+        from .record_writer import record_tenant_effective
+
+        tenant = record_tenant_effective(getattr(self, "_record_tenant", None))
+        if tenant is None:
+            if mode == MODE_RECORD:
+                raise RecordServeError(
+                    "this SDK carries no record tenant, so the read cannot be "
+                    "served from the record — absence is NOT established")
+            answer = answered_by_cache(
+                read=READ_ENTITY_UNION_BY_ID, coordinate=coordinate,
+                props=_cache_answer(),
+                reason=FALLBACK_RECORD_TENANT_UNRESOLVED)
+        else:
+            from .monitoring import record_read_timeout_s
+
+            bound_s = record_read_timeout_s()
+
+            def _cache_answered(reason: str):
+                """The caller's OWN cache read — the deferred shape's fallback.
+
+                It runs HERE, on the caller's thread, so the bounded worker
+                touches the RECORD and never a graph handle (the same split
+                :meth:`get_point` makes).
+                """
+                return answered_by_cache(
+                    read=READ_ENTITY_UNION_BY_ID, coordinate=coordinate,
+                    props=_cache_answer(), reason=reason)
+
+            try:
+                answer = serve_entity_bounded(
+                    bound_s=bound_s,
+                    tenant=tenant, id_val=id_val,
+                    # `prefer` takes the DEFERRED shape; `record` never calls
+                    # the callback and must pass one at all (`serve_entity`
+                    # refuses `None` outside `prefer`).
+                    cache_answer=(None if mode == MODE_PREFER else _cache_answer),
+                    mode=mode)
+            except CacheAnswerRequired as needed:
+                answer = _cache_answered(needed.reason)
+            except RecordReadBoundMiss as bound_miss:
+                if mode == MODE_RECORD:
+                    # No cache branch, so "too slow" must RAISE: turning a
+                    # capacity condition into an absence is the §17.2 inversion.
+                    raise RecordUnavailable(
+                        f"the record did not answer {coordinate} inside "
+                        f"{bound_s:.1f}s — in 'record' mode there is no cache "
+                        f"branch, so an absence is NOT established"
+                    ) from bound_miss
+                answer = _cache_answered(FALLBACK_RECORD_BOUND_MISS)
+
+        if answer.props is None:
+            # An ABSENT answer is NEVER an ESTABLISHED ABSENCE in this union
+            # unless EVERY label the read could mean is served —
+            # `entity_absent_wire` is that rule's one home and returns `{}`
+            # (falsy) only when it holds.
+            return entity_absent_wire(answer)
+        return {**answer.props, **answer.as_wire()}
 
     def _update_entity_any(self, id_val: str, **props) -> dict:
         """Update any entity's properties. Implementation behind
@@ -59671,10 +59891,7 @@ class TortoiseSDK:
         """
         from .record_writer import is_usable_tenant, record_tenant_effective
 
-        uri_graph: str | None = None
-        if self._db_uri is not None:
-            from urllib.parse import urlparse
-            uri_graph = urlparse(self._db_uri).path.lstrip("/") or "tortoise"
+        uri_graph = _uri_graph_name(self._db_uri)
         graph_name = _derive_graph_name(
             namespace=self._namespace, graph_name=self._graph_name,
             uri_graph=uri_graph)
