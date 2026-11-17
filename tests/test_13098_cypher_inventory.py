@@ -27,6 +27,7 @@ than report agreement.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from decimal import Decimal
@@ -1215,17 +1216,29 @@ def _psql_install_run() -> str:
     return match[0]["run"]
 
 
-def _run_install_step(tmp_path, psql_body: str | None, stub_ls: bool = False):
-    """Execute that step hermetically: `sudo`/`dpkg` are stubs, the client is the variable.
+def _run_install_step(tmp_path, psql_body: str | None, versioned_psql: str | None = None):
+    """Execute that step hermetically: `sudo`/`dpkg`/`ls` are stubs, the client is the variable.
 
-    `psql_body=None` puts NO `psql` on PATH. Nothing here touches the network or a
-    database — the step's own shell is the code under test.
+    `psql_body=None` puts NO `psql` on PATH, and PATH carries **nothing from the host**
+    but the shell plumbing the step itself invokes. That hermeticity is load-bearing:
+    with `PATH=f"{bin_dir}:/usr/bin:/bin"` — the previous spelling — `command -v psql`
+    searched `/usr/bin`, so on any box carrying a real client the MISSING-client arm
+    resolved the HOST's binary and never reached the refusal it exists to pin (measured
+    on this host before the fix: `psql: /usr/bin/psql (psql (PostgreSQL) 16.15 …)`,
+    exit 0, `$GITHUB_PATH`=/usr/bin — #13314 review, P1). Nothing here touches the
+    network or a database — the step's own shell is the code under test.
 
-    `stub_ls=True` also shadows `ls`, which is what keeps the MISSING-client arm
-    hermetic: the step's fallback is `ls -d /usr/lib/postgresql/*/bin`, so on a box
-    that carries a real versioned client (installed but not exposed) that fallback
-    would resolve a working `psql` and the refusal would never be reached. The
-    shipped runner reaches it, so the guard must be able to reach it here.
+    `versioned_psql=<script>` installs that client at `<tmp>/vendor/bin/psql` and makes
+    `ls` report `<tmp>/vendor/bin` as the `/usr/lib/postgresql/*/bin` hit, so the
+    step's FALLBACK arm is reachable without consulting the host either. It defaults to
+    `None`, where `ls` exits 1 and nothing resolves. That arm pins the fallback
+    RESOLUTION and the probe/reach-`$GITHUB_PATH` behaviour, not the `sort -V` version
+    SELECTION — `sort` is stubbed to a pass-through for exactly that reason.
+
+    ⛔ `ls` IS A STUB, NOT A HOST SYMLINK, AND THAT IS A MEASUREMENT. This host carries
+    `/usr/lib/postgresql/16/bin/psql`, so a real `ls` on a hermetic PATH would let the
+    step's fallback resolve a working client, the refusal would never be reached, and
+    the MISSING-client arm would be host-dependent again — the very defect being fixed.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -1233,10 +1246,44 @@ def _run_install_step(tmp_path, psql_body: str | None, stub_ls: bool = False):
         stub = bin_dir / name
         stub.write_text("#!/bin/sh\nexit 0\n")
         stub.chmod(0o755)
-    if stub_ls:
-        stub = bin_dir / "ls"
-        stub.write_text("#!/bin/sh\nexit 1\n")
-        stub.chmod(0o755)
+    # `ls` NEVER sees the host's `/usr/lib/postgresql`: the arms under test are "nothing
+    # resolves", "the client on PATH is the one we supplied" and (via `versioned_psql`)
+    # "only a versioned client outside PATH resolves".
+    ls_stub = bin_dir / "ls"
+    if versioned_psql is None:
+        ls_stub.write_text("#!/bin/sh\nexit 1\n")
+    else:
+        vendor_bin = tmp_path / "vendor" / "bin"
+        vendor_bin.mkdir(parents=True)
+        fake = vendor_bin / "psql"
+        fake.write_text(versioned_psql)
+        fake.chmod(0o755)
+        ls_stub.write_text(f"#!/bin/sh\necho '{vendor_bin}'\n")
+    ls_stub.chmod(0o755)
+    # Shell plumbing, not the subject under test: `bash` (which `subprocess` must resolve
+    # THROUGH this PATH, since `env` is passed), and the utilities the step's own lines
+    # invoke. Omitting them would turn this into an assertion about which coreutils a
+    # runner ships instead of about the step's logic — so a host missing one is a LOUD
+    # failure here, not a silently wrong verdict three assertions later.
+    for name in ("bash", "dirname", "tail"):
+        real = shutil.which(name)
+        assert real is not None, f"this suite needs `{name}` on the host to drive the step"
+        (bin_dir / name).symlink_to(real)
+    # ⛔ `sort` IS STUBBED, NOT SYMLINKED. The step resolves the fallback with `sort -V`,
+    # and `-V` is a GNU coreutils extension — symlinking the host's `sort` would make this
+    # arm's verdict depend on the host being GNU (measured: a non-GNU `sort` reds it, and
+    # it reds with a message that blames the STEP, because the pipeline's failure is
+    # swallowed by the step's own `|| true`). The version SELECTION is not what this arm
+    # claims to pin; one candidate line makes `sort -V | tail -1` a pass-through, so a
+    # pass-through stub is the honest stand-in (#13314 review, P2). It must IGNORE argv:
+    # the step passes `-V`, and `exec cat` inherits it and dies on it.
+    sort_stub = bin_dir / "sort"
+    sort_stub.write_text(
+        "#!/bin/sh\n"
+        "# pass-through: ignore argv (the step passes -V) and echo stdin unchanged\n"
+        'while IFS= read -r line; do printf \'%s\\n\' "$line"; done\n'
+    )
+    sort_stub.chmod(0o755)
     if psql_body is not None:
         fake = bin_dir / "psql"
         fake.write_text(psql_body)
@@ -1249,10 +1296,10 @@ def _run_install_step(tmp_path, psql_body: str | None, stub_ls: bool = False):
 
     env = {
         **os.environ,
-        # The fake client comes FIRST, so `command -v psql` finds it and the
-        # `/usr/lib/postgresql/*/bin` fallback is never consulted — which is what keeps
-        # this assertion independent of whether the host has a real client installed.
-        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        # ⛔ `bin_dir` ALONE, with no `/usr/bin` suffix. That suffix was the whole defect:
+        # the host's `psql` lives there and `command -v psql` searches PATH, so a
+        # missing-client arm silently inherited a working client.
+        "PATH": str(bin_dir),
         "GITHUB_PATH": str(github_path),
     }
     return (
@@ -1309,7 +1356,7 @@ def test_a_missing_client_fails_with_the_word_psql_in_the_remedy(tmp_path):
     `::error::postgresql-client is installed but no  binary resolves …` plus two
     `bash: line N: psql: command not found` lines.
     """
-    proc, github_path = _run_install_step(tmp_path, None, stub_ls=True)
+    proc, github_path = _run_install_step(tmp_path, None)
     combined = proc.stdout + proc.stderr
 
     assert proc.returncode != 0, (
@@ -1340,6 +1387,29 @@ def test_a_working_client_still_passes_and_repairs_path(tmp_path):
     assert "psql (PostgreSQL) 16.1" in proc.stdout
     assert github_path.read_text().strip().endswith("bin"), (
         "the client's directory must be appended to $GITHUB_PATH for the harness steps"
+    )
+
+
+def test_a_versioned_client_outside_path_is_resolved_by_the_fallback(tmp_path):
+    """The `/usr/lib/postgresql/*/bin` fallback arm — the reason `ls` is stubbed at all.
+
+    Its sibling tests shadow the fallback (so no host client can satisfy them), which
+    would leave this branch unpinned: deleting the `ls -d … | sort -V | tail -1`
+    resolution would red nothing. Here the fallback is the ONLY client that exists, so
+    the step must find it, probe it, and put its directory on `$GITHUB_PATH` — the
+    trimmed-image case the step's comment describes.
+    """
+    proc, github_path = _run_install_step(tmp_path, None, versioned_psql=WORKING_PSQL)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "psql (PostgreSQL) 16.1" in proc.stdout, (
+        "the fallback client must be probed, not merely found: "
+        f"stdout={proc.stdout} stderr={proc.stderr}"
+    )
+    repaired = github_path.read_text().strip()
+    assert repaired.endswith("vendor/bin"), (
+        "the RESOLVED client's directory — not /usr/bin — must reach $GITHUB_PATH: "
+        f"got {repaired!r}"
     )
 
 
