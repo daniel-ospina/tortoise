@@ -7915,6 +7915,11 @@ def _record_health() -> dict:
     """
     try:
         from tortoise import record_writer
+        # #12943 (reopened): the live-write TARGET registry lives in
+        # `cache_leg` (it is a bounded per-process map, not a Prometheus
+        # counter — a per-graph label would be unbounded cardinality), so it is
+        # imported with the counters and read in the SAME snapshot.
+        from tortoise.cache_leg import cache_write_targets as _cache_targets
         from tortoise.monitoring import (
             cache_leg_failure_counts,
             record_last_write_at,
@@ -7938,6 +7943,7 @@ def _record_health() -> dict:
                 # Present-and-null for the same reason (#12943): a missing key
                 # must not read as "the cache is fine".
                 "cache_leg_failures": None,
+                "cache_write_targets": None,
                 # The POSITIVE pair is present-and-null here for the same reason:
                 # a consumer must not read a missing key as "no writes" (#9548).
                 "record_writes_applied": None, "record_last_write_at": None,
@@ -7967,6 +7973,11 @@ def _record_health() -> dict:
         # missing-key class). Caught by review cycle 2; the seeded arm had no
         # test at all.
         "cache_leg_failures": None,
+        # #12943 (reopened): WHERE live writes landed. Seeded ``None`` for the
+        # same reason as every key above — a key assigned only in the ``else``
+        # arm is ABSENT exactly when the snapshot failed, and an absent key
+        # reads as "the cache is fine" (#9548 review P2's missing-key class).
+        "cache_write_targets": None,
         # The POSITIVE pair (#9548): committed writes, and when. Seeded ``None``
         # for the same reason as the three above — an unread counter is not a
         # zero, and a ``0`` here is exactly what a never-writing deployment
@@ -8030,6 +8041,16 @@ def _record_health() -> dict:
         # key that only existed there would have made the split visible to a
         # scrape and invisible to ``/health`` — the surface an operator reads.
         cache_leg = cache_leg_failure_counts()
+        # #12943 (reopened): WHERE this process's live writes actually landed,
+        # read in the SAME snapshot (all-or-nothing, like every key beside it).
+        # `cache_leg_failures` above counts one CONFIGURATION split; this is the
+        # cause-agnostic fact that covers the other three shapes — a cache URI
+        # naming another SERVER, a credential class opening another GRAPH, a
+        # lane binding a tenant it did not resolve. An operator compares the
+        # tenant's target against the deployment's cache; a target list with an
+        # `embedded:` or an unexpected graph in it is the split, visible without
+        # knowing which variable caused it.
+        cache_targets = _cache_targets()
         # The POSITIVE pair (#9548) rides the SAME snapshot for the same reason.
         applied = record_write_applied_count()
         last_write_at = record_last_write_at()
@@ -8043,6 +8064,7 @@ def _record_health() -> dict:
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
         block["cache_leg_failures"] = cache_leg
+        block["cache_write_targets"] = cache_targets
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
     # this counter carries — SEVEN values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly

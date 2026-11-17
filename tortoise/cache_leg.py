@@ -73,13 +73,23 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import threading
 
 from . import monitoring
 
 __all__ = [
     "CACHE_NOT_SHARED",
+    "CACHE_TARGET_OVERFLOW",
+    "TENANT_GRAPH_MISMATCH",
     "cache_leg_reason",
+    "cache_store_fingerprint",
+    "cache_write_targets",
+    "note_cache_write_target",
     "note_local_cache",
+    "note_tenant_graph",
+    "reset_cache_write_targets",
+    "tenant_graph_reason",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,9 +98,41 @@ _LOGGER = logging.getLogger(__name__)
 #: The remediation is per-shape and the warning below spells both out.
 CACHE_NOT_SHARED = "cache_not_shared"
 
+#: A write was filed under ``(org_id, graph_id)`` while the cache graph it folded
+#: into is a PER-GRAPH name for a DIFFERENT id (``org_<org>_<gid>`` /
+#: ``team_<org>_<gid>``) — the record's tenant and the cache's graph disagree
+#: about WHICH graph this write belongs to. The one shape of the split that is
+#: decidable from inside the process without reading either store.
+TENANT_GRAPH_MISMATCH = "tenant_graph_mismatch"
+
+#: The bucket a write target is filed under once ``_TARGETS`` is full. The
+#: registry is BOUNDED on purpose: a hosted process serves one graph per tenant,
+#: and an unbounded per-graph map is a memory leak with a monitoring label on it.
+CACHE_TARGET_OVERFLOW = "(other targets)"
+
+#: How many distinct ``store|graph`` pairs the process remembers. Sixteen covers
+#: every deployment shape this repo runs (one shared cache, one embedded file,
+#: the registry graph) with room for the handful of graphs one process writes on
+#: a healthy day; a process past it is either a big multi-tenant worker — where
+#: the OVERFLOW count is the answer — or split, which the first target shows.
+_TARGETS_CAP = 16
+
+#: ``{"<store>|<graph>": live writes}`` for THIS process, and its lock. Written
+#: by :func:`note_cache_write_target` from the one fold every live write passes.
+_TARGETS: dict[str, int] = {}
+_TARGETS_LOCK = threading.Lock()
+
 #: Reasons already rendered as a warning by THIS process — see the module
 #: docstring for why the latch exists (one SDK per request on the hosted lane).
 _WARNED: set[str] = set()
+
+#: ``org_<org>_<gid>`` / ``team_<org>_<gid>`` — the two per-graph namespace
+#: families this tree mints (``supabase_control``/``_provision_graph`` and the
+#: pre-#3543 ``team_`` form). Only their TAIL is read, and only to answer "does
+#: this graph name carry a graph id at all?" — a name that does not carry one
+#: (the org-level ``org_<org>``, ``tortoise``, the registry graph) cannot be
+#: graded here and is deliberately left ungraded rather than guessed at.
+_GRAPH_ID_IN_NAME = re.compile(r"(?:^|_)(g_[A-Za-z0-9]+)$")
 
 
 def _record_armed() -> bool:
@@ -140,6 +182,179 @@ def _redirected_to_a_server() -> bool:
     if os.environ.get("TORTOISE_TEST_MODE") != "1":
         return False
     return bool((os.environ.get("TORTOISE_DB_URI") or "").strip())
+
+
+def cache_store_fingerprint(endpoint: object) -> str:
+    """A credential-free identity for the store a projection writes to.
+
+    ``endpoint`` is ``FalkorProjection._stable_endpoint()``'s answer —
+    ``("embedded", path)`` or ``("server", host, port)`` — so the identity is
+    the projection's OWN, not a second reading of the environment. That matters:
+    the whole #12943 class is "two variables chose two stores", and a fingerprint
+    derived from the variable would agree with itself while the write went
+    elsewhere.
+
+    No credential is ever rendered (same rule as the record's
+    ``dsn_fingerprint``): a target list is a health payload and a log line.
+    """
+    try:
+        parts = tuple(endpoint or ())
+    except TypeError:
+        return "unknown"
+    if not parts:
+        return "unknown"
+    kind = parts[0]
+    if kind == "embedded" and len(parts) > 1:
+        return f"embedded:{parts[1]}"
+    if kind == "server" and len(parts) > 1:
+        host = parts[1]
+        port = parts[2] if len(parts) > 2 else None
+        return f"server://{host}" + (f":{port}" if port else "")
+    return ":".join(str(p) for p in parts)
+
+
+def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
+    """Count one LIVE write against the store+graph it actually folded into.
+
+    Called from ``FalkorProjection.apply`` — the ONE fold every live door passes
+    (SDK, REST, MCP, capture, the onboarding metadata lane) after ``create_point``
+    went through the outbox — so the count cannot drift from the writes. Replay
+    is excluded by the caller: a rebuild WRITES the target on purpose and
+    counting it would let a repair make the picture look healthier than the live
+    traffic it repaired.
+
+    WHAT THIS ANSWERS THAT ``cache_leg_failures`` CANNOT. ``cache_leg_failures``
+    counts a CONFIGURATION split (record armed + this process's cache is the
+    embedded file), decided once per construction. It is blind to every other way
+    the two copies can diverge — a cache URI naming a DIFFERENT server, a
+    credential class that opens a different GRAPH (measured: an org-wide
+    credential opens ``org_<org>`` while the record files the same write under
+    ``org_<org>_<gid>``), a per-request construction that binds a tenant it did
+    not resolve. This records the fact those share: **the store and graph each
+    write actually reached**, per process, so "the record has 8 and the cache you
+    looked at has 0" becomes "this process wrote 8 to THAT target" — one number
+    to compare, whichever of the shapes caused it (#12943 reopening).
+
+    A COUNT IS NOT A VERDICT: two targets in one process is normal for a
+    deployment that writes the registry graph as well as tenant graphs. What is
+    pathological is the TENANT's target absent from this list — or present under
+    a store the deployment does not read.
+
+    Deliberately cannot raise (#5148's rule — observability must never deny a
+    write that already landed): the caller folds inside a live scope and the
+    fold's failure is the caller's problem, not this function's.
+    """
+    try:
+        key = f"{cache_store_fingerprint(endpoint)}|{graph_name or '?'}"
+        with _TARGETS_LOCK:
+            if key in _TARGETS or len(_TARGETS) < _TARGETS_CAP:
+                _TARGETS[key] = _TARGETS.get(key, 0) + 1
+            else:
+                _TARGETS[CACHE_TARGET_OVERFLOW] = (
+                    _TARGETS.get(CACHE_TARGET_OVERFLOW, 0) + 1)
+        return key
+    except Exception:  # noqa: BLE001, RUF100 — never deny a write that landed
+        return "unknown"
+
+
+def cache_write_targets() -> dict[str, int]:
+    """Snapshot of this process's live-write targets (``store|graph`` → writes).
+
+    Copied under the lock so a caller iterating it cannot see a concurrent
+    increment land mid-render.
+    """
+    with _TARGETS_LOCK:
+        return dict(_TARGETS)
+
+
+def reset_cache_write_targets() -> None:
+    """Clear the registry. TESTS ONLY — production never resets a total.
+
+    A cumulative total that resets cannot be alerted on, which is why the
+    counters beside this one have no reset either; the registry is a snapshot of
+    WHERE writes go rather than a total to alert on, and tests need a clean
+    baseline to distinguish "this fold counted" from "an earlier one did".
+    """
+    with _TARGETS_LOCK:
+        _TARGETS.clear()
+
+
+def tenant_graph_reason(*, cache_graph: str | None, org_id: str,
+                        graph_id: str) -> str | None:
+    """Does the cache graph name DISAGREE with the record tenant? Pure.
+
+    ``cache_graph`` is the name this SDK will fold into
+    (``sdk._cache_graph_name()`` — the projection's own derivation, computed
+    without opening anything). Returns :data:`TENANT_GRAPH_MISMATCH` only when
+    the name carries a graph id and it is not the tenant's.
+
+    ⛔ IT IS DELIBERATELY SILENT ON THREE SHAPES, and the silence is the design:
+
+    * **a name with no graph id** — the org-level ``org_<org>`` (the DEFAULT
+      graph's namespace, and what an org-wide credential legitimately opens for
+      a tenant that IS the default graph), ``tortoise``, ``registry_tortoise``.
+      Nothing in a constructor can tell "the default graph of this org" from "a
+      custom graph, opened at the org level" — that needs the control plane — so
+      guessing would count a coherent hosted org-wide request as a fault and
+      drown the signal. The TARGET registry above is what makes that shape
+      visible instead of silently trusted;
+    * **no binding decided yet** (``cache_graph`` falsy) — #12950's arm owns the
+      construction-level split (``cache_not_shared``), and reporting it twice
+      under two names would make one defect look like two;
+    * **a graph id that MATCHES** — the ordinary coherent write.
+
+    What is left is the measured misroute: a write whose record row says
+    ``org_<org>_g_A`` and whose cache node is in ``org_<org>_g_B``. That is not a
+    lag, not a residency miss, and not repairable by a replay into the graph the
+    reconciler reads.
+    """
+    if not cache_graph:
+        return None
+    name = str(cache_graph)
+    match = _GRAPH_ID_IN_NAME.search(name)
+    if match is None:
+        return None
+    if match.group(1) == graph_id:
+        return None
+    return TENANT_GRAPH_MISMATCH
+
+
+def note_tenant_graph(*, cache_graph: str | None, org_id: str,
+                      graph_id: str) -> str | None:
+    """Count (+ warn once) a tenant bound to a cache graph of ANOTHER graph.
+
+    Called from ``TortoiseSDK._bind_record_tenant`` — the by-value carrier the
+    hosted REST lane binds in ``_data_sdk`` and the MCP lane installs as a
+    scope — so it grades the moment the two answers become comparable, before
+    any write can file a row under one and a node under the other.
+
+    Never raises, same reason as its siblings: a fault in observability must not
+    refuse a request that can still be served.
+    """
+    try:
+        reason = tenant_graph_reason(cache_graph=cache_graph, org_id=org_id,
+                                     graph_id=graph_id)
+        if reason is None:
+            return None
+        monitoring.record_cache_leg_failure(reason)
+        if reason not in _WARNED:
+            _WARNED.add(reason)
+            _LOGGER.warning(
+                "the record tenant and the CACHE graph disagree: this SDK "
+                "writes the cache graph %r while the record will file the same "
+                "write under graph_id %r (org %r). Nothing is lost — the write "
+                "lands in a graph the record's own reconciler will not look "
+                "at, so `record-reconcile` reports the tenant missing while "
+                "this process reports success (#12943, counted on "
+                "monitoring.metrics()['cache_leg_failures']). Fix: open the SDK "
+                "for the tenant's own graph (hosted: `_data_sdk`; a script: "
+                "`_make_sdk(graph_name='org_<org>_<gid>')`) and bind the tenant "
+                "you actually resolved.",
+                cache_graph, graph_id, org_id,
+            )
+        return reason
+    except Exception:  # noqa: BLE001, RUF100
+        return None
 
 
 def cache_leg_reason(*, cache_uri: str | None) -> str | None:

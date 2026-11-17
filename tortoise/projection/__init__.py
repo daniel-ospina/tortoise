@@ -12658,6 +12658,32 @@ class FalkorProjection(
                 "engines must run inside `_replay_write_scope()`. event_type="
                 f"{(event or {}).get('type')!r}"
             )
+        # #12943 (reopened): RECORD WHERE THIS FOLD LANDS, once per live write.
+        # `apply` is THE fold every live door passes (SDK `_apply_and_journal`,
+        # `EventAPI._emit`, the raw event door, the onboarding metadata lane), so
+        # one hook here covers every door without a list that can go stale — and
+        # the door inventory is exactly what drifts.
+        #
+        # ⛔ NOT DURING A REPLAY. A rebuild writes this same target on purpose;
+        # counting it would let a repair make the live picture look healthier
+        # than the traffic it repaired, which is the inverse of what the
+        # instrument is for. `replay_window_open()` is the shipped predicate for
+        # "this fold came FROM the journal" (#9553).
+        #
+        # The store identity is the PROJECTION's own (`_stable_endpoint`), never
+        # the environment's: the whole #12943 class is "two variables chose two
+        # stores", so a fingerprint derived from the variable would agree with
+        # itself while the write went somewhere else.
+        if not replay_window_open():
+            from tortoise.cache_leg import note_cache_write_target
+            endpoint = getattr(self, "_cache_target_endpoint", None)
+            if endpoint is None:
+                endpoint = self._stable_endpoint() or ()
+                # Memoised: the endpoint cannot change for a live projection
+                # (the client is built once), and this fold is on the write
+                # path.
+                self._cache_target_endpoint = endpoint
+            note_cache_write_target(endpoint, self.graph_name)
         # #3585 re-review (cycle 2, FIX A): `journal_object_surviving` is
         # ``(ids, names)`` of every Object the WHOLE journal leaves in place,
         # and `journal_object_deleted` the ids it hard-deletes. They are

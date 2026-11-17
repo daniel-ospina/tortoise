@@ -1,0 +1,299 @@
+{
+  "cache_uri": "docker://127.0.0.1:16403/tortoise_test_matrix#87627ce7",
+  "record_dsn": "postgresql://127.0.0.1:33943/record#0367bb5d",
+  "rows": [
+    {
+      "door": "sdk",
+      "org": "a129438cae6da453",
+      "graph_id": "g_12943a8cae6da453",
+      "cache_graph_canonical": "org_a129438cae6da453_g_12943a8cae6da453",
+      "record": {
+        "object": 1,
+        "subject": 0,
+        "point": 0,
+        "event": 0,
+        "relation": 0,
+        "journal_event": 1
+      },
+      "cache_canonical": {
+        "Object": 1,
+        "Subject": 0,
+        "Point": 0,
+        "Event": 0,
+        "Source": 0
+      },
+      "cache_org_default": {
+        "__absent__": 1
+      },
+      "outcome": {
+        "cache_target": "org_a129438cae6da453_g_12943a8cae6da453"
+      },
+      "error": null,
+      "cache_leg_failures": {},
+      "cache_leg_failures_delta": {},
+      "cache_write_target_delta": {
+        "server://127.0.0.1:16403|org_a129438cae6da453_g_12943a8cae6da453": 1
+      },
+      "metrics_keys_moved": [
+        "cache_write_targets",
+        "record_last_write_at",
+        "record_writes_applied",
+        "server_code",
+        "uptime"
+      ],
+      "reached_canonical": true,
+      "reached_org_default": false
+    },
+    {
+      "door": "data_sdk",
+      "org": "b129438cae6da453",
+      "graph_id": "g_12943b8cae6da453",
+      "cache_graph_canonical": "org_b129438cae6da453_g_12943b8cae6da453",
+      "record": {
+        "object": 1,
+        "subject": 0,
+        "point": 0,
+        "event": 0,
+        "relation": 0,
+        "journal_event": 1
+      },
+      "cache_canonical": {
+        "Object": 1,
+        "Subject": 0,
+        "Point": 0,
+        "Event": 0,
+        "Source": 0
+      },
+      "cache_org_default": {
+        "__absent__": 1
+      },
+      "outcome": {
+        "cache_target": "org_b129438cae6da453_g_12943b8cae6da453"
+      },
+      "error": null,
+      "cache_leg_failures": {},
+      "cache_leg_failures_delta": {},
+      "cache_write_target_delta": {
+        "server://127.0.0.1:16403|org_b129438cae6da453_g_12943b8cae6da453": 1
+      },
+      "metrics_keys_moved": [
+        "cache_write_targets",
+        "record_last_write_at",
+        "record_writes_applied",
+        "uptime"
+      ],
+      "reached_canonical": true,
+      "reached_org_default": false
+    },
+    {
+      "door": "data_sdk_orgwide",
+      "org": "c129438cae6da453",
+      "graph_id": "g_12943c8cae6da453",
+      "cache_graph_canonical": "org_c129438cae6da453_g_12943c8cae6da453",
+      "record": {
+        "object": 1,
+        "subject": 0,
+        "point": 0,
+        "event": 0,
+        "relation": 0,
+        "journal_event": 1
+      },
+      "cache_canonical": {
+        "__absent__": 1
+      },
+      "cache_org_default": {
+        "Object": 1,
+        "Subject": 0,
+        "Point": 0,
+        "Event": 0,
+        "Source": 0
+      },
+      "outcome": {
+        "cache_target": "org_c129438cae6da453"
+      },
+      "error": null,
+      "cache_leg_failures": {},
+      "cache_leg_failures_delta": {},
+      "cache_write_target_delta": {
+        "server://127.0.0.1:16403|org_c129438cae6da453": 1
+      },
+      "metrics_keys_moved": [
+        "cache_write_targets",
+        "record_last_write_at",
+        "record_writes_applied",
+        "uptime"
+      ],
+      "reached_canonical": false,
+      "reached_org_default": true
+    },
+    {
+      "door": "rest",
+      "org": "d129438cae6da453",
+      "graph_id": "g_12943d8cae6da453",
+      "cache_graph_canonical": "org_d129438cae6da453_g_12943d8cae6da453",
+      "record": {
+        "object": 1,
+        "subject": 0,
+        "point": 0,
+        "event": 0,
+        "relation": 0,
+        "journal_event": 1
+      },
+      "cache_canonical": {
+        "Object": 1,
+        "Subject": 0,
+        "Point": 0,
+        "Event": 0,
+        "Source": 0
+      },
+      "cache_org_default": {
+        "__absent__": 1
+      },
+      "outcome": {
+        "status": 200,
+        "body": "{\"canonical_name\":\"door rest 8cae6da453\",\"createdAt\":\"2026-11-17T21:02:58.827088+00:00\",\"id\":\"1a1eb51f30a-3c41fcc81b5a\",\"name\":\"door-rest-8cae6da453\",\"objectKind\":\"goal\",\"title\":\"\"}"
+      },
+      "error": null,
+      "cache_leg_failures": {},
+      "cache_leg_failures_delta": {},
+      "cache_write_target_delta": {
+        "server://127.0.0.1:16403|org_d129438cae6da453_g_12943d8cae6da453": 1
+      },
+      "metrics_keys_moved": [
+        "cache_write_targets",
+        "record_last_write_at",
+        "record_writes_applied",
+        "server_code",
+        "uptime"
+      ],
+      "reached_canonical": true,
+      "reached_org_default": false
+    },
+    {
+      "door": "mcp",
+      "org": "e129438cae6da453",
+      "graph_id": "g_12943e8cae6da453",
+      "cache_graph_canonical": "org_e129438cae6da453_g_12943e8cae6da453",
+      "record": {
+        "object": 1,
+        "subject": 0,
+        "point": 0,
+        "event": 0,
+        "relation": 0,
+        "journal_event": 1
+      },
+      "cache_canonical": {
+        "Object": 1,
+        "Subject": 0,
+        "Point": 0,
+        "Event": 0,
+        "Source": 0
+      },
+      "cache_org_default": {
+        "__absent__": 1
+      },
+      "outcome": {
+        "cache_target": "tortoise_test_matrix",
+        "tool_returned": "{'node': {'canonical_name': 'door mcp 8cae6da453', 'createdAt': '2026-11-17T21:03:00.253273+00:00', 'id': '1a1eb51f89d-14c583b8a8b7', 'name': 'door-mcp-8cae6da4"
+      },
+      "error": null,
+      "cache_leg_failures": {},
+      "cache_leg_failures_delta": {},
+      "cache_write_target_delta": {
+        "server://127.0.0.1:16403|org_e129438cae6da453_g_12943e8cae6da453": 1
+      },
+      "metrics_keys_moved": [
+        "cache_write_targets",
+        "record_last_write_at",
+        "record_writes_applied",
+        "uptime"
+      ],
+      "reached_canonical": true,
+      "reached_org_default": false
+    },
+    {
+      "door": "script_orglevel",
+      "org": "f129438cae6da453",
+      "graph_id": "g_12943f8cae6da453",
+      "cache_graph_canonical": "org_f129438cae6da453_g_12943f8cae6da453",
+      "record": {
+        "object": 1,
+        "subject": 0,
+        "point": 0,
+        "event": 0,
+        "relation": 0,
+        "journal_event": 1
+      },
+      "cache_canonical": {
+        "__absent__": 1
+      },
+      "cache_org_default": {
+        "Object": 1,
+        "Subject": 0,
+        "Point": 0,
+        "Event": 0,
+        "Source": 0
+      },
+      "outcome": {
+        "cache_target": "org_f129438cae6da453"
+      },
+      "error": null,
+      "cache_leg_failures": {},
+      "cache_leg_failures_delta": {},
+      "cache_write_target_delta": {
+        "server://127.0.0.1:16403|org_f129438cae6da453": 1
+      },
+      "metrics_keys_moved": [
+        "cache_write_targets",
+        "record_last_write_at",
+        "record_writes_applied",
+        "uptime"
+      ],
+      "reached_canonical": false,
+      "reached_org_default": true
+    },
+    {
+      "door": "misroute",
+      "org": "h129438cae6da453",
+      "graph_id": "g_12943h8cae6da453",
+      "cache_graph_canonical": "org_h129438cae6da453_g_12943h8cae6da453",
+      "record": {
+        "object": 1,
+        "subject": 0,
+        "point": 0,
+        "event": 0,
+        "relation": 0,
+        "journal_event": 1
+      },
+      "cache_canonical": {
+        "__absent__": 1
+      },
+      "cache_org_default": {
+        "__absent__": 1
+      },
+      "outcome": {
+        "cache_target": "org_h129438cae6da453_g_12943other6a56e93e",
+        "tenant_graph_id": "g_12943h8cae6da453"
+      },
+      "error": null,
+      "cache_leg_failures": {
+        "tenant_graph_mismatch": 1
+      },
+      "cache_leg_failures_delta": {
+        "tenant_graph_mismatch": 1
+      },
+      "cache_write_target_delta": {
+        "server://127.0.0.1:16403|org_h129438cae6da453_g_12943other6a56e93e": 1
+      },
+      "metrics_keys_moved": [
+        "cache_leg_failures",
+        "cache_write_targets",
+        "record_last_write_at",
+        "record_writes_applied",
+        "uptime"
+      ],
+      "reached_canonical": false,
+      "reached_org_default": false
+    }
+  ]
+}

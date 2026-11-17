@@ -302,6 +302,15 @@ try:
 except Exception:  # observability never denies a usable graph
     _note_local_cache = None
 
+# #12943 (reopened): the TENANT/CACHE-GRAPH grading half, imported under the same
+# guard and for the same reason (`_bind_record_tenant` is on the hosted write
+# path, and a broken observability seam must not refuse a request that could be
+# served).
+try:
+    from .cache_leg import note_tenant_graph as _note_tenant_graph
+except Exception:  # observability never denies a usable graph
+    _note_tenant_graph = None
+
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
 register_kind("checkpoint-item")
@@ -16187,6 +16196,38 @@ class TortoiseSDK:
                 f"(got {org_id!r}, {graph_id!r})"
             )
         self._record_tenant = (org_id, graph_id)
+        # #12943 (reopened): the tenant and the CACHE graph are two answers, and
+        # until this line nothing compared them. The hosted REST lane takes both
+        # from one credential, so they cannot drift THERE — but this method is
+        # also the seam any other lane binds through (a script, a maintenance
+        # job, a future door), and a tenant that names a graph this SDK does not
+        # fold into files the record row under one graph and the cache node in
+        # another: the write lands, `record-reconcile` reports the whole tenant
+        # missing, and every counter reads healthy (the measured shape of the
+        # issue's 8 objects / 0 nodes). Graded HERE, at the binding, because
+        # this is the moment both values exist — see
+        # `tortoise.cache_leg.tenant_graph_reason` for the three shapes it
+        # deliberately does NOT grade and why silence is the right answer there.
+        # Cheap: a name derivation that opens nothing (no projection, no
+        # socket) plus one regex on the name.
+        if _note_tenant_graph is not None:
+            _note_tenant_graph(cache_graph=self._cache_graph_name(),
+                               org_id=org_id, graph_id=graph_id)
+
+    def _cache_graph_name(self) -> str:
+        """The cache graph this SDK WILL fold into — derived, never opened.
+
+        The projection's own derivation (`_derive_graph_name`), so a caller can
+        name the graph without paying a connect, a version probe or an index
+        check. Used by `_bind_record_tenant`'s tenant/cache grading (#12943).
+        """
+        uri_graph: str | None = None
+        if self._db_uri is not None:
+            from urllib.parse import urlparse
+            uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
+        return _derive_graph_name(namespace=self._namespace,
+                                  graph_name=self._graph_name,
+                                  uri_graph=uri_graph)
 
     def _record_write_failure(self, reason: str, exc: BaseException) -> None:
         """Count and report one armed record write that did not happen (#9188).
