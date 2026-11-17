@@ -3029,73 +3029,93 @@ def test_the_probes_line_citations_resolve_too():
 
 
 def test_a_stale_cite_in_the_readme_or_probe_names_the_resolved_line(tmp_path, monkeypatch):
-    """The third wired miss path is pinned BY ITS MESSAGE CONTENT, not by its numbers.
+    """ALL SEVEN `_locate_hint` sites in this file are pinned BY MESSAGE CONTENT.
 
-    ⛔ MEASURED (#13033 round-10 review, P2): every `_locate_hint` site in this file
-    could be replaced by a constant string with the whole suite green — a shim right
-    after the import (`_locate_hint = lambda *a, **k: 'is somewhere in this file'`)
-    ran 1106 passed, 1 skipped, byte-identical to the unmutated run. The measure
-    file's deliverable pin stops at its own file boundary, so the README/probe rules
-    — the half of the deliverable that lives HERE — could silently go back to naming
-    only what the cited line *reads*, which is the pre-#13033 behaviour the whole
-    change exists to replace.
+    ⛔ MEASURED (#13033 round-10 review, P2): replacing every `_locate_hint` site with a
+    constant left the whole suite green (1106 passed, 1 skipped — identical to the
+    unmutated run), so the README/probe rules — the half of the deliverable that lives
+    HERE — could go back to naming only what the cited line *reads*. ⛔ AND MEASURED
+    AGAIN (#13033 round-11 review, P2): the first cut of THIS test drove three sites and
+    left four open — each `(def, call)` pair was pinned on one half only — so a constant
+    at `README`'s call half, the step table, the probe step loop, or the probe `def` half
+    still passed the whole suite. There is now one arm per site.
 
-    Each arm drives the REAL rule with a document whose number is one off and requires
-    the resolved line in the message the rule raises. Deleting the `_locate_hint` call
-    from the site an arm drives reds that arm; the documents themselves are copied to
-    `tmp_path`, so nothing here mutates the tree.
+    Each arm drives the REAL rule with a document whose number is wrong and requires the
+    resolved line in the message the rule raises. Deleting the `_locate_hint` call from
+    the site an arm drives reds that arm; the documents are copied to `tmp_path`, so
+    nothing here mutates the tree.
+
+    Arms, in site order: 1 README entry def, 2 README entry call, 3 README step table,
+    4 probe step loop (inside the README test), 5 probe entry def, 6 probe entry call,
+    7 the probe-step test's own loop.
     """
     module = sys.modules[__name__]
     real_readme, real_probe = _README, PROBE
-
-    # ── arm 1: rule (a), the README's entry-point (def, call) pair ────────────
     readme = real_readme.read_text()
-    m = re.search(r"`sdk\.py:(\d+)`; called at `:(\d+)`", readme)
-    assert m, ("the README's entry-point cite moved or was reformatted — this arm "
-               "cannot drive rule (a); re-derive it, do not drop the pin")
-    stale_readme = readme[:m.start(1)] + str(int(m.group(1)) + 1) + readme[m.end(1):]
-    stale_doc = tmp_path / "README.md"
-    stale_doc.write_text(stale_readme, encoding="utf-8")
-    monkeypatch.setattr(module, "_README", stale_doc)
-    with pytest.raises(AssertionError) as readme_exc:
-        test_the_readmes_line_citations_resolve_to_the_symbols_they_name()
-    assert "is at line" in str(readme_exc.value), (
-        "the README rule's stale-cite message must name the line the anchor really "
-        f"lives on, not only what the cited line reads: {readme_exc.value}")
-
-    # ── arm 2: rule (d), the probe's entry-point CALL half ───────────────────
-    # the rule NORMALISES the probe's doubled backticks before matching, so this arm
-    # does the same or it would be driving a shape the rule never sees.
-    probe = re.sub(r"`{2}", "`", real_probe.read_text())
-    m = re.search(r"`sdk\.py:(\d+)`, called at `:(\d+)`", probe)
-    assert m, ("the probe's entry-point cite moved or was reformatted — this arm "
-               "cannot drive rule (d)")
-    stale_probe_text = probe[:m.start(2)] + str(int(m.group(2)) + 1) + probe[m.end(2):]
-    stale_probe = tmp_path / "capstone_run_entry.py"
-    stale_probe.write_text(stale_probe_text, encoding="utf-8")
-    monkeypatch.setattr(module, "_README", real_readme)
-    monkeypatch.setattr(module, "PROBE", stale_probe)
-    with pytest.raises(AssertionError) as probe_exc:
-        test_the_readmes_line_citations_resolve_to_the_symbols_they_name()
-    assert "is at line" in str(probe_exc.value), (
-        "the probe entry-point rule's stale-cite message must name the resolved "
-        f"line: {probe_exc.value}")
-
-    # ── arm 3: the probe's nine bare STEP cites (the second rule in this file) ─
-    # ⛔ NOT the first ` ``:NNNN``) ` — the entry-point sentence ends in that shape
-    # too, and its call assertion carries NO hint (it is a plain `in` check), so
-    # mutating it would drive the wrong assertion.
     raw_probe = real_probe.read_text()
-    step = next(
-        (mm for mm in re.finditer(r"``:(\d+)``\)", raw_probe)
-         if "called at" not in raw_probe[max(0, mm.start() - 30):mm.start()]),
-        None)
-    assert step, "the probe's step cites moved or were reformatted — arm 3 cannot drive them"
-    stale_step_text = (raw_probe[:step.start(1)] + str(int(step.group(1)) + 1)
-                       + raw_probe[step.end(1):])
-    stale_step = tmp_path / "capstone_run_step.py"
-    stale_step.write_text(stale_step_text, encoding="utf-8")
-    monkeypatch.setattr(module, "PROBE", stale_step)
+    # the probe rules normalise the doubled backticks before matching, so every arm that
+    # drives them does the same or it would mutate a shape the rule never sees
+    probe = re.sub(r"`{2}", "`", raw_probe)
+
+    def stale(name: str, text: str) -> Path:
+        path = tmp_path / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def bump(text: str, number: str) -> str:
+        return text.replace(":" + number, ":" + str(int(number) + 1), 1)
+
+    def drive_readme_test(exc_message: str) -> None:
+        with pytest.raises(AssertionError) as exc:
+            test_the_readmes_line_citations_resolve_to_the_symbols_they_name()
+        assert "is at line" in str(exc.value), exc_message + f": {exc.value}"
+
+    readme_cites = re.search(r"`sdk\.py:(\d+)`; called at `:(\d+)`", readme)
+    assert readme_cites, ("the README's entry-point cite moved — the arms below cannot "
+                          "drive rule (a); re-derive it, do not drop the pin")
+    probe_cites = re.search(r"`sdk\.py:(\d+)`, called at `:(\d+)`", probe)
+    assert probe_cites, ("the probe's entry-point cite moved — the arms below cannot "
+                         "drive rule (d)")
+
+    # ── arm 1: rule (a), the README's entry-point DEF half ──────────────────
+    monkeypatch.setattr(module, "_README", stale("readme-def.md", bump(
+        readme, readme_cites.group(1))))
+    drive_readme_test("the README rule's DEF message must name the resolved line")
+
+    # ── arm 2: rule (a), the README's entry-point CALL half ─────────────────
+    monkeypatch.setattr(module, "_README", stale("readme-call.md", bump(
+        readme, readme_cites.group(2))))
+    drive_readme_test("the README rule's CALL message must name the resolved line")
+
+    # ── arm 3: rule (b), the README's eight-row step table ──────────────────
+    rows = re.search(r"`([A-Za-z_][\w.]*)`\s*`:(\d+)`", readme)
+    assert rows, "the README's step table moved — arm 3 cannot drive rule (b)"
+    monkeypatch.setattr(module, "_README", stale("readme-table.md", bump(
+        readme, rows.group(2))))
+    drive_readme_test("the README step table's message must name the resolved line")
+
+    # ── arm 4: rule (c), the probe's bare step cites, inside the README test ─
+    step = next((mm for mm in re.finditer(r"``:(\d+)``\)", raw_probe)
+                 if "called at" not in raw_probe[max(0, mm.start() - 30):mm.start()]), None)
+    assert step, "the probe's step cites moved — arm 4 cannot drive rule (c)"
+    monkeypatch.setattr(module, "_README", real_readme)
+    monkeypatch.setattr(module, "PROBE", stale("probe-rule-c.md", bump(
+        raw_probe, step.group(1))))
+    drive_readme_test("the probe step loop's message must name the resolved line")
+
+    # ── arm 5: rule (d), the probe's entry-point DEF half ───────────────────
+    monkeypatch.setattr(module, "PROBE", stale("probe-def.md", bump(
+        probe, probe_cites.group(1))))
+    drive_readme_test("the probe DEF message must name the resolved line")
+
+    # ── arm 6: rule (d), the probe's entry-point CALL half ──────────────────
+    monkeypatch.setattr(module, "PROBE", stale("probe-call.md", bump(
+        probe, probe_cites.group(2))))
+    drive_readme_test("the probe CALL message must name the resolved line")
+
+    # ── arm 7: the probe-step test's own loop ───────────────────────────────
+    monkeypatch.setattr(module, "PROBE", stale("probe-steps.md", bump(
+        raw_probe, step.group(1))))
     with pytest.raises(AssertionError) as step_exc:
         test_the_probes_line_citations_resolve_too()
     assert "is at line" in str(step_exc.value), (
