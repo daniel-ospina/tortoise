@@ -67,7 +67,7 @@ once"*:**
 | `Object` | **no** | **yes, and NOT expressible** — no status column, and the fold answers only `live`/`superseded` | the status fold first (paragraph above), then the column and the label — `object` has **no embedding column on `main`** as of 2026-11-17 (`#13265`'s migration), which is the widest gap of any label here |
 | `Subject` | **no** | same as `Object` | same as `Object`, column included: **no embedding column on `main`** as of 2026-11-17 (`#13265`) |
 
-**⇒ The arming order follows from the table: `Point`/operator → `Source`/`Event` → `Object`/`Subject`**, the
+**⇒ The arming order follows from the table: `Point`/operator → `Source`/`Event` → `Object`/`Subject`** — and it is a **READINESS** order, not a rollout order, because the switch cannot do what the word suggests: `cutover_armed()` reads ONE process-wide flag (`record_vector.ARMING_ENV`) and `searcher()` returns a callable that takes `entity_type` per call, so the flip turns on **every** label in `LABEL_SERVED` at once. There is no per-label arming today; the only per-label control is editing `LABEL_SERVED`, which is a deploy and not a flag. The consequence is the one that matters for sequencing: **the weakest served label gates the flip** — `Document` (`document_kind IS NOT NULL`) being unready blocks arming for `Point`, so the order below is what must be true per label BEFORE the single flip, never a way to arm one label while another stays on the graph, the
 last two gated on the status fold — not the order the ruling names the labels in (`Object`/`Subject`
 first), which would spend the longest stretch of the work on the two with the most still blocking them,
 and the shortest on the one that is already able to answer.
