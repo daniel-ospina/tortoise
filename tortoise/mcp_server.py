@@ -10112,9 +10112,14 @@ def tortoise_session_capture(conversation: list[dict],
         # spellings of one contract. The capacity refusal therefore reaches this
         # surface as `status: 429` plus the sentence; REST (`detail.code` /
         # `detail.retry_after` / the `Retry-After` header) is the typed surface, and
-        # `docs/infra-runbook.md` §4.1.1b publishes it there. Adding a typed arm here
-        # is a TOOL-SURFACE CHANGE and needs Daniel's approval (AGENTS.md →
-        # MCP/SDK surface), so it is recorded rather than taken.
+        # `docs/infra-runbook.md` §4.1.1b publishes it there. ⚠️ A `retry_after` key
+        # on this result dict — a response FIELD — is NOT the approval-gated MCP/SDK
+        # surface change AGENTS.md names: that rule covers adding, removing or
+        # renaming a TOOL (`TOOL_REGISTRY`) or a public SDK method, and
+        # `tools/surface_manifest.py` classifies `response_fields` as "outside the
+        # gated surface". So a typed arm here is a CONTRACT change that needs its own
+        # review, not an owner-approval gate; it is deferred for SCOPE (#12992 types
+        # the REST body, the counter and `/health`), not because a gate forbids it.
         if status == 402:
             out["code"] = ERR_QUOTA
         return out
