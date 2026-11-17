@@ -344,14 +344,26 @@ def _org(org_id, name="acme", email=None):
 
 
 class _FakeCP:
-    """A control plane that answers by table, so the REAL index runs."""
+    """A control plane that answers by table, so the REAL index runs.
 
-    def __init__(self, *, orgs, graphs):
+    ``graphs_complete=False`` models a walk the server could not certify (a
+    deployment `max_rows` cap), which is now a REFUSAL rather than a shorter
+    index.
+    """
+
+    def __init__(self, *, orgs, graphs, graphs_complete=True, graphs_raise=None):
         self._orgs = orgs
         self._graphs = graphs
+        self._complete = graphs_complete
+        self._raise = graphs_raise
 
     def query(self, table, **kw):
         return self._orgs if table == "organizations" else self._graphs
+
+    def query_all(self, table, **kw):
+        if self._raise is not None:
+            raise self._raise
+        return self._graphs, self._complete
 
 
 def _owned(org, gid=None):
@@ -506,27 +518,45 @@ class TestReaperRefusesRatherThanGuesses:
         `graph_name` IS a `org_{id}_{gid}` namespace) resolve from the
         organizations row with `gid: None`, classify as reapable, and be deleted
         with its global `tenant_<gid>` credential left live (round-4 review)."""
-        class _Broken:
-            def query(self, table, **kw):
-                if table == "organizations":
-                    return [_org("agent-1", "agent-signup")]
-                raise RuntimeError("PGRST: statement timeout")
-
+        cp = _FakeCP(orgs=[_org("agent-1", "agent-signup")], graphs=[],
+                     graphs_raise=RuntimeError("PGRST: statement timeout"))
         with pytest.raises(reaper.Refusal, match="graphs read failed"):
-            reaper._namespace_index(_Broken())
+            reaper._namespace_index(cp)
+
+    def test_an_uncertifiable_graphs_walk_is_a_refusal(self):
+        """⛔ A single-page `query` is silently capped at the deployment's
+        `max_rows` (1000) and never says so, so a promoted org's `graphs` row
+        could simply be MISSING from the page while its `organizations.
+        graph_name` still names that custom namespace. The walk is therefore
+        `query_all`, and an uncertified one is a refusal (round-5 review)."""
+        cp = _FakeCP(orgs=[_org("agent-1", "agent-signup")], graphs=[],
+                     graphs_complete=False)
+        with pytest.raises(reaper.Refusal, match="could not be certified"):
+            reaper._namespace_index(cp)
 
     def test_a_custom_shaped_graph_with_no_gid_is_refused(self):
-        """The independent gate: even if an incomplete read somehow produced no
-        gid for a CUSTOM namespace, that graph is refused rather than deleted —
-        deleting it would orphan its live `tenant_<gid>` credential."""
-        org = _org("agent-1", "agent-signup")
+        """⛔ THE GATE MUST FIRE ON INPUT THE REAL INDEX PRODUCES (round-5 review).
+
+        The round-4 version exempted the org's stored `graph_name`, so a PROMOTED
+        default — whose `graph_name` IS `org_{id}_{gid}` — was exempted and the
+        gate was unreachable for exactly the graph it exists to protect. This
+        drives the REAL `_namespace_index`: the org row names the custom
+        namespace, and the `graphs` row for it is absent, so the entry carries
+        `gid: None`.
+        """
+        cp = _FakeCP(
+            orgs=[{"id": "agent-1", "name": "agent-signup", "email": None,
+                   "graph_name": "org_agent-1_g_9"}],
+            graphs=[])  # the row is MISSING (a short/unfiltered page)
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1_g_9"]["gid"] is None
         bucket, reason = reaper.classify_graph(
-            "org_agent-1_g_9", org_index={"org_agent-1_g_9": _owned(org, None)},
-            node_count=0)
-        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED
+            "org_agent-1_g_9", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, index
         assert "ACL user" in reason
+        org = index["org_agent-1_g_9"]["org"]
         assert reaper._looks_custom("org_agent-1_g_9", org) is True
-        # the DEFAULT graph is not custom-shaped, so it needs no gid
+        # the BARE defaults need no gid and stay reapable
         assert reaper._looks_custom("org_agent-1", org) is False
         assert reaper._looks_custom("team_agent-1", org) is False
 

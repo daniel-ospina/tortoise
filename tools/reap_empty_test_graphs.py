@@ -192,7 +192,23 @@ def _namespace_index(cp) -> dict[str, dict]:
     except Exception as e:
         raise Refusal(f"organizations read failed: {e}") from e
     try:
-        graph_rows = cp.query("graphs", select=["id", "org_id", "namespace"])
+        # ⛔ `query_all`, NOT `query` (review round 5). A single-page read is
+        # silently capped at the deployment's `max_rows` (1000) and `query`
+        # never reports it — so a promoted org's `graphs` row could be missing
+        # from the page while its `organizations.graph_name` still names that
+        # custom namespace, and `classify_graph` would lose the gid.
+        # `query_all` returns `(rows, complete)`; an uncertified walk is a
+        # REFUSAL, never a shorter index.
+        graph_rows, complete = cp.query_all(
+            "graphs", select=["id", "org_id", "namespace"], cursor="id")
+        if not complete:
+            raise Refusal(
+                "the graphs walk could not be certified complete — an "
+                "incomplete read can lose the gid of a CUSTOM graph, and a "
+                "custom graph without its gid cannot have its ACL user "
+                "dropped; refusing rather than reaping on a partial view")
+    except Refusal:
+        raise
     except Exception as e:
         raise Refusal(
             f"graphs read failed ({e}) — the gid of every CUSTOM graph comes "
@@ -262,15 +278,22 @@ def _looks_custom(graph_name: str, org: dict) -> bool:
     """Is this a PER-GRAPH namespace (``org_{id}_{gid}``) rather than a default?
 
     A custom graph is minted with a global ``tenant_<gid>`` ACL user, so it can
-    only be reaped safely when its gid is known. A DEFAULT graph is
-    ``org_{id}``/``team_{id}``/the registry ``org_{name}`` and has no per-graph
-    user — so the shape decides, not the presence of a row.
+    only be reaped safely when its gid is known.
+
+    ⛔ The exemption list is the BARE default spellings ONLY — never the org's
+    stored ``graph_name`` (review round 5). A promoted/repaired org's
+    ``graph_name`` IS a custom ``org_{id}_{gid}`` namespace, so exempting it made
+    the gate unreachable for exactly the graph it was added to protect: with that
+    row missing from the ``graphs`` read, the stored pointer claimed the
+    namespace with ``gid: None``, `_looks_custom` said "default", and the graph
+    was deleted with its live ``tenant_<gid>`` credential behind it. A bare
+    default is ``org_{id}``/``team_{id}``, and those stay exempt.
     """
     org_id = str(org.get("id") or "")
     if not org_id:
         return False
     if graph_name in (canonical_org_graph_name(org_id), f"team_{org_id}",
-                      f"org_{org_id}", str(org.get("graph_name") or "")):
+                      f"org_{org_id}"):
         return False
     return graph_name.startswith((f"org_{org_id}_", f"team_{org_id}_"))
 
