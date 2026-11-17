@@ -94,7 +94,21 @@ ontology:
         rules). Lifecycle: draft → adopted → breached → retired. A mandate is
         the constraint, not the holding: "is this within mandate?" is answered
         by looking at the mandate a position or target is bound to.
-      statuses: [draft, adopted, breached, retired]
+      # #11824 S0 — PIPELINE STAGES, not `status` words: a knowledge kind's
+      # `status` is the four-word lifecycle vocabulary
+      # (`tortoise/lifecycle_vocabulary.py`), and a pack's own words are
+      # positions (design §3.2, §4). `retired` reads TERMINAL BY SLOT.
+      # `breached` is SUSPENDED, not terminal — a breached mandate is still in
+      # force (that is the whole point of flagging it), so closing the Object
+      # there would retire a live constraint.
+      pipeline:
+        defaultStage: draft
+        stages:
+        - {id: draft, label: Draft, order: 0, slot: entry}
+        - {id: adopted, label: Adopted, order: 1, slot: active}
+        - {id: breached, label: Breached, order: 2, slot: suspended}
+        - {id: retired, label: Retired, order: 3, slot: terminal,
+           outcome: completed}
       synonyms:
       - investment mandate
       - investment policy
@@ -125,7 +139,13 @@ ontology:
         against); a bare benchmark LABEL with no weight is not this kind, and is
         kept as prose rather than minted into a kind with a `targetPct` the
         utterance never stated.
-      statuses: [proposed, adopted, retired]
+      pipeline:
+        defaultStage: proposed
+        stages:
+        - {id: proposed, label: Proposed, order: 0, slot: entry}
+        - {id: adopted, label: Adopted, order: 1, slot: active}
+        - {id: retired, label: Retired, order: 2, slot: terminal,
+           outcome: completed}
       values:
       - name: targetPct
         valueKind: percent
