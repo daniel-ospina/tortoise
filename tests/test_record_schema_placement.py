@@ -1895,8 +1895,10 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #: place a number may live. ⛔ NOT HERE: this comment carried a hand-copied census
 #: and it was WRONG WHEN IT WAS WRITTEN — not merely stale later, which is the
 #: explanation it used to give. Measured at this PR's own base: the tree already
-#: held 88 migrations, the tightest gap was 1,304 and there were 9 declarations,
-#: while the comment said 87 and 2,038. A hand-copied census is a claim nothing
+#: held 88 migrations and 9 declarations while the comment said 87, and the gap
+#: figure it named matched the PRE-FIX scanner, not the shipped one (a line
+#: comment is replaced by a space now, which moves every gap containing one). A
+#: hand-copied census is a claim nothing
 #: checks; that is the same defect as the one this block documents. The CONVENTION
 #: is stated so the next reader does not "correct" one ruler with the other
 #: (round 4 did): end→start, not start→start — they differ by the declaration's own
@@ -2494,8 +2496,8 @@ def test_no_migration_executes_dynamic_DDL_for_a_props_ban():
     # `COMMENT ON TABLE … $c$ … $c$` does not read as a dropped event. The
     # exclusion is LOAD-BEARING for `COMMENT ON CONSTRAINT chk_… IS '…'` too
     # whenever the comment's own text quotes DDL — measured: a comment whose text
-    # contains `ADD CONSTRAINT chk_… CHECK (…)` matches 2 patterns, so without the
-    # exclusion the count is 2 against 1 parsed event and legal SQL reds. (An
+    # contains `ADD CONSTRAINT chk_… CHECK (…)` adds a second match, so without
+    # the exclusion the count is 2 against 1 parsed event and legal SQL reds. (An
     # earlier version of this note claimed such a statement "matches none of the
     # three patterns", which is true only when its text quotes no DDL.)
     stripped = record_projection._strip_sql_comments(all_migration_text())
@@ -2521,9 +2523,10 @@ def test_the_snippet_cap_clears_every_declaration_gap():
     """The 400-char snippet cap is only diagnostic if it cannot reach the next ban.
 
     ⛔ THIS TEST OWNS THE CENSUS. The block above used to state it as prose
-    (a file count and a tightest gap), and both were WRONG WHEN WRITTEN (88 files
-    and 1,304 at this PR's base) —
-    a stale figure BESIDE a pinned one, which is the failure class this file
+    (a file count and a tightest gap), and both were WRONG WHEN WRITTEN (the tree
+    already held 88 migrations at this PR's base, and the gap it named came from a
+    DIFFERENT ruler — the pre-fix scanner) — a stale figure BESIDE a pinned one,
+    which is the failure class this file
     documents at length. So the figures are derived here, at run time, and the
     failure message prints them; nothing in the file asserts a hand-copied number.
     """

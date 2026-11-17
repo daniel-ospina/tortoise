@@ -2399,8 +2399,15 @@ def _strip_sql_comments(sql: str) -> str:
     # `DROP/* the ban is being retired */CONSTRAINT chk_…` became
     # `DROPCONSTRAINT chk_…`, which matches no pattern, so a REAL DROP was
     # invisible and the props-ban pin stayed green over a database whose ban had
-    # been dropped (round 9 P2, measured). A line comment needs no space: its
-    # newline survives as code, and that is a separator already.
+    # been dropped (round 9 P2, measured). Every removed comment gets the space,
+    # line comments included: their newline would also separate tokens, but one
+    # rule for both is simpler to reason about than two.
+    #
+    # ⚠️ STATED RESIDUAL: `_scan_sql` is NOT `"`-aware, so a `'`, `;` or `--`
+    # inside a DOUBLE-QUOTED identifier would be misread as SQL. Latent only:
+    # measured, the corpus's quoted identifiers in code spans contain none of those
+    # characters, and the props-ban guard's count (`hits == parsed`) turns a
+    # resulting DROP mismatch red rather than silent.
     return "".join(
         sql[start:end] if kind in ("code", "literal") else " "
         for start, end, kind in _scan_sql(sql)
