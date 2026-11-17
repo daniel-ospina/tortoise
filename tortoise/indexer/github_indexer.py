@@ -261,11 +261,19 @@ def _row_is_frozen(status, outdated) -> bool:
     # ARRAY `status` raises `TypeError: unhashable type`. ⚠️ NOT reachable through a
     # current door: `update_knowledge(id, status=['live'])`, `create_object(...,
     # status=['live'])` and `create_entity('Object', ..., status=['live'])` all
-    # REFUSE it (`lifecycle_vocabulary.py:279-286`; the refusing calls are
-    # `sdk.py:53803-53805` on the update door and `sdk.py:54851-54855` on the create
-    # door). ⛔ `sdk.py:53785-53791` is the WRONG place to check that — prose about
-    # where the check must sit, asserting the OLD behaviour ("a LIVE never-statused
-    # Object accepted `status=['live']` and stored the list verbatim"). It is the
+    # REFUSE it — and the refusal is S0's, ONE HOP EARLIER than it looks: the update
+    # door refuses at `sdk.py:53763-53765` and the create door at `sdk.py:54657-54659`,
+    # both into `lifecycle_vocabulary.py:279-286`. ⛔ NOT at
+    # `_refuse_non_string_object_status` (`sdk.py:53803-53805` / `:54851-54855`): those
+    # calls are in the Object arm and are UNREACHABLE for a non-string, because S0's
+    # `_read_caller_status` has already raised (`tests/test_status_projection.py:2223-2236`
+    # says so outright — *"one lifecycle door refuses EVERY non-string as its FIRST arm
+    # … `_refuse_non_string_object_status` keeps its `lands`/`_value_ok` scoping for the
+    # shapes S0 does not answer first"*). Its own type arm is live only at a door with
+    # no S0 leg, `EventAPI.add_object` (`api.py:2927-2932`). ⛔ And `sdk.py:53785-53791`
+    # is the wrong place to check at all — prose about where the check must sit, asserting
+    # the OLD behaviour ("a LIVE never-statused Object accepted `status=['live']` and
+    # stored the list verbatim"). It is the
     # LEGACY population — rows written before that door existed, which
     # `lifecycle_vocabulary.py:263-264` records explicitly ("`status=['live']` *used
     # to be* STORED on an `:Object`") and `sdk.py:53808-53811` enumerates from the
