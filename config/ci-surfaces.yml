@@ -1931,6 +1931,22 @@ surfaces:
   # diff, so the suite would have stayed green if the gate were deleted. That is
   # the #10513 / #1349 silent-drop class. Keep BOTH arms.
   - test_allowance_gate.py
+  # #9559 R11 review (F1/F3, BLOCKING): the blocked-release-conditions pins.
+  # DUAL-REGISTERED with `core` (below) for the #10668 reason exactly — measured
+  # at this head: `select(['tortoise/metering.py'])` -> ['api'] and
+  # `select(['tortoise/postgres_bytes.py'])` -> ['api'] (both EXACT
+  # `SOURCE_PATTERN` matches, and a match REPLACES the `core` fallback), while
+  # `select(['tortoise/allowance_gate.py'])` -> ['core'] and
+  # `select(['tortoise/pricing.py'])` -> ['core'] (neither matches any pattern).
+  # `select(['tortoise/postgres_storage.py'])` and
+  # `select(['tortoise/cost_dimensions.py'])` are `core` too. So THIS row is what
+  # selects the file on a `metering.py`/`postgres_bytes.py` diff, and the `core`
+  # row below is what selects it on the gate's own diff. Without the pair the
+  # 17 guards ran on no leg on any diff — measured before this entry:
+  # `--integrity` printed `❌ manifest drift:
+  # ['test_9559_blocked_release_conditions.py']` and exited 1, redding the
+  # REQUIRED `manifest-integrity` leg.
+  - test_9559_blocked_release_conditions.py
   # ⛔ #11837 landed the `api` arm of the storage-dimensions evidence FIRST (this
   # PR had registered the same file for the same surface), so a row here is a
   # SAME-SURFACE DUPLICATE and `tools/ci_selection.py --integrity` refuses the
@@ -3025,6 +3041,17 @@ surfaces:
   # guards is an exact `api` match, the other is a `core` fallback, and both
   # diffs must select the evidence.
   - test_allowance_gate.py
+  # #9559 R11 review (F1/F3, BLOCKING): the `core` arm of the blocked-release
+  # pins above. `tortoise/allowance_gate.py` — the file the suite mostly guards —
+  # matches NO `SOURCE_PATTERNS` entry and falls through to the `core` fallback,
+  # so an `allowance_gate.py`-only diff never reaches the `api` row. Measured:
+  # `select(['tortoise/allowance_gate.py'])` -> ['core'],
+  # `select(['tortoise/pricing.py'])` -> ['core'],
+  # `select(['tortoise/postgres_storage.py'])` -> ['core'],
+  # `select(['tortoise/cost_dimensions.py'])` -> ['core']. Keep BOTH arms; a
+  # same-surface duplicate is refused by `--integrity`, an absent one silently
+  # runs the guards on no diff (#1349/#10513 class).
+  - test_9559_blocked_release_conditions.py
   - test_10000_narrative_record_home.py
   - test_10017_cache_tier.py
   - test_10017_purge_guard.py

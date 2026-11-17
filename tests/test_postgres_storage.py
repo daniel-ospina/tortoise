@@ -168,7 +168,8 @@ def test_the_caveats_travel_with_the_reading_and_through_as_dict():
     assert d["postgres_precision_note"] == PRECISION_NOTE
     assert d["postgres_attribution_note"] == ATTRIBUTION_NOTE
     assert d["postgres_live_rows_are_estimates"] is True
-    assert "per-org byte split would be an ALLOCATION" in d["postgres_attribution_note"]
+    assert "ALLOCATION" in d["postgres_attribution_note"]
+    assert "per-org split of the database TOTAL" in d["postgres_attribution_note"]
     # and the whole reading serialises (a NaN/inf would raise here)
     json.dumps(d, allow_nan=False)
 
