@@ -2083,9 +2083,37 @@ _NEGATION_CUE_WINDOW = 32
 # including the rest falls on the SAFE side of this ledger's own trade-off: a false red
 # is friction a lane reads and relaxes, while a spared inversion is the fail-open the
 # ledger exists to prevent (measured: no wording in this record trips it, 64 passed).
+#
+# ⛔ THE BREAK THAT STARTS A NEW PREDICATION IS A STRUCTURAL PROPERTY, NOT A WORDS LIST,
+# and enumerating terms one review round at a time kept missing a whole FAMILY of them.
+# Measured GREEN at `4e1bf37cbd` (each a row asserting its own forbidden spelling, with
+# the cue inside the 32-char look-back):
+#
+#   `the loss is equal to the eviction. No repair — it is smaller than the eviction.`
+#   `the loss is equal to the eviction. No repair (it is smaller than the eviction).`
+#   `the loss is equal to the eviction. No repair / it is smaller than the eviction.`
+#   `the loss is equal to the eviction. No signal then it is smaller than the eviction.`
+#
+# The first three carry no `,;:` and no listed coordinator, so nothing split the cue
+# from the phrase it does not govern — the same P1 fail-open the round-13/14/15 fixes
+# narrowed, in the punctuation register. The DASH FAMILY and the OPENING BRACKET are
+# therefore named here as punctuation, and the remaining clausal adverbs are named as
+# words. The alternation is ONE mechanism on purpose (round 15 removed a second,
+# unreddenable one): a break either splits the cue's scope or it does not.
+#
+# The spaced `-`/`--`/`/` forms are dashes USED AS punctuation; a hyphen INSIDE a word
+# (`set-shaped`, `cold-tail`) is deliberately not a break, which is why they are
+# anchored on whitespace rather than listed as bare characters. `rather` and `instead`
+# stay OUT of the word list even though they start predications: they are prefixes of
+# cues this matcher relies on (`rather than`, `instead of`), so splitting on them would
+# false-red the exact negated forms the escape hatch exists for.
 _TERMINATION = re.compile(
-    r"[,;:]|\b(?:but|however|nevertheless|though|although|yet|except|whereas|"
-    r"aside from|apart from|and|so|which|because|while|therefore|thus|hence)\b",
+    r"[,;:()\[\]\u2014\u2013]|(?<= )-{1,2}(?= )|(?<= )/(?= )|"
+    r"\b(?:but|however|nevertheless|though|although|yet|except|whereas|"
+    r"aside from|apart from|and|so|which|because|while|therefore|thus|hence|"
+    r"then|plus|whereby|whereupon|meaning|save that|in fact|of course|notably|"
+    r"still|also|only|notwithstanding|on the contrary|consequently|accordingly|"
+    r"moreover|furthermore|additionally|similarly|likewise|namely|specifically)\b",
     re.IGNORECASE)
 
 
@@ -2661,6 +2689,59 @@ def test_the_claim_ledger_matcher_is_pinned_on_synthetic_input():
     assert not _dismissed("There is no repair, and "), (
         "the punctuated break ends the cue's scope — this is the fail-open that was "
         "measured GREEN at e24e8a209c")
+
+    # ── …and the BREAK is STRUCTURAL, not a words list (#13126 round 15 residual) ──
+    # ⛔ Round 15 named the clausal COORDINATORS (`and`, `so`, `which`, `because`,
+    # `while`, …), and a whole FAMILY of predication breaks stayed unnameable: each of
+    # the rows below was measured GREEN at `4e1bf37cbd`, asserting a row's own
+    # forbidden spelling with the cue inside the 32-char look-back. The dash family,
+    # the opening bracket and the spaced slash carry no `,;:` and no listed
+    # coordinator, so nothing split the cue from the phrase it does not govern — the
+    # SAME P1 fail-open the round-13/14/15 repairs narrowed, in the punctuation
+    # register. `_TERMINATION` names them as punctuation (boundaries, like `,`),
+    # rather than as one more round of words.
+    for label, prefix in (
+            ("em dash", "No repair \u2014 it "),
+            ("en dash", "No repair \u2013 it "),
+            ("spaced hyphen", "No repair - it "),
+            ("spaced double hyphen", "No repair -- it "),
+            ("open parenthesis", "No repair (it "),
+            ("open bracket", "No repair [it "),
+            ("spaced slash", "No repair / it "),
+            ("closing parenthesis", "No repair (a note) it "),
+            ("an unlisted clausal adverb", "No signal then it "),
+            ("a sentence adverbial", "No signal in fact it "),
+            ("a second sentence adverbial", "No signal on the contrary it ")):
+        assert not _dismissed(prefix), (
+            f"{label} starts a NEW predication, so the cue before it must not dismiss "
+            f"the phrase after it (#13126 round 15 residual)")
+    # …while the shapes this escape hatch EXISTS for keep sparing, so the repair is a
+    # scope bound and not a blanket refusal:
+    assert _dismissed("the loss is not "), (
+        "a cue ADJACENT to the hit still dismisses it")
+    assert _dismissed("there is no signal, rather than a "), (
+        "`rather than` / `instead of` are CUES, not breaks — splitting on the bare "
+        "`rather`/`instead` would false-red the exact negated forms this hatch is for")
+    assert _dismissed("there is no cold-tail "), (
+        "a hyphen INSIDE a word is not punctuation-level break: the dash terms are "
+        "anchored on whitespace so `set-shaped` / `cold-tail` cannot split a cue")
+    assert _dismissed("no `a` or `b` "), (
+        "`or` stays out of the termination set: `no A or B` is a negation scoping "
+        "over a coordinated list (the reading NegEx relies on)")
+    # The ledger-level consequence, on a document rather than on the helper: the
+    # inversion the helper used to spare is now refused.
+    for label, doc in (
+            ("em dash", "the loss is equal to the eviction. No repair \u2014 it is "
+                        "smaller than the eviction."),
+            ("parenthesis", "the loss is equal to the eviction. No repair (it is "
+                            "smaller than the eviction)."),
+            ("clausal adverb", "the loss is equal to the eviction. No signal then it "
+                               "is smaller than the eviction.")):
+        assert "claim inverted" in violations(
+            [(doc, "the loss is", "equal to the eviction",
+              ("smaller than the eviction",))]), (
+            f"{label} separating the cue from the claim must be refused by the "
+            f"LEDGER too, not only by `_dismissed`")
 
     # ── the vacuity refusal covers every shape `required` may take ────────────
     # ⛔ The guard was `isinstance(required, str)`, so the tuple/regex shapes
