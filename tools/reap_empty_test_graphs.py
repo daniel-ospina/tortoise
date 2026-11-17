@@ -141,20 +141,64 @@ class Refusal(Exception):
 def _owns_namespace(org_id: str, namespace: str) -> bool:
     """Does ``namespace`` PROVABLY belong to ``org_id``?
 
-    The same clause `hosted_api._org_graph_names` uses, and it is the whole safety
-    property of the index below: the control plane supplies CANDIDATES, ownership
-    decides. Without it a malformed (or hostile) ``public.graphs`` row
+    The same clause `hosted_api._org_graph_names` uses, and it is the safety
+    property of the ``graphs`` WALK below: the control plane supplies CANDIDATES,
+    ownership decides. ⛔ It does NOT govern the ``organizations.graph_name`` claim
+    (which is indexed verbatim, by design — #2023), so that path can still name
+    another org's namespace; #13306 tracks that gap and is pre-existing. Without the
+    walk's check a malformed (or hostile) ``public.graphs`` row
     ``{org_id: <a test org>, namespace: "org_<a customer>_g_x"}`` would attribute
     a customer's graph to a test org, and an EMPTY customer graph would land in
     ``reapable`` and be deleted — exactly what this tool promises never to do.
     """
     if not org_id or not namespace:
         return False
-    own = (canonical_org_graph_name(org_id), f"team_{org_id}", f"org_{org_id}",
-           f"team_{org_id}")
-    if namespace in own:
+    if namespace in _own_spellings(org_id):
         return True
     return namespace.startswith((f"org_{org_id}_", f"team_{org_id}_"))
+
+
+def _own_spellings(org_id: str) -> tuple[str, ...]:
+    """The spellings an org's DEFAULT graph is known by — no gid among them."""
+    return (canonical_org_graph_name(org_id), f"team_{org_id}", f"org_{org_id}")
+
+
+def _gid_from_namespace(namespace: str, org_id: str) -> str | None:
+    """The per-graph gid a CUSTOM namespace embeds, or ``None``.
+
+    ``_provision_graph`` mints ``org_{org_id}_{gid}`` with ``graphs.id == gid`` and
+    the ACL user is ``tenant_{gid}`` (`acl_graph_users`), so for a custom namespace
+    the credential is NAMEABLE even when its row is gone, tombstoned or partly
+    unreadable.
+
+    ⛔ This is a SHAPE test, never a source of gids: a missing gid never authorises
+    a deletion (see `classify_graph`), so nothing here feeds ``entry["gid"]``. It
+    does three jobs: it decides which refusal MESSAGE fits, it supplies the gid a
+    row's ``id`` must AGREE with (refusal 6(b), in BOTH the live pass and the
+    deferred one), and it selects the tombstone wording.
+
+    Two tests, in this order, and they fail for different reasons:
+
+    * the PREFIX is ``org_{org_id}_`` / ``team_{org_id}_``, matched against the
+      ROW's org id — so a name is only a candidate when it begins ``{id}_``. A
+      registry-lane org's ``graph_name`` is ``org_{name}``, and when ``name`` does
+      not begin with the org's own ``{id}_`` no prefix matches at all;
+    * the SHAPE then requires the remainder to be ``g_[0-9a-z]+``. A name UNDER the
+      org's own prefix but with any other tail — ``org_{org_id}_backup`` — matches
+      the prefix and is kept gid-less by THIS test.
+
+    A name that passes both is read as per-graph, and there the row's ``id`` must
+    agree with the gid the name spells or the graph is refused (fail-closed; it is
+    never reaped on a name). A self-referentially prefixed registry-lane
+    ``graph_name`` (``org_{id}_g_x``) passes both, so it is attributed and, when its
+    row id disagrees, over-refused — the declared fail-closed residual.
+    """
+    for prefix in (f"org_{org_id}_", f"team_{org_id}_"):
+        if namespace.startswith(prefix):
+            tail = namespace[len(prefix):]
+            if re.fullmatch(r"g_[0-9a-z]+", tail):
+                return tail
+    return None
 
 
 def _namespace_index(cp) -> dict[str, dict]:
@@ -174,7 +218,7 @@ def _namespace_index(cp) -> dict[str, dict]:
       (``org_{org_id}_{gid}``), carrying its ``id`` so the reaper can also drop
       that graph's per-graph ACL user (:func:`reap`).
 
-    ⛔ THREE refusals, all fail-closed:
+    ⛔ SIX refusals, all fail-closed:
 
     1. **An unreadable ``graphs`` read is a REFUSAL, not a degradation.** That
        read is the ONLY source of ``gid``s, and a gid is what makes a custom
@@ -193,7 +237,72 @@ def _namespace_index(cp) -> dict[str, dict]:
     3. a name claimed by more than one org is dropped from the index entirely
        and reported as ambiguous. The old `setdefault` over an unordered query
        made the keeper depend on PostgREST's row order, i.e. the keep/reap
-       decision was nondeterministic on an estate with registry-era rows.
+       decision was nondeterministic on an estate with registry-era rows;
+    4. a ``status`` that is not ``'active'`` never lets a row DECIDE which gid a
+       namespace lends during the live pass, and a namespace whose rows are all
+       non-live is indexed as REFUSED (item 6) — except ``kind='default'`` rows,
+       which are DEFERRED and do lend their own id afterwards (see the ⛔ below).
+       ``status`` is free text, so the gate is "anything but ``'active'``"
+       rather than a vocabulary of the two values the product writes; a row that
+       arrives WITHOUT one is not live either (the column is
+       ``NOT NULL DEFAULT 'active'`` and is always selected, so an absent one is a
+       control plane whose liveness answer cannot be read).
+
+       ⛔ WHERE A GID IS A CREDENTIAL, AND WHERE IT IS NOT. No per-graph ACL user
+       is MINTED for a ``kind='default'`` graph — protection rides the org-scoped
+       tenant ACL, and ``create_acl_user`` is minted only for CUSTOM graphs
+       (``org_{tid}_{gid}`` ⇒ ``tenant_{gid}``). So on a bare ``org_{id}`` /
+       ``team_{id}`` namespace the gid is at most this row's OWN credential (a
+       graph demoted from custom keeps ``tenant_<id>``), never another graph's. On
+       a CUSTOM namespace the gid IS the credential, and that is where the gates in
+       items 5 and 6 earn their place.
+
+       ⛔ A NON-LIVE ``kind='default'`` ROW IS NOT REFUSED, it is DEFERRED: claimed
+       only after the live pass, when no live row has spoken for the namespace, so
+       a live row always decides and the graph stays reapable. Refusing it would
+       strand an empty leaked graph for ever — nothing else reclaims one
+       (`restore_graph` refuses the kind; the purge sweep enumerates CUSTOM
+       tombstones only), which is the waste this tool exists to remove. A
+       tombstoned CUSTOM row IS refused (item 6(b)); and
+    5. two LIVE rows carrying DISTINCT gids for one namespace are refused, for
+       the same reason — never resolved by row order; and
+    6. a claim that must not be reaped is refused, with a REASON (what the row
+       looked like) and a MESSAGE FORM decided by whether the NAMESPACE names a
+       gid at all:
+
+       (a) the namespace names NO gid (a bare ``org_{id}`` / ``team_{id}``, or any
+           prefixed-but-not-gid-shaped name such as ``org_{id}_backup``) and its row
+           is not live, carries an unrecognised status, or carried no ``id``. No
+           credential can be attributed, so the ACL drop cannot be verified — a
+           gid-less reap would leave ``tenant_<gid>`` live forever;
+       (b) the namespace NAMES its gid (``org_{id}_{gid}`` / ``team_{id}_{gid}``)
+           and its row is a tombstone of a ``kind`` other than ``'default'``,
+           carries an unrecognised status, or its ``id`` disagrees with that gid. Here the credential is SPELLED BY THE NAME, so
+           the refusal is a judgement about DESTROYING the graph, not about
+           attributing a drop: a tombstone is restorable within its grace window and
+           erasing it is the purge sweep's job, and a row whose ``id`` disagrees must
+           not be trusted to hand :func:`reap` an arbitrary gid.
+
+       The REGISTRY-LANE case, scoped precisely: for ``graph_name = org_{name}``
+       where ``name`` does NOT begin with the org's own ``{id}_``,
+       :func:`_owns_namespace` does not attribute a ``graphs`` row of that shape, so
+       its tombstone is invisible to this gate and the name is claimed gid-less from
+       ``graph_name`` — a PRE-EXISTING asymmetry on the restorability axis (no
+       per-graph credential is involved), tracked separately, not fixed here. A name
+       that IS self-referentially prefixed (``org_{id}_g_x``) is attributed like any
+       other per-graph name and takes item 6(b)'s agreement check, so it is refused
+       rather than left invisible — the declared fail-closed over-refusal.
+
+    What this index does NOT do: derive a gid from the namespace NAME. The name
+    does spell the credential (``org_{org_id}_{gid}`` ⇒ ``tenant_{gid}``), but
+    `_gid_from_namespace` never supplies a gid of its own: it decides which refusal
+    MESSAGE fits, and it supplies the value a live row's ``id`` must agree with
+    (item 6(b)). A missing gid never authorises a deletion, so a per-graph
+    namespace whose row is gone is refused by `classify_graph`, not reaped on a
+    name. One limitation it
+    does not claim away: a name refused because it was AMBIGUOUS reads as "no
+    organizations row owns this graph name" in the report — the reason is coarse
+    (the stderr warning is exact), because the entry leaves the index entirely.
 
     Raises :class:`Refusal` on any ``organizations`` read failure: a resolver that
     degrades to "unknown" is indistinguishable from "no owner", and this tool
@@ -210,9 +319,13 @@ def _namespace_index(cp) -> dict[str, dict]:
         # from the page while its `organizations.graph_name` still names that
         # custom namespace, and `classify_graph` would lose the gid.
         # `query_all` returns `(rows, complete)`; an uncertified walk is a
-        # REFUSAL, never a shorter index.
+        # REFUSAL, never a shorter index. `status` decides whose gid a namespace
+        # may lend (refusal 4); `kind` decides whether a TOMBSTONED row is
+        # restorable at all — a default graph is not, so refusing it would strand
+        # an empty leaked graph for ever.
         graph_rows, complete = cp.query_all(
-            "graphs", select=["id", "org_id", "namespace"], cursor="id")
+            "graphs",
+            select=["id", "org_id", "namespace", "status", "kind"], cursor="id")
         if not complete:
             raise Refusal(
                 "the graphs walk could not be certified complete — an "
@@ -229,6 +342,12 @@ def _namespace_index(cp) -> dict[str, dict]:
             f"view") from e
     claims: dict[str, dict] = {}
     ambiguous: set[str] = set()
+    # namespace -> {"org", "reason"}: WHY this namespace must not be reaped. The
+    # reason describes the ROW (a tombstone, an unreadable status, no id, an id that
+    # disagrees with the namespace); `_refuse` turns it into one of TWO message forms
+    # depending on whether the NAMESPACE names a gid, so the reason and the message
+    # are not the same statement.
+    dormant: dict[str, dict] = {}
 
     def _claim(namespace: object, org: dict, gid: str | None) -> None:
         if not isinstance(namespace, str) or not namespace:
@@ -244,8 +363,14 @@ def _namespace_index(cp) -> dict[str, dict]:
             # `graph_name` IS a custom `org_{id}_{gid}` namespace) would reap the
             # graph while `reap()` skipped its ACL drop for want of a gid, leaving
             # the global `tenant_<gid>` credential live forever (round-3 review).
-            if gid and not held.get("gid"):
+            if not gid:
+                return
+            if not held.get("gid"):
                 held["gid"] = gid
+            elif held["gid"] != gid:
+                # Two LIVE rows, two DIFFERENT credentials, one namespace: which
+                # one `reap()` deletes would depend on row order, so refuse.
+                ambiguous.add(namespace)
             return
         claims[namespace] = {"org": org, "gid": gid}
 
@@ -259,16 +384,152 @@ def _namespace_index(cp) -> dict[str, dict]:
                      canonical_org_graph_name(str(org_id)),
                      f"team_{org_id}"):
             _claim(name, row, None)
+    unknown_status = 0
+    # (namespace, org, row id) for every NON-LIVE `kind='default'` row: claimed
+    # only AFTER the live pass, so a live row always wins and a bare namespace
+    # nobody reclaims is still reaped (see the branch below).
+    deferred_default: list[tuple[str, dict, str]] = []
     for row in graph_rows:
         org = by_id.get(str(row.get("org_id")))
         namespace = row.get("namespace")
-        if org and _owns_namespace(str(row.get("org_id")), str(namespace or "")):
-            _claim(namespace, org, row.get("id"))
+        status = row.get("status")
+        org_id = str(row.get("org_id") or "")
+        owned = bool(org) and _owns_namespace(org_id, str(namespace or ""))
+        if not owned or not isinstance(namespace, str) or not namespace:
+            continue
+        derived = _gid_from_namespace(namespace, org_id)
+        row_id = row.get("id")
+        # Only a LIVE row may DECIDE a namespace in THIS pass. A tombstoned row can
+        # share the bare default namespace with the live one, and taking its id as
+        # the gid would make the drop depend on row order — the credential dropped
+        # need not be the live graph's (on a bare namespace it is at most the
+        # tombstone's own; on a promoted/custom shape it is a real
+        # `tenant_<gid>`). A row with NO status is not live either —
+        # `graphs.status` is `NOT NULL DEFAULT 'active'` and always selected, so an
+        # absent one is a control plane whose liveness answer we cannot read.
+        if status != "active":
+            if status is None:
+                unknown_status += 1
+            if row.get("kind") == "default":
+                # ⛔ A DEFAULT graph has no minted per-graph ACL user, and nothing
+                # reclaims it once it is not live: `restore_graph` refuses the
+                # kind, and the purge sweep enumerates CUSTOM tombstones only
+                # (#13262's neighbour). Refusing here would strand an empty leaked
+                # graph for ever, which is the waste this tool exists to remove.
+                # Its gid is at most THIS row's own credential (a graph demoted
+                # from custom keeps `tenant_<id>`), so it is claimed after the
+                # live pass, when no live row has spoken for the namespace.
+                if isinstance(row.get("id"), str) and row.get("id"):
+                    deferred_default.append((namespace, org, str(row["id"])))
+                continue
+            if status == "deleted" and derived:
+                # The namespace NAMES the credential, and it is a CUSTOM graph, so
+                # a TOMBSTONE is restorable within its grace window and erasing it
+                # is the purge sweep's job — not a cleaner's.
+                reason = ("its `graphs` row is a TOMBSTONE (status='deleted'), and "
+                          "a trashed CUSTOM graph is restorable until the purge "
+                          "sweep owns its erasure")
+            else:
+                reason = (f"its `graphs` row is not live (status={status!r}), which "
+                          f"this tool cannot read as an active graph")
+            dormant[namespace] = {"org": org, "reason": reason}
+            continue
+        if not row_id:
+            # A live row whose PRIMARY KEY did not arrive is as unreadable as a
+            # missing status: the gid decides a DELUSER, and a gid is NEVER
+            # reconstructed from the namespace name — a missing one never
+            # authorises a deletion (see `classify_graph`).
+            dormant[namespace] = {
+                "org": org,
+                "reason": "its `graphs` row is live but carried no id"}
+            continue
+        if derived and derived != row_id:
+            # A malformed (or hostile) row must not lend an arbitrary gid: that is
+            # a wrong-credential DELUSER on the tool's most dangerous axis. The
+            # namespace is the authority; a disagreeing id is refused, never
+            # trusted (round-5 review).
+            dormant[namespace] = {
+                "org": org,
+                "reason": (f"its `graphs` row's id {row_id!r} disagrees with the "
+                           f"gid its namespace embeds ({derived!r})")}
+            continue
+        _claim(namespace, org, row_id)
+
+    for namespace, org, row_id in deferred_default:
+        entry = claims.get(namespace)
+        if entry is not None and entry.get("gid") is not None:
+            if entry.get("deferred") and entry["gid"] != row_id:
+                # TWO non-live default rows, two ids, one namespace: whichever
+                # credential is real is not decidable from the rows, so the name is
+                # refused rather than resolved by query order (the doctrine the
+                # multi-org case already follows).
+                ambiguous.add(namespace)
+            continue
+        # ⛔ The SAME agreement check the live pass makes, because this pass lends a
+        # gid too: a drift row whose `id` disagrees with the gid its namespace
+        # embeds must not hand `reap()` an arbitrary DELUSER target, and it must
+        # not defeat a custom tombstone's refusal when both rows coexist.
+        derived = _gid_from_namespace(namespace, str(org.get("id") or ""))
+        if derived and derived != row_id:
+            dormant[namespace] = {
+                "org": org,
+                "reason": (f"its non-live `graphs` row's id {row_id!r} disagrees "
+                           f"with the gid its namespace embeds ({derived!r})")}
+            continue
+        _claim(namespace, org, row_id)
+        claimed = claims.get(namespace)
+        if claimed is not None and claimed.get("gid") == row_id:
+            # Remember that this gid came from a NON-LIVE row: `_refuse` may not
+            # treat it as the live verdict it stands in for.
+            claimed["deferred"] = True
+
+    def _refuse(name: str, org: dict, reason: str) -> None:
+        entry = claims.get(name)
+        if (entry is not None and entry.get("gid") is not None
+                and not entry.get("deferred")):
+            # A LIVE row attributed the credential after this complaint was
+            # recorded (the tombstone+live default shape, in either order). The gid
+            # is known, so the refusal would be false — and a reason claiming "no
+            # gid can be attributed" beside a published gid is the kind of record
+            # a later lane reads and deletes the gate over (round-6 review).
+            #
+            # ⛔ A DEFERRED gid is not that verdict: it came from a NON-LIVE
+            # default row, so it must not rescue a custom tombstone into a reap
+            # (that would destroy a restorable graph, which refusal 6(b) exists to
+            # prevent).
+            return
+        entry = claims.setdefault(name, {"org": org, "gid": None})
+        if _gid_from_namespace(name, str(org.get("id") or "")):
+            entry["refused"] = (
+                f"REFUSED rather than deleted: {reason}. The namespace does "
+                f"spell the credential, so this is a judgement about destroying "
+                f"the graph, not about attributing its ACL drop")
+        else:
+            entry["refused"] = (
+                f"no gid can be attributed to it ({reason}), so the ACL drop "
+                f"cannot be verified and the graph is REFUSED rather than deleted")
+        if is_test_org(org):
+            # A customer graph is ruled out by the test marker, so its credential
+            # verdict is moot — do not warn once per customer org (round-5 review).
+            print(f"[warn] {name!r} refused: {entry['refused']}", file=sys.stderr)
+
+    # A gid-less claim that NAMES a credential but cannot attribute it is not
+    # reapable: `reap()` would delete the graph and skip the ACL drop, orphaning
+    # `tenant_<gid>` forever. A bare default spelling is different — it never had
+    # a per-graph credential, so gid-less is its normal shape.
+    for name in list(dormant):
+        info = dormant.pop(name)
+        _refuse(name, info["org"], info["reason"])
+    if unknown_status:
+        print(f"[warn] {unknown_status} graphs row(s) carried no `status` — "
+              f"treated as NOT live: their namespaces are refused, or reaped "
+              f"behind a live row's gid, or (for a `kind='default'` row that "
+              f"carries an id) reaped with that row's own id deferred", file=sys.stderr)
     for name in ambiguous:
         claims.pop(name, None)
-        print(f"[warn] {name!r} is claimed by more than one organization — "
-              f"REFUSED (ambiguity is never resolved by row order)",
-              file=sys.stderr)
+        print(f"[warn] {name!r} is claimed ambiguously (several orgs, several "
+              f"live gids, or two non-live default rows) — REFUSED (ambiguity is "
+              f"never resolved by row order)", file=sys.stderr)
     return claims
 
 
@@ -320,9 +581,11 @@ def classify_graph(graph_name: str, *, org_index: dict[str, dict],
     never an assumption of emptiness.
 
     The gates are applied in the order that fails CLOSED first: reserved name →
-    ownership → test marker → emptiness. Ownership comes before the marker so an
-    unresolvable graph is reported as unresolved rather than being mis-filed as
-    "some org's, not test" (which would read like a decision about an owner).
+    ownership → test marker → credential attribution → emptiness. Ownership comes
+    before the marker so an unresolvable graph is reported as unresolved rather
+    than being mis-filed as "some org's, not test" (which would read like a
+    decision about an owner); the credential verdict comes AFTER the marker
+    because a graph this tool would never touch needs none.
     """
     if graph_name in RESERVED_GRAPH_NAMES or graph_name.startswith("registry_"):
         return (BUCKET_REFUSED_UNRESOLVED,
@@ -337,6 +600,12 @@ def classify_graph(graph_name: str, *, org_index: dict[str, dict],
         return (BUCKET_KEPT_NOT_TEST_ORG,
                 f"owner {org.get('id')!r} ({org.get('name')!r}) is not marked "
                 f"test/agent")
+    if entry.get("refused"):
+        # The org row DOES own it; what cannot be attributed is its credential.
+        # This gate comes AFTER the test marker: a graph this tool would never
+        # touch needs no credential verdict, and reporting a customer graph as an
+        # unattributable orphan would be false (round-5 review).
+        return BUCKET_REFUSED_UNRESOLVED, str(entry["refused"])
     if node_count is None:
         return (BUCKET_REFUSED_UNREADABLE,
                 "node-count read failed — emptiness is never assumed")
@@ -437,6 +706,7 @@ def build_report(*, explicitly_named: frozenset[str] = frozenset(),
         needs_count = (name not in RESERVED_GRAPH_NAMES
                        and not name.startswith("registry_")
                        and org is not None
+                       and not (entry or {}).get("refused")
                        and is_test_org(org, explicitly_named))
         count = _node_count(proj, name) if needs_count else None
         bucket, reason = classify_graph(

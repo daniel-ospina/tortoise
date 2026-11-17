@@ -2336,7 +2336,12 @@ def storage_overage_cost_usd(tier: str, dimension: str, used, *,
             missing is a figure that is BOTH per-org and affordable here: the
             audit is a whole-table aggregation per call (with a per-row TOAST
             lookup), and the ledger reader is the window addend, not the org's
-            stored footprint. And the only database-grain reader,
+            stored footprint. ⛔ THAT AFFORDABILITY GAP IS NOW CLOSED (#9559):
+            ``get_postgres_residency`` reads the per-org snapshot the audit
+            writes offline (one row by primary key), and the gate's meter is
+            wired to it. Read the gate's ``RELEASE_CONDITIONS`` for the LIVE
+            state rather than this paragraph's history. And the only
+            database-grain reader,
             ``measure_postgres_storage()``, returns the WHOLE database — passing
             that as ``used`` would bill every tenant for the shared database's
             bytes, the over-charge the allowance gate records as one reason for
@@ -3066,3 +3071,135 @@ def get_postgres_bytes_written(org_id: str) -> int:
         params={"tid": org_id, "pstart": period.start_iso},
     ).result_set
     return int(rows[0][0] or 0) if rows else 0
+
+
+def get_postgres_residency(org_id: str) -> dict:
+    """The org's snapshotted Postgres STORED bytes — the residency GAUGE (#9559).
+
+    ⛔ THE DIFFERENCE FROM :func:`get_postgres_bytes_written`, WHICH IS THE WHOLE
+    POINT. That function returns the ADDEND of the current window: how many bytes
+    the org wrote since the window opened. A storage cap held against that
+    figure does not cap what the org STORES — a tenant that wrote 10 GB last
+    window and nothing this one reads as zero. Residency is the stored footprint,
+    and only the audit (``postgres_bytes.per_org_bytes``) measures it.
+
+    The audit is a whole-table aggregation with a per-row TOAST lookup plus a
+    second pass over the TOAST relation, so it can NOT be called on a write path.
+    This reads the SNAPSHOT the audit writes (``org_postgres_residency``,
+    refreshed by ``postgres_residency_snapshot()`` offline) — one row by primary
+    key, O(1) in the database's size. That is the affordability the block on
+    ``postgres_storage`` required.
+
+    ⛔ THREE-NOT-KNOWN STATES, NOT ONE ``None`` — the vocabulary
+    :func:`get_capture_usage` already uses, because flattening them is either a
+    fail-open or a deadlock (``allowance_gate._Absent``'s docstring). Returns
+    ``{"measured", "unmeasured_reason", "stored_bytes", "rows", "measured_at",
+    "source"}``:
+
+    * ``measured=True`` — the snapshot has a row for this org; ``stored_bytes``
+      and the audit's own ``measured_at`` are the reading.
+    * ``unmeasured_reason="absent"`` — **the gauge HAS reported** (the table
+      holds at least one row, so ``postgres_residency_snapshot()`` has run and
+      the audit attributed SOMETHING to somebody) and this org holds nothing.
+      That is a TRUE ZERO, not an unknown: an org whose rows the audit cannot
+      find stores no bytes in its tables. It carries ``gauge_measured_at``, the
+      NEWEST report's instant, so the gate ages this zero against the same bound
+      it ages a stored figure against. ⛔ WITHOUT THAT STAMP THE ZERO IS
+      UNBOUNDED: the table only ever gains rows, so "the gauge has reported"
+      becomes true permanently after ONE run, and a never-snapshotted org would
+      then pass any cap for good — silently, while an org WITH a row of the same
+      age is refused (review round 5, measured at gate level).
+    * ``unmeasured_reason="unreported"`` — the table is EMPTY: the gauge has
+      NEVER reported. Reading that as a zero would be a FLEET-WIDE fail-open
+      (every org compares as 0 bytes and passes any cap), so it is no reading.
+    * ``unmeasured_reason="read_error"`` — the control plane failed. Our fault.
+
+    ⛔ WHY ``absent`` IS A ZERO AND NOT A REFUSAL — measured, not assumed. The
+    row only exists once the audit finds rows to attribute, and rows only exist
+    once a write is served, so refusing ``absent`` refuses the very write that
+    would create the condition it waits for: a fresh tenant's FIRST write is
+    refused forever. The same deadlock is measured in CI for the sibling gauge
+    (``#13084``/``#13102``: a paid tenant's first ``POST /v1/points`` returned
+    HTTP 500 from the graph meter), which is why the gate has an ``ABSENT``
+    sentinel distinct from ``None`` in the first place.
+    """
+    view: dict = {"measured": False, "unmeasured_reason": None,
+                  "stored_bytes": None, "rows": None,
+                  "measured_at": None, "source": None}
+
+    def _unmeasured(reason: str) -> dict:
+        return {**view, "unmeasured_reason": reason}
+
+    if not org_id:
+        # No org to look up is not an "absent" row: nothing was established.
+        return _unmeasured("read_error")
+    if not _supabase_mode():
+        # The registry/embedded lane has no ``org_postgres_residency`` table:
+        # storage there is the graph's, not Postgres's. No gauge ⇒ UNREPORTED,
+        # never a zero (a zero would arm a cap against a figure nobody measures).
+        return _unmeasured("unreported")
+    try:
+        from tortoise.supabase_control import get_control_plane
+        plane = get_control_plane()
+        rows = plane.query(
+            "org_postgres_residency",
+            select=["stored_bytes", "rows", "measured_at", "source"],
+            filters=[("org_id", "eq", org_id)],
+        )
+    except Exception as e:
+        _logger.warning(
+            "postgres residency read failed (NO READING, not a zero): "
+            "team=%s error=%s", org_id, e,
+        )
+        return _unmeasured("read_error")
+    if not rows:
+        # ⛔ An absent ROW is ambiguous until we ask whether the GAUGE has ever
+        # reported, and the two answers are opposite outcomes: "you store
+        # nothing" (serve, as a true zero) vs "nothing has ever been measured
+        # for anyone" (refuse — a zero here would pass every org's cap).
+        try:
+            # ⛔ NEWEST FIRST, because the answer is not just "has the gauge ever
+            # reported" — it is "and WHEN". A zero-by-absence must be AGED or it
+            # escapes the dimension's ``stale_after_seconds`` bound, and a table
+            # that only ever gains rows makes "ever reported" true forever: one
+            # run 400 days ago would then serve every never-snapshotted org at 0
+            # bytes indefinitely and silently, while an org WITH a row of the same
+            # age is refused. Measured in review round 5.
+            # ⛔ AND IT IS INDEXED, or this one probe would undo the whole
+            # affordability argument (review finding 4): the migration creates
+            # ``org_postgres_residency_measured_at_idx`` on this column, so the
+            # ordered LIMIT 1 is an index lookup. Without it the absent-org
+            # branch is a seq scan + sort over one row per org — O(orgs) on a
+            # GATED WRITE path, growing with the fleet's tenant count.
+            anywhere = plane.query("org_postgres_residency",
+                                   select=["measured_at"],
+                                   order="measured_at.desc", limit=1)
+        except Exception as e:
+            _logger.warning(
+                "postgres residency gauge-state probe failed (NO READING): "
+                "team=%s error=%s", org_id, e,
+            )
+            return _unmeasured("read_error")
+        # Only an org with NO row of its own pays for this, and it is one
+        # index-ordered lookup (``org_postgres_residency_measured_at_idx``),
+        # not a scan: the cost does not grow with the org count.
+        if not anywhere:
+            return _unmeasured("unreported")
+        gauge_at = anywhere[0].get("measured_at")
+        if not gauge_at:
+            # The gauge reports but carries no instant to age it by: an absence
+            # aged by nothing is an absence we cannot defend, so not a reading.
+            return _unmeasured("unreported")
+        # ``gauge_measured_at`` travels WITH ``absent`` so the gate can age this
+        # zero against the same bound it ages a stored figure against.
+        return {**view, "unmeasured_reason": "absent",
+                "gauge_measured_at": gauge_at}
+    row = rows[0]
+    return {
+        "measured": True,
+        "unmeasured_reason": None,
+        "stored_bytes": row.get("stored_bytes"),
+        "rows": row.get("rows"),
+        "measured_at": row.get("measured_at"),
+        "source": row.get("source"),
+    }
