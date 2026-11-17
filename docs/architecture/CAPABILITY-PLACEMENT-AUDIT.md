@@ -51,7 +51,7 @@ every number rather than trust it.
 
 The population is not the ontology's wish list; it is what a writer **actually puts on a node**. ⚠️ **The claim
 is scoped, not 'everything in the database':** it covers the **memory substrate** (rows 1–6) plus every
-**graph-only bookkeeping label reached from the code paths this audit read** (rows 7–17). It is **not** a census
+**graph-only bookkeeping label reached from the code paths this audit read** (rows 7–18). It is **not** a census
 of the registry / tenancy / metering substrate — and the labels found but NOT censused are listed in row 18
 rather than silently omitted.
 
@@ -86,14 +86,15 @@ bookkeeping with **no record table** (relevant in §5.2).
 | 15 | `:Batch`, `:PipelineStage`, `:PackInstall`, `:PackSelection`, `:PackManifest` | `mining.py`, `pipeline.py`, `pack_state.py`, `hosted_api:32965`, `pack_manifest_store.py:467` | — | 0 (not exercised) |
 | 16 | `:ContextSubscription` (webhook registration) | `webhook_delivery.py:406` (`CREATE (s:ContextSubscription {…})`) | — | 0 (not exercised) |
 | 17 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:317` (`MERGE (n:OnboardingState {org_id})`), `:322`/`:929` (`MERGE (s:OnboardingStep {org_id, step_id})`), `:324`/`:934` (`MERGE (n)-[:COMPLETED_STEP]->(s)`) | — (`COMPLETED_STEP` is an EDGE type, not a record table — `NODE_TABLES` has six labels and onboarding is not one of them) | 0 (not exercised) |
-| 18 | **found, NOT censused** — `:Pipeline` (`pipeline.py:525`), `:MeteringRecord` (`metering.py:108`, `:840`, `:1146`, `:1608`), `:MeteringUnmeteredIncrement` (`metering.py:616`), `:WebhookEvent` (`hosted_api.py:47787`), and the tenancy/registry labels `:Team` (`sdk.py:46612`), `:Membership` (`:47262`), `:APIKey` (`:47409`), `:TeamMeta` (`:46671`), `:Graph` (`:46753`), `:SignupToken` (`hosted_api.py:34901`), `:Invitation` (`hosted_api.py:30343`) | sdk / metering / pipeline | — | **not censused — a GAP, see §7** |
+| 18 | `:Document` (pre-D10 legacy) | `migrate_kinds.py:89` (`_LEGACY_DOCUMENT_LABEL`), reached at `:297` (`MATCH (n:{_LEGACY_DOCUMENT_LABEL}) RETURN …`) and `:430-437` (the `SET n:Source` relabel) | — | 0 (not exercised) |
+| 19 | **found, NOT censused** — `:Pipeline` (`pipeline.py:525`), `:MeteringRecord` (`metering.py:108`, `:840`, `:1146`, `:1608`), `:MeteringUnmeteredIncrement` (`metering.py:616`), `:WebhookEvent` (`hosted_api.py:47787`), and the tenancy/registry labels `:Team` (`sdk.py:46612`), `:Membership` (`:47262`), `:APIKey` (`:47409`), `:TeamMeta` (`:46671`), `:Graph` (`:46753`), `:SignupToken` (`hosted_api.py:34901`), `:Invitation` (`hosted_api.py:30343`) | sdk / metering / pipeline | — | **not censused — a GAP, see §7** |
 
-⛔ **Row 18 is a real gap, labelled as one.** This audit read the memory-substrate writers and the bookkeeping
+⛔ **Row 19 is a real gap, labelled as one.** This audit read the memory-substrate writers and the bookkeeping
 labels on their paths; it did **not** classify the billing / tenancy / pipeline substrate. **No placement
 decision on `:Pipeline` or `:MeteringRecord` may be made from this document.** (`:Pipeline` is named
 explicitly because the same module writes the censused `:PipelineStage`.)
 
-Rows 10–17 are declared **not exercised by the instrument** rather than counted as zero-cost — a shape
+Rows 10–18 are declared **not exercised by the instrument** rather than counted as zero-cost — a shape
 the corpus does not create is a shape this document has *not* measured, and saying so is the difference
 between a census and a guess.
 
@@ -307,7 +308,7 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
 | `:PipelineStage` | `pipeline.py:349` (read); `:685`/`:731`/`:754-756` are `SET` statements — writes with no read of the node, not `RMW` and not reads | **none** |
 | `:PackManifest` | `pack_manifest_store.py:524` (`MATCH (m:PackManifest) RETURN m.namespace, …`), `:539` (`RETURN m.namespace, m.yaml`), `export.py:133` (`MATCH (m:PackManifest {namespace:$ns}) RETURN m.yaml`); `:550` is the `DELETE`, `:467` the writer named in §1 | **none** |
-| `:PackInstall` / `:PackSelection` | `export.py:126` (`:PackInstall`); `pack_state.py:878-881` (`MATCH (s:PackSelection) RETURN s.revision, s.configured_at, s.updated_by`) | **none** |
+| `:PackInstall` / `:PackSelection` | `export.py:126` (`:PackInstall`); `pack_state.py:878-881` (`MATCH (s:PackSelection) RETURN s.revision, s.configured_at, s.updated_by`); `projection/__init__.py:2335`, `:13801-13802`, `:17586-17587` (`MATCH (s:{_PACK_SELECTION_LABEL}) RETURN properties(s)` — **whole-node reads**, invisible to a `:PackSelection` grep because the label is the constant at `:2256`, the same interpolation that hid `:PackManifest`) | **none** |
 | `:ContextSubscription` | `webhook_delivery.py:425`, `:435`, `:444`, `:452`, `:1113`, `:1134-1136` (the due-subscription read); `why_snapshot.py:557` (reads; `:406` is the `CREATE` named in §1 and `:461` the `DETACH DELETE`, neither a reader) | **none** |
 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:759-763` (`MATCH (n:OnboardingState {org_id:$org_id})-[:COMPLETED_STEP]->(s:OnboardingStep) RETURN s.step_id`) | **adjacency** → **`graph`** (§3 row 11c) — listed here only so the label is not missing from the table |
 
@@ -625,7 +626,7 @@ changes nothing.
   **`NOT_PLANNED`** on 2026-11-06, so there is no shipped purge tooling to point at. The legacy copies this
   document declines to fold-delete therefore remain, which is a *stronger* reason for the §5.1 refusal, not a
   weaker one.
-- ⛔ **It is NOT a census of the whole database.** Row 18 of §1 lists the labels found but **not censused**
+- ⛔ **It is NOT a census of the whole database.** Row 19 of §1 lists the labels found but **not censused**
   (`:Pipeline`, the metering substrate, the tenancy/registry labels). Those get no reader census and no
   verdict here, and a placement decision on them must not be made from this document. That is a **gap**, not
   a scope choice dressed as one.
@@ -654,7 +655,7 @@ provider was queried directly, and that substitution is disclosed rather than pa
 | claim taken | checked here |
 |---|---|
 | RAM is the scarce resource, disk is cheap | §5/§2.1: **$73/GB-month** resident vs **$0.125/GB** disk — 584× |
-| resorting to disk costs a cold-restore penalty | §12/§A4: **0.03 s** index-dropped, **1.585 s** index-kept (and that one blocks the instance) |
+| resorting to disk costs a cold-restore penalty | `docs/evidence/12766-fulltext-restore/README.md` (90 000-node row): **0.032 s** index-dropped, **1.585 s** index-kept (and that one blocks the instance) |
 | the vector index is a major residency term | §12.1, and §4 above: `embedding` (101,376 B stored) and `content` (93,287 B) are the two largest payload families in the corpus — comparable, neither dominating |
 | a shape nothing reads cannot help the hit ratio | this document's own §2: `:GraphEvent` has **zero** capability readers and is **801 B/turn** of the armed-lane residue |
 
