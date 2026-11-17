@@ -518,21 +518,24 @@ def test_a_demoted_claim_query_returns_another_claim_not_an_empty_answer(artifac
 
 
 def test_the_claim_population_ceiling_matches_the_record(artifact):
-    """§9.1: the lexical leg's own ceiling, complete — 15.7 % recall@3, 71.3 % deep."""
-    complete = _arms(artifact, "point")["complete"]
-    assert complete["recall@3"] <= 0.20              # the claim leg's ceiling is LOW
-    assert complete["found_deep"] > complete["recall@3"]   # …but the deep axis is not
-    # ⛔ Bounds, not decimals. An earlier cut pinned these at ±0.05 pp, which is
-    # the EXACT rule this file's sibling test states and forbids: `recall@k`
-    # moves by up to 1.0 pp between runs of identical input and `found@deep` by
-    # up to 0.33 pp (the artifact's own `reproducibility` block), so a decimal
-    # pin here reds an honest re-measurement and teaches the next lane to bump
-    # the number. The decimal belongs where it can be derived — the `N.N %` doc
-    # scan reads the ARTIFACT, not a copy of it.
-    # …and §9.1 quotes a loss at the target size that clears the run-to-run band.
-    half = _arms(artifact, "point")["tail@0.5"]
-    assert complete["found_deep"] - half["found_deep"] >= 0.25
+    """§9.1: the lexical leg's own ceiling, complete — 15.7 % recall@3, 71.3 % deep.
 
+    ⛔ EXACT, not a bound, and the difference is not pedantry. The
+    reproducibility band (recall@k <=1.0 pp, found@deep <=0.33 pp) governs whether
+    a NEW run may be quoted against the old record; it does NOT relax a pin on a
+    COMMITTED artifact, which never re-runs. Loosening these to `recall@3 <= 0.20`
+    and `found_deep > recall@3` let the artifact's ceiling drift from 0.157 to
+    0.05 and still pass — while §9.1 goes on publishing "15.7 %". The doc scan
+    below is a MEMBERSHIP test over every figure the artifact holds, so it cannot
+    tell a correct binding from a figure that merely exists somewhere; binding a
+    QUOTED number to its QUANTITY is this test's whole job.
+    """
+    complete = _arms(artifact, "point")["complete"]
+    assert complete["recall@3"] == pytest.approx(0.157, abs=5e-4)
+    # …and the deep axis is not the same number, which is the point of the row.
+    assert complete["found_deep"] == pytest.approx(0.713, abs=5e-4)
+    # …and §9.1 quotes the same loss at the target size.
+    assert _arms(artifact, "point")["tail@0.5"]["found_deep"] == pytest.approx(0.410, abs=5e-4)
 
 #: Figures the docs legitimately state that are NOT artifact rates — declared
 #: explicitly so the scan below can tell "a number the artifact holds" from "a
