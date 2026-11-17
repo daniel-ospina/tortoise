@@ -81,7 +81,7 @@ without reading the source.
 2. **It is submitted and runs out of budget.** Two budgets, both 500 ms by default: the
    per-leg driver timeout (`timeout_ms: int = 500` on the VECTOR leg, `search_engine.py:3526`;
    `:2832` is `run_fts_query`'s — the LEXICAL leg's — and `runner_timeout` in `degradation_chain`
-   is defined at `:4839`, not `:4673`, which is a comment line about `#4210`/`#3019`;
+   is defined at `:4854`, not `:4673`, which is a comment line about `#4210`/`#3019`;
    `#13121` round 8 F4) and the collector's
    `as_completed(timeout=0.5)`. A leg **still not done at the post-deadline rescan** is
    recorded `reason="timeout", ran=True, degraded=True` (`#8450`, `#6851`).
