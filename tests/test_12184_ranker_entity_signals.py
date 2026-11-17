@@ -49,8 +49,8 @@ from tortoise.ranking import (
     UnsupportedEntitySignals,
     signal_family_for,
 )
-from tortoise.security import VALID_ENTITY_TYPES
 from tortoise.sdk import TortoiseSDK
+from tortoise.security import VALID_ENTITY_TYPES
 
 _GRAPH = f"tortoise_test_12184rk_{uuid.uuid4().hex[:8]}"
 _DB_URI = _live_utils.docker_uri(_GRAPH)
@@ -105,7 +105,7 @@ class _NeverQueried:
     query that happened to return nothing: if the fetch ran, this raises.
     """
 
-    class g:  # noqa: N801 — mirrors the projection attribute
+    class g:
         @staticmethod
         def query(*_a, **_kw):
             raise AssertionError("the graph was queried for a refused label")

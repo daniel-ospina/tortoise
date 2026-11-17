@@ -47,8 +47,8 @@ from tortoise.audit import audit_graph
 from tortoise.ep import TortoiseEP
 from tortoise.live import EPISTEMIC_LABELS, epistemic_labels_of, epistemic_sweep
 from tortoise.ranking import (
-    W4_CONTESTED_BOOST,
     ENTITY_SIGNAL_SPECS,
+    W4_CONTESTED_BOOST,
     GapsRanker,
     GraphRanker,
     StateRanker,
