@@ -107,6 +107,23 @@
 # with it is checked by tools/surface-target-check.py, which reads those docs rather than
 # a constant here.
 #
+# ROWS RE-STAMPED FOR A DECLARATION CHANGE (#13110) — recorded HERE because a re-cut
+# erases body comments (see the ⚠️ above). `tortoise_create_object`,
+# `tortoise_create_entity` and `tortoise_create_point` each gained a `goalState`
+# PARAMETER, which moved both of their cells: `served_from` is the `_code_digest` of the
+# handler's code object (bytecode, names, constants — a docstring counts, it is a
+# `co_const`; `co_firstlineno` is excluded on purpose, so a pure code move moves
+# nothing, and only the edited tool's row moves), and `served_attributes` hashes
+# `__defaults__`/`__annotations__`, which a new parameter changes (#4192). The values were
+# re-stamped to what the code DERIVES — `tools/surface_manifest.py check` re-derives and
+# compares, so the code is authoritative, not these digits. Precedent: #12547 re-stamped
+# `served_from` for `tortoise_query` in the same way, and its own row comment was then
+# erased by the next cut (2c67c0cf99) — which is why this note lives in the header.
+# ⛔ A re-stamp is NOT an approval. The approval gate is the “add or remove a tool or a
+# public SDK method” rule (AGENTS.md §MCP/SDK Surface Approval); a parameter on an
+# existing door is neither, `counts:`/`high_water_counts:` are unchanged, and the tool
+# and SDK name sets are unchanged. A green `surface-guard` run is a consistency result.
+#
 # `cut_at_commit` IS a DEFAULT-BRANCH COMMIT, never a lane one (#11057 review F1). It names
 # the `main` commit this baseline was cut AGAINST, so `cut --commit <sha-in-main>` — not the
 # worktree HEAD it happened to run in. This repo squash-merges and deletes the source
@@ -1482,8 +1499,8 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:9860ad2503ad1b45
-  served_attributes: edb6c4d045fc0522
+  served_from: tortoise/mcp_server.py:a8ac1e8d58e702a6
+  served_attributes: 0bdf08286d48f29c
   family: memory
   family_rank: 1
   served: http
@@ -1834,8 +1851,8 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_get_entity
 - name: tortoise_create_entity
-  served_from: tortoise/mcp_server.py:b489e9cdb82dbd6d
-  served_attributes: 764058954f66db36
+  served_from: tortoise/mcp_server.py:2ad91f43163a0f76
+  served_attributes: 93b456ed38374aa3
   family: graph
   family_rank: 2
   served: http
@@ -1862,6 +1879,91 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_create_entity
+  cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
+- name: tortoise_create_event
+  served_from: tortoise/mcp_server.py:777802f3585f9042
+  served_attributes: f15148fa26e4d095
+  family: graph
+  family_rank: 2
+  served: http
+  sdk_method: create_event
+  group_source: mapped
+  keyword: create
+  keyword_rank: 2
+  cluster: create
+  canonical: false
+  job: Create an Event node (meeting, decision, deployment, etc.).
+  dependency: declares TortoiseSDK.create_event (resolves)
+  lifecycle: active
+  used_by: never called, tooling, docs
+  recommendation: merge
+  basis: decided
+  reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
+    so this is one name too many — the caller keeps working either way'
+  recommended_family: graph
+  proposed: true
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: tortoise_create_entity
+  cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
+- name: tortoise_create_object
+  served_from: tortoise/mcp_server.py:f6f1291a10c7cba8
+  served_attributes: 02dd12308466f524
+  family: graph
+  family_rank: 2
+  served: http
+  sdk_method: create_object
+  group_source: mapped
+  keyword: create
+  keyword_rank: 2
+  cluster: create
+  canonical: false
+  job: 'Create an Object node (product, customer, skill, etc.), unless the kind is a §5 Subject kind: the KIND decides
+    the LABEL (#9964), so objectKind=''core:organization'' writes a :Subject and is reported as advisories.kind_layer_routed.'
+  dependency: declares TortoiseSDK.create_object (resolves)
+  lifecycle: active
+  used_by: never called, tooling, docs
+  recommendation: merge
+  basis: decided
+  reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
+    so this is one name too many — the caller keeps working either way'
+  recommended_family: graph
+  proposed: true
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: tortoise_create_entity
+  cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
+- name: tortoise_create_subject
+  served_from: tortoise/mcp_server.py:45cc3c6f978d5ac1
+  served_attributes: af0f73916896a555
+  family: graph
+  family_rank: 2
+  served: http
+  sdk_method: create_subject
+  group_source: mapped
+  keyword: create
+  keyword_rank: 2
+  cluster: create
+  canonical: false
+  job: 'Create a Subject node (team, role, organization, person), unless the kind names the other entity layer:
+    the KIND decides the LABEL (#9964), so a kind the classifier partitions as an Object (e.g. subjectKind=''core:skill'')
+    writes an :Object and is reported as advisories.kind_layer_routed.'
+  dependency: declares TortoiseSDK.create_subject (resolves)
+  lifecycle: active
+  used_by: never called, tooling, docs
+  recommendation: merge
+  basis: decided
+  reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
+    so this is one name too many — the caller keeps working either way'
+  recommended_family: graph
+  proposed: true
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: tortoise_create_entity
+  cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_create_edge
   served_from: tortoise/mcp_server.py:f584fb5c935a1e9a
   served_attributes: 674a7d628b644657
