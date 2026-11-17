@@ -928,7 +928,18 @@ def test_an_UNHASHABLE_stored_status_reaches_the_documented_ValueError(sdk):
         sdk.update_knowledge(goal["id"], goalState="abandoned")
     assert isinstance(exc.value, ValueError)
     assert not isinstance(exc.value, TypeError)
-    assert "leaves it running" in str(exc.value), str(exc.value)
+    # ⛔ the refusal must NAME the stored offender, not merely say the row is
+    # ended. This arm passes `goalState` and never `status`, so a message
+    # carrying the STORED `['live']` is the positive evidence that the stored
+    # half was read at all: a refusal answered from `goalState` alone could not
+    # name it, and the arm would pass while proving nothing (#13217).
+    msg = str(exc.value)
+    assert "['live']" in msg, msg
+    # ...and the sentence stays as `main` landed it. `#11824` S0 re-worded the
+    # VOCABULARY refusal ("list is not one"); it did not re-word this one, and a
+    # `"list" in msg and "string" in msg` rewrite was once applied here on the
+    # belief that it had. It can never pass: the message renders the VALUE.
+    assert "leaves it running" in msg, msg
 
 
 def test_a_goal_retired_by_the_LEGACY_outdated_flag_refuses_a_LIVE_word(sdk):
