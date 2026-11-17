@@ -16,6 +16,19 @@
       "definite": 138578,
       "ident": 12557,
       "path": 5314
+    },
+    "point_build": {
+      "built": 786,
+      "causes": [
+        "no_span",
+        "sanitised_out",
+        "duplicate_span",
+        "too_short"
+      ],
+      "reason": "This run predates the funnel accounting (#13126 review P2-3): tools/window_quality_m2.py now writes the per-filter counts here, but the committed artifact was produced before that, so only the SIZE of the gap is recorded. The split is not back-filled or guessed.",
+      "requested": 900,
+      "split_recorded": false,
+      "unattributed": 114
     }
   },
   "document": "docs/architecture/SEARCH-ARCHITECTURE.md \u00a79",
@@ -583,7 +596,7 @@
     }
   },
   "provenance": {
-    "tool_sha256": "4f7e0d89d6ffd80304b706ce043ba001cc34dfe568fa9e2a0c6c1c2157f9b7c4"
+    "tool_sha256": "c61e37f773c5b303b0f23e3e9ad5ac956862727dc3c4dd88adf46bffed26a8cf"
   },
   "reproducibility": {
     "conclusions_rest_on_gap_pp": "13.3 to 48.3",

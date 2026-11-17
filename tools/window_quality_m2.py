@@ -516,7 +516,8 @@ def _term_postings(texts: list[str]) -> dict[str, set[int]]:
     return dict(postings)
 
 
-def build_point_population(turns: list[str], n: int, sanitise=None) -> list[dict]:
+def build_point_population(turns: list[str], n: int, sanitise=None,
+                           stats: dict | None = None) -> list[dict]:
     """Points from real captured turn text, each carrying its own fixed query.
 
     The QUERY is chosen AFTER the whole population is known, because the choice
@@ -529,19 +530,33 @@ def build_point_population(turns: list[str], n: int, sanitise=None) -> list[dict
 
     A Point whose text yields no query span is DROPPED rather than given a
     synthetic query: a query invented here would be a query the corpus never
-    contained, and the whole population's job is to be real. The drop count is
-    recorded by the caller's own accounting.
+    contained, and the whole population's job is to be real.
+
+    ⛔ EVERY DROP IS ACCOUNTED FOR, IN THIS FUNCTION (#12186 review P2-3). Four
+    filters can lose a text — the length gate below (``too_short``), no valid
+    span (``no_span``), a span the sanitiser collapses (``sanitised_out``), and a
+    span already claimed by an earlier Point (``duplicate_span``) — and the
+    record used to say the CALLER recorded them, which it did not: ``--points
+    900`` built 786 nodes with nothing in the bundle naming where the 114 went.
+    Write ``stats=`` and the funnel is filled here, so the shrink is a recorded
+    number rather than an inference a reader has to make from two other fields.
     """
+    funnel: dict = {"requested": n, "texts_considered": 0, "too_short": 0,
+                    "kept": 0, "no_span": 0, "sanitised_out": 0,
+                    "duplicate_span": 0, "built": 0}
     kept: list[str] = []
     for text in turns:
         if len(kept) >= n:
             break
+        funnel["texts_considered"] += 1
         text = " ".join(text.split())[:POINT_TEXT_LIMIT]
         # A turn too short to hold a span, or too short to be a claim, is not a
         # search target.
         if len(text) < 80:
+            funnel["too_short"] += 1
             continue
         kept.append(text)
+    funnel["kept"] = len(kept)
 
     postings = _term_postings(kept)
     out: list[dict] = []
@@ -549,6 +564,7 @@ def build_point_population(turns: list[str], n: int, sanitise=None) -> list[dict
     for text in kept:
         q = query_span(text, postings=postings)
         if q is None:
+            funnel["no_span"] += 1
             continue
         # ⛔ The SELECTIVITY that chose ``q`` was scored on its raw tokens; the
         # form the LEG receives is ``sanitise(q)``, and `_sanitise_query_text`
@@ -557,6 +573,7 @@ def build_point_population(turns: list[str], n: int, sanitise=None) -> list[dict
         # a query that can single out a claim, so it is dropped HERE rather than
         # scored against a selectivity it does not have.
         if sanitise is not None and len(sanitise(q).split()) < 3:
+            funnel["sanitised_out"] += 1
             continue
         # ⛔ ONE CANONICAL PER QUERY, enforced rather than hoped for. The captures
         # repeat boilerplate verbatim (fleet briefs, AGENTS.md, the PR template),
@@ -564,9 +581,10 @@ def build_point_population(turns: list[str], n: int, sanitise=None) -> list[dict
         # several claims has no single canonical to recall, so scoring it would
         # charge the window for an ambiguity the corpus created. Deduping on the
         # span makes every query name exactly one node; the count of Points lost
-        # to it is reported by the caller's accounting, not swallowed.
+        # to it is in ``duplicate_span`` below, not swallowed.
         key = q.casefold()
         if key in seen_spans:
+            funnel["duplicate_span"] += 1
             continue
         seen_spans.add(key)
         # Popularity proxy = the number of distinct word-bearing tokens at least
@@ -577,6 +595,14 @@ def build_point_population(turns: list[str], n: int, sanitise=None) -> list[dict
                    if len(t) >= MIN_TERM_LEN and not _NOT_A_WORD.match(t)})
         out.append({"id": f"{ID_PREFIX['point']}{len(out):06d}",
                     "content": text, "query": q, "popularity": pop})
+    funnel["built"] = len(out)
+    # The funnel must ADD UP, or it is a decoration rather than an accounting:
+    # every kept text is either built or lost to exactly one of the three filters.
+    assert funnel["kept"] == (funnel["built"] + funnel["no_span"]
+                              + funnel["sanitised_out"]
+                              + funnel["duplicate_span"]), funnel
+    if stats is not None:
+        stats.update(funnel)
     return out
 
 
@@ -719,9 +745,19 @@ def run(args: argparse.Namespace) -> int:
     # ── population construction ──────────────────────────────────────────────
     texts, text_stats = harvest_turn_texts(sessions, args.points * 4)
     artifact_stats["corpus"] = text_stats
+    # ⛔ The population's OWN funnel is recorded beside the harvest's (#12186
+    # review P2-3): `--points 900` built 786 nodes and the bundle carried nothing
+    # naming the 114 — the record claimed the caller accounted for them and the
+    # caller passed nothing. `build_point_population` fills this dict in-place, so
+    # a reader can tell `no_span` from `duplicate_span` instead of inferring a
+    # shrink from two unrelated fields.
+    point_funnel: dict = {}
     pops: dict[str, list[dict]] = {
-        "point": build_point_population(texts, args.points, sanitise=_sanitise_query_text),
+        "point": build_point_population(texts, args.points,
+                                       sanitise=_sanitise_query_text,
+                                       stats=point_funnel),
     }
+    artifact_stats["point_build"] = point_funnel
 
     _input_stats: dict = {}
     harvested = harvest(sessions, stats=_input_stats)
@@ -1007,21 +1043,29 @@ def run(args: argparse.Namespace) -> int:
         },
         "signal": _signal_available(),
         "provenance": {
-            #: The instrument's OWN bytes, so a figure can be traced to the code
-            #: that produced it — not to a head sha, which the repo squash-merges
-            #: and which a later re-run could never re-verify.
+            #: ⛔ A DRIFT CHECK, NOT PRODUCTION EVIDENCE (#13126 review Finding 1).
+            #: This is sha256 of the instrument's bytes AS COMMITTED, recomputed by
+            #: the pin in `tests/test_window_quality_m2.py`. It is hand-carried:
+            #: whoever edits `tools/` updates it in the same commit, so it names the
+            #: CURRENT bytes and never the bytes that produced these numbers (on this
+            #: branch it was rewritten seven times while `generated_at` and
+            #: `git_head` never moved). Only a re-run can attest production, and a
+            #: re-run is what the README's "Reproducing" section asks a reader to do.
             "tool_sha256": _sha256_file(Path(__file__).resolve()),
         },
         #: ⛔ Measured, and NOT a second copy of this record. It lives at MODULE
         #: level (`REPRODUCIBILITY_BOUND`) so `tests/test_window_quality_m2.py`
         #: can import the block the instrument EMITS and pin the committed
-        #: artifact's block EQUAL to it. That equality is what the artifact's
-        #: `provenance.tool_sha256` claims, and without the pin the binding is an
-        #: assertion about bytes that may no longer emit these keys — which is
-        #: exactly what had happened here (#12186 review P0-1): the artifact
-        #: carried 3 runs / 0.33 / 1.0 / 9.85 while these bytes emitted
-        #: 2 / 0.0 / 2.94 and a "17-43" gap, so a reproducer following the
-        #: README would have reported a diff that was not a measurement.
+        #: artifact's block EQUAL to it. That equality is a COMPOSITION check — the
+        #: artifact was not edited independently of the constant — and it is NOT
+        #: evidence that a run emitted the block: `--out` over
+        #: `measurement.json` is a re-run, whose numbers are never byte-identical to
+        #: these, so the committed file's block cannot have been written by one.
+        #: Without the pin the two copies drift silently — which is exactly what had
+        #: happened here (#12186 review P0-1): the artifact carried 3 runs / 0.33 /
+        #: 1.0 / 9.85 while the constant emitted 2 / 0.0 / 2.94 and a "17-43" gap.
+        #: What the pin CANNOT do is re-derive the band, because the three runs'
+        #: outputs are not committed; the README says so in those words.
         "reproducibility": dict(REPRODUCIBILITY_BOUND),
         "cleanup": {
             "graphs_created": len(graphs),

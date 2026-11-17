@@ -196,19 +196,47 @@ def test_query_span_rejects_structural_noise():
 
 
 def test_query_span_picks_the_most_selective_window_when_postings_are_given():
+    """The SELECTIVITY rule, on a fixture where the windows genuinely differ.
+
+    ⛔ The first cut of this test could not fail (#13126 review Finding 2). Every
+    term mapped to the same single document, so `_hits` returned 1 for all four
+    candidate windows and the `min` was decided by the tie-break alone — and the
+    assertion named the SET of all four windows, so `min` -> `max` and deleting
+    the postings branch entirely both stayed green. The rule this instrument
+    adopted on the strength of a measured 19.0 % -> 15.7 % ceiling comparison was
+    therefore unpinned: a silent revert to the first-window rule changed the
+    measured query set with the suite green.
+
+    The fixture below makes the intersection sizes DIFFER, so the adopted rule has
+    a distinct answer from both its neighbours:
+
+      window                     intersection          size
+      alpha beta gamma d eps     {0,1,2}..           3
+      beta gamma d eps zeta      {0,1,2} n {0} =     1   <- most selective
+      gamma d eps zeta eta       {0,1,2} n {0} =     1   (ties; earliest wins)
+      d eps zeta eta theta       {0,1,2} n {0} =     1
+
+    The expected span is asserted EXACTLY, and it is neither the first window
+    (which is what `max` and a deleted postings branch both return) nor the last.
+    """
     text = "alpha beta gamma delta epsilon zeta eta theta"
     postings = {
-        "alpha": {0}, "beta": {0}, "gamma": {0}, "delta": {0}, "epsilon": {0},
-        # The second window's terms are held by exactly one document.
+        "alpha": {0, 1, 2}, "beta": {0, 1, 2}, "gamma": {0, 1, 2},
+        "delta": {0, 1, 2}, "epsilon": {0, 1, 2},
+        # The second window's tail terms are held by ONE document, so the window
+        # starting at `beta` intersects to a single doc while the first window
+        # intersects to all three.
         "zeta": {0}, "eta": {0}, "theta": {0},
     }
+    first_window = "alpha beta gamma delta epsilon"
     # Without postings the first window wins…
-    assert query_span(text, n_tokens=5) == "alpha beta gamma delta epsilon"
-    # …and with them the most selective window still wins, deterministically.
-    picked = query_span(text, postings=postings, n_tokens=5)
-    assert picked in {"alpha beta gamma delta epsilon", "beta gamma delta epsilon zeta",
-                      "gamma delta epsilon zeta eta", "delta epsilon zeta eta theta"}
-    assert picked == query_span(text, postings=postings, n_tokens=5)
+    assert query_span(text, n_tokens=5) == first_window
+    # …and with them the most selective window wins, deterministically.
+    assert query_span(text, postings=postings, n_tokens=5) == (
+        "beta gamma delta epsilon zeta")
+    assert query_span(text, postings=postings, n_tokens=5) != first_window
+    assert query_span(text, postings=postings, n_tokens=5) == query_span(
+        text, postings=postings, n_tokens=5)
 
 
 def test_point_population_gives_every_query_exactly_one_canonical():
@@ -379,21 +407,29 @@ def _load_tool():
 
 
 def test_the_artifact_binds_its_own_provenance(artifact):
-    """The three provenance blocks are PRESENT and actually self-consistent.
+    """The three blocks are PRESENT and self-consistent — a DRIFT check, no more.
 
     ⛔ This is the pin `config/ci-surfaces.yml` claims and did not have (#12186
     review P1-1): the row said it pinned "the artifact's own `reproducibility` /
     `provenance` / `cleanup` blocks being present and self-consistent", and no
     test in this module read any of them. Measured then: setting
-    `provenance.tool_sha256` to 64 zeros, `reproducibility.runs_compared` to 11
-    and `found_deep_max_delta_pp` to 99.0, and `params.points` to 12 all left the
-    suite green.
+    `provenance.tool_sha256` to 64 zeros and `reproducibility.runs_compared` to 11
+    left the suite green.
 
-    The first assertion is the one that would have caught the real defect: the
-    artifact's `reproducibility` block described 3 runs at 0.33 / 1.0 / 9.85
-    while the bytes its `tool_sha256` named emitted 2 runs at 0.0 / 2.94 and a
-    "17-43" gap — so the provenance claim bound the artifact to an instrument
-    that did not produce it (#12186 review P0-1).
+    ⛔ **AND IT IS NOT PROVENANCE EVIDENCE — that was the overclaim this
+    docstring used to make (#13126 review Finding 1).** Both sides of assertions
+    (1) and (2) are HAND-MAINTAINED: `REPRODUCIBILITY_BOUND` is a constant in the
+    instrument and `provenance.tool_sha256` is rewritten in the same commit
+    whenever the instrument changes (measured on this branch: seven rewrites of
+    the hash while `generated_at` and `git_head` never moved). So the pin catches
+    the two copies DIVERGING — a real defect, the one that shipped at #12186
+    P0-1 — and it cannot tell whether a run produced the numbers. Nothing in the
+    committed bundle can: the three compared runs' outputs are not committed.
+    Per SLSA v1.2 build-requirements, provenance is evidence only when the
+    PRODUCING run writes it; a digest maintained by hand beside its subject is a
+    cosmetic consistency check, and that is what this test is. The record states
+    the same thing in those words (see
+    `test_the_record_does_not_present_its_digest_as_provenance`).
     """
     import hashlib
 
@@ -402,13 +438,17 @@ def test_the_artifact_binds_its_own_provenance(artifact):
     # (1) the block in the artifact IS the block the instrument emits.
     assert artifact["reproducibility"] == tool.REPRODUCIBILITY_BOUND, (
         "the artifact's `reproducibility` block is not the one the instrument "
-        "emits — the provenance binding is then an assertion, not a measurement")
+        "composes — the two hand-maintained copies have diverged, so a reader "
+        "cannot tell which one a reproducer would get back")
 
-    # (2) the hash names THESE bytes.
+    # (2) the digest names the tool bytes as committed beside it.
     digest = hashlib.sha256(TOOL.read_bytes()).hexdigest()
     assert artifact["provenance"]["tool_sha256"] == digest, (
-        "provenance.tool_sha256 does not name the shipped instrument — "
-        "regenerate the artifact (or update the hash) after editing tools/")
+        "provenance.tool_sha256 no longer matches tools/window_quality_m2.py as "
+        "committed — this is a DRIFT check, so update the digest in the SAME "
+        "commit that edits the instrument. It is not evidence that a run "
+        "produced the numbers; only re-running the tool can produce a new "
+        "`reproducibility` band")
 
     # (3) the bound is internally coherent: the deltas it claims to have
     #     measured are positive numbers, and the gap it leans on is real.
@@ -438,6 +478,147 @@ def test_the_artifact_binds_its_own_provenance(artifact):
     assert cleanup["graphs_created"] > 0
     assert cleanup["graphs_dropped"] == 0, (
         "the tool drops no graph; if that is now false, the note must say so")
+
+
+def test_the_record_does_not_present_its_digest_as_provenance():
+    """The record states what its provenance block IS: a drift control, not evidence.
+
+    ⛔ #13126 review Finding 1. The README claimed the artifact's
+    `provenance.tool_sha256` was a binding "to the instrument's bytes" and that
+    the block-equality pin made that binding "checked rather than asserted". Both
+    halves are false, measurably: the digest is rewritten by hand in the same
+    commit that edits `tools/` (seven times on this branch, while `generated_at`
+    and `git_head` never moved), and the artifact-adding commit's instrument
+    emitted a DIFFERENT `reproducibility` block (2 runs / 0.0 / 2.94, no
+    `found_deep_max_delta_pp` at all) — so the block was written into the JSON, not
+    by a run. A reader told to trust the band as measured would be trusting two
+    hand-maintained copies of one another.
+
+    This binds the CORRECTED sentences, so the overclaim cannot come back by a
+    later edit: the false phrases must be gone and the honest ones present. It is
+    a prose pin on purpose — the defect was prose, and the code pin next door
+    (`test_the_artifact_binds_its_own_provenance`) can only ever check that the
+    two hand-maintained copies agree.
+    """
+    body = _flat(README.read_text(encoding="utf-8"))
+
+    # the two false claims, in the words they shipped in
+    assert "binding these figures to the instrument's bytes" not in body, (
+        "the README still presents provenance.tool_sha256 as binding the figures "
+        "to the instrument — it is a hand-maintained digest of the CURRENT bytes")
+    assert ("so the `provenance.tool_sha256` binding is checked rather than"
+            " asserted") not in body, (
+        "the README still claims the block-equality pin checks the provenance "
+        "binding — it checks that two hand-maintained copies agree")
+
+    # …and the statements that replaced them
+    assert ("it names the **current** bytes and never the bytes that"
+            " produced these numbers") in body, (
+        "the record no longer says what the digest does name")
+    assert ("the `reproducibility` block (3 runs, 0.33 / 1.0 / 9.85 pp) is a"
+            " hand-maintained constant whose three source runs are **not**"
+            " committed") in body, (
+        "the record no longer discloses that the band's source runs are uncommitted")
+    assert ("It is **not** provenance evidence") in body, (
+        "the record no longer denies the provenance claim it used to make")
+
+
+def test_the_artifact_records_the_point_population_drop_funnel(artifact):
+    """`--points 900` is a REQUEST; the 786 built and the 114 lost are accounted.
+
+    ⛔ #13126 review Finding 2 / P2-3. The instrument said the drop count was
+    "recorded by the caller's own accounting" and nothing counted it, so the only
+    trace of 900 -> 786 was two unrelated fields (`params.points` and
+    `populations.point.nodes`) that cannot distinguish the four filters which can
+    lose a text. The `corpus.point_build` block is that accounting; this pin holds
+    it to the rest of the artifact and to itself.
+
+    ⛔ It does NOT invent the split for the committed run: that run predates the
+    accounting, and the block says so (`split_recorded: false`). A pin that
+    demanded four counts here would have to be satisfied by guessing them, which
+    is the defect, not the fix — so the assertion is `split_recorded false => the
+    size of the gap is stated and a reason is given`, and `split_recorded true =>
+    the four filters add up to the whole gap`.
+    """
+    pb = artifact["corpus"]["point_build"]
+    arms_nodes = artifact["populations"]["point"]["nodes"]
+    requested = artifact["params"]["points"]
+
+    # the request and the result are the artifact's own declared numbers, not
+    # copies that may drift from them
+    assert pb["requested"] == requested, (
+        f"point_build.requested {pb['requested']} != params.points {requested}")
+    assert pb["built"] == arms_nodes, (
+        f"point_build.built {pb['built']} != populations.point.nodes {arms_nodes}")
+    assert pb["requested"] >= pb["built"], "the builder cannot build more than asked"
+
+    lost = pb["requested"] - pb["built"]
+    filters = ("too_short", "no_span", "sanitised_out", "duplicate_span")
+    if pb["split_recorded"]:
+        assert all(f in pb for f in filters), (
+            "split_recorded is true but the four filter counts are not all present")
+        assert sum(pb[f] for f in filters) == lost, (
+            f"the funnel accounts for {sum(pb[f] for f in filters)} of the {lost} "
+            f"texts lost — a drop is unaccounted for")
+    else:
+        # the size of the gap must still be recorded, and the absence explained
+        assert pb.get("unattributed") == lost, (
+            f"the run did not record the split, so the gap size ({lost}) must be "
+            f"stated in `unattributed`; it says {pb.get('unattributed')!r}")
+        assert pb.get("reason", "").strip(), (
+            "a run that did not record the split must say why, not leave it silent")
+        assert set(pb.get("causes", ())) == set(filters), (
+            "the possible causes must be named, or 'unattributed' is unreadable")
+
+
+def test_the_point_population_accounts_for_every_drop():
+    """`build_point_population(stats=...)` reports the funnel and it ADDS UP.
+
+    ⛔ #13126 review Finding 3: the accounting is what makes the artifact's block
+    (and therefore the README's `:Point` disclosure) possible at all, so it is
+    pinned on the object the instrument calls, not on a re-typed copy. Measured
+    pre-fix: `stats` did not exist, the two docstrings pointed at a caller that
+    passed nothing, and the 900 -> 786 shrink had no recorded cause.
+
+    Three drops are exercised — one of each kind a long text can hit — plus the
+    length gate, so every counter is a number some fixture produced rather than a
+    key that happens to exist.
+    """
+    long_tail = " and more words here to pass the eighty character gate"
+    ok = ("the reservation window holds closed components across the merge "
+          "boundary" + long_tail)
+    dup = ("a canonical phrase that repeats verbatim in this capture corpus"
+           + long_tail)
+    # `-- --- ### * * *` repeated has NO word-bearing 5-token run, so it yields
+    # no span — and it is long enough to survive the 80-character gate, so it
+    # exercises `no_span` rather than `too_short`.
+    no_span = "-- --- ### * * * " * 6
+    stats: dict = {}
+    pop = build_point_population(
+        ["too short to be a claim", ok, dup, dup, no_span], 10,
+        sanitise=lambda s: s, stats=stats)
+
+    assert [r["query"] for r in pop] == [row["query"] for row in pop]
+    assert len(pop) == 2, pop                       # `ok` and the first `dup`
+    assert stats["requested"] == 10
+    assert stats["texts_considered"] == 5
+    assert stats["too_short"] == 1
+    assert stats["kept"] == 4                       # the 80-character gate passed
+    assert stats["no_span"] == 1
+    assert stats["duplicate_span"] == 1
+    assert stats["sanitised_out"] == 0
+    assert stats["built"] == len(pop) == 2
+    # THE INVARIANT: every kept text is built or lost to exactly one filter.
+    assert stats["kept"] == (stats["built"] + stats["no_span"]
+                             + stats["sanitised_out"] + stats["duplicate_span"])
+
+    # …and the sanitiser filter is a real counter, not a dead key.
+    collapsed: dict = {}
+    build_point_population([ok], 10, sanitise=lambda s: "x y", stats=collapsed)
+    assert collapsed["sanitised_out"] == 1 and collapsed["built"] == 0
+
+    # …and omitting `stats` stays supported: the population is the contract.
+    assert len(build_point_population([ok], 10, sanitise=lambda s: s)) == 1
 
 
 def _arms(artifact: dict, kind: str) -> dict:
@@ -1561,6 +1742,7 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
     total_arms = len(pt_arms) + len(obj_arms)                 # 22 with `complete`
     gap_low, gap_high = _gap_endpoints(artifact)
     params = artifact["params"]
+    pb = artifact["corpus"]["point_build"]
 
     rows = [
         # (document, fragment as the document states it, what it must derive from)
@@ -1617,6 +1799,14 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
          f"--points {params['points']} --objects {params['objects']} "
          f"--sample {params['sample']}",
          "artifact.params (the reproduction recipe)"),
+        # ── round 4: what the run did NOT record, and what the digest is ────
+        (readme, f"{pb['requested']} texts are taken into the population builder "
+                 f"and {pb['built']} Points come out",
+         "corpus.point_build requested -> built"),
+        (readme, f"with the {pb['unattributed']} lost texts left `unattributed`",
+         "corpus.point_build unattributed (= requested - built)"),
+        (readme, "It is **not** provenance evidence",
+         "the provenance block is a drift control, not production evidence"),
     ]
     # the README quotes `signal` verbatim, and it is the evidence for half the
     # verdict ("— and it is SILENT"). Nothing compared the quote to the artifact,

@@ -88,6 +88,19 @@ Two populations, because the window does not demote one kind of node:
   retrieval. Nothing in this bundle weights them, and no row is presented as a production rate. It is
   kept because it makes M2's curve comparable with the recall figures the epic already carries.
 
+⚠️ **The `:Point` population's own drop funnel — 900 requested, 786 built** (#13126 review P2-3).
+`--points 900` is a REQUEST, not a count: 900 texts are taken into the population builder and 786
+Points come out, because four filters can lose a text — `too_short` (a turn under 80 characters),
+`no_span` (no valid 5-token span), `sanitised_out` (a span the production sanitiser collapses below
+three terms) and `duplicate_span` (a span an earlier Point already claimed; this corpus repeats
+boilerplate verbatim). The instrument records that funnel under `corpus.point_build`, and for **this**
+run the block carries `split_recorded: false` with the 114 lost texts left `unattributed`: the committed
+artifact was produced before the accounting existed, and the split is neither guessed here nor
+back-filled into the block. A run of the current instrument reports the four counts instead. The split
+changes no published rate — every arm is measured on the 786 built Points — but it is the number that
+says *which* texts the population excludes, which is why it is recorded rather than left to be inferred
+from `params.points` and `populations.point.nodes`.
+
 Each population is measured **complete**, then at coverages 0.90 / 0.75 / 0.50 / 0.25 / 0.10 under
 **two** eviction policies: `tail` (coldest/most-boilerplate first — a **static popularity** count; §7
 describes a *recency* policy, which this corpus cannot supply and this run did **not** test — see
@@ -421,9 +434,20 @@ is the eviction plus the claim leg's own ceiling — Finding 2). A reader compar
 expect the same split — the bound is a property of the instrument, and the artifact records it rather
 than assuming it. And a reproducer should get the artifact's own block back: `tools/window_quality_m2.py`
 emits it from `REPRODUCIBILITY_BOUND`, and `tests/test_window_quality_m2.py` pins the committed
-artifact's block **equal** to that constant, so the `provenance.tool_sha256` binding is checked rather
-than asserted.
+artifact's block **equal** to that constant.
 
-The artifact also carries `provenance.tool_sha256`, binding these figures to the instrument's bytes,
-and a `cleanup` block that declares how many graphs a run leaves behind (they are **not** dropped; on a
-lane container `test_lane.py down` is the disposal path).
+⛔ **What that pin is, stated exactly, because the earlier cut of this paragraph overclaimed it**
+(#13126 review Finding 1). It is a **composition** check: the artifact's block and the instrument's
+constant are the same values, so an edit to one that stales the other reds the suite. It is **not**
+provenance evidence, and neither is `provenance.tool_sha256`: the digest is hand-updated whenever
+`tools/window_quality_m2.py` changes, so it names the **current** bytes and never the bytes that
+produced these numbers, and the `reproducibility` block (3 runs, 0.33 / 1.0 / 9.85 pp) is a
+hand-maintained constant whose three source runs are **not** committed. Nothing in this bundle lets a
+reader re-derive the band; re-running the instrument is what reproduces it, which is what the section
+above asks a reader to do. The pin's job is to keep the two hand-maintained copies agreeing — a drift
+control — and the record says so rather than calling it a check on the instrument's bytes.
+
+The artifact also carries `provenance.tool_sha256` (that drift control on the instrument's current
+bytes, not an attestation by the producing run), `corpus.point_build` (the `:Point` population's own
+drop funnel — see "What was measured"), and a `cleanup` block that declares how many graphs a run
+leaves behind (they are **not** dropped; on a lane container `test_lane.py down` is the disposal path).
