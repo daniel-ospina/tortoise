@@ -9049,6 +9049,10 @@ surfaces:
   # of silently scoring with another row type's signals. Selects `ep` because the change is in
   # `tortoise/ranking.py` (a named-surface match replaces the `core` fallback, #2938/#7951).
   - test_12184_ranker_entity_signals.py
+  # #12184 R4 routing pin (review FINDING 2): `StateRanker` dispatches EVERY
+  # entity label to the entity read — no graph, no Docker, so the mutant
+  # (`if et != "object": family = "point"`) cannot hide behind a skip.
+  - test_12184_state_ranker_routing.py
   # #11702: the ABSENCE/PRESENCE contract — an absent belief is `null` + ep_state "absent", never the
   # neutral 0.5, and it never orders against a measured one. Dual-registered with `core` because the
   # surfaces it pins split across two SOURCE_PATTERNS: `tortoise/ranking.py` and `tortoise/analyze.py`
