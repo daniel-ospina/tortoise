@@ -1822,8 +1822,14 @@ def derived_embedding_columns(
 
     ⛔ AND WHAT THIS DOES **NOT** REACH: a `record_projection.replay()` that is
     passed no ``derived`` — `tools/record_runner.py`'s fold is the live example —
-    derives nothing, so it lands `embedding` NULL on every row it folds. The gap
-    is stated in this PR's migration header, not repaired here.
+    derives nothing, so every row it CREATES lands `embedding` NULL. ⚠️ NOT
+    "every row it folds", which an earlier cut said: `embedding` is absent from
+    the node UPSERT's column list AND from `ON CONFLICT … DO UPDATE SET` (both
+    name only the BOUND columns), so a row that already HAS a vector keeps it
+    through a no-derived re-fold (measured: `payload_SURVIVED=t vec_SURVIVED=t`).
+    The scope matters — it is the difference between "the backfill mints blank
+    rows" and "the backfill wipes the population". The long form, with the
+    measurement, is in this PR's migration header; the gap is not repaired here.
 
     Anything that cannot be derived returns NO columns: an uninstalled embedder
     (`compute_embeddings` answers `None`, #4280), an encode that raised, blank

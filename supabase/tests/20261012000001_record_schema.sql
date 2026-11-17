@@ -108,8 +108,11 @@ SELECT tests.assert(
 -- assertions need pgvector (the column/index existence pair) and are the two
 -- inside the guard; the third — the props-CHECK refusal — needs none and is
 -- deliberately OUTSIDE it, which is why it is green in this drill regardless.
--- Those two are RED in the only harness that runs them and absent
--- everywhere else — a false RED here, and no coverage gained anywhere.
+-- WITHOUT the guard those two are RED here and absent everywhere else — a false
+-- RED, and no coverage gained anywhere. (WITH it they do not execute on this
+-- harness at all: the `DO` block returns at the `to_regprocedure` test below.
+-- Neither state is a pass — which is why the coverage statement two paragraphs
+-- down names where the real proof lives.)
 --
 -- ⛔ THE GUARD IS SILENT ON PGlite, AND SAYING OTHERWISE WOULD BE FALSE. An
 -- earlier cut of this comment claimed the `NOTICE` below makes the absence

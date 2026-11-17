@@ -1888,12 +1888,26 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
     # (this PR's own header does), so the name's last textual occurrence is not a
     # definition. Match the DDL form only — `ADD CONSTRAINT <name> CHECK` or a
     # bare `CONSTRAINT <name> CHECK` — and read the LAST one.
-    text = "\n".join(p.read_text(encoding="utf-8") for p in MIGRATIONS)
-    definitions = re.findall(
-        rf"(?:ADD\s+)?CONSTRAINT\s+chk_{table}_props_no_derived\s+CHECK\b(.{{0,400}})",
-        text, re.S | re.I)
+    #
+    # ⛔ AND READ IT FROM THE WHOLE MIGRATIONS DIRECTORY, not this file's
+    # `MIGRATIONS` tuple. That tuple is the read set `parse_sql_columns()` uses for
+    # its COLUMN census, and it is hand-maintained — it does NOT list
+    # `20261014000001_record_subject_props_no_derived.sql`, which holds the
+    # IN-FORCE `chk_subject_props_no_derived` (`ARRAY['embedding','status']`). A
+    # first cut of this assertion read the tuple and therefore read the STALE
+    # Oct-12 declaration (`ARRAY['embedding']`) while reporting that it had read
+    # "the LAST" one — a pin structurally unable to see the re-declaration it
+    # exists to catch, since append-only history means every future re-declaration
+    # is a NEW FILE too. The directory read is the same rule the sibling
+    # `test_relation_is_never_a_bare_id` documents for the same reason.
+    definitions: list[str] = []
+    for path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+        definitions.extend(re.findall(
+            rf"(?:ADD\s+)?CONSTRAINT\s+chk_{table}_props_no_derived\s+CHECK\b(.{{0,400}})",
+            path.read_text(encoding="utf-8"), re.S | re.I))
     assert definitions, (
-        f"chk_{table}_props_no_derived has no DDL definition — the props ban has no home")
+        f"chk_{table}_props_no_derived has no DDL definition anywhere under "
+        f"{_MIGRATIONS_DIR.relative_to(REPO_ROOT)} — the props ban has no home")
     assert f"'{col}'" in definitions[-1], (
         f"the LAST re-declaration of chk_{table}_props_no_derived no longer names "
         f"'{col}' — a later migration re-opened the name even though the column now "

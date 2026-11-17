@@ -94,9 +94,22 @@
 --     the graph fold's `_upsert_object`/`_upsert_subject` (both on the JOURNAL
 --     fold) and this change's `record_writer.derived_embedding_columns` (the
 --     LIVE write seam, whose only caller is `RecordWriter.write`); the work is
---     to thread `derived=` from `record_restore`/`rebuild_from_record` into
---     `replay` — and through `tools/record_runner.py`'s fold — REUSING that
---     encoder rather than writing a second one;
+--     to REUSE that encoder rather than write a second one.
+--
+--     ⛔ AND THE SEAM IS NOT `replay`, which an earlier cut of this paragraph
+--     named because it is the fold that is easy to think of. The restore path
+--     never calls it: `record_restore` → `rebuild_from_record` builds its plan
+--     with `record_plan(nodes, relations)` (`projection/__init__.py`; its inputs
+--     are the READ rows) and `record_plan` (`cache_projection.py`) takes neither
+--     records nor `derived`. `replay`'s only production call sites
+--     at this head are `tortoise/record_writer.py` (the live seam) and
+--     `tools/record_runner.py:769` (no `derived=`), neither of which is on the
+--     restore path. The recompute therefore belongs where the vector is actually
+--     DROPPED — the record→node read, `node_from_row` / `_props_from_row`, which
+--     is the function `refused_props_names()` makes drop `embedding`; and the
+--     separate `record_runner` half IS a `replay` threading job. Two seams, two
+--     different edits — naming only `replay` sends the next lane to a function
+--     the restore never reaches.
 --   * `embedding_vec` stays GENERATED, so "the indexed vector disagrees with the
 --     stored payload" is not a reachable state (the same property
 --     `20261109000001` took for point/source/event).
