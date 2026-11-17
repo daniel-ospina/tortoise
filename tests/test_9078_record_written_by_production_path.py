@@ -64,6 +64,7 @@ import json
 import logging
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -2796,9 +2797,13 @@ def test_a_parked_handle_whose_backend_died_costs_a_reconnect_not_a_record(
     real projection, real counter. It runs in the `test-record-postgres` job.
 
     FALSIFIER, and the mutant that was OBSERVED to red it: delete the
-    `_peer_went_away` arm from `record_writer._connection_is_reusable` and the
+    `_socket_has_pending_input`/`_verify_pending_input` pair from
+    `record_writer._take_idle_connection` and the
     second write comes back `REFUSED/'write_failed'` with one row instead of
-    two, and `record_write_failures` moves by one.
+    two, and `record_write_failures` moves by one. The leg asserts its own
+    premise first (the corpse is still invisible to `closed` /
+    `transaction_status`) so that revert cannot be masked by the kill happening
+    to land where the old predicate can see it.
     """
     conn = _record_db()
     try:
@@ -2839,20 +2844,39 @@ def test_a_parked_handle_whose_backend_died_costs_a_reconnect_not_a_record(
         # ⚠️ THE KILL IS SERVER-SIDE AND THE EOF IS NOT: `pg_terminate_backend`
         # returns before the FIN reaches this client, and a probe run 1 ms later
         # would correctly see a socket that has not been told yet (measured:
-        # the assertion below reds without this wait). In the production case
+        # the assertions below red without this wait). In the production case
         # worth fixing the peer went away seconds-to-minutes earlier, so the
-        # wait is a TEST settling a race, not a property of the fix. Waited on
-        # the module's OWN probe, so the condition is exactly "what the next
-        # borrow would see" and the failure is named rather than timed out.
+        # wait is a TEST settling a race, not a property of the fix.
+        #
+        # ⛔ THIS WAIT MUST NOT CALL THE CODE UNDER TEST (fresh-context review,
+        # P1). The first version waited on the module's own probe
+        # — which DRAINS the socket with `poll()`, and psycopg2's `poll()` can
+        # leave the handle reporting `closed=2 / transaction_status=4`. The
+        # pre-fix arms of `_connection_is_reusable` then discard the corpse on
+        # their own, so the leg PASSED with the fix removed (measured by the
+        # reviewer: 1 passed on four consecutive runs) while claiming to be the
+        # falsifier for that exact revert. `select` on the fd is the same
+        # readiness fact with no side effect, so the mutant is measured against
+        # the real predicate.
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
-            if record_writer._peer_went_away(parked):
+            if select.select([parked.fileno()], [], [], 0)[0]:
                 break
             time.sleep(0.02)
         else:
             pytest.fail(
                 "this leg's socket never reported the peer as gone, so the kill "
                 "did not reach the client and nothing was measured")
+        # ⛔ AND THE LEG ASSERTS ITS OWN PREMISE: the death must be INVISIBLE to
+        # the two fields the pre-fix predicate trusted, or a pre-fix tree would
+        # discard the corpse for a reason that has nothing to do with this fix
+        # and this leg would pass on it. An empty population is not a green
+        # measurement (DoD rule 1) — a premise that is not true is not a test.
+        assert parked.closed == 0 and parked.info.transaction_status == 0, (
+            "this corpse is already visible to `closed`/`transaction_status` "
+            f"({parked.closed}, {parked.info.transaction_status}), so a tree "
+            "WITHOUT the socket probe would discard it anyway — this leg cannot "
+            "discriminate on this database")
 
         second = record_writer.write_live_record(
             session_record("b"), seq=2, tenant=tenant)

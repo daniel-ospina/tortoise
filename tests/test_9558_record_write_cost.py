@@ -110,30 +110,57 @@ class FakeStatusConnection(FakeConnection):
 class SocketFakeStatusConnection(FakeStatusConnection):
     """`FakeStatusConnection` with a REAL socket behind `fileno()`.
 
-    The borrow-time liveness probe asks the OS about the handle's SOCKET, so its
-    pin cannot use a handle with no socket to ask (`_peer_went_away` answers
-    "not known to be gone" for those, on purpose — the probe may only ever ADD a
-    discard). A `socketpair` gives the probe a real fd whose readability the
-    TEST controls, and it is the same signal a real terminated backend
-    produces: measured against PG16 + psycopg2 2.9.13, a parked handle whose
-    backend was killed still reports `closed=0, transaction_status=IDLE` (both
-    STALE) and its fd is the only thing that knows.
+    The borrow path asks the OS about the handle's SOCKET, so its pin cannot use
+    a handle with no socket to ask (`_socket_has_pending_input` answers False for
+    those, on purpose — it may only ever ADD a verification). A `socketpair` gives
+    it a real fd whose readability the TEST controls, in both of the ways a real
+    connection can become readable:
 
-    `poll()` is the drain the probe runs before deciding; psycopg2's is a no-op
-    for a synchronous handle (measured), so this one is too.
+    * `peer_alive=False` closes the peer — the input a terminated backend leaves
+      behind. Measured against PG16 + psycopg2 2.9.13: a parked handle whose
+      backend was killed still reports `closed=0, transaction_status=IDLE` (both
+      STALE), and its fd is the only thing that knows. ⚠️ It is NOT an empty read
+      either: PostgreSQL sends a FATAL ErrorResponse before the FIN, so the byte
+      pending on a dead connection is `'E'`, which is why the borrow asks the
+      SERVER rather than sniffing the protocol at it.
+    * `pending_input(b"…")` writes bytes the client has not consumed — the shape
+      a `LISTEN`ing session's socket takes when another session `NOTIFY`s it.
+      Measured: such a handle is READABLE while parked
+      (`closed=0, transaction_status=IDLE`) and its next statement still works,
+      so a borrow that treated readability as death would discard a HEALTHY
+      handle on every occurrence.
+
+    `cursor()` therefore raises once the peer is gone, exactly as the driver does
+    on a dead connection, and `commands` records what the verification asked so a
+    pin can require (or forbid) a round trip.
     """
 
     def __init__(self, status: int = IDLE, *, peer_alive: bool = True) -> None:
         super().__init__(status)
         self._ours, self._peer = socket.socketpair()
+        self.peer_alive = peer_alive
+        self.commands: list[str] = []
         if not peer_alive:
-            self._peer.close()      # FIN -> this end becomes readable (EOF)
+            self._peer.close()      # FIN -> this end becomes readable
+
+    def pending_input(self, payload: bytes) -> None:
+        """Make this handle readable WITHOUT ending its peer (a notification)."""
+        self._peer.send(payload)
 
     def fileno(self) -> int:
         return self._ours.fileno()
 
-    def poll(self) -> None:         # pragma: no cover - the drain, not the probe
-        return None
+    def cursor(self) -> FakeCursor:
+        if not self.peer_alive:
+            raise RuntimeError(
+                "server closed the connection unexpectedly")   # the driver's
+        self.commands.append("cursor()")
+        return super().cursor()
+
+    def rollback(self) -> None:
+        if not self.peer_alive:
+            raise RuntimeError("server closed the connection unexpectedly")
+        super().rollback()
 
     def close(self) -> None:
         super().close()
@@ -760,13 +787,12 @@ def test_a_dead_candidate_is_skipped_and_a_live_one_in_the_bucket_is_used():
 def test_an_idle_handle_whose_peer_hung_up_is_discarded_at_borrow(monkeypatch):
     """The IDLE park's hole: a dead handle must cost a RECONNECT, not a record.
 
-    Both halves of :func:`record_writer._connection_is_reusable` are client-side
-    caches, and psycopg2 only refreshes them when a statement touches the
-    socket. The READ door parks INTRANS, so its borrow-time rollback IS that
-    touch and the death is found (`test_a_handle_that_dies_while_idle_is_discarded_at_borrow`).
-    The WRITE door parks IDLE, where the rollback is a no-op — so before
-    :func:`record_writer._peer_went_away` the corpse was lent to the door, its
-    first statement (`_apply_tenant_scope`'s `TENANT_GUC_SQL`) raised
+    Both fields `_connection_is_reusable` reads are client-side caches, and
+    psycopg2 only refreshes them when a statement touches the socket. The READ
+    door parks INTRANS, so its borrow-time rollback IS that touch and the death is
+    found (`test_a_handle_that_dies_while_idle_is_discarded_at_borrow`). The WRITE
+    door parks IDLE, where the rollback is a no-op — so before this work the
+    corpse was lent to the door, its first statement raised
     ``OperationalError: server closed the connection unexpectedly``, and the
     record was LOST and counted ``write_failed``.
 
@@ -775,9 +801,12 @@ def test_an_idle_handle_whose_peer_hung_up_is_discarded_at_borrow(monkeypatch):
     production shape behind #12822's counter (8 lost / 1292 attempts, ~0.6 %,
     whose 300 s window is what flips `record.degraded`).
 
-    FALSIFIER: delete the `_peer_went_away` arm from `_connection_is_reusable`
-    and this reds on all three assertions — the corpse is handed out, the fresh
-    connect never happens, and the caller inherits the dead handle.
+    FALSIFIER: delete the `_socket_has_pending_input` /
+    `_verify_pending_input` pair from `_take_idle_connection` and this reds on
+    the FIRST assertion (the corpse is handed out). Since that ends the test, the
+    other two are covered by
+    `test_a_discarded_candidate_is_replaced_by_a_fresh_connect` (exactly one
+    fresh connect) and by the close-is-called assertion here.
     """
     made = _fake_driver(monkeypatch)
     corpse = SocketFakeStatusConnection(IDLE, peer_alive=False)
@@ -795,48 +824,62 @@ def test_an_idle_handle_whose_peer_hung_up_is_discarded_at_borrow(monkeypatch):
         "one fresh connect")
 
 
-def test_an_idle_handle_whose_socket_is_quiet_is_still_reused():
-    """The other direction: the probe must not discard a HEALTHY parked handle.
+def test_an_idle_handle_whose_socket_is_quiet_is_reused_with_no_round_trip():
+    """The normal case pays 1.7 µs and NOTHING else — no statement, no round trip.
 
-    A probe that answered "dead" too eagerly would be worse than the bug it
-    fixes — it would disable pooling (a connect per record, the 12.5–13.9 ms
-    #9558 removed) while every existing pin still passed, because those pins
-    park handles with no socket at all. This is the pin that keeps the probe a
-    real QUESTION about the peer rather than a constant.
+    A borrow that verified every handle with a health query would reintroduce the
+    per-record round trip #9558 removed (12.5–13.9 ms of connect + auth per
+    record). The verification is gated on the readiness read precisely so it is
+    paid once per EVENT (a death, a notification) instead of once per record.
 
-    FALSIFIER: make `_peer_went_away` return True unconditionally and this reds
-    on the reuse (the handle is closed instead of lent).
+    FALSIFIER: make `_take_idle_connection` verify unconditionally (drop the
+    `_socket_has_pending_input` guard) and `commands` is no longer empty here.
     """
     live = SocketFakeStatusConnection(IDLE)
     rw._park_connection(_DSN_KEY, live)
     assert rw._take_idle_connection(_DSN) is live, (
-        "a live parked handle with a quiet socket was dropped — the probe "
-        "discards healthy connections, which silently disables the pool")
+        "a live parked handle with a quiet socket was dropped — the readiness "
+        "read discards healthy connections, which silently disables the pool")
     assert live.closed == 0
+    assert live.commands == [], (
+        "a borrow of a QUIET handle issued a statement — that is a server round "
+        "trip on every write borrow, the cost #9558 removed")
 
 
-def test_the_borrow_probe_asks_the_socket_and_not_the_server():
-    """The probe must stay LOCAL — a health query per borrow is the regression.
+def test_a_readable_handle_is_verified_by_the_server_and_kept():
+    """Readable is not dead: the server gets ONE question, and a healthy handle stays.
 
-    The pool deliberately does not poke the server on acquire (a round trip per
-    record is what #9558 deleted), so the liveness answer has to come off the
-    socket. This pins the MECHANISM rather than a wall-clock figure (a timing
-    assertion rots into a pass): if a future probe is implemented as `SELECT 1`,
-    the handle records a statement and this reds, whatever the millisecond cost.
+    A session that `LISTEN`s a channel another session `NOTIFY`s is READABLE while
+    parked (measured on PG16 + psycopg2 2.9.13: `closed=0`,
+    `transaction_status=IDLE`, and its next statement still works). A local read
+    cannot tell that from a peer that hung up — PostgreSQL's shutdown sends a
+    FATAL ErrorResponse, so the pending byte on a dead connection is `'E'`, not
+    EOF — so the borrow asks the server, drains the notification that way, and
+    leaves the handle parked exactly as it found it.
 
-    FALSIFIER: make `_connection_is_reusable` prove the handle with an executed
-    `SELECT 1` (or any cursor work) and `executed`/`rollbacks` are no longer
-    empty here.
+    Without the verification half, this healthy handle is discarded on every
+    occurrence: one fresh connect per record, which is the failure the previous
+    pin's docstring calls worse than the bug being fixed.
+
+    FALSIFIER: return the candidate as soon as the socket reads readable (drop
+    `_verify_pending_input`, or make it always return True without asking) and
+    the FIRST assertion reds — the handle is closed, not lent.
     """
-    quiet = SocketFakeStatusConnection(IDLE)
-    gone = SocketFakeStatusConnection(IDLE, peer_alive=False)
-    assert rw._connection_is_reusable(quiet) is True
-    assert rw._connection_is_reusable(gone) is False
-    for handle in (quiet, gone):
-        assert handle.executed == [] and handle.rollbacks == 0, (
-            "the borrow-time liveness probe issued a statement — that is a "
-            "server round trip on EVERY write borrow, the cost #9558 removed")
-        assert handle.commits == 0
+    live = SocketFakeStatusConnection(IDLE)
+    live.pending_input(b"NOTIFY record, 'a peer spoke'")
+    rw._park_connection(_DSN_KEY, live)
+    assert rw._take_idle_connection(_DSN) is live, (
+        "a HEALTHY but readable handle was judged dead — pending input is "
+        "verified with the server first, so discarding here costs a reconnect "
+        "on every notification")
+    assert live.commands == ["cursor()"], (
+        "the borrow did not ask the server about a readable handle, so a pending "
+        f"notification and a dead peer are the same answer: {live.commands}")
+    assert live.rollbacks == 1, (
+        "the verification left the handle inside the transaction its probe "
+        "opened — the next borrower would inherit it")
+    assert live.executed and live.executed[-1][0] == rw.PENDING_INPUT_PROBE_SQL, (
+        f"the probe statement was not the declared one: {live.executed}")
 
 
 def test_a_discarded_candidate_is_replaced_by_a_fresh_connect(monkeypatch):

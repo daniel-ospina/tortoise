@@ -1168,36 +1168,42 @@ def _transaction_statuses() -> tuple[int, int]:
     )
 
 
-def _peer_went_away(conn: Any) -> bool:
-    """Did the SERVER hang up while this handle sat parked? **No round trip.**
+#: The ONE statement a borrowed handle is asked when its socket has input
+#: pending. Not a health check on every borrow — see
+#: :func:`_verify_pending_input` for why it is paid only in that window.
+PENDING_INPUT_PROBE_SQL = "SELECT 1"
 
-    The third question :func:`_connection_is_reusable` has to ask, and the one
-    the other two cannot answer. `closed` and `transaction_status` are
-    CLIENT-side caches: psycopg2 only learns that the peer is gone when a
-    statement touches the socket, so a handle parked while the server was alive
-    reports `closed == 0` and `transaction_status == IDLE` forever after it dies.
-    Measured on PG16 + psycopg2 2.9.13: after `pg_terminate_backend`, a parked
-    handle still reads `closed=0, transaction_status=0` — which is TRUTHY, so the
-    pool lent it out, the door's first statement raised
-    ``OperationalError: server closed the connection unexpectedly``, and one
-    record was lost and counted ``write_failed`` (#12822's production counter).
 
-    A handle parked IDLE has nothing outstanding: psycopg2 consumes the whole
-    reply — including notices — before the caller sees the result, so input that
-    arrives while nothing was asked can only be the peer ending the connection
-    (EOF, a reset, or a FATAL). This reads that readiness off the LOCAL socket
-    and does NOT send anything, which is why it is allowed here: the pool
-    deliberately does not poke the server on acquire (see :func:`_park_connection`).
+def _socket_has_pending_input(conn: Any) -> bool:
+    """Is there unread input on this handle's socket? **Locally, no round trip.**
 
-    Measured cost, 20 000 calls on an idle fd: **1.7 µs/call** — against the
-    12.5–13.9 ms connect this reuse exists to avoid.
+    The question `closed` and `transaction_status` cannot answer: both are
+    CLIENT-side caches, and psycopg2 only refreshes them when a statement touches
+    the socket. Measured on PG16 + psycopg2 2.9.13: a handle parked while its
+    backend was alive still reports `closed=0, transaction_status=IDLE` after
+    `pg_terminate_backend`, so the pool lent it out, the door's FIRST statement
+    raised ``OperationalError: server closed the connection unexpectedly``, and
+    one record was lost and counted ``write_failed`` (#12822's production
+    counter, ~0.6 % of writes on the hosted deployment).
+
+    A parked IDLE handle has nothing outstanding — psycopg2 consumes the whole
+    reply, notices included, before the caller sees a result — so unread input
+    means the peer spoke unasked, and only two things can have done that: it
+    ENDED the connection, or it SENT something (a `NOTIFY` to a session that
+    `LISTEN`s leaves a perfectly healthy handle readable). This function reports
+    only the readiness, because a local read cannot tell those two apart:
+    PostgreSQL's own shutdown sends a FATAL ErrorResponse before the FIN, so the
+    first byte pending on a dead connection is ``'E'``, not EOF (measured) —
+    sniffing it would be a second, silent copy of the wire format. The caller
+    asks the SERVER when this says yes (:func:`_verify_pending_input`).
 
     Anything this cannot ask — a fake handle with no `fileno`, a driver that is
-    not socket-backed, a platform where the fd is not selectable — is answered
-    ``False`` ("not known to be gone"), so the probe can only ever ADD a discard
-    and never invent one. A readable socket is drained once with `poll()` first,
-    so a handle carrying a genuinely pending notice is kept rather than
-    discarded.
+    not socket-backed, an unselectable fd — is answered ``False`` ("nothing is
+    known to be pending"), so this can only ever ADD a verification and never
+    invent a discard.
+
+    Measured cost, 20 000 calls on an idle fd: **1.7 µs/call**, and it sends
+    nothing.
     """
     try:
         fileno = conn.fileno()
@@ -1209,39 +1215,68 @@ def _peer_went_away(conn: Any) -> bool:
         readable, _, _ = select.select([fileno], [], [], 0)
     except Exception:
         return False
-    if not readable:
-        return False
-    # Readable on an idle handle. Drain first: psycopg2 delivers pending input
-    # (a notice, a parameter change) here, and only a peer that has GONE stays
-    # readable after the drain — measured: still readable after `poll()` for a
-    # terminated backend, and not readable at all for a live one carrying an
-    # unconsumed NOTIFY.
-    with contextlib.suppress(Exception):
-        conn.poll()
-    try:
-        readable, _, _ = select.select([fileno], [], [], 0)
-    except Exception:
-        return True
     return bool(readable)
+
+
+def _verify_pending_input(conn: Any) -> bool:
+    """Ask the server, ONCE, whether a handle with pending input is still usable.
+
+    ⛔ THE ROUND TRIP IS PAID ONLY IN THIS WINDOW, and that placement is the whole
+    design. A parked handle normally has a quiet socket, so the common borrow path
+    pays 1.7 µs and nothing else; this runs only when the readiness read found
+    input, which happens once per peer death and once per notification. That is
+    what makes it affordable to be CERTAIN: the alternative the module rejected
+    ("a health query per acquire … a round trip on every record") is exactly the
+    cost this avoids.
+
+    What it does on a HEALTHY handle is answer the pending input and leave the
+    handle as it was parked: the probe statement consumes whatever the peer sent,
+    and the `rollback()` clears the transaction the probe opened, so a NOTIFY that
+    a `LISTEN`ing session is entitled to stays delivered (measured: the
+    notification is still in `conn.notifies`) and the next borrower's transaction
+    starts clean. A statement that fails — the connection is gone, however the
+    driver words it — returns ``False`` and the caller DISCARDS the handle: the
+    next record gets a fresh connect instead of inheriting a corpse.
+
+    ⚠️ The rollback is the same round trip, not a second one: psycopg2's
+    `rollback()` on a connection with no open transaction sends nothing.
+    """
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(PENDING_INPUT_PROBE_SQL)
+            cursor.fetchone()
+        finally:
+            with contextlib.suppress(Exception):
+                cursor.close()
+        conn.rollback()
+        return True
+    except Exception:
+        return False
 
 
 def _connection_is_reusable(conn: Any) -> bool:
     """Is this idle handle still attached to a live server connection?
 
-    Three questions, all cheap and all LOCAL: `closed` (psycopg2 noticed),
+    Two questions, both cheap and both LOCAL: `closed` (psycopg2 noticed) and
     `transaction_status == UNKNOWN` (psycopg2 has not, but the protocol says the
-    link is gone), and :func:`_peer_went_away` (neither cache has been touched
-    since the peer hung up, which is the IDLE park's standing state). None of
-    them touches the network — see :func:`_park_connection` for why the pool does
-    not poke the server on every acquire.
+    link is gone). Neither touches the network — see :func:`_park_connection` for
+    why the pool does not poke the server on every acquire.
+
+    ⛔ IT IS DELIBERATELY NOT THE WHOLE ANSWER ON THE BORROW PATH. Both fields are
+    client-side caches that psycopg2 refreshes only when a statement touches the
+    socket, so a handle parked IDLE whose peer died passes this and is a CORPSE
+    (#12822). :func:`_take_idle_connection` therefore follows it with
+    :func:`_socket_has_pending_input` + :func:`_verify_pending_input`, which ask
+    the socket and then — only if there is anything to ask about — the server.
+    The split matters at RELEASE (`_park_connection`), where a round trip is
+    forbidden: there the two local fields are all that may be paid.
 
     A handle that cannot even report its status — or a process where the driver
     cannot be imported — is NOT reusable, which fails towards the old
     close-per-record behaviour rather than towards reusing something unverified.
     """
     if conn is None or conn.closed:
-        return False
-    if _peer_went_away(conn):
         return False
     try:
         _idle, unknown = _transaction_statuses()
@@ -1285,11 +1320,21 @@ def _take_idle_connection(dsn: str) -> Any | None:
     be reset — is DISCARDED here rather than returned, so one record pays for a
     server restart and the next acquire connects fresh.
 
-    Every blocking step (the reset, and the discard's Terminate packet) happens
-    OUTSIDE the lock, one candidate at a time: `close()` is a socket write that
-    can block on a full send buffer, and holding the pool lock across it would
-    stall every other borrower and every release for that DSN behind one dead
-    handle.
+    ⛔ THE IDLE CASE IS THE ONE THAT LOST RECORDS (#12822). `closed` and
+    `transaction_status` cannot see a peer that hung up while the handle was
+    parked, so the borrow also reads the SOCKET (:func:`_socket_has_pending_input`,
+    1.7 µs, no I/O) and, only when something is pending, asks the SERVER once
+    (:func:`_verify_pending_input`). Quiet socket ⇒ no round trip; pending input
+    ⇒ one round trip, which is either a death found or a notification delivered
+    to a handle that then stays in service. Paying the round trip on EVERY borrow
+    instead would be the "health query per acquire" this module rejected, and
+    skipping it is what let a corpse through.
+
+    Every blocking step (the verification, the reset, and the discard's Terminate
+    packet) happens OUTSIDE the lock, one candidate at a time: `close()` is a
+    socket write that can block on a full send buffer, and holding the pool lock
+    across it would stall every other borrower and every release for that DSN
+    behind one dead handle.
     """
     key = _pool_key(dsn)
     while True:
@@ -1299,6 +1344,14 @@ def _take_idle_connection(dsn: str) -> Any | None:
         if candidate is None:
             return None
         if _connection_is_reusable(candidate):
+            # A quiet socket is the normal case and costs nothing beyond the
+            # readiness read; pending input means the peer spoke, and only the
+            # server can say whether it spoke to end us or to notify us.
+            if _socket_has_pending_input(candidate) and not \
+                    _verify_pending_input(candidate):
+                with contextlib.suppress(Exception):
+                    candidate.close()
+                continue
             try:
                 _reset_parked_transaction(candidate)
             except Exception:
@@ -1544,14 +1597,15 @@ def _park_connection(key: str, conn: Any) -> None:
 
     * the WRITE door's happy path parks IDLE, so nothing here touches its socket
       and the reset below is a no-op for it. That door used to find the death at
-      USE — one lost record per dead handle, counted ``write_failed`` and
-      healed by replay, with the breaker correctly not tripped because the
-      record is reachable. ⛔ THE POOL NO LONGER ACCEPTS THAT COST: measured in
-      production at 8 lost writes / 1292 attempts (~0.6 %) for one hosted
-      deployment, the `write_failed` counter is what flipped `record.degraded`
-      to true. :func:`_peer_went_away` now proves the socket at BORROW instead,
-      so the dead handle is discarded before the door opens and the record is
-      WRITTEN on a fresh connect rather than lost and replayed (#12822);
+      USE — one lost record per dead handle, counted ``write_failed`` and healed
+      by replay, with the breaker correctly not tripped because the record is
+      reachable. ⛔ THE POOL NO LONGER ACCEPTS THAT COST: measured in production
+      at 8 lost writes / 1292 attempts (~0.6 %) for one hosted deployment, the
+      `write_failed` counter is what flipped `record.degraded` to true. The
+      BORROW path now reads the socket and, when anything is pending, asks the
+      server once (:func:`_take_idle_connection`), so the dead handle is
+      discarded before the door opens and the record is WRITTEN on a fresh
+      connect rather than lost and replayed (#12822);
     * the READ door parks INTRANS, so ``_reset_parked_transaction`` touches the
       socket BEFORE the door opens and discards the handle — the fresh connect is
       then paid by the pool, not by the caller as a ``RecordUnavailable``.
@@ -2657,27 +2711,38 @@ def write_live_record(record: Mapping[str, Any], *,
     record — N records used to cost N × 10 s inside one ``capture_session`` call,
     which is a wedged capture, not a degraded one.
 
-    ⚠️ RESIDUAL, stated rather than implied: a connection parked in the pool
-    whose server went away is noticed at BORROW, not before, so a death that
-    lands between the borrow's socket probe and the first statement still costs
-    ONE ``write_failed`` record (healed by replay — the record's own repair
-    story). The handle is DISCARDED at that borrow (see `_peer_went_away`), so
-    the cost is one record per DEATH rather than one per following record.
+    ⚠️ RESIDUAL, stated rather than implied: the death is proven at BORROW, so
+    TWO windows remain, and neither is silent — both still count ONE
+    ``write_failed`` record (healed by replay, unless the graph is cut over):
+    a death that lands between the borrow and the first statement, and a peer
+    that VANISHES without closing (a partition, a blackholed route): a socket
+    that never learns of the death has no pending input to verify, so nothing
+    local can see it. The local probe decides the first window; only a round
+    trip on every borrow could decide the second, which is the price this door
+    still declines. The handle is DISCARDED the moment a death IS seen (see
+    :func:`_take_idle_connection`), so the cost is one record per DEATH rather
+    than one per following record.
 
     ⛔ THE PARAGRAPH THIS REPLACES ACCEPTED ONE LOST RECORD PER DEAD HANDLE, and
     its own reasoning was right about the option it considered: *"a health query
     per acquire would remove it entirely at the price of a round trip on every
     record, which is not worth it"*. The option it did NOT consider is the one
-    taken here — ask the LOCAL SOCKET (``select`` readiness, measured **1.7 µs**,
-    no round trip), which removes the loss without paying that price. The
+    taken here — read the LOCAL SOCKET first (``select`` readiness, measured
+    **1.7 µs**, no round trip) and ask the server ONCE only when that read finds
+    something pending, which is where the round trip belongs: it is then a
+    question about a specific handle, not a tax on every record. The
     measurement that made this worth doing: the hosted deployment lost 8 record
     writes out of 1292 attempts (~0.6 %) to this exact path, monotonically, and
     the ``write_failed`` counter is what flipped `record.degraded`; a pooler's
     idle timeout, a failover or an operator restart is enough to produce it,
     and on a CUT-OVER graph the enumerated replay that is supposed to heal it is
-    REFUSED (#12822). Reproduced end-to-end and pinned by
-    `tests/test_9078...::test_a_parked_handle_whose_backend_died_costs_a_reconnect_not_a_record`:
-    before, 18 lost writes / 400; after, 0 / 400.
+    REFUSED (#12822). The lane measurement: 400 writes with the parked backends
+    terminated from outside, **18 lost before this change and 0 after** (one
+    command, both runs). The PIN is narrower and says so: `tests/test_9078…::
+    test_a_parked_handle_whose_backend_died_costs_a_reconnect_not_a_record`
+    writes TWICE around a real `pg_terminate_backend` and asserts the second one
+    is APPLIED with both rows present and the counter unmoved — it proves the
+    mechanism, and it is not the source of the 400-write figures above.
 
     ``seq`` is the record's OWN journal position — what `EventLog.append`
     returned (#9190). It is a fact of the journal, never an allocator: the replay
