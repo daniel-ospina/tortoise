@@ -315,10 +315,10 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     Two further REFUSALS apply to an existing holder before any of that, and
     neither writes: a holder whose kind is not a plan (this call would retag it),
     and a plan whose position does not resolve (`_unresolvable_message`). And the
-    re-mention RESOLVE can refuse before a holder exists at all — both are
-    ``ValueError``s and both are recorded as R8 refusals by the resolver: a name
-    with two live carriers (``AmbiguousEntityName``), or exactly one live holder
-    that carries no id (``UnaddressableEntityName``).
+    re-mention RESOLVE can refuse before this function has a RESOLVED holder (an
+    id) — both are ``ValueError``s and both are recorded as R8 refusals by the
+    resolver: a name with two live carriers (``AmbiguousEntityName``), or exactly
+    one live holder that carries no id (``UnaddressableEntityName``).
     """
     from . import pipeline
 
@@ -490,11 +490,17 @@ def create_plan(sdk, name: str, *, title: str | None = None,
             # ⛔ WHAT MAKES THE MOVE UNAPPLIED IS THE STALE-TRANSITION GUARD, not
             # a same-target no-op: `pipeline.advance_stage` has NO "already at
             # this stage" guard (a move onto the current stage APPLIES and
-            # rewrites `pipelineStageSince`), so this arm is reached only when
-            # the observation's `at` precedes the record's `since`. The
-            # reachable population is therefore "a stale `at`", plus — since the
-            # positioned, bindable re-mention short-circuits above — the
+            # rewrites `pipelineStageSince`), so the ordinary way in is an
+            # observation whose `at` precedes the record's `since` — reached,
+            # since the positioned bindable re-mention short-circuits above, by a
             # BARE-SPELLING repair carrying one (#13100 review round 8).
+            # ⚠️ NOT the only way: this arm answers from the DECLARED pipeline
+            # (`plan_position`, which states that residual), while the move
+            # resolves through `effective_pipeline` — so a graph override that
+            # retires `scheduled` (`set_default_stage` + `retire_stage`) makes the
+            # move `unknown-stage` on a fresh `at` while this read still sees
+            # `scheduled`/active, and this arm returns the node (#13100 review
+            # round 9).
             return node
         if pos["unresolvable"]:
             # The stored position cannot be validated, so NO stage move could be.
