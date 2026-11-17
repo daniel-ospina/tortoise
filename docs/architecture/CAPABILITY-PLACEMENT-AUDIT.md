@@ -457,9 +457,13 @@ changes nothing.
   Phase 1/2 behind a differential harness.
 - **It arms nothing** — no cap (`#13084`), no retention, no eviction.
 - **It bounds nothing.** `journal_event` is untouched (`#9025`), and no per-graph cap or node-count rule is
-  introduced (`#11758`): this is *what may be resident*, never how many graphs or nodes a tenant may have.
-- **It does not delete.** No product code changed in this slice, so nothing was removed from any graph; the
-  destructive leg remains `#10017`'s tooling.
+  introduced (`#11758`: the price of record is a share of STORAGE, not a node count): this is *what may be
+  resident*, never how many graphs or nodes a tenant may have.
+- **It does not delete.** No product code changed in this slice, so nothing was removed from any graph. ⚠️ The
+  destructive leg is **not** available to cite: `#10017` ("purge the pre-`#10000` turn nodes") was closed
+  **`NOT_PLANNED`** on 2026-11-06, so there is no shipped purge tooling to point at. The legacy copies this
+  document declines to fold-delete therefore remain, which is a *stronger* reason for the §5.1 refusal, not a
+  weaker one.
 - ⛔ **It is NOT a census of the whole database.** Row 17 of §1 lists the labels found but **not censused**
   (`:Pipeline`, the metering substrate, the tenancy/registry labels). Those get no reader census and no
   verdict here, and a placement decision on them must not be made from this document. That is a **gap**, not
