@@ -350,6 +350,16 @@ surfaces:
   # half is `test_record_serve_live.py`.
   - test_record_serve.py
   - test_12941_read_your_writes.py    # #12941: dual: core
+  # #13110: the `goalState` doors — REST `/v1/objects` + `/v1/points`, the MCP
+  # `tortoise_create_{object,entity,point}` declarations, and the one SDK guard
+  # (`sdk.validate_goal_state`) all three call. DUAL-REGISTERED with `core` for
+  # the reason `test_12941_read_your_writes.py` above gives, measured here too:
+  # `--changed-files tortoise/hosted_api.py` selects `api`+`onboarding` and this
+  # file was ABSENT, so a hosted-API-only regression of exactly this fix would
+  # not run its own test. The `core` arm covers the `mcp_server.py`/`sdk.py`
+  # subjects and the `config/surface-manifest.yml` diff (no SOURCE_PATTERN).
+  # Hermetic apart from the throwaway EMBEDDED engine under `tmp_path`.
+  - test_13110_goalstate_doors.py    # #13110: dual: core
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -2505,6 +2515,15 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
+  # #13110: the `goalState` doors (REST `/v1/objects` + `/v1/points`, MCP
+  # `tortoise_create_{object,entity,point}`, and the one SDK guard behind them).
+  # DUAL-REGISTERED with `api` for the reason the two rows above give: the REST
+  # half lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
+  # that REPLACES the `core` fallback — measured, `--changed-files
+  # tortoise/hosted_api.py` selects `api` and this file was ABSENT from it, i.e.
+  # a hosted-API-only regression of this very fix would not run its own test.
+  # `core` covers the `mcp_server.py`/`sdk.py` subjects and the surface-manifest
+  # diff (neither is claimed by a SOURCE_PATTERN).
   - test_13110_goalstate_doors.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`

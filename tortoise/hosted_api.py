@@ -13564,19 +13564,16 @@ async def create_object(body: CreateObjectRequest, request: Request,
             props["status"] = body.status
         if _okind is not None:
             props["objectKind"] = _okind
-        # #13110: forward ``goalState`` only when the caller NAMED the field.
-        # `model_fields_set` is what makes that distinction, and it is
-        # load-bearing in BOTH directions:
-        #   * ABSENT on an idempotent re-create (this door is MERGE-by-name) must
-        #     not be forwarded at all — a forwarded default here would wipe a
-        #     stored achievement state on every repeat call, which is the #9572
-        #     clobber class documented on `objectKind` above;
-        #   * an EXPLICIT ``null`` is a named value and IS forwarded: the SDK's
-        #     fold treats it as "no achievement state" on create (measured — it
-        #     preserves rather than clearing) and as a CLEAR on the update door.
-        # Passing it through unchanged is what keeps this door's semantics the
-        # SDK's, instead of inventing a second set here.
-        if "goalState" in body.model_fields_set:
+        # #13110: forward ``goalState`` only when the caller NAMED a value.
+        # ⛔ `is not None`, not `model_fields_set`: an explicit ``null`` must be
+        # treated EXACTLY like an absent field here, because this door MERGEs by
+        # name and a forwarded `None` reaches whichever fold the SDK takes —
+        # measured (#13110 review round 2), the POINTS door's dedup fold REMOVES
+        # the property on a `None` (`create_point` -> `update_point(pid, **props)`)
+        # while this one preserves it, so the two doors deleted vs kept the same
+        # request. One rule for both: a create door never clears, and
+        # `update_knowledge(…, goalState=None)` is the clear (as the test pins).
+        if body.goalState is not None:
             props["goalState"] = body.goalState
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
@@ -13691,11 +13688,14 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                 _author_props["authoredBy"] = body.authoredBy
             if body.credibility is not None:
                 _author_props["credibility"] = body.credibility
-            # #13110: `goalState` on the same rule as the objects door — only
-            # when the caller NAMED it, so a dedup hit that does not name the
-            # field cannot wipe a stored achievement state (the #9572 clobber
-            # class).
-            if "goalState" in body.model_fields_set:
+            # #13110: `goalState` on the same rule as the objects door — a value
+            # the caller NAMED, never a `None`. ⛔ This is not cosmetic here: with
+            # `dedup=True` this route folds onto the existing Point through
+            # `update_point`, where a forwarded `None` DELETES the property —
+            # measured on this branch, `{goalState: null, dedup: true}` wiped a
+            # stored `met` while the objects door preserved it. A create door does
+            # not clear; `update_knowledge` does.
+            if body.goalState is not None:
                 _author_props["goalState"] = body.goalState
             out = sdk.create_point(
                 content=body.content,

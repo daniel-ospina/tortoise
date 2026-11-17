@@ -247,17 +247,38 @@ def test_rest_points_door_persists_and_refuses_goal_state(tmp_path):
 
 def test_rest_points_re_create_without_the_field_does_not_wipe_it(tmp_path):
     """`dedup` folds onto the existing Point by content hash, so this door has
-    the same clobber exposure as the objects door."""
+    the same clobber exposure as the objects door — and `dedup` is passed
+    explicitly, because the default is False and a test that leaves it off
+    writes a SECOND node, which cannot detect a clobber at all.
+
+    The `null` leg is the one that actually measured a wipe (#13110 review round
+    2): with `dedup=True` the fold runs `update_point(pid, **props)`, where a
+    forwarded `None` DELETES the property while the objects door preserved it.
+    Both are pinned here so the two doors cannot diverge again.
+    """
+    content = "a goal whose state must survive a repeat write"
     with _graph(str(tmp_path / "rest-points-repeat.db")) as ha, _rest_client() as client:
         first = client.post("/v1/points", json={
-            "content": "a goal whose state must survive a repeat write",
-            "kind": "goal", "goalState": "met"})
+            "content": content, "kind": "goal", "goalState": "met",
+            "dedup": True})
         assert first.status_code == 200, first.text
+        node_id = first.json()["id"]
+        assert _stored(ha, node_id) == "met"
+
+        # ABSENT: same fold target (the id proves the fold happened at all).
         again = client.post("/v1/points", json={
-            "content": "a goal whose state must survive a repeat write",
-            "kind": "goal"})
+            "content": content, "kind": "goal", "dedup": True})
         assert again.status_code == 200, again.text
-        assert _stored(ha, first.json()["id"]) == "met"
+        assert again.json()["id"] == node_id, "dedup did not fold - test is vacuous"
+        assert _stored(ha, node_id) == "met"
+
+        # EXPLICIT NULL: accepted (never a 4xx) and must NOT erase.
+        nulled = client.post("/v1/points", json={
+            "content": content, "kind": "goal", "goalState": None,
+            "dedup": True})
+        assert nulled.status_code == 200, nulled.text
+        assert nulled.json()["id"] == node_id
+        assert _stored(ha, node_id) == "met"
 
 
 # ── Door 2 — MCP `tortoise_create_object` ───────────────────────────────────
