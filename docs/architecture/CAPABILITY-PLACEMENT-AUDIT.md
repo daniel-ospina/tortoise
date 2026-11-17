@@ -55,7 +55,7 @@ below it, with no symbol having changed. ⚠️ **That drift is already measurab
 unique `path.py:NNNN` pairs in this file after resolving **every** written path to the module it names
 (a bare `name.py:` is `tortoise/name.py` when that file exists, and the one file of that name
 otherwise — `edges.py` is `tortoise/projection/edges.py`, `propagation.py` is
-`tortoise/projection/propagation.py`), which dedupes the 228 as-written spellings to 212 — 16
+`tortoise/projection/propagation.py`; a range cite counts once, by its **start** line), which dedupes the 228 as-written spellings to 212 — 16
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
 text), and **none of
 the 212 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
@@ -79,8 +79,8 @@ file — `search_engine.py` FTS
 `:6830`; `sdk.py`'s second `capture_redactions` writer `:2705`; `audit.py`'s carrier probe `:2445`/`:2456`;
 and `mcp_server.py`'s `entity_type` passthrough `:5475` — and the drift figure
 above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so this revision moved it**:
-it contributes **14** resolved pairs, **8** of which drift — 98 (the `main` copy) + 8 = **106** — and every one of
-the 14 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
+it contributes **15** resolved pairs, **8** of which drift — 98 (the `main` copy) + 8 = **106** — and every one of
+the 15 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of §0) instead of enumerated here.
@@ -166,7 +166,7 @@ named, so nothing is hidden behind the omission.** Post-D10 a document **is** a 
 readers are that migration's own named-property read (`migrate_kinds.py:296-300`, `MATCH
 (n:{_LEGACY_DOCUMENT_LABEL}) RETURN ID(n), n.id, n.url, …` — capability **`none`**) and its pre-write re-scan of
 the same label joined to `:Source` (`migrate_kinds.py:310`, `MATCH (n:{_LEGACY_DOCUMENT_LABEL}:Source) RETURN ID(n)`, `_LEGACY_DOCUMENT_LABEL` = `"Document"` at `:89`) and the deprecated-alias
-acceptance at `projection/edges.py:2965-2966`; its only writer is the relabel itself (`migrate_kinds.py:430-437`,
+acceptance at `projection/edges.py:2965-2966`; its only writer is the relabel itself (`migrate_kinds.py:430-439`,
 `SET n:Source … REMOVE n:Document`) — `:297`/`:296-300` is its ENUMERATOR, a reader, named two sentences above and
 deliberately not repeated here as a writer. **No placement verdict is available on it**: the
 label is removed by the migration, so "what may be resident" is not a question that has an answer — the population
@@ -392,7 +392,7 @@ MIXED set, and precision here is the point — it is not one claim:
   `MERGE`/`SET` at `hosted_api.py:23661-23668`, a statement with no `:CommitRecord` in it; `machine_id`, `model`, `client_captured_at`,
   `client_captured_at_source` are named by the session-detail read (`sdk.py:52229-52251`), with
   `client_captured_at` also read inside a `SET` (`sdk.py:4018-4021`); **`draft_count` and `commit_count`**
-  are read inside the same commit-statement `SET` (`hosted_api.py:22237-22240`) — §1's reader rule, exactly
+  are read inside the same commit-statement `SET` (`hosted_api.py:22237-22240`) — §2's reader rule, exactly
   as `provenance_spans` is counted in §2.2, and an earlier revision of this paragraph omitted them.
 - **No shipped query NAMES it — but it IS read back as a WHOLE NODE:** `capture_redactions`. `sdk.py:2682` and
   `:2705` only WRITE it (`SET s.capture_redactions=$redactions`) and no product `RETURN`/`WHERE` names the
@@ -866,7 +866,8 @@ retrofit audit alone:
   the session LIST (`hosted_api.py:23958`, `:23959`, `:23965`, `:23969`), the retrofit audit
   (`session_schema.py:860-861`, `:916-917`) and the session-DETAIL point lookup (`sdk.py:52227-52251`);
   `harness`'s NAMED readers are the filter-and-counts at `hosted_api.py:25703`/`:25708` **plus two id-keyed
-  point lookups** (`:10132`, `:25822`).
+  point lookups** (`:10132`, `:25822`) — plus the three sibling projections named just above
+  (`hosted_api.py:23958`, `sdk.py:52229`, `session_schema.py:861`).
   Every one is a point lookup, a property guard or a sibling column — capability **`none`** — which is why
   the verdict is `record_only` on the CAPABILITY rule, never on the false premise "unread". Moving them is a
   **property-level** placement, which the row-level tier cannot express.
@@ -936,9 +937,9 @@ changes nothing.
   for this shape. The legacy copies this
   document declines to fold-delete therefore remain, which is a *stronger* reason for the §5.1 refusal, not a
   weaker one.
-- ⛔ **It is NOT a census of the whole database.** Row 18 of §1 lists the labels found but **not censused**
-  (`:Pipeline`, the metering substrate, the tenancy/registry labels — `:Organization` among them, and it is not
-  even in a tenant's graph — and the retired `:Document`). Those get **no §2-table census and no §3 verdict**
+- ⛔ **It is NOT a census of the whole database.** Row 18 of §1 lists the labels found but **carrying no §2
+  table row and no §3 verdict** (`:Pipeline`, the metering substrate, the tenancy/registry labels — `:Organization` among them, and it is not
+  even in a tenant's graph — and the retired `:Document`). Those get **no §2-table row and no §3 verdict**
   here, and a placement decision on them must not be made from this document. ⚠️ **The reading the `d` column
   must not be given**: a record table is a PRECONDITION (§5.3), never a verdict. ⚠️ **Precisely:** `:Organization`
 and `:Document` DO have their readers named at `file:line` — `:Document`'s at `migrate_kinds.py:296-300`
