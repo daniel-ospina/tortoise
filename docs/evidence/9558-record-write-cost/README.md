@@ -39,8 +39,9 @@ n      60 timed records after 5 warmup, per run
 `_migrations_fingerprint` pass and the rejected blake2b digest
 (`fingerprint_cost.py` re-takes both). The rest is re-runnable by a named command:
 the BEFORE-tree paragraph's counts are `git` (`rev-list --count`,
-`--shortstat`), and §"Falsifiers" censuses twelve mutations and twenty-four
-`FALSIFIER:` blocks over the file the tests name. Re-derive instead of trusting
+`--shortstat`), and §"Falsifiers" censuses fourteen mutations and the
+falsifier blocks carried by twenty-eight of the thirty-two pins in
+the file the tests name. Re-derive instead of trusting
 the prose.
 
 **The SEVEN items that are neither**, each named so a reader knows what to
@@ -397,10 +398,10 @@ substrate preamble on first use, seeds a tenant, and asserts every write is
 
 ## Falsifiers — what must make each claim red
 
-The mechanism half is pinned in `tests/test_9558_record_write_cost.py` (28
-tests: 7 for the schema cache, 16 for the pool, and 5 for the wrapper/park/
-read-door contracts the review cycles added). 24 of the 28 carry a recorded
-mutation: **23** under a literal `FALSIFIER:` block and one
+The mechanism half is pinned in `tests/test_9558_record_write_cost.py` (32
+tests: 7 for the schema cache, 21 for the pool, and 4 for the wrapper/park/
+read-door contracts the review cycles added). 28 of the 32 carry a recorded
+mutation: **27** under a literal `FALSIFIER:` block and one
 (`test_a_parked_transaction_is_reset_at_reuse_not_at_release`) stated as
 `FALSIFIER, both halves:`. The four with no block at all
 (`test_the_refused_props_map_also_reacts_to_an_edit`,
@@ -410,12 +411,13 @@ mutation: **23** under a literal `FALSIFIER:` block and one
 them. ⛔ They are not mutation-proof by nature — dropping `str(base)` from
 `_schema_entry`'s key reds the two-trees pin, and sharing the refused-props parse
 across fingerprints reds the refused-props pin — so the honest statement is "no
-falsifier was recorded for these four", not "no mutation exists". **Twelve were
-OBSERVED RED** by breaking the source, running only the named test, and restoring
-the file byte-identically (`/tmp/prove_falsifiers.py`, one pass; the ninth — the
-parked-handle bound — is from review cycle 4, and the three that follow it are
-from cycle 5, each re-measured the same way with the source restored
-byte-identically — sha256 re-checked after restore):
+falsifier was recorded for these four", not "no mutation exists". **Fourteen
+were OBSERVED RED** by breaking the source, running only the named test, and
+restoring the file byte-identically (`/tmp/prove_falsifiers.py`, one pass; the
+ninth — the parked-handle bound — is from review cycle 4, the three that follow
+it are from cycle 5, and the last two are #12822's own, each re-measured the
+same way with the source restored byte-identically — sha256 re-checked after
+restore):
 
 | Mutation applied | Test that must notice | Observed |
 |---|---|---|
@@ -431,6 +433,8 @@ byte-identically — sha256 re-checked after restore):
 | decide the bound by a substring of the whole `dsn` (the shape cycle 4 shipped) | `test_a_password_that_mentions_the_bound_does_not_disable_it` | **RED** |
 | drop the `operator_options` half of `already_bounded` | `test_an_operator_idle_timeout_in_their_options_is_not_replaced` | **RED** |
 | pass the bound without prefixing the operator's own `options` | `test_an_operators_other_startup_options_survive_the_bound` | **RED** |
+| remove the readiness/verification pair from `_take_idle_connection` (#12822) | `test_an_idle_handle_whose_peer_hung_up_is_discarded_at_borrow`, `test_a_readable_handle_is_verified_by_the_server_and_kept`, and the DB-armed leg in `tests/test_9078_…` (`REFUSED 'write_failed'`, one row not two) | **RED** |
+| put `select.select` back in the readiness probe (#12822) | `test_the_readiness_probe_has_no_fd_ceiling` | **RED** |
 
 ⚠️ Two mutations were tried first and reported **STILL-GREEN**. ONE was a
 defect in the mutant; the other was reporting a REAL gap in the pin (per bullet) —

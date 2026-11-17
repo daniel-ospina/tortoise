@@ -1201,11 +1201,14 @@ def _socket_has_pending_input(conn: Any) -> bool:
     not socket-backed, an fd the poller refuses — is answered ``False`` ("nothing
     is known to be pending").
 
-    ⛔ THE TWO DIRECTIONS ARE NOT SYMMETRIC, so both are named. A ``False`` answer
-    can only ever ADD a verification and never invent a discard — but it is also
-    SILENT about the check not happening, and on a long-lived API process that is
-    the normal case rather than an edge one: fds climb past 1023, and
-    ``select.select`` REFUSES an fd at or above ``FD_SETSIZE`` (measured:
+    ⛔ THE TWO DIRECTIONS ARE NOT SYMMETRIC, and this function's own caller makes
+    the difference load-bearing: ``True`` is what ADDS the verification
+    (``if _socket_has_pending_input(...) and not _verify_pending_input(...)``),
+    while ``False`` SKIPS it. ``False`` can never invent a discard — the caller
+    reads it as "nothing is known" — but skipping is exactly the fail-open this
+    module must not have quietly, and on a long-lived API process the case that
+    produces it is the normal one rather than an edge one: fds climb past 1023,
+    and ``select.select`` REFUSES an fd at or above ``FD_SETSIZE`` (measured:
     ``select.select([1060], ...)`` raises ``ValueError: filedescriptor out of
     range in select()``, whose ``except`` would have turned every borrow into
     "nothing pending" — the corpse lent unchanged and #12822 open again, with no
@@ -1214,8 +1217,9 @@ def _socket_has_pending_input(conn: Any) -> bool:
     consumes no byte. Where ``poll`` does not exist (Windows) this answers
     ``False``: the pre-fix behaviour, never a wrong record.
 
-    Measured cost, 20 000 calls on an idle fd: **1.7 µs/call**, and it sends
-    nothing.
+    Measured cost, 20 000 calls on an idle fd: **~1–2 µs/call** (1.7 µs on the
+    host this was developed against, 0.9 µs on a reviewer's), and it sends
+    nothing. A single-digit-microsecond claim, not a portable constant.
     """
     try:
         fileno = conn.fileno()
@@ -1239,7 +1243,8 @@ def _verify_pending_input(conn: Any) -> bool:
 
     ⛔ THE ROUND TRIP IS PAID ONLY IN THIS WINDOW, and that placement is the whole
     design. A parked handle normally has a quiet socket, so the common borrow path
-    pays 1.7 µs and nothing else; this runs only when the readiness read found
+    pays single-digit microseconds and nothing else; this runs only when the
+    readiness read found
     input, which happens once per peer death and once per notification. That is
     what makes it affordable to be CERTAIN: the alternative the module rejected
     ("a health query per acquire … a round trip on every record") is exactly the
@@ -1256,8 +1261,9 @@ def _verify_pending_input(conn: Any) -> bool:
 
     ⚠️ THE PAIR COSTS **TWO** ROUND TRIPS, and the honest price is stated rather than
     hidden: the probe's own statement, then the `rollback()` that clears the
-    transaction it opened (measured on the shipped driver: 427–461 µs for the
-    pair, against 0.9 µs for a `rollback()` on an already-IDLE handle). It is
+    transaction it opened (measured on the shipped driver: **0.43–1.3 ms** for the
+    pair on two hosts, against single-digit µs for a `rollback()` on an
+    already-IDLE handle). It is
     paid ONCE PER EVENT — a death or a notification — never per record, which is
     what makes certainty affordable here; the common borrow (quiet socket) pays
     no round trip at all. ⛔ The rollback is NOT dropped to make this read as one
@@ -1349,7 +1355,7 @@ def _take_idle_connection(dsn: str) -> Any | None:
     parked, so the borrow also reads the SOCKET (:func:`_socket_has_pending_input`,
     1.7 µs, no I/O) and, only when something is pending, asks the SERVER
     (:func:`_verify_pending_input`: one `SELECT 1` and its rollback, i.e. two
-    round trips, measured 427–461 µs). Quiet socket ⇒ NO round trip; pending
+    round trips, measured 0.43–1.3 ms). Quiet socket ⇒ NO round trip; pending
     input ⇒ that verification, which is either a death found or a notification
     delivered to a handle that then stays in service. Paying it on EVERY borrow
     instead would be the "health query per acquire" this module rejected, and
@@ -2755,7 +2761,7 @@ def write_live_record(record: Mapping[str, Any], *,
     per acquire would remove it entirely at the price of a round trip on every
     record, which is not worth it"*. The option it did NOT consider is the one
     taken here — read the LOCAL SOCKET first (readiness probe, measured
-    **1.7 µs**, no round trip) and ask the server ONCE only when that read finds
+    **~1–2 µs**, no round trip) and ask the server ONCE only when that read finds
     something pending, which is where the round trip belongs: it is then a
     question about a specific handle, not a tax on every record. The
     measurement that made this worth doing: the hosted deployment lost 8 record
