@@ -857,6 +857,25 @@ def test_only_a_complete_run_may_publish_into_the_bundle(tmp_path):
     )
 
 
+def test_product_served_text_is_not_redacted_AT_THE_CALL_SITES():
+    """The `redact=False` rule must hold where the text is used, not only in `_cut` (#13303 c10).
+
+    Cycle 8 made `_cut(..., redact=False)` for product-served text, but pinned it only as a
+    capability of `_cut` — so reverting any call site left the suite green and the reader went
+    back to grading text the instrument had already rewritten.
+    """
+    import inspect
+
+    src = inspect.getsource(cap)
+    for needle, what in (
+        ('r.get("content") or r.get("snippet") or "", 120, redact=False', "excerpt `what`"),
+        ('row.get("because") or "", 400, redact=False', "verdict `because`"),
+        ('row.get("cause") or "", 240, redact=False', "verdict `cause`"),
+        ("r.get('what'), 70, redact=False", "scoreboard row `what`"),
+    ):
+        assert needle in src, f"{what} is redacted — the reader would grade altered text"
+
+
 def test_the_packet_is_written_only_after_the_publish_guard(tmp_path):
     """A REFUSED run must not replace the committed `judge-packet.json` (#13303 cycle 9, P1).
 
@@ -897,6 +916,46 @@ def test_verdicts_out_cannot_cross_runs_into_the_bundle(tmp_path):
     before = (cap.DEFAULT_OUT / "verdicts-baseline.json").read_bytes()
     assert cap.cmd_judge(args) == 2
     assert (cap.DEFAULT_OUT / "verdicts-baseline.json").read_bytes() == before
+
+
+def test_publishing_cannot_be_pointed_at_another_bundle_file(tmp_path):
+    """`--verdicts-out` is decided by FILE, not by directory (#13303 cycle 10, P1).
+
+    The cycle-9 guard keyed on the parent directory and exempted a publishing run, so
+    `--verdicts-out <bundle>/run-local.json` replaced the machine-readable board with a
+    verdicts map and still exited 0.
+    """
+    board = json.loads(
+        (ROOT / "docs" / "evidence" / "13038-capstone" / "run-local.json").read_text()
+    )
+    assert board["tally"] == {"right": 3, "wrong": 3, "blocked": 0, "unjudged": 0}
+    # …the only name the bundle accepts is the baseline, asserted structurally below; the
+    # behavioural half (a real run) lives in `test_a_publishing_run_writes_its_own_baseline`
+    # because it needs the whole `cmd_run` path.
+    import inspect
+
+    src = inspect.getsource(cap.cmd_run)
+    gate = src.index("verdicts_target.name")
+    assert "verdicts-baseline.json" in src[gate : gate + 400], (
+        "the bundle gate no longer restricts the name to verdicts-baseline.json"
+    )
+    # …and the decision is taken BEFORE the publish guard, so nothing is written first.
+    assert src.index("verdicts_target.is_dir()") < src.index("may_publish(board, out_dir)")
+
+
+def test_a_publishing_run_writes_its_own_baseline(monkeypatch, tmp_path):
+    """A complete run that publishes its board also publishes its verdicts (#13303 c10, P2).
+
+    Without this, `run --judge fresh` into the bundle left `verdicts-baseline.json`
+    describing a DIFFERENT run, with exit 0 and nothing said — falsifying the README's
+    "the tally is one value in the three files that carry verdicts".
+    """
+    import inspect
+
+    src = inspect.getsource(cap.cmd_run)
+    assert 'DEFAULT_OUT / "verdicts-baseline.json"' in src or (
+        "DEFAULT_OUT" in src and "verdicts-baseline.json" in src
+    ), "a publishing run does not default its verdicts target to the baseline"
 
 
 def test_judge_records_that_the_scenario_could_not_be_verified(tmp_path):

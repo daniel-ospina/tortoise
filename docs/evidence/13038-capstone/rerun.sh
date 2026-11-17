@@ -8,7 +8,7 @@
 #
 # ⚠️ The UNJUDGED form may not publish into the evidence bundle: an all-`unjudged` board is
 # not a baseline and would replace `run-local.json` / `scoreboard-local.md` (the instrument
-# refuses it, exit 2). With no `--out` this wrapper therefore defaults to a scratch
+# refuses it, exit 1). With no `--out` this wrapper therefore defaults to a scratch
 # directory; a SCORED run (`--judge fresh|file`) may publish into the bundle.
 #
 # `tools/test_lane.py run` runs PYTEST, so it cannot take the instrument's own argv;
