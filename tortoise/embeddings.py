@@ -1175,15 +1175,17 @@ class EmbeddingModel:
         unaffected, and the bounded path can only run where a background load is
         the declared behaviour.
         """
-        if cls._instance is not None and cls._instance._model is not None:
+        inst = cls._instance
+        if inst is not None and inst._model is not None:
             return True
+        # ⛔ A DESIGNED ABSENCE IS PERMANENT BY CONTRACT (#2952): with the
+        # `embeddings` extra absent the model can never load, so neither waiting
+        # nor retrying can help. This is the DOCUMENTED DEFAULT install (a plain
+        # `uv sync` is keyword-only), so answering instantly here is what keeps
+        # the bound from adding 0.25 s to every write on it.
+        if cls._last_failure_kind == "not_installed":
+            return False
         now = time.monotonic()
-        # A load that FAILED must not re-charge the budget on every write:
-        # `get()`'s negative cache already says "do not retry yet", so the answer
-        # is "no vector" without waiting (#399's cooldown, reused). Checked
-        # BEFORE the warm-up opt-out below, because "the load broke" is a fact
-        # in both modes — the caller would get `None` either way, and this way it
-        # does not pay for a `get()` that is already known to decline.
         if cls._last_failed_at is not None and \
                 (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
             return False
@@ -1194,10 +1196,20 @@ class EmbeddingModel:
             return True
         # Idempotent: a no-op while the lifespan pre-warm is already running,
         # and the thing that starts one when a write is first past the post.
-        cls.start_warm_up()
+        if cls.start_warm_up() is None:
+            # ⛔ NOTHING IS IN FLIGHT AND THE ONCE-PER-PROCESS ATTEMPT IS SPENT.
+            # `start_warm_up` latches (`_warm_up_started`), so without this arm a
+            # failed load charges the full budget to EVERY subsequent write while
+            # never re-trying — measured on a failing `__init__`: three calls at
+            # 0.250 s each, load attempts still 1. Re-arm ONE background attempt
+            # and decline without waiting, so the retry's answer is ready for the
+            # next write and no write pays for a load that cannot make progress.
+            cls._rearm_warm_up()
+            return False
         deadline = now + max(0.0, budget)
         while True:
-            if cls._instance is not None and cls._instance._model is not None:
+            inst = cls._instance
+            if inst is not None and inst._model is not None:
                 return True
             now = time.monotonic()
             if cls._last_failed_at is not None and \
@@ -1209,9 +1221,26 @@ class EmbeddingModel:
             time.sleep(min(_WRITE_READY_POLL_S, remaining))
 
     @classmethod
+    def _rearm_warm_up(cls) -> None:
+        """Allow exactly one fresh background load attempt (#13224).
+
+        `start_warm_up` is deliberately once-per-process; a write path that only
+        ever asks it therefore never re-tries a load that FAILED, so a transient
+        failure (OOM, resource starvation) would disable embedding for the whole
+        process with no way back. Clearing the latch under the lock it is read
+        under lets the next `start_warm_up()` spawn one attempt — never more than
+        one, and never on the caller's thread.
+        """
+        with cls._WARM_UP_LOCK:
+            if cls._warm_up_thread is not None and cls._warm_up_thread.is_alive():
+                return
+            cls._warm_up_started = False
+
+    @classmethod
     def loaded(cls) -> bool:
         """True iff the model is already warm — never blocks, never loads."""
-        return cls._instance is not None and cls._instance._model is not None
+        inst = cls._instance
+        return inst is not None and inst._model is not None
 
     # ── #4055: the one-time setup's clock, read by the wait-bound seams ────
 
@@ -1637,7 +1666,7 @@ def encode_for_store(
     return _degrade_to_width([vec], expected_dim)[0]
 
 
-#: #13224: how long a WRITE path will wait for a COLD embedder before it writes
+#: #13224: how long a WRITE path will wait for a COLD embedder before writing
 #: the row without a vector. MEASURED: `EmbeddingModel.get()` is 13.5 s on a warm
 #: model cache and ~57 s cold (#1349) — two orders of magnitude above this — so
 #: the budget is not a fraction of a load, it is the most a create may spend on
@@ -1652,9 +1681,45 @@ WRITE_EMBED_BUDGET_S = 0.25
 #: becomes ready mid-budget is used, coarse enough not to spin (<= 25 wakeups).
 _WRITE_READY_POLL_S = 0.01
 
+#: The ONE lane a fold must treat as REPLAY (`projection._replay_write_scope()`'s
+#: declared reason, imported from its home in `projection` rather than re-lettered
+#: here). Every OTHER lane — `"live-door"`, `"create_entity"`, `"commit"`, a bare
+#: SDK write with no scope at all — is a LIVE door, where the bound may apply. An
+#: allow-list is not possible: live lanes are named by their feature and there are
+#: many, while the replay scope is a single declared literal. (`"create_entity"`
+#: is the lane a hosted `POST /v1/subjects` actually runs under — measured — which
+#: is why an allow-list on `"live-door"` silently disabled this bound.)
+
+
+def _in_replay_scope() -> bool:
+    """True when this fold is a journal REPLAY, not a live door (#13224).
+
+    ⛔ WHY THE BOUND MUST NOT REACH REPLAY. An entity's vector is DERIVED IN THE
+    FOLD and rides no journal record (`_upsert_subject` / `_upsert_object` /
+    `_upsert_document` / the Event fold all RECOMPUTE it from the payload text),
+    so `derived = replay(journal)` only holds while live and replay make the same
+    encode decision. A budget that made replay timing-dependent would give two
+    rebuilds of one journal DIFFERENT graphs — the rowvectors a cold rebuild's
+    first seconds do not get — which is the §2.0 divergence the rebuild engines
+    exist to rule out. Live may decline (its row is the one a request is waiting
+    on, and its vector is repairable from the graph); replay may not.
+
+    Fail-safe: a read that raises, or a projection import that fails, is treated
+    as REPLAY — the bound stays off, so the failure direction is "embed anyway",
+    never "drop a vector".
+    """
+    try:
+        from tortoise.projection import (
+            _CACHE_WRITE_AUTHORIZED,
+            _REPLAY_WRITE_LANE,
+        )
+        return _CACHE_WRITE_AUTHORIZED.get() == _REPLAY_WRITE_LANE
+    except Exception:  # noqa: BLE001 — a projection import fault must not decide
+        return True
+
 
 def encode_for_row(
-    content: str, expected_dim: int | None,
+    content: str, expected_dim: int | None, *, bounded: bool = False,
 ) -> list[float] | None:
     """The EMBED-gated submission step for a WRITTEN row (#5008).
 
@@ -1681,10 +1746,27 @@ def encode_for_row(
     trusted — the measurement `#5008` asks for, without a new stats channel in
     the projection.
 
-    ⚠️ **Live/replay parity** holds by construction: the verdict is a pure
+    ⚠️ **Live/replay parity** holds for the GATE above: its verdict is a pure
     function of the TEXT, and live and replay encode the same text, so gating
     both sides (they both call this seam) cannot make one carry a vector the
     other does not — the `#5004` divergence class.
+
+    ⛔ **The `#13224` bound below is NOT text-pure, and is scoped so that it
+    never decides what a REPLAY computes.** Its outcome is a function of
+    *process state* (is a load in flight? how long has this write been waiting?),
+    so an unscoped bound would make two rebuilds of ONE journal disagree on the
+    rows a cold replay's first minute folds — the `§2.0` divergence the rebuild
+    engines exist to rule out. Two mechanisms keep that from happening, and
+    both are load-bearing: `bounded` defaults to **False** (record-TRUTH callers
+    — the Point journal stamp under `PRESENCE IS OWNERSHIP`, `#5004` — must
+    never take an `None` for a slow embedder, because a cold `None` there is
+    recorded as an explicit CLEAR that a rebuild reproduces and no graph-side
+    backfill can reach it), and a `bounded=True` call is suppressed inside
+    `projection._replay_write_scope()` (`_in_replay_scope()`), so a fold's
+    decision is timing-free on both sides. The DERIVED-entity folds are the only
+    opt-in: `_upsert_subject` / `_upsert_object` / the document and Event arms
+    recompute their vector from the payload text, so a live decline is
+    repairable from the graph and `derived = replay(journal)` still holds.
 
     ⚠️ **Deliberately NOT routed through here**, so the boundary is written
     down rather than inferred: `encode_batch_for_store` (the session TURN
@@ -1701,14 +1783,25 @@ def encode_for_row(
                 verdict["reason"], verdict["rule_id"],
             )
             return None
-    # ⛔ #13224: BOUND the wait for a cold embedder. `get()` (reached through
+    # ⛔ #13224: BOUND the wait for a cold embedder — ONLY for a caller that
+    # opted in AND only on a LIVE door. `get()` (reached through
     # `encode_for_store`) blocks up to `_LOAD_TIMEOUT_S` for the load and, during
     # a warm window, on `_lock` for the load another thread is running — so a
     # write issued while the hosted lifespan pre-warm was still loading stalled
     # its own request past the transport wait bound (504 at 18.4 s, measured).
     # MEASURED dominant cost on this path: 13.5 s warm-cache model load vs 25-43
     # ms per encode, on a create whose own fold is 8-10 ms.
-    if not EmbeddingModel.await_write_ready(WRITE_EMBED_BUDGET_S):
+    #
+    # ⛔ `bounded` DEFAULTS TO FALSE, so every existing caller — the Point
+    # journal stamp, the legacy replay recompute, the turn writer, every
+    # extraction lane — keeps the pre-#13224 contract EXACTLY. Only the
+    # DERIVED-entity folds opt in, because their vector is recomputed on replay
+    # and therefore repairable from the graph; a record-TRUTH vector (a Point's,
+    # stamped by `stamp_journal_embedding` with PRESENCE IS OWNERSHIP, #5004)
+    # must never be dropped, since a cold `None` there is recorded as an explicit
+    # CLEAR that a rebuild reproduces and no graph-side backfill can reach.
+    if bounded and not _in_replay_scope() and \
+            not EmbeddingModel.await_write_ready(WRITE_EMBED_BUDGET_S):
         # Visible, not silent: counted on the existing "ran no model work"
         # metering term (#4488) and logged once per process — a bulk write must
         # not storm the log with one line per row.
@@ -1726,17 +1819,23 @@ def _note_cold_write(budget: float) -> None:
     designed absence or a broken load (the #4488 ambiguity). Latched on module
     state rather than a counter so a bulk write costs one line, and re-armed by
     `EmbeddingModel._reset()` (tests) so a later window is reportable again.
+
+    ⛔ The repair named here is the graph-side one, and it is truthful only for
+    the DERIVED-entity vectors this bound is scoped to: `_upsert_subject` and
+    friends recompute from the payload text, so re-encoding the graph row needs no
+    record change. A Point's vector rides the record and is deliberately never
+    dropped here — see `encode_for_row`'s `bounded` note.
     """
     global _COLD_WRITE_REPORTED
     if _COLD_WRITE_REPORTED:
         return
     _COLD_WRITE_REPORTED = True
     logger.warning(
-        "embedder is still COLD — this write stored its row WITHOUT a vector "
-        "after waiting %.2fs (#13224). The row is visible to every reader; the "
-        "dense leg will not find it until `graph-scripts/backfill_embeddings.py` "
-        "re-encodes it. Further occurrences are counted on embed metering's "
-        "`skipped` term, not logged.",
+        "embedder is still COLD — this DERIVED entity row was stored WITHOUT a "
+        "vector after waiting %.2fs (#13224). The row is visible to every "
+        "reader; the dense leg will not find it until "
+        "`graph-scripts/backfill_embeddings.py` re-encodes it. Further "
+        "occurrences are counted on embed metering's `skipped` term, not logged.",
         budget,
     )
 

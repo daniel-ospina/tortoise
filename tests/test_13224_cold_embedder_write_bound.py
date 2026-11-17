@@ -38,6 +38,7 @@ Run (embedded lane; URI-less by design)::
 """
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
@@ -58,10 +59,12 @@ from tortoise.embeddings import (  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 #: How long the simulated cold load takes. Long enough that "blocked on the
-#: load" is unmistakable in a wall-clock assertion, short enough to keep the
-#: suite quick. The real figure is 13.5 s warm-cache / ~57 s cold; a test may not
-#: sleep either, so the DISCRIMINATOR is the ratio below, not this number.
-_LOAD_S = 3.0
+#: load" is unmistakable in a wall-clock assertion, long enough to keep 3-4x
+#: margin over an unloaded box's create cost (measured 1.31 s for two creates when
+#: this was 3.0), short enough to keep the suite quick. The real figure is 13.5 s
+#: warm-cache / ~57 s cold, so a test may not use it; the DISCRIMINATOR is the
+#: comparison against this number, not the number itself.
+_LOAD_S = 6.0
 
 _DIM = 384
 
@@ -243,8 +246,22 @@ def test_the_opt_out_keeps_the_pre_13224_synchronous_contract(monkeypatch):
         EmbeddingModel._reset()
 
 
-def test_a_failed_load_does_not_recharge_the_budget_on_every_write(cold_embedder):
-    """A broken embedder must not add the budget to EVERY write (#399's cache)."""
+def test_a_failed_load_answers_from_the_negative_cache_inside_its_cooldown(
+        cold_embedder):
+    """`#399`'s cooldown answers without waiting — the WITHIN-window half only.
+
+    ⛔ SCOPE, stated so this row is not read as coverage it does not have: setting
+    `_last_failed_at` to *now* puts the call in the one window where the cooldown
+    branch is guaranteed to answer first, so this pins the "cache answers
+    immediately" half and NOTHING about the window after `_FAIL_COOLDOWN_S`
+    expires. The post-cooldown half — where the once-per-process load attempt is
+    already spent and a naive implementation sleeps the whole budget forever — is
+    pinned by `test_a_spent_load_attempt_does_not_charge_the_budget` below, and
+    that is the row that reds if the re-arm arm is removed (measured on the
+    pre-fix source: this row stayed GREEN with `return False` substituted for
+    everything after the opt-out check, which is exactly why the defect it was
+    once named for reached review un-caught).
+    """
     EmbeddingModel._reset()
     try:
         EmbeddingModel._last_failed_at = time.monotonic()
@@ -253,13 +270,14 @@ def test_a_failed_load_does_not_recharge_the_budget_on_every_write(cold_embedder
         elapsed = time.perf_counter() - t0
         assert elapsed < 0.5, (
             f"a write waited {elapsed:.2f}s on an embedder whose load already "
-            f"FAILED — the negative cache must answer without waiting"
+            f"FAILED inside the cooldown — the negative cache must answer "
+            f"without waiting"
         )
     finally:
         EmbeddingModel._reset()
 
 
-def test_await_write_ready_reports_the_warm_answer_immediately(cold_embedder):
+def test_await_write_ready_reports_the_cold_answer_within_the_budget(cold_embedder):
     """Cold ⇒ False within the budget (not the 90 s load timeout)."""
     t0 = time.perf_counter()
     assert EmbeddingModel.await_write_ready(0.1) is False
@@ -277,12 +295,125 @@ def test_encode_for_row_is_the_seam_that_carries_the_bound(cold_embedder):
     ``Subject``-only fix would leave the stall reachable from the other doors
     (which is how it looked in production: the fast doors were only fast because
     the model was already warm).
+
+    ⛔ `bounded=True` is the OPT-IN the derived-entity folds pass; the default is
+    deliberately unbounded (see the record-truth test below).
     """
     t0 = time.perf_counter()
-    assert encode_for_row(f"cold seam {time.time_ns()}", _DIM) is None
+    assert encode_for_row(f"cold seam {time.time_ns()}", _DIM, bounded=True) is None
     elapsed = time.perf_counter() - t0
     assert elapsed < _LOAD_S, (
         f"encode_for_row blocked {elapsed:.2f}s on a cold embedder"
+    )
+
+
+def test_the_default_caller_never_consults_the_bound(monkeypatch):
+    """⚠ RECORD-TRUTH vectors must never be dropped.
+
+    `bounded` defaults to FALSE so every pre-existing caller — the Point journal
+    stamp (`PRESENCE IS OWNERSHIP`, #5004), the legacy replay recompute, the turn
+    writer — keeps the synchronous contract. A cold `None` on the Point path is
+    recorded as an explicit CLEAR that a rebuild reproduces, and no graph-side
+    backfill can reach it, so this default is load-bearing data integrity, not
+    style.
+    """
+    consulted: list[float] = []
+    monkeypatch.setattr(
+        EmbeddingModel, "await_write_ready",
+        classmethod(lambda cls, budget: consulted.append(budget) or False))
+    with mock.patch("tortoise.embeddings.compute_embedding",
+                    lambda text, **kw: [0.5] * _DIM):
+        vec = encode_for_row(f"record truth {time.time_ns()}", _DIM)
+    assert vec is not None, (
+        "the DEFAULT caller must still embed — a record-truth vector is never "
+        "dropped for a slow embedder (#5004 presence-is-ownership)"
+    )
+    assert consulted == [], (
+        "the default path must not even ASK the bound — asking is how a cold "
+        "window silently becomes a recorded vector deletion"
+    )
+
+
+def test_a_replay_scope_keeps_the_synchronous_contract(cold_embedder):
+    """A journal REPLAY must always embed, so rebuilds stay deterministic.
+
+    Entity vectors are DERIVED IN THE FOLD and ride no journal record, so
+    `derived = replay(journal)` holds only while live and replay make the same
+    encode decision. A timing-dependent replay would give two rebuilds of one
+    journal different graphs.
+    """
+    from tortoise.projection import _replay_write_scope
+
+    with _replay_write_scope():
+        t0 = time.perf_counter()
+        vec = encode_for_row(f"replay seam {time.time_ns()}", _DIM, bounded=True)
+        elapsed = time.perf_counter() - t0
+    assert vec is not None, (
+        "a replay-scoped fold must embed even with bounded=True, or two "
+        "rebuilds of the same journal produce different graphs"
+    )
+    assert elapsed >= _LOAD_S * 0.5, (
+        f"the replay did not wait for the load ({elapsed:.2f}s) — the bound leaked "
+        f"into the replay path"
+    )
+
+
+def test_the_cold_decline_is_logged_once_per_process_and_rearmed(cold_embedder, caplog):
+    """The LOG half of the decline: ONE line, naming the budget and the repair.
+
+    ⛔ THREE MUTANTS THIS ROW IS THE ONLY KILLER FOR (each was verified to leave the
+    rest of this file green — the #13224 review's F4): delete the
+    `_note_cold_write(...)` call (no line at all), delete the
+    `_COLD_WRITE_REPORTED` latch (one line PER ROW, i.e. a per-row log storm on a
+    bulk write), or delete `_rearm_cold_write_report()` from
+    `EmbeddingModel._reset()` (the next cold window is silent forever).
+
+    The line is not decoration: the metering term (#4488) counts the declines but
+    cannot say WHY, and "a cold window" is only actionable if it names the repair an
+    operator has to run — which is why the message text is asserted, not just the
+    count.
+    """
+
+    def _cold_lines(records):  # noqa: ANN001, ANN202
+        return [r for r in records if "still COLD" in r.getMessage()]
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.embeddings"):
+        assert encode_for_row(
+            f"cold log 1 {time.time_ns()}", _DIM, bounded=True) is None
+        assert encode_for_row(
+            f"cold log 2 {time.time_ns()}", _DIM, bounded=True) is None
+        first = _cold_lines(caplog.records)
+    assert len(first) == 1, (
+        f"two declining rows produced {len(first)} cold-write line(s); the latch must "
+        f"make it EXACTLY one per process, and zero means the report was removed"
+    )
+    msg = first[0].getMessage()
+    assert f"{WRITE_EMBED_BUDGET_S:.2f}s" in msg, (
+        f"the line must name the budget it waited ({WRITE_EMBED_BUDGET_S}s), or a "
+        f"reader cannot tell a cold decline from a designed absence: {msg!r}"
+    )
+    assert "backfill_embeddings.py" in msg, (
+        f"the line must name the REPAIR an operator runs for the derived vectors "
+        f"this bound drops: {msg!r}"
+    )
+
+    # `_reset()` must RE-ARM the latch, or every later cold window is silent. The
+    # load latch is spent by hand here rather than by spawning a second real load:
+    # the re-arm of the LOAD attempt has its own row
+    # (`test_a_spent_load_attempt_does_not_charge_the_budget`), and a 6 s join in this
+    # test would buy nothing this assertion does not already carry.
+    EmbeddingModel._reset()
+    EmbeddingModel._warm_up_started = True
+    EmbeddingModel._warm_up_thread = None
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.embeddings"):
+        assert encode_for_row(
+            f"cold log 3 {time.time_ns()}", _DIM, bounded=True) is None
+        later = _cold_lines(caplog.records)
+    assert len(later) == 1, (
+        "a cold window AFTER `EmbeddingModel._reset()` logged nothing — the latch "
+        "was not re-armed (delete `_rearm_cold_write_report()` from `_reset()` and "
+        "this is the only row that reds)"
     )
 
 
@@ -291,11 +422,90 @@ def test_the_cold_decline_is_counted_not_silent(cold_embedder, monkeypatch):
     counted: list[int] = []
     monkeypatch.setattr(embeddings, "_note_embed_skip",
                         lambda n=1: counted.append(n))
-    assert encode_for_row(f"counted {time.time_ns()}", _DIM) is None
+    assert encode_for_row(f"counted {time.time_ns()}", _DIM, bounded=True) is None
     assert counted, (
         "a row written without a vector because the embedder was cold must be "
         "counted (#4488), or it is indistinguishable from a designed absence"
     )
+
+
+def test_a_spent_load_attempt_does_not_charge_the_budget(monkeypatch):
+    """A FAILED load must not add the budget to every write, nor stop retrying.
+
+    `start_warm_up` latches once per process, so without the re-arm arm a failed
+    load charges the full budget to EVERY subsequent write forever while never
+    re-trying — measured on a failing `__init__`: 0.250 s x 3, load attempts 1.
+
+    The contract is two-sided, so both halves are asserted: the write that finds
+    the attempt SPENT re-arms and declines instantly, and a write inside the
+    failure cooldown declines instantly. (The write that follows a fresh re-arm
+    legitimately waits its budget — a load really is in flight and may land.)
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    try:
+        EmbeddingModel._last_failed_at = time.monotonic() - 3600  # past cooldown
+        EmbeddingModel._last_failure_kind = "load_failed"
+        EmbeddingModel._warm_up_started = True
+        EmbeddingModel._warm_up_thread = None
+
+        t0 = time.perf_counter()
+        assert EmbeddingModel.await_write_ready(5.0) is False
+        spent_elapsed = time.perf_counter() - t0
+        assert spent_elapsed < 0.1, (
+            f"a write waited {spent_elapsed:.2f}s for a load whose "
+            f"once-per-process attempt was already spent"
+        )
+        assert EmbeddingModel._warm_up_started is False, (
+            "the spent attempt must be RE-ARMED, or the load is never retried and "
+            "a transient failure disables embedding for the whole process"
+        )
+
+        # A load just failed again -> the cooldown answers without waiting.
+        EmbeddingModel._last_failed_at = time.monotonic()
+        t0 = time.perf_counter()
+        assert EmbeddingModel.await_write_ready(5.0) is False
+        cool_elapsed = time.perf_counter() - t0
+        assert cool_elapsed < 0.1, (
+            f"a write waited {cool_elapsed:.2f}s inside the failure cooldown"
+        )
+    finally:
+        t = EmbeddingModel._warm_up_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=60)
+        EmbeddingModel._reset()
+
+
+def test_a_designed_absence_answers_immediately(monkeypatch):
+    """The DEFAULT install is keyword-only — it must not pay the budget.
+
+    A plain `uv sync` has no `embeddings` extra, so the model can never load
+    (`not_installed`). Waiting or retrying cannot help, so the answer must be
+    immediate or the bound taxes every write on the documented default install.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    try:
+        EmbeddingModel._last_failure_kind = "not_installed"
+        EmbeddingModel._last_failed_at = time.monotonic()
+        t0 = time.perf_counter()
+        assert EmbeddingModel.await_write_ready(5.0) is False
+        assert time.perf_counter() - t0 < 0.05
+    finally:
+        EmbeddingModel._reset()
+
+
+def test_loaded_is_false_for_a_half_built_instance():
+    """`loaded()` must not dereference `_model` on a None instance (#13224)."""
+    EmbeddingModel._reset()
+    try:
+        assert EmbeddingModel.loaded() is False
+        inst = mock.Mock()
+        inst._model = None      # the transient post-failure shape `get()` clears
+        EmbeddingModel._instance = inst
+        assert EmbeddingModel.loaded() is False
+    finally:
+        EmbeddingModel._reset()
 
 
 # ── end to end, from outside the handler ──────────────────────────────────
