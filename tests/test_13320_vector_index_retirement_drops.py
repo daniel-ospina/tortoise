@@ -27,8 +27,14 @@ WHAT IS PINNED HERE
 1. ``test_an_armed_setup_REMOVES_a_real_in_graph_vector_index`` — the LIVE
    falsifier the issue asks for: a real VECTOR index on a real engine, armed, the
    setup path invoked ⇒ the index is GONE from ``CALL db.indexes()``, and a line
-   names what removed it. On the shipped code this fails on the survived-index
-   assertion (that is the red this file was written against).
+   names what removed it.
+   ⛔ RED-FIRST, stated exactly: on the parent commit (``54682177bcff``) this file
+   does not even IMPORT — ``vector_index_drop_statement`` does not exist yet — so
+   that is the first red. With the import stubbed to the shipped generic forms,
+   the LIVE pin reds on the survived-index assertion (verified: the armed sweep
+   left ``{'embedding': ['VECTOR']}`` in the catalogue) and the two DB-free pins
+   red too. The behavioural red is the one that matters; the import red is what a
+   reader would see first.
 2. ``test_the_retirement_drops_with_the_VECTOR_form`` — DB-free, so CI without a
    live engine still reds if the form regresses to the generic one. The fake
    engine answers the generic DROPs the way the real one does (``no such
@@ -36,6 +42,14 @@ WHAT IS PINNED HERE
 3. ``test_a_vector_index_that_SURVIVES_is_not_silent`` — the second half of the
    defect: an index that survives the sweep must produce a WARNING naming it, and
    must NOT produce the "dropped" INFO. Silence is how #13320 shipped.
+4. ``test_an_engine_that_ACCEPTS_the_drop_and_keeps_the_index_is_a_false_PASS``,
+   ``test_a_RESHAPED_post_drop_catalogue_does_not_claim_a_removal`` and
+   ``test_an_UNREADABLE_catalogue_on_an_armed_store_is_loud`` — the three ways the
+   REPORT (not the sweep) can lie, each added because the #13330 review showed the
+   first draft got them wrong: "dropped, confirmed absent" read off a half that
+   also covers an unparseable catalogue; an accepted-then-surviving index printed
+   as ``Statements tried: none``; and an armed store whose catalogue read fails
+   was DEBUG-only silence — the issue's own complaint, one arm over.
 """
 from __future__ import annotations
 
@@ -52,7 +66,11 @@ import redis
 from tests import _live_utils
 from tortoise.embeddings import EMBEDDING_DIM
 from tortoise.index_catalogue import vector_index_drop_statement
-from tortoise.projection import FalkorProjection, vector_index_retired
+from tortoise.projection import (
+    FalkorProjection,
+    _reset_vector_gap_warnings,
+    vector_index_retired,
+)
 
 #: The arming surface (a record DSN) and the arming DECISION — BOTH, or
 #: ``vector_index_retired()`` is False and this file would be testing the
@@ -62,6 +80,21 @@ ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 _RECORD_DSN = "postgresql://localhost/record"
 
 _SUPPORTED_SCHEMES = ("docker", "redis", "rediss")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_warning_latches():
+    """Clear the process-global latches around EVERY test here.
+
+    ``_VECTOR_INDEX_DROP_FAILED_WARNED`` (#13320) and the #4997/#11087 registers
+    are keyed per ``(endpoint, graph)`` and never expire, so without this a second
+    in-process run of the survivor pin would find its bucket already latched and
+    red spuriously — a pin that only passes on the first run is not a pin. This is
+    the same hook ``tests/test_4997_vector_index_parity.py`` uses (#13330 review).
+    """
+    _reset_vector_gap_warnings()
+    yield
+    _reset_vector_gap_warnings()
 
 
 # ── the live lane ───────────────────────────────────────────────────────────
@@ -254,8 +287,18 @@ class _Result:
 class _EngineLikeGraph:
     """A fake engine that answers the DROP forms the REAL engine answers.
 
-    ``drop_accepts``: ``"vector"`` — only ``DROP VECTOR INDEX`` drops the index
-    (the measured engine); ``"none"`` — nothing drops it (the survivor lane).
+    ``mode``:
+
+    * ``"vector"`` — only ``DROP VECTOR INDEX`` drops the index (the measured
+      engine).
+    * ``"none"`` — nothing drops it; every DROP is REFUSED (the survivor lane).
+    * ``"accept-noop"`` — the engine ACCEPTS ``DROP VECTOR INDEX`` and keeps the
+      index: the false PASS the report must not call a removal.
+    * ``"vector-reshaped"`` — the drop works, and the POST-drop catalogue comes
+      back in a shape this store cannot parse (the engine changed its row shape
+      between two reads). The removal is then NOT measurable.
+    * ``"unreadable"`` — ``CALL db.indexes()`` raises on every read: the armed
+      sweep cannot even tell whether an index is there.
 
     ⛔ The generic forms are REJECTED with the engine's own message rather than
     accepted. A fake that accepts any statement mentioning ``embedding`` is how
@@ -268,20 +311,34 @@ class _EngineLikeGraph:
         self.drop_accepts = drop_accepts
         self._rows = [_catalogue_row("Point", "embedding", "VECTOR")]
 
+    def _drop_row(self):
+        self._rows = [
+            r for r in self._rows
+            if not (str(r[0]) == "Point" and "VECTOR" in str(r[2]).upper())
+        ]
+
     def query(self, cypher, params=None, timeout=None):
         self.calls.append(cypher)
         low = cypher.lower()
         if "db.indexes()" in low:
+            if self.drop_accepts == "unreadable":
+                raise RuntimeError("CALL db.indexes() unavailable")
             return _Result(list(self._rows))
         if low.startswith("drop"):
-            if self.drop_accepts == "vector" and "drop vector index" in low:
-                self._rows = [
-                    r for r in self._rows
-                    if not (str(r[0]) == "Point" and "VECTOR" in str(r[2]).upper())
-                ]
+            if "drop vector index" not in low or self.drop_accepts in {
+                    "none", "unreadable"}:
+                raise RuntimeError(
+                    "Unable to drop index on :Point(embedding): no such index.")
+            if self.drop_accepts == "accept-noop":
+                return _Result([])          # accepted — and the index stays
+            if self.drop_accepts == "vector-reshaped":
+                # The row survives in a shape this store cannot parse: dict-less
+                # `types` cell, i.e. "returned but not interpretable".
+                self._rows = [("Point", ["embedding"], "not-a-dict", 0, 0, 0,
+                               "NODE", "OPERATIONAL", "")]
                 return _Result([])
-            raise RuntimeError(
-                "Unable to drop index on :Point(embedding): no such index.")
+            self._drop_row()
+            return _Result([])
         return _Result([])
 
     @property
@@ -378,3 +435,98 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
     assert not any("dropped the in-graph" in r.getMessage() for r in caplog.records), (
         "the sweep claimed a drop that did not happen — that is the false PASS "
         "#13320 was filed on")
+
+
+def _retirement_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records
+        if r.levelno >= logging.WARNING and "#13320" in r.getMessage()
+    ]
+
+
+def test_an_engine_that_ACCEPTS_the_drop_and_keeps_the_index_is_a_false_PASS(
+        monkeypatch, caplog):
+    """A `g.query()` that raised nothing is NOT evidence the index went (#13320).
+
+    This is the false PASS the report exists to prevent, and the first draft of
+    this fix got its wording wrong twice (#13330 review P2 x2): it called the
+    store a SURVIVOR by measurement it had not taken, and it printed
+    ``Statements tried: none`` because only REFUSED candidates were recorded —
+    which reads as "nothing was attempted" at exactly the moment an accepted
+    statement is the whole story.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="accept-noop")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert not any("dropped the in-graph" in r.getMessage() for r in caplog.records), (
+        "the engine ACCEPTED the statement and kept the index, and the sweep "
+        "reported a drop anyway")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "a false PASS was reported silently"
+    line = warnings[0]
+    assert "SURVIVED" in line and "FALSE PASS" in line, (
+        f"the line must say the index SURVIVED a measurement and why: {line!r}")
+    assert "none refused" in line, (
+        "the line must distinguish 'nothing was refused' from 'nothing was "
+        f"attempted'; got {line!r}")
+
+
+def test_a_RESHAPED_post_drop_catalogue_does_not_claim_a_removal(monkeypatch, caplog):
+    """An unparseable catalogue is NOT "measured, nothing indexed" (#13320).
+
+    ``_vector_indexed_labels`` documents a ``set()`` that also covers a response
+    which came back in a shape nothing could parse. Reading the CONFIRMED-ABSENT
+    verdict off that half is how a report prints "confirmed absent from the
+    post-drop catalogue" over an index that is still there — so this pin drives
+    exactly that shape and requires the unconfirmed arm instead. The behavioural
+    half (``_vector_indexed_labels_for_reads``, #13108) is what the verdict reads.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="vector-reshaped")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert "confirmed absent from the post-drop catalogue" not in caplog.text, (
+        "the sweep claimed a CONFIRMED removal from a catalogue it could not parse")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "an unmeasurable removal was reported silently"
+    assert "NOT CONFIRMED" in warnings[0], (
+        f"the line must say the removal is unconfirmed: {warnings[0]!r}")
+
+
+def test_an_UNREADABLE_catalogue_on_an_armed_store_is_loud(monkeypatch, caplog):
+    """The fourth state: armed, and the catalogue cannot be read at all (#13320).
+
+    The fail-SAFE half (never drop blind) is right and unchanged. The SILENT half
+    was not: the read failure was ``_log.debug``, so on an armed store an
+    operator at INFO could not tell "nothing to drop" from "cannot even look" —
+    the issue's own complaint, one arm over. Latched, because this method runs on
+    the hosted per-request path and the store's state is permanent.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="unreadable")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert not [d for d in graph.drops if "embedding" in d.lower()], (
+        "an unreadable catalogue must never authorise a DROP of the vector "
+        f"index; the sweep issued {graph.drops!r} (the `is_operator` purges the "
+        "full sweep always issues are unrelated and are not what this pins)")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "an armed store whose catalogue could not be read was silent"
+    assert "could not read the index catalogue" in warnings[0], warnings[0]
+
+    # …and it is LATCHED per store: a second sweep in this process says it once.
+    with caplog.at_level(logging.INFO):
+        _bare(graph)._ensure_indexes()
+    assert len(_retirement_warnings(caplog)) == 1, (
+        "the unable-to-retire line is not latched — on the hosted PER-REQUEST "
+        "path that is a per-request warning for the life of the deployment")
