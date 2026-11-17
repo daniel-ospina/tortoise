@@ -2385,10 +2385,16 @@ def _strip_sql_comments(sql: str) -> str:
     because that is where the narrowing migrations put the `ALTER COLUMN … TYPE`
     the reader must see.
     """
+    # ⛔ A BLOCK COMMENT BECOMES ONE SPACE, deliberately NOT nothing. In PostgreSQL
+    # a comment is WHITESPACE, so deleting it merges the tokens around it:
+    # `DROP/* the ban is being retired */CONSTRAINT chk_…` became
+    # `DROPCONSTRAINT chk_…`, which matches no pattern, so a REAL DROP was
+    # invisible and the props-ban pin stayed green over a database whose ban had
+    # been dropped (round 9 P2, measured). A line comment needs no space: its
+    # newline survives as code, and that is a separator already.
     return "".join(
-        sql[start:end]
+        sql[start:end] if kind in ("code", "literal") else " "
         for start, end, kind in _scan_sql(sql)
-        if kind in ("code", "literal")
     )
 
 
