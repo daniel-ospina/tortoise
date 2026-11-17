@@ -484,9 +484,10 @@ def test_replay_forwards_the_derived_columns_to_the_PLAN(monkeypatch):
     """The junction below the live seam, which had no witness (review of #13265 P2).
 
     ⛔ MEASURED GAP: `replay()` forwards `derived=derived` into `replay_plan(`,
-    and DELETING that kwarg left `test_13220_record_label_embeddings.py
-    test_record_schema_placement.py test_cache_projection.py
-    test_record_projection.py` at **334 passed**. The seam test spies
+    and DELETING that kwarg reds THIS test and nothing else — every other test in
+    `test_13220_record_label_embeddings.py test_record_schema_placement.py
+    test_cache_projection.py test_record_projection.py` stays GREEN (the whole
+    four-file set passes without the forward). The seam test spies
     `record_projection.replay` (so it stops one call short) and
     `test_the_derived_vector_lands_in_the_object_COLUMN` calls `replay_plan`
     directly — both ends pinned, the wire between them not. With that kwarg gone
@@ -495,8 +496,10 @@ def test_replay_forwards_the_derived_columns_to_the_PLAN(monkeypatch):
     exists for, one call deeper.
 
     The spy RAISES on arrival instead of returning a plan: everything after this
-    call in `replay()` needs a real connection and a live allocator, and the fact
-    under test is the FORWARD, not the execution.
+    call in `replay()` needs a real connection (and, on the `allocate=True` arm,
+    a live allocator — this test passes `allocate=False`, so it is the connection
+    that would be needed), and the fact under test is the FORWARD, not the
+    execution.
     """
     seen: dict[str, object] = {}
 
