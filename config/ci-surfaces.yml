@@ -362,6 +362,21 @@ surfaces:
   # URI-LESS lane's engine only: under an ambient `TORTOISE_DB_URI` the same fixture
   # harness gives that server's session+path HASHED graph instead (`tests/_http_fixtures.py`).
   - test_13110_goalstate_doors.py    # #13110: dual: core
+  # #13084/#13102 review F5: the RAM cap's assertions. DUAL-REGISTERED with `core`
+  # (where the file appears further down this file) for the reason the two rows above
+  # give, measured here: the file exercises `quota._arm_graph_storage` (`:40`, `:84`,
+  # `:778`) and pins `metering.get_graph_storage_reading`'s `unmeasured_reason`
+  # vocabulary (`_ledger_reading`, `:378`), and BOTH `tortoise/quota.py` and
+  # `tortoise/metering.py` are EXACT `api` SOURCE_PATTERNS matches that REPLACE the
+  # `core` fallback in `select()` — so `--changed-files tortoise/metering.py` (and
+  # `tortoise/quota.py`) selected `api` with this file ABSENT, i.e. someone changing
+  # the reader's reason vocabulary — the exact seam the served-unmeasured arm turns
+  # on — would not run these P0 assertions. The `core` arm covers the subjects no
+  # SOURCE_PATTERN claims (the gate itself and the census). Hermetic apart from the
+  # throwaway EMBEDDED engine under `tmp_path` those ledger cases build, like
+  # `test_11892_health_quota.py` above. No `durations:` row is required: the file is
+  # already in a fast surface, which is what the ENTRY RULE keys on.
+  - test_13084_ram_cap.py            # #13084: dual: core
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -2645,6 +2660,9 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
+  - test_13084_demand_census.py
+  - test_13084_ram_cap.py
+  - test_13084_ram_window_census.py
   # #13110: the `goalState` doors (REST `/v1/objects` + `/v1/points`, MCP
   # `tortoise_create_{object,entity,point}`, and the one SDK guard behind them).
   # DUAL-REGISTERED with `api` for the reason the two rows above give: the REST
@@ -2681,6 +2699,7 @@ surfaces:
   # After the deletion the file keeps main's two rows; `--integrity` and
   # `duplicate_entries()` are both green here.
   - test_13100_planned_occurrences.py
+  - test_13220_record_label_embeddings.py
   # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
   # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
   # added with its own rationale. This branch registered it here first; the

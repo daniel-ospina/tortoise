@@ -32,6 +32,44 @@ Lifecycle decision table (THE rule):
 - first ingest of an already-closed issue → ``-created`` ONLY (kind carries
   the closed state) — the one-time legacy backfill is the only other source
   of ``-closed`` events (marker-gated, T2-P3).
+- a row NO fold can reconcile records NO transition ("cannot place") → the diff
+  answers ``None`` and the transition arm is gated off. Two families: a row whose
+  position the fold cannot resolve (foreign ``pipelineStageKey`` / stage id absent
+  from its declaration), and a row carrying a LATCHED lifecycle word (``status`` in
+  ``commit_ops.OBJECT_TERMINAL_STATUSES``) — the fold refuses such a row in BOTH
+  directions, so no fold ever reaches it. ⚠️ Stated trade, symmetric: it
+  records neither ``-closed`` nor ``-reopened``. Bounded and inspectable; an
+  unbounded mint loop is neither (#13143, #13288 F1). This is NOT the pre-#13143
+  bug returning — that was a real close reading as "first ingest"; both refusals
+  above are shapes for which no fold writes anything.
+  ⚠️ The WIDER terms — ``status='outdated'`` and the legacy ``outdated=true`` flag —
+  are NOT latched: ``_fold_object_stage``'s set has no ``outdated`` member, the
+  CLOSE fold cannot reach such a row (no live holder) while the REOPEN fold can
+  (``_reopen_targets_closed``), so they are answered from the POSITION, per
+  direction. See ``_status_is_latched`` / ``_row_is_frozen`` / the reader below.
+  ⛔ BOTH are answered BEFORE the polarity (closed/open) arms, on purpose: the
+  answer therefore does not depend on ``isClosed``. It must not, because
+  ``is_position_ended`` short-circuits on the marker alone and never looks at the
+  slot, so a marker-carrying row with an unplaceable position would otherwise
+  answer ``"closed"`` and mint ``-reopened``, ``-reopened-2``, … on every poll of
+  an OPEN issue (measured at ``[1,1,1]`` — #13288 F1). A lookup the fold refuses to
+  perform is not a negative result; it is a third answer.
+
+  **Stated residual (#13288 review, note — kept, and it still applies).** The
+  declaration this reader resolves against is ``core:workitem`` only, because that
+  is the only pipeline the BUILT-IN fold can put on an indexed issue Object. A pack
+  that DECLARES a stage fold for ``pm:issue`` keys the pipeline on the declaring
+  kind (``projection/entities.py:5976-5977``, ``pipeline_key = target_kind``), so
+  such a row's ``pipelineStageKey`` names a pipeline this reader cannot resolve and
+  it answers ``None`` — its close/reopen history stops, re-introducing the #13143
+  symptom (``events_minted: 0`` on a close) for that population. That answer is
+  unconditional in every other prop (it is taken before the polarity arms, see the
+  refusal bullet above), so it does not flip to ``"closed"`` on a row that also
+  carries ``isClosed`` — the shape that would loop. It is BOUNDED (no mint loop)
+  and one config away from being live, so it is stated here rather than guessed at.
+  Resolving the declaration the way the fold does — through the pack index — is the
+  honest close, and it is deliberately NOT done in the loop fix: it would put the
+  pack registry on the indexer's read path as part of it.
 
 The (dormant) statement machinery writes ``statement`` ONLY — never
 ``observation`` (removed kind, §5). DORMANT since #1844: the default path
@@ -252,9 +290,14 @@ def _row_is_frozen(status, outdated) -> bool:
     never touches it (the clobber guard)"*), so an unrelated re-mention cannot
     reset the word out from under a poll.
 
-    ⚠️ It is the SHARED predicate, not a local re-spelling, and the POSITION axis
-    is deliberately not passed: this helper answers only the lifecycle question.
-    Position is the axis a diff CAN converge on, so it is read separately.
+    ⚠️ It answers only the LIFECYCLE question, and the POSITION axis is
+    deliberately not passed (position is the axis a diff CAN converge on, so it is
+    read separately below). ⛔ It is NOT the shared ``live.is_terminal_status``,
+    and the omission is deliberate: that helper is a ``frozenset`` membership test,
+    so it HASHES the value and raises on a stored ARRAY ``status`` the fold
+    tolerates (the hashing guard below states that row). The two terms are spelled
+    out here instead, and ``live.TERMINAL_EXCLUDED_STATUSES`` — the shared set — is
+    still the vocabulary they agree with, so no local second vocabulary is defined.
     """
     # ⛔ HASHING GUARD (#13289 review F6): `frozenset` membership HASHES the value,
     # so a stored ARRAY `status` would raise `TypeError: unhashable type` and take the
@@ -1387,6 +1430,19 @@ class GitHubIndexer:
         # `outdated`, so a SUBSEQUENT GitHub close mints nothing — unavoidable, since
         # the fold that would apply it is never dispatched for a row with no live
         # holder.
+        # ⛔ SECOND STATED RESIDUAL (`#13289` review F4, and it is NOT bounded away):
+        # `"closed"` below assumes the REOPEN fold is actually DISPATCHED, and
+        # `_reopen_targets_closed` (`entities.py:6158-6163`) requires exactly ONE
+        # registered incarnation (`not _live_holders and len(_held) == 1`). On a name
+        # with TWO OR MORE registered carriers — the legal coexistence `#3590` pins,
+        # `tests/test_3590_minted_identity_acceptance.py:1443-1445` — that predicate is
+        # False, the fallback `resolve_fold_name` needs exactly one LIVE holder
+        # (`entity_identity.py:658-676`), and an `outdated` row has none: nothing
+        # folds, so this `"closed"` answer repeats and mints `-reopened` per poll.
+        # Bounding it means answering `None` when the NAME is not uniquely resolvable,
+        # which puts the object-identity read on this path — a read-path decision, so
+        # it is stated here and on the PR rather than taken unilaterally. The
+        # single-incarnation population (every fixture in this suite) is unaffected.
         # ⚠️ Not folded into `_status_is_latched`: this term is reachable only after
         # that arm declines, so the order below is load-bearing.
         if position_ended:

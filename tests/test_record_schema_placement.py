@@ -81,6 +81,16 @@ MIGRATIONS = sorted(
         # be removed this way, and a read that understood only the ADD would keep
         # certifying a column the database no longer has.
         "20261110000001_record_point_retire_as_of_11827.sql",
+        # `#13220` — the FORWARD migration that gives `public.object` and
+        # `public.subject` an `embedding` column + a GENERATED `embedding_vec` +
+        # an HNSW index each (owner ruling 2026-11-17). ⛔ Leaving it out was a
+        # FALSE PASS this pin's own review measured: `parse_sql_columns()` reads
+        # only this tuple, so the two `("object"|"subject", "embedding")` rows in
+        # the carve-out parametrisation below kept asserting the columns were
+        # ABSENT while the migration created them — green, about a schema the
+        # record no longer has. Append-only history means a column ARRIVES this
+        # way, which is exactly the reason the ADD file above is listed.
+        "20261117000001_record_object_subject_embedding.sql",
     )
 )
 
@@ -296,6 +306,25 @@ def parse_sql_columns() -> dict[str, set[str]]:
     return tables
 
 
+def declared_derived_column_exceptions() -> set[tuple[str, str]]:
+    """`{(table, column)}` — DERIVED names a DECISION gave a column (`#13220`).
+
+    Read from `record_projection.DERIVED_COLUMNS`, never re-listed here: that
+    mapping is the ONE home of "a DERIVED value that has a column and still may
+    not be carried by a payload", and a second copy in a test is how a declaration
+    and the code it describes drift apart.
+
+    ⛔ A DECLARATION, NOT A BLANKET EXEMPTION: the guard beside
+    `test_derived_and_volatile_properties_have_no_column` asserts every name in
+    here is genuinely DERIVED in the placement table AND genuinely a column, so a
+    name added to the code side cannot quietly widen the carve-out, and one that
+    stopped being a column reds rather than lingering.
+    """
+    from tortoise.record_projection import DERIVED_COLUMNS
+
+    return {(table, col) for table, cols in DERIVED_COLUMNS.items() for col in cols}
+
+
 def check_placement(rows, columns_by_table) -> list[str]:
     """The checker, as a pure function, so the mutation test can drive it."""
     problems: list[str] = []
@@ -319,7 +348,8 @@ def check_placement(rows, columns_by_table) -> list[str]:
                     problems.append(
                         f"MISSING COLUMN: {table}.{col} — {section}.{prop} is PRIMARY{note}"
                     )
-            elif cls == "D" and col in cols:
+            elif cls == "D" and col in cols and (
+                    (table, col) not in declared_derived_column_exceptions()):
                 problems.append(
                     f"DERIVED/VOLATILE AS AUTHORITY: {table}.{col} — "
                     f"{section}.{prop} is {cls} (§17.5 carve-out)"
@@ -1762,6 +1792,38 @@ def test_derived_and_volatile_properties_have_no_column():
     assert not derived, "\n".join(derived)
 
 
+def test_every_declared_derived_column_exception_is_REAL_and_still_DERIVED():
+    """The guard that keeps the declared exception from becoming a loophole.
+
+    Two directions, both measured against this tree: every exception names a
+    column `parse_sql_columns()` can see (a stale entry would otherwise silently
+    excuse a name that is not even there), and every exception names a property
+    the placement table really classifies DERIVED (an entry for a PRIMARY or
+    absent row would be excusing the wrong thing). Without this, adding a name to
+    `record_projection.DERIVED_COLUMNS` would widen §17.5's carve-out with no
+    test anywhere saying so.
+    """
+    exceptions = declared_derived_column_exceptions()
+    assert exceptions == {("object", "embedding"), ("subject", "embedding")}, (
+        "the declared exception is `#13220`'s two fingerprint columns and nothing "
+        f"else — a third entry is a §17.5 reopen, not a test edit ({exceptions})")
+    columns = parse_sql_columns()
+    for table, col in sorted(exceptions):
+        assert col in columns.get(table, set()), (
+            f"{table}.{col} is declared as a columned DERIVED value but is not a "
+            "column at this head — the declaration has outlived the schema")
+    derived_pairs = {
+        (SECTION_TABLE[section], normalize(name))
+        for section, prop, cls in parse_placement()
+        if cls == "D"
+        for name in (expand_edge_property(prop) if section == "Edges" else [prop])
+    }
+    for table, col in sorted(exceptions):
+        assert (table, col) in derived_pairs, (
+            f"{table}.{col} is declared an exception to the §17.5 carve-out but "
+            "the placement table does not classify it DERIVED")
+
+
 def test_no_unresolved_rows():
     assert not [r for r in parse_placement() if r[2] == "U"]
 
@@ -1784,8 +1846,6 @@ def test_every_predicate_the_table_names_is_declared():
         ("point", "content_hash"),
         ("point", "version"),
         ("object", "status"),  # the projection-owned status CACHE
-        ("object", "embedding"),
-        ("subject", "embedding"),
         ("source", "reliability"),
         ("relation", "msg_alpha"),
         ("relation", "msg_beta"),
@@ -1800,6 +1860,125 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
     `confidence` is PRIMARY on `relation`, DERIVED on `point`/`event`)."""
     columns = parse_sql_columns()
     assert col not in columns.get(table, set()), f"{table}.{col} must not be a record column"
+
+
+#: `chk_<table>_props_no_derived CHECK (…)` bodies in DECLARATION ORDER. Same
+#: shape as `contract_key_pins` above: `CHECK` must follow the constraint name,
+#: so a `DROP CONSTRAINT IF EXISTS chk_…` and the prose that names the
+#: constraint (migration headers do) both miss — only a real declaration is
+#: captured.
+_PROPS_BAN_PIN_RE = re.compile(
+    r"(ADD\s+)?CONSTRAINT\s+chk_(\w+)_props_no_derived\s+CHECK\b(.{0,400})",
+    re.S | re.I,
+)
+
+
+def props_ban_pins(text: str) -> dict[str, list[tuple[bool, str]]]:
+    """Every `props_no_derived` CHECK body, per table, in declaration order.
+
+    Each entry is `(is_redeclaration, body)`: `is_redeclaration` is True when the
+    DDL form was `ADD CONSTRAINT …` (a FORWARD re-declaration, which under
+    append-only history SUPERSEDES the in-`CREATE TABLE` one) and False for a
+    bare `CONSTRAINT … CHECK` inside a `CREATE TABLE` body.
+    """
+    pins: dict[str, list[tuple[bool, str]]] = {}
+    for m in _PROPS_BAN_PIN_RE.finditer(text):
+        pins.setdefault(m.group(2), []).append((bool(m.group(1)), m.group(3)))
+    return pins
+
+
+def all_migration_text() -> str:
+    """Every `supabase/migrations/*.sql` on disk, in filename (= chronological) order."""
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted(_MIGRATIONS_DIR.glob("*.sql"))
+    )
+
+
+@pytest.mark.parametrize("table,col", [("object", "embedding"), ("subject", "embedding")])
+def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col):
+    """The ONE declared exception to the carve-out — asserted, not exempted.
+
+    `#13220` / owner ruling 2026-11-17: these two labels gain the fingerprint
+    column (it must be INDEXED in Postgres, impossible without storing it), which
+    is why they were REMOVED from the "absent from the SQL" parametrisation above
+    rather than left there going quietly green. Both halves are pinned here, in
+    one place: the column EXISTS (**this is the assertion that would have caught
+    the propagation defect** — the migration arrived while the pin still said the
+    column could not), and the open property tail still REFUSES the name, so the
+    column is the projection's to write and never a payload's.
+    """
+    columns = parse_sql_columns()
+    assert col in columns.get(table, set()), (
+        f"{table}.{col} is the #13220 fingerprint column and must be a record column")
+    # ⛔ The assertion below is scoped to the LAST DDL re-declaration of the
+    # constraint, not to the whole migration union. A union-wide `'embedding' in
+    # text` was satisfied by HISTORY — `20261012000002_record_semantic.sql` and
+    # `20261014000001_record_subject_props_no_derived.sql` both carry the string —
+    # so it stayed green even if a later migration dropped and re-added
+    # `chk_<table>_props_no_derived` WITHOUT the name. And a bare `rfind` on the
+    # constraint NAME is equally wrong: migration headers cite it in PROSE
+    # (this PR's own header does), so the name's last textual occurrence is not a
+    # definition. Match the DDL form only — `ADD CONSTRAINT <name> CHECK` or a
+    # bare `CONSTRAINT <name> CHECK` — and read the LAST one.
+    # ⛔ AND READ IT FROM THE WHOLE MIGRATIONS DIRECTORY, not this file's
+    # `MIGRATIONS` tuple. That tuple is the read set `parse_sql_columns()` uses for
+    # its COLUMN census, and it is hand-maintained — it does NOT list
+    # `20261014000001_record_subject_props_no_derived.sql`, which holds the
+    # IN-FORCE `chk_subject_props_no_derived` (`ARRAY['embedding','status']`). A
+    # first cut of this assertion read the tuple and therefore read the STALE
+    # Oct-12 declaration (`ARRAY['embedding']`) while reporting that it had read
+    # "the LAST" one — a pin structurally unable to see the re-declaration it
+    # exists to catch, since append-only history means every future re-declaration
+    # is a NEW FILE too. The directory read is the same rule the sibling
+    # `test_relation_is_never_a_bare_id` documents for the same reason.
+    #
+    # The read is `props_ban_pins(all_migration_text())` — ONE helper, shared with
+    # `test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one`
+    # below, so the regex that defines "a declaration" has a single home rather
+    # than a second copy that can drift from this one.
+    definitions = [body for _is_redecl, body in
+                   props_ban_pins(all_migration_text()).get(table, [])]
+    assert definitions, (
+        f"chk_{table}_props_no_derived has no DDL definition anywhere under "
+        f"{_MIGRATIONS_DIR.relative_to(REPO_ROOT)} — the props ban has no home")
+    assert f"'{col}'" in definitions[-1], (
+        f"the LAST re-declaration of chk_{table}_props_no_derived no longer names "
+        f"'{col}' — a later migration re-opened the name even though the column now "
+        f"exists. Definition read: {definitions[-1]!r}")
+
+
+def test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one():
+    """F8's own non-vacuity pin: the LAST declaration read is the one in force.
+
+    `chk_subject_props_no_derived` is declared TWICE — inside
+    `20261012000002_record_semantic.sql`'s `CREATE TABLE` (`ARRAY['embedding']`)
+    and again, RE-DECLARED to add `status`, by
+    `20261014000001_record_subject_props_no_derived.sql`'s
+    `DROP CONSTRAINT IF EXISTS … ADD CONSTRAINT …` (`ARRAY['embedding',
+    'status']`). Under append-only history the Oct-14 one is in force, so a pin
+    that reads the Oct-12 one is certifying a constraint the database no longer
+    has — which is precisely F8. TWO independent discriminators, because either
+    alone is defeatable: the DDL FORM (`ADD CONSTRAINT` = a forward re-declaration;
+    the Oct-12 one is a bare `CONSTRAINT … CHECK` inside `CREATE TABLE`) reddens on
+    the pre-fix read set, and the NAME SET (the in-force body refuses BOTH
+    `embedding` and `status`) reddens on the review's mutant, which shrinks the ban
+    to `ARRAY['status']` — a body that still contains the string `'status'` and so
+    would pass a status-only check.
+    """
+    pins = props_ban_pins(all_migration_text())
+    is_redecl, body = pins["subject"][-1]
+    assert is_redecl, (
+        "the LAST chk_subject_props_no_derived is an in-`CREATE TABLE` declaration "
+        "— the Oct-14 FORWARD re-declaration is the one in force, so the pin is "
+        f"reading the wrong definition again: {body!r}")
+    assert "'embedding'" in body and "'status'" in body, (
+        "the LAST chk_subject_props_no_derived does not refuse BOTH names — the "
+        "in-force Oct-14 re-declaration refuses `embedding` and `status`, and the "
+        "Oct-12 one it superseded refused only `embedding`. Either the pin is "
+        f"reading the superseded definition again or the ban was shrunk: {body!r}")
+    # …and the subject ban has TWO declarations to choose between, which is why
+    # `[-1]` had to stop meaning "the Oct-12 one". Object stays single-declared.
+    assert len(pins["subject"]) >= 2 and len(pins["object"]) >= 1
 
 
 def test_props_checks_refuse_the_derived_names():
