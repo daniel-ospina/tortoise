@@ -1889,13 +1889,17 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #:
 #: ⛔ AND WHY THE BODY IS NOT A WINDOW EITHER (round 3 of the same review). Taking
 #: "the text up to the next header, capped at 400" looked right and was not: the
-#: closest pair of declarations in this tree is **2,038** characters apart — END
-#: of one declaration to the START of the next, which is the distance that matters
-#: for a window and is the convention of every figure below AT THIS HEAD over 87
-#: files / 9 declarations: 2,200 · 2,048 · 3,123 · 2,038 · 6,536 · 3,895 · 44,747 ·
-#: 109,441 · 148,124. (Start-to-start gives 2,082 for the tightest pair and a
-#: different list; the convention is stated so the next reader does not "correct"
-#: one ruler with the other — round 4 did exactly that.) So the CAP bound on EVERY
+#: closest pair of declarations in this tree — END of one declaration to the START
+#: of the next, which is the distance a window has to clear — is MEASURED by
+#: `test_the_snippet_cap_clears_every_declaration_gap`, and that test is the ONLY
+#: place a number may live. ⛔ NOT HERE: this comment carried a hand-copied census
+#: ("87 files / 9 declarations: …, 2,038 …") that was already stale two migrations
+#: later — the tree had gained a migration and the tightest gap had moved — which is
+#: the same defect as the one this block documents: a
+#: figure with no reader rots into a false statement. The CONVENTION is stated so
+#: the next reader does not "correct" one ruler with the other (round 4 did):
+#: end→start, not start→start — the two differ by the declaration's own width.
+#: So the CAP bound on EVERY
 #: declaration in the tree and the "body" was a 400-character slice of whatever
 #: followed the constraint. Substring-testing
 #: that slice for `'embedding'` let MIGRATION PROSE satisfy the pin: a new
@@ -1913,8 +1917,9 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #: ⛔ AND THE NAMES SEARCH IS ANCHORED TO THE CHECK'S OWN EXPRESSION (round 3 P1 of
 #: the same review, still open at round 4 as N4). A bare `ARRAY[…]` search over
 #: the span took the FIRST such literal ANYWHERE in it — and the LAST
-#: declaration's span ran to EOF — 148,124 characters on the RAW text at this head,
-#: and 41,284 on the comment-stripped text the parse now reads — so a comment
+#: declaration's span ran to EOF (tens of thousands of characters — its exact length
+#: moves with every migration, and the test above measures it rather than this note
+#: asserting it) — so a comment
 #: citing the literals to explain the history (this repo's own header style, and a
 #: comment is a WORSE answerer than prose because its `ARRAY['embedding']` is
 #: well-formed) was read as the ban. Measured counter-example: an in-force ban
@@ -1947,8 +1952,13 @@ _PROPS_BAN_PIN_HEADER_RE = re.compile(
 #: names). `(?:\(\s*)*` tolerates redundant parentheses; a body spelled any other
 #: way yields NO names and fails the pins LOUDLY rather than guessing.
 _PROPS_BAN_EXPR_RE = re.compile(r"\s*(?:\(\s*)*NOT\s*\(\s*props\s*\?\|", re.I)
-#: The refused-name list: `NOT (props ?| ARRAY['embedding', 'status'])`.
-_PROPS_BAN_NAMES_RE = re.compile(r"ARRAY\s*\[([^\]]*)\]", re.I)
+#: The refused-name list: `NOT (props ?| ARRAY['embedding', 'status'])`. ⛔ MATCHED
+#: at the operand position (`?|` takes its right-hand operand immediately), NEVER
+#: searched for later in the statement: a sibling action in the same ALTER could
+#: otherwise answer a CHECK whose own operand this pattern cannot read — the same
+#: class as round 5's D, one level in. `props ?| some_ident` therefore yields NO
+#: names and fails the pins loudly, which is the documented contract.
+_PROPS_BAN_NAMES_RE = re.compile(r"\s*ARRAY\s*\[([^\]]*)\]", re.I)
 #: ⛔ THE NAMES ARE THE **QUOTED** ENTRIES, so a cast cannot smuggle SQL type
 #: tokens into a property-name set: `ARRAY['embedding'::text, 'status'::text]`
 #: yields `{embedding, status}`, not `{embedding, status, text}` (round 5 P3).
@@ -2009,7 +2019,7 @@ def props_ban_events(text: str) -> list[PropsBanEvent]:
         names: frozenset[str] = frozenset()
         anchor = _PROPS_BAN_EXPR_RE.match(statement)
         if anchor is not None:
-            array = _PROPS_BAN_NAMES_RE.search(statement, anchor.end())
+            array = _PROPS_BAN_NAMES_RE.match(statement, anchor.end())
             if array is not None:
                 names = frozenset(_QUOTED_PROPERTY_RE.findall(array.group(1)))
         events.append(PropsBanEvent(
@@ -2192,8 +2202,9 @@ def test_the_props_ban_pin_reads_the_CHECKS_own_expression_not_the_tail():
 
     ⛔ MEASURED (review of #13265, round 3 P1, still open at round 4 as N4).
     `_PROPS_BAN_NAMES_RE.search(span)` took the FIRST `ARRAY[…]` anywhere in the
-    span, and the LAST declaration's span ran to EOF (148,124 characters on the raw
-    text at this head), so the documented promise — "a body that refuses by some expression
+    span, and the LAST declaration's span ran to EOF (see
+    `test_the_snippet_cap_clears_every_declaration_gap` for the measured length),
+    so the documented promise — "a body that refuses by some expression
     this pattern does not understand yields NO names and fails the pin loudly
     instead of passing on a stray quote" — held only while nothing downstream of
     it contained an `ARRAY[…]`. That is exactly what a migration header does, and
@@ -2260,6 +2271,40 @@ def test_the_props_ban_pin_reads_the_CHECKS_own_expression_not_the_tail():
     assert (kind, names) == ("drop", frozenset()), (
         "a DROP after the last declaration was not seen, so the read keeps "
         f"certifying a ban the database no longer has: {(kind, sorted(names))}")
+
+
+def test_the_snippet_cap_clears_every_declaration_gap():
+    """The 400-char snippet cap is only diagnostic if it cannot reach the next ban.
+
+    ⛔ THIS TEST OWNS THE CENSUS. The block above used to state it as prose
+    ("87 files / 9 declarations: 2,200 · … · 2,038 · …"), and by the time anyone
+    read it again the tree had gained migrations and the tightest gap had moved —
+    a stale figure BESIDE a pinned one, which is the failure class this file
+    documents at length. So the figures are derived here, at run time, and the
+    failure message prints them; nothing in the file asserts a hand-copied number.
+    """
+    raw = all_migration_text()
+    clean = record_projection._strip_sql_comments(raw)
+    files = sorted((REPO_ROOT / "supabase" / "migrations").glob("*.sql"))
+    declarations = [
+        (match.start(), match.end())
+        for match in _PROPS_BAN_PIN_HEADER_RE.finditer(clean)
+    ]
+    assert len(declarations) >= 2, (
+        f"the tree holds {len(declarations)} props_no_derived declaration(s) — the "
+        "parse is not reading it")
+    gaps = [
+        declarations[i + 1][0] - declarations[i][1]
+        for i in range(len(declarations) - 1)
+    ]
+    tail = len(clean) - declarations[-1][1]
+    assert min(gaps) > _PROPS_BAN_SNIPPET_CHARS, (
+        f"the snippet cap ({_PROPS_BAN_SNIPPET_CHARS}) reaches into the NEXT ban: "
+        f"tightest END→START gap is {min(gaps)} over {len(files)} migrations / "
+        f"{len(declarations)} declarations (gaps {gaps}, last tail {tail})")
+    assert tail > _PROPS_BAN_SNIPPET_CHARS, (
+        f"the last declaration's tail ({tail}) is shorter than the snippet cap "
+        f"({_PROPS_BAN_SNIPPET_CHARS}) — the snippet would be a whole-file read")
 
 
 def test_legal_sql_spellings_cannot_false_pass_the_props_ban():
@@ -2348,6 +2393,17 @@ def test_legal_sql_spellings_cannot_false_pass_the_props_ban():
     assert (kind, names) == ("declare", frozenset()), (
         "an unreadable CHECK borrowed a LATER statement's ARRAY[…] list instead of "
         f"failing closed: {(kind, sorted(names))}")
+
+    # …AND the same statement's sibling must not answer when OUR operand is
+    # unreadable (`?| some_ident`, not an ARRAY). Fail-closed is the contract.
+    unreadable_operand = (
+        "ALTER TABLE public.subject\n"
+        "  ADD CONSTRAINT chk_subject_props_no_derived CHECK (NOT (props ?| excluded)),\n"
+        "  ADD CONSTRAINT chk_subject_props_guard CHECK (NOT (props ?| ARRAY['embedding', 'status']));\n")
+    kind, names = props_ban_in_force(unreadable_operand, "subject")
+    assert names == frozenset(), (
+        "an unreadable operand borrowed the sibling's ARRAY[…] in the SAME "
+        f"statement: {sorted(names)}")
 
     # ROUND 5 vehicle E — `RENAME CONSTRAINT` does not re-declare: after it the name
     # these pins read no longer exists.
