@@ -388,9 +388,13 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "retired-forward total to. ⛔ THE FORM IS DECLARED, not inferred: a clause in a "
         "RUNNING record cannot be identified by position (a last match retargets on an "
         "append, a first match on an insertion before it — both measured, #13052 review at "
-        "0881a403 and at 7a61cde), so the sentence's own closing form is the anchor and a "
-        "change to it fails CLOSED here. If the movement record grew, extend this pin in "
-        "the same change rather than reshuffling the sentence to fit it"
+        "0881a403 and at 7a61cde), so the sentence's own closing form is the anchor. WHAT "
+        "THAT BUYS, MEASURED — an append whose closing plus-chain totals something OTHER "
+        "than the retired count reds at the total comparison below, an append that totals "
+        "the retired count is accepted (the binding moves to it, and the total, which is "
+        "the only claim this fragment makes, stays true), and a MINUS-form append cannot "
+        "match a plus-chain at all, so it reds here. If the record grows, extend this pin "
+        "in the same change rather than reshaping the sentence to fit it"
     )
     assert int(advertised_eq.group(2)) - int(door_wave.group(1)) == live, (
         f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
@@ -402,6 +406,25 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         f"{retired_eq.group(2)}; the manifest carries {retired}"
     )
 
+    # 1d. The SAME count, stated a SECOND time in present tense a few paragraphs earlier —
+    # "The population is **60** now … and it is still 60 of 60 verified" (#13052 review at
+    # 2c3c9acc, P3). Nothing read it: mutating all three numbers to 61 stayed green while every
+    # other pin still agreed with itself, which is this wave's own defect class — a present-tense
+    # claim with no machine behind it.
+    population_now = re.findall(
+        r"The population is\s+\*\*(\d+)\*\* now .*?and it is still (\d+) of (\d+) verified",
+        canonical, re.S)
+    assert population_now, (
+        "canonical-mcp-tools.md no longer states the retired population in present tense as "
+        "`The population is **N** now … and it is still N of N verified` — the amendment's "
+        "SECOND statement of that count. Its absence is a failure and not a vacuous pass: "
+        "delete the sentence and the surviving clause is the only statement left to check"
+    )
+    for stated, of_verified, verified in population_now:
+        assert (int(stated), int(of_verified), int(verified)) == (retired, retired, retired), (
+            f"canonical-mcp-tools.md says the retired population is {stated} now and "
+            f"{of_verified} of {verified} verified; the manifest's retired rows number "
+            f"{retired}")
     # 2. The live surface's MOVEMENTS — they COMPOSE, so the rule is the chain.
     # The doc records the whole history in one blockquote and states each movement with a
     # different verb: `moved the live surface 72 → 68`, then `took it 68 → 60`, `took it
