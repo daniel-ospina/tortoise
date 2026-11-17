@@ -1017,6 +1017,7 @@ surfaces:
   # one-surface registration drops this file on one of the two halves' own
   # diffs — the #1349/#3332 silent-drop class the manifest exists for.
   - test_10893_read_stage_attribution.py
+  # #10602: the wait-bound BREACH channel — `wait_bound_breaches` on the health
   # surface, so a `-32009` refusal is observable in-process instead of only in
   # the best-effort analytics sink. Dual-registered for the same reason as its
   # sibling above and as the health guards below: the emit sites and the
