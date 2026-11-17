@@ -54,6 +54,8 @@ to this document is COVERAGE, not a new leg:** §3's mechanism, §6.1's filter g
 text-index decision are unchanged, and the work it orders (the columns and the writer, the record-served
 dense leg, the arming) is not a question this document decides.
 
+⛔ **The read half is not a switch for `:Object`/`:Subject`, and the way it fails looks like a WIN.** `search_engine._STATUS_FILTERED_LABELS` is `("Point", "Object", "Subject")` (`search_engine.py:148`), so both graph branches drop a superseded / deprecated / archived / retracted entity out of the dense leg — and the record cannot yet express that: `record_vector._STATUS_COLUMN` has no entry for either label (`record_vector.py:337`, so `_status_predicates` emits NO clause for them), and the fold it would have to read (`public.object_current_status` / `subject_current_status`, `20261012000004_record_procedural.sql:56`) answers only `live` / `superseded`, collapsing `deprecated` / `archived` / `retracted` — which arrive as `EntityMutated op=restatus` — to `live`; `chk_object_props_no_derived` refuses a status column in the props tail. **So adding those two labels to `record_vector.LABEL_SERVED` before that gap is closed returns exactly the rows `#689` exists to hide, and it reports as better recall.** The status fold comes first; `_status_predicates`'s own docstring is the standing rule (*the record leg must not be a loophole around `#689`*).
+
 **Sibling documents:** `STORAGE-ARCHITECTURE.md` owns authority per layer (§2.0/§3) and the cost model
 (§17.4); `CONSUMPTION-MODEL.md` owns metering; **this document owns where each search leg executes, and
 what the graph engine holds.**
