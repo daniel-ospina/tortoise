@@ -1,0 +1,1514 @@
+{
+ "arms": {
+  "object@c1": {
+   "concurrency": 1,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "object",
+   "external_load_procs": 0,
+   "latency_ms": {
+    "max": 84.62,
+    "mean": 58.06,
+    "p50": 56.88,
+    "p95": 69.06,
+    "p99": 76.61
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     7.78,
+     24.55,
+     31.2
+    ]
+   },
+   "mechanism": {
+    "scan_fallback": 60
+   },
+   "n": 60,
+   "over_budget": 0,
+   "reason": {
+    "ok": 60
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 51.62,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 51.83,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 51.98,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.0,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.05,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.28,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.7,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.93,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.08,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.32,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.37,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.42,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.65,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.67,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.72,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.01,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.03,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.04,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.17,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.3,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.31,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.54,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.77,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.99,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 55.0,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 55.34,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 55.37,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 55.39,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.12,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.16,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.88,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 57.03,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 57.53,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 57.68,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 57.69,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 58.01,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 58.02,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 58.27,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 58.49,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 58.65,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 58.72,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 59.01,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 59.04,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 59.1,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 60.2,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 60.33,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 60.52,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 60.9,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 60.91,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 61.33,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 61.69,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 62.61,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 64.66,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 65.48,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 67.44,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 68.63,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 69.06,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 70.28,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.61,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 84.62,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  },
+  "point@c1": {
+   "concurrency": 1,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "point",
+   "external_load_procs": 0,
+   "latency_ms": {
+    "max": 36.57,
+    "mean": 22.6,
+    "p50": 21.48,
+    "p95": 27.25,
+    "p99": 32.92
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     7.78,
+     24.55,
+     31.2
+    ]
+   },
+   "mechanism": {
+    "index": 60
+   },
+   "n": 60,
+   "over_budget": 0,
+   "reason": {
+    "ok": 60
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 20.45,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.47,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.48,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.71,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.77,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.77,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.82,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.84,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.85,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.85,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.86,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.87,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.9,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 20.91,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.01,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.02,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.02,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.03,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.05,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.06,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.1,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.19,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.23,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.24,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.25,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.32,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.33,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.34,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.4,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.47,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.48,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.63,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.76,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.8,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.94,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.98,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 22.02,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 22.07,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 22.3,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 22.74,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 22.79,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 22.9,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.09,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.26,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.32,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.35,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.54,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.58,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.9,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.99,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 24.07,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 24.25,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 24.44,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 24.61,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 24.84,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 26.14,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 27.25,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 27.96,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 32.92,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 36.57,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  }
+ },
+ "box": {
+  "cpus": 16,
+  "loadavg": [
+   7.66,
+   23.97,
+   30.94
+  ]
+ },
+ "census": {
+  "labels": {
+   "Object": {
+    "embedded": 8000,
+    "stored": 8000
+   },
+   "Point": {
+    "embedded": 8000,
+    "stored": 8000
+   }
+  },
+  "vector_indexes": [
+   [
+    "Point",
+    "['id', 'pointKind', 'content_hash', 'key', 'lastDreamedAt', 'content', 'search_keys', 'quote', 'embedding']",
+    "OrderedDict({'id': ['RANGE'], 'pointKind': ['RANGE'], 'content_hash': ['RANGE'], 'key': ['RANGE'], 'lastDreamedAt': ['RANGE'], 'content': ['FULLTEXT'], 'search_keys': ['FULLTEXT'], 'quote': ['FULLTEXT'], 'embedding': ['VECTOR']})",
+    "OrderedDict({'id': OrderedDict(), 'pointKind': OrderedDict(), 'content_hash': OrderedDict(), 'key': OrderedDict(), 'lastDreamedAt': OrderedDict(), 'content': OrderedDict(), 'search_keys': OrderedDict(), 'quote': OrderedDict(), 'embedding': OrderedDict({'dimension': 384, 'similarityFunction': 'cosine', 'M': 16, 'efConstruction': 200, 'efRuntime': 10})})"
+   ]
+  ]
+ },
+ "code_head": "d93c4c99e970249de8336ae949c8418bee08538c",
+ "config": {
+  "concurrency": [
+   1
+  ],
+  "external_load": 0,
+  "labels": [
+   "object",
+   "point"
+  ],
+  "limit": 3,
+  "population": 1000,
+  "reads": 60,
+  "sessions_dir": "~/.tortoise/session-events",
+  "timeout_ms": 500
+ },
+ "index_attempt": [
+  {
+   "answered_signature": null,
+   "attempts": [
+    {
+     "elapsed_ms": 10.5,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "A"
+    },
+    {
+     "elapsed_ms": 10.6,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "B"
+    }
+   ],
+   "elapsed_ms": 21.13,
+   "label": "Object",
+   "outcome": "refused-both-signatures"
+  },
+  {
+   "answered_signature": "B",
+   "attempts": [
+    {
+     "elapsed_ms": 10.22,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "A"
+    },
+    {
+     "elapsed_ms": 9.33,
+     "outcome": "ok",
+     "raised": null,
+     "signature": "B"
+    }
+   ],
+   "elapsed_ms": 19.57,
+   "label": "Point",
+   "outcome": "ok"
+  }
+ ],
+ "issue": 13108,
+ "measured_at": "2026-11-17T02:27:51Z",
+ "seed": null,
+ "uri_graph": "dense13108_8000",
+ "windows": {
+  "windows@c1": {
+   "concurrency": 1,
+   "keyword_only_share": 0.0,
+   "latency_ms": {
+    "max": 130.947716999799,
+    "p50": 95.32268799375743,
+    "p95": 111.81106208823621,
+    "p99": 120.82467705477029
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     7.72,
+     24.25,
+     31.07
+    ]
+   },
+   "vector_mechanism": {
+    "scan_fallback": 60
+   },
+   "vector_reason": {
+    "ok": 60
+   },
+   "window_modes": {
+    "hybrid": 60
+   },
+   "windows": 60
+  }
+ }
+}

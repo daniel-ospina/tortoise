@@ -1,0 +1,137 @@
+{
+ "arms": {
+  "object@c1": {
+   "concurrency": 1,
+   "count": {
+    "rows_mean": null,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "object",
+   "external_load_procs": 22,
+   "latency_ms": {
+    "max": null,
+    "mean": null,
+    "p50": null,
+    "p95": null,
+    "p99": null
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     126.07,
+     131.67,
+     133.94
+    ]
+   },
+   "mechanism": {},
+   "n": 0,
+   "over_budget": 0,
+   "reason": {},
+   "samples": []
+  }
+ },
+ "box": {
+  "cpus": 16,
+  "loadavg": [
+   140.03,
+   142.31,
+   139.81
+  ]
+ },
+ "census": {
+  "labels": {
+   "Object": {
+    "embedded": 8000,
+    "stored": 8000
+   },
+   "Point": {
+    "embedded": 8000,
+    "stored": 8000
+   }
+  },
+  "vector_indexes": [
+   [
+    "Point",
+    "['id', 'pointKind', 'content_hash', 'key', 'lastDreamedAt', 'content', 'search_keys', 'quote', 'embedding']",
+    "OrderedDict({'id': ['RANGE'], 'pointKind': ['RANGE'], 'content_hash': ['RANGE'], 'key': ['RANGE'], 'lastDreamedAt': ['RANGE'], 'content': ['FULLTEXT'], 'search_keys': ['FULLTEXT'], 'quote': ['FULLTEXT'], 'embedding': ['VECTOR']})",
+    "OrderedDict({'id': OrderedDict(), 'pointKind': OrderedDict(), 'content_hash': OrderedDict(), 'key': OrderedDict(), 'lastDreamedAt': OrderedDict(), 'content': OrderedDict(), 'search_keys': OrderedDict(), 'quote': OrderedDict(), 'embedding': OrderedDict({'dimension': 384, 'similarityFunction': 'cosine', 'M': 16, 'efConstruction': 200, 'efRuntime': 10})})"
+   ]
+  ]
+ },
+ "code_head": "d93c4c99e970249de8336ae949c8418bee08538c",
+ "config": {
+  "concurrency": [
+   1
+  ],
+  "external_load": 22,
+  "labels": [
+   "object"
+  ],
+  "limit": 3,
+  "population": 1000,
+  "reads": 0,
+  "sessions_dir": "~/.tortoise/session-events",
+  "timeout_ms": 500
+ },
+ "index_attempt": [
+  {
+   "answered_signature": null,
+   "attempts": [
+    {
+     "elapsed_ms": 9.99,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "A"
+    },
+    {
+     "elapsed_ms": 9.87,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "B"
+    }
+   ],
+   "elapsed_ms": 19.88,
+   "label": "Object",
+   "outcome": "refused-both-signatures"
+  }
+ ],
+ "issue": 13108,
+ "measured_at": "2026-11-17T03:30:52Z",
+ "seed": null,
+ "uri_graph": "dense13108_8000",
+ "windows": {
+  "windows@c1": {
+   "concurrency": 1,
+   "external_load_procs": 22,
+   "keyword_only_share": 0.0333,
+   "latency_ms": {
+    "max": 19427.338217035867,
+    "p50": 15412.61782310903,
+    "p95": 18815.775225055404,
+    "p99": 19303.15045104362
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     122.52,
+     127.9,
+     132.3
+    ]
+   },
+   "vector_mechanism": {
+    "None": 2,
+    "scan_fallback": 58
+   },
+   "vector_reason": {
+    "ok": 58,
+    "timeout": 2
+   },
+   "window_modes": {
+    "hybrid": 58,
+    "keyword_only": 2
+   },
+   "windows": 60
+  }
+ }
+}
