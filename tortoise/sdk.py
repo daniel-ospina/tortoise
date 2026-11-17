@@ -44969,6 +44969,12 @@ class TortoiseSDK:
                 # could have failed in the same read. The total is withheld
                 # (``exact`` stays False), so the caller gets the third state.
                 _trunc["incomplete"] = bool(_lost_legs)
+                # #10893 review F2: this arm RETURNS with no graph work of its
+                # own, so without a terminal mark a breach here publishes
+                # ``retrieval`` — the stage that is still OPEN, whose legs have
+                # already answered. The right name for "read finished, answer
+                # late" is ``response``.
+                _mark_read_stage(STAGE_RESPONSE)
                 return _with_read_status([])
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
@@ -45056,8 +45062,18 @@ class TortoiseSDK:
                     # cap-driven ``declined`` all leave the slot unserved with
                     # ``TORTOISE_BM25_LEXICAL=1``.
                     _trunc["incomplete"] = bool(_lost_legs)
-                    return _with_read_status(
-                        _decorate_fallback_hits(snap_hits, graph))
+                    # #10893 review F2/F4: the decoration is a GRAPH round trip
+                    # (`fetch_point_epistemic_state` + the `subject_binding_
+                    # available` probe), so it must finish BEFORE the terminal
+                    # mark. A return expression is evaluated after the preceding
+                    # statement, so marking first charged that fetch to
+                    # `response` — which claims "every stage finished, the answer
+                    # is late" while the store is the blocking call. `retrieval`
+                    # is still the open stage here and its contract already
+                    # covers "whatever the graph answers".
+                    _decorated = _decorate_fallback_hits(snap_hits, graph)
+                    _mark_read_stage(STAGE_RESPONSE)
+                    return _with_read_status(_decorated)
                 points = self.query(kind=kind,
                                     include_retracted=include_terminal,
                                     # #7983: these hits are recorded ONCE, by
@@ -45127,8 +45143,12 @@ class TortoiseSDK:
                 # rows: those rows were ranked from the whole corpus, not from
                 # the match set the dead leg owed this read.
                 _trunc["incomplete"] = bool(_lost_legs)
-                return _with_read_status(
-                    _decorate_fallback_hits(legacy_hits, graph))
+                # #10893 F4: same as the snapshot tier above — decorate (graph
+                # round trips, `retrieval`'s own contract) before the terminal
+                # mark, never inside it.
+                _decorated = _decorate_fallback_hits(legacy_hits, graph)
+                _mark_read_stage(STAGE_RESPONSE)
+                return _with_read_status(_decorated)
             if status_trace is not None:
                 status_trace.append(_trace_entry(
                     "fallback", ran=True, degraded=True,
@@ -45137,6 +45157,10 @@ class TortoiseSDK:
             # nothing was cut, but an asked leg that never answered means the
             # empty answer is not a complete one.
             _trunc["incomplete"] = bool(_lost_legs)
+            # #10893 review F2: terminal mark — this arm does no graph work, so
+            # the time from here to the answer being written out is response
+            # assembly, not retrieval.
+            _mark_read_stage(STAGE_RESPONSE)
             return _with_read_status([])
 
         # R4 (#1543): 1-2 hop IMPL/NAND expansion on TEXT hits (graph as
@@ -45320,6 +45344,18 @@ class TortoiseSDK:
             if threshold > 0:
                 fused = {pid: score for pid, score in fused.items() if score >= threshold}
             match_source = "rrf"
+
+        # #10893 review F1: ``fusion`` is PURE CPU and must bracket only
+        # ``rrf_fusion``. Everything below (recency weights, kind/status/claim
+        # filters, echo fold, the rerank pool fetch) is a graph round trip, and
+        # leaving ``fusion`` open across it made a breach inside, say, the
+        # ``exclude_status`` query publish ``stage=fusion`` with ``retrieval``
+        # already closed and healthy — the operator then rules out the graph and
+        # blames the CPU. ``retrieval`` is documented as "all three legs PLUS
+        # whatever the graph answers" (read_stages.py), so the graph bracketing
+        # belongs there. Marked after the dispatch so the single-strategy
+        # (keyword-only, no-embeddings) arm is bracketed identically.
+        _mark_read_stage(STAGE_RETRIEVAL)
 
         # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
         result_ids = list(fused.keys())

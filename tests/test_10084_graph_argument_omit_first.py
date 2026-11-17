@@ -243,11 +243,18 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   this view is the HTTP-filtered one (`_reset_ip_rate_limits` imports
     #   `tortoise.hosted_api`, which registers the HTTP tool transform on the shared
     #   `mcp` singleton): measured at origin/main (d741bd4) 59 unfiltered -> 54 filtered,
-    #   and at THIS head 55 unfiltered -> 50 filtered (both populations move by the same
-    #   −9 + 5 = −4, since all nine retired doors and all five arriving containers are
-    #   `http_policy=True`). Of the six `GRAPH_ARGUMENT_EXCLUDED` names only three are in
+    #   and at the head lane E branched from 55 unfiltered -> 50 filtered (both
+    #   populations move by the same −9 + 5 = −4, since all nine retired doors and all
+    #   five arriving containers are `http_policy=True`). Of the six
+    #   `GRAPH_ARGUMENT_EXCLUDED` names only three are in
     #   the filtered view (`tortoise_graph_set_recording`, `tortoise_list_graphs`,
     #   `tortoise_manage_sources`), so 50 − 3 = 47 advertising tools.
+    #
+    #   #11609's DOOR-RETIREMENT wave (lane E) then retired seven advertised doors into
+    #   containers that were ALREADY in this population, so nothing arrives and the view
+    #   moves 50 → 43. All SEVEN were `http_policy=True` — measured from the registry at
+    #   origin/main, not assumed (a stdio-only door would have left this view untouched
+    #   and the floor would be 41, not 40). So 43 − 3 = 40 advertising tools.
     #
     #   ⛔ These are TWO populations and the terms do not cross (review finding, #12951):
     #   the unfiltered registry (59 → 55) and the filtered view (54 → 50) differ by the
@@ -261,12 +268,13 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   55 - 9 + 5 = 51 after #11609 batch A, then 59 - 7 + 6 = 58 and -9 + 5 again on
     #   the re-cut; it converges on the SAME 50 measured here. ⛔ The UNFILTERED total is a
     #   DIFFERENT sum and must not reuse those terms: 68 - 14 + 6 = 60, - 7 + 6 = 59 at
-    #   origin/main, - 9 + 5 = 55 at this head. Stating either one's net as if both
+    #   origin/main, - 9 + 5 = 55 at the head lane E branched from (48 at this head).
+    #   Stating either one's net as if both
     #   populations were the same hides a real `http_policy=False` row behind a
     #   coincidence.
-    assert len(advertising) >= 47, (
+    assert len(advertising) >= 40, (
         f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
-        "at least 47 (50 HTTP-filtered live tools minus the 3 excluded names in that "
+        "at least 40 (43 HTTP-filtered live tools minus the 3 excluded names in that "
         "view); a lower number means the registry lost entries, not that a pin moved")
     # …and the served view must BE that population, name for name, so a name that is
     # registered-but-unserved is caught too (the floor above cannot see a substitution).
@@ -276,7 +284,11 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     assert set(advertised) <= http_population, (
         "the served list carries names the registry does not declare as http_policy — "
         f"served-only={sorted(set(advertised) - http_population)}")
-    assert len(http_population) >= 50, (
+    # 50 until #11609's door-retirement wave retired seven `http_policy=True`
+    # doors into containers already in this population (50 − 7 = 43). A floor, for
+    # the same reason as the one above: an equality would move with a collapsed
+    # registry and pass over it.
+    assert len(http_population) >= 43, (
         f"the registry's http_policy population collapsed to {len(http_population)}")
     for name in advertising:
         schema = advertised[name]

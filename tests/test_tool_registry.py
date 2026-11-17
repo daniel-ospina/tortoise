@@ -158,20 +158,21 @@ class TestRegistryEquivalence:
         the surface. The composition, in the order the waves landed on main:
 
             68 − 14 + 6 = 60   lane B (WRITE/MUTATE containers)
-            60 −  7 + 6 = 59   lane C (SOURCES/MINE/SESSION)   = origin/main @ d741bd4
-            59 −  9 + 5 = 55   THIS PR (READ/QUERY)            = measured at this head
+            60 −  7 + 6 = 59   lane C (SOURCES/MINE/SESSION)
+            59 −  9 + 5 = 55   #12951 (READ/QUERY)              = origin/main @ 486f5ca
+            55 −  7 + 0 = 48   THIS PR (door retirement, lane E) = measured at this head
 
         Retired composes the same way, and it is a UNION — no wave drops another's
-        rows: 23 + 7 + 14 = 44 at main, + 9 = **53** here. The live delta is −9 + 5 and
-        not −9 + 6 because `tortoise_graph_overview` — one of the family's six
-        containers — was already live (#10914); the five that actually ARRIVE are
-        `search_knowledge`, `list_knowledge`, `check_confidence`,
-        `explore_connections`, `review_link_candidates`.
+        rows: 23 + 7 + 14 = 44 at main, + 9 = **53** after #12951, + 7 = **60** here.
+        The lane-E wave adds NO container rows: it removes doors whose containers
+        were already advertised by the three Phase 2 waves, so the live delta is
+        exactly −7 and the arithmetic has no `+ n` term.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
-        # lane C composes on top of lane B (59), then THIS PR's READ/QUERY wave: 59 - 9 + 5 = 55.
-        assert len(TOOL_REGISTRY) == 55, f"Expected 55, got {len(TOOL_REGISTRY)}"
+        # lane C composes on top of lane B (59), then the READ/QUERY wave (55), then
+        # THIS PR's door-retirement wave: 55 - 7 + 0 = 48.
+        assert len(TOOL_REGISTRY) == 48, f"Expected 48, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated, the 5 #4282 container members, the 14 #11609 lane B
@@ -179,7 +180,7 @@ class TestRegistryEquivalence:
         # members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
 
-        assert len(retired) == 53, f"Expected 53 retired, got {len(retired)}"
+        assert len(retired) == 60, f"Expected 60 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -234,7 +235,15 @@ class TestRegistryEquivalence:
         # TEMPORAL FIELD on the revise verb (#11609 lane B), so the door retired and the
         # container is what resolves.
         assert "tortoise_update_knowledge" in names, "Missing the update_knowledge container"
-        assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
+        # `tortoise_find_cross_lens_candidates` retired FORWARD into the container as
+        # `kind="cross_lens"` (#11609 lane E) — same treatment as `review_connections`
+        # above: the assertion follows the CAPABILITY, because asserting the NAME would
+        # re-assert the surface shape the approved target removes.
+        assert "review_link_candidates" in _rui["tortoise_find_cross_lens_candidates"], (
+            "the retired cross-lens door must name the review_link_candidates container")
+        assert "cross_lens" in _rui["tortoise_find_cross_lens_candidates"], (
+            "#438's capability is `kind=\"cross_lens\"`; a pointer without it sends the "
+            "caller to the connections arm, which is a different read")
         # #348's audit capability, reached through the #4282 container: the door retired and
         # `graph_overview(section="audit")` is the name that resolves now.
         from tortoise.tool_registry import RETIRED_USE_INSTEAD as _RUI
@@ -2408,9 +2417,15 @@ class TestToolIdentity:
         # (`check_confidence` / `list_knowledge` / `search_knowledge` are tiered
         # `maintenance`, `explore_connections` / `review_link_candidates` are `read`),
         # so the live move is exactly −1 and the served move is zero.
+        # #11609 DOOR RETIREMENT (lane E): FOUR of the seven doors this wave retires are
+        # WRITERS — `create_subject`/`create_object`/`create_event`/`create_document`
+        # (`risk="write"`, absorbed by `create_entity`) — and the other three are reads
+        # (`get_session`, `list_batch`, `find_cross_lens_candidates`). They keep their
+        # #3883 shims, so SERVED stays 54 (24 live + 30 retired writer shims) while LIVE
+        # falls 28 -> 24 with NO container row arriving (the container was already live).
         assert len(WRITE_TOOL_NAMES) == 54, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 28, f"live write census moved: {len(live)}"
+        assert len(live) == 24, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
