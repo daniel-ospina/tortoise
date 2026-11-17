@@ -838,16 +838,24 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
     explicit, recorded choice and the report says when it was taken"). Factoring
     it means a further verb inherits it by construction instead of re-spelling it.
 
-    ⚠ `apply` does NOT call it, deliberately and not by drift: it refuses
-    `--salvage` outright, and a non-salvage segmented read RAISES rather than
-    skipping — so there is no damage state `apply` can be in without having
-    already refused. (`plan` and `status` DO accept `--salvage`, which is why the
-    disclosure is load-bearing for them.)
+    ⚠ `apply` does NOT call it, and the residual is real rather than closed (review
+    P2 #13272). `apply` refuses `--salvage`, and a non-salvage read RAISES on
+    MID-FILE damage (`journal_segments.py:949-953`) — so a fold cannot skip a
+    record. But an unparseable TORN TAIL is tolerated by BOTH readers (the
+    segmented one only warns, `:954-957`; `EventLog.read_all` keeps the fragment
+    on the last line, `log.py:2470`), so `apply` CAN fold a journal that dropped a
+    torn tail fragment, undisclosed, and it never consults
+    `torn_tail_revival_records()` — the #3316 contract that a torn tail whose loss
+    could REVIVE removed state must be refused before any wipe or fold
+    (`log.py:2355-2365`). That gap is pre-existing and out of this file's scope;
+    this docstring states it instead of asserting the state cannot occur, because
+    a maintainer reading "impossible" would not go looking for it.
     """
     if j["corrupt_lines"] is None or j["torn_tails"] is None:
         return ["  ⚠ damage counters NOT REPORTED: this layout's reader does not "
-                "return them — it RAISES on damage unless asked to salvage — "
-                "so damage here is unmeasured rather than absent"]
+                "return them — it REFUSES mid-file damage unless asked to "
+                "salvage, and it DROPS a torn tail fragment with a log-only "
+                "warning — so damage here is unmeasured rather than absent"]
     if j["corrupt_lines"] or j["torn_tails"]:
         return [f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s), "
                 f"{j['torn_tails']} torn tail fragment(s) — a SKIPPED line "

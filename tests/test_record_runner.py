@@ -601,6 +601,42 @@ def test_status_on_a_SALVAGED_segmented_layout_cannot_claim_completion(
     assert "complete: UNKNOWN" in out
 
 
+def test_a_REAL_graph_dir_read_keeps_the_completion_claim(tmp_path, monkeypatch, capsys):
+    """F3 (review #13272): pin the READER's half, not only the predicate's.
+
+    The two boundary rows above mock `read_journal`, so they pin the predicate
+    over a `Journal` the test states. The symptom this PR fixes lived in the
+    READER's return (`segmented=True, salvage=False, corrupt=None`), and a mutant
+    there — `salvage=salvage` → `salvage=True` in the segmented arm — reproduced
+    the whole bug while the suite stayed green (measured: 52 passed).
+
+    So this row goes through the real `read_journal` over a real directory, which
+    is the documented `--journal <graph dir>` form.
+    """
+    from tortoise import journal_segments
+
+    active = tmp_path / journal_segments.ACTIVE_NAME
+    active.write_text(
+        "\n".join(json.dumps({"type": t}) for t in
+                   ("IngestStarted", "PointAdded", "PointAdded")) + "\n",
+        encoding="utf-8")
+    # the reader's own contract, asserted directly so a mutant fails HERE first
+    journal = read_journal(tmp_path)
+    assert journal.segmented is True
+    assert journal.salvage is False
+    assert journal.corrupt is None and journal.torn is None
+    assert len(journal) == 3
+
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=3, present=3))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(tmp_path), "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["fully_consumed"] is True
+    assert payload["completeness_unknown"] is False
+    assert payload["journal"]["corrupt_lines"] is None  # still disclosed
+
+
 def test_a_CLEAN_segmented_read_STILL_reports_completion(monkeypatch, capsys):
     """The other side of the boundary: `--journal <graph dir>`, no damage.
 
