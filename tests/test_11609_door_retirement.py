@@ -153,7 +153,12 @@ def _destination(name: str) -> str:
     """
     from tools.bridge_table import DESTINATION
 
-    return DESTINATION[name]
+    destination = DESTINATION.get(name)
+    assert destination, (
+        f"{name} has no recorded destination in `tools/bridge_table.py`'s map, so the "
+        "reason this table records for it cannot be asserted against a container — "
+        "re-derive it before retiring the door")
+    return destination
 
 
 #: The same first-token read the generators use (`tools/bridge_table.py`'s
