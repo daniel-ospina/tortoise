@@ -1976,6 +1976,8 @@
           }
         }
       },
+      "ranked_lists_compared": 300,
+      "ranked_lists_compared_note": "this arm recorded each item's ranked list, so fired/identical was a real element-wise comparison",
       "reads": {
         "off": 300,
         "on": 300
@@ -2007,6 +2009,14 @@
     "per_k_from_one_read": true,
     "read_limit": 60
   },
+  "construction_unrecorded": {
+    "fields": [
+      "query_chars",
+      "key_tokens",
+      "min_query_tokens"
+    ],
+    "note": "this run predates the tool recording these knobs, so they are NOT evidence here \u2014 the values it ran with are prose in research-brief.md \u00a73 and \u00a78 (headline: query-chars default 500, read window 30; short-query arm: query-chars 200, read window 60; key-tokens 4, min-query-tokens 3). \u26d4 The two point arms differ in BOTH `query_chars` and `read_limit`, so the robustness arm's difference cannot be attributed to the query cap alone (#13267 F5). The tool records `construction.query_chars`/`key_tokens`/`min_query_tokens` from this version onward."
+  },
   "environment": {
     "db_uri_scheme": "docker",
     "elapsed_s": 133.7,
@@ -2032,13 +2042,20 @@
   "items": {
     "dropped": {},
     "id_digest": "4d6899d3d0b62543777628ef16a2fa2ef5e9aea845823b073a2158c2119da686",
-    "ids_match_all_arms": true,
+    "id_digest_note": "sha256 over the synthetic `item-NNNNNN` ids every draw assigns \u2014 a function of the sample SIZE only, NOT pairing evidence; use name_digest",
     "median_target_overlap_with_query": 0.0,
     "name_digest": "06373b442bc9318223d65220d30054c4138dd62c661181c29e8d9b8cf5d6d4eb",
     "sampled": 300,
     "with_item": 300
   },
   "measured_at": "2026-11-17T17:51:54.610893+00:00",
+  "pairing": {
+    "items_read_per_arm": {
+      "point": 300
+    },
+    "same_item_list_is_structural": "one `items` list is built once and handed to every arm in the same process, so a different sample per arm is not reachable; `items.name_digest` (and `population.names_sha256`) is the discriminating record of WHICH names those items came from. `items.id_digest` is NOT: it digests the synthetic `item-NNNNNN` ids, so it is a function of the sample SIZE only (#13267 F6).",
+    "unit": "the item"
+  },
   "population": {
     "names_sha256": "06373b442bc9318223d65220d30054c4138dd62c661181c29e8d9b8cf5d6d4eb",
     "population": 1000,
@@ -2048,6 +2065,13 @@
     "snapshot_digest": "18ab6174e440f7b38dbd49b00b519409cedaacef58647f2cf29532b825f325d0"
   },
   "population_file": "/tmp/snap-2518/population-300.json",
+  "provenance": {
+    "git_head": "9b537d875a3ee27e6abdb7ccac07b28ef71a78cd",
+    "git_head_note": "`git_head` is the repo commit the run sat on, and it does NOT identify the producing code: these artifacts carry `mde_note` and a null/`nan` `mde_paired`, which the tool emits only from 5898385f2e onward \u2014 that fix was UNCOMMITTED when the run happened. `tool_sha256` is null because this run predates the field; a run from this tool version records the digest of its own bytes and whether they were committed (#13267 F4).",
+    "tool_path": "tools/paired_expansion_ab_2518.py",
+    "tool_sha256": null,
+    "tool_uncommitted": true
+  },
   "refusals": [],
   "schema": "paired-expansion-ab-2518.artifact.v1",
   "snapshot": {

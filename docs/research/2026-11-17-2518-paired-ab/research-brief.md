@@ -38,20 +38,24 @@ Neither is distinguishable from noise, and the tool now **reproduces the sample 
 implied** from the formula rather than trusting them: with p̄ ≈ 0.865 and n = 300 an independent design
 resolves **7.82 pp**; 5 pp needs **~734 per arm** and 3 pp **~2,034 per arm** (the brief's "~755 / ~2,100").
 
-⛔ **And the comparison was worse than underpowered — it was structurally blind, which this run
-demonstrates rather than asserts.** `entity_key_expansion` arms only when `entity_type == "point"`
-(`sdk.SDK.search_graph`: both halves sit behind `entity_key_expansion and entity_type == "point"`), and
-`tools/candidate_recall_11901.py` measures the **OBJECT** leg. Measured here on the same frozen corpus,
-same items, same box, back to back (`paired-object-60-control.json`, n = 60):
+⛔ **And the comparison was worse than underpowered — it was structurally blind, which the call site
+fixes and this control reproduces as a gate, not as a measured effect.** `entity_key_expansion` arms only
+when `entity_type == "point"` (`sdk.SDK.search_graph`: both halves sit behind
+`entity_key_expansion and entity_type == "point"`), and `tools/candidate_recall_11901.py` measures the
+**OBJECT** leg. The control below ran the object arm on the same frozen corpus, same items, same box,
+back to back (`paired-object-60-control.json`, n = 60) — and its two switch states are one code path, so
+the tool flags the arm `structurally_blind: true` and **refuses** to publish its null as a result (exit 3,
+artifact still written).
 
-| object arm, k | OFF hits | ON hits | discordant | identical ranked lists |
-|---|---|---|---|---|
-| 3 / 5 / 10 / 15 | **60/60** | **60/60** | b = 0, c = 0 | **60 of 60 items, element-wise** |
-
-So between those two published runs there was **no code difference to measure** on that instrument: the
-expansion's two switch states are one code path there. Whatever produced 75.0 → 76.3 and 88.0 → 85.0 was
-corpus drift, machine load and sampling noise. The tool flags the arm `structurally_blind: true` and
-**refuses** to publish its null as a result (exit 3, artifact still written). Its minimum detectable
+⛔ **What that control does NOT carry, and this brief previously said it did.** Its
+`expansion_identical_items: 60` was derived from `(ids or []) == (ids or [])` while `read_arm` recorded
+ranked lists for the **point** arm only: both sides were `None`, so the "identical ranked list in both
+switch states" was `None == None` for every item — a constant no retrieval behaviour can move, published
+as a measurement (`#13267` F1). The identity is TRUE, and it is a **call-site fact**
+(`entity_key_expansion and entity_type == "point"` at `tortoise/sdk.py:44955` and `:45453`), not something
+that artifact measured. The artifact now records `identity_measured: false` with those counts `null`
+rather than a number, and the tool records each item's ranked list on **both** sides (with a per-side
+digest in the artifact) so the next run measures it instead of asserting it. Its minimum detectable
 effect is reported as **not estimable** (`nan`, with a `mde_note`) rather than `0` — an all-agree run
 carries no information about the difference, and an MDE of 0 beside a null reads as "infinitely powered",
 which is the opposite of what it means.
@@ -133,8 +137,22 @@ contradicts the 2026-11-10 KEEP ruling (`#11395`), `SEARCH-ARCHITECTURE.md` V1, 
    competition; 300 anchors + 600 linked points + 500 distractors = 1,100 points.
 4. **One read per item per arm** at `--read-limit`, so every k is a **prefix** of one ranked list and the
    arms cannot differ by read width.
-5. **Both arms in one process, back to back**: load 10.36 → 10.27 (Δ −0.09). `window_modes` recorded per
-   arm; a mixed mode is refused as contamination.
+5. **Both arms in one process, back to back**: the headline run is bracketed by load **13.09 → 12.55**
+   (Δ −0.54) and the object control by **11.25 → 11.25** (Δ −0.01). `window_modes` recorded per arm; a
+   mixed mode is refused as contamination. ⛔ The figures are the artifacts' own `environment` block — a
+   re-run moves them, so they are quoted from the committed evidence and must be re-read when it moves
+   (`#13267` F3: an earlier revision quoted a trace that appears in NO committed artifact — the
+   numbers had been transposed in from another run — and this row is the reason the figures are now read
+   out of the artifact rather than remembered).
+
+⛔ **The robustness arm (see §4.1) moves TWO knobs, and this brief previously named one.** It is
+`--query-chars 200` **and** `--read-limit 60`, against the headline's default query cap (500) and
+`--read-limit 30`. An earlier revision of this section and of §4.1 attributed the whole difference to the
+query cap; the committed artifacts could not settle it either, because `construction` recorded
+`read_limit`, `distractors` and `keys_source` but **not** `query_chars` (`#13267` F5). Both are the
+treatment: the honest statement is *"a shorter query **in a wider read window** makes harm measurable"*,
+and the tool now records `construction.query_chars`/`key_tokens`/`min_query_tokens` so the next run's
+artifact alone says what it ran.
 
 ⚠️ **`window_modes`: `keyword_only` 300/300 in BOTH arms**, uniform. This box has no embedder
 (`EmbeddingModel.get() → None`), so the dense leg never ran — the measured mechanism is the **sparse half**
@@ -145,9 +163,14 @@ measurement, and it is not reported as one.
 
 ## 4. Result — the headline (n = 300, frozen corpus, one sample, two arms)
 
-**`paired-point-300.json`** · arm `point` (the leg the expansion arms) · 300 items, ids identical across
-arms (`ids_match_all_arms: true`, `id_digest 4d6899d3d0b62543`) · expansion demonstrably fired on **293 of
-300** items · repeat of the OFF side returned the **identical** outcome for every item (determinism check).
+**`paired-point-300.json`** · arm `point` (the leg the expansion arms) · 300 items, ONE list read by both
+arms in one process (`items.with_item = 300`) · **the discriminating digest is `items.name_digest`
+`06373b442bc93182…`, which equals `population.names_sha256`** — the paired evidence is that both arms come
+from one drawn sample, and that digest is what pins WHICH names it was. ⛔ `items.id_digest`
+`4d6899d3d0b62543…` is **not** pairing evidence and was cited as if it were: it digests the synthetic
+`item-NNNNNN` ids every draw assigns, so it is the constant for ANY 300-item sample (`9eeb9c4f…` for the
+60-item control) — `#13267` review 2, finding 1. Expansion demonstrably fired on **293 of 300** items;
+repeat of the OFF side returned the **identical** outcome for every item (determinism check).
 
 | k | OFF hits | ON hits | b (miss→hit) | c (hit→miss) | McNemar exact p | paired Δ | 95 % bootstrap CI | **MDE at this n** |
 |---|---|---|---|---|---|---|---|---|
@@ -190,7 +213,9 @@ exactly that — **churn, not harm**: the OFF top-k here is mostly unrelated com
 qrels for it.
 
 **So the robustness arm exists to make harm measurable** (`paired-point-300-short-query.json`, query capped
-at 200 chars, same names, same snapshot, read window 60, n = 300):
+at 200 chars **and** read window 60 — see the §3 note: both knobs differ from the headline, so "once the
+query is short" is shorthand for that pair of changes, not a single-variable attribution), same names,
+same snapshot, n = 300):
 
 | k | OFF | ON | b | c | p | Δ | MDE | seed lost from window | seed demoted |
 |---|---|---|---|---|---|---|---|---|---|
@@ -210,10 +235,10 @@ and its benefit are indistinguishable in size**, and neither is significant at n
 | falsifier | verdict | output |
 |---|---|---|
 | **the corpus snapshot exists with its digest and file list; both arms read it** | **MET** | `corpus-snapshot-manifest.json`: digest `18ab6174e440f7b38dbd49b00b519409cedaacef58647f2cf29532b825f325d0`, **23 files**, 14,225 lines, 78,571,361 bytes, per-file sha256/bytes/lines. `verify_snapshot` re-derives and **refuses** on any byte change (pinned by `test_a_tampered_snapshot_is_refused_never_renamed`). |
-| **the same sampled items are used in both arms** | **MET** | One `--population-file` (`population-300.json`, seed 20261117, names digest recorded); artifact `items.id_digest = 4d6899d3d0b62543`, `items.with_item = 300`, `ids_match_all_arms: true`. A population drawn against another snapshot is **refused** (pinned). |
+| **the same sampled items are used in both arms** | **MET** (structural + digest) | One `--population-file` (`population-300.json`, seed 20261117) is read by both arms in ONE process — the pairing is a property of that construction, not a predicate to assert. The discriminating record is **`items.name_digest = 06373b442bc93182…`, equal to `population.names_sha256`** in both point artifacts. ⛔ `items.id_digest` (`4d6899d3…`) is a function of the sample SIZE and settles nothing — the `ids_match_all_arms` predicate this row used to cite was `True` for every reachable input (`#13267` F6) and is now a `pairing` block that says so. A population drawn against another snapshot is **refused** (pinned). |
 | **the result is paired, with the test named and its p-value** | **MET** | McNemar exact two-sided per k: **p = 0.0625** (@3), **0.0313** (@5), **0.00024** (@10), **0.00002** (@15); paired bootstrap CI (2,000 resamples, seed 20261117) reported beside each. |
 | **the detectable effect size for n is stated before the conclusion** | **MET** | MDE @ n=300: **2.08 / 2.28 / 3.35 / 3.84 pp** for k = 3/5/10/15. The k=3 point estimate (+1.67 pp) is **below** it and is **not** reported as a win. The published comparison's independent MDE at p̄=0.865 is **7.82 pp** ⇒ ~734/arm for 5 pp and ~2,034/arm for 3 pp — the brief's ~755/~2,100, reproduced from the formula. |
-| **`window_modes` recorded per arm; any contamination named** | **MET** | `keyword_only` 300/300 in both arms (no embedder on this box) ⇒ uniform, no contamination, and **not** reported as a hybrid measurement. `load 10.36 → 10.27` (Δ −0.09) across both arms in one process; `repeat` of the OFF side returned identical outcomes for all 300 items. |
+| **`window_modes` recorded per arm; any contamination named** | **MET** | `keyword_only` 300/300 in both arms (no embedder on this box) ⇒ uniform, no contamination, and **not** reported as a hybrid measurement. `load 13.09 → 12.55` (Δ −0.54) across both arms in one process — the artifact's own `environment` block, not a transcription (`#13267` F3: an earlier revision quoted a trace that appears in NO committed artifact, and the load moves between runs, so a trace is only ever valid for the artifact it came from — the pin in `tests/test_paired_expansion_ab_2518.py` compares this number against the artifact); `repeat` of the OFF side returned identical outcomes for all 300 items. |
 | **⛔ no retrieval behaviour changed** | **MET** | `git diff --stat origin/main...HEAD` = `tools/paired_expansion_ab_2518.py`, `tests/test_paired_expansion_ab_2518.py`, `MEMORY.md`. No change to `tortoise/`, no index, no `TOOL_REGISTRY`, no public SDK method; the tool **refuses** when `TORTOISE_ENTITY_KEY_DENSE` is armed. |
 
 ---
@@ -265,12 +290,35 @@ uv run python tools/paired_expansion_ab_2518.py \
     --population 1000 --sample 300 --distractors 500 \
     --read-limit 30 --seed 20261117 --arms point --repeat-arm point \
     --out /tmp/point-300.json
+# the robustness arm — ⛔ TWO knobs differ from the headline run (query cap AND
+# read window), and that pair is the treatment (see §3):
+uv run python tools/paired_expansion_ab_2518.py --snapshot /tmp/snap-2518 \
+    --population 1000 --sample 300 --distractors 500 \
+    --read-limit 60 --query-chars 200 --seed 20261117 --arms point \
+    --repeat-arm point \
+    --out /tmp/point-300-short-query.json
 # the control (a different sample size is enough — its claim is structural):
 uv run python tools/paired_expansion_ab_2518.py --snapshot /tmp/snap-2518 \
     --population 1000 --sample 60 --distractors 500 --read-limit 30 --arms object \
     --out /tmp/object-60.json        # exits 3: it REFUSES to publish the blind null
 ```
 
+⛔ **A re-run is not byte-reproducible from this repo alone.** The frozen snapshot lived only in a
+box-local `/tmp` and the live corpus has since drifted (23 files at the measurement, 14 now), and the
+drawn `population-300.json` was never committed — so `items.name_digest` can be checked for CONSISTENCY
+(it equals `population.names_sha256`) but the names behind it cannot be re-derived here. The artifacts say
+so rather than implying otherwise.
+
+The tool records, in the artifact's own `provenance` block, the sha256 of its own bytes and whether those
+bytes were committed (`tool_sha256` / `tool_uncommitted`) — because `git_head` alone does **not** identify
+the producing code (`#13267` F4): these three artifacts record `9b537d875a` while carrying `mde_note` and a
+`nan` `mde_paired`, which only `5898385f2e`'s code emits (that fix was uncommitted when the run happened),
+and the earlier generation recorded `44a1b82` while carrying fields first committed in `9b537d8`.
+
 `tests/test_paired_expansion_ab_2518.py` pins the statistics to hand-computed tails and to the brief's own
-sample-size arithmetic, the snapshot/population refusals, the item construction, and one live end-to-end
-run in which the point arm reaches the lever and the object arm provably cannot — **18 passed**.
+sample-size arithmetic, the snapshot/population refusals, the item construction, the refusal CLASSES (so
+`--allow-mixed-modes` cannot excuse a blind or inert run), the ON-vs-OFF delta being a comparison of
+recorded ranked lists rather than `None == None`, **this brief's own citations against the committed
+artifacts**, and one live end-to-end run in which the point arm reaches the lever and the object arm
+provably cannot. ⛔ The case count moves with every review round — run the file (or
+`tools/ci_selection.py --integrity` for the registration) rather than trusting a number quoted here.

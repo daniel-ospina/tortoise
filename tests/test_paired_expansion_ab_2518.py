@@ -583,6 +583,83 @@ def test_the_object_arms_blindness_is_a_measured_identity_and_the_point_arms_nul
     assert P.INERT_REFUSAL not in fired["refusal_kinds"]
 
 
+# ── 2d. the brief against its own artifacts (the documented figures) ─────────
+
+_DOCS = (Path(__file__).resolve().parent.parent
+         / "docs" / "research" / "2026-11-17-2518-paired-ab")
+_ARTIFACTS = ("paired-point-300.json", "paired-point-300-short-query.json",
+              "paired-object-60-control.json")
+
+
+def _artifact(name: str) -> dict:
+    return json.loads((_DOCS / name).read_text())
+
+
+def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
+    """The four evidence defects of `#13267` F1/F3/F5/F6, pinned as a doc drift.
+
+    A brief is prose and its artifacts are the evidence; when they disagree the
+    brief has to move. Each assertion below is one of the review's findings:
+
+    * F3 — the quoted load trace was in NO artifact (`10.36 → 10.27` was the
+      object control's `9.44 → 9.36`, transposed);
+    * F6 — `ids_match_all_arms` was a tautology and `id_digest` is a function of
+      the sample SIZE, so it cannot be the pairing evidence;
+    * F1 — the object control's "60 of 60 identical" was `None == None`, and the
+      artifact now says so instead of publishing the number;
+    * F5 — the robustness arm's treatment knob (`--query-chars`) was unrecorded,
+      so the arm could not be reproduced from its own artifact.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    head = _artifact("paired-point-300.json")
+    short = _artifact("paired-point-300-short-query.json")
+    ctrl = _artifact("paired-object-60-control.json")
+
+    # F3: the load trace must be the artifact's own
+    assert f"{head['environment']['load_start']['load_1m']:.2f}" in brief
+    assert f"{head['environment']['load_end']['load_1m']:.2f}" in brief
+    for transposed in ("10.36", "10.27"):
+        assert transposed not in brief, (
+            f"{transposed} is in no committed artifact — a falsifier must quote "
+            "the artifact it points at")
+
+    # F6: the pairing datum is the NAME digest
+    assert head["items"]["name_digest"] == head["population"]["names_sha256"]
+    assert short["items"]["name_digest"] == head["items"]["name_digest"]
+    assert head["items"]["name_digest"][:16] in brief
+    assert head["items"]["id_digest"] != head["items"]["name_digest"]
+    assert "NOT pairing evidence" in head["items"]["id_digest_note"]
+    for art in (head, short, ctrl):
+        assert "ids_match_all_arms" not in art["items"], (
+            "that predicate was True for every reachable input")
+        # the brief may name the retired predicate while recording the finding;
+        # what it must never do again is cite it as evidence (`: true`)
+        assert "ids_match_all_arms: true" not in brief
+        assert art["pairing"]["items_read_per_arm"]
+
+    # F1: the object arm's identity is a CALL-SITE fact in this generation
+    obj = ctrl["arms"]["object"]
+    assert obj["identity_measured"] is False
+    assert obj["expansion_identical_items"] is None
+    assert obj["ranked_lists_compared"] == 0
+    assert "UNMEASURED" in obj["identity_note"]
+    assert "60 of 60 items, element-wise" not in brief
+
+    # F5: the robustness arm is reproducible from the brief, and the artifacts
+    # say which knobs they did NOT record
+    assert "--query-chars 200" in brief
+    assert short["construction"]["read_limit"] != head["construction"]["read_limit"]
+    for art in (head, short, ctrl):
+        assert "query_chars" in art["construction_unrecorded"]["fields"]
+        assert "query_chars" not in art["construction"]
+
+    # F4: `git_head` never stands alone as the code identity again
+    for art in (head, short, ctrl):
+        assert art["provenance"]["git_head"] == art["git_head"]
+        assert "tool_sha256" in art["provenance"]
+        assert art["provenance"]["git_head_note"]
+
+
 # ── 3. the pair, live ───────────────────────────────────────────────────────
 
 def _falkordb_available() -> bool:
