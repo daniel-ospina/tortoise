@@ -637,7 +637,6 @@ home argued with this evidence, never a silent adoption; or the window excludes 
 and is sized against §8's target on that basis; or every demoted answer is labelled with a reason and
 repaired from the record, which needs a record-served set read the record does not have.
 
-
 ---
 
 ## 10. What would reopen this decision
