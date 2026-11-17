@@ -486,8 +486,10 @@ def _names_the_budget(node: ast.expr) -> bool:
 
 def test_the_dense_pass_default_is_the_one_budget_not_a_literal():
     """`_entity_key_dense_pass`'s `timeout_ms` default NAMES the constant.
-    identically — which is exactly why nothing would go red while the default
-    stopped tracking the budget the moment somebody moved it. Measured:
+
+    The default and `degradation_chain`'s fallback are the SAME number, which is
+    exactly why nothing would go red while the default stopped tracking the budget
+    the moment somebody moved it. Measured:
     reverting the default to the literal left every other arm in this file
     passing (the whole point of #11691 is "ONE home for the number").
     """
