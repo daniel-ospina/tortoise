@@ -358,8 +358,12 @@ name — so the composed surface is:
   its own base, so
   (68 − 9 + 5 − 14 + 6 − 7 + 6 = 55, then the door wave's −7 with no container row arriving =
   48, and 23 + 9 + 14 + 7 + 7 = 60) over a SERVED population of
-  **108** rows (48 live + 60 shims), which is what `config/surface-order.yml` totals and what
-  `surface_manifest.py check` re-derives;
+  **108** rows (48 live + 60 shims) — the registry total `tools/bridge_table.py --check` reports
+  as `current (108 registry tools)` and `tools/mcp_rename_table.py` prints as
+  `served tools: 108` — and `surface_manifest.py check` re-derives the 48/60 split.
+  ⛔ NOT `config/surface-order.yml`: that file is the ordering / keyword table (its header says
+  the lint "must not be satisfiable by editing the rows it checks"), and its `baseline_counts`
+  sum to the **advertised 48**, not the served 108, so it cannot total a served population;
 - **94 public SDK methods**, composed the same way, on a surface this wave does not touch:
   125 → 120 (#12901 wave 1) → 112 (#11609's READ/QUERY family A, #12951: six containers in,
   fourteen read methods re-privatised) → 111 (lane B: four retired, three delivered) → 110

@@ -303,16 +303,29 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         f"carries {retired}"
     )
 
-    # 2. "took the live surface A → B" — the move COMPOSES, so the rule is the chain.
-    # #11609 lane E added a second movement to this doc (59 → 55, then 55 → 48), and each
-    # endpoint except the LAST is an intermediate state, not a claim about this head. So:
-    # every move's endpoint must be the next move's start (the composition is stated, not
-    # implied), and the LAST endpoint is the one that must equal this head's count.
+    # 2. The live surface's MOVEMENTS — they COMPOSE, so the rule is the chain.
+    # The doc records the whole history in one blockquote and states each movement with a
+    # different verb: `moved the live surface 72 → 68`, then `took it 68 → 60`, `took it
+    # 60 → 59`, `took the live surface 59 → 55`, `took the live surface 55 → 48`.
+    # ⛔ Both verbs are matched on purpose (#13052 review F4): matching ONLY `took the live
+    # surface` read the last two movements and left the earlier three unchecked, while this
+    # comment claimed the composition was "stated, not implied". A pin that verifies 2 of 5
+    # movements is not the composition — it is the tail of it.
+    # Each endpoint except the LAST is an intermediate state, not a claim about this head,
+    # so every move's endpoint must be the next move's start, and only the LAST endpoint
+    # must equal this head's count.
     moves = [
         (int(a), int(b))
-        for a, b in re.findall(r"took the live surface (\d+)\s*→\s*(\d+)", canonical)
+        for a, b in re.findall(r"(?:live surface|took it)\s+(\d+)\s*→\s*(\d+)", canonical)
     ]
     assert moves, "the canonical doc stopped naming the surface this container lands on"
+    # Evidence floor: the five movements ARE the record of how 72 became 48, and deleting
+    # one loses evidence rather than moving a number — so a silent drop reds here instead
+    # of shortening the chain above invisibly. `>=` because a later wave ADDS a movement.
+    assert len(moves) >= 5, (
+        f"canonical-mcp-tools.md states {len(moves)} movements of the live surface; the "
+        "history this container lands on is five (72 → 68 → 60 → 59 → 55 → 48) — a "
+        "movement was DELETED rather than superseded")
     for (start_a, end_a), (start_b, _end_b) in itertools.pairwise(moves):
         assert end_a == start_b, (
             "canonical-mcp-tools.md records two movements that do NOT compose: "
