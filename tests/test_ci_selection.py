@@ -22981,25 +22981,31 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match, and a named
     match REPLACES the `core` fallback in `select()` (`core` is added only when
     nothing named matched). MEASURED with the shipped selector against a manifest
-    carrying a **`core`-ONLY row** — the state THIS BRANCH itself created in
-    `3c380b667fe8`, before the `api` arm was added. ⛔ NOT "main's state":
-    `origin/main` carried **zero** rows for the file (`grep -c` over
+    carrying a **`core`-ONLY row** — the intermediate state THIS BRANCH itself
+    created in `7353be04b9c1` (`fix(ci): register
+    test_13034_currency_rule_reads_position.py`), before `3c380b667fe8` added the
+    `api` row and made it dual. ⛔ NOT "main's state": `origin/main` carried
+    **zero** rows for the file (`grep -c` over
     `git show origin/main:config/ci-surfaces.yml` -> 0), which is what the
     docstring above means by "UNLISTED on `main`" and what commit `a36581fd`
     retired by name — so do not re-read this clause as "main had a `core` row".
-    On that `core`-only row: `select(['tortoise/hosted_api.py'], 'pull_request',
-    manifest)` -> `surfaces=['api', 'onboarding']`, `full: False`, and this file
-    ABSENT from `test_files`. (⛔ On the manifest WITH the `api` row the same call
-    returns the pin PRESENT, so a reader who re-measures against the committed
-    file gets the opposite answer — which is why the qualifier is load-bearing.)
+    On that `core`-only manifest: `select(['tortoise/hosted_api.py'],
+    'pull_request', manifest)` -> `surfaces=['api', 'onboarding']`, `full: False`,
+    and this file ABSENT from `test_files`. (⛔ On the manifest WITH the `api` row
+    the same call returns the pin PRESENT, so a reader who re-measures against the
+    committed file gets the opposite answer — which is why the qualifier is
+    load-bearing.)
     So BOTH census arms slept on the diff class they exist for: a re-spelled
     `status != 'superseded'` filter, or a deleted `_terminal_excluded` usage in the
     hosted door, merged green.
 
-    That is the #1349/#2938/#3154 silent-drop class in its harmful direction, and
-    it is the defect the two rows above record for themselves
-    (`test_12941_read_your_writes.py`, `test_11892_health_quota.py` are the
-    `['api', 'core']` siblings). ⛔ NOT "the only hosted-door guard registered
+    That is the #1349/#2938/#3154 silent-drop class in its harmful direction. It is
+    the same defect `test_record_serve.py` (the row immediately above, at
+    `config/ci-surfaces.yml:351`) and `test_12941_read_your_writes.py` (`:352`)
+    each record for themselves — those are the two rows ABOVE this one. The
+    `['api', 'core']` siblings are `test_12941_read_your_writes.py` and
+    `test_11892_health_quota.py` (`:1815` / `:2531` — elsewhere in the map, NOT
+    above this row). ⛔ NOT "the only hosted-door guard registered
     single-surface": on `main` this file was registered on **zero** surfaces,
     and several hosted-door guards legitimately live on `api` alone
     (`test_hosted_api.py`, `test_billing.py`, `test_commit_endpoint.py`,

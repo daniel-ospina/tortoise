@@ -360,8 +360,9 @@ surfaces:
   # presence arm at `:708-722` asserts the literal `"tortoise/hosted_api.py":
   # "_terminal_excluded"` (`:714`), and `hosted_api.py` is an EXACT `api`
   # SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()`.
-  # MEASURED on a `core`-only row, with this manifest and `tools/ci_selection.py`
-  # (`select(['tortoise/hosted_api.py'], 'pull_request', manifest)`):
+  # MEASURED on a manifest carrying a `core`-ONLY row — i.e. with the `api` row
+  # BELOW REMOVED, NOT on this committed file (`tools/ci_selection.py`,
+  # `select(['tortoise/hosted_api.py'], 'pull_request', manifest)`):
   # `surfaces=['api','onboarding']`, `full: False`, and this file ABSENT from
   # `test_files` — so BOTH census arms slept on the one file #13034 converted
   # (a re-spelled `status != 'superseded'` filter, or a deleted
