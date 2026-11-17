@@ -396,6 +396,73 @@ GOAL_LIVE_STATES = GOAL_STATE_VALUES - GOAL_ENDING_STATES
 #: enforcing the wider one is a trap for the next reader, and the axis table in
 #: this module's header now says what the code does.
 
+
+def validate_goal_state(value: object) -> object:
+    """THE closed-vocabulary guard for a goal's achievement state (#13110).
+
+    One home for the rule, so every door that can carry the field refuses an
+    unknown word with the SAME sentence and the SAME set instead of each
+    restating it:
+
+      * the SDK/props boundary (``_sanitize_props``, reached by ``create_point``,
+        ``create_object``/``create_entity``, ``update_point``, ``update_entity``)
+        — the fail-closed backstop every write passes, and the ONLY guard the
+        door code calls rather than re-implements;
+      * the REST create doors that declare the field
+        (``hosted_api.CreateObjectRequest.valid_goal_state``,
+        ``CreatePointRequest.valid_goal_state``) — which must refuse BEFORE
+        submitting the write, because those routes' blanket ``except Exception``
+        maps a ValueError raised inside the SDK to a 500 that names nothing;
+      * the MCP doors that declare it (``tortoise_create_entity``,
+        ``tortoise_create_object``, ``tortoise_create_point``), through the same
+        ``_sanitize_props`` backstop.
+
+    ``None`` is LEGAL and is returned unchanged: it is the explicit "no
+    achievement state". ⛔ ``None``'s effect on a re-write is the FOLD's, not
+    this function's, and the two folds DIFFER — measured (#13110): the Object/
+    entity fold PRESERVES a stored state on a ``None`` (so an idempotent re-create
+    cannot wipe one, the #9572 clobber class), while the Point dedup fold
+    (``create_point`` → ``update_point(pid, **props)``) DELETES the property.
+    ``create_point`` therefore POPS a ``None`` before the fold (same rule as
+    ``mentions``, #11239), and ``update_knowledge(…, goalState=None)`` is the
+    documented clear. A create door never clears.
+
+    The word test is ``_is_lifecycle_word`` — TYPE-FIRST, so a ``str`` SUBCLASS
+    that cannot hash gets this refusal rather than ``TypeError`` (#13065 review
+    round 16, finding 4) — and it answers against the SIX-word set #13035 left:
+    ``guideline`` was removed by owner ruling (2026-11-16), and its removal gets
+    its own hint below rather than a bare "not in the list".
+
+    ⛔ The ``status``/``goalState`` AGREEMENT rule is NOT here:
+    ``_refuse_inconsistent_goal_ending`` compares TWO fields, where this function
+    reads one word. Keeping them apart is what lets the REST doors share this
+    sentence without also inheriting a two-field contract they cannot see.
+
+    Sits beside ``GOAL_STATE_VALUES`` on purpose: the set and its rule are one
+    object, so a widening edit cannot update one and miss the other.
+    """
+    if value is None:
+        return value
+    if not _is_lifecycle_word(value, GOAL_STATE_VALUES):
+        _hint = ""
+        if value == "guideline":
+            _hint = (
+                " `guideline` was REMOVED from this vocabulary (#13035, "
+                "owner ruling 2026-11-16): whether a goal is directional "
+                "is a question about priority, not about outcome, so it "
+                "was never an achievement state. Record the priority "
+                "elsewhere — the four live words ("
+                f"{sorted(GOAL_LIVE_STATES)}) and the two endings "
+                f"({sorted(GOAL_ENDING_STATES)}) are the whole set."
+            )
+        raise ValueError(
+            f"Invalid goalState {value!r}. A goal's achievement "
+            f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
+            "(Lifecycle is the separate `status` field — goalState is not "
+            "draft/live/retracted/archived.)" + _hint
+        )
+    return value
+
 # #7856 defect 2: the objective map's TOP node was a `goal` POINT created
 # without an explicit status, so it defaulted to `draft`. A draft point that
 # is only ever a TARGET is EP-inert — `create_operator` promotes only the
@@ -9195,6 +9262,12 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # `add_point`), so the vocabulary is enforced at the SDK/MCP boundary, not
     # at the projection choke point that live writes and replay share.
     #
+    # #13110: the RULE lives in `validate_goal_state` (module level, above) so
+    # the REST door can refuse an unknown word with the SAME sentence and the
+    # SAME set BEFORE the write is submitted — otherwise its blanket
+    # `except Exception` turned this ValueError into a 500 and the client never
+    # learned the vocabulary. One home, three doors.
+    #
     # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (#13065 review ROUND 8, finding 1,
     # P2). `"goalState" in props` hashes the LITERAL name while the live
     # transport files a key by `str(key)`, so a `str`-subclass key rendering as
@@ -9208,35 +9281,15 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # :func:`lifecycle_props_by_rendering` (the renderer UNION, first-wins) — the
     # same fix the two ending guards took, applied to the gate they all sit
     # behind.
+    #
+    # The WORD TEST and the SENTENCE stay in `validate_goal_state`, which is the
+    # one home the REST and MCP doors share; duplicating either here is how
+    # #13110's blanket `except Exception` turned the refusal into a message-less
+    # 500 on `/v1/objects` and `/v1/points`.
     _vocab_goal = lifecycle_props_by_rendering(props, ("goalState",)).get(
         "goalState")
     if _vocab_goal is not None:
-        _goal_state = _vocab_goal
-        # ⛔ #13065 review round 16, finding 4 (P3): this membership test HASHED
-        # the value, so a `goalState` that is an unhashable `str` SUBCLASS raised
-        # `TypeError: unhashable type` where the doors document `ValueError` —
-        # and it runs BEFORE the guard, so the type-safe helper the module
-        # already has never got the chance. `_is_lifecycle_word` is type-first
-        # for exactly this class; a non-`str` and a subclass that cannot hash
-        # both answer `False` here and get the documented refusal.
-        if not _is_lifecycle_word(_goal_state, GOAL_STATE_VALUES):
-            _hint = ""
-            if _goal_state == "guideline":
-                _hint = (
-                    " `guideline` was REMOVED from this vocabulary (#13035, "
-                    "owner ruling 2026-11-16): whether a goal is directional "
-                    "is a question about priority, not about outcome, so it "
-                    "was never an achievement state. Record the priority "
-                    "elsewhere — the four live words ("
-                    f"{sorted(GOAL_LIVE_STATES)}) and the two endings "
-                    f"({sorted(GOAL_ENDING_STATES)}) are the whole set."
-                )
-            raise ValueError(
-                f"Invalid goalState {_goal_state!r}. A goal's achievement "
-                f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
-                "(Lifecycle is the separate `status` field — goalState is not "
-                "draft/live/retracted/archived.)" + _hint
-            )
+        validate_goal_state(_vocab_goal)
     # #13035: the two fields must AGREE about whether the goal has ended. This
     # is the fail-closed boundary every SDK write surface shares, so a caller
     # cannot mint a goal that `derived_invalidation` retires (it reads
@@ -12238,6 +12291,63 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
+#: The prefixes the product has ever put in front of a TENANT graph name.
+#:
+#: ``team_`` is the pre-#3543 spelling and ``org_`` the current one; no data
+#: migration rewrote the graphs older orgs still have, so both spellings are
+#: live (see ``supabase_control.per_graph_namespace_prefixes``). These are read
+#: ONLY to strip an input back to the bare id — never to mint a name, which is
+#: what makes the composition below idempotent.
+_TENANT_GRAPH_PREFIXES: tuple[str, ...] = ("org_", "team_")
+
+
+def bare_tenant_id(value: str) -> str:
+    """``value`` with every leading tenant-graph prefix removed — the BARE id.
+
+    Why this exists (#13205). The composer below used to concatenate
+    unconditionally (``f"org_{namespace}"``, and ``f"team_{namespace}"`` before
+    #3543), so a caller that handed it a string which ALREADY carried the
+    prefix got a second one. That is not hypothetical: the production instance
+    carried ``team_team_3326a01ea34ae595d84de5d8f9`` — a graph no resolver can
+    ever name again, because every lookup composes ``org_{id}``/``team_{id}``
+    from a bare 26-hex org id. The cost is not cosmetic: a tenant graph is
+    ~1.46 MB of resident RAM (measured by DELETE, not by create — a new graph
+    reuses held pages and reads ~346 KiB), so every such name is a permanent,
+    unreclaimable allocation.
+
+    ⚠️ Stripping REPEATS, so the composition is idempotent in the strong sense:
+    ``team_team_x`` → ``x`` (not ``team_x``), because a single strip would leave
+    the accidental prefix in the middle and mint ``org_team_x`` — a THIRD
+    spelling, still not one any lookup derives. Stripping stops at a value that
+    would become empty (``"org_"`` is a name, not a prefix of anything).
+
+    Not applied to a DISPLAY name: ``org_create`` composes from the org's
+    human-chosen name (``org_{name}``), and a name that happens to begin
+    ``org_`` there is a name, not a double prefix. This helper is for the
+    id / namespace seam, where the input is meant to be the bare 26-hex id.
+    """
+    while True:
+        for prefix in _TENANT_GRAPH_PREFIXES:
+            if value.startswith(prefix) and len(value) > len(prefix):
+                value = value[len(prefix):]
+                break
+        else:
+            return value
+
+
+def canonical_org_graph_name(tenant: str) -> str:
+    """The DEFAULT-graph name of an org, from the bare id OR any spelling of it.
+
+    Idempotent by construction — composing an already-composed name returns it
+    unchanged — which is the property #13205 needs: composing twice must never
+    mint a second prefix. ``bare_tenant_id`` does the stripping, so a caller
+    that already holds ``team_{id}`` (the pre-#3543 spelling, or a stored
+    ``organizations.graph_name``) lands on the same ``org_{id}`` a caller
+    holding the bare id lands on, instead of on ``org_team_{id}``.
+    """
+    return f"org_{bare_tenant_id(tenant)}"
+
+
 def _derive_graph_name(*, namespace: str | None,
                        graph_name: str | None,
                        uri_graph: str | None = None) -> str:
@@ -12254,8 +12364,16 @@ def _derive_graph_name(*, namespace: str | None,
     Precedence is unchanged from ``_get_proj`` (in order): registry control
     plane → explicit ``graph_name`` verbatim → namespace (test_*/
     tortoise_test* → ``{ns}_tortoise``, hyphenated test-* → normalized to
-    ``test_<ns>_tortoise``, otherwise ``org_{ns}``) → the URI's own graph,
-    else ``tortoise``.
+    ``test_<ns>_tortoise``, otherwise ``canonical_org_graph_name(ns)``) → the
+    URI's own graph, else ``tortoise``.
+
+    ⛔ The org arm is NOT a bare concatenation any more (#13205): it goes
+    through :func:`canonical_org_graph_name`, which strips any leading
+    ``org_``/``team_`` before composing, so composing twice cannot mint a
+    second prefix. The measured casualty of the old form was the production
+    graph ``team_team_3326a01ea34ae595d84de5d8f9`` — unmintable-again,
+    unnameable by every resolver, and ~1.46 MB of resident RAM that no delete
+    path could reclaim.
     """
     if namespace == "registry":
         # Control-plane SDK: shared registry main graph.
@@ -12282,8 +12400,12 @@ def _derive_graph_name(*, namespace: str | None,
             # bulk wipe.
             return f"{namespace.replace('-', '_')}_tortoise"
         # Org SDK: isolated org graph (matches provision's org_{org_id}
-        # namespace creation, #7886).
-        return f"org_{namespace}"
+        # namespace creation, #7886). Composed through
+        # `canonical_org_graph_name` so a namespace handed in already carrying
+        # a prefix (``team_{id}``, the pre-#3543 spelling; or a name this seam
+        # itself would produce) cannot mint a SECOND one — the ``team_team_…``
+        # graph #13205 measured.
+        return canonical_org_graph_name(namespace)
     # No namespace: honor the URI's own graph (the conftest session graph for
     # tests). Fixes #7886 regression that hardcoded 'tortoise' and clobbered
     # the test graph.
@@ -16811,6 +16933,25 @@ class TortoiseSDK:
         # than forwarded.
         if props.get("mentions") is None:
             props.pop("mentions", None)
+        # #13110 (review round 3): the SAME rule for the goal's achievement
+        # state, and the same measured failure. A CREATE must not DELETE: an
+        # explicit ``goalState=None`` reaches the dedup fold's
+        # ``self.update_point(pid, **props)`` below, where a `None` in a generic
+        # prop REMOVES the property — measured: `create_point(goalState=None,
+        # dedup=True)` on an existing ``met`` goal left ``p.goalState`` UNSET,
+        # while ``create_object(goalState=None)`` on the Object twin PRESERVED
+        # it. ⚠️ WHAT THIS POP COVERS, exactly (round 4 review): the MCP ``props``
+        # bag, a direct SDK call, and the nested-``props`` flatten — NOT the MCP
+        # ``goalState=`` parameter, which the three tool bodies already guard
+        # with ``if goalState is not None`` before it reaches here. The two REST
+        # routes guard the same way. So this is the ONE place that covers every
+        # channel the guards cannot see; it is not the only place a guard sits,
+        # and it is not redundant — removing it re-opens the ``props`` bag and
+        # the SDK call (measured: that leg of
+        # ``test_no_create_channel_can_erase_a_stored_goal_state`` fails).
+        # `update_knowledge(…, goalState=None)` is the documented clear.
+        if props.get("goalState") is None:
+            props.pop("goalState", None)
         # #10122: a `name` the index does not hold is a stored-but-unfindable
         # identifier — advise here, at the door that accepted it (after the
         # flatten, so the coverage check sees the stored `search_keys` form).
@@ -32266,16 +32407,13 @@ class TortoiseSDK:
         # above gives the flag, and the one the sibling `:Subject` arm inside
         # the endpoint loop could never provide.
         #
-        # `:Object` used to be deliberately EXEMPT ("its writer does not
-        # validate, it STORES the value"), so refusing it here would have
-        # rejected bundles the writer accepted. #11824 S0 closes that asymmetry:
-        # the Object writer validates against the SAME four-word lifecycle door
-        # as the Subject one, so both are checked here, through the SAME question
-        # (`_status_refusal_reason`) rather than a re-spelt vocabulary — a
-        # divergence between this phase and the writer is exactly the
+        # `:Object` is refused here since #11824 S0: its writer now validates
+        # against the SAME four-word lifecycle door (`_status_refusal_reason`,
+        # shared with `:Subject`), so a Phase 1 skip would reopen the
         # partial-mutation class. `:Event` is no longer in that sentence: since
-        # #11825 its door refuses the TERMINAL half, and the arm BELOW mirrors
-        # that refusal at Phase 1 for the same reason.
+        # #13100 its door refuses ANY `status` (the terminal half alone was
+        # #11825's interim boundary), and the arm BELOW mirrors that refusal at
+        # Phase 1 for the same partial-mutation reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue

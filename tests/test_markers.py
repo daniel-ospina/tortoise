@@ -99,6 +99,18 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # test_cross_tenant_read_isolation.py's registry control-plane seeding. The
     # seeded id is run-unique, so nothing collides.
     "test_12943_cache_leg.py": {"registry": "prod-coupled"},
+    # #13110: the SAME shape as #12943 above — this module's `_seed_registry`
+    # helper provisions the `:Team` node the MCP lane's quota resolution reads
+    # (`_make_sdk(namespace="registry")._get_registry()`), so the literal IS the
+    # namespace PROD code resolves (`quota`/`hosted_api` resolve `registry`). A
+    # `test_*` rename would seed a graph the resolver never reads, and the three
+    # MCP create doors in that suite would then be refused `Team '<id>' not found
+    # in registry` before reaching the write they measure — the `prod-coupled`
+    # class exactly. The seeded id is run-unique, so nothing collides.
+    # MEASURED: without this row the literal reds
+    # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (c)`
+    # shard, which is how it was found (the module landed without the row).
+    "test_13110_goalstate_doors.py": {"registry": "prod-coupled"},
     # The seed helper does `_make_sdk(namespace="registry")._get_registry()
     # .query(CREATE :Team ...)` — i.e. it seeds a Team through the CANONICAL
     # namespace PROD code resolves, the same `prod-coupled` class as the

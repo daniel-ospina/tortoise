@@ -253,6 +253,7 @@ from tortoise.sdk import (
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _journal_write_failure_warning,  # #4240 F1: the shared "a journal append failed" receipt warning
+    _refuse_inconsistent_goal_ending,  # #13065: the status/goalState AGREEMENT refusal, ONE home
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
@@ -260,6 +261,8 @@ from tortoise.sdk import (
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk._capture_session)
+    canonical_org_graph_name,  # #13205: the ONE idempotent `org_{bare id}` composition
+    validate_goal_state,  # #13110: the ONE goal-achievement guard (REST refuses before the write)
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
@@ -685,8 +688,15 @@ def _graph_name_for_namespace(namespace: str | None, *,
     Branch order and truthiness mirror ``_get_proj`` EXACTLY: ``registry``
     first; ``graph_name is not None`` (not truthiness); the ``test_`` /
     ``tortoise_test`` family; the hyphenated ``test-`` family; then
-    ``org_{namespace}``; a falsy namespace falls back to the URI's own graph,
-    else ``tortoise``.
+    ``canonical_org_graph_name(namespace)``; a falsy namespace falls back to the
+    URI's own graph, else ``tortoise``.
+
+    ⛔ The org arm DELEGATES to the SDK's
+    :func:`tortoise.sdk.canonical_org_graph_name` (#13205) rather than restating
+    `f"org_{namespace}"`. That is not style: the two used to be independent
+    concatenations, so an idempotency fix applied to one would have split the
+    admission key from the graph the request opened — the #3365 class this
+    mirror exists to prevent.
     """
     if namespace == "registry":
         return "registry_tortoise"
@@ -697,7 +707,11 @@ def _graph_name_for_namespace(namespace: str | None, *,
             return f"{namespace}_tortoise"
         if namespace.startswith("test-"):
             return f"{namespace.replace('-', '_')}_tortoise"
-        return f"org_{namespace}"
+        # #13205: the SAME idempotent composition the SDK uses — never a bare
+        # `f"org_{namespace}"`, which minted a second prefix when the input
+        # already carried one (the `team_team_…` graph on the production
+        # instance). This mirror must not restate the rule; it calls it.
+        return canonical_org_graph_name(namespace)
     return uri_graph or "tortoise"
 
 
@@ -11700,6 +11714,33 @@ from pydantic import (  # noqa: E402
 )
 
 
+def _refuse_goal_axes_disagreeing_at_the_door(
+        status: str | None, goal_state: str | None, surface: str) -> None:
+    """Refuse a CREATE whose two goal axes disagree — at the DOOR, as a 422.
+
+    #13110's placement rule, applied to #13065's two-field guard. The SDK runs
+    ``_refuse_inconsistent_goal_ending`` inside ``_sanitize_props``; left to
+    reach it, this route's blanket ``except Exception`` answers a bare 500 that
+    names nothing (measured at #13116's merge: ``POST /v1/objects
+    {"goalState": "abandoned"}`` was ``500 {"detail":"Internal server
+    error"}``). The vocabulary half of #13110 was refused here for exactly this
+    reason; the agreement half is the same failure shape and gets the same home.
+
+    The bag is built EXACTLY as the route forwards it — a ``None`` ``goalState``
+    is OMITTED (the #13110 no-clobber rule) and a falsy ``status`` is OMITTED
+    (the route's own ``if body.status``) — so this judges the state the write
+    actually lands, never a stricter one. An empty bag is a no-op, which is what
+    keeps ``{goalState: null}`` and a bare create working unchanged.
+    """
+    bag: dict[str, object] = {}
+    if status:
+        bag["status"] = status
+    if goal_state is not None:
+        bag["goalState"] = goal_state
+    if bag:
+        _refuse_inconsistent_goal_ending(bag, surface=surface)
+
+
 class CreatePointRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
     kind: str = Field(default="statement")
@@ -11738,6 +11779,46 @@ class CreatePointRequest(BaseModel):
     # the baseline it already has otherwise (with a logged warning) — never a
     # silent drop either way (#7980).
     credibility: str | int | float | None = None
+    # #13110: the SAME class #4032 fixed above, for the other ontology field a
+    # customer must be able to set. `goalState` is declared on the §4.1 Point
+    # table too (a legacy goal POINT — the objective map's goals are Points,
+    # #7856), the SDK persists it through the props passthrough, and this
+    # model dropped it the same way `confidence`/`authoredBy` were dropped. So
+    # the Field description above is the class: **a value the store can hold
+    # must never be a 200 with the value missing.**
+    goalState: str | None = None
+
+    @field_validator("goalState")
+    @classmethod
+    def valid_goal_state(cls, v: str | None) -> str | None:
+        """Same rule and same sentence as the objects door (`CreateObjectRequest`)
+        — and the same SDK function, so there is still ONE vocabulary.
+
+        Refused at the door rather than left to the SDK because this route's
+        blanket ``except Exception`` would turn the SDK's ValueError into a bare
+        500 that names nothing.
+        """
+        validate_goal_state(v)  # raises ValueError → 422 naming the set
+        return v
+
+    @model_validator(mode="after")
+    def goal_axes_agree(self):
+        """#13065's ending rule, refused HERE so the answer is a 422.
+
+        The route forwards these two fields to one SDK write, and the SDK's
+        ``_sanitize_props`` refuses an ending ``goalState`` beside a live
+        ``status``. Reaching it through the route's ``except Exception`` is a
+        bare 500, so the door runs the SAME guard (one home) before the write.
+
+        ⛔ The points door has NO ``status`` field (#13110 did not add one, and
+        this is not the place to), so the bag carries only ``goalState``: the
+        create reading then refuses an ENDING word outright — which is honest,
+        because this door cannot express the agreeing lifecycle status an
+        ending requires. It is a 422 naming both repairs, not a 500.
+        """
+        _refuse_goal_axes_disagreeing_at_the_door(
+            getattr(self, "status", None), self.goalState, "POST /v1/points")
+        return self
 
     @field_validator("kind")
     @classmethod
@@ -13803,6 +13884,48 @@ class CreateObjectRequest(BaseModel):
     # caller NAMES — there is no 'live' default to splat over since #9974 R1)
     # — the onboarding STATE seed passes in_progress.
     status: str | None = None
+    # #13110: ``goalState`` is a SEPARATE axis from ``status`` (ONTOLOGY §4.3,
+    # #7856) and was reachable only from Python: pydantic's default
+    # ``extra='ignore'`` DROPPED it here, so ``POST /v1/objects
+    # {"goalState": "unmet"}`` answered 200 with the value silently gone —
+    # and an INVALID word was dropped just as silently, so the door failed in
+    # the worst direction (no error, no vocabulary). Same class, same fix shape
+    # as #4032 on the points door (``confidence``/``authoredBy``).
+    goalState: str | None = None
+
+    @field_validator("goalState")
+    @classmethod
+    def valid_goal_state(cls, v: str | None) -> str | None:
+        """Refuse an unknown word HERE, naming the closed set.
+
+        The guard is the SDK's own (``sdk.validate_goal_state``, the same one
+        ``_sanitize_props`` runs) — never a second copy of the vocabulary:
+        this door only decides WHEN it runs, not WHAT it accepts.
+
+        It MUST run at the door. Left to the SDK, the ValueError is raised
+        inside ``sdk.create_object`` and caught by this route's blanket
+        ``except Exception``, which answers a bare 500 — a status that names
+        nothing and tells the client nothing (measured on today's tree: the
+        same request was 200 with the field dropped; with the field declared
+        but unvalidated it would be 500). A pydantic validator turns it into
+        FastAPI's 422, whose body carries the SDK's own sentence and therefore
+        the whole closed set.
+        """
+        validate_goal_state(v)  # raises ValueError → 422 naming the set
+        return v
+
+    @model_validator(mode="after")
+    def goal_axes_agree(self):
+        """#13065's ending rule, refused HERE so the answer is a 422.
+
+        Same home as the vocabulary refusal above and for the same reason: the
+        route's blanket ``except Exception`` turns the SDK's ValueError into a
+        bare 500 (measured at #13116's merge: ``{"goalState": "abandoned"}``
+        answered ``500``), so the door runs the SDK's own guard before the write.
+        """
+        _refuse_goal_axes_disagreeing_at_the_door(
+            self.status, self.goalState, "POST /v1/objects")
+        return self
 
 
 @app.post("/v1/objects")
@@ -13842,6 +13965,17 @@ async def create_object(body: CreateObjectRequest, request: Request,
             props["status"] = body.status
         if _okind is not None:
             props["objectKind"] = _okind
+        # #13110: forward ``goalState`` only when the caller NAMED a value.
+        # ⛔ `is not None`, not `model_fields_set`: an explicit ``null`` must be
+        # treated EXACTLY like an absent field here, because this door MERGEs by
+        # name and a forwarded `None` reaches whichever fold the SDK takes —
+        # measured (#13110 review round 2), the POINTS door's dedup fold REMOVES
+        # the property on a `None` (`create_point` -> `update_point(pid, **props)`)
+        # while this one preserves it, so the two doors deleted vs kept the same
+        # request. One rule for both: a create door never clears, and
+        # `update_knowledge(…, goalState=None)` is the clear (as the test pins).
+        if body.goalState is not None:
+            props["goalState"] = body.goalState
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;
@@ -13955,6 +14089,15 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                 _author_props["authoredBy"] = body.authoredBy
             if body.credibility is not None:
                 _author_props["credibility"] = body.credibility
+            # #13110: `goalState` on the same rule as the objects door — a value
+            # the caller NAMED, never a `None`. ⛔ This is not cosmetic here: with
+            # `dedup=True` this route folds onto the existing Point through
+            # `update_point`, where a forwarded `None` DELETES the property —
+            # measured on this branch, `{goalState: null, dedup: true}` wiped a
+            # stored `met` while the objects door preserved it. A create door does
+            # not clear; `update_knowledge` does.
+            if body.goalState is not None:
+                _author_props["goalState"] = body.goalState
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,
@@ -34374,6 +34517,140 @@ def _drop_org_graph_strict(org_id: str, graph_name: str | None = None) -> None:
     _drop_org_graph_impl(org_id, graph_name)
 
 
+def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
+    """EVERY data-plane graph name this org owns — the deprovision list (#13205).
+
+    Why this exists. An org's data plane is not one graph. The default graph is
+    ``organizations.graph_name`` (``org_{org_id}``, or the pre-#3543
+    ``team_{org_id}``, or the registry lane's ``org_{name}``), and every custom
+    graph ``_provision_graph`` / ``insert_graph`` mints is a SEPARATE physical
+    graph named ``org_{org_id}_{gid}``. The purge used to drop exactly ONE name
+    (the stored default), so a hard-deleted org left its custom graphs — and
+    every legacy-spelled graph — on the instance forever. That is the same
+    class of leak #13205 measured: on ``instance-yxwgk64it``, 148 empty graphs
+    held 216 MB (26 % of a 1 GB instance) because a tenant graph costs ~1.46 MB
+    of resident RAM (measured by DELETE, not by create) and nothing ever
+    reclaimed it.
+
+    ⛔ THE SAFETY CLAUSE IS THE FILTER, not the enumeration. A candidate name is
+    kept ONLY if it provably belongs to THIS org: it equals the stored
+    ``graph_name``, or it is ``org_{org_id}``/``team_{org_id}``, or it is
+    prefixed ``org_{org_id}_``/``team_{org_id}_``. A malformed or foreign
+    ``graphs`` row therefore cannot make a purge delete another tenant's graph —
+    the enumerator supplies candidates, this function decides, and the two are
+    not the same trust level.
+
+    ⛔ THE CANONICAL NAME IS RETURNED **LAST**, and that ordering is a
+    CORRECTNESS requirement, not tidiness. Every drop goes through
+    :func:`_drop_org_graph_impl`, which obtains its DB handle by BINDING
+    ``org_{org_id}`` (``_make_sdk(namespace=org_id)._get_proj()``). Binding a
+    graph the store does not hold MATERIALISES it — measured and documented at
+    ``projection.FalkorProjection.__init__`` (#11113: the open-time health probe
+    creates the graph; write-freedom needs the PAIR ``skip_health_check=True,
+    ensure_indexes=False``) — and on the live lane a bind after a
+    ``GRAPH.DELETE`` brings the graph back WITH ITS NODES (reproduced 2026-11-17
+    on ``falkordb-server:v4.20.6``: delete → bind → ``GRAPH.LIST`` holds it
+    again, ``MATCH (n) RETURN count(n)`` = 1). So a list that dropped the
+    canonical name FIRST and then bound it again on the next name would end the
+    purge with the tenant's data graph still present — the erasure silently
+    undone by its own deprovision loop. Putting the bind target last means every
+    bind happens BEFORE its delete. Pinned by
+    ``test_the_whole_org_is_ACTUALLY_GONE_from_a_live_store``, which reds when
+    the order is reversed.
+
+    Enumeration can FAIL, and it must fail LOUD (review round 4, P1). A failed
+    enumeration is not "no custom graphs": the caller is about to commit an
+    IRREVERSIBLE erasure by deleting the control-plane rows, and after
+    ``purge_org_control_plane`` the custom namespaces exist nowhere — no
+    resolver can derive them and the reaper refuses an unresolved graph, so a
+    partial drop is unrecoverable. `_purge_deleted_orgs_locked` wraps each org in
+    its own try/except, so a raise here keeps the org row as the #926 retry
+    anchor and the next sweep completes the erasure. This is the same rule
+    `record_projection` states about a failed cutover probe: a failure to ask is
+    not an answer.
+
+    ⚠️ Residual, stated rather than hidden: the bind still TRANSIENTLY
+    materialises ``org_{org_id}`` on a legacy org whose only other graph is
+    ``team_{org_id}`` — the empty graph is created by the first iteration's bind
+    and removed by the last iteration's delete, so a process killed inside that
+    window leaves one empty graph behind. Removing the bind altogether means
+    changing ``_drop_org_graph_impl``'s handle (a write-free projection), which
+    is a wider change than this fix and is filed as follow-up work.
+    """
+    prefixes = (f"org_{org_id}_", f"team_{org_id}_")
+    own_defaults = {f"org_{org_id}", f"team_{org_id}"}
+    if graph_name:
+        own_defaults.add(str(graph_name))
+    bind_target = canonical_org_graph_name(org_id)
+    candidates: list[str] = [str(graph_name)] if graph_name else []
+    candidates.append(f"team_{org_id}")  # pre-#3543 spelling; no migration rewrote it
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "graphs", select=["namespace"],
+                filters=[("org_id", "eq", org_id)],
+            )
+            candidates += [r.get("namespace") for r in rows]
+        else:
+            nodes = _make_sdk(namespace="registry")._get_registry().query(
+                "MATCH (g:Graph {org_id:$tid}) RETURN g.namespace",
+                params={"tid": org_id},
+            ).result_set
+            candidates += [r[0] for r in nodes]
+    except Exception as e:
+        # ⛔ A FAILURE TO ASK IS NOT AN ANSWER (review round 4, P1). Degrading to
+        # "the derived names only" would commit an erasure that leaves every
+        # custom `org_{org_id}_{gid}` graph resident with its control-plane row
+        # gone — unnameable, unreapable, permanent. Raising keeps the org row as
+        # the #926 retry anchor, which is the whole point of that anchor.
+        raise RuntimeError(
+            f"graph enumeration failed for org {org_id}: {e} — refusing to "
+            f"deprovision a SUBSET of the org's graphs (the custom "
+            f"`org_{{id}}_{{gid}}` namespaces exist nowhere once the org rows "
+            f"are deleted); the org row stays so the next sweep retries"
+        ) from e
+    out: list[str] = []
+    for name in candidates:
+        if not name or not isinstance(name, str):
+            continue
+        if name == bind_target:
+            continue  # appended LAST, below
+        if name not in own_defaults and not name.startswith(prefixes):
+            continue  # not provably this org's — never drop it
+        if name not in out:
+            out.append(name)
+    out.append(bind_target)  # the bind target, always last (see the docstring)
+    return out
+
+
+def _drop_org_graphs_strict(org_id: str, graph_name: str | None = None) -> list[str]:
+    """STRICT drop of every graph this org owns — the deprovision seam (#13205).
+
+    Same retry-anchor contract as :func:`_drop_org_graph_strict`, widened from
+    the org's default graph to the WHOLE org: every name
+    :func:`_org_graph_names` proves is this org's (default + legacy spelling +
+    every custom ``org_{org_id}_{gid}``). Dropping only the default was the
+    defect — the row went, the custom graphs stayed, and a hard delete is the
+    last moment anything knows they existed.
+
+    An ABSENT graph is success (the impl treats that family as success), so the
+    list is safe to re-run; a REAL failure (auth, dead connection) propagates so
+    the caller keeps the org row as the retry anchor (#926) rather than
+    committing an erasure that orphaned a live graph.
+
+    ⛔ The list's LAST name is the one the drop seam BINDS, which is why the
+    canonical name is ordered last — see :func:`_org_graph_names`.
+    """
+    names = _org_graph_names(org_id, graph_name)
+    for name in names:
+        _drop_org_graph_strict(org_id, name)
+    return names
+
+
 def _drop_org_graph_impl(org_id: str, graph_name: str | None = None) -> None:
     target = graph_name or f"org_{org_id}"
     sdk = _make_sdk(namespace=org_id)
@@ -34440,10 +34717,17 @@ def _drop_org_acl_users(org_id: str) -> None:
 
 
 def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None:
-    """Cascade-delete a registry org + drop its graph (mirrors sdk.org_delete)."""
+    """Cascade-delete a registry org + drop its graphs (mirrors sdk.org_delete).
+
+    #13205: EVERY graph, not just the default. The enumeration runs BEFORE the
+    nodes go — the registry ``Graph`` nodes are where the custom graphs'
+    namespaces live, so a drop list built after the ``DETACH DELETE`` would be
+    the default graph alone and the custom ones would leak.
+    """
     # C4 (#2113): drop the custom graphs' ACL users BEFORE the nodes go
     # (the enumeration reads the nodes).
     _drop_org_acl_users(org_id)
+    graph_names = _org_graph_names(org_id, graph_name)
     reg = sdk._get_registry()
     reg.query(
         "MATCH (m:Membership {org_id:$tid}) DETACH DELETE m",
@@ -34461,7 +34745,8 @@ def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None
         "MATCH (t:Team {id:$id}) DETACH DELETE t",
         params={"id": org_id},
     )
-    _drop_org_graph(org_id, graph_name)
+    for name in graph_names:
+        _drop_org_graph(org_id, name)
 
 
 def _stored_grace_elapsed(row_deleted_at, row_grace_hours,
@@ -34647,8 +34932,12 @@ def _purge_deleted_orgs_locked() -> None:
                     else:
                         # C4 (#2113): drop the custom graphs' ACL users first
                         # (the enumeration reads the rows).
+                        # #13205: and drop EVERY graph the org owns — the
+                        # default name alone left every custom
+                        # `org_{org_id}_{gid}` graph on the instance after the
+                        # row was gone, permanently.
                         _drop_org_acl_users(org_id)
-                        _drop_org_graph_strict(org_id, row.get("graph_name"))
+                        _drop_org_graphs_strict(org_id, row.get("graph_name"))
                     purge_org_control_plane(cp, org_id)
                     _audit_logger.append(
                         org_id, None, "team_delete_purged",

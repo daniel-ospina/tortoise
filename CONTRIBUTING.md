@@ -87,10 +87,14 @@ which #11609 batch 1 archived — the live examples are `tortoise_search` and `v
 (the latter's `why` key is a DIFFERENT one, present by default).
 
 **One qualification: the gate also fingerprints implementations.** It records a digest of each
-registered tool's own code object, so a field added *inside a tool's handler* changes that tool's
-fingerprint — and, since the fingerprint covers the function's source position, the fingerprint of every
-tool defined after it — and reds the gate, correctly, as a changed implementation rather than a new
-tool. Add response fields in the SDK or assembly layer, not inside a tool function.
+registered tool's own code object, so a field added *inside a tool's handler* changes **that tool's**
+fingerprint (`served_from`, the code digest) and reds the gate, correctly, as a changed implementation
+rather than a new tool. A new PARAMETER moves a second cell as well (`served_attributes`, which hashes
+the handler's `__defaults__`/`__annotations__`) — re-stamp both to what `tools/surface_manifest.py
+check` derives. ⚠️ Only the edited tool's row moves: the digest covers bytecode, names and constants
+and deliberately EXCLUDES the source position, so a pure code move — and every tool defined after the
+edited one — is unaffected. (A docstring edit DOES move it: a docstring is a `co_const`.) Add response
+fields in the SDK or assembly layer, not inside a tool function.
 
 **And it must still be recorded.** Every such addition goes in the `response_fields` block of
 [`config/surface-manifest.yml`](config/surface-manifest.yml), rendered as a table in
