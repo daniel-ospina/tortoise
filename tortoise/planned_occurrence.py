@@ -242,13 +242,20 @@ def plan_position(stage_id, *, outcome=None, is_closed=False,
         # ⛔ An UNRESOLVABLE row must not report a stale outcome: `ended: False`
         # beside `outcome: 'lost'` is the same mixed-cache contradiction round 3
         # removed from `ended`, one field over.
-        "outcome": (None if unresolvable
-                    else ((stage.outcome if stage is not None else outcome)
-                          or None)),
+        # ⛔ `ended` follows the RESOLVED STAGE, never the key: a stage id that
+        # resolves TERMINAL beside a cleared or foreign key has ENDED, and nulling
+        # it made the Q5 read answer "upcoming" for exactly the shape an operator
+        # must see (an ended plan with no linked Event) — contradicting this
+        # module's own refusal text and the promotion gate on the same row.
+        # ⛔ `outcome` is the STAGE's outcome and nothing else: when no stage
+        # resolves it is None, never the stale `pipelineOutcome` prop (which would
+        # pair `ended: False` with `outcome: 'lost'`). `unresolvable`/
+        # `unresolvable_cause` answer a different question again: can a stage MOVE
+        # be validated.
+        "outcome": (stage.outcome if stage is not None
+                    else (None if unresolvable else outcome)) or None,
         "has_position": bool(stage_id),
-        "ended": bool(is_closed) or (stage is not None
-                                     and not bound_elsewhere
-                                     and stage.is_terminal),
+        "ended": bool(is_closed) or (stage is not None and stage.is_terminal),
         "unresolvable": unresolvable,
         "unresolvable_cause": unresolvable_cause,
     }
@@ -315,6 +322,60 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     door_props: dict[str, Any] = {**merged, "objectKind": PLAN_PIPELINE_KEY}
     if title is not None:
         door_props.setdefault("title", title)
+    # ⛔ THE RE-MENTION PRE-FLIGHT. `create_entity("object", <name>)` is the
+    # documented idempotent re-mention (#452): it resolves the name to its single
+    # LIVE holder. Without this check, `create_plan` RETAGGED a live `core:goal`
+    # Object into `core:plan` and then drove its stage props — a kind clobber the
+    # module's own writers refuse (`_resolve_plan`: "is not a plan — its kind is
+    # …"), reached one door over. It also made "a plan with this name already
+    # exists and has ENDED" look like a *created* plan that could not be staged.
+    from .entity_identity import resolve_entity_id_same_entity
+
+    _graph = sdk._get_proj().g
+    _existing = resolve_entity_id_same_entity(_graph, "Object", name)
+    if _existing:
+        _rows = _graph.query(
+            "MATCH (o:Object {id:$o}) RETURN o.objectKind",
+            params={"o": _existing}).result_set
+        _kind = _rows[0][0] if _rows else None
+        if not is_plan_kind(_kind):
+            raise ValueError(
+                f"Refused: a live Object named {name!r} already exists and is "
+                f"not a plan — its kind is {_kind!r}. This call would have "
+                f"RETAGGED that record into {PLAN_PIPELINE_KEY!r} and staged it. "
+                f"Nothing was changed. WHAT TO DO: pick a distinct name for the "
+                f"plan, or use `record_occurrence` if the existing record is "
+                f"what happened.")
+        _cur = pipeline.current_stage(_graph, _existing)
+        _pos = plan_position(_cur.get("stageId"), outcome=_cur.get("outcome"),
+                             is_closed=bool(_cur.get("isClosed")),
+                             pipeline_key=_cur.get("pipelineKey"))
+        if _pos["ended"]:
+            # ⛔ `ended` FIRST, like both writers: an ended plan with a broken key
+            # is still ENDED, and the binding message would tell the caller it is
+            # "still open" — a sentence `plan_position` itself contradicts.
+            raise ValueError(
+                f"Refused: a plan named {name!r} already exists and has ENDED "
+                f"(stage {_cur.get('stageId')!r}) — it cannot be re-created. WHAT "
+                f"TO DO: act on the existing plan (`record_occurrence` / "
+                f"`settle_plan`), or choose a distinct name if this is a "
+                f"different planned occurrence.")
+        if _pos["unresolvable"]:
+            # ⛔ The cause decides the remedy (review round 9 + the F1 fix): a
+            # drifted STAGE ID is repaired by writing a declared id — never by
+            # "use a distinct name", which would be a no-op for the caller's
+            # actual problem.
+            raise ValueError(_unresolvable_message(name, _pos, _cur))
+        # A live, unended plan of this name: the documented re-mention. Return the
+        # record's OWN node payload — the same SHAPE the create path returns
+        # (`create_entity`'s `node`), so a caller reading `title`/`description`
+        # does not work on one arm and KeyError on the other. Its position is
+        # already its own, so nothing is re-staged.
+        _node = _graph.query(
+            "MATCH (o:Object {id:$o}) RETURN properties(o)",
+            params={"o": _existing}).result_set
+        return dict(_node[0][0]) if _node else {"id": _existing}
+
     created = sdk.create_entity("object", name, **door_props)
     node = created.get("node") or {}
     plan_id = node.get("id")
@@ -558,17 +619,9 @@ def _unresolvable_message(plan_ref, pos: dict, cur: dict) -> str:
     repair = (f"repair the binding first — "
               f"`update_knowledge(<id>, pipelineStageKey="
               f"{PLAN_PIPELINE_KEY!r})`")
-    ended_by_stage = pos.get("slot") == "terminal"
-    if ended_by_stage:
-        # The stage RESOLVES and is terminal, so the plan has ended: the key
-        # repair only makes a stage write able to validate that. Saying "still
-        # open" here sent the caller to repair-then-be-refused-as-settled.
-        return (
-            f"Refused: the plan {plan_ref!r} sits at stage {stage_id!r}, which "
-            f"resolves TERMINAL (outcome {pos.get('outcome')!r}), and its stored "
-            f"`pipelineStageKey` ({cur.get('pipelineKey')!r}) is not this "
-            f"pipeline's {PLAN_PIPELINE_KEY!r}. The plan has ENDED — {repair} "
-            f"only so a stage write can validate it; nothing else is owed here.")
+    # No terminal sub-branch: `ended` is derived from the RESOLVED stage, so a
+    # terminal stage beside a broken key is refused by the writers' "already
+    # settled" arm (which states the same fact more accurately).
     return (
         f"Refused: the plan {plan_ref!r} sits at stage {stage_id!r}, but its "
         f"stored `pipelineStageKey` ({cur.get('pipelineKey')!r}) is not this "

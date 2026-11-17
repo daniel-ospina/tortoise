@@ -1106,8 +1106,9 @@ def endpoint_permits_operator_promotion(
       retired ``:Event`` ``status='scheduled'`` did.
 
       ⛔ ``plan_state`` is the dict ``planned_occurrence.plan_position`` returns,
-      i.e. the WRITER's own answer (marker OR resolved-terminal stage OR an
-      unresolvable stage) — never the stored ``pipelineSlot`` prop, which is a
+      i.e. the WRITER's own answer (whether the record has ENDED — the durable
+      marker OR a stage that resolves terminal — and, separately, whether a stage
+      MOVE could be validated) — never the stored ``pipelineSlot`` prop, which is a
       cache that a generic-door ending leaves stale. Passing the resolved state
       is why this predicate takes a dict rather than a slot string: the earlier
       signature let a settled plan keep suppressing promotion for ever, and let

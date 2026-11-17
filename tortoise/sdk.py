@@ -25697,7 +25697,7 @@ class TortoiseSDK:
                 "MATCH (o:Point {id:$oid})-[r]->(s) "
                 f"WHERE {epistemic_disjunction('s')} "
                 "RETURN s.id, s.status, coalesce(s.outdated, false), "
-                "       s.objectKind, s.pipelineStageId, s.pipelineSlot, "
+                "       s.objectKind, s.pipelineStageId, "
                 "       s.pipelineOutcome, coalesce(s.isClosed, false), "
                 "       s.pipelineStageKey",
                 params={"oid": oid},
@@ -25728,7 +25728,7 @@ class TortoiseSDK:
                                               is_closed=bool(closed),
                                               pipeline_key=key)
                                 if is_plan_kind(kind) else None))
-                for (_, st, od, kind, stage_id, slot, outcome, closed,
+                for (_, st, od, kind, stage_id, outcome, closed,
                      key) in eps
             )
             if not all_live:

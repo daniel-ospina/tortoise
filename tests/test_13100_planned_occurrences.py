@@ -475,23 +475,23 @@ class TestThePlanPipeline:
         PO.settle_plan(sdk, typo["id"], PO.STAGE_MISSED)
         assert _stage(sdk, typo["id"])["stageId"] == "missed"
 
-    def test_a_cleared_key_beside_a_TERMINAL_stage_says_ENDED(self, sdk):
-        """The key arm must not report the stale `pipelineSlot` prop as "the stage
-        itself", nor call an ended plan "still open".
+    def test_a_cleared_key_beside_a_TERMINAL_stage_reads_ENDED(self, sdk):
+        """`ended` follows the RESOLVED stage, never the key.
 
-        `pipelineStageId='held'` resolves TERMINAL; the slot PROP may still say
-        `active`. Reporting the prop told the caller the plan was open, and the
-        next call refused it as settled.
+        A terminal stage beside a cleared key has ended, and EVERY reader must say
+        so: Q5 must not answer "upcoming" for exactly the shape an operator has to
+        see (an ended plan with no linked Event), and the writers refuse it as
+        settled rather than as a repairable binding.
         """
+        g = sdk._get_proj().g
         plan = PO.create_plan(sdk, "terminal then key cleared")
         sdk.update_knowledge(plan["id"], pipelineStageId="held")
         sdk.update_knowledge(plan["id"], pipelineStageKey=None)
-        with pytest.raises(ValueError) as exc:
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        assert rows["terminal then key cleared"]["ended"] is True
+        assert rows["terminal then key cleared"]["outcome"] == "completed"
+        with pytest.raises(ValueError, match="already settled"):
             PO.settle_plan(sdk, plan["id"], PO.STAGE_MISSED)
-        message = str(exc.value)
-        assert "resolves TERMINAL" in message, message
-        assert "still open" not in message and "already settled" not in message
-        assert "pipelineStageKey" in message
 
     def test_an_open_plan_with_a_cleared_key_says_open_and_the_repair_works(
             self, sdk):
@@ -561,6 +561,85 @@ class TestThePlanPipeline:
         assert sdk._get_proj().g.query(
             "MATCH (o:Object) WHERE o.name = 'positioned at birth' "
             "RETURN count(o)").result_set[0][0] == 0
+
+    def test_create_plan_cannot_RETAG_another_kinds_record(self, sdk):
+        """`create_entity("object", name)` is the documented re-mention (#452).
+
+        Without a pre-flight, `create_plan` over an existing `core:goal` Object
+        RETAGGED it into `core:plan` and drove its stage props — the kind clobber
+        this module's own writers refuse, reached one door over.
+        """
+        g = sdk._get_proj().g
+        goal = sdk.create_entity("object", "Retire the legacy queue",
+                                 objectKind="core:goal",
+                                 description="an operator's goal record")["node"]
+        with pytest.raises(ValueError, match="would have RETAGGED"):
+            PO.create_plan(sdk, "Retire the legacy queue")
+        assert g.query(
+            "MATCH (o:Object {id:$o}) RETURN o.objectKind, o.description, "
+            "o.pipelineStageId, o.pipelineStageKey",
+            params={"o": goal["id"]}).result_set == [
+                ["core:goal", "an operator's goal record", None, None]], (
+            "the existing record must be left untouched")
+
+    def test_create_plan_refuses_a_LIVE_holder_that_has_ENDED(self, sdk):
+        """A live holder whose stage is terminal cannot be re-created.
+
+        (A CLOSED holder is not reachable here: the identity resolver resolves
+        LIVE holders only, so a closed plan's name is free — same-name coexistence
+        is legal, #3590 D2. This pins the shape the resolver DOES return.)
+        """
+        plan = PO.create_plan(sdk, "Ended but still live")
+        sdk.update_knowledge(plan["id"], pipelineStageId="held")
+        with pytest.raises(ValueError, match="already exists and has ENDED"):
+            PO.create_plan(sdk, "Ended but still live")
+
+    def test_create_plan_refuses_an_ENDED_holder_even_with_a_broken_key(
+            self, sdk):
+        """`ended` is checked FIRST — an ended plan with a cleared key is still
+        ENDED, and the binding message would call it "still open"."""
+        plan = PO.create_plan(sdk, "Ended and key-broken, still live")
+        sdk.update_knowledge(plan["id"], pipelineStageId="held")
+        sdk.update_knowledge(plan["id"], pipelineStageKey=None)
+        with pytest.raises(ValueError) as exc:
+            PO.create_plan(sdk, "Ended and key-broken, still live")
+        message = str(exc.value)
+        assert "already exists and has ENDED" in message, message
+        assert "still open" not in message
+
+    def test_a_CLOSED_plans_name_is_free_for_a_new_plan(self, sdk):
+        """#3590 D2: same-name coexistence is legal, and a closed record is not a
+        live holder — so the next plan of that name is a NEW record, not a retag."""
+        first = PO.create_plan(sdk, "Quarterly review")
+        PO.record_occurrence(sdk, first["id"], name="Q1 review held")
+        second = PO.create_plan(sdk, "Quarterly review")
+        assert second["id"] != first["id"]
+        assert _stage(sdk, second["id"])["stageId"] == "scheduled"
+        assert _stage(sdk, first["id"])["stageId"] == "held"
+
+    def test_create_plan_over_a_LIVE_plan_is_the_documented_re_mention(self, sdk):
+        plan = PO.create_plan(sdk, "Same plan, mentioned twice")
+        again = PO.create_plan(sdk, "Same plan, mentioned twice")
+        assert again["id"] == plan["id"]
+        assert _stage(sdk, plan["id"])["stageId"] == "scheduled"
+
+    def test_a_re_mention_returns_the_SAME_node_shape(self, sdk):
+        """Both arms return `create_entity`'s node payload, so a caller reading
+        `title` works on either — the narrower dict KeyError'd only on this arm."""
+        created = PO.create_plan(sdk, "shape parity", title="A title")
+        again = PO.create_plan(sdk, "shape parity")
+        assert again["id"] == created["id"]
+        assert again.get("title") == "A title"
+
+    def test_an_unresolvable_stage_never_reports_a_stale_outcome(self, sdk):
+        """`outcome` is the STAGE's outcome; with no resolution it is None, never
+        the stored `pipelineOutcome` prop (which would pair `ended: False` with
+        `outcome: 'lost'`)."""
+        pos = PO.plan_position("no-such-stage", outcome="lost",
+                               pipeline_key=PO.PLAN_PIPELINE_KEY)
+        assert pos["unresolvable"] is True
+        assert pos["ended"] is False
+        assert pos["outcome"] is None
 
     def test_create_plan_cannot_be_mis_kinded_by_a_caller_prop(self, sdk):
         """The kind is the module's decision, not a `**props` override."""
