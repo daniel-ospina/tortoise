@@ -73,7 +73,7 @@ lines that hold something else at **every** recent `main` head — no commit eve
 `:3064`, the walk at `:4477` or the operator leg at `:6352` — so the number was drifted forward, not
 read off. All sixteen were re-derived at the pin, and each is named here by the cite it became, with its
 file — `search_engine.py` FTS
-`:3039`, walk `:4426`, operator leg `:6297`, subject probe `:6655-6658` (plus `:6656`, cited in §2.5, and
+`:3039`, walk `:4426`, operator leg `:6297`, subject probe `:6655-6658` (plus `:6656`, cited in §2.1, and
 `subject_binding_available()` at `:6661-6675`), label scan `:4350-4351`, HNSW
 `:3938`, label derivation `:2944`, index note `:3011`; `projection/__init__.py` `("Object", ["name"])`
 `:6830`; `sdk.py`'s second `capture_redactions` writer `:2705`; `audit.py`'s carrier probe `:2445`/`:2456`;
