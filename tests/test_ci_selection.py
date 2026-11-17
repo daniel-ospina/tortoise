@@ -23039,12 +23039,20 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     `['api', 'core']`
     siblings, each at its OWN rows: `test_12941_read_your_writes.py` at `:352` /
     `:2582`, and `test_11892_health_quota.py` at `:1849` / `:2573` (all
-    re-derived at THIS head, not carried: the `core` list has moved twice under
-    this docstring, once from `:1816` / `:2532` / `:2541` and once again from
-    `:1849` / `:2565` / `:2574` — #13137 inserted 8 lines at `+2553` above them.
-    The `api` cites above (`:351`, `:352`, `:1109`) have not moved across either
-    shift: both insertions landed in the `core` list and the `durations` map,
-    below the `api` list.)
+    re-derived at THIS head, not carried; they have moved twice under this
+    docstring and ⛔ **the two moves have DIFFERENT causes**, so one sentence
+    cannot explain both. First `:1816` / `:2532` / `:2541` -> `:1849` / `:2565` /
+    `:2574`, a uniform `+33` from `main` replacing this branch's own superseded
+    `#13034` block **inside `surfaces.api`** — `api:` spans `:131`..`:2401` at that
+    head, so `:1816` was an `api` row, NOT a `core` one (`−34` at yml `:350`, `+67`
+    at `:1074`; net `+33`). Then `:1849` / `:2565` / `:2574` -> `:1849` / `:2573` /
+    `:2582` via `#13137`'s `+8` at `+2553` in the `core` list plus one line in
+    `durations:` — which is exactly why `:1849` did NOT move and the two `core`
+    rows did. The `api` cites above (`:351`, `:352`) did not move — measured
+    identical at both heads (`test_record_serve.py`, `test_12941_read_your_writes.py`).
+    `:1109` is NOT a cite that survived the first shift: it is the row `main`
+    landed INSIDE that `+67` block (it read `test_agent_signup.py` at the earlier
+    head), and it has not shifted since.)
     ⛔ NOT "the only hosted-door guard registered
     single-surface": `main` registered this file on **zero** surfaces when
     #13075 landed it (both rows were added later, by #13144),
