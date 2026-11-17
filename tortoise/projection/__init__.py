@@ -21972,13 +21972,16 @@ class FalkorProjection(
                 # facts and the line must not merge them (#13330 review P2 x2):
                 # "SURVIVED" is a MEASUREMENT, and it is only made when the
                 # post-drop catalogue actually answered.
-                # ⛔ WHICH READ IS BEING DESCRIBED (#13330 review 7): with no
-                # write the rows in hand are the GATE's pre-drop read, so calling
-                # them "the post-drop catalogue" names a read that never
-                # happened.
+                # ⛔ NAME THE EVIDENCE, NOT THE OUTCOME (#13330 review 8, P3):
+                # `not _attempted` proves only that every refusal SAID
+                # `no such index` — it cannot prove no DDL was applied (an engine
+                # that applies a DROP and then reports `no such index` is this
+                # commit's own stated residual). So the line says what the store
+                # observed, never what happened on the server.
                 _read_noun = ("the post-drop catalogue" if _attempted
                               else "the catalogue read before the sweep "
-                                   "(no DROP was written, so that read is current)")
+                                   "(no DROP reported itself applied, so this "
+                                   "store treats that read as current)")
                 if _still_indexed is None:
                     # ⛔ #13330 review (P2): `None` has TWO causes and the line
                     # must not fabricate the wrong one. The read RAISING is a
