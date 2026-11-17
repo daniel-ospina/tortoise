@@ -21,17 +21,19 @@ closes or re-states:** [#12186](https://github.com/daniel-ospina/tortoise/issues
 
 **Verdict in one paragraph.** The dispatch names a class — *"9.3 % of real nouns (28 of 300) are not
 found at ANY window"* — and asks this lane to attack it with additive entity/fact-augmented
-expansion. **The class is empty at this head, in both retrieval shapes**, and it was emptied by a
-deterministic fix that is already on `main`, not by expansion: with the production read (hybrid,
-`4372` uniformly-hybrid windows) **`miss_absent_at_max_k` = 0/300 at every k**, and recall@3 is
-**298/300 = 99.3 %**; with the lexical window alone and the shipped `_`-composite tail on, it is
-**0/300 absent**; with that tail **off** — the pre-`#12360` shape the dispatch's baseline was taken
-on — it is **82/300 absent**. Expansion is therefore not measurable on this class: it cannot lower a
-zero, and the mechanism `#2518` specifies (`_entity_key_alias_harvest` → `search_keys`) acts on the
-**point** leg while the instrument's arm measures the **object** leg. **No product code is changed by
-this lane**; the deliverables are the measurement, the characterisation, and the two decisions the
-numbers support (below). The `TORTOISE_ENTITY_KEY_DENSE` / `entity_key_expansion` switches keep
-their shipped posture (OFF / caller-gated).
+expansion. **The class is empty at this head in the production read shape, and it was emptied by two
+deterministic levers that are already on `main`, not by expansion:** with the hybrid read **and** the
+shipped `_`-composite tail, **`miss_absent_at_max_k` = 0/300 at every k** and recall@3 is
+**298/300 = 99.3 %**; with the lexical window alone and the tail on, **0/300 absent**; with the tail
+**off** — the pre-`#12360` shape the dispatch's baseline was taken on — **20/300 absent hybrid** and
+**82/300 absent lexical**. The two levers divide the work cleanly: the **dense leg removes 62 of the
+82** (the mention *is* the stored name, so its own name vector ranks it in) and the **`_`-composite
+OR tail removes the remaining 20 hybrid / all 82 lexical**. Expansion is therefore not measurable on
+this class — and the mechanism `#2518` specifies (`_entity_key_alias_harvest` → `search_keys`) acts on
+the **point** leg while the instrument's arm measures the **object** leg. **No product code is changed
+by this lane**; the deliverables are the measurement, the characterisation, and the two decisions the
+numbers support (§6). The `TORTOISE_ENTITY_KEY_DENSE` / `entity_key_expansion` switches keep their
+shipped posture (OFF / caller-gated).
 
 ---
 
@@ -172,16 +174,18 @@ is empty on this cell because `HOME=/tmp/cell-home`). ⚠️ **Reading files out
 the declared corpus the instrument exists to measure; nothing else outside the checkout was read.
 
 **Pairing, and why these runs are comparable.** The corpus is live and moved between runs
-(`harvested_distinct` definite `123 927 → 123 938 → 123 961`, lines `10 746 → 10 747`). But
-`arms.blocking.index_stats` is **identical in all three runs** (`members: 1000`, `blocks: 8454`,
-`key_memberships: 11067`, `max_block_size: 102`) — the blocker is a pure function of the population,
-so **the 1000-name population and therefore the stratified 300-name sample are the same in every run
-below**. That is what makes the ON/OFF comparison paired at the population level, not between-run.
+(`harvested_distinct` definite `123 927 → 123 938 → 123 961 → 123 981 → 124 057`, lines
+`10 746 → 10 747`). But `arms.blocking.index_stats` is **identical in all five runs** (`members:
+1000`, `blocks: 8454`, `key_memberships: 11067`, `max_block_size: 102`) — the blocker is a pure
+function of the population, so **the 1000-name population and therefore the stratified 300-name sample
+are the same in every run below**. That is what makes the ON/OFF comparisons paired at the population
+level, not between-run.
 
 | run | artifact | retrieval shape | `window_modes` |
 |---|---|---|---|
 | **hybrid, HEAD** | `measurement-hybrid.json` | fused read, dense leg live | **`hybrid`: 4372, `keyword_only`: 0** (`uniform_windows: true`) |
 | **hybrid, HEAD — REPEAT** | `measurement-hybrid-repeat.json` | same, independent second run 6 min later | `hybrid`: 4372, `keyword_only`: 0 (`uniform_windows: true`) |
+| **hybrid, composite OFF** | `measurement-hybrid-composite-off.json` | fused read, dense leg live, `TORTOISE_UNDERSCORE_TERMS=0` | `hybrid`: 4372 / `keyword_only`: 0 |
 | **lexical, composite ON** | `measurement-keyword-only-composite-on.json` | lexical window only | `keyword_only`: 4372 |
 | **lexical, composite OFF** | `measurement-keyword-only-composite-off.json` | lexical window only, `TORTOISE_UNDERSCORE_TERMS=0` | `keyword_only`: 4372 |
 
@@ -215,6 +219,18 @@ row for every cell** — `in_window` **298 / 299 / 300 / 300**, `miss_absent_at_
 | 15 | **300/300** | **100 %** | 0 | **0** | 0 |
 
 By class at k=3 → k=15: definite **158 → 180**, ident **79 → 90**, path **25 → 30**.
+
+**HYBRID with the composite OFF — the production shape WITHOUT `#12360`**
+
+| k | `in_window` | `miss_past_k` | **`miss_absent_at_max_k`** | `rows_zero` |
+|---|---|---|---|---|
+| **3** | 246 | 34 | **20** | 0 |
+| 5 | 256 | 24 | **20** | 0 |
+| 10 | 267 | 13 | **20** | 0 |
+| 15 | 280 | 0 | **20** | 0 |
+
+By class at k=3 → k=15: definite **178 → 180** (of 180), ident **40 → 70** (of 90), path **28 → 30**
+(of 30).
 
 **KEYWORD-ONLY, composite OFF — the pre-`#12360` shape the dispatch's baseline was taken on**
 
@@ -263,16 +279,37 @@ holds.**
   population; this run reproduces its direction on a corpus harvested 2026-11-17 and reports the
   complete decomposition.
 
-### 3.3 The dispatch's baseline is not reproducible at this head — and the difference is explained
+### 3.3 Who closes the class — the dense leg 62, the composite 20, together 82 → 0
+
+Crossing the two axes (dense leg on/off × composite tail on/off) on one population decomposes the
+whole `absent_at_any_k` class **82 → 0**, and each lever's share is measured rather than argued:
+
+| shape | `absent_at_any_k` | recall@3 | recall@15 |
+|---|---|---|---|
+| lexical only, composite OFF | **82** | 184/300 = 61.3 % | 218/300 = 72.7 % |
+| **hybrid**, composite OFF | **20** | 246/300 = 82.0 % | 280/300 = 93.3 % |
+| lexical only, composite ON | **0** | 262/300 = 87.3 % | 300/300 = 100 % |
+| **hybrid, HEAD** (composite ON) | **0** | **298/300 = 99.3 %** | 300/300 = 100 % |
+
+- **The dense leg alone removes 62 of the 82** (82 → 20): the mention **is** the stored name, so its
+  embedding is the node's own name vector and the vector leg ranks it into the window — which is why
+  the class is invisible in the production read at HEAD.
+- **The `_`-composite tail removes the remaining 20 in the hybrid shape** (20 → 0) and **all 82 in the
+  lexical shape** (82 → 0). Both are deterministic, both are already shipped, neither is an expansion.
+- **Neither lever adds a ranking regression that matters here**: recall@3 rises monotonically across
+  the four cells (61.3 → 82.0 → 87.3 → 99.3 %), and `past_k` at k=3 falls 34 → 34 → 38 → 2.
+
+### 3.4 The dispatch's baseline is not reproducible at this head — and the nearest measured state is named
 
 The dispatch says the measurement to beat is **28 absent / recall@15 88 % / recall@3 75 %**. Measured
-here, on the same instrument: **0 absent** (hybrid and lexical-on), **82 absent** (lexical with the
-composite off), and no configuration on this box produced **28**. The two numbers bracket it, and the
-mechanism that separates them is `#12360` — merged **after** the `#11901`/`#12295` artifacts the
-dispatch's figure descends from (`#12295`'s own artifact reads `miss_absent_at_max_k: 19` on *its*
-corpus, and `#11901`'s reads **81**). ⛔ **This is stated as a non-reproduction, not as an error in
-the dispatch**: the corpus is live, the artifacts are dated, and no committed artifact holds a 28. A
-re-read of the dispatch's number would need the exact run that produced it, which is named nowhere.
+here, on the same instrument: **0** (hybrid and lexical-on), **20** (hybrid, composite off) and **82**
+(lexical, composite off). **No configuration on this box produced 28.** The nearest measured state is
+**hybrid with the composite tail off** — *20 absent / 93.3 % @15 / 82.0 % @3* — i.e. the **same
+regime** as the dispatch's figures, which is consistent with (but does not prove) that baseline having
+been taken on a hybrid read **before `#12360` landed**, or on a corpus where some `_` runs were not yet
+covered. ⛔ **Stated as a non-reproduction with the bracketing states named, never as an error in the
+dispatch**: the corpus is live, the artifacts are dated (`#11901` reads 81 absent, `#12295` reads 19 on
+its own corpus), and **no committed artifact on `main` holds a 28**.
 
 ---
 
@@ -309,7 +346,7 @@ inventing a point corpus (declared, not done).
 | falsifier (dispatch) | verdict | output |
 |---|---|---|
 | the class is characterised **before** the change, with examples | **MET** | §3.2: 82 = ident 75 + path 7; `rows_zero` 8/82 with the named zero-row set; emitted-query evidence (`search\|web` vs the index's `web_search`); constant across k = 3/5/10/15. |
-| **`absent_at_any_k` falls** | **UNSATISFIABLE — no change attempted** | HEAD reads **0** (hybrid, 4372 uniform hybrid windows) and **0** (lexical with the shipped composite). The pre-`#12360` control reads **82**. There is no non-zero baseline at this head to fall from, so the falsifier is reported as not applicable rather than gamed. |
+| **`absent_at_any_k` falls** | **UNSATISFIABLE — no change attempted** | At this head: **0** (hybrid, 4372 uniform hybrid windows; **0** lexical with the shipped composite), and the pre-`#12360` controls read **20** (hybrid) / **82** (lexical). There is no non-zero baseline at this head to fall from, so the falsifier is reported as not applicable rather than gamed. |
 | **`past_k` does not rise** | **MET trivially — no change** | HEAD: hybrid `past_k` **2 → 1 → 0 → 0** (k=3/5/10/15); lexical-on **38 → 22 → 7 → 0**; lexical-off **34 → 22 → 9 → 0**. Nothing shipped, so nothing moved. |
 | **extra embeds/queries counted and bounded** | **MET as a code bound; NOT exercised** | Per read, at most: **1** anchor FTS (≤ 20 fetched / ≤ 3 kept) + **1** batched `aboutObject` harvest (≤ 200 aliases, ≤ 64/anchor) + **1** extra fts pass + **1** extra embed (≤ 240 chars from ≤ 32 terms) + **1** extra vector-leg query. Fail-open on every path. **The eval counts 0 of them** because its arm never reaches the mechanism — stated rather than quoted as a measured cost. |
 | **recall reported with its `window_modes` split, on a load-stated box** | **MET** | §3.1: hybrid **4372/0** (`uniform_windows: true`), lexical **0/4372** (twice). Box: 16 cores / 31 GB, load **33.2 → 4.4**; the hybrid arm's `#4997` unindexed-label warning is recorded in the run log and the artifact. |
