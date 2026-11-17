@@ -767,6 +767,86 @@ def test_judge_refuses_a_packet_holding_a_subset_of_the_frozen_scenario(tmp_path
     assert cap.cmd_judge(args) == 2
 
 
+def test_all_three_producers_return_the_same_exit_rule(tmp_path):
+    """`run`, `judge` and `render` are all scoreboard producers and must agree (#13303 c7).
+
+    The pin this replaces asserted only `cap.exit_code(...)`, which is a function of a
+    hand-built dict — mutating `cmd_render` back to `return 0` left the suite GREEN. So:
+    the render half is exercised BEHAVIOURALLY here, and all three call sites are asserted
+    structurally (no hermetic run can reach `cmd_run`'s tally: it needs a live graph).
+    """
+    import inspect
+
+    unjudged = {
+        "schema": "capstone-state-value-scoreboard/v1",
+        "header": {},
+        "ingest": [],
+        "rows": [],
+        "tally": {"right": 0, "wrong": 0, "blocked": 0, "unjudged": 6},
+    }
+    clean = dict(unjudged, tally={"right": 3, "wrong": 3, "blocked": 0, "unjudged": 0})
+    a = tmp_path / "unjudged.json"
+    b = tmp_path / "clean.json"
+    a.write_text(json.dumps(unjudged))
+    b.write_text(json.dumps(clean))
+    mk = lambda p: type("A", (), {"run": str(p), "write": None})()  # noqa: E731
+    assert cap.cmd_render(mk(a)) == 1, "render reported success over an unjudged board"
+    assert cap.cmd_render(mk(b)) == 0
+    for fn in (cap.cmd_run, cap.cmd_judge, cap.cmd_render):
+        assert "exit_code(" in inspect.getsource(fn), (
+            f"{fn.__name__} does not route its exit through exit_code, so it can report "
+            "success over a board the table calls a failure"
+        )
+
+
+def test_a_long_secret_is_redacted_before_truncation(tmp_path):
+    """A secret longer than the truncation budget must not survive as a PREFIX.
+
+    #13303 cycle 7, P1: `_cut(secret, 160)` kept 141 characters of a 210-character password,
+    and neither the `scheme://user:pass@` regex nor a literal `replace` of the FULL secret
+    can match a prefix — so it was written into `run-deployed-refused.json`.
+    """
+    secret = "J" * 210
+    url = f"https://alice:{secret}@api.example.com"
+    # The real vector: the exception text carries the FULL secret, and the redaction that can
+    # see it is `_strip_userinfo`; truncating first is what kept a 141-character prefix.
+    msg = f"/health: InvalidURL: nonnumeric port: '{secret}@api.example.com'"
+    out = cap._cut(cap._strip_userinfo(msg, url), 160)
+    assert secret[:20] not in out, "a prefix of the secret survived redact-then-truncate"
+    assert "alice" not in out
+    # …and the keyword form, which `_redact` matches directly, must redact before cutting too.
+    assert secret[:20] not in cap._cut("password=" + secret, 160)
+    assert secret[:20] not in cap._cut("token: " + secret + " trailing prose", 160)
+
+    # …and the deployed probe path, which is the one that writes a file.
+    target = cap.DeployedTarget(api_url=url, api_key="tt_x")
+    blob = json.dumps(target.provenance())
+    assert secret[:100] not in blob and "alice" not in blob.replace("https://", "")
+
+
+def test_run_refuses_to_publish_an_unjudged_board_into_the_bundle(tmp_path, narrative):
+    """`run --judge none` must not replace the baseline with a non-result (#13303 c7, P3)."""
+    nar = tmp_path / "n.json"
+    nar.write_text(json.dumps(narrative))
+    args = type(
+        "A",
+        (),
+        {
+            "narrative": str(nar),
+            "out": str(cap.DEFAULT_OUT),
+            "judge": "none",
+            "verdicts": None,
+            "target": "local",
+            "graph": None,
+            "db_uri": None,
+            "search_timeout_ms": 0,
+        },
+    )()
+    before = (cap.DEFAULT_OUT / "run-local.json").read_bytes()
+    assert cap.cmd_run(args) == 2
+    assert (cap.DEFAULT_OUT / "run-local.json").read_bytes() == before
+
+
 def test_run_judge_file_refuses_a_verdicts_document_before_measuring(tmp_path, narrative):
     """`run --judge file` has the SAME `--verdicts` door as `judge` (#13303 cycle 4, P1).
 

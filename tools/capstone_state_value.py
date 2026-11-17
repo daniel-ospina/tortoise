@@ -164,8 +164,17 @@ def _stamp() -> str:
 
 
 def _cut(value, limit: int = 320) -> str:
+    """One-line, REDACTED, truncated text for a recorded field.
+
+    Redaction runs BEFORE truncation, and that order is load-bearing (#13303 cycle 7, P1):
+    `_cut(secret, 160)` leaves a 141-character PREFIX, which neither the
+    `scheme://user:pass@` regex nor a literal `replace` of the FULL secret can match —
+    measured on a 210-character password, 141 characters of it were written into
+    `run-deployed-refused.json`. Redacting here closes the whole class at ONE point rather
+    than at the nine call sites that each had to remember it.
+    """
     text = value if isinstance(value, str) else json.dumps(value, default=str)
-    text = " ".join(text.split())
+    text = _redact(" ".join(text.split()))
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
@@ -408,7 +417,10 @@ class LocalTarget:
                 "this route — it hands its argv to pytest."
             )
         if not re.match(r"^(docker|bolt|redis)://", uri):
-            raise TargetRefused(f"TORTOISE_DB_URI is not a store URI: {_redact(_cut(uri, 40))}")
+            raise TargetRefused(
+                "TORTOISE_DB_URI is not a store URI: "
+                f"{_cut(_strip_userinfo(uri, uri), 40)}"
+            )
         os.environ["TORTOISE_DB_URI"] = uri
         self.uri = _redact(uri)
         self.namespace = namespace or f"capstone13038_{_stamp()}"
@@ -770,9 +782,10 @@ class DeployedTarget:
                     out[path.strip("/").replace("/", "_")] = json.loads(
                         resp.read().decode("utf-8", "replace")
                     )
-            except Exception as exc:
-                out["error"] = _strip_userinfo(
-                    f"{path}: {type(exc).__name__}: {_cut(str(exc), 160)}", self.api_url
+            except Exception as exc:  # noqa: BLE001 — a probe records, it never raises
+                out["error"] = _cut(
+                    _strip_userinfo(f"{path}: {type(exc).__name__}: {str(exc)}", self.api_url),
+                    160,
                 )
         return out
 
@@ -783,7 +796,10 @@ class DeployedTarget:
             # dict is written into `run-deployed-refused.json` inside the COMMITTED
             # evidence directory, and a deployed API URL can carry userinfo
             # (`https://user:pass@host`) just as a store URI can (#13303 cycle 4, P2).
-            "api": _redact(self.api_url),
+            # `_strip_userinfo`, not `_redact`: a bare USERNAME (`https://alice@host`) is
+            # not matched by the `user:pass@` regex, and this dict is written into the
+            # committed evidence dir (#13303 cycle 7, P4).
+            "api": _strip_userinfo(self.api_url, self.api_url),
             "reachability": self.reach,
             "capabilities": [],
             "ingest_surface": [],
@@ -1937,6 +1953,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
             return 2
 
+    # `run --judge none` produces an all-`unjudged` board — not a baseline. Writing it into
+    # the bundle replaced the committed `run-local.json` / `scoreboard-local.md` with a
+    # non-result, and the only other signal was `git status` (#13303 cycle 7, P3). The
+    # producer MAY publish here (`--judge fresh` / `--judge file`); the unjudged form may not.
+    if args.judge == "none" and out_dir.resolve() == DEFAULT_OUT.resolve():
+        print(
+            f"capstone: refusing to write an UNJUDGED board into the evidence bundle "
+            f"{DEFAULT_OUT} — every row would be `unjudged`, which is not a baseline. "
+            "Point --out at a scratch directory, or score it (--judge fresh|file).",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         target = build_target(
             args.target,
@@ -1990,7 +2019,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "target": "deployed",
             "product": f"hosted api {prov.get('api')} "
             f"commit={(prov.get('reachability') or {}).get('v1_version', {}).get('commit_sha')}",
-            "store": _redact(prov.get("api") or ""),
+            # `prov["api"]` is already userinfo-scrubbed by `DeployedTarget.provenance`.
+            "store": prov.get("api") or "",
             "graph": "—",
             "narrative": str(narrative_path),
             "narrative_frozen": narrative.get("frozen"),
@@ -2252,6 +2282,14 @@ def cmd_judge(args: argparse.Namespace) -> int:
     # cycle 6, P2). Verified only when the packet records a narrative we can read; a
     # packet from another checkout is judged with a note rather than refused.
     same_scenario = _same_questions_as_narrative(packet)
+    scenario_note: str | None = None
+    if same_scenario is None:
+        # The comment above says so, so WRITE it (#13303 cycle 7, P5): a promise with no
+        # artifact behind it is the shape this instrument exists against.
+        scenario_note = (
+            "scenario not verified: the packet records no readable narrative path here, so "
+            "the question set could not be checked against the frozen scenario"
+        )
     if same_scenario is False:
         print(
             f"capstone: refusing {packet_path} — its questions are not the frozen "
@@ -2353,6 +2391,12 @@ def cmd_judge(args: argparse.Namespace) -> int:
     )
     board["header"]["judge"] = judge_meta
     board["judge"] = judge_meta
+    if scenario_note:
+        board["header"].setdefault("notes", []).append(scenario_note)
+        judge_meta["scenario_check"] = "unverified"
+    else:
+        judge_meta["scenario_check"] = "matches-frozen-scenario"
+
     md = render_markdown(board)
     print(md)
     # Persist beside the packet so the committed run JSON and the committed
