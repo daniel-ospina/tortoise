@@ -67,6 +67,12 @@ WHAT IT REWRITES, AND WHAT IT DELIBERATELY DOES NOT
   it is what the owner's decision names. `retracted` → `deprecated` is a
   dead→dead move, which `_update_entity`'s non-Point arm admits by design;
   `outdated` is NOT in the family's dead set, so that move is live→dead.
+  ⚠️ THE READ SIDE MOVES TOO, and that is the point: `outdated` is not a member
+  of `OBJECT_TERMINAL_STATUSES`, so a rewritten row leaves the recall/search
+  pool it was being served from and is excluded by the terminal vocabulary
+  instead. That is the intended alignment — one state, not a state half the
+  system believes — but an operator comparing recall output before and after
+  should expect the row to disappear rather than to change label.
 * **No:** the `outdated` **boolean flag** (`n.outdated = true`). It is a different
   axis (ONTOLOGY §5's Point lifecycle flag, read by `live.is_terminal_status`),
   the owner's decision excludes it, and this tool would corrupt Points if it
@@ -136,18 +142,20 @@ EXIT CODES
 ==========
     0   the run completed — a preview, or an execute whose population is now 0
     1   the run did not reach its post-condition: rows remain, a row failed,
-        the read was truncated, or a row is UNADDRESSABLE (no `id`, so the SDK
-        cannot rewrite it), or a record did not land. A PREVIEW over such a read
-        exits 1 too — the preview is the measurement that unblocks the sequenced
-        drop, so it must not read as complete.
-    2   refused before touching anything: no journal, an empty target flag; and
-        on `--execute` a TRUNCATED read or an UNADDRESSABLE row (no `id`) — both
-        exit 1 on a preview (an incomplete measurement) and 2 on the write arm
-        (nothing is written). ⚠️ A FAN-OUT / dual-labelled row is NOT in this
-        set: it is a per-ROW refusal (that row is reported by id, the safe rows
-        are still rewritten, exit 1), because refusing the whole run would mean
-        the tool could never make progress on a graph holding one such row —
-        which is exactly the canonical instance.
+    1   the run did not reach its post-condition: rows remain, a row failed, a
+        record did not land, a row's `id` is bound by more than one node, or the
+        read was truncated / a row is UNADDRESSABLE (no usable `id`). A PREVIEW
+        over such a read exits 1 too — the preview is the measurement that
+        unblocks the sequenced drop, so it must not read as complete.
+    2   refused before touching anything: no journal, an empty or AMBIGUOUS
+        target flag (`--uri` together with `--db-path`); and on `--execute` a
+        TRUNCATED read or an UNADDRESSABLE row (no usable `id`) — both exit 1 on
+        a preview (an incomplete measurement) and 2 on the write arm (nothing is
+        written). ⚠️ A FAN-OUT / dual-labelled row is NOT in this set: it is a
+        per-ROW refusal (that row is reported by id, the safe rows are still
+        rewritten, exit 1), because refusing the whole run would mean the tool
+        could never make progress on a graph holding one such row — which is
+        exactly the canonical instance.
 """
 
 from __future__ import annotations
@@ -483,7 +491,7 @@ def collect(proj, *, sample: int = 20) -> Report:
             rep.sample.append(row)
         if sup_by or sup_at:
             rep.carriers.append(row)
-        if not isinstance(rid, str) or not rid:
+        if rid is None or (isinstance(rid, str) and not rid):
             rep.unaddressable.append(str(graph_id))
         else:
             # ⛔ Read the ID, not just this row's labels. `update_knowledge`
@@ -530,16 +538,17 @@ def rewrite(sdk, rep: Report) -> Report:
     log = sdk._get_event_log()
     try:
         rep.journal_records_before = log.position()
-    except OSError as exc:                            # pragma: no cover
+    except (OSError, AttributeError) as exc:          # pragma: no cover
         rep.failures.append({"phase": "journal-position", "error": str(exc)})
 
     for row in rep.rows:
         rid = row["id"]
-        if not isinstance(rid, str) or not rid:
+        if rid is None or (isinstance(rid, str) and not rid):
             rep.failures.append({
                 "id": None, "graph_id": row.get("graph_id"),
                 "error": ("UNADDRESSABLE: this :Object carries a legacy status "
-                          "word and no `id`, so the SDK cannot rewrite it"),
+                          "word and no usable `id` (None, or an empty string), so "
+                          "the SDK cannot rewrite it"),
             })
             continue
         proj = sdk._get_proj()
@@ -630,6 +639,18 @@ def rewrite(sdk, rep: Report) -> Report:
         rep.truncated = True
     if after.unaddressable:
         rep.unaddressable.extend(after.unaddressable)
+    # ⛔ RECONCILE `fanout` WITH WHAT WAS ACTUALLY WRITTEN. `rep.fanout` is the
+    # PRE-READ snapshot: a sibling can be deleted (or created) before the write,
+    # and the write re-resolves the address. Left unreconciled, the report tells
+    # an operator a row was "refused, never written" that the run just rewrote —
+    # and the exit code stays 1 on a clean run, blocking the sequencing step
+    # this tool exists to unblock.
+    written = set(rep.rewritten)
+    rep.fanout = [r for r in rep.fanout if r.get("id") not in written]
+    _listed = {r.get("id") for r in rep.fanout}
+    for row in after.fanout:
+        if row.get("id") not in written and row.get("id") not in _listed:
+            rep.fanout.append(row)
     return rep
 
 
@@ -737,7 +758,16 @@ def _empty_flag(args) -> str | None:
     here in one line because this tool opens ONE store through the SDK and a
     set-but-empty flag would fall through to the embedded default while the
     operator believes they addressed a container.
+    ⛔ AND `--uri` + `--db-path` TOGETHER IS THE SAME DEFECT IN A WORSE FORM: the
+    SDK lets an explicit `db_path` win over the URI, so the run writes the
+    EMBEDDED store while the operator believes it addressed the container — and
+    the journal it appends to is whichever `--event-log-path` names, so a
+    production journal can receive a record for a write that never touched the
+    production graph. Refused rather than resolved.
     """
+    if getattr(args, "uri", None) is not None and \
+            getattr(args, "db_path", None) is not None:
+        return "--uri and --db-path were both passed, and they name two stores"
     for name in ("uri", "db_path", "graph_name", "event_log_path"):
         value = getattr(args, name, None)
         if value is not None and not str(value).strip():
@@ -811,6 +841,11 @@ def run(sdk, *, execute: bool = False, sample: int = 20,
     # exit 2; a caller that reaches `run(execute=True)` directly gets the SAME
     # gate as an exception, so there is no second, unguarded write path — the
     # shape that half-wrote a graph in review (2026-11-17).
+    if sdk._get_event_log() is None:
+        raise Refused(
+            REFUSE_NO_JOURNAL,
+            "no journal is configured for this target, so every write would be "
+            "live-only and the next `rebuild_all` would revert it.")
     refusal = _refusal(rep)
     if refusal is not None:
         raise refusal
@@ -921,7 +956,7 @@ def main(argv: list[str] | None = None) -> int:
     record_short = (rep.journal_delta is None
                     or rep.journal_delta < len(rep.rewritten))
     if (rep.failures or rep.truncated or leftover or rep.unaddressable
-            or rep.fanout or record_short):
+            or record_short):
         return 1
     return 0
 

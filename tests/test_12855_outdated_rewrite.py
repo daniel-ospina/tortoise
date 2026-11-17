@@ -266,31 +266,61 @@ def test_a_failed_journal_append_is_a_failure_and_exits_1(tmp_path, monkeypatch)
     counted as rewritten, and the run exits 1.
     """
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    db = tmp_path / "unrecorded.db"
-    events = tmp_path / "ev"
-    events.mkdir()
-    journal = events / "events.jsonl"
-    sdk = TortoiseSDK(str(db), event_log_path=str(journal))
-    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
-    _mint_legacy(sdk, oid, "outdated")
-    sdk.close()
+
+    def fresh_legacy(name):
+        """One live-only leg needs its OWN graph: the first run rewrites the
+        only legacy row, so a second run over the same DB legitimately finds
+        nothing to do (population 0, exit 0) and would measure nothing.
+
+        Called BEFORE the append is broken — the historical record has to reach
+        the journal (`_mint_legacy` asserts it), or the row is not the legacy
+        shape this test is about.
+        """
+        db = tmp_path / name
+        events = tmp_path / (name + "-ev")
+        events.mkdir()
+        journal = events / "events.jsonl"
+        sdk = TortoiseSDK(str(db), event_log_path=str(journal))
+        oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+        _mint_legacy(sdk, oid, "outdated")
+        sdk.close()
+        return db, journal, oid
+
+    run_db, run_journal, oid = fresh_legacy("unrecorded.db")
+    cli_db, cli_journal, _cli_oid = fresh_legacy("unrecorded-cli.db")
 
     def boom(self, event):
         raise OSError("journal is read-only")
 
     monkeypatch.setattr(EventLog, "append", boom)
 
-    rc = tool.main(["--db-path", str(db), "--event-log-path", str(journal),
-                    "--execute"])
-
-    assert rc == 1, "a live-only rewrite must never exit 0"
-    sdk = TortoiseSDK(str(db), event_log_path=str(journal))
+    # ⛔ Drive `run` and assert the PER-ROW verdict, not just the process exit.
+    # The batch backstop (`journal_delta < len(rewritten)`) also returns 1, so an
+    # exit-code-only assertion would stay green with the per-row probe deleted —
+    # and the per-row probe is the half a batch delta CANNOT do: attribute the
+    # missing record to a row.
+    sdk = TortoiseSDK(str(run_db), event_log_path=str(run_journal))
+    try:
+        rep = tool.run(sdk, execute=True)
+        assert rep.rewritten == [], "a live-only row must never count as rewritten"
+        assert [f.get("id") for f in rep.failures] == [oid], rep.failures
+        assert "LIVE-ONLY" in rep.failures[0]["error"], rep.failures[0]["error"]
+        assert rep.journal_delta == 0, rep.journal_delta
+    finally:
+        sdk.close()
+    sdk = TortoiseSDK(str(run_db), event_log_path=str(run_journal))
     try:
         # The write DID land live — that is exactly why the guard is needed.
         assert _status(sdk, oid) == "deprecated"
         assert _legacy_rows(sdk) == []
     finally:
         sdk.close()
+
+    # …and the CLI arm answers the same state with exit 1.
+    rc = tool.main(["--db-path", str(cli_db), "--event-log-path", str(cli_journal),
+                    "--execute"])
+
+    assert rc == 1, "a live-only rewrite must never exit 0"
 
 
 def test_a_sibling_created_after_the_read_is_refused_at_write_time(env):
@@ -471,7 +501,12 @@ def test_a_row_carrying_a_supersession_carrier_is_reported(env):
 def test_the_legacy_outdated_FLAG_is_reported_and_not_rewritten(env):
     """`n.outdated = true` is a DIFFERENT axis (the Point lifecycle flag). The
     owner's decision excludes it; touching it here would corrupt the flag read
-    every read surface performs."""
+    every read surface performs.
+
+    ⛔ Both halves are measured: the flag is REPORTED, and an `--execute` run
+    leaves it exactly as it found it (a preview-only assertion would hold for
+    any preview ever taken and measure nothing about the write).
+    """
     sdk, _events = env
     oid = sdk.create_object("flagged", objectKind="test:widget")["id"]
     sdk._get_proj().g.query(
@@ -483,6 +518,13 @@ def test_the_legacy_outdated_FLAG_is_reported_and_not_rewritten(env):
     assert [r["id"] for r in rep.flag_sample] == [oid]
     assert rep.by_word["outdated"] == 0, (
         "the flag is not a status word — it must not enter the status population")
+
+    tool.run(sdk, execute=True)
+
+    flag = sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$id}) RETURN n.outdated",
+        params={"id": oid}).result_set
+    assert flag == [[True]], f"the flag must survive the rewrite, got {flag!r}"
 
 
 # ══ the refusals ═════════════════════════════════════════════════════════
@@ -555,6 +597,37 @@ def test_an_empty_target_flag_is_refused_not_treated_as_absent(monkeypatch):
     different store while the operator believes they named one."""
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     assert tool.main(["--db-path", ""]) == 2
+
+
+def test_two_targets_at_once_are_refused_not_silently_resolved(monkeypatch):
+    """`--uri` AND `--db-path` name two stores, and the SDK prefers `db_path`.
+
+    Resolving it silently writes the EMBEDDED graph while the operator believes
+    the container was addressed — and the journal appended to is whichever
+    `--event-log-path` names, so a production journal can receive a record for a
+    write that never touched the production graph.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert tool.main(["--uri", "bolt://127.0.0.1:1/none",
+                      "--db-path", "/tmp/does-not-matter.db"]) == 2
+
+
+def test_run_refuses_a_journal_less_target_instead_of_crashing(tmp_path, monkeypatch):
+    """The journal precondition is a REFUSAL at the `run` layer, not a crash.
+
+    A refusal reachable only from `main` is one every other caller walks past —
+    here it produced `AttributeError: 'NoneType' object has no attribute
+    'position'` out of the write loop. It fails closed either way, but the
+    contract (`Refused`) has to hold for a non-CLI caller too.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+    sdk = TortoiseSDK(str(tmp_path / "no-journal.db"))
+    try:
+        with pytest.raises(tool.Refused):
+            tool.run(sdk, execute=True)
+    finally:
+        sdk.close()
 
 
 # ══ the refusals are not a CLI-only courtesy ═════════════════════════════
