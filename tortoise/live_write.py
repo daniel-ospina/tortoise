@@ -41,15 +41,32 @@ What IS true here, and what the falsifiers measure:
    — a line whose projection failed — is the direction `derived =
    replay(journal)` was built to heal.
 
-3. **That disagreement is NAMED, not silent.** Every outcome says whether the
-   record took the write (`LiveWrite.record`), and a failure leaves
-   `unprojected` set with the journal position. The named disagreement is
-   readable from the two stores without this process's memory:
+3. **That disagreement is NAMED, not silent.** Every outcome this function
+   RETURNS says whether the record took the write (`LiveWrite.record`), and a
+   failure leaves `unprojected` set with the journal position. The named
+   disagreement is readable from the two stores without this process's memory:
    `record_projection.journal_coverage` compares the journal's own enumeration
-   (`EventLog.position()`) with `public.journal_event`, `python -m tortoise
-   record-reconcile --journal <path>` reports it as `unprojected_journal`, and
-   `tools/record_runner.py status` already reports the resume point. The repair
-   is one idempotent `record_runner apply`.
+   (`EventLog.position()` or the read-only `position_readonly()`) with
+   `public.journal_event`, `python -m tortoise record-reconcile --journal
+   <path>` reports it as `unprojected_journal`, and `tools/record_runner.py
+   status` already reports the resume point. The repair is one idempotent
+   `record_runner apply`.
+
+   ⛔ WHAT "NAMED" DOES **NOT** MEAN, STATED SO THE CLAIM CANNOT DRIFT (#13345
+   review F3). The returned `LiveWrite` is *handed to the caller* and it is a
+   fact about the write; it is **not** a report any production door reads. All
+   three doors discard the value (`api.EventAPI._emit`, `mining.
+   ConversationMiner._emit_event`, `sdk.TortoiseSDK._emit_event`), and the one
+   thing that IS consumed from the record attempt is the `RecordWrite` the SDK
+   door collects through ``record_sink`` for its store decision (#10021). So
+   the per-write `unprojected`/`refusal` names the disagreement to a CALLER
+   that asks, and tests ask. The PRODUCTION signal for a refused armed write is
+   the door's own counter plus its WARNING (`record_writer._count_write_failure`
+   / `_report_live_write_refusal`), and the durable signal is the three readers
+   above. Making a door branch on `refusal` is #8447's work — `record_writer.
+   write_live_record`'s docstring records the same boundary ("Consuming
+   ``refusal`` where the store decision is not at stake is #8447's work, not
+   this change's") — so do not read this module as claiming a fourth surface.
 
 ⛔ **WHY THE APPEND IS NOT WITHHELD WHEN THE RECORD IS NOT READY.** A tempting
 "refuse rather than half-write" is to abort the whole write when the record
@@ -129,7 +146,10 @@ class LiveWrite:
     ``unprojected`` is the named disagreement: ``1`` when the journal holds a
     line the record did NOT take, ``0`` otherwise. It is deliberately an
     integer over this one record rather than a boolean, so `record_reconcile`'s
-    count and this value are the same quantity at different scopes.
+    count and this value are the same quantity at different scopes. ⚠️ It is
+    returned to the caller and read by no production door — see the module
+    docstring's §3 note and #8447; the durable readers are `journal_coverage`,
+    `record-reconcile --journal` and `record_runner status`.
     """
 
     event: Mapping[str, Any]

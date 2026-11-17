@@ -711,12 +711,21 @@ def _warn_readiness_contradictory(path: str | None, cov) -> None:
     ⛔ A LEG THAT IS CORRECTLY OFF MUST NOT BE SILENTLY OFF — the same rule
     `_warn_readiness_unmeasurable` states, for the shape one branch over
     (#13345 review P2). Here the journal WAS counted and the count cannot be the
-    one behind this tenant's rows: it enumerates no records while the record
-    holds some, so `JournalCoverage.unprojected` refuses to answer and the gate
-    keeps the graph branch. Without this, declaring a rotated, replaced or
-    freshly-truncated path would disable the dense leg for ever with nothing in
-    the default log — the failure an operator caused THEMSELVES being the
-    quietest one, which review F2 point 3 already priced.
+    one behind this tenant's rows, so `JournalCoverage.unprojected` refuses to
+    answer and the gate keeps the graph branch. Without this, declaring a
+    rotated, replaced or freshly-truncated path would disable the dense leg for
+    ever with nothing in the default log — the failure an operator caused
+    THEMSELVES being the quietest one, which review F2 point 3 already priced.
+
+    ⛔ THE REASON IS THE COVERAGE'S OWN (#13345 review F2), not a sentence
+    re-spelled here. The first cut hardcoded "enumerates NO records", which was
+    the whole vocabulary when the empty-journal shape was the only one guarded;
+    the guard now refuses ANY record holding more positions than its journal
+    enumerates (a rotated file that has since received a few lines), and a
+    message that names the empty case for a 100-row record would send the
+    operator looking for an empty file. Quoting the reading is also what
+    `record_reconcile.log_result` does, so the log and the reconcile line cannot
+    describe one contradiction in two ways.
     """
     key = path or ""
     with _WARN_LOCK:
@@ -724,13 +733,11 @@ def _warn_readiness_contradictory(path: str | None, cov) -> None:
             return
         _WARNED_CONTRADICTORY.add(key)
     logging.getLogger(LOG_NAME).warning(
-        "record dense leg: %s declares %r, which enumerates NO records while "
-        "this tenant's record holds %d of its positions — that file cannot be "
-        "the journal that fed the record, so its lag cannot be measured and "
-        "every tenant keeps the graph branch (a correct answer, #11642 P1) "
-        "until the declaration names the right file (#13371, #13345). "
-        "Reported once per path.",
-        RECORD_JOURNAL_ENV, key, int(cov.present))
+        "record dense leg: %s declares %r, which CONTRADICTS this tenant's "
+        "record — %s. Its lag cannot be measured, so every tenant keeps the "
+        "graph branch (a correct answer, #11642 P1) until the declaration "
+        "names the right file (#13371, #13345). Reported once per path.",
+        RECORD_JOURNAL_ENV, key, cov.unprojected_unknown_reason)
 
 
 def _warn_readiness_multitenant() -> None:
@@ -836,10 +843,13 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
     # serve, and the graph branch is the correct answer.
     # ⛔ `unprojected` answers `None` — never `0` — when the reading is not a
     # measurement, and the JOURNAL-AHEAD-IMPOSSIBLE shape is one of them: a
-    # journal enumerating NO records cannot have fed a record holding rows, so
-    # `max(0 - 0, 0)` there is a detectable contradiction, and `== 0` below
-    # would arm the dense leg on the strength of it (JournalCoverage
-    # .unprojected_unknown_reason, #13371/#13345 P2). The `None` cannot come
+    # record holding MORE positions than its journal enumerates cannot be a
+    # fold of that journal (it is the empty-journal case when the journal
+    # enumerates none, and a rotated/replaced file when it enumerates fewer
+    # than the record holds), so `max(enumerated - within_prefix, 0)` there is a
+    # detectable contradiction, and `== 0` below would arm the dense leg on the
+    # strength of it (JournalCoverage.unprojected_unknown_reason,
+    # #13371/#13345 P2/F2). The `None` cannot come
     # from an uncountable journal here — that arm returned above — so it is
     # exactly that contradiction, and it is REPORTED rather than silently off.
     if cov.unprojected is None:

@@ -7728,20 +7728,41 @@ class JournalCoverage:
         drift, and the copy that drifts is the one that reports a clean pass.
 
         Two shapes, and the second is a CONTRADICTION rather than an absence:
-        a journal that ENUMERATES NO RECORDS cannot be the journal that fed a
-        record holding rows, so ``max(0 - 0, 0) == 0`` would report a measured
-        zero over a file that cannot have produced what is in the record — the
-        detectable contradiction `#13371` names, read as green. The arithmetic
-        predates #13331; what makes it dangerous here is that this PR is its
-        second and third consumer (the reconcile verdict at
+        a record that holds MORE positions than its journal ENUMERATES cannot be
+        a fold of that journal, so ``max(enumerated - within_prefix, 0)`` would
+        report a measured agreement between two stores that cannot be related —
+        the detectable contradiction `#13371` names, read as green. The
+        arithmetic predates #13331; what makes it dangerous here is that this PR
+        is its second and third consumer (the reconcile verdict at
         `__main__._cmd_record_reconcile`, and the dense leg's readiness gate at
         `record_vector._measure_readiness`), so it is refused at the source.
+
+        ⛔ ONE CONDITION, NOT TWO (#13345 review F2). The first cut of this guard
+        refused only ``enumerated == 0 and present > 0`` — the shape where the
+        journal is EMPTY. The same impossibility one shape over went unguarded:
+        a rotated/replaced journal that has since received a few lines enumerates
+        **5** while the record holds **100**, so ``within_prefix == 5``,
+        ``unprojected == 0``, the verdict is ``clean``/exit 0 and the dense leg
+        arms — a measured agreement with a file that is 95 positions SHORTER than
+        the record. ``present > enumerated`` subsumes the empty-journal arm and
+        is the invariant this module already states: a projection is consistent
+        with a processed PREFIX of the log, so a replay of the journal reproduces
+        exactly the log — never fewer rows than the record holds. Every healthy
+        graph satisfies it (the documented cut-over order re-bases the allocator
+        from the journal's own ``row_max``, so one record row is one journal
+        line), so no correct deployment is refused by this.
         """
         if self.enumerated is None:
             return "the journal could NOT be counted"
-        if int(self.enumerated) == 0 and int(self.present) > 0:
-            return (f"the journal enumerates NO records while the record holds "
-                    f"{int(self.present)} of its positions — that file cannot "
+        if int(self.present) > int(self.enumerated):
+            if int(self.enumerated) == 0:
+                return (f"the journal enumerates NO records while the record "
+                        f"holds {int(self.present)} of its positions — that "
+                        f"file cannot be the journal that fed this record")
+            return (f"the record holds {int(self.present)} of the journal's "
+                    f"positions while the journal enumerates only "
+                    f"{int(self.enumerated)} records — a record cannot hold a "
+                    f"position its journal never issued, so that file cannot "
                     f"be the journal that fed this record")
         return None
 
@@ -7753,9 +7774,9 @@ class JournalCoverage:
         reachable only with a known ``enumerated``; a caller that cannot say how
         many records its journal holds must not be handed a zero it did not
         measure — and a file that CANNOT be the record's journal is one of those
-        callers (:attr:`unprojected_unknown_reason`). ``enumerated == 0`` with
-        an empty record is the one shape that still answers ``0``: both sides
-        genuinely hold nothing.
+        callers (:attr:`unprojected_unknown_reason`). Both sides genuinely
+        holding nothing (``enumerated == 0``, ``present == 0``) is the one shape
+        that still answers ``0``.
         """
         if self.unprojected_unknown_reason is not None:
             return None

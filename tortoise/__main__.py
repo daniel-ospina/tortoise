@@ -880,9 +880,33 @@ def _cmd_record_reconcile(args):
                     f"short of its journal reads as complete when the journal "
                     f"that would show the lag cannot be counted (#13331). Check "
                     f"the --journal path and the file's permissions")
-            journal_leg = _coverage(
-                conn, org_id=args.org, graph_id=args.graph,
-                enumerated=enumerated)
+            # ⛔ THE RECORD'S OWN READ RAISES BY DESIGN, SO IT IS TRANSLATED
+            # HERE (#13345 review F1). `journal_coverage` refuses an unreadable
+            # record (`RecordProjectionError` when the aggregate returns no row)
+            # and re-raises whatever the driver raises — `QueryCanceled` from the
+            # gap statement under this session's `statement_timeout`, and
+            # `UndefinedTable` on a partially-migrated record. None of those is
+            # `ReconciliationUnavailable`, so without this arm they propagated
+            # past both handlers below and out of the verb as a TRACEBACK, i.e.
+            # exit **1** — the code this verb's docstring says it never returns,
+            # and the exact class the sibling `enumerated is None` arm above and
+            # the record↔cache read (`read_record_view`, wrapped at the top of
+            # this block) were already fixed for. A scheduler then reads a crash
+            # instead of `verdict=unanswerable`, and the operator is pointed at a
+            # Python stack instead of "the journal leg is UNKNOWN".
+            # `PlacementTableUnavailable` stays itself: a fault in the INSTALL is
+            # not a fault in the record, and the handler below says so.
+            try:
+                journal_leg = _coverage(
+                    conn, org_id=args.org, graph_id=args.graph,
+                    enumerated=enumerated)
+            except (ReconciliationUnavailable, PlacementTableUnavailable):
+                raise
+            except Exception as e:
+                raise ReconciliationUnavailable(
+                    f"the record's journal coverage could not be read "
+                    f"({type(e).__name__}) — the journal leg is UNKNOWN, not "
+                    f"clean") from e
         result = reconcile_record_and_cache(
             record_key_map(view),
             scan.view,

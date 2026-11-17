@@ -227,6 +227,12 @@ def _coverage(present, high, low, within, gap=None, enumerated=None):
     # holding five of its positions, so `max(0 - 0, 0) == 0` used to report a
     # measured agreement between a file and a record it never produced.
     (_coverage(5, 5, 1, 0, None, 0), None),
+    # ⛔ …AND THE SAME IMPOSSIBILITY ONE SHAPE OVER (#13345 review F2): a
+    # ROTATED journal that has since received a few lines enumerates 5 while the
+    # record holds 100, so `within_prefix == 5` and `max(5 - 5, 0) == 0` used to
+    # report a measured agreement with a file that is 95 positions SHORTER than
+    # the record — `clean`, exit 0, and the dense leg armed.
+    (_coverage(100, 100, 1, 5, None, 5), None),
     # …while BOTH sides genuinely holding nothing is a real, healthy zero:
     (_coverage(0, 0, 0, 0, None, 0), 0),
 ])
@@ -256,6 +262,40 @@ def test_an_empty_journal_over_a_populated_record_is_unknown_not_clean():
         "the contradiction is reported as an uncountable journal — the operator "
         "is sent to check file permissions for a file that reads fine")
     assert "record_runner.py apply" not in line
+
+
+def test_a_record_ahead_of_its_journal_is_unknown_not_clean():
+    """The contradiction guard is not ONE-SIDED (#13345 review F2).
+
+    The `#13345` P2 fix refused a journal that enumerates NO records over a
+    populated record. The same impossibility one shape over went unguarded: a
+    rotated/replaced journal (the operator action `_warn_readiness_contradictory`
+    exists for) that has since received a few lines enumerates 5 while
+    `public.journal_event` holds 100 positions, so `within_prefix == 5`,
+    `unprojected == 0`, `verdict() == clean`, `exit_code_for == 0` and the dense
+    leg armed — a `clean` verdict over a pair this module's own docstring calls
+    impossible (`live_write.py`: *"a record row can never exist for a journal
+    line that is not there"*), where `rebuild_all` from that journal would
+    delete 95 live memories.
+
+    RED on the pre-fix code: `max(5 - 5, 0) == 0`, clean, exit 0.
+    """
+    ahead = _coverage(100, 100, 1, 5, None, 5)
+
+    reason = ahead.unprojected_unknown_reason or ""
+    assert ahead.unprojected is None
+    assert "100" in reason and "5" in reason, (
+        f"the contradiction must name BOTH counts, got {reason!r}")
+    assert "never issued" in reason
+
+    result = _result(journal=ahead)
+    assert result.verdict() == VERDICT_UNANSWERABLE
+    assert exit_code_for(result) == EXIT_UNAVAILABLE
+    assert result.as_dict()["unprojected_journal"] is None
+    line = log_result(result)
+    assert "never issued" in line
+    assert "record_runner.py apply" not in line, (
+        "a replay is the CURE for a lagging record; this pair is a contradiction")
 
 
 def test_contiguous_covers_both_edges():
@@ -570,6 +610,95 @@ def test_the_cli_refuses_a_journal_it_could_not_count(
     assert composed == []
 
 
+def test_the_cli_translates_a_raising_coverage_read_into_no_verdict(
+        monkeypatch, tmp_path, capsys):
+    """The record-side coverage read must not escape the verb as a traceback.
+
+    ⛔ F1 (#13345 review). `journal_coverage` RAISES by design —
+    `RecordProjectionError` when its aggregate returns no row, and whatever the
+    driver raises (`QueryCanceled` under this session's `statement_timeout`,
+    `UndefinedTable` on a partially-migrated record) — and none of those is
+    `ReconciliationUnavailable`, so pre-fix they propagated past both handlers
+    out of `_cmd_record_reconcile` and out of `main()`: a Python TRACEBACK, i.e.
+    exit **1**, the code this verb's docstring says it never returns. A
+    scheduler scheduling this verb (§17.2) then reads a crash instead of
+    `verdict=unanswerable`, and the operator is pointed at a stack instead of
+    "the journal leg is UNKNOWN".
+
+    The neighbouring record↔cache read is wrapped for exactly this reason; the
+    journal half of the uncountable path is too; only this read was not. RED on
+    the pre-fix code (the exception left the verb).
+    """
+    import sys
+    import types as _types
+
+    import tortoise.cache_projection as cache_projection
+    import tortoise.projection as projection
+    import tortoise.record_projection as record_projection
+    import tortoise.record_reconcile as record_reconcile
+    import tortoise.record_writer as record_writer
+    import tortoise.residency as residency
+    from tortoise.__main__ import _cmd_record_reconcile
+    from tortoise.record_projection import RecordProjectionError
+
+    journal = tmp_path / "events.jsonl"
+    journal.write_text("{}\n{}")
+
+    composed: list = []
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "psycopg2",
+                        _types.SimpleNamespace(connect=lambda *a, **k: _Conn()))
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://localhost/record")
+    monkeypatch.setattr(cache_projection, "read_record_view",
+                        lambda conn, *, org_id, graph_id: {"k": {"v": 1}})
+    monkeypatch.setattr(record_reconcile, "record_key_map",
+                        lambda view: dict(view))
+    monkeypatch.setattr(record_reconcile, "scan_cache_view",
+                        lambda g, *, timeout_ms: _types.SimpleNamespace(
+                            view={"k": {"v": 1}}, placed={}))
+    monkeypatch.setattr(
+        record_reconcile, "reconcile_record_and_cache",
+        lambda record, cache, **kw: composed.append(kw) or pytest.fail(
+            "a coverage read that RAISED was reconciled as though it had "
+            "answered — the run reports a journal leg it never measured"))
+    monkeypatch.setattr(residency, "read_declaration",
+                        lambda g: ResidencyDeclaration(source=None))
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        _types.SimpleNamespace(
+                            from_uri=lambda uri, graph_name=None:
+                            _types.SimpleNamespace(g=object(), close=lambda: None)))
+
+    def _raising_coverage(conn, *, org_id, graph_id, enumerated=None,
+                          want_gap=True):
+        raise RecordProjectionError(
+            "the record's coverage read returned no row — refusing rather than "
+            "reporting zero consumed")
+
+    monkeypatch.setattr(record_projection, "journal_coverage",
+                        _raising_coverage)
+
+    args = _types.SimpleNamespace(
+        record_dsn=None, db="redis://unused", cache_graph="org_o",
+        org="o", graph="g", journal=str(journal), timeout_ms=None, json=False)
+
+    rc = _cmd_record_reconcile(args)          # pre-fix: raises OUT of the verb
+    out, err = capsys.readouterr()
+
+    assert rc == EXIT_UNAVAILABLE, (
+        "a record-side read that raised must be `2` ('no verdict was "
+        "produced'); exit 1 is the traceback this contract forbids")
+    assert composed == []
+    assert "UNAVAILABLE" in err and "RecordProjectionError" in err, (
+        f"the operator must be told the journal leg is UNKNOWN, got {err!r}")
+    assert "Traceback" not in err
+    assert "✓ record == cache" not in out
+
+
 # ── 4. the dense leg's per-tenant gate ─────────────────────────────────────
 
 
@@ -806,6 +935,56 @@ def test_an_empty_journal_never_arms_the_dense_leg(
         "the warning repeats on every read; a request path must log once")
 
 
+def test_a_record_ahead_of_its_journal_never_arms_the_dense_leg(
+        vector, single_tenant, monkeypatch, tmp_path, caplog):
+    """The gate refuses the SAME contradiction the coverage guard does (F2).
+
+    One shape over from `test_an_empty_journal_never_arms_the_dense_leg`: the
+    journal enumerates 5 records while the record holds 100 positions, so
+    `unprojected` used to be `0`, `unprojected == 0 and present > 0` returned
+    **True**, and the dense leg served a tenant from a record its declared
+    journal cannot have produced. RED on the pre-fix code.
+
+    ⛔ AND THE WARNING NAMES THE ACTUAL NUMBERS: the first cut of
+    `_warn_readiness_contradictory` hardcoded "enumerates NO records", which for
+    this shape sends the operator looking for an EMPTY file — the file is not
+    empty, it is 95 lines short.
+    """
+    import tortoise.record_projection as record_projection
+    import tortoise.record_serve as record_serve
+
+    journal = tmp_path / "events.jsonl"
+    journal.write_text("\n".join("{}" for _ in range(5)))   # enumerates 5
+    monkeypatch.setenv(vector.RECORD_JOURNAL_ENV, str(journal))
+    scope = vector._Scope(org_id="org-1", graph_id="graph-1")
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(record_serve, "open_record", lambda dsn, **k: _Conn())
+    # the READINESS DECISION, not the SQL: 100 positions in the record, 5 in the
+    # journal (`enumerated` is the real count of the real file above).
+    monkeypatch.setattr(
+        record_projection, "journal_coverage",
+        lambda conn, *, org_id, graph_id, enumerated=None, want_gap=True:
+        _coverage(100, 100, 1, 5, None, enumerated))
+
+    assert vector._measure_readiness(scope, record_dsn=None) is False, (
+        "a record 95 positions AHEAD of its journal read as READY — the dense "
+        "leg served a tenant from a journal that cannot be the one behind it")
+    assert vector.journal_ready(scope) is False
+
+    named = [rec for rec in caplog.records
+             if vector.RECORD_JOURNAL_ENV in rec.message
+             and "never issued" in rec.message]
+    assert named and named[0].levelname == "WARNING", (
+        "the contradiction disabled the dense leg with nothing in the default "
+        "log — and a message about an EMPTY journal would misdirect the "
+        "operator, whose file is not empty")
+    assert "100" in named[0].message and "only 5" in named[0].message
+
+
 def test_the_gate_refuses_a_process_global_journal_it_cannot_apply_to_every_tenant(
         vector, monkeypatch, tmp_path, caplog):
     """One path, process-global ⇒ one tenant (#9192, #13331 review F4).
@@ -1015,6 +1194,35 @@ def test_the_read_only_count_reports_unmeasurable_as_none_not_zero(tmp_path):
     empty = tmp_path / "empty.jsonl"
     empty.write_text("")
     assert EventLog(empty).position_readonly() == 0                 # a real zero
+
+
+def test_the_non_regular_file_guard_refuses_before_it_counts(
+        tmp_path, monkeypatch):
+    """The `stat.S_ISREG` guard must refuse a directory, not merely fail on it.
+
+    ⛔ The directory row above pins NOTHING about the guard (#13345 review, the
+    "dead weight" note): `_count_records` on a directory raises `OSError`, which
+    `position_readonly`'s own `_COUNT_MAY_RAISE` fallback already converts to
+    `None` — so deleting the `S_ISREG` arm leaves that assertion green, and the
+    guard's stated purpose (refuse a non-journal BEFORE asking a reader whose
+    failure mode is a different errno family per platform) is untested.
+
+    Pinning the ORDER makes the guard attributable: a reader that would ANSWER
+    must never be asked. RED on the pre-fix code, where the directory reached
+    `_records_before` and the patched count came back as a journal size.
+    """
+    from tortoise.log import EventLog
+
+    asked: list = []
+    monkeypatch.setattr(
+        EventLog, "_records_before",
+        lambda self, size, mtime_ns: asked.append((size, mtime_ns)) or 7)
+
+    assert EventLog(tmp_path).position_readonly() is None, (
+        "a DIRECTORY was counted as a journal")
+    assert asked == [], (
+        "the count was attempted for a non-regular file — only the OSError "
+        "fallback refused it, so the S_ISREG guard is unpinned")
 
 
 def test_the_unmeasured_journal_leg_is_unanswerable_not_clean():
