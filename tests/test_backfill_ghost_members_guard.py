@@ -45,7 +45,7 @@ def _install_fake_sdk(monkeypatch, resolved_name: str) -> dict:
         def _get_registry(self):
             return SimpleNamespace(name=resolved_name)
 
-        def sweep_invite_ghost_memberships(self, *, dry_run=False):
+        def _sweep_invite_ghost_memberships(self, *, dry_run=False):
             calls["sweep_dry_run"] = dry_run
             return {"found": 0, "ghosts": 0, "deleted": 0}
 
