@@ -1820,6 +1820,11 @@ def _load_verdicts_map(path: str | Path) -> dict:
     The vocabulary itself is NOT enforced here — a recognised map carrying a word
     outside `VERDICTS` is `build_scoreboard`'s job (recorded `unjudged`, never refused).
     """
+    # `--verdicts` is optional in argparse, so `run --judge file` with it omitted reaches
+    # here with None; `Path(None)` is a TypeError, which the callers do not catch, so the
+    # promise above ("or raise ValueError") was broken by a traceback (#13303 cycle 5).
+    if not path:
+        raise ValueError("--verdicts was not given, but --judge file needs one")
     doc = json.loads(Path(path).read_text())
     if isinstance(doc, dict):
         doc.pop("_provenance", None)
