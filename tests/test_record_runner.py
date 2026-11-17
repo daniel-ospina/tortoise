@@ -1273,7 +1273,10 @@ def test_the_unknown_completion_sentence_names_the_REASON_it_was_withdrawn(
                           records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
                           segmented=corrupt is None, salvage=True,
                           corrupt=corrupt, torn=torn)
-        monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
+        # B023: bind the loop's journal, or ruff reds the required lint leg — the
+        # repair belongs here, not in an ignore.
+        monkeypatch.setattr(record_runner, "read_journal",
+                            lambda *a, _j=journal, **k: _j)
         _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
         rc = main(["status", "--org-id", "o", "--graph-id", "g",
                    "--journal", str(FIXTURE), "--salvage"])
@@ -1286,9 +1289,17 @@ def test_the_unknown_completion_sentence_names_the_REASON_it_was_withdrawn(
         # PARTIAL report names the class it could not measure, and the completeness
         # line must not then call the whole read "no counters".
         if (corrupt is None) != (torn is None):
-            assert "count was NOT REPORTED" in out, (
+            # ⛔ WHICH class, not merely "some class" (review P3, #13275): naming the
+            # one that WAS reported passed this assertion while the report said the
+            # opposite of the truth, so both halves are asserted.
+            missing = "torn tail" if torn is None else "mid-file"
+            reported = "mid-file" if torn is None else "torn tail"
+            assert f"the {missing} count was NOT REPORTED" in out, (
                 f"counters={counters}: the damage line did not name the unmeasured "
                 f"class: {out}")
+            assert f"the {reported} count was NOT REPORTED" not in out, (
+                f"counters={counters}: the damage line called a MEASURED class "
+                f"unreported: {out}")
 
 
 def test_the_counters_REACH_plan_and_apply_from_a_real_graph_directory(
