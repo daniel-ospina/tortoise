@@ -959,6 +959,167 @@ def test_a_publishing_run_writes_its_own_baseline(monkeypatch, tmp_path):
     ), "a publishing run does not default its verdicts target to the baseline"
 
 
+class _StubTarget:
+    """The smallest target that reaches the publish guard without a database (#13303 c11)."""
+
+    kind = "local"
+    namespace = "stub"
+    uri = "docker://127.0.0.1:6379/stub"
+
+    def __init__(self):
+        self.capabilities: set = set()
+
+    def node_count(self):
+        return 0
+
+    def provenance(self):
+        return {"product": {"commit": "stub"}}
+
+    def drop(self):
+        return "dropped"
+
+
+class _StubIngestor:
+    def __init__(self, target, ops):
+        self.refs: dict = {}
+        self.failed_refs: set = set()
+
+    def run(self):
+        return []
+
+
+def _parse_run(monkeypatch, tmp_path, out, extra=()):
+    """(bundle, argv) for a hermetic `cmd_run` invocation."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    for f in (ROOT / "docs" / "evidence" / "13038-capstone").iterdir():
+        if f.is_file():
+            (bundle / f.name).write_bytes(f.read_bytes())
+    monkeypatch.setattr(cap, "DEFAULT_OUT", bundle, raising=True)
+    monkeypatch.setattr(cap, "build_target", lambda *a, **k: _StubTarget(), raising=True)
+    monkeypatch.setattr(cap, "Ingestor", _StubIngestor, raising=True)
+
+    # Every recipe ANSWERS (status "answered") without touching a store, and no recipe
+    # declares a ref or a capability — so the rows take the judge's verdicts and the tally is
+    # a completed run (3 right / 3 wrong), which is what the publish guard requires.
+    def _stub_recipe(target, refs, q):
+        return cap.Answer(q["id"])
+
+    narrative = json.loads(cap.DEFAULT_NARRATIVE.read_text())
+    names = {q.get("recipe") for q in narrative["questions"]} | set(cap.RECIPES)
+    monkeypatch.setattr(cap, "RECIPES", {n: _stub_recipe for n in names if n}, raising=True)
+    monkeypatch.setattr(cap, "RECIPE_NEEDS", {}, raising=True)
+    monkeypatch.setattr(cap, "RECIPE_REFS", {}, raising=True)
+    dest = bundle if out == "bundle" else tmp_path / "scratch"
+    return bundle, [
+        "run",
+        "--target",
+        "local",
+        "--narrative",
+        str(cap.DEFAULT_NARRATIVE),
+        "--out",
+        str(dest),
+        "--judge",
+        "file",
+        "--verdicts",
+        str(bundle / "verdicts-baseline.json"),
+        *extra,
+    ]
+
+
+def _snapshot(bundle):
+    return {f.name: f.read_bytes() for f in bundle.iterdir() if f.is_file()}
+
+
+def test_a_publishing_run_cannot_send_its_verdicts_elsewhere(monkeypatch, tmp_path):
+    """Publishing the board and putting the verdicts elsewhere leaves a MIXED bundle (#13303 c11, #1)."""
+    bundle, argv = _parse_run(
+        monkeypatch, tmp_path, "bundle", ["--verdicts-out", str(tmp_path / "v.json")]
+    )
+    before = _snapshot(bundle)
+    assert cap.main(argv) == 1
+    assert _snapshot(bundle) == before
+
+
+def test_a_descendant_path_cannot_write_inside_the_bundle(monkeypatch, tmp_path):
+    """`parent == bundle` let `<bundle>/nested/v.json` through; `_write_verdicts` mkdir'd it (#13303 c11, #2).
+
+    Exercised on a NON-PUBLISHING run on purpose: when publishing, the "verdicts must go to
+    the baseline" rule refuses first, so a descendant test there would pass without ever
+    reaching the containment check (mutation-verified: reverting `is_relative_to` to
+    `parent ==` stayed green until this case was added).
+    """
+    bundle, argv = _parse_run(
+        monkeypatch,
+        tmp_path,
+        "scratch",
+        ["--verdicts-out", str(tmp_path / "bundle" / "nested" / "v.json")],
+    )
+    before = _snapshot(bundle)
+    assert cap.main(argv) == 1
+    assert _snapshot(bundle) == before
+    assert not (bundle / "nested").exists()
+
+
+def test_judge_refuses_a_directory_or_a_descendant_target(monkeypatch, tmp_path, capsys):
+    """Both `--verdicts-out` shapes are refused from `judge` too (#13303 c11, #2 and #7)."""
+    bundle, _ = _parse_run(monkeypatch, tmp_path, "scratch")
+    base = {
+        "packet": str(bundle / "judge-packet.json"),
+        "verdicts": str(bundle / "verdicts-baseline.json"),
+        "judge_cmd": None,
+        "out": str(tmp_path / "scratch"),
+    }
+    outside_dir = tmp_path / "verdicts_as_a_dir"
+    outside_dir.mkdir()
+    for target in (str(bundle), str(bundle / "nested" / "v.json"), str(outside_dir)):
+        args = type("A", (), {**base, "verdicts_out": target})()
+        before = _snapshot(bundle)
+        assert cap.cmd_judge(args) == 2, f"{target} was not refused"
+        assert _snapshot(bundle) == before
+    assert not (bundle / "nested").exists()
+    # A directory OUTSIDE the bundle is refused by the same rule. Without it `_write_verdicts`
+    # raises `IsADirectoryError`, which surfaces as a usage traceback — exit 2 for the wrong
+    # reason, which is why the MESSAGE is asserted, not only the code.
+    args = type("A", (), {**base, "verdicts_out": str(outside_dir)})()
+    assert cap.cmd_judge(args) == 2
+    assert "that is a directory" in capsys.readouterr().err
+
+
+def test_publishing_refuses_a_board_that_is_not_judged(monkeypatch, tmp_path):
+    """The publish guard itself, exercised rather than grepped (#13303 c11, #6)."""
+    monkeypatch.setattr(cap, "DEFAULT_OUT", tmp_path / "bundle", raising=True)
+    bundle, argv = _parse_run(monkeypatch, tmp_path, "bundle", ["--judge", "none"])
+    before = _snapshot(bundle)
+    assert cap.main(argv) == 1
+    assert _snapshot(bundle) == before, "an unjudged board replaced the committed baseline"
+
+
+def test_a_publishing_run_writes_the_baseline_of_its_own_run(monkeypatch, tmp_path):
+    """No `--verdicts-out` while publishing must still refresh the baseline (#13303 c11, #5)."""
+    bundle, argv = _parse_run(monkeypatch, tmp_path, "bundle")
+    before = _snapshot(bundle)
+    assert cap.main(argv) == 0
+    after = _snapshot(bundle)
+    assert after["run-local.json"] != before["run-local.json"]
+    assert after["verdicts-baseline.json"] != before["verdicts-baseline.json"], (
+        "the baseline still describes the previous run"
+    )
+
+
+def test_a_non_publishing_run_cannot_write_the_baseline(monkeypatch, tmp_path):
+    """The `not publishing` half of the gate, exercised (#13303 c11, #4)."""
+    bundle, argv = _parse_run(
+        monkeypatch,
+        tmp_path,
+        "scratch",
+        ["--verdicts-out", str(tmp_path / "bundle" / "verdicts-baseline.json")],
+    )
+    before = _snapshot(bundle)
+    assert cap.main(argv) == 1
+    assert _snapshot(bundle) == before
+
+
 def test_judge_records_that_the_scenario_could_not_be_verified(tmp_path):
     """The `scenario_check` note must exist in the artifact, not only in prose (#13303 c8)."""
     real = json.loads(

@@ -2230,24 +2230,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     # code, this comment and the README now state one rule.
     publishing = out_dir.resolve() == DEFAULT_OUT.resolve()
 
-    # WHERE the verdicts go is decided HERE, before any bundle write (#13303 cycle 10):
-    # the cycle-9 rule keyed on the DIRECTORY, so `--verdicts-out <bundle>/run-local.json`
-    # overwrote the machine-readable board with a verdicts map and still exited 0; a
-    # publishing run that omitted the flag left `verdicts-baseline.json` describing a
-    # DIFFERENT run; and a directory target raised `IsADirectoryError` only AFTER three
-    # committed files had been replaced. One decision, keyed on the FILE, taken first.
-    verdicts_target: Path | None = None
-    if publishing and judged:
-        if args.verdicts_out:
-            verdicts_target = Path(args.verdicts_out).resolve()
-        else:
-            # The bundle comes from ONE run, so a complete run that publishes its board
-            # here also publishes the verdicts that produced it — otherwise the three
-            # carriers would disagree with exit 0 and nothing would say so.
-            verdicts_target = DEFAULT_OUT / "verdicts-baseline.json"
-    elif args.verdicts_out and judged:
-        verdicts_target = Path(args.verdicts_out).resolve()
-
     def refuse(message: str, code: int = 1) -> int:
         """Every post-ingestion refusal goes through here, so `--drop-graph` cannot be skipped.
 
@@ -2261,13 +2243,42 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(message, file=sys.stderr)
         return code
 
+    # WHERE the verdicts go is decided HERE, before any bundle write (#13303 cycle 10):
+    # the cycle-9 rule keyed on the DIRECTORY, so `--verdicts-out <bundle>/run-local.json`
+    # overwrote the machine-readable board with a verdicts map and still exited 0; a
+    # publishing run that omitted the flag left `verdicts-baseline.json` describing a
+    # DIFFERENT run; and a directory target raised `IsADirectoryError` only AFTER three
+    # committed files had been replaced. One decision, keyed on the FILE, taken first.
+    verdicts_target: Path | None = None
+    bundle_baseline = DEFAULT_OUT.resolve() / "verdicts-baseline.json"
+    if publishing and judged:
+        if args.verdicts_out:
+            verdicts_target = Path(args.verdicts_out).resolve()
+            if verdicts_target != bundle_baseline:
+                return refuse(
+                    f"capstone: refusing --verdicts-out {verdicts_target} while publishing the "
+                    f"board into {DEFAULT_OUT} — a publishing run writes its verdicts to "
+                    f"{bundle_baseline} so that all three carriers describe ONE run; drop the "
+                    "flag (the baseline is the default here) or send the board elsewhere with "
+                    "--out"
+                )
+        else:
+            # The bundle comes from ONE run, so a complete run that publishes its board
+            # here also publishes the verdicts that produced it — otherwise the three
+            # carriers would disagree with exit 0 and nothing would say so.
+            verdicts_target = DEFAULT_OUT / "verdicts-baseline.json"
+    elif args.verdicts_out and judged:
+        verdicts_target = Path(args.verdicts_out).resolve()
+
     if verdicts_target is not None:
         if verdicts_target.is_dir():
             return refuse(
                 f"capstone: refusing --verdicts-out {verdicts_target} — that is a directory, "
                 "not a verdicts file"
             )
-        if verdicts_target.parent.resolve() == DEFAULT_OUT.resolve():
+        # CONTAINMENT, not one level of it (#13303 cycle 11, #2): `parent == DEFAULT_OUT`
+        # let `<bundle>/nested/v.json` through, and `_write_verdicts` mkdir'd it.
+        if verdicts_target.is_relative_to(DEFAULT_OUT.resolve()):
             # Only the baseline may live in the bundle, and only from the run whose board
             # is published beside it. Any other name would overwrite `run-local.json`,
             # `scoreboard-local.md` or `judge-packet.json`.
@@ -2434,7 +2445,7 @@ def cmd_judge(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        if vo.parent == DEFAULT_OUT.resolve():
+        if vo.is_relative_to(DEFAULT_OUT.resolve()):
             print(
                 f"capstone: refusing --verdicts-out into the evidence bundle {DEFAULT_OUT} "
                 "— `judge` does not produce the baseline",
