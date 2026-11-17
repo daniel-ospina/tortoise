@@ -170,6 +170,12 @@ MIGRATIONS = [
     # entry is: this list is `record_projection.RECORD_MIGRATIONS` in EQUALITY.
     "20261116000002_record_cursor_meter_grant.sql",
     "20261109000001_record_embedding_vector.sql",
+    # #13220 — `object`/`subject` gain `embedding` + a GENERATED `embedding_vec`
+    # + an HNSW index each (owner ruling 2026-11-17). This list is
+    # `record_projection.RECORD_MIGRATIONS` in EQUALITY, so the file belongs
+    # here in the SAME position; omitting it would stand up a pre-vector
+    # schema the shipped read names columns from.
+    "20261117000001_record_object_subject_embedding.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and

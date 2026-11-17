@@ -1642,6 +1642,14 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     # `api.py:318`, which is `vec = encode_for_row(` in a DIFFERENT function).
     "tortoise.api::_point": (
         ("tortoise/api.py", "_point", 'p["embedding"] = vec'),),
+    # `#13220` — the override's own evidence: the derivation binds the `embedding`
+    # column key on the value the RECORD stores, and that key is the whole claim
+    # (there is no Cypher in this module to read, which is why the label needed an
+    # override at all). Cited by SYMBOL, never by line: `record_writer.py` is a
+    # large module and grows.
+    "tortoise.record_writer::derived_embedding_columns": (
+        ("tortoise/record_writer.py", "derived_embedding_columns",
+         'columns={"embedding": list(vec)}'),),
 }
 
 
@@ -1743,6 +1751,26 @@ WRITER_LABEL_OVERRIDES: dict[str, str] = {
     # a bare-name lookup ASSIGNED `Point` to any same-named writer with no
     # Cypher evidence while the comment above claimed the opposite.
     "tortoise.api::_point": "Point",
+    # `#13220` — `tortoise.record_writer::derived_embedding_columns` derives the
+    # vector the RECORD stores for `object` / `subject` / `event` / a document's
+    # `:Source` row. It reaches the gated seam (`embeddings.encode_for_row`) and
+    # binds an `embedding` key, so the derivation classes it a WRITE path whose
+    # label no Cypher names — correctly, because there is no Cypher at all: its
+    # vector lands in a Postgres COLUMN, and the graph copies are written by the
+    # fold's own writers.
+    #
+    # ⛔ THE OVERRIDE NAMES ONE LABEL BECAUSE THE FIELD IS SINGLE-VALUED, and the
+    # choice is stated rather than implied: the other three are separately visible
+    # in this very population through the writers that store them on a node —
+    # `projection.entities::_upsert_object` (`Object`), `::_upsert_subject`
+    # (`Subject`), `::_event_plain_merge` (`Event`) and the document path via
+    # `set_embedding_clause("s")` (`Source`) — so an unserved label cannot hide
+    # behind this entry. What the override must NOT do is name a label the function
+    # never touches. (An earlier cut of this sentence added "which is why it is the
+    # first rule in the table" — false: `tortoise.api::_point` sits directly above
+    # it, so this is the SECOND entry. The ordering carries no meaning at all; the
+    # claim was merely wrong and is struck rather than reworded.)
+    "tortoise.record_writer::derived_embedding_columns": "Object",
 }
 
 

@@ -197,74 +197,12 @@ def test_state_ranker_refuses_a_label_it_has_no_signal_set_for():
             [{"id": "e", "entity_type": "event", "scores": {"rrf": 0.9}}])
 
 
-def test_state_ranker_routes_every_entity_label_to_the_entity_fetch(monkeypatch):
-    """R4 for ``StateRanker`` — the ROUTING per label, not only the refusal.
-
-    Round-3 review FINDING 2 (P2), measured: the refusal test above pins the
-    labels with NO signal set, and ``test_7948``/``test_7927`` pin only the
-    ``object`` delegation, so nothing pinned that ``subject`` / ``source`` /
-    ``document`` reach the ENTITY read — although R4 claims exactly that and it
-    is audit point 4 of #12184. The mutant that restores the defect one level
-    over — validation kept, then
-
-        if et != "object": family = "point"
-
-    — left every assertion in this file GREEN (12 passed, 0 failed), because
-    the only entity label any test routed through ``StateRanker`` was
-    ``object``.
-
-    Non-blocking at the time it was found (``recall_state``'s pool is
-    ``points + objects``, so no product path reaches this class with the other
-    three labels) and that is precisely why it is pinned: the day that pool
-    widens, the silent point-read substitution comes back with every guard in
-    this file still green, which is the shape #12184 was filed about.
-
-    Uses ``_NeverQueried`` plus monkeypatched fetches: the graph is never
-    touched, so the assertion is about the DISPATCH and not about what a query
-    happened to answer.
-    """
-    calls: list[tuple[str, str]] = []
-    r = StateRanker(projection=_NeverQueried())
-
-    def _point(ids):
-        calls.append(("point", ""))
-        return {}
-
-    def _entity(ids, entity_type):
-        calls.append(("entity", entity_type))
-        return {}
-
-    monkeypatch.setattr(r, "_fetch_point_signals", _point)
-    monkeypatch.setattr(r, "_fetch_entity_signals", _entity)
-
-    for et in ENTITY_SIGNAL_SPECS:
-        calls.clear()
-        r.rerank([{"id": f"x-{et}", "entity_type": et,
-                   "scores": {"rrf": 0.5}}])
-        assert calls == [("entity", et)], (
-            f"StateRanker dispatched {et!r} to {calls}, not "
-            f"[('entity', {et!r})] — the entity label reached another row "
-            f"type's signal read")
-
-    # The other half: a point row must NOT be sent to the entity read (the
-    # dispatch is a resolution, not an unconditional widening).
-    calls.clear()
-    r.rerank([{"id": "p1", "entity_type": "point", "scores": {"rrf": 0.5}}])
-    assert calls == [("point", "")], (
-        f"StateRanker dispatched a point row to {calls}")
-
-    # …and a MIXED pool routes each row to its OWN family (the mixed-list
-    # contract in the class docstring), which a per-call `family` hoisted out
-    # of the loop would break while every single-label row above stayed green.
-    calls.clear()
-    r.rerank([
-        {"id": "s1", "entity_type": "source", "scores": {"rrf": 0.9}},
-        {"id": "p1", "entity_type": "point", "scores": {"rrf": 0.8}},
-    ])
-    assert sorted(calls) == [("entity", "source"), ("point", "")], (
-        f"a mixed pool dispatched to {calls}")
-
-
+# ⚠️ The ROUTING half of R4 (round-4 review FINDING 2 — which labels reach
+# ``StateRanker``'s ENTITY read, not only which labels it refuses) is pinned in
+# ``tests/test_12184_state_ranker_routing.py``, which needs no Docker: ONE owner
+# for that predicate, and the file that runs everywhere. It is not restated here.
+# This module keeps the live-graph assertions and the refusal, which need the
+# lane's own FalkorDB.
 # ── 3. What an entity row is actually measured by (live graph) ────────────
 
 def _seed_object_with_claims(sdk, *, beliefs=(0.9, None, None)) -> tuple[str, str]:

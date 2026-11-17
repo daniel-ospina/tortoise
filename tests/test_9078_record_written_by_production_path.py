@@ -391,6 +391,23 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # the org was charged 0 bytes on the required `test-record-postgres` leg.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261116000002_record_cursor_meter_grant.sql", None),
+    # #13220 — `object`/`subject` get `embedding` + a GENERATED `embedding_vec`
+    # + an HNSW index each. RE-APPLY SAFE for the same reason the #11642 entry
+    # above is, and re-applied for the same reason too: the readers PARSE THE
+    # FILES (`record_projection.table_columns()`/`column_types()` now report both
+    # columns, and `record_writer.derived_embedding_columns` binds
+    # `object.embedding`), so a container that predates this file would be told
+    # it has two columns it does not have — the `INSERT`/`UPDATE` would then fail
+    # with `42703 UndefinedColumn`, i.e. the record would refuse the very writes
+    # that carry a fingerprint, and `/health` would count them as
+    # `record_write_failures` while every other leg stayed green.
+    # Every statement is idempotent by construction: `ADD COLUMN IF NOT
+    # EXISTS` (a generated column is not rewritten when it already exists) and
+    # `CREATE INDEX IF NOT EXISTS` — the index creation being the one statement a
+    # re-apply does not skip for free, which is a no-op only because the index
+    # already exists, i.e. exactly the already-migrated container.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261117000001_record_object_subject_embedding.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
