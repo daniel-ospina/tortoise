@@ -51861,17 +51861,17 @@ class TortoiseSDK:
         # (`_assert_lifecycle_guard` refuses on the stored terminal marker). Two
         # different mechanisms, neither of them this arm's.
         #
-        # ⚠️ RESIDUAL, on the STORED side, and NARROWED BY THIS PR (#12896 review,
-        # P2) rather than left as it was: this fix guards the TARGET's type and
-        # hashability. A row whose stored `status` is a list is reachable at all
-        # only because a LIVE row accepts `status=['live']` (#10371's vocabulary
-        # hole). Before the P2 above, that stored shape made the dead-set build
-        # raise `TypeError: unhashable type: 'list'` on the NEXT lifecycle write;
-        # the dead set now takes `str` stored values only, so NO traceback escapes
-        # here (measured: stored `['live']`, then `'live'`/`['live']`/`123`/`None`
-        # all ACCEPTED, row intact). What is left is the VOCABULARY hole, not a
-        # traceback — #12869's wording predates this narrowing and should be
-        # re-measured there before it is restated.
+        # ⛔ THE STORED SIDE IS CLOSED TOO (#12869 / #12896 review, P2): this
+        # loop used to read a row whose stored `status` is a list as CURRENT —
+        # the dead set took `str` stored values only, so the unreadable shape
+        # fell through to a silent ACCEPT, the fail-open direction. `_np_foreign`
+        # above now REFUSES that row before this dead set is built, so no
+        # `TypeError` escapes AND no write lands on a row the guard cannot read
+        # (measured at this head: stored `['live']`, then `'live'`/`['live']`/
+        # `123`/`None` all REFUSED, row intact — the "all ACCEPTED" reading an
+        # earlier cut called measured is the branch this PR deletes). The shape
+        # is reachable only from a pre-fix SDK / raw Cypher / journal replay;
+        # what is left is the VOCABULARY hole, not this guard: re-measured.
         #
         # ⛔ THE REMEDY IS `supersede_knowledge` (#12914 review P3): #12592 gave
         # the Object/Subject families their OWN supersede path, so this paragraph
