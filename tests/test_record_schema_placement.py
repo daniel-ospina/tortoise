@@ -1961,7 +1961,7 @@ _PROPS_BAN_PIN_HEADER_RE = re.compile(
 #: so the blind spot cannot be entered silently.
 _PROPS_BAN_STMT_RE = re.compile(
     r"\s*(?:CREATE|ALTER)\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+(?:NOT\s+)?EXISTS\s+)?"
-    r"(?:[\w\"]+\s*\.\s*)?[\"]?(\w+)[\"]?",
+    r"(?:([\w\"]+)\s*\.\s*)?[\"]?(\w+)[\"]?",
     re.I,
 )
 
@@ -2012,7 +2012,7 @@ class PropsBanEvent:
     is_redeclaration: bool
     names: frozenset[str]
     snippet: str
-    declared_on: str | None = None   # the statement's table, when it is a table DDL
+    declared_on: tuple[str, str] | None = None  # (schema, table) of its statement
 
 
 def props_ban_events(text: str) -> list[PropsBanEvent]:
@@ -2036,30 +2036,23 @@ def props_ban_events(text: str) -> list[PropsBanEvent]:
     # superseded body, which is F8 through a fourth vehicle). `_scan_sql` says
     # which characters are CODE, so a terminator inside a literal is not one and
     # an event inside a literal is not an event.
-    code_spans = [
-        (start, end) for start, end, kind in record_projection._scan_sql(clean)
-        if kind == "code"
-    ]
+    code_spans_ = code_spans(clean)
 
     def is_code(position: int) -> bool:
-        return any(start <= position < end for start, end in code_spans)
-
-    def statement_start(position: int) -> int:
-        """Index just past the last `;` that is CODE before `position`."""
-        best = 0
-        for start, end in code_spans:
-            if start >= position:
-                break
-            found = clean.rfind(";", start, min(end, position))
-            if found != -1:
-                best = max(best, found + 1)
-        return best
+        return any(start <= position < end for start, end in code_spans_)
 
     def declared_on(position: int) -> str | None:
         """The table this event's own STATEMENT targets, or None if it is not one."""
-        prefix = clean[statement_start(position):position]
+        prefix = statement_opening(clean, code_spans_, position)
         target = _PROPS_BAN_STMT_RE.match(prefix)
-        return target.group(1) if target is not None else None
+        if target is None:
+            return None
+        # ⛔ THE SCHEMA IS PART OF THE TARGET: `ALTER TABLE archive.subject …` is
+        # not `public.subject`, and a constraint there constrains nothing here
+        # (round 8 P3, measured — same class as round 6's H, one level out). An
+        # unqualified name means `public`, which is where every record table lives.
+        schema = (target.group(1) or "public").strip('"').lower()
+        return (schema, target.group(2).strip('"').lower())
 
     headers = [
         m for m in _PROPS_BAN_PIN_HEADER_RE.finditer(clean)
@@ -2088,7 +2081,16 @@ def props_ban_events(text: str) -> list[PropsBanEvent]:
         later += [m.start() for m, _kind in others if m.start() > match.start()]
         stop = min(later) if later else len(clean)
         span = clean[match.end():stop]
-        statement = span.split(";", 1)[0]
+        # …and the cut is the first `;` that is CODE, so a `;` inside a literal
+        # cannot truncate the CHECK's own body (`AND note <> 'x;y'` measured).
+        statement = span
+        for start, end in code_spans_:
+            if end <= match.end():
+                continue
+            found = clean.find(";", max(start, match.end()), min(end, stop))
+            if found != -1:
+                statement = clean[match.end():found]
+                break
         names: frozenset[str] = frozenset()
         anchor = _PROPS_BAN_EXPR_RE.match(statement)
         if anchor is not None:
@@ -2142,7 +2144,7 @@ def props_ban_in_force(text: str, table: str) -> tuple[str, frozenset[str]]:
     if not events:
         return ("none", frozenset())
     last = events[-1]
-    if last.declared_on is not None and last.declared_on != table:
+    if last.declared_on is not None and last.declared_on != ("public", table):
         # ⛔ A NAME IS NOT A TARGET: constraint names are per-table, so
         # `ALTER TABLE public.other ADD CONSTRAINT chk_subject_props_no_derived`
         # is legal and constrains NOTHING on `subject` while answering for it
@@ -2156,6 +2158,31 @@ def all_migration_text() -> str:
     return "\n".join(
         p.read_text(encoding="utf-8") for p in sorted(_MIGRATIONS_DIR.glob("*.sql"))
     )
+
+
+def code_spans(text: str) -> list[tuple[int, int]]:
+    """The `(start, end)` spans of `text` that are CODE (not literal, not comment).
+
+    From `record_projection._scan_sql` — the ONE scanner — because a `;` inside a
+    literal is DATA, not a statement terminator (round 7 P1, measured).
+    """
+    return [
+        (start, end)
+        for start, end, kind in record_projection._scan_sql(text)
+        if kind == "code"
+    ]
+
+
+def statement_opening(text: str, spans: list[tuple[int, int]], position: int) -> str:
+    """The text from the last CODE `;` before `position` up to it."""
+    start = 0
+    for span_start, span_end in spans:
+        if span_start >= position:
+            break
+        found = text.rfind(";", span_start, min(span_end, position))
+        if found != -1:
+            start = max(start, found + 1)
+    return text[start:position]
 
 
 @pytest.mark.parametrize("table,col", [("object", "embedding"), ("subject", "embedding")])
@@ -2366,15 +2393,18 @@ def test_no_migration_executes_dynamic_DDL_for_a_props_ban():
 
     1. no dynamic statement may mention a props-ban constraint at all — the
        spelling-independent rule, since the name is what makes it ours;
-    2. every occurrence of `props_no_derived` in CODE text must be accounted for
-       by a parsed event, so a declaration the statement filter drops (for any
-       reason, not just this one) cannot disappear silently.
+    2. every DDL-SHAPED MATCH (`…CONSTRAINT chk_<t>_props_no_derived`, on ADD,
+       DROP or RENAME) in the comment-stripped text must be a parsed event, so a
+       declaration the statement filter drops — for ANY reason, including a
+       statement it never sees — cannot disappear silently. Counting it over
+       LITERALS TOO is what catches the `DO $$ … $$` spelling; excluding
+       `COMMENT ON` statements is what keeps a legal `COMMENT ON CONSTRAINT`
+       (and a history note) from reading as a dropped event.
 
     ⚠️ STATED RESIDUAL: a name ASSEMBLED from parameters (`format('… ADD
     CONSTRAINT %I …', 'chk_' || t || '_props_no_derived')`) appears literally
     nowhere, and no text control can see it. Measured: no migration does this.
     """
-    text = all_migration_text()
     for path in sorted((REPO_ROOT / "supabase" / "migrations").glob("*.sql")):
         clean = record_projection._strip_sql_comments(path.read_text(encoding="utf-8"))
         for match in re.finditer(r"\bEXECUTE\b", clean, re.I):
@@ -2385,19 +2415,36 @@ def test_no_migration_executes_dynamic_DDL_for_a_props_ban():
                 f"{path.name} executes a dynamic statement that names a props-ban "
                 f"constraint ({statement[:120]!r}) — the props-ban parse cannot "
                 "see it; teach the parse or record the gap")
-    # Control 2: every code-level occurrence of the NAME has a parsed event.
-    stripped = record_projection._strip_sql_comments(text)
-    code = "".join(
-        stripped[start:end]
-        for start, end, kind in record_projection._scan_sql(stripped)
-        if kind == "code"
-    )
-    named = len(re.findall(r"props_no_derived", code))
-    parsed = len(props_ban_events(text))
-    assert named == parsed, (
-        f"{named} code-level mention(s) of `props_no_derived` but {parsed} parsed "
-        f"event(s) — a declaration was dropped by the statement filter "
-        f"({sorted(f'{e.table}:{e.kind}' for e in props_ban_events(text))})")
+    # Control 2: EVERY DDL-SHAPED MATCH must be a parsed event. ⛔ COUNTED OVER
+    # THE COMMENT-STRIPPED TEXT WITH LITERALS KEPT — not over code spans. Code
+    # spans would make DDL inside a `DO $$ … $$` body (a LITERAL, but EXECUTED)
+    # invisible to the count, which is measured: the corpus already ships plain
+    # `ALTER TABLE` inside DO bodies (`20261022000001_record_session_capture_
+    # redactions_integer.sql:78`, `20261102000002_record_point_search_keys_text
+    # .sql:2259`, `0005_waitlist_subscribers.sql:833`), and a props-ban
+    # re-declaration placed there read the STALE event with both controls silent —
+    # a green false pass in the guard that exists to prevent exactly that.
+    #
+    # A `COMMENT ON …` statement is excluded: it NAMES the constraint without
+    # declaring it, so `COMMENT ON CONSTRAINT chk_… IS '…'` (and a history note in
+    # a `COMMENT ON TABLE … $c$ … $c$`) must not read as a dropped event.
+    stripped = record_projection._strip_sql_comments(all_migration_text())
+    spans = code_spans(stripped)
+    hits = 0
+    for match in list(_PROPS_BAN_PIN_HEADER_RE.finditer(stripped)) + [
+        m for m, _kind in [
+            (m, "drop") for m in _PROPS_BAN_DROP_RE.finditer(stripped)
+        ] + [(m, "rename") for m in _PROPS_BAN_RENAME_RE.finditer(stripped)]
+    ]:
+        opening = statement_opening(stripped, spans, match.start())
+        if re.match(r"\s*COMMENT\s+ON\b", opening, re.I):
+            continue
+        hits += 1
+    parsed = len(props_ban_events(all_migration_text()))
+    assert hits == parsed, (
+        f"{hits} DDL-shaped match(es) of `props_no_derived` but {parsed} parsed "
+        f"event(s) — a declaration, DROP or RENAME was dropped by the statement "
+        f"filter (parsed: {sorted(f'{e.table}:{e.kind}' for e in props_ban_events(all_migration_text()))})")
 
 
 def test_the_snippet_cap_clears_every_declaration_gap():
@@ -2564,6 +2611,44 @@ def test_legal_sql_spellings_cannot_false_pass_the_props_ban():
 
 
 
+
+    # ROUND 8 vehicle — a declaration inside a LITERAL of a real ALTER TABLE
+    # statement is DATA (a default value), not a second declaration: only the
+    # statement's own constraint counts.
+    literal_declaration = (
+        "ALTER TABLE public.subject ADD COLUMN note text DEFAULT $c$ADD CONSTRAINT\n"
+        "  chk_subject_props_no_derived CHECK (NOT (props ?| ARRAY['embedding','status']))$c$;\n"
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['status']::text[]));\n")
+    # ⛔ ASSERTED ON THE EVENT LIST, NOT ON THE WINNER: a phantom that comes
+    # BEFORE the real declaration is masked by it, so an "in force" assertion
+    # passes while the parse is wrong (the same ordering trap as vehicle B).
+    events_here = [e for e in props_ban_events(literal_declaration) if e.table == "subject"]
+    assert len(events_here) == 1, (
+        "a CHECK declaration inside a `DEFAULT $c$…$c$` literal was counted as a "
+        f"declaration of its own: {[(e.kind, sorted(e.names)) for e in events_here]}")
+
+    # …and a `DROP` inside a dollar-quoted note is a NOTE, not a drop.
+    note_drop = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n"
+        "COMMENT ON TABLE public.subject IS $c$ a DROP CONSTRAINT\n"
+        "  chk_subject_props_no_derived was tried and reverted $c$;\n")
+    assert props_ban_in_force(note_drop, "subject")[0] == "declare", (
+        "a DROP mentioned in a comment note registered as a real drop")
+
+    # ROUND 8 vehicle — ANOTHER SCHEMA is not `public`: a same-named constraint
+    # on `archive.subject` says nothing about the record table.
+    other_schema = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n"
+        "ALTER TABLE public.subject DROP CONSTRAINT chk_subject_props_no_derived;\n"
+        "ALTER TABLE archive.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n")
+    kind, names = props_ban_in_force(other_schema, "subject")
+    assert kind == "mismatch", (
+        "a constraint on ANOTHER SCHEMA answered for `public.subject`: "
+        f"{(kind, sorted(names))}")
 
     # ROUND 7 vehicle — a `;` inside a LITERAL is not a statement terminator, so a
     # `DEFAULT 'a;b'` earlier in the same CREATE TABLE must not hide the constraint.
