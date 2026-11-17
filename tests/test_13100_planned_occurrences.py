@@ -844,6 +844,44 @@ class TestThePlanPipeline:
         assert entry.shape == "duplicate-id", entry
         assert entry.name == "dup-plan", entry
 
+    def test_the_R8_guard_ignores_ANOTHER_refusals_entry(self, sdk, monkeypatch):
+        """The guard must identify its OWN entry, not merely notice that the
+        process-global record grew.
+
+        ⛔ The R8 record is shared by every thread (`_non_folded_lock` exists for
+        that reason), so a COUNT-based guard skips this coordinate's record
+        whenever another refusal lands in the window — losing exactly the
+        evidence the arm exists to keep. This test makes that window
+        deterministic: the resolver files an unrelated entry and then raises, so
+        a count guard records NOTHING for our coordinate and a coordinate guard
+        records it once (#13100 review round 8).
+        """
+        from tortoise import entity_identity
+        from tortoise.entity_identity import (
+            AmbiguousEntityName,
+            non_folded_entries,
+            record_non_folded,
+        )
+
+        real = entity_identity.resolve_entity_id_same_entity
+
+        def noisy_resolver(graph, label, value, **kwargs):
+            if value == "Concurrent plan":
+                record_non_folded("Object", "someone-else", ["other-id"])
+                raise AmbiguousEntityName("Object", value, ["c1", "c2"])
+            return real(graph, label, value, **kwargs)
+
+        monkeypatch.setattr(entity_identity, "resolve_entity_id_same_entity",
+                            noisy_resolver)
+        before = len(non_folded_entries())
+        with pytest.raises(AmbiguousEntityName):
+            PO.record_occurrence(sdk, "Concurrent plan")
+        mine = [e for e in non_folded_entries()[before:]
+                if e.name == "Concurrent plan"]
+        assert len(mine) == 1, (
+            "the guard treated another refusal's entry as its own and dropped "
+            "this coordinate's record")
+
     def test_a_name_held_by_a_SETTLED_and_a_LIVE_plan_resolves_the_LIVE_one(
             self, sdk):
         """Widening the name arm must not over-block the shape this module mints.

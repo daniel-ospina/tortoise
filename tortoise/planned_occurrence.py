@@ -314,10 +314,11 @@ def create_plan(sdk, name: str, *, title: str | None = None,
 
     Two further REFUSALS apply to an existing holder before any of that, and
     neither writes: a holder whose kind is not a plan (this call would retag it),
-    and a plan whose position does not resolve (`_unresolvable_message`). A third
-    can arrive from the re-mention RESOLVE itself, before this function has a
-    holder at all: a name with two live carriers (``AmbiguousEntityName``, a
-    ``ValueError``), which the resolver records as an R8 refusal.
+    and a plan whose position does not resolve (`_unresolvable_message`). And the
+    re-mention RESOLVE can refuse before a holder exists at all — both are
+    ``ValueError``s and both are recorded as R8 refusals by the resolver: a name
+    with two live carriers (``AmbiguousEntityName``), or exactly one live holder
+    that carries no id (``UnaddressableEntityName``).
     """
     from . import pipeline
 
@@ -486,11 +487,14 @@ def create_plan(sdk, name: str, *, title: str | None = None,
             # The ONE unapplied move that is not a lie: the plan is already on
             # `scheduled` and open, so the contract — "a scheduled,
             # not-yet-happened plan exists under this name" — holds.
-            # ⛔ The reachable shape is the BARE-SPELLING repair (the positioned
-            # re-mention above short-circuits, so it never gets here): the door
-            # repaired the kind and the stage move is a no-op because the record
-            # was already there. A stale-`at` re-mention also lands here, but
-            # only after that same fall-through.
+            # ⛔ WHAT MAKES THE MOVE UNAPPLIED IS THE STALE-TRANSITION GUARD, not
+            # a same-target no-op: `pipeline.advance_stage` has NO "already at
+            # this stage" guard (a move onto the current stage APPLIES and
+            # rewrites `pipelineStageSince`), so this arm is reached only when
+            # the observation's `at` precedes the record's `since`. The
+            # reachable population is therefore "a stale `at`", plus — since the
+            # positioned, bindable re-mention short-circuits above — the
+            # BARE-SPELLING repair carrying one (#13100 review round 8).
             return node
         if pos["unresolvable"]:
             # The stored position cannot be validated, so NO stage move could be.
