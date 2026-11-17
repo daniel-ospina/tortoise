@@ -1075,7 +1075,10 @@ surfaces:
   # The SECOND pin is `tortoise/mcp_auth.py`: the tag-arm fixture binds `_current_org_id` /
   # `_current_org_limits` / `_transport_mode` from it, and it is an EXACT `api`
   # SOURCE_PATTERNS match too — MEASURED: `--changed-files tortoise/mcp_auth.py` -> surfaces
-  # `['api']` with this file SELECTED, which it is only because of the row below.
+  # `['api']` with this file SELECTED, which it is only because of THIS `api` row (the one
+  # this PR adds) — NOT the `core` row below: with the `core` row alone that same diff
+  # resolves `['api']` with this file ABSENT. (`core` is what selects it on a `live.py` /
+  # `pipeline.py` diff; the two halves are why the registration is dual.)
   # ⛔ `--surface-audit`'s candidate line lists UNCOVERED pins only, so the "`mcp_auth.py`"
   # text appears there while the file is `core`-only and the line vanishes once the row
   # exists because the file is no longer a CANDIDATE — not because the pin disappeared. An
