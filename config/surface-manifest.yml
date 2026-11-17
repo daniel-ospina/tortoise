@@ -102,7 +102,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 3d437429e98d744b2f35ae94fdefd2139b6bc37a
+cut_at_commit: 486f5ca25b637b1a4346af06ce16876ae06a4912
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1209,7 +1209,7 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  served_from: tortoise/mcp_server.py:59f8f7e5957d81d8
+  served_from: tortoise/mcp_server.py:5864fd98a914f746
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
