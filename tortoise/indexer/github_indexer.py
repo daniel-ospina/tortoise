@@ -41,13 +41,21 @@ Lifecycle decision table (THE rule):
      directions, so no fold ever reaches it;
   3. a row whose ``isClosed`` marker is a FALSY NON-BOOLEAN (``0`` / ``0.0`` /
      ``""``) — the doors store it verbatim, and the fold's live-holder probe is
-     type-sensitive, so such a row is not live either and nothing writes back a
-     repair (#13326).
+     type-sensitive, so such a row is not live either, and no fold THIS reader
+     can trigger runs for it: ``None`` gates the transition arm off. Not being
+     trigger-reachable is not being unreachable — a ``github.issue.reopened``
+     fold reached by NAME does rewrite the marker to a real boolean
+     (``projection/entities.py:6157-6164`` → ``pipeline.py:434``); what makes the
+     truthy half self-heal is that this reader ANSWERS ``"closed"`` for it, so
+     the fold is triggered at all (#13326).
+  ⚠️ Stated trade, symmetric: these rows record no transition at all, so neither
   ⚠️ Stated trade, symmetric: these rows record no transition at all, so neither
   ``-closed`` nor ``-reopened``. Bounded and inspectable; an unbounded mint loop is
   neither (#13143, #13288 F1). This is NOT the pre-#13143 bug returning — that was
-  a real close reading as "first ingest"; all three are shapes for which no fold
-  writes anything.
+  a real close reading as "first ingest". For families 1 and 2 no fold ever
+  reaches the row; for family 3 a fold CAN reach it by name, but none is
+  triggered — because this reader records no transition for it to fold. So nothing
+  in this path writes back a repair.
   ⚠️ The WIDER terms — ``status='outdated'`` and the legacy ``outdated=true`` flag —
   are NOT latched: ``_fold_object_stage``'s set has no ``outdated`` member, the
   CLOSE fold cannot reach such a row (no live holder) while the REOPEN fold can
@@ -1560,14 +1568,20 @@ class GitHubIndexer:
         # (`pipeline.py:434`, `"isClosed": target.is_terminal`). What makes the
         # truthy half self-heal is not the fold's reach — it is that this reader
         # ANSWERS `"closed"` for it, so the fold is triggered at all.
-        # The asymmetry that DOES justify `None` is the folds that REFUSE. `None`
-        # cannot loop under ANY fold outcome (it gates the transition arm off,
-        # `if prev_state is not None:`). `"closed"` loops unboundedly wherever the
-        # reopen fold refuses the row while GitHub says open: `len(_held) != 1`
-        # (the name is held by 2+ incarnations), the regression guard,
-        # `unresolvable-current-stage`, `cross-pipeline` — one `-reopened` per poll,
-        # for ever. That is the choice, and it is the one not to reverse.
-        # ⛔ AND IT IS ANSWERED AFTER THE POSITION ARM, deliberately: a falsy marker
+        # The asymmetry that DOES justify `None` is the folds that REFUSE — and the
+        # point holds at THIS arm, where the answer it replaces is `"open"`, not
+        # `"closed"` (`return "open"` below runs for every row carrying a
+        # stage/slot prop). Reading it `"open"` mints a `-closed` on every poll of
+        # a CLOSED issue, because the close fold refuses a row with no live holder
+        # (measured `[1,1,1,1]`, the row left byte-identical). Reading it
+        # `"closed"` would instead mint `-reopened` per poll wherever the REOPEN
+        # fold refuses the row while GitHub says open: `len(_held) != 1` (the name
+        # is held by 2+ incarnations), the regression guard,
+        # `unresolvable-current-stage`, `cross-pipeline`. `None` cannot loop under
+        # ANY fold outcome (it gates the transition arm off, `if prev_state is not
+        # None:`), so it is the only answer that cannot loop — that is the choice,
+        # and it is the one not to reverse.
+        # ⛔ AND IT IS ANSWERED AFTER THE POSITION READ, deliberately: a falsy marker
         # on an ENDED position still reads `"closed"` above, which is the reading
         # the fold reaches and REPAIRS. Answering `None` there would cost that row
         # its entire remaining close/reopen history (no mint ⇒ no fold ⇒ no repair,

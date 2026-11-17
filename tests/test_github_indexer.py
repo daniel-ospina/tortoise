@@ -687,6 +687,57 @@ def test_a_FALSY_isClosed_on_an_ENDED_position_still_records_its_reopen(sdk):
         "the repaired row must be settled — nothing further to record")
 
 
+def test_a_FALSY_isClosed_on_a_TERMINAL_BY_ID_row_still_records_its_reopen(sdk):
+    """#13326 review F3 (P2): the arm order is load-bearing, and the DECLARED selector had no shape.
+
+    `test_a_FALSY_isClosed_on_an_ENDED_position_still_records_its_reopen` plants its
+    marker on a row whose BOTH axis props read terminal (`("done", "terminal")`), so
+    the `pipelineSlot` prop alone already answers ended and an arm placed ABOVE the
+    position read passes every one of its assertions. The row this pin adds is the
+    one only the DECLARED selector covers: the slot PROP is stale (`active`) while
+    the stage DECLARATION by id is terminal — `apply_stage_fold` resolves the stage
+    by id, so the fold sees an ended position, while the `pipelineSlot` prop alone
+    says not-ended. Under this head the reopen mints `1`; under the falsy arm placed
+    above the position read it answers `None`, the transition arm is gated off, and
+    it mints `0`.
+
+    Honest scope (#13289 merge): the collapsed `position_ended` predicate means the
+    "arm inserted between two position arms" mutant no longer exists as a shape, so
+    this pin's arm-order half now coincides with the sibling pin's — what it adds is
+    the DECLARED-over-PROP precedence, which no other test exercises.
+    """
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    # Close it through the normal fold — the shape every closed issue has.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    assert _run(_indexer(t), sdk)["events_minted"] == 1
+    # …then plant terminal-BY-ID + a STALE live slot prop + the verbatim integer,
+    # all through the PUBLIC DOOR.
+    sdk.update_knowledge("github-issue-acme/repo1-1",
+                         pipelineStageId="done", pipelineSlot="active", isClosed=0)
+    proj = sdk._get_proj()
+    stored = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.pipelineStageId, "
+        "o.pipelineSlot, o.isClosed, typeof(o.isClosed)").result_set[0]
+    assert tuple(stored) == ("done", "active", 0, "Integer"), (
+        "the precondition is not the shape this pin is about (terminal by id, a "
+        f"stale live slot prop, a falsy marker): {stored!r}")
+    # THE ENDED DECLARATION WINS: the row is READ as closed, so the settled close
+    # mints nothing per poll.
+    assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
+        "a close was minted per poll over a position ended BY ID")
+    # ⛔ THE DISCRIMINATOR (the gap this pin closes): with the falsy arm placed ABOVE
+    # the position read, this row answers `None` — the `pipelineSlot` prop alone said
+    # not-ended — and this is 0.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", closed_at=None, updated_at="2026-07-23T08:00:00Z")]
+    assert _run(_indexer(t), sdk)["events_minted"] == 1, (
+        "the terminal-by-id row stopped recording transitions once a falsy marker "
+        "landed on it — the falsy arm was placed above the position read")
+
+
 def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
     """#13222 review round 2, finding 1 (P1): reading a SUBSET of the fold's decision.
 
