@@ -36,14 +36,16 @@ in it"*:
 At 300 per arm the @15 delta is 3.0 pp at SE 2.8 pp (**z = 1.08**), the @3 delta 1.3 pp (**z = 0.37**).
 Neither is distinguishable from noise, and the tool now **reproduces the sample sizes those figures
 implied** from the formula rather than trusting them: with p̄ ≈ 0.865 and n = 300 an independent design
-resolves **7.82 pp**; 5 pp needs **~734 per arm** and 3 pp **~2,034 per arm** (the brief's "~755 / ~2,100").
+resolves **7.82 pp**; 5 pp needs **~734 per arm** and 3 pp **~2,037 per arm** (the brief's "~755 / ~2,100").
 
 ⛔ **And the comparison was worse than underpowered — it was structurally blind, which the call site
 fixes and this control reproduces as a gate, not as a measured effect.** `entity_key_expansion` arms only
 when `entity_type == "point"` (`TortoiseSDK.tortoise_fts_query` in `tortoise/sdk.py`: both halves sit
 behind `entity_key_expansion and entity_type == "point"`), and `tools/candidate_recall_11901.py` measures the
-**OBJECT** leg. The control below ran the object arm on the same frozen corpus, same items, same box,
-back to back (`paired-object-60-control.json`, n = 60) — and its two switch states are one code path, so
+**OBJECT** leg. The control below ran the object arm on the same frozen corpus and the same box, back to
+back (`paired-object-60-control.json`, n = 60) — over an **independent draw** from the same 1,000-name
+population, not the headline 300 (`items.name_digest` `1776aaa9…`, against the point arms' `06373b44…`):
+its claim is structural, so the items need not be the 300. Its two switch states are one code path, so
 the tool flags the arm `structurally_blind: true` and **refuses** to publish its null as a result (exit 3,
 artifact still written).
 
@@ -193,8 +195,15 @@ repeat of the OFF side returned the **identical** outcome for every item (determ
   `#11901` declared the same residual for its generated variant arm.
 - **The k = 3 delta is BELOW this n's MDE.** Observed +1.67 pp against a 2.08 pp minimum detectable effect
   ⇒ **no winner at k = 3 is claimable**, and the tool says so rather than reporting the point estimate.
-- **MDE stated before the verdict, per k**: 2.08 / 2.28 / 3.35 / 3.84 pp. At n = 300 this run **can**
-  resolve a 3 pp effect at k ≥ 10 and **cannot** at k = 3.
+- **MDE stated before the verdict, per k**: 2.08 / 2.28 / 3.35 / 3.84 pp — and it **rises with k**,
+  because the discordant count rises with k (b = 5 → 6 → 13 → 17), so this design is *most* powered at
+  low k. At n = 300 the run **can** resolve a 3 pp effect at k = 3 and k = 5 (MDE 2.08 / 2.28 pp) and
+  **cannot** at k = 10 or k = 15 (MDE 3.35 / 3.84 pp).
+- **The winner rule, applied to every row.** A winner is claimable only where the *observed* delta clears
+  its **own** MDE: k = 10 (4.33 > 3.35) and k = 15 (5.67 > 3.84) do; k = 3 (1.67 < 2.08) does **not**, and
+  **neither does k = 5 (2.00 < 2.28)** — even though its exact p is 0.0313 and is bolded above. The
+  p-value and the MDE answer different questions; the rule this brief declares is the MDE one, and it is
+  applied to all four rows rather than to k = 3 alone.
 
 ### 4.1 The harm side — measured, and one arm where it is measurable
 
@@ -209,12 +218,16 @@ it was unmeasured before).
 | **seed** (the query's own point — the one labelled id) lost from the window | 0 | 0 |
 | seed demoted but kept | 0 | 0 |
 
-⚠️ **The seed rows are 0/0 here for a measured reason, not because nothing moved:** with full-turn
-queries over this corpus (an agent transcript corpus whose records are near-duplicates of each other), the
-seed does not enter a 30-wide window in **either** arm (`seed_at_top1` 0 → 0), so the one labelled harm
-signal is **unmeasurable at this scale**. The displacement counts above that are labelled "churn" are
-exactly that — **churn, not harm**: the OFF top-k here is mostly unrelated competition, and there are no
-qrels for it.
+⚠️ **The seed rows are 0/0, and these artifacts do not settle WHY.** `seed_at_top1` (0 → 0) is a
+**top-1** count: it says no item's seed was rank 1 in either arm, and it says **nothing** about ranks
+1–29. The artifact records no per-item `seed_rank` at all (`per_item` carries only `off_rank`/`on_rank`),
+so its four zeroes (`seed_at_top1` 0 → 0, `seed_lost_from_window` 0, `seed_demoted_but_kept` 0,
+`seed_rank_shift_sum` 0) are equally consistent with *"the seed never entered the 30-wide window"* and
+with *"it entered at an unchanged rank in both arms"*. The one labelled harm signal is therefore
+**unrecorded at this scale — not measured absent**, and this brief does not claim to have measured its
+absence (the short-query arm below runs a 60-wide window, where the seed **does** move and the signal
+becomes recordable). The displacement counts above that are labelled "churn" are exactly that — **churn,
+not harm**: the OFF top-k here is mostly unrelated competition, and there are no qrels for it.
 
 **So the robustness arm exists to make harm measurable** (`paired-point-300-short-query.json`, query capped
 at 200 chars **and** read window 60 — see the §3 note: both knobs differ from the headline, so "once the
@@ -230,7 +243,11 @@ same snapshot, n = 300):
 **Why this is the result worth keeping.** With a short query the gain is smaller (**+1.67 pp**, not
 significant) and the harm becomes visible: **5 of 300 items (1.7 %) had their own best match moved — 3 out
 of the window entirely** — which is the **same order** as the 1.67 pp gained. On this arm **the lever's cost
-and its benefit are indistinguishable in size**, and neither is significant at n = 300.
+and its benefit are indistinguishable in size**, and **neither side can be separated from noise at
+n = 300** — the gain's exact McNemar p is 0.0625, and the 3 seeds lost are a bare count (1 % of items)
+with no interval and no test attached. ⚠️ The 5 is `seed_lost_from_window` 3 **plus**
+`seed_demoted_but_kept` 2, and "best match" is shorthand: the artifact records the seed as never rank 1
+(`seed_at_top1` 0 → 0), so it is its own *best recorded* match, not a proven top-1.
 
 ---
 
@@ -241,7 +258,7 @@ and its benefit are indistinguishable in size**, and neither is significant at n
 | **the corpus snapshot exists with its digest and file list; both arms read it** | **MET** | `corpus-snapshot-manifest.json`: digest `18ab6174e440f7b38dbd49b00b519409cedaacef58647f2cf29532b825f325d0`, **23 files**, 14,225 lines, 78,571,361 bytes, per-file sha256/bytes/lines. `verify_snapshot` re-derives and **refuses** on any byte change (pinned by `test_a_tampered_snapshot_is_refused_never_renamed`). |
 | **the same sampled items are used in both arms** | **MET** (structural + digest) | One `--population-file` (`population-300.json`, seed 20261117) is read by both arms in ONE process — the pairing is a property of that construction, not a predicate to assert. The discriminating record is **`items.name_digest = 06373b442bc93182…`, equal to `population.names_sha256`** in both point artifacts. ⛔ `items.id_digest` (`4d6899d3…`) is a function of the sample SIZE and settles nothing — the `ids_match_all_arms` predicate this row used to cite was `True` for every reachable input (`#13267` F6) and is now a `pairing` block that says so. A population drawn against another snapshot is **refused** (pinned). |
 | **the result is paired, with the test named and its p-value** | **MET** | McNemar exact two-sided per k: **p = 0.0625** (@3), **0.0313** (@5), **0.00024** (@10), **0.00002** (@15); paired bootstrap CI (2,000 resamples, seed 20261117) reported beside each. |
-| **the detectable effect size for n is stated before the conclusion** | **MET** | MDE @ n=300: **2.08 / 2.28 / 3.35 / 3.84 pp** for k = 3/5/10/15. The k=3 point estimate (+1.67 pp) is **below** it and is **not** reported as a win. The published comparison's independent MDE at p̄=0.865 is **7.82 pp** ⇒ ~734/arm for 5 pp and ~2,034/arm for 3 pp — the brief's ~755/~2,100, reproduced from the formula. |
+| **the detectable effect size for n is stated before the conclusion** | **MET** | MDE @ n=300: **2.08 / 2.28 / 3.35 / 3.84 pp** for k = 3/5/10/15 — the MDE **rises** with k. The winner rule is the MDE one applied to every row: k = 10 (+4.33 against 3.35) and k = 15 (+5.67 against 3.84) clear their own MDE; k = 3 (+1.67 < 2.08) and k = 5 (+2.00 < 2.28, p = 0.0313) do **not**, and neither is reported as a win. The published comparison's independent MDE at p̄=0.865 is **7.82 pp** ⇒ ~734/arm for 5 pp and **~2,037/arm** for 3 pp — the brief's ~755/~2,100, reproduced from the formula. |
 | **`window_modes` recorded per arm; any contamination named** | **MET** | `keyword_only` 300/300 in both arms (no embedder on this box) ⇒ uniform, no contamination, and **not** reported as a hybrid measurement. `load 13.09 → 12.55` (Δ −0.54) across both arms in one process — the artifact's own `environment` block, not a transcription (`#13267` F3: an earlier revision quoted a trace that appears in NO committed artifact, and the load moves between runs, so a trace is only ever valid for the artifact it came from — the pin in `tests/test_paired_expansion_ab_2518.py` compares this number against the artifact); `repeat` of the OFF side returned identical outcomes for all 300 items. |
 | **⛔ no retrieval behaviour changed** | **MET** | `git diff --name-only origin/main...HEAD` touches exactly these paths: `tools/paired_expansion_ab_2518.py`, `tests/test_paired_expansion_ab_2518.py`, `MEMORY.md`, `config/ci-surfaces.yml`, `docs/00_index.md`, and the brief plus its four artifacts under `docs/research/2026-11-17-2518-paired-ab/`. No change to `tortoise/`, no index, no `TOOL_REGISTRY`, no public SDK method; the tool **refuses** when `TORTOISE_ENTITY_KEY_DENSE` is armed. ⛔ The **`git diff --stat` insertion/deletion tally is deliberately not quoted**, and neither is a total file count: both move whenever the evidence itself is committed and whenever `main` is merged in, so a quoted tally is stale on the very next commit while the touched-path set is not — the previous revision of this cell quoted one, and the head already prints a different number. The **path set is the falsifier**, because that is what "no retrieval behaviour changed" means, and it is reproducible with the command at the head of this cell; a tally that cannot be reproduced is not a falsifier. (`#13267` F3, three generations on: a 3-file list the tree does not produce, then a `--stat` tally that went stale on the next commit, now the set itself — the pin in `tests/test_paired_expansion_ab_2518.py` keeps this cell to the path set.) |
 
@@ -256,8 +273,10 @@ and its benefit are indistinguishable in size**, and neither is significant at n
   behaviour **under a clean key set**, not under production's noisy E3 keys.
 - **Not a dense-leg measurement.** No embedder on this box ⇒ `keyword_only`; the dense half
   (`TORTOISE_ENTITY_KEY_DENSE`) is OFF by default and refused if armed.
-- **Not a proof of no harm.** Harm is measurable only in the short-query arm, where it is the same order
-  as the benefit. In the headline arm the one labelled harm signal does not enter the window at all.
+- **Not a proof of no harm.** Harm is measured only in the short-query arm, where it is the same order
+  as the benefit. In the headline arm the one labelled harm signal is **unrecorded** at that scale — see
+  §4.1: the artifacts record no per-item seed rank, so "does not enter the window" is not a claim this
+  evidence makes.
 - **Not a general "pairing needs fewer samples" demonstration.** Measured ρ is **undefined** here (the OFF
   arm is at floor, zero variance), so the pairing bought **no** variance reduction in this design — its
   value was that the **exact** test is the only valid test at 5–17 discordant pairs.
@@ -273,8 +292,9 @@ and its benefit are indistinguishable in size**, and neither is significant at n
    and load, and no n would have fixed it. ⛔ The retired identical-`count` is **not** evidence here —
    it was `None == None` (`#13267` F1, and this restatement was `#13267` F4).
 2. **On the leg the lever arms, it helps on its own class** (+5.67 pp @15, p = 2 × 10⁻⁵) and **its cost is
-   a re-rank of the same size** (+1.67 pp gain against 1.7 % of items losing their own best match in the
-   short-query arm). Neither the benefit nor the cost is resolvable at k = 3 with n = 300.
+   a re-rank of the same size** (+1.67 pp gain against 5 of 300 items whose seed moved in the short-query
+   arm — 3 out of the k-window, 2 demoted but kept). At k = 15 the benefit is resolvable and the cost is
+   not; at k = 3 neither is.
 3. **Do not arm it on this evidence.** `entity_key_expansion` stays caller-gated `False`; the honest
    summary is *"the mechanism works on its class and its displacement cost is unquantified at production
    scale"*, not *"it helps"*. A decision to arm it needs the harm side measured on items whose relevance

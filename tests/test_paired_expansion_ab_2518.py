@@ -1206,6 +1206,106 @@ def test_the_briefs_result_tables_repeat_their_artifacts_cell_by_cell():
             "the headline arm's firing count and sample size, not a re-staled pair")
 
 
+def test_the_mde_direction_is_pinned_and_not_only_its_values():
+    """⛔ `#13267` F7: the MDE **rises** with k, so the power claim was inverted.
+
+    The brief said this run "can resolve a 3 pp effect at k ≥ 10 and cannot at
+    k = 3". The artifact says the opposite: MDE is 2.08 pp at k = 3 and 3.84 pp at
+    k = 15 — it *shrinks* as k falls, because the discordant count shrinks
+    (b = 5 → 6 → 13 → 17). A table two lines above the sentence contradicted it
+    and nothing compared the two, so the inversion survived a full review round.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    per_k = _artifact("paired-point-300.json")["arms"]["point"]["per_k"]
+    mdes = {int(k.split("=")[1]): v["mde_paired"] for k, v in per_k.items()}
+    ks = sorted(mdes)
+    assert all(mdes[a] < mdes[b] for a, b in zip(ks, ks[1:])), (
+        "this pin encodes the measured shape — the MDE rises with k; the artifact "
+        f"now says {mdes}, so re-derive the brief's power claim before trusting it")
+    # 3 pp is resolvable exactly where the MDE sits below it. Said by the brief as
+    # a sentence, so the two must agree: a k the artifact powers is a k it names.
+    can = [k for k in ks if mdes[k] < 0.03]
+    cannot = [k for k in ks if mdes[k] >= 0.03]
+    sentence = re.search(r"can\*\* resolve a 3 pp effect at (.*?) and\s+\*\*cannot\*\*",
+                         brief, re.S)
+    assert sentence, "the brief states which k can and cannot resolve a 3 pp effect"
+    said_can = {int(x) for x in re.findall(r"k = (\d+)", sentence.group(1))}
+    assert said_can == set(can), (
+        f"the brief says 3 pp is resolvable at k = {sorted(said_can)} but the "
+        f"artifact's MDE powers exactly k = {can}; 3 pp is NOT resolvable at "
+        f"k = {cannot}")
+
+
+def test_the_winner_rule_is_the_mde_one_and_applied_to_every_row():
+    """⛔ `#13267` F7: k = 5 was a non-winner by MDE and read as a winner by p.
+
+    The brief declares the rule for k = 3 — "+1.67 pp against a 2.08 pp MDE ⇒ no
+    winner is claimable". Applying that same rule, k = 5 (+2.00 pp against
+    2.28 pp) also fails, yet its p was bolded as significant with no caveat, so
+    one of the two rows was described wrongly whichever rule was in force.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    head = _artifact("paired-point-300.json")
+    n = head["population"]["sample"]
+    per_k = head["arms"]["point"]["per_k"]
+    no_winner = set()
+    for key, cell in per_k.items():
+        delta = (cell["on_hits"] - cell["off_hits"]) / n
+        if abs(delta) < cell["mde_paired"]:
+            no_winner.add(int(key.split("=")[1]))
+    assert no_winner == {3, 5}, (
+        f"the artifact's own numbers make k = {sorted(no_winner)} non-winners "
+        "(|delta| < that row's MDE); the pin assumes {3, 5}")
+    rule = re.search(r"neither does k = (\d+)", brief)
+    assert rule, "the brief names the second non-winner explicitly, not just k = 3"
+    assert {int(rule.group(1))} | {3} == no_winner, (
+        "the brief's winner rule must be applied to every row the artifact makes "
+        f"a non-winner ({sorted(no_winner)}), not to k = 3 alone")
+
+
+def test_the_brief_does_not_claim_an_unmeasured_seed_absence():
+    """⛔ `#13267` F7: `seed_at_top1` is a TOP-1 count; it cannot report a 30-wide window.
+
+    The brief said the seed "does not enter a 30-wide window in either arm" and
+    cited `seed_at_top1` 0 → 0 — a top-*1* count. `per_item` records no
+    `seed_rank` at all, so the artifact's four zeroes are equally consistent with
+    "never entered the window" and "entered at an unchanged rank". Dismissing the
+    only labelled harm signal as measured was the same `None == None` shape as F1.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    art = _artifact("paired-point-300.json")
+    arm = art["arms"]["point"]
+    assert "seed_rank" not in next(iter(arm["per_item"].values())), (
+        "the artifact now records per-item seed ranks — the brief can cite them, "
+        "and this pin must be retired rather than silently kept")
+    assert "does not enter a 30-wide window" not in brief, (
+        "that is a claim about WINDOW MEMBERSHIP and the artifact records none; "
+        "say the signal is unrecorded, not measured absent")
+    assert "unrecorded at this scale" in brief, (
+        "the brief must name the harm signal unrecorded, which is what the "
+        "committed evidence supports")
+
+
+def test_the_index_row_calls_displacement_churn_not_harm():
+    """⛔ `#13267` F7: the docs index presented the churn figure as the harm side.
+
+    The artifact's own note on `off_topk_displacement` reads "CHURN, not harm,
+    unless the ids carry qrels", and the brief §4.1 says the same — but the index
+    row other lanes read first said "the harm side is measured" and led with the
+    727/900 displacement. There are no qrels; that sentence was false.
+    """
+    index = (Path(__file__).resolve().parent.parent / "docs" / "00_index.md").read_text()
+    row = next((ln for ln in index.splitlines()
+                if "#2518" in ln and "PAIRED A/B" in ln), None)
+    assert row, "the docs index carries the #2518 paired-A/B row"
+    assert "the harm side is measured, not argued" not in row, (
+        "displacement is churn — the artifact says so in its own `note` field")
+    assert "churn, not harm" in row, (
+        "the index row must label the displacement figure as churn")
+    assert "displaced" in row and "727" in row, (
+        "the displacement figure is still the one the row publishes")
+
+
 def test_the_brief_parsers_are_not_vacuous():
     """The pins above can only kill a mutant if they actually read the cells.
 
