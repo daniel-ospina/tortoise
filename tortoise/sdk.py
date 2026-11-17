@@ -328,7 +328,12 @@ GOAL_LIVE_STATES = GOAL_STATE_VALUES - GOAL_ENDING_STATES
 
 #: The ``status`` word each ending is spelled as on the lifecycle axis (#13035).
 #: `abandoned` is `deprecated` under another name; `superseded` keeps the word.
-GOAL_ENDING_STATUS = {"abandoned": "deprecated", "superseded": "superseded"}
+#: ⛔ DELETED (#13065 review ROUND 10, finding 2): nothing read it. The rule the
+#: code actually enforces is `_status_words_for_goal_ending`, which accepts ANY
+#: non-`superseded` terminal `status` for `abandoned` (so the legacy `outdated`
+#: retirement is not refused). A constant stating the STRICTER rule beside code
+#: enforcing the wider one is a trap for the next reader, and the axis table in
+#: this module's header now says what the code does.
 
 # #7856 defect 2: the objective map's TOP node was a `goal` POINT created
 # without an explicit status, so it defaulted to `draft`. A draft point that
@@ -5853,8 +5858,9 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
 # running on the other is REFUSED, in either direction:
 #
 #   * `goalState` in GOAL_ENDING_STATES  ⇒ `status` must be that ending's own
-#     word (GOAL_ENDING_STATUS), and `superseded` must additionally NAME its
-#     successor;
+#     word (`_status_words_for_goal_ending`, the ONE authority — it accepts any
+#     non-`superseded` terminal status for `abandoned`), and `superseded` must
+#     additionally NAME its successor;
 #   * `status` in the ended set           ⇒ `goalState` must be the matching
 #     ending, or absent/None — a goal carrying no achievement word makes no
 #     claim to contradict, so ending it on `status` alone stays legal.
@@ -6100,7 +6106,20 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
 
     if may_target_existing_node and _stored_view() and (
             _is_lifecycle_word(_stored.get("status"), TERMINAL_EXCLUDED_STATUSES)
-            or _is_lifecycle_word(_stored.get("goalState"), GOAL_ENDING_STATES)):
+            or _is_lifecycle_word(_stored.get("goalState"), GOAL_ENDING_STATES)
+            # ⛔ #13065 review ROUND 10, finding 1 (P2): the LEGACY `outdated`
+            # half counts as ended HERE too. The two read predicates THIS diff
+            # introduces (`derived_invalidation._retired_by_status`,
+            # `goal_judgement._goal_retired_on_status`) are both
+            # `ended_on_status or bool(outdated)`; a door that read only `status`
+            # therefore disagreed with its own repairs about which rows are
+            # ended, and a goal retired by the flag got no stored-side check at
+            # all. Measured: `SET n.outdated=true` on a live goal, then
+            # `update_knowledge(goal, goalState='met')` LANDED and left
+            # `status=None, goalState='met', outdated=True` — retired on the
+            # reading axis, live on the achievement axis, the #13035 divergence
+            # through the chokepoint that claims to close it.
+            or bool(_stored.get("outdated"))):
         # #13065 review finding 4: on a door that can land on an ALREADY
         # EXISTING node, the STORED ending is part of the state the write
         # leaves — even when the caller names BOTH fields. Otherwise
@@ -6185,10 +6204,26 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             )
         return
 
-    if (_is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
-            and _is_lifecycle_word(goal_state, GOAL_LIVE_STATES)):
+    if (_is_lifecycle_word(goal_state, GOAL_LIVE_STATES)
+            # ⛔ #13065 review ROUND 10, finding 1 (P2): the same two-half predicate
+            # the repairs use. A row retired by the LEGACY `outdated` flag is ended
+            # on the axis `derived_invalidation` reads, so a LIVE achievement word
+            # over it is the divergence this guard exists to refuse — measured
+            # before this arm: landed, leaving the row retired-and-live at once.
+            # ⛔ THE ORDER IS LOAD-BEARING: the `outdated` read is INSIDE this
+            # conjunct, i.e. AFTER the live-word test, so a write that carries no
+            # live `goalState` word (`status='live'`, a rename, a coherent ending
+            # pair) still pays NO stored read — the call-count pin exists because
+            # the first draft of this arm read on EVERY write.
+            and (_is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
+                 or bool(_stored_view().get("outdated")))):
         want = (_SUPERSEDED_STATUS
                 if status == _SUPERSEDED_STATUS else "abandoned")
+        _carrier = ("" if _is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
+                    else (f" The stored row carries no terminal `status`; it is "
+                          f"ended by the LEGACY `outdated` flag (the pre-#2901 "
+                          f"retirement), which `derived_invalidation` reads as "
+                          f"an ending."))
         raise ValueError(
             f"REFUSED: status={status!r} ends the goal, but "
             f"goalState={goal_state!r} "
@@ -6196,7 +6231,7 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             f"`status` ends the goal and `goalState` never ends it alone, so "
             f"the ending has to be said on BOTH fields — otherwise the goal "
             f"reads as ended to one surface and as a live commitment to the "
-            f"next reader that asks about its achievement.\n"
+            f"next reader that asks about its achievement.{_carrier}\n"
             f"Two ways to fix it, either is accepted:\n"
             f"  1. add the ending to `goalState` — pass goalState={want!r}"
             + (" together with the successor's id, supersededBy=<successor "
@@ -6362,8 +6397,8 @@ def _stored_goal_ending_view(proj, id_val: str, *,
     match = f"MATCH (n:{label} {{id:$id}})" if label else "MATCH (n {id:$id})"
     rows = proj.g.query(
         match + " OPTIONAL MATCH (s)-[:CORRECTS]->(n) "
-        "RETURN n.status, n.goalState, "
-        "coalesce(n.supersededBy, n.superseded_by), collect(s.id)",
+        "RETURN n.status, n.goalState, coalesce(n.supersededBy, n.superseded_by), "
+        "collect(s.id), n.outdated",
         params={"id": id_val},
     ).result_set
     if not rows:
@@ -6387,10 +6422,19 @@ def _stored_goal_ending_view(proj, id_val: str, *,
     endings = {_ending_key(row[0]) + "\x00" + _ending_key(row[1])
                for row in rows}
     status, goal_state, carrier, corrects = rows[0][:4]
+    legacy_outdated = rows[0][4] if len(rows[0]) > 4 else None
     named = carrier if carrier not in (None, "") else None
     if named is None and corrects:
         named = next((c for c in corrects if c), None)
-    view = {"status": status, "goalState": goal_state, "successor": named}
+    view = {"status": status, "goalState": goal_state, "successor": named,
+            # ⛔ #13065 review ROUND 10, finding 1 (P2): the LEGACY retirement
+            # flag is part of the stored ending, because the two read
+            # predicates this PR adds (`derived_invalidation._retired_by_status`,
+            # `goal_judgement._goal_retired_on_status`) both count it. A door
+            # that ignored it disagreed with its own repairs about which rows
+            # are ended — measured: a flag-retired goal admitted
+            # `update_knowledge(goal, goalState='met')`.
+            "outdated": legacy_outdated}
     if len(endings) > 1:
         view["conflict"] = True
     return view

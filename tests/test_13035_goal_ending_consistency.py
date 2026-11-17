@@ -837,6 +837,38 @@ def test_an_UNHASHABLE_stored_status_reaches_the_documented_ValueError(sdk):
     assert "leaves it running" in str(exc.value), str(exc.value)
 
 
+def test_a_goal_retired_by_the_LEGACY_outdated_flag_refuses_a_LIVE_word(sdk):
+    """#13065 review ROUND 10, finding 1 (P2) — the door and its own repairs must
+    agree about which rows are ended.
+
+    The two read predicates this PR adds are `ended_on_status or bool(outdated)`
+    (`derived_invalidation._retired_by_status`, `goal_judgement._goal_retired_on
+    _status`). The write guard read only `status`, so a goal retired by the LEGACY
+    `outdated` flag got no stored-side check: MEASURED before the fix —
+    `SET n.outdated = true` on a live goal, then `update_knowledge(goal,
+    goalState='met')` LANDED, leaving `status=None, goalState='met',
+    outdated=True`: retired on the axis `derived_invalidation` reads and live on
+    the axis every other reader reads. That is the #13035 divergence, admitted
+    through the chokepoint that claims to close it.
+    """
+    goal = _goal(sdk, tag="legacy-outdated")
+    # the pre-#2901 retirement, set the way the legacy rows carry it
+    sdk._get_proj().g.query("MATCH (n {id:$id}) SET n.outdated = true",
+                            params={"id": goal["id"]})
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="met")
+    msg = str(exc.value)
+    assert "REFUSED" in msg
+    # the refusal names the carrier it actually found, not a `status` that is absent
+    assert "outdated" in msg, msg
+    # nothing landed
+    node = sdk.get_entity(goal["id"])
+    assert node["goalState"] == "active"
+    # ...and the coherent ending still works on that row
+    sdk.update_knowledge(goal["id"], status="archived", goalState="abandoned")
+    assert sdk.get_entity(goal["id"])["goalState"] == "abandoned"
+
+
 def test_the_SWEEP_clears_a_goal_retired_on_its_status(sdk):
     """#13065 review round 5, finding 2 (P2) — ``expected == word`` is not
     "the cache is right".
