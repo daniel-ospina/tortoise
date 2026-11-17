@@ -439,8 +439,11 @@ def test_the_goal_state_cache_writes_through_a_live_sdk_method():
     written = []
     stub = _stub_sdk(update_knowledge=lambda node_id, **props: written.append(
         (node_id, props)),
-        get_entity=lambda _id: {"id": _id, "status": "live",
-                               "goalState": "active"})
+        # `**_kw` because #13093 gave `get_entity` its caller-facing `cache_only`
+        # opt-out, and every internal reader passes it; a stub with a fixed
+        # positional signature would redden on the call, not on the behaviour.
+        get_entity=lambda _id, **_kw: {"id": _id, "status": "live",
+                                       "goalState": "active"})
 
     assert _write_goal_state_cache(stub, "goal-1", "met") == "met"
     assert written == [("goal-1", {"goalState": "met"})], written
