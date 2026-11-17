@@ -45,7 +45,9 @@ substrates selected by `metering._supabase_mode()` — `:MeteringRecord` in the 
 `supabase.metering_records` post-`#669` (the flip DELETES the registry copy; neither is a mirror of the other),
 keyed `(org_id, period_start)` — `tortoise/metering.py`;
 **two** are per-org on **Prometheus** label sets rather than that ledger; and **two Postgres reads are SQL
-functions with no per-org *byte* figure at all** (one is exact per-org *rows*). The registry of what each dimension
+functions** — one exact per-org *rows*, one the database/table footprint, *plus* a
+per-org **byte** measurement now that `#12762` landed (`postgres_per_org_bytes()`,
+the rows an org wrote, with the unattributable remainder as a labelled residual). The registry of what each dimension
 is, its unit, and its declared holes is `tortoise/cost_dimensions.py` (#5045), queryable with
 `python tools/cost_coverage_audit.py matrix`.
 
@@ -334,7 +336,7 @@ This document **implements** these; it reverses none of them. Run first, before 
 | **no** session cap; **no** retention window of any length | `#4010`, `#3853` | **obeys** — §7 |
 | prices are calibrated by the owner **after beta**, from measured consumption | owner 2026-09-26 | **obeys** — every number `TBD-BY-MEASUREMENT` |
 | `write_ops` is the billed unit **today**, and redefining it is an owner decision | `metering.py` `#3359` | **obeys** — §2 keeps it as the transition unit; no redefinition here |
-| ~~a per-org Postgres **byte** figure would be an allocation, not a measurement~~ — **OVERRIDES** by `#12762`: a write-time measurement of the org's OWN stored rows is a measurement; apportioning the database total is still an allocation | `cost_dimensions.py` `#5045` → `#12762` | **obeys** — §2 FOLD; the meter exists, the included amounts stay `TBD` (§6 S3), nothing is armed |
+| ~~a per-org Postgres **byte** figure would be an allocation, not a measurement~~ — **OVERRIDES** by `#12762`: a write-time measurement of the org's OWN stored rows is a measurement; apportioning the database total is still an allocation | `cost_dimensions.py` `#5045` → `#12762` | **obeys** — §2 FOLD; the meter exists, so arming waits on the two conditions `allowance_gate.RELEASE_CONDITIONS` declares: the included amounts stay `TBD` (§6 S3) **and** no per-org gauge the gate can afford on a write path exists; nothing is armed |
 | every lane must **not** invent caps before measurement | owner 2026-11-02 (`#4051`) | **obeys** — this is the document that states the shape and leaves the numbers empty |
 
 **No `CONTRADICTS(...)` arises.** The pricing surface (`product/pricing.json`, `owner_confirmed 2026-08-07`) states

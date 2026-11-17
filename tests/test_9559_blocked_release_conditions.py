@@ -179,7 +179,15 @@ _RELEASED_PHRASES = {
         "no per-org byte ownership",
         "BLOCKED until a per-org attribution exists",
     ),
-    "postgres_residency_gauge": ("no per-org byte meter",),
+    "postgres_residency_gauge": (
+        # ⛔ The LIVE wording, not an older paraphrase. This arm used to read
+        # "no per-org byte meter", which appears nowhere in the block it guards:
+        # on the day a gauge exists, the still-quoted "no per-org RESIDENCY
+        # GAUGE" would not have been flagged — the one sentence this issue
+        # rewrote would have had no covering phrase.
+        "no per-org RESIDENCY GAUGE",
+        "no per-org figure this gate can read ON A WRITE PATH",
+    ),
     "storage_included_amounts_confirmed": (
         "free/anon included amounts are still undecided",
     ),
@@ -284,6 +292,44 @@ def test_a_satisfied_condition_is_not_quoted_as_the_obstacle(dim):
                 f"current obstacle in blocked_reason:\n  {reason}")
 
 
+def test_the_staleness_guard_has_at_least_one_live_token():
+    """★ The guard must be able to FIRE. Per-dimension arms skip on unsatisfied.
+
+    Every assertion above sits behind ``if not satisfied: continue``, so the day
+    every predicate reads False the whole file stays green with the staleness
+    guard covering nothing — the "guard that stopped guarding" shape in its
+    purest form. Aggregated across the registry, not per dimension: a dimension
+    that legitimately waits on everything it names is fine as long as SOME
+    condition somewhere is live.
+    """
+    checked = [t for d in DIMENSIONS if d.blocked for t in d.release
+               if _PREDICATES[t]()[0]]
+    assert checked, (
+        "NO declared release condition is satisfied anywhere, so the phrase "
+        "guard above checks nothing: either the predicates became false (re-derive "
+        "them) or every block legitimately waits on all it names — and then this "
+        "file's staleness coverage must be re-homed deliberately, not assumed")
+
+
+def test_exactly_the_attribution_condition_is_satisfied_today():
+    """The one SATISFIED condition is asserted POSITIVELY, so its proof cannot lapse.
+
+    `per_org_postgres_attribution` is the finding of this issue (#12762 landed the
+    attribution). Three other tests consume it through a `if not satisfied:
+    continue`, so if the predicate quietly started returning False they would all
+    stay green and the staleness guard would cover nothing. This pins it.
+
+    When the remaining conditions fire — or if one of them is satisfied by
+    accident — this test's job is to make the next lane look, not to fix it.
+    """
+    satisfied, evidence = _per_org_postgres_attribution()
+    assert satisfied is True, (
+        "the per-org Postgres byte attribution no longer reads as MEASURED — "
+        "if #12762's artifact moved, re-point this predicate and re-derive "
+        f"postgres_storage's release conditions:\n  {evidence}")
+    assert _PREDICATES["per_org_postgres_attribution"] is _per_org_postgres_attribution
+
+
 def test_the_falsified_premise_is_actually_recorded_as_released():
     """The correction itself, pinned — and the registry side of it.
 
@@ -330,7 +376,7 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
     ``postgres_storage.ATTRIBUTION_NOTE`` — and restoring the old sentence there
     kept every test green. These are the surfaces an arming lane actually reads.
     """
-    from tortoise import metering
+    from tortoise import cost_dimensions, metering
     from tortoise.postgres_storage import ATTRIBUTION_NOTE
 
     surfaces = {
@@ -338,6 +384,11 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
         "metering.storage_overage_cost_usd.__doc__":
             metering.storage_overage_cost_usd.__doc__ or "",
         "pricing.storage_limits.__doc__": pricing.storage_limits.__doc__ or "",
+        # ⛔ The ONE registry's own header. Round 3 found it asserting the
+        # falsified premise while the same registry's `postgres_storage` row
+        # carried the OVERRIDES of it — the header disagreeing with its own row
+        # is the drift this issue is about.
+        "cost_dimensions module docstring": cost_dimensions.__doc__ or "",
     }
     # Phrasings that assert the attribution does NOT exist.
     released_assertions = (
@@ -346,22 +397,40 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
         "records no per-org byte ownership",
         "no per-org byte meter",
         "only once a per-org attribution exists",
+        "no per-org split",
     )
     offenders = []
+    scanned = 0
     for name, text in surfaces.items():
         # ⛔ NORMALISE FIRST. These are wrapped docstrings, so on the pre-fix tree
         # the phrase "no per-org figure at all" appeared with a line break inside
         # it and could never match the very text it was written to catch.
         # Whitespace is collapsed before matching.
-        flat = " ".join(text.split())
-        # …and an occurrence is a finding UNLESS the surface marks it as
-        # superseded: quoting an overridden position beside an ``OVERRIDES``
-        # marker is the practice AGENTS.md mandates, not the defect.
-        if "OVERRIDES" in flat:
-            continue
-        for phrase in released_assertions:
-            if " ".join(phrase.split()) in flat:
-                offenders.append(f"{name}: {phrase!r}")
+        #
+        # ⛔ THE EXEMPTION IS PER-PARAGRAPH, NOT PER-SURFACE — and that is load
+        # bearing, not tidiness. A whole-surface skip was measured INERT on
+        # ``metering.storage_overage_cost_usd.__doc__``, because this very change
+        # added the word OVERRIDES to it: the surface the commit message names as
+        # a restatement site became permanently unscannable, and appending the
+        # pre-fix sentence to it stayed GREEN. A paragraph that quotes the
+        # superseded position beside the marker is an argument; a paragraph that
+        # asserts it without one is the defect.
+        for para in text.split("\n\n"):
+            flat = " ".join(para.split())
+            scanned += 1
+            if "OVERRIDES" in flat:
+                continue
+            for phrase in released_assertions:
+                if " ".join(phrase.split()) in flat:
+                    offenders.append(f"{name}: {phrase!r} in: {flat[:90]}")
+    assert scanned >= len(surfaces), (
+        f"only {scanned} paragraph(s) scanned across {len(surfaces)} surface(s) "
+        f"— the scan has become vacuous")
+    assert not offenders, (
+        "a surface an arming lane reads still asserts the FALSIFIED premise "
+        "(the per-org byte attribution exists — #12762, "
+        "postgres_bytes.PerOrgPostgresBytes.for_org):\n  "
+        + "\n  ".join(offenders))
     assert not offenders, (
         "a surface an arming lane reads still asserts the FALSIFIED premise "
         "(the per-org byte attribution exists — #12762, "
@@ -473,9 +542,16 @@ def test_the_record_restore_door_never_consults_an_allowance():
 
     offenders = []
     for path in targets:
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            # Aliased imports too: `from tortoise.quota import enforce_org_limit`
-            # ends this lane. A name-only match would miss it.
+        # ⛔ CODE ONLY: comments and string literals are stripped with `tokenize`
+        # before matching. A substring match over raw lines reds on a COMMENT that
+        # names the forbidden call — and #9559 explicitly asks this lane to name
+        # it ("say so in the wiring"), so the guard would punish the documentation
+        # it requires and the natural response would be to weaken the guard.
+        # `record_restore.py` already carries a `QUOTA (G5 on #9556)` prose block;
+        # that block must stay writable. An aliased import still offends, because
+        # the NAME survives in code even when the call does not follow it.
+        code = _code_only(path)
+        for lineno, line in enumerate(code.splitlines(), 1):
             if "enforce_allowances" in line or "enforce_org_limit" in line:
                 offenders.append(f"{path.relative_to(_REPO)}:{lineno}: {line.strip()}")
     assert not offenders, (
@@ -485,10 +561,48 @@ def test_the_record_restore_door_never_consults_an_allowance():
         + "\n  ".join(offenders))
 
 
+def _code_only(path: Path) -> str:
+    """The file's source with comments AND string literals blanked out.
+
+    Line numbers are preserved (blanked tokens become empty, comments become
+    empty) so a reported line number still points at the offending code.
+    """
+    import tokenize
+
+    keep: dict[int, list[str]] = {}
+    with path.open("rb") as fh:
+        for tok in tokenize.tokenize(fh.readline):
+            if tok.type in (tokenize.COMMENT, tokenize.STRING,
+                            tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+                            tokenize.DEDENT, tokenize.ENCODING,
+                            tokenize.ENDMARKER):
+                continue
+            keep.setdefault(tok.start[0], []).append(tok.string)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return "\n".join(" ".join(keep.get(i, [])) for i in range(1, len(lines) + 1))
+
+
 def test_the_restore_verb_still_exists():
-    """The G5 pin above is scoped by a name; if it moves, the pin must move too."""
+    """The G5 pin above is scoped by names; if one moves, the pin must move too.
+
+    ⛔ BOTH ends are pinned by CONTENT, round 3's finding: the scan set includes
+    ``__main__.py`` (a 20k-line file), so if the ``record-restore`` verb moved out
+    of it the pin would keep scanning a file that no longer holds the door —
+    green and uncovered. The verb's name is asserted here for the same reason
+    ``rebuild_from_record`` is.
+    """
     from tortoise.projection import FalkorProjection
 
     assert callable(getattr(FalkorProjection, "rebuild_from_record", None)), (
         "rebuild_from_record is gone or renamed — the G5 exemption pin above "
         "scans a package whose restore lane no longer lives where it names")
+
+    main_src = (_REPO / "tortoise" / "__main__.py").read_text(encoding="utf-8")
+    assert "_cmd_record_restore" in main_src, (
+        "the `record-restore` CLI verb is no longer in tortoise/__main__.py — the "
+        "G5 pin keeps scanning that file, so the door would be uncovered. Add the "
+        "verb's new home to the scan set above.")
+    assert "record-restore" in main_src, (
+        "the `record-restore` CLI subcommand name is gone from tortoise/__main__.py "
+        "— re-derive which file now holds the restore door and add it to the G5 "
+        "scan set")

@@ -44,9 +44,13 @@ stating a unit is not setting a price.
 **⛔ MEASUREMENT vs ALLOCATION is a DECLARED distinction, not a comment.** A
 `fixed_shared_saas` row is an ALLOCATION: a policy applied to a stated total,
 recomputed each refresh, which must never be read as "we measured this org's
-share". Postgres BYTES have no per-org split for exactly this reason (a per-org
-byte figure would be an allocation wearing a measurement's name) and the row
-declares that limit rather than inventing one.
+share". Apportioning the Postgres TOTAL by a proxy is refused for exactly this
+reason (a per-org share of the database would be an allocation wearing a
+measurement's name) — but that is a limit on the METHOD, not on the capability:
+the bytes an org's OWN rows occupy are measurably theirs, and that measurement
+exists (`tortoise.postgres_bytes`, #12762 — see the ``postgres_storage`` row
+below, whose attribution carries the ``OVERRIDES:`` of the older position this
+paragraph used to imply was absolute).
 
 **Dependency-free on purpose** (stdlib only, no FastAPI / graph client /
 prometheus import at module scope): the audit tool, the tests and any future
