@@ -255,7 +255,8 @@ settles where the vector index lives and
 explicitly not which labels carry one — so when the owner answers the label question as a *placement*
 answer (*"just … in Postgres and the search aligned with that"*), the canonical home for it is the search
 document, exactly as `#4051`'s 2026-11-07 ruling was. **What this entry adds to the design document is a
-decision block after the 2026-11-07 one and one row of §3:** the vector-search row now names the served
+decision block after the 2026-11-07 one — carrying the per-label gate table and the four-condition
+arming paragraph it ends in — and one row of §3:** the vector-search row now names the served
 set (`Point`, `Event`, `Object`, `Source`, `Subject`, and the `Document` rows that are `:Source`'s other kind) instead of leaving coverage unsaid. ⛔ **No mechanism
 moved:** §6.1's filtered-ANN guard, §6.2's decision that the text index stays in FalkorDB, and §1.5's
 phase split are all untouched, because the ruling changes *which rows* the index answers, not *which
