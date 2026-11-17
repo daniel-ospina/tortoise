@@ -1131,6 +1131,80 @@ class EmbeddingModel:
         except Exception:  # noqa: BLE001, RUF100 — a daemon thread must not raise
             logger.debug("embedder warm-up worker failed", exc_info=True)
 
+    # ── #13224: a WRITE must never block on a COLD embedder ───────────────
+
+    @classmethod
+    def await_write_ready(cls, budget: float) -> bool:
+        """True when the model is loaded — waiting at most ``budget`` s (#13224).
+
+        ⛔ THE DEFECT THIS EXISTS TO REMOVE. ``get()`` blocks its caller for up
+        to ``_LOAD_TIMEOUT_S`` (90 s) while the model loads, and during a warm
+        window it blocks on ``cls._lock`` for the WHOLE load — the caller's own
+        ``load_timeout`` cannot bound it, because the time is spent waiting for
+        a lock another thread holds, not in its own join. The hosted lifespan
+        pre-warm is a DAEMON THREAD and does not gate readiness, so a container
+        that has just started serves writes while the model is still loading and
+        the first write pays the load ON ITS OWN REQUEST THREAD.
+
+        MEASURED (#13224, 2026-11-17): ``EmbeddingModel.get()`` on an already
+        downloaded ``bge-small`` cache is **13.5 s** on a warm dev box; the
+        recorded cold figure is ~57 s on a contended machine (#1349). The
+        transport wait bound is ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` = **10 s**,
+        so ``POST /v1/subjects`` — whose fold embeds the row
+        (``projection/entities.py::_upsert_subject``) — returned **504 at
+        18.4 s** and then **200 at 22.9 s** once the load landed, while
+        ``POST /v1/points`` (1.1 s) and ``POST /v1/objects`` (1.4 s) were fast
+        because by then the embedder was WARM. The cost was never the write: an
+        in-process subject create is 8-10 ms warm and 27-32 ms inside the
+        hosted handler (measured, same run).
+
+        So the answer is a BOUNDED WAIT, not a removal: a write kicks the load
+        (``start_warm_up``, idempotent) and waits ``budget`` for it, then writes
+        its row **without a vector** rather than stalling the request. That is
+        the degradation every writer already handles — ``encode_for_row``
+        documents ``None`` as "this row carries no vector", ``#5008``'s gate
+        produces it by policy, and ``graph-scripts/backfill_embeddings.py``
+        restores it — so nothing new is traded: what IS traded is that rows
+        written inside the cold window are not vector-searchable until a
+        backfill, in exchange for a create that cannot exceed the budget.
+
+        ⛔ ``TORTOISE_EMBEDDER_WARMUP=0`` (the test/dev opt-out) keeps the
+        PRE-#13224 behaviour EXACTLY: with no background lane to kick, this
+        returns True and the caller's ``get()`` loads synchronously as it always
+        did. A test that relies on a write producing a vector is therefore
+        unaffected, and the bounded path can only run where a background load is
+        the declared behaviour.
+        """
+        if cls._instance is not None and cls._instance._model is not None:
+            return True
+        if not _embedder_warmup_enabled():
+            # No background lane to hand the load to — preserve the synchronous
+            # contract (#13224: the bound must never change dev/test behaviour).
+            return True
+        # Idempotent: a no-op while the lifespan pre-warm is already running,
+        # and the thing that starts one when a write is first past the post.
+        cls.start_warm_up()
+        deadline = time.monotonic() + max(0.0, budget)
+        while True:
+            if cls._instance is not None and cls._instance._model is not None:
+                return True
+            now = time.monotonic()
+            # A load that FAILED must not re-charge the budget on every write:
+            # `get()`'s negative cache already says "do not retry yet", so the
+            # answer is "no vector" without waiting (#399's cooldown, reused).
+            if cls._last_failed_at is not None and \
+                    (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+                return False
+            remaining = deadline - now
+            if remaining <= 0:
+                return False
+            time.sleep(min(_WRITE_READY_POLL_S, remaining))
+
+    @classmethod
+    def loaded(cls) -> bool:
+        """True iff the model is already warm — never blocks, never loads."""
+        return cls._instance is not None and cls._instance._model is not None
+
     # ── #4055: the one-time setup's clock, read by the wait-bound seams ────
 
     @classmethod
@@ -1257,6 +1331,10 @@ class EmbeddingModel:
         cls._one_time_setup_started_at = None
         cls._one_time_setup_owner = None
         cls._one_time_setup_in_progress.clear()
+        # #13224: re-arm the cold-write latch, so a test that resets the
+        # embedder to observe a cold window gets its own line rather than
+        # inheriting a previous test's already-reported state.
+        _rearm_cold_write_report()
 
     def __init__(self, load_timeout: float | None = None):
         timeout = load_timeout if load_timeout is not None else self._LOAD_TIMEOUT_S
@@ -1551,6 +1629,22 @@ def encode_for_store(
     return _degrade_to_width([vec], expected_dim)[0]
 
 
+#: #13224: how long a WRITE path will wait for a COLD embedder before it writes
+#: the row without a vector. MEASURED: `EmbeddingModel.get()` is 13.5 s on a warm
+#: model cache and ~57 s cold (#1349) — two orders of magnitude above this — so
+#: the budget is not a fraction of a load, it is the most a create may spend on
+#: setup it did not trigger (the ``#4055`` principle: process INITIALIZATION must
+#: not be charged to a request's wait budget). The public target for this path is
+#: p95 < 1 s (#13224), and a warm encode is 25-43 ms, so 0.25 s leaves the whole
+#: steady-state path unchanged. Raised only by a test that wants to observe the
+#: wait; never by an operator (a bigger number just moves the stall back).
+WRITE_EMBED_BUDGET_S = 0.25
+
+#: Poll interval for the bounded wait above — small enough that a model that
+#: becomes ready mid-budget is used, coarse enough not to spin (<= 25 wakeups).
+_WRITE_READY_POLL_S = 0.01
+
+
 def encode_for_row(
     content: str, expected_dim: int | None,
 ) -> list[float] | None:
@@ -1599,7 +1693,54 @@ def encode_for_row(
                 verdict["reason"], verdict["rule_id"],
             )
             return None
+    # ⛔ #13224: BOUND the wait for a cold embedder. `get()` (reached through
+    # `encode_for_store`) blocks up to `_LOAD_TIMEOUT_S` for the load and, during
+    # a warm window, on `_lock` for the load another thread is running — so a
+    # write issued while the hosted lifespan pre-warm was still loading stalled
+    # its own request past the transport wait bound (504 at 18.4 s, measured).
+    # MEASURED dominant cost on this path: 13.5 s warm-cache model load vs 25-43
+    # ms per encode, on a create whose own fold is 8-10 ms.
+    if not EmbeddingModel.await_write_ready(WRITE_EMBED_BUDGET_S):
+        # Visible, not silent: counted on the existing "ran no model work"
+        # metering term (#4488) and logged once per process — a bulk write must
+        # not storm the log with one line per row.
+        _note_embed_skip(1)
+        _note_cold_write(WRITE_EMBED_BUDGET_S)
+        return None
     return encode_for_store(content, expected_dim)
+
+
+def _note_cold_write(budget: float) -> None:
+    """Log ONCE that a row was written without a vector for a COLD embedder.
+
+    The metering term above counts every occurrence; this line explains what the
+    count MEANS, because "skipped" alone cannot distinguish a cold window from a
+    designed absence or a broken load (the #4488 ambiguity). Latched on module
+    state rather than a counter so a bulk write costs one line, and re-armed by
+    `EmbeddingModel._reset()` (tests) so a later window is reportable again.
+    """
+    global _COLD_WRITE_REPORTED
+    if _COLD_WRITE_REPORTED:
+        return
+    _COLD_WRITE_REPORTED = True
+    logger.warning(
+        "embedder is still COLD — this write stored its row WITHOUT a vector "
+        "after waiting %.2fs (#13224). The row is visible to every reader; the "
+        "dense leg will not find it until `graph-scripts/backfill_embeddings.py` "
+        "re-encodes it. Further occurrences are counted on embed metering's "
+        "`skipped` term, not logged.",
+        budget,
+    )
+
+
+#: #13224: one-line latch for `_note_cold_write` — see there.
+_COLD_WRITE_REPORTED = False
+
+
+def _rearm_cold_write_report() -> None:
+    """Test/reset hook for the #13224 cold-write latch."""
+    global _COLD_WRITE_REPORTED
+    _COLD_WRITE_REPORTED = False
 
 
 def encode_batch_for_store(
