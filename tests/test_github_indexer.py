@@ -558,9 +558,11 @@ def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
     door set is NOT a partition: `create_object(..., isClosed=0)` and
     `update_knowledge(id, isClosed=0)` both store the INTEGER `0` (measured:
     `typeof(o.isClosed)` → `['Integer']` through either door), just as
-    `create_object(..., isClosed=1)` stores `1`. This pin uses the update path and
-    the truthy sibling uses the create path — which door each exercises, not a claim
-    that either is the only way in.
+    `create_object(..., isClosed=1)` stores `1`. What each PIN exercises is a
+    separate fact and must not be read off that one: this pin plants the marker
+    through the public `update_knowledge` door, while the truthy sibling writes the
+    same prop by a RAW graph write (`SET o.isClosed = 1`) — it does not call
+    `create_object` at all, so neither pin's path is evidence about the other's.
     The two sides then disagree irreconcilably: this module reads the marker by
     `bool()` (→ live), while the fold's live-holder probe compares
     `coalesce(n.isClosed, false) = false` in Cypher, where `0 = false` is FALSE
@@ -3049,4 +3051,3 @@ def test_7951_registration_probe_failure_fails_open(tmp_path, monkeypatch):
             "the fail-open path did not journal the Object (#7951 P2-b)")
     finally:
         sdk.close()
-
