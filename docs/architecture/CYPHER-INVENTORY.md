@@ -437,9 +437,11 @@ and exactly **1** verb occurrence
 nine-prose/four-Cypher split are UNCHANGED by it (the added match is single-line, not cross-line).
 ⚠️ That regeneration is not decorative at this head. The appendix pins `file:line` COORDINATES and
 `--check` cannot see them — its 25 pins are SCALARS, and an insertion is not a new statement — so
-re-cutting the appendix moves ROWS while every SCALAR stays put. Measured at THIS head against
-`origin/main` **`9cebd72ad7`**: the appendix `main` carried was stale in **709 of its 1,311 rows**,
-over exactly five files — the same 1,311 statements, renumbered:
+re-cutting the appendix moves ROWS while every SCALAR stays put. Measured **on `9cebd72ad7`'s OWN
+TREE — both sides of the comparison at that one commit**, because a cut taken at a later head is a
+different pair and reproduces a different number (at this head the same comparison reads 746 rows /
+8 files, the three extra files being everything merged since): the appendix `main` carried there was
+stale in **709 of its 1,311 rows**, over exactly five files — the same 1,311 statements, renumbered:
 
 | file | rows | shift |
 |---|---|---|
@@ -449,8 +451,8 @@ over exactly five files — the same 1,311 statements, renumbered:
 | `tortoise/indexer/github_indexer.py` | 11 | +97 (4), +24 (7) |
 | `tortoise/record_projection.py` | 1 | +22 |
 
-reproduced by `git show origin/main:docs/architecture/CYPHER-INVENTORY.md` versus a fresh
-`--markdown` at this tree. It is regenerated HERE because every commit that moved those statements
+reproduced by `git show 9cebd72ad7:docs/architecture/CYPHER-INVENTORY.md` versus a fresh
+`--markdown` **at `9cebd72ad7`**. It is regenerated HERE because every commit that moved those statements
 has already merged without regenerating them (the rule assigns the refresh to the commit that moves
 the code; none of those commits did it), while
 `tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` is RED at
