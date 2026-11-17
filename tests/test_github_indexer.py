@@ -433,6 +433,57 @@ def test_repeated_transitions_mint_monotonic_ids(sdk):
         "a connector close folded a LIFECYCLE word onto the four-word axis")
 
 
+def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk):
+    """#13222 round-2 review, the residual arm (P1): `cross-pipeline` and
+    `unresolvable-current-stage`.
+
+    `apply_stage_fold` refuses two rows the earlier pins do not cover, and BOTH are
+    one supported PUBLIC write away:
+
+      * `cross-pipeline` — `update_knowledge(id, pipelineStageKey='venture:deal')`
+        stores a foreign key beside the id, and the fold will not read that id as
+        another pipeline's stage;
+      * `unresolvable-current-stage` — `update_knowledge(id, pipelineStageId='nope')`
+        stores an id the declaration does not contain, and the fold fails closed
+        rather than rewrite `isClosed` on a row it cannot place.
+
+    In both the fold writes NOTHING, so a reader that answered "open" minted a
+    `-closed` (then `-closed-2`, …) on every poll FOR EVER — measured on the
+    merged head: `1/1/1` on both shapes. The read now answers `None` ("cannot
+    place this row"), which is loop-free: `prev_state is None` gates the
+    transition arm off and the `-created` mint is guarded by `_event_in_graph`.
+    That is the same answer `planned_occurrence.plan_position` gives these two
+    refusals — it treats them as unresolvable and refuses to call such a row
+    open/upcoming.
+
+    ⚠️ The trade, stated: a genuinely closing issue whose row carries a broken
+    position records no `-closed`. That is bounded and inspectable; an unbounded
+    mint loop on the journal is neither.
+    """
+    oid = "github-issue-acme/repo1-1"
+    shapes = {
+        "a foreign pipelineStageKey (cross-pipeline)": (
+            "pipelineStageKey", "venture:deal"),
+        "a pipelineStageId the declaration does not contain": (
+            "pipelineStageId", "nope"),
+    }
+    for why, (prop, value) in shapes.items():
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        proj.g.query("MATCH (e:Event) DETACH DELETE e")
+        t = MockGitHubTransport(issues=[gh_issue(1)])
+        _run(_indexer(t), sdk)
+        # through the PUBLIC door — the shape a caller can actually create
+        sdk.update_knowledge(oid, **{prop: value})
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="closed", closed_at="2026-07-20T08:00:00Z",
+            updated_at="2026-07-20T08:00:00Z")]
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+        assert mints == [0, 0, 0], (
+            f"{why}: the fold refuses this row, so the read must not call it open "
+            f"— every poll minted another close ({mints})")
+
+
 def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
     """#13222 review round 2, finding 1 (P1): reading a SUBSET of the fold's decision.
 

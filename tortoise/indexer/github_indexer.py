@@ -230,15 +230,17 @@ def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
     if stage_id is None:
         return None
     # An ABSENT key falls back to the CONNECTOR's own declaration, because that is
-    # the only pipeline a fold can put on an indexed issue Object — a pack move
-    # always writes its key (`stage_move_props(pipeline_key, …)` fills
-    # `pipelineStageKey`), so a keyless stage id came from the connector arm or
-    # from a partial hand write. Resolving it against the core declaration is what
-    # lets the read agree with the fold on a row whose `pipelineSlot` PROP was
-    # never written: measured, that row read as OPEN and minted a `-closed` on
-    # every poll (1/1/1) while the fold refused it as terminal.
-    decl = (_PIPELINE_DECLS.get(str(pipeline_key or ""))
-            or _PIPELINE_DECLS.get(CORE_WORK_ITEM_PIPELINE_KEY))
+    # the only pipeline the built-in fold can put on an indexed issue Object — a
+    # pack move always writes its key (`stage_move_props(pipeline_key, …)` fills
+    # `pipelineStageKey`). Resolving a keyless stage id against the core
+    # declaration is what lets the read agree with the fold on a row whose
+    # `pipelineSlot` PROP was never written: measured, that row read as OPEN and
+    # minted a `-closed` on every poll (1/1/1) while the fold refused it as
+    # terminal.
+    # ⛔ A PRESENT key does NOT fall back: `apply_stage_fold` refuses a key that is
+    # not the fold's own (`cross-pipeline`), so resolving it against another
+    # declaration would describe a move the fold will never make.
+    decl = _PIPELINE_DECLS.get(str(pipeline_key or CORE_WORK_ITEM_PIPELINE_KEY))
     if not decl:
         return None
     for stage in decl.get("stages") or ():
@@ -1159,6 +1161,26 @@ class GitHubIndexer:
         if is_terminal_status(status, outdated, is_closed=is_closed,
                               stage_slot=declared_slot):
             return "closed"
+        # ⛔ UNRESOLVABLE POSITION — the fold refuses these, so "open" here is a
+        # mint loop, not a read. `apply_stage_fold` answers `cross-pipeline` when
+        # the stored `pipelineStageKey` names ANOTHER pipeline than the fold's,
+        # and `unresolvable-current-stage` when the id is absent from its
+        # declaration; in both cases it writes NOTHING, so a reader calling the
+        # row open mints a `-closed` (then `-closed-2`, …) on every poll, for
+        # ever. BOTH are one supported public write away — measured on the merged
+        # head, three polls of a closed issue:
+        #   update_knowledge(id, pipelineStageId='nope')           1/1/1 mints
+        #   update_knowledge(id, pipelineStageKey='venture:deal')  1/1/1 mints
+        # `None` is the loop-free answer and the repo's own precedent for this
+        # shape: `planned_occurrence.plan_position` treats the same two refusals
+        # as unresolvable and explicitly refuses to call such a row open/upcoming
+        # ("a pre-check must not attempt one either"). `prev_state is None` gates
+        # the transition arm off, and the `-created` mint is guarded by
+        # `_event_in_graph`, so nothing re-mints and the graph stops growing.
+        if stage_id is not None:
+            _key = str(stage_key or CORE_WORK_ITEM_PIPELINE_KEY)
+            if _key not in _PIPELINE_DECLS or declared_slot is None:
+                return None                  # the fold refuses (see above)
         if stage_id is not None or slot is not None:
             return "open"
         if status is None:
