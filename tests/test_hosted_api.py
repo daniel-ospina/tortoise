@@ -14615,6 +14615,17 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # dropping that seam reds this gate instead of passing silently.
         "the team allowances could not be resolved for",
         "unreadable for dimension",
+        # #13084: the ARMING seam's own fail-closed arm — a hand-edited or
+        # truncated ``pricing.json`` amount that `int()` cannot read. It is the
+        # SAME category as "unreadable for dimension" two lines above (the
+        # configured limit VALUE is unreadable, i.e. corrupt state on OUR side),
+        # and the reason it needs its own row is structural, not stylistic: this
+        # guard reads the raise site's LITERAL, and this message is built in
+        # `quota._arm_graph_storage` from an f-string whose text reads
+        # "pricing.json tier … is unreadable (…)" — the word "tier" puts it in
+        # the universe, and no other row matches it. Registered as a CATEGORY
+        # entry, never by rewording the message (the rule #10142/f8970b536 set).
+        "pricing.json tier",
         "has an allowance configured for team",
         "usage has no reading for team",
         # #4051 (this lane): the gate builds the SDK whose graph it counts

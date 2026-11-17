@@ -571,6 +571,98 @@ def test_reader_degrades_to_a_zero_view_for_an_unknown_org(org):
     assert got["graph_storage_measured_at"] is None
 
 
+# ── the reader NAMES why it has no reading (#13102) ───────────────────────
+#
+# The four states used to be ONE zero view. They are decided differently by the
+# allowance gate — a wrong collapse is either a false refusal (every write of a
+# brand-new paid tenant) or a fail-open (a broken meter read as 0 MB).
+
+
+def test_reader_names_ABSENT_for_an_org_with_no_row_yet(org):
+    """No row for the window is an ANSWER: nobody has measured this tenant."""
+    from tortoise import metering
+    got = metering.get_graph_storage_reading("org_never_measured")
+    assert got["measured"] is False
+    assert got["unmeasured_reason"] == "absent"
+
+
+def test_reader_names_READ_ERROR_when_the_store_refuses(org, monkeypatch):
+    """A store that refused the query is NOT an absence — it is our fault."""
+    from datetime import UTC, datetime
+
+    import tortoise.metering as metering_mod
+    from tortoise.metering import MeteringPeriod
+
+    # Pin the WINDOW so this exercises the READ failure rather than the anchor
+    # read that resolves it (that one reports ``period_error``, below).
+    monkeypatch.setattr(
+        metering_mod, "_current_period",
+        lambda *a, **k: MeteringPeriod(start=datetime(2026, 9, 1, tzinfo=UTC),
+                                       end=datetime(2026, 10, 1, tzinfo=UTC)))
+    monkeypatch.setattr(metering_mod, "_reg_sdk",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    got = metering_mod.get_graph_storage_reading(org)
+    assert got["measured"] is False
+    assert got["unmeasured_reason"] == "read_error"
+
+
+def test_reader_names_PERIOD_ERROR_when_the_window_is_unresolvable(
+        org, monkeypatch):
+    """An unresolvable billing window is a DIFFERENT fault from a failed read."""
+    import tortoise.metering as metering_mod
+    monkeypatch.setattr(
+        metering_mod, "_current_period",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no anchor")))
+    got = metering_mod.get_graph_storage_reading(org)
+    assert got["measured"] is False
+    assert got["unmeasured_reason"] == "period_error"
+
+
+def test_reader_names_UNREPORTED_for_a_row_with_no_timestamp(org):
+    """A gauge write that cannot be AGED is not usable as a reading."""
+    from tortoise import metering
+    metering.record_graph_storage_reading(org, total_mb=4.0)  # no measured_at
+    got = metering.get_graph_storage_reading(org)
+    assert got["graph_storage_mb"] == 4.0
+    assert got["measured"] is False
+    assert got["unmeasured_reason"] == "unreported"
+
+
+def test_a_SIBLING_meter_row_is_not_a_graph_storage_reading(org):
+    """The row is SHARED: a write-op MERGE must not read as an unageable gauge.
+
+    ⛔ MEASURED (#13102): this is why "a row exists" is not the discriminator.
+    ``record_write_ops`` MERGEs the very same ``:MeteringRecord``, so a tenant's
+    FIRST ``POST /v1/points`` creates a row carrying no graph-storage figure —
+    and a reader that called that row "unreported" refused the SECOND request
+    with 500 while the tenant sat far under its cap.
+    """
+    from tortoise import metering
+    metering.record_write_ops(org, n=1)
+    got = metering.get_graph_storage_reading(org)
+    assert got["graph_storage_samples"] == 0
+    assert got["measured"] is False
+    assert got["unmeasured_reason"] == "absent"
+
+
+def test_reader_reports_MEASURED_for_a_real_reading(org):
+    """⚠️ The inverse guard: a zero-byte graph MEASURED is a real reading.
+
+    An empty graph's row is a row of literal zeros WITH a timestamp, so a reader
+    that keyed on ``mb == 0`` would call a measured empty graph unmeasured and
+    the gate would refuse it. ``measured_at`` is the discriminator, not the
+    number.
+    """
+    from tortoise import metering
+    metering.record_graph_storage_reading(
+        org, total_mb=0.0, samples=100,
+        measured_at="2026-09-26T00:00:00+00:00")
+    got = metering.get_graph_storage_reading(org)
+    assert got["graph_storage_mb"] == 0.0
+    assert got["measured"] is True
+    assert got["unmeasured_reason"] is None
+
+
 def test_reader_never_raises_when_the_registry_is_broken(org, monkeypatch):
     import tortoise.metering as metering_mod
     from tortoise import metering
@@ -866,12 +958,28 @@ def test_supabase_gauge_roundtrip(supabase_lane):
     metering_mod, fake = supabase_lane
     metering_mod.record_graph_storage_reading(
         "org_s", total_mb=55.0, indices_mb=12.0, samples=100, repeats=2,
-        min_mb=54.0, max_mb=56.0, spread_mb=2.0)
+        min_mb=54.0, max_mb=56.0, spread_mb=2.0,
+        measured_at="2026-09-26T00:00:00+00:00")
     assert [fn for fn, _ in fake.rpc_calls] == ["metering_set_graph_storage"]
     got = metering_mod.get_graph_storage_reading("org_s")
     assert got["graph_storage_mb"] == 55.0
     assert got["graph_storage_indices_mb"] == 12.0
     assert got["graph_storage_spread_mb"] == 2.0
+    assert got["measured"] is True
+    assert got["unmeasured_reason"] is None
+
+
+def test_supabase_reader_names_ABSENT_for_an_org_with_no_row(supabase_lane):
+    """The remote lane must tell "no row" from "a row we cannot age" too.
+
+    ``metering_get_graph_storage`` returns zeros for both, so it reports
+    ``row_present`` separately — without it the Supabase deployment keeps the
+    #13102 deadlock the registry lane just lost.
+    """
+    metering_mod, _fake = supabase_lane
+    got = metering_mod.get_graph_storage_reading("org_never_measured")
+    assert got["measured"] is False
+    assert got["unmeasured_reason"] == "absent"
 
 
 def test_supabase_gauge_overwrites(supabase_lane):

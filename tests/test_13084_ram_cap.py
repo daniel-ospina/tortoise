@@ -311,6 +311,66 @@ def test_the_armed_cap_refuses_only_its_own_WRITE_doors():
 
 
 # ── 3. the meter's honesty: a stale/absent reading is NOT zero ────────────
+#
+# ⛔ BUT "absent" IS TWO THINGS, and #13102 measured the cost of one of them:
+# the reader's zero view carried ``measured_at is None`` for (a) a successful
+# read that found NO row — nobody has measured this tenant yet — and (b) a store
+# that refused the read / an unageable row. Treating (a) as a refusal refused
+# every write of a brand-new paying tenant (a 500 on ``POST /v1/points``), because
+# the gauge's only writer is the DEFAULT-OFF backup sweep. The reader now names
+# WHY (``unmeasured_reason``, the vocabulary ``get_capture_usage`` already
+# publishes) and the gate is DEFAULT-DENY on it: only ``"absent"`` is a fact.
+
+
+def test_a_tenant_with_NO_ledger_ROW_is_served_not_refused(monkeypatch):
+    """The #13102 regression: a fresh paying tenant must be able to write.
+
+    Pre-fix this raises ``QuotaCheckError`` ("has no reading … refusing to fail
+    open"), which the REST/MCP seams surface as a 500 on the tenant's very first
+    point — the deadlock measured in ``hosted-e2e`` and ``test-slow (b)``: the
+    row is written by a scheduled sweep, so refusing the write can never make it
+    appear. #3981's ruling forbids refusing a paying org over our own bookkeeping
+    state.
+    """
+    from tortoise import metering
+
+    monkeypatch.setattr(
+        metering, "get_graph_storage_reading",
+        lambda _org: {"graph_storage_mb": 0.0,
+                      "graph_storage_measured_at": None,
+                      "measured": False,
+                      "unmeasured_reason": "absent"})
+    enforce_allowances(_limits(max_graph_storage_mb=102))  # the pro cap
+    # …and the cost of that is stated where the arming is declared, not hidden:
+    # the cap does not bind until the gauge first reports (under-enforcement).
+    dim = {d.dimension: d for d in DIMENSIONS}["graph_storage"]
+    assert dim.absent_is_zero, (
+        "graph_storage must declare that an absent row is consumed as a fact; "
+        "without it the gate refuses a brand-new paid tenant")
+
+
+@pytest.mark.parametrize("reason", ["unreported", "read_error", "period_error",
+                                    "a_reason_this_gate_has_never_seen"])
+def test_every_OTHER_unmeasured_reason_STILL_refuses(monkeypatch, reason):
+    """The fix must not widen into a fail-open.
+
+    A row that exists but cannot be aged, a store that refused the read and an
+    unresolvable window are FAULTS — and an UNKNOWN reason is default-DENY, so a
+    future reason cannot silently disarm a configured allowance. Pre-fix these
+    already refused; this pins that the absent-row fix did not take them with it.
+    """
+    from tortoise import metering
+
+    monkeypatch.setattr(
+        metering, "get_graph_storage_reading",
+        lambda _org: {"graph_storage_mb": 0.0,
+                      "graph_storage_measured_at": None,
+                      "measured": False,
+                      "unmeasured_reason": reason})
+    assert _graph_storage_mb(ORG) is None
+    with pytest.raises(QuotaCheckError):
+        enforce_allowances(_limits(max_graph_storage_mb=102))
+
 
 
 def test_a_missing_measured_at_is_no_reading_not_zero(monkeypatch):

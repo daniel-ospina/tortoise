@@ -331,10 +331,14 @@ class AllowanceDimension:
     blocked_reason: str | None = None
     resources: frozenset[str] = frozenset({"points", "documents"})
     #: Whether "no ledger row yet" is a real ZERO or NO reading. It differs by
-    #: dimension KIND: a cumulative FLOW for a window that has just begun is
-    #: zero-by-construction (nobody has captured), while a GAUGE's absence means
-    #: the instrument has not reported. Getting this wrong in the flow direction
-    #: is a deadlock: the row is created by the very operation being refused.
+    #: dimension KIND, and getting it wrong in EITHER direction is a defect:
+    #: a cumulative FLOW for a window that has just begun is zero-by-construction
+    #: (nobody has captured), while a GAUGE's absence means nobody has MEASURED.
+    #: Both must be served, for the same reason — the row is created by a
+    #: scheduled writer, never by the operation being refused, so refusing can
+    #: never make the row appear. A GAUGE that declares nothing stays strict
+    #: (refuse), which is what keeps a missing reading a refusal for every
+    #: dimension whose writer is reliably running.
     absent_is_zero: bool = False
     #: Where an ESTIMATED reading may hard-refuse (see :class:`CapBand`).
     cap_band: CapBand = CapBand()
@@ -389,20 +393,31 @@ def _graph_storage_mb(org_id: str) -> MeterReading | None:
     """The org's last graph-storage GAUGE, in MB (#5331 unit 2).
 
     ``get_graph_storage_reading`` never raises: a degraded read is
-    indistinguishable from "never measured" in its return value, and both carry
-    ``graph_storage_measured_at is None``. Both are NO READING here — which is
-    the honest answer for both, because a zero-valued degradation would otherwise
-    compare as 0 MB and pass silently.
+    indistinguishable from "never measured" in its TIMESTAMP, and the gate must
+    not treat them alike. Since #13084 is a CAP INPUT, the reader also publishes
+    ``unmeasured_reason`` and this meter consumes it with DEFAULT-DENY — the same
+    rule ``_extraction_tokens`` applies to its own reader (#13102):
+
+    * ``"absent"`` — the read SUCCEEDED and NO row exists for the window — is
+      the meter's ``ABSENT``, the one state a dimension may consume as a fact
+      rather than refuse (``graph_storage`` declares ``absent_is_zero``).
+    * **every other reason** — ``"unreported"`` (a row with no age), —
+      ``"read_error"``, ``"period_error"``, and any value this gate has never
+      seen — is NO READING and refuses. Folding an unknown reason into
+      "absent" would disarm a configured allowance the day the reader grows a
+      reason.
     """
     from .metering import get_graph_storage_reading
 
     reading = get_graph_storage_reading(org_id)
     measured_at = reading.get("graph_storage_measured_at")
     if not measured_at:
-        # NO AGE = NO READING, on purpose (see ``_stale``): the ledger's zero
-        # view and a degraded read both carry ``None`` here, and a 0 MB figure
-        # would compare as "under the cap" and pass. A GAUGE that has not
-        # reported is refused, never read as an empty graph.
+        # NO AGE = NO READING, unless the reader NAMES the absence itself (the
+        # one state that is an ANSWER rather than a fault — see this function's
+        # docstring). A present row without an age cannot prove freshness, and a
+        # 0 MB figure would compare as "under the cap" and pass silently.
+        if reading.get("unmeasured_reason") == "absent":
+            return ABSENT
         return None
     return MeterReading(
         used=float(reading.get("graph_storage_mb") or 0.0),
@@ -594,6 +609,35 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         # byte, on a tier that still grants a graph. An unset amount is UNARMED:
         # it refuses nothing, and the dimension keeps being metered by its writer.
         zero_means_unarmed=True,
+        # ⛔ "NO ROW YET" IS AN ANSWER, NOT A REFUSAL — and this bit is what
+        # makes arming survivable at all (#13102). The gauge's ONLY production
+        # writer is the backup sweep (``backup_sweep.py`` ->
+        # ``record_graph_storage``), which ``BACKUP_SWEEP_ENABLED`` leaves OFF by
+        # default; the row is keyed by the billing WINDOW, so EVERY paying tenant
+        # loses its reading at each window boundary too. Refusing an absent row
+        # therefore refuses a brand-new paying tenant's first ``POST /v1/points``
+        # — measured, twice: ``hosted-e2e``/``test_05_backup_restore`` and
+        # ``test-slow (b)``'s three ``test_hosted_api.py`` cases, each 500 with
+        # "graph_storage usage has no reading for team … refusing to fail open".
+        # That is a false refusal, and #3981's owner ruling (SETTLED 2026-09-18:
+        # PROCEED AND ALERT, no new user-facing refusal) forbids refusing a paying
+        # org over our own bookkeeping state.
+        #
+        # ⚠️ WHAT IT COSTS, stated rather than discovered later: an absent row is
+        # NOT proof of zero bytes (a gauge cannot promise that), so a tenant whose
+        # sweep has never run is served while its true residency is unknown. The
+        # residual is UNDER-enforcement — the opposite direction from a false
+        # refusal — and it lasts until the gauge first reports. Wiring the meter
+        # so that a reading always exists is #9559 ("land the byte gate, then wire
+        # the meter"); this declaration does not pretend that is done.
+        #
+        # It is why ``_graph_storage_mb`` must distinguish "absent" from every
+        # OTHER reason the reader can report: a row that exists but cannot be
+        # aged, a store that refused the read, and an unresolvable window are
+        # FAULTS and still refuse (``unreported``/``read_error``/``period_error``,
+        # pinned by ``test_a_missing_measured_at_is_no_reading_not_zero`` and
+        # ``test_a_stale_reading_is_refused_rather_than_enforced``).
+        absent_is_zero=True,
         # ⚠️ DISCLOSED COST OF ARMING (follow-up filed from #13084): an armed
         # dimension READS its meter on every gated write (`_reading`), so a
         # paying tenant's points/documents door now performs one extra ledger
@@ -874,12 +918,15 @@ def _reading(dim: AllowanceDimension, org_id: str,
                 f"reading ({type(reading).__name__}) — refusing to enforce "
                 f"{dim.limit_key} from it")
     if reading is ABSENT and dim.absent_is_zero:
-        # The per-dimension FLOW semantics: for a cumulative flow, "no ledger row
-        # for this window" is a real ZERO (nobody has done it yet) — not an
-        # unmeasurable figure. Declared on the dimension, consumed HERE, so a
-        # future flow dimension gets the behaviour from its declaration instead of
-        # from a meter-specific branch (and a GAUGE that declares nothing stays
-        # strict, which is what keeps a missing gauge a refusal).
+        # The per-dimension ABSENCE semantics: "no ledger row for this window" is
+        # a fact, not an unmeasurable figure — and the row is created by a
+        # SCHEDULED writer, never by the operation being refused, so refusing can
+        # never make it appear. Declared on the dimension, consumed HERE, so a
+        # future dimension gets the behaviour from its declaration instead of from
+        # a meter-specific branch (and a GAUGE that declares nothing stays strict,
+        # which is what keeps a missing gauge a refusal). It RETURNS rather than
+        # falling through on purpose: a row that does not exist has no AGE, so the
+        # staleness bound below must not be applied to it.
         return MeterReading(used=0.0, measured_at=None, estimated=False,
                             note="no usage metered in this window")
     if reading is ABSENT:
