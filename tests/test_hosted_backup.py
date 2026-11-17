@@ -14,12 +14,15 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tortoise.hosted_backup import (
     DUMP_FORMAT,
+    _LIST_MANIFEST_MAX_INFLIGHT,
     LockVerificationError,
     MemoryStorage,
     R2Storage,
@@ -1953,6 +1956,127 @@ def test_list_backups_sorted_newest_first():
     listed = list_backups(store, org_id)
     assert len(listed) == 2
     assert listed[0]["created_at"] > listed[1]["created_at"]
+
+
+# ── #13097: the listing is O(backups) round trips, so the GETs must overlap ────
+# The bug these pin: `list_backups` downloaded every manifest SERIALLY, which put
+# `GET /v1/backups` over the 60 s edge deadline for a real org (≈420 manifests
+# under the default retention) and answered 504 — indistinguishable from a
+# storage outage and, worse, from "no backups exist". Each test below pins one
+# half of the contract: they overlap (so the deadline is not met), the pool is
+# bounded (so a big org does not burst R2), and a real failure still raises
+# (so a partial list can never read as a smaller restore set).
+
+
+class _SlowCountingStorage(MemoryStorage):
+    """`MemoryStorage` whose downloads are slow enough to overlap.
+
+    Records the HIGH-WATER MARK of concurrent `download` calls — the property
+    under test — plus an optional single key to fail on.
+    """
+
+    def __init__(self, *, delay: float = 0.05, fail_on: str | None = None) -> None:
+        super().__init__()
+        self.delay = delay
+        self.fail_on = fail_on
+        self._lock = threading.Lock()
+        self._inflight = 0
+        self.max_inflight = 0
+        self.downloads: list[str] = []
+
+    def download(self, key: str) -> bytes:
+        with self._lock:
+            self._inflight += 1
+            self.max_inflight = max(self.max_inflight, self._inflight)
+            self.downloads.append(key)
+        try:
+            time.sleep(self.delay)
+            if self.fail_on is not None and self.fail_on in key:
+                raise PermissionError("AccessDenied")
+            return super().download(key)
+        finally:
+            with self._lock:
+                self._inflight -= 1
+
+
+def _seed_manifests(store: MemoryStorage, org_id: str, count: int) -> list[str]:
+    """Seed `count` per-graph manifests with distinct, increasing timestamps."""
+    base = datetime.now(timezone.utc)  # noqa: UP017
+    ids: list[str] = []
+    for i in range(count):
+        created = base - timedelta(minutes=i)
+        backup_id = f"{org_id}/g_test/{created.strftime('%Y%m%dT%H%M%SZ')}-{i:03d}"
+        store.upload(f"backups/{backup_id}/manifest.json", json.dumps({
+            "backup_id": backup_id,
+            "org_id": org_id,
+            "graph_name": "g_test",
+            "created_at": created.isoformat(),
+            "node_count": i,
+            "edge_count": 0,
+            "sha256": "0" * 64,
+            "format": DUMP_FORMAT,
+        }).encode())
+        ids.append(backup_id)
+    return ids
+
+
+def test_list_backups_fetches_manifests_concurrently():
+    """#13097: the per-manifest GETs overlap instead of costing one trip each."""
+    store = _SlowCountingStorage(delay=0.05)
+    org_id = "team_conc"
+    _seed_manifests(store, org_id, 8)
+
+    started = time.monotonic()
+    listed = list_backups(store, org_id)
+    elapsed = time.monotonic() - started
+
+    assert len(listed) == 8  # completeness is unchanged by the pool
+    assert store.max_inflight > 1  # ... and the GETs actually overlapped
+    # Strictly faster than the serial cost the bug was made of. A generous
+    # bound: the assertion that matters is the overlap above, this one only
+    # refuses a "pool" that serialised anyway.
+    assert elapsed < (8 * store.delay) / 2
+
+
+def test_list_backups_bounds_manifest_concurrency():
+    """#13097: the pool is BOUNDED — a big org must not open one GET per backup."""
+    store = _SlowCountingStorage(delay=0.005)
+    org_id = "team_big"
+    _seed_manifests(store, org_id, 40)
+
+    listed = list_backups(store, org_id)
+
+    assert len(listed) == 40
+    assert 1 < store.max_inflight <= _LIST_MANIFEST_MAX_INFLIGHT
+
+
+def test_list_backups_propagates_a_storage_failure_rather_than_a_partial_list():
+    """#13097: concurrency must not turn an outage into a SHORTER list.
+
+    A partial answer reads as "this org has fewer restore points" (or none) on
+    the one read a restore depends on, so the failure must escape the pool.
+    """
+    store = _SlowCountingStorage(delay=0.005)
+    org_id = "team_outage"
+    ids = _seed_manifests(store, org_id, 5)
+    store.fail_on = ids[2]
+
+    with pytest.raises(PermissionError):
+        list_backups(store, org_id)
+
+
+def test_list_backups_still_skips_an_unreadable_manifest_inside_the_pool():
+    """#13097: the SKIPPED class (corrupt / pruned) stays skipped under concurrency."""
+    store = _SlowCountingStorage(delay=0.005)
+    org_id = "team_corrupt"
+    _seed_manifests(store, org_id, 6)
+    bad_id = f"{org_id}/g_test/19990101T000000Z-bad"
+    store.upload(f"backups/{bad_id}/manifest.json", b"{this is not json")
+
+    listed = list_backups(store, org_id)
+
+    assert len(listed) == 6  # the corrupt one is skipped, the rest are complete
+    assert bad_id not in {m["backup_id"] for m in listed}
 
 
 def test_prune_keep_hourly_day_anchor_semantics(monkeypatch):

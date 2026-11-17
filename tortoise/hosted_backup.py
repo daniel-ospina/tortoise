@@ -57,6 +57,7 @@ import os
 import re
 import secrets
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Protocol  # noqa: UP035
 
@@ -2276,6 +2277,21 @@ def create_backup(
     return manifest
 
 
+# #13097: how many manifest GETs `list_backups` keeps in flight. The listing is
+# O(backups) round trips — ONE `download` per manifest — so serial collection is
+# what pushed `GET /v1/backups` into the 60 s edge deadline (a 504 that a caller
+# cannot tell from "storage down" or "no backups exist"). Measured arithmetic in
+# the issue: ~35 manifests/graph under the default retention, org-wide listing
+# ≈ 420 sequential GETs at 100-150 ms ≈ 42-63 s.
+#
+# ⛔ The bound is deliberately small and FIXED rather than "as many as there are
+# backups": this talks to R2/S3, and an unbounded pool converts a slow listing
+# into a burst that earns throttling — which would fail the same read, later and
+# less legibly. 16 is enough to turn 420 round trips into ~26 waves while staying
+# inside a single client's request budget.
+_LIST_MANIFEST_MAX_INFLIGHT = 16
+
+
 def list_backups(storage: BackupStorage, org_id: str,
                  graph_id: str | None = None) -> list[dict]:
     """Return manifests for an org's backups, newest first.
@@ -2284,23 +2300,54 @@ def list_backups(storage: BackupStorage, org_id: str,
     graph key-segment prefix). When None, lists the whole org pool — both
     legacy flat artifacts and per-graph nested ones (manifest-based listing
     carries graph_name/graph_id, so org-wide consumers keep working).
+
+    #13097: the per-manifest GETs run through a BOUNDED pool. Two properties are
+    load-bearing and must survive any future edit here:
+
+    * **The result is complete or it raises.** A partial list would read as "this
+      org has fewer restore points" — or as none — during the one procedure that
+      depends on it, so a storage failure still propagates rather than being
+      collected as an empty/short answer (see the comment in ``_fetch``).
+    * **Only the unreadable/vanished class is skipped** — a corrupt manifest and a
+      concurrently-pruned object are ordinary states of a live bucket, not an
+      outage, and they are logged (`logger.warning`) exactly as before.
     """
     _validate_org_id(org_id)
     if graph_id is not None:
         _validate_graph_id(graph_id)
     prefix = f"backups/{org_id}/{graph_id}/" if graph_id is not None \
         else f"backups/{org_id}/"
-    out: list[dict] = []
-    for key in storage.list(prefix):
-        if key.endswith("/manifest.json"):
-            try:
-                out.append(json.loads(storage.download(key)))
-            except (json.JSONDecodeError, ValueError, UnicodeDecodeError, KeyError) as e:
-                logger.warning("unreadable/vanished backup manifest %s: %s", key, e)
-            # Storage/network failures (AccessDenied, timeouts) propagate — a
-            # partial outage must not masquerade as "no backups exist" during
-            # disaster recovery. KeyError (concurrently pruned object) is the
-            # same unreadable-manifest class and is skipped.
+    keys = [k for k in storage.list(prefix) if k.endswith("/manifest.json")]
+
+    def _fetch(key: str) -> dict | None:
+        """One manifest, or None when it is the skipped (unreadable) class.
+
+        Storage/network failures (AccessDenied, timeouts) are deliberately NOT
+        caught: a partial outage must not masquerade as "no backups exist"
+        during disaster recovery. KeyError (concurrently pruned object) and the
+        decode errors are the same unreadable-manifest class and are skipped.
+        """
+        try:
+            return json.loads(storage.download(key))
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError, KeyError) as e:
+            logger.warning("unreadable/vanished backup manifest %s: %s", key, e)
+            return None
+
+    if not keys:
+        return []
+    if len(keys) == 1:
+        # One GET: a pool would cost more than the download it wraps.
+        loaded: list[dict | None] = [_fetch(keys[0])]
+    else:
+        workers = min(_LIST_MANIFEST_MAX_INFLIGHT, len(keys))
+        # ⛔ `map` (not `as_completed`): it yields in INPUT order, so which
+        # exception surfaces first — and therefore which error a caller sees — is
+        # identical to the serial loop this replaced. `as_completed` would make
+        # the reported failure depend on network timing.
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="list-backups") as pool:
+            loaded = list(pool.map(_fetch, keys))
+    out = [m for m in loaded if m is not None]
     out.sort(key=lambda m: str(m.get("created_at", "")), reverse=True)
     return out
 
