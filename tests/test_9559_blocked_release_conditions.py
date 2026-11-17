@@ -1952,7 +1952,7 @@ def test_the_body_scan_is_bounded_to_the_named_function():
 
     The slice this replaces ran from the file's FIRST `AS $$` to its LAST `$$`,
     so in a multi-function migration (ordinary here: one file defines 13
-    functions, three others 3–5) the snapshot's own `RAISE WARNING` could be
+    functions, twelve others 3–5) the snapshot's own `RAISE WARNING` could be
     deleted and the assertion would still pass on a neighbour's. Measured
     consequence of the old shape: `code` below matched `RAISE WARNING`.
     """
