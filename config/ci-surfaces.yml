@@ -5199,7 +5199,16 @@ surfaces:
   # shallow clone that cannot resolve `cut_at_commit`, plus the `tortoise_query` digest) —
   # and NOT `test (e)` either (job 133859918292, 3 failed: a `hosted_api.py` cite census in
   # `test_demo_session_read_exclusion_8290.py` plus two `test_extractor_v4_citation_rot.py`
-  # arms) — both are the next paragraph's subject, not this row's.
+  # arms) — both are red for causes outside this row (the digest is the `surface-guard`
+  # paragraph's subject below; the cite census and the citation-rot arms are nobody's row
+  # here, and need their own tracker).
+  # ⛔ AND a SIXTH leg that this row does NOT repair, on the same run: `test (j)` 133859918399
+  # (`1 failed, 4006 passed`) is red on `tests/test_uri_env_mutations_declared.py` because
+  # THIS FILE mutates `TORTOISE_DB_URI` in six undeclared places (66, 75, 77, 86, 89, 91), and
+  # that guard scans the FILES, not this manifest — so registering the file neither causes nor
+  # cures it, and no row here can. It needs a `DELIBERATE_URI_MUTATIONS` entry of its own;
+  # filed as #13158. Named so the next lane does not read this leg as another symptom of the
+  # missing row.
   # Reproduced locally too: `integrity()` over this manifest is `[]`, and over the same
   # manifest with this file's rows removed from BOTH lists (the state `main` was in) it
   # returns `['test_13034_currency_rule_reads_position.py']`. ⛔ Removing only the `core`
