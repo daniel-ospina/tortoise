@@ -22598,6 +22598,28 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_the_cypher_census_tool_and_doc_select_the_census_suite():
+    # #13098: `tests/test_13098_cypher_inventory.py` is `core`-registered, and its pins
+    # compare `tools/cypher_inventory.py`'s own count against the counts PINNED IN
+    # `docs/architecture/CYPHER-INVENTORY.md` — so both the tool and the doc are subjects
+    # of the suite. Without the CORE_ALSO entries this was the #3261/#6388 silent-drop
+    # class: `tools/` is in `NON_PYTHON_PREFIXES`, so a tool-only diff was filtered out
+    # BEFORE the `core` fallback and took the docs-only early return, and the harness's
+    # exit-code contract was graded by nothing.
+    #
+    # Mutation check: removing the three CORE_ALSO entries empties `surfaces` for all
+    # three paths and drops the suite from `test_files` — measured at the reviewed head.
+    for subject in (
+        "tools/cypher_inventory.py",
+        "tools/cypher_diff_harness.py",
+        "docs/architecture/CYPHER-INVENTORY.md",
+    ):
+        r = _sel([subject])
+        assert "core" in r["surfaces"], (subject, r)
+        assert "test_13098_cypher_inventory.py" in r["test_files"], (subject, r)
+        assert r["full"] is False, (subject, r)
+
+
 def _pin_reference_scan(lines: list[str], root: Path) -> tuple[int, list[str]]:
     r"""Resolve every `Pinned by tests/….py::name` citation in `lines`.
 
