@@ -420,6 +420,82 @@ def test_the_cli_threads_the_journal_leg_it_measured(monkeypatch, tmp_path):
     assert rc == EXIT_DIVERGENT
 
 
+def test_the_cli_refuses_a_journal_that_cannot_have_fed_the_record(
+        monkeypatch, tmp_path, capsys):
+    """End-to-end for the `#13345` P2 contradiction, at the verb's own wiring.
+
+    The reviewer's observation was made by driving the CLI: a REAL empty
+    `events.jsonl` (an existing file, enumerated `0`) over a record holding rows
+    used to print the unqualified `✓ record == cache for o/g` and exit **0** —
+    `unprojected 0`, `clean`, and the dense leg armed on it. Only the record-side
+    reading is stubbed here (this suite is DB-free); the journal leg is a real
+    file, so the `0` the coverage reader is handed is genuinely counted.
+    """
+    import sys
+    import types as _types
+
+    import tortoise.cache_projection as cache_projection
+    import tortoise.projection as projection
+    import tortoise.record_projection as record_projection
+    import tortoise.record_reconcile as record_reconcile
+    import tortoise.record_writer as record_writer
+    import tortoise.residency as residency
+    from tortoise.__main__ import _cmd_record_reconcile
+
+    journal = tmp_path / "events.jsonl"
+    journal.write_text("")                       # EXISTS, enumerates 0 records
+
+    seen: dict = {}
+    real_compose = record_reconcile.reconcile_record_and_cache
+
+    def spy_compose(record, cache, **kwargs):
+        seen.update(kwargs)
+        return real_compose(record, cache, **kwargs)
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "psycopg2",
+                        _types.SimpleNamespace(connect=lambda *a, **k: _Conn()))
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://localhost/record")
+    monkeypatch.setattr(cache_projection, "read_record_view",
+                        lambda conn, *, org_id, graph_id: {"k": {"v": 1}})
+    monkeypatch.setattr(record_reconcile, "record_key_map",
+                        lambda view: dict(view))
+    monkeypatch.setattr(record_reconcile, "scan_cache_view",
+                        lambda g, *, timeout_ms: _types.SimpleNamespace(
+                            view={"k": {"v": 1}}, placed={}))
+    monkeypatch.setattr(record_reconcile, "reconcile_record_and_cache",
+                        spy_compose)
+    monkeypatch.setattr(residency, "read_declaration",
+                        lambda g: ResidencyDeclaration(source=None))
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        _types.SimpleNamespace(
+                            from_uri=lambda uri, graph_name=None:
+                            _types.SimpleNamespace(g=object(), close=lambda: None)))
+    # the record side: five positions held. With the journal enumerating none,
+    # the REAL `JournalCoverage` refuses to answer (this stub only supplies the
+    # record half the live read would return).
+    monkeypatch.setattr(record_projection, "journal_coverage",
+                        lambda conn, *, org_id, graph_id, enumerated=None,
+                        want_gap=True: _coverage(5, 5, 1, 0, None, enumerated))
+
+    args = _types.SimpleNamespace(
+        record_dsn=None, db="redis://unused", cache_graph="org_o",
+        org="o", graph="g", journal=str(journal), timeout_ms=None, json=False)
+    rc = _cmd_record_reconcile(args)
+
+    assert seen["journal"].enumerated == 0, (
+        "the journal leg was not measured from the real empty file")
+    assert seen["journal"].unprojected is None
+    assert rc == EXIT_UNAVAILABLE, (
+        "a journal that cannot be the one behind the record produced a verdict "
+        "— exit 0 here is the false PASS the leg exists to refuse")
+    assert "✓ record == cache" not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("shape", ["missing", "directory", "empty"])
 def test_the_cli_refuses_a_journal_it_could_not_count(
         shape, monkeypatch, tmp_path):
