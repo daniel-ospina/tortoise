@@ -6543,10 +6543,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # insertions moved `hosted_api.py` by +102 at BOTH ends, and the three offsets above
         # still hold EXACTLY at the new START, so the START is confirmed by structure rather
         # than assumed from one bumped number:
-        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:14708`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14737` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:14747` (inside it), and `:14785` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:14786`.
+        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:14896`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14925` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:14935` (inside it), and `:14973` is
+        # the blank line immediately before `return OrgInfoResponse(` at `:14974`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14896", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
@@ -6680,11 +6680,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:14747` (both needles are the file's only occurrences —
-    # `:14737` and `:14747` — so a later end cannot change the sum). Ends below `:14747` fail
+    # true for any end at or beyond `:14935` (both needles are the file's only occurrences —
+    # `:14925` and `:14935` — so a later end cannot change the sum). Ends below `:14935` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:14708`-`:14746` gives a non-empty window that lacks the second needle, and an
-    # end below `:14708` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:14896`-`:14934` gives a non-empty window that lacks the second needle, and an
+    # end below `:14896` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
@@ -6696,7 +6696,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
         assert sum(_needle in _l for _l in _span) == 1, (
-            f"04-plan.md I7 says `:14708-14785` publishes `nodes_used` / `max_nodes`, but "
+            f"04-plan.md I7 says `:14896-14973` publishes `nodes_used` / `max_nodes`, but "
             f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
             "range has moved, so re-derive it (start AND end) rather than bumping one end")
     # …and the END by structure, because membership inside a window cannot see it move.
