@@ -353,6 +353,7 @@ def _refuse_a_foreign_graph(graph, graph_name: str) -> None:
 def seed_graph(graph_uri: str, graph_name: str) -> dict[str, Any]:
     """Seed the corpus into a real FalkorDB graph. Returns the lane it used."""
     from falkordb import FalkorDB  # local import: a missing driver must read as 2
+
     from tortoise.projection import _bounded_server_socket_kwargs
 
     # ⛔ BOUNDED (#3065/#8118): ``falkordb`` defaults ``socket_timeout=None`` and
@@ -534,6 +535,7 @@ def bootstrap_record(dsn: str) -> int:
 # --------------------------------------------------------------------------- #
 def run_cypher(graph_uri: str, graph_name: str, cypher: str, params: dict) -> tuple[list[tuple], list[str]]:
     from falkordb import FalkorDB
+
     from tortoise.projection import _bounded_server_socket_kwargs
 
     # ⛔ BOUNDED (#3065/#8118) — see `seed_graph`'s note: an unset
@@ -978,6 +980,7 @@ def bench(graph_uri: str, graph_name: str, dsn: str, candidate: Candidate,
     import time
 
     from falkordb import FalkorDB
+
     from tortoise.projection import _bounded_server_socket_kwargs
 
     # ⛔ BOUNDED (#3065/#8118) — see `seed_graph`'s note.
