@@ -392,8 +392,21 @@ halves:
    that only counts its own diff) is a snapshot wearing a census's name.
 
 **Where these numbers were last cut:** the PINS by `main`'s **`05fe46e94e`**, re-derived at
-`origin/main` **`b8f56fdec4`** — `sites` 1308→1311, `files` 98→99, `shape_plain` 857→859,
-`ast_door_calls` 1567→1569, `files_scanned` 297 unchanged.
+`origin/main` **`b8f56fdec4`**. ⚠️ Both columns below are the CENSUS's own measurements at those two
+commits, not the marker values — the markers `main` carried into the re-cut were themselves stale,
+which is why the two sets differ:
+
+| what | measured at `534f3e1bee` (parent of the re-cut) | measured at `b8f56fdec4` |
+|---|---|---|
+| `sites` | 1309 (its marker said **1308**) | 1311 |
+| `files` | 98 | 99 |
+| `shape_plain` | 857 (its marker said **856**) | 859 |
+| `ast_door_calls` | 1567 (its marker said **1565**) | 1569 |
+| `files_scanned` | 297 | 297 (unchanged) |
+
+`tools/cypher_inventory.py --check` was **RC=1** at `534f3e1bee` on six counts — so `05fe46e94e`
+corrected six, not three, and the three above are the ones whose marker had drifted. Re-derived by
+running the tool at both commits; nothing here is arithmetic on the marker values.
 
 ⛔ **Appendix A, however, was NOT re-cut by that commit, and this is the defect that keeps
 recurring here:** the pins are 25 SCALARS, so an insertion inside a file that already carries
