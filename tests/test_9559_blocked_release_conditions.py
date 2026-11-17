@@ -1642,3 +1642,68 @@ def test_the_restore_verb_still_exists():
 
 
 
+
+
+# --------------------------------------------------------------------------- #
+# The fail-CLOSED arm of the refresh has no runtime gate, so it gets a
+# source-level one — scoped to the function BODY, never to the file.
+# --------------------------------------------------------------------------- #
+def test_the_refresh_keeps_its_fail_closed_arm():
+    """The empty-audit guard and its warning are asserted at SOURCE level, and the
+    limitation is stated rather than papered over.
+
+    ⛔ WHAT THIS DOES NOT PROVE. The refresh's `RAISE WARNING` is delivered as a
+    postgres NOTICE, and `@electric-sql/pglite` 0.5.4 exposes **no notice channel**
+    — `db.on` is not a function, and `exec`/`query` return only
+    `{rows, fields, affectedRows}` (measured). So the harness can assert that the
+    rows are left UNTOUCHED (`supabase/tests/pglite/validate.mjs`) but not that a
+    human would be TOLD, and reviewer round 9 measured the consequence: deleting
+    the whole `RAISE WARNING` arm left the entire suite green. The warning is the
+    only in-database signal that the gauge is refusing everyone because the audit
+    saw nobody, so its silent loss is worth a gate even an imperfect one.
+
+    ⛔ THE SCAN IS THE FUNCTION BODY WITH `--` COMMENTS STRIPPED, and that scoping
+    is the point. The migration's HEADER explains both the guard and the warning
+    in prose, so a file-wide substring search is satisfied by the comment that
+    describes them — the "documentation satisfied the gate" defect this file's
+    dispatch test was explicitly rewritten to kill. What this asserts is that the
+    two constructs exist in the EXECUTED text.
+
+    Mutation this REDs: delete the `IF jsonb_array_length(v_audit->'orgs') > 0`
+    guard (the zeroing then fires over an empty audit — a fleet-wide fail-open),
+    or delete the `RAISE WARNING` arm (the operator signal vanishes silently).
+    """
+    candidates = sorted(
+        (_REPO / "supabase" / "migrations").glob("*_postgres_residency_zero_*.sql"))
+    assert candidates, (
+        "no forward migration replaces postgres_residency_snapshot() any more — "
+        "the erased-org fix (an org the audit stops reporting must not be frozen "
+        "stale) has no home; restore it as an APPEND-ONLY migration (#1095)")
+    sql = candidates[-1].read_text(encoding="utf-8")
+
+    # The executed text: from the function's `AS $$` to its closing `$$;`, minus
+    # `--` comments (the header's prose must not satisfy this).
+    marker = "AS $$"
+    assert sql.count(marker) >= 1, (
+        f"{candidates[-1].name} declares no `AS $$` body — the scan below cannot "
+        "reach the executed statements")
+    body = sql[sql.index(marker) + len(marker):]
+    body = body[:body.rindex("$$")]
+    code = "\n".join(line.split("--", 1)[0] for line in body.splitlines())
+
+    guard = re.compile(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0\s+THEN")
+    assert guard.search(code), (
+        "the zeroing UPDATE is no longer GUARDED on the audit having reported "
+        "somebody. `postgres_per_org_bytes()` returns `orgs: '[]'` when "
+        "`journal_event` is empty, and an unguarded `NOT EXISTS` is then TRUE for "
+        "EVERY residency row — one refresh re-stamps the whole table to 0 bytes "
+        "with a fresh instant, every org passes every cap, and the reader's "
+        "`unreported` refusal can never fire. Re-add the guard")
+    assert re.search(r"RAISE\s+WARNING", code), (
+        "the empty-audit branch no longer RAISE WARNINGs — the rows are still left "
+        "untouched, so nothing data-visible changes, and the only operator signal "
+        "that the gauge is refusing everyone would be gone silently")
+    assert re.search(r"RETURN\s+QUERY\s+SELECT\s+v_written\s*\+\s*v_zeroed", code), (
+        "`orgs_written` no longer counts the zeroed rows — the refresh would report "
+        "fewer writes than it made, which is the figure the operator reads")

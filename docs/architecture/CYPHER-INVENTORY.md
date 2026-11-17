@@ -424,13 +424,17 @@ all 25 pins are unchanged. That row is `main`'s OWN staleness, inherited by this
 here: `#13317` regenerated the appendix at `4cbff33e49`, and **`#13265` (`34bd33d22a`) then moved that
 statement 115 lines down** — so `--check` passes on `main` (the pins are 25 SCALARS, and this row is
 not one of them) while the appendix's `file:line` is stale. That is the exact `file:line`-versus-SCALAR
-gap this section describes, caught by regenerating rather than by trusting the pins. (An earlier
-revision of this sentence said "31 of 1,313 rows": `1,313` is the table's LINE count, not its row
-count, and `31` reproduces at no adjacent commit — the row difference between the commits around
-`#13115` is 373, and around each of the three after it, 408 / 376 / 376. A later revision said "137 of
-1,311 rows", measured against the pre-rebase `origin/main`; that base then regenerated its own
-appendix in `#13317`, which is why the figure at THIS base is one row. A count taken off the wrong
-unit, or off a base that has since moved, is the defect class this paragraph exists to name.)
+gap this section describes, caught by regenerating rather than by trusting the pins. (Two earlier
+revisions of this sentence are RETIRED rather than reconciled, because each named a unit, a metric or
+a base it did not measure. It said "31 of 1,313 rows": `1,313` is the table's LINE count — it is
+**1,311 rows over 1,313 lines**, of which **1,310** are distinct, the duplicate being the two
+unresolved door calls on `tortoise/session_source_migration.py:235` — and `31` was attributed to no
+metric. It then said "137 of 1,311 rows", measured against the pre-rebase `origin/main`, which
+`#13317` has since regenerated. Neither is restated: at THIS base the number is **one row**, and that
+is the only count in this paragraph a reader can reproduce from the tree
+(`git show 34bd33d22a:docs/architecture/CYPHER-INVENTORY.md` versus a fresh `--markdown`). A count
+taken off the wrong unit, off a base that has since moved, or off an unnamed metric is the defect
+class this paragraph exists to name.)
 
 The paragraph below is `main`'s cut, kept as the record of it.
 
