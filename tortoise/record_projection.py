@@ -5887,9 +5887,14 @@ def mutations_for(
     DROPPED, not resolved to the column), and what keeps it out of the `props`
     tail. Merging these values into the payload instead would send them through
     that same refusal arm and the feature would write nothing at all. The two
-    arms the split DOES apply with identical semantics are re-checked on the
-    derived path below (`GENERATED_COLUMNS`, `_BOOKKEEPING_COLUMNS`), and the
-    merge is gated on `column in columns[node.table]` the same way. It is a
+    column guards the split applies are re-checked on the derived path below, so
+    a derived name cannot reach a `GENERATED` or a bookkeeping column; their
+    OUTCOMES are not the split's in both cases — for `GENERATED_COLUMNS` it is
+    the same (`continue` on both arms), for `_BOOKKEEPING_COLUMNS` it is
+    STRICTER (the split preserves the value as data in the `props` tail, this
+    path drops it, because `derived`'s only producer is the record itself and it
+    never supplies a bookkeeping name). The merge is gated on `column in
+    columns[node.table]` the same way. It is a
     PARAMETER
     and not something this module computes, for two reasons that are both
     structural rather than stylistic:

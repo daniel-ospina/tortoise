@@ -1709,18 +1709,24 @@ def _release_pooled_connections() -> None:
 #:
 #:   * `ObjectRegistered` / `SubjectAdded` — `encode_for_row(name)`
 #:     (`projection/entities.py::_upsert_object`, `::_upsert_subject`, #7845);
-#:   * `EventRecorded` — `" ".join([subject, eventKind, object])`
-#:     (`projection/entities.py::_upsert_event`);
-#:   * `DocumentCreated` — `" ".join([title, content])`
+#:   * `EventRecorded` — `" ".join(filter(None, [subject, eventKind, object]))`
+#:     (`projection/entities.py::_upsert_event` — the `filter(None, …)` is part
+#:     of the expression, not decoration: a FALSY part is dropped and the rest
+#:     still composes);
+#:   * `DocumentCreated` — `" ".join(filter(None, [title, content]))`
 #:     (`projection/entities.py::_upsert_document`, which computes it
 #:     UNCONDITIONALLY on the legacy path).
 #:
 #: ⚠️ `SourceCreated` IS DELIBERATELY ABSENT, and the reason is measured rather
-#: than assumed: the graph holds **0** `:Source` embeddings (#13220, 2026-11-17)
-#: because `_upsert_source` computes none. A Document IS a Source (`D10`) and lives
-#: in the same `public.source` table under `document_kind IS NOT NULL`; deriving a
-#: vector for a plain `:Source` row would make the record's dense leg return
-#: sources the graph leg never had — the divergence in the OTHER direction.
+#: than assumed. A Document IS a `:Source` (`D10`) and DOES carry `s.embedding`
+#: — `_upsert_document` writes it through `set_embedding_clause("s")` on the
+#: very same `MERGE (s:Source {url:$id})` node — so the measured figure is
+#: scoped to the population it was actually taken over: the graph holds **0**
+#: `:Source` embeddings on NON-DOCUMENT rows (`document_kind IS NULL`), because
+#: `_upsert_source` computes none at all. Deriving a vector for a plain
+#: `:Source` row would make the record's dense leg return sources the graph leg
+#: never had — the divergence in the OTHER direction; a document's vector is
+#: exactly what `DocumentCreated` below derives, for the same reason.
 _RECORD_EMBEDDING_TEXT: dict[str, tuple[str, ...]] = {
     "ObjectRegistered": ("name",),
     "SubjectAdded": ("name",),
@@ -1838,6 +1844,15 @@ def derived_embedding_columns(
     and "no vector" is a state the record can hold (the column is nullable by
     construction). The divergence is bounded and stated rather than papered over
     — the same treatment the width arm above gets.
+
+    ⛔ AND THE FALSY TEST IS THE GRAPH'S OWN (`filter(None, …)`), NOT
+    `is None or == ""` — a DIFFERENT question from the non-string arm above, and
+    the one an earlier cut got wrong. A falsy part of ANY type — `None`, `""`,
+    `0`, `False`, `[]` — never reaches the graph's join: `filter(None, …)` drops
+    it and the rest of the text still composes, so the node earns a vector.
+    Testing identity instead refused it and left the record's row NULL where the
+    node carried one — the #5004 divergence class this table exists to prevent.
+    A TRUTHY non-string is the arm above: the graph raises, the record refuses.
     """
     record_type = record.get("type")
     keys = (_RECORD_EMBEDDING_TEXT.get(record_type)
@@ -1864,12 +1879,17 @@ def derived_embedding_columns(
     parts: list[str] = []
     for key in keys:
         value = payload.get(key)
-        if value is None or value == "":
+        # ⛔ THE GRAPH'S OWN PREDICATE (`filter(None, …)`): a FALSY part is
+        # dropped and composition continues, whatever its type. `is None or
+        # == ""` was narrower than that and refused a falsy non-string
+        # (`0`, `False`, `[]`) the graph happily joins past — a vector on the
+        # node and none in the record, for one event.
+        if not value:
             continue
         if not isinstance(value, str):
             return _DerivedEmbedding(
                 skipped=f"{key} is {type(value).__name__}, which the graph's "
-                        "text composition refuses")
+                        "text composition cannot join (the fold raises there)")
         parts.append(value)
     text = " ".join(parts)
     if not text.strip():

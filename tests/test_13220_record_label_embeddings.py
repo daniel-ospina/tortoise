@@ -273,6 +273,28 @@ def test_a_non_string_part_derives_nothing(encoder):
     assert encoder.calls == []
 
 
+def test_a_FALSY_non_string_part_is_DROPPED_like_the_graph_drops_it(encoder):
+    """`filter(None, …)` is the graph's predicate, so `0` is skipped, not refused.
+
+    Pinned because the narrower `is None or value == ""` test REFUSED every
+    non-string, and the graph does not: `projection/entities.py::_upsert_event`
+    composes `" ".join(filter(None, [subject, eventKind, object]))`, so a falsy
+    `subject=0` is dropped and `"met C"` still earns a vector on the node. Under
+    the refused form the node carries `e.embedding` while the record's
+    `event.embedding` stayed NULL — the #5004 divergence class this table exists
+    to prevent, in the one direction a `test_a_non_string_part…` (a TRUTHY list)
+    could not see.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "EventRecorded", "eventId": "e1", "subject": 0,
+        "eventKind": "met", "object": "C",
+    })
+    assert encoder.text == "met C", (
+        "a falsy part must not be joined into the text — the graph's "
+        "filter(None, …) drops it")
+    assert set(out.columns) == {"embedding"}
+
+
 def test_an_embedder_that_answers_nothing_derives_nothing(monkeypatch):
     """The #4280 shape — an uninstalled embedder is `None`, never a junk vector."""
     import tortoise.embeddings as embeddings
