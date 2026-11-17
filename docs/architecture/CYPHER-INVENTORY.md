@@ -391,11 +391,20 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where these numbers were last cut:** `origin/main` **`6c1a01df87`** — `sites` 1308→1309, `plain`
+**Where these numbers were last cut:** this branch's merge base `origin/main` **`534f3e1bee`** —
+`sites` 1308→1309, `plain`
 856→857 (read 575→576; the 281 write half is unchanged), `candidates` 575→576,
 `non_cypher_door_calls` 257→258, `ast_door_calls` 1565→1567, the `rg` reconciliation in §1
 re-measured on this tree, and Appendix A regenerated with `--markdown`. `files_scanned` (297) and
 `files_with_sites` (98) did NOT move: the new site arrived in a file that already carried one.
+
+⚠️ **Two heads are named above on purpose, and neither is the other's stand-in.** The pin
+TRANSITION (`1308`→`1309`) was first measured at `6c1a01df87`; the tree then moved twice more
+(`d4d07aa2d1`, `534f3e1bee`) before the final rebase, and those commits touched six `tortoise/`
+modules WITHOUT moving any pin count. The **appendix** is the derived artifact and was therefore
+regenerated LAST, at `534f3e1bee` — that ordering is the whole point of step 1 above, and getting
+it wrong is what made an earlier cut of this branch ship 644 false `file:line` rows behind a green
+`--check` (the pins are 25 scalars and read nothing in the appendix).
 
 ⛔ **The cut this one replaces is why the paragraph exists again one commit later.** `#13133` re-cut
 these pins to `1306` while it landed the four sites that make the tree measure `1308`: it INCREMENTED
@@ -404,7 +413,7 @@ the pin it inherited (`1302` + its own four) instead of re-deriving from the mer
 measured on `7c1df6e7d6` — stayed absorbed only on paper. Measured, not inferred: `--json` at
 `7c1df6e7d6` reports 1304 sites with 0 in `tortoise/planned_occurrence.py`; at `97fd713ffb` it reports
 1308 with that one file carrying exactly 4, and `tortoise/projection/entities.py` reads 54 at BOTH.
-The numbers above are re-derived from the merged tree at this head (`6c1a01df87`); the ONE site this
+The numbers above are re-derived from the merged tree at this head (`534f3e1bee`); the ONE site this
 cut absorbs is `tortoise/hosted_api.py`'s `_org_graph_names` (`#13218`) — a file that already carried
 sites, which is why `files_with_sites` did not move.
 

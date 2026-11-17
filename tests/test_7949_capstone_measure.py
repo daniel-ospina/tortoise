@@ -6705,7 +6705,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     _i7_end_ok = _org_info[15257 - 1].strip() == "" and bool(
         _org_info[15257].lstrip().startswith("return OrgInfoResponse("))
     assert _i7_end_ok, (
-        "04-plan.md I7's range end (`:15245`) is no longer the blank line before "
+        "04-plan.md I7's range end (`:15257`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
 
