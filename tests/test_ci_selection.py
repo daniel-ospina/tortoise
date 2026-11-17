@@ -10234,11 +10234,15 @@ ROWED_BY_THIS_FOLD = (
     "test_rail_detach.py",
     # #13110 (PR #13116) — the fold that registered `goalState` on both public doors.
     # `test_13110_goalstate_doors.py` is a file this fold ADDED; the second is `main`'s
-    # own UNREGISTERED file, which this fold's `sdk` row is the first to put in a
-    # `fast_pool()` surface. Either way the ENTRY RULE applies, and neither row existed
-    # until the round-5 review reported them (the pin above could not see them, because
-    # nothing listed them here — which is the reason both halves of this fix ship
-    # together).
+    # own file, which this fold's `sdk` row is the first to put in the `sdk` surface (a
+    # `sdk`-only diff resolves that NAMED surface, so `main`'s `api`+`core` rows from
+    # #13144 leave an `sdk.py` change running it in no leg). Either way the ENTRY RULE
+    # applies, and neither row existed until the round-5 review reported them (the pin
+    # above could not see them, because nothing listed them here — which is the reason
+    # both halves of this fix ship together).
+    # ⛔ The `durations:` row for the second file now comes from `main` (#13144): the
+    # rebase onto it made this fold's own copy a DUPLICATE mapping key, which
+    # `--integrity` reds rather than silently keeping the last value.
     "test_13110_goalstate_doors.py",
     "test_13034_currency_rule_reads_position.py",
 )
@@ -10279,6 +10283,13 @@ def test_the_entry_rule_bites_on_the_two_rows_this_fold_registered():
     is the half of this defect the rows alone do not fix (measured: with the rows added
     and the set untouched, the entry-rule pin stayed green over any future file nobody
     listed).
+
+    ⛔ Only ONE of the two `durations:` rows is this fold's: `test_13034`'s row landed on
+    `main` at #13144 while this branch was open, so the rebase dropped this fold's
+    duplicate (two keys for one file is a red — a YAML loader keeps the LAST, silently
+    discarding the first). This pin is unaffected: it asks whether a row EXISTS and
+    whether dropping exactly one names exactly that file, and both hold against main's
+    row.
     """
     from tools.ci_selection import load_manifest
     real = load_manifest()["durations"]
