@@ -92,13 +92,16 @@ def _mutations(events, pid: str) -> list[dict]:
 
 # ── Acceptance 1: an unrecognised status is refused, and writes nothing ───
 
-@pytest.mark.parametrize("bad", ["not-a-status-word", "", "deprecated", None])
+@pytest.mark.parametrize("bad", ["not-a-status-word", ""])
 def test_unrecognised_status_is_refused_and_writes_nothing(env, bad):
-    """``''`` and the legacy ``'deprecated'`` are not vocabulary values.
+    """A word no door stores is refused BY THE VOCABULARY DOOR, and writes nothing.
 
-    ``deprecated`` is deliberately absent from ``POINT_STATUS_VALUES`` (only
-    legacy graphs carry it), so the generic surface must refuse it exactly as
-    it refuses arbitrary text.
+    ⛔ #11824 S0 MOVED TWO VALUES OUT OF THIS PARAMETRIZATION, and the reason is
+    the whole change: ``deprecated`` is now a DECLARED word (it was *"only legacy
+    graphs carry it"* — the model that made an ending unsayable), and ``None``
+    is refused on a Point by the SHAPE arm, not by the vocabulary. Both are
+    pinned by their own tests below, so neither the acceptance nor the refusal
+    is left unpinned.
     """
     sdk, events = env
     pid = _multilabel_point(sdk)
@@ -106,7 +109,9 @@ def test_unrecognised_status_is_refused_and_writes_nothing(env, bad):
         "the fixture must build the multi-label shape or this test is vacuous"
     before = _mutations(events, pid)
 
-    with pytest.raises(ValueError, match="Invalid status"):
+    # #11824 S0: the message is the ONE door's three-part refusal. It names the
+    # word it refused and the vocabulary — the invariant here is unchanged.
+    with pytest.raises(ValueError, match="was refused"):
         sdk.update_knowledge(pid, status=bad)
 
     assert _status(sdk, pid) == "draft", (
@@ -114,6 +119,59 @@ def test_unrecognised_status_is_refused_and_writes_nothing(env, bad):
         "write")
     assert _mutations(events, pid) == before, \
         "a refused status must not be journaled"
+
+
+def test_deprecated_is_now_a_DECLARED_word_that_lands(env):
+    """⛔ THE REVERSAL (#11824 S0): ``deprecated`` used to be refused here.
+
+    This test's parametrization used to carry ``deprecated`` as an UNRECOGNISED
+    value, on the reasoning that only legacy graphs hold it. S0 makes it the
+    canonical *"ended, and nothing replaced it"* word — the verb table's
+    retire/withdraw/retract/reject/abandon/drop all land on it — so a claim that
+    ended with no successor must be able to SAY so. ``draft -> deprecated`` is a
+    declared transition (§5), so the write lands.
+
+    Kept as its own test rather than deleting the case: the reversal is a
+    behaviour change to this issue's own surface and must not be silent.
+    """
+    sdk, events = env
+    pid = _multilabel_point(sdk)
+    sdk.update_knowledge(pid, status="deprecated")
+    assert _status(sdk, pid) == "deprecated"
+    assert [r["op"] for r in _mutations(events, pid)] == ["restatus"], (
+        "the newly-declared word must be journaled like any other")
+
+
+def test_a_NONE_status_is_refused_on_a_POINT_though_it_DELETES_on_an_Object(env):
+    """``None`` is a property-DELETE on an Object/Subject and a SHAPE refusal here.
+
+    #13143 review finding 1 made ``status=None`` the documented delete on the
+    non-Point doors (a legal write that had become a refusal). A Point's status
+    is the lifecycle carrier the fold reads, so the Point arm keeps refusing the
+    SHAPE — and that asymmetry is pinned on both sides, in one place, so neither
+    half can be read as the rule for the other.
+    """
+    sdk, events = env
+    pid = _multilabel_point(sdk)
+    obj = sdk.create_object("Status None Widget", kind="core:entity")["id"]
+    before = _mutations(events, pid)
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_knowledge(pid, status=None)
+    assert _status(sdk, pid) == "draft", "the refused shape must write nothing"
+    assert _mutations(events, pid) == before
+
+    # …and the other half: on an Object the same argument DELETES the property.
+    sdk.create_object("placeholder", kind="core:entity")
+    sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$id}) SET n.status='live'", params={"id": obj})
+    sdk.update_knowledge(obj, status=None)
+    got = sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$id}) RETURN n.status", params={"id": obj}
+    ).result_set[0][0]
+    assert got is None, (
+        "`status=None` is the declared property DELETE on a non-Point door: "
+        + repr(got))
 
 
 # ── Acceptance 2: the write is journaled and survives a rebuild ───────────
@@ -309,29 +367,48 @@ def test_vocabulary_values_are_accepted_and_journaled(env, good):
 
 @pytest.mark.parametrize("word", ["outdated", "archived"])
 def test_an_undeclared_transition_is_refused_as_a_TRANSITION(env, word):
-    """#9649: a vocabulary word the lifecycle does not allow from ``draft``.
+    """⛔ #11824 S0 RESHAPED THIS ARM: neither word is "a legal word with an
+    undeclared transition" any more, so the two halves are pinned by what each
+    now IS rather than by one shared message.
 
-    The refusal must be about the TRANSITION — the word IS legal Point
-    vocabulary, and ONTOLOGY §5 declares neither ``draft -> outdated`` nor
-    ``draft -> archived`` (``archived`` is *"reserved — no v1 write path"*;
-    ``outdated`` is written only by ``invalidate_point``/``supersede_point``).
-    Refusing it as a bad WORD would be a regression of this issue's defect 1.
+    * ``outdated`` is REFUSED AS A WORD — it names an ending without saying
+      whether anything replaced it, so the vocabulary door answers first and
+      names the successor route. Refusing it as arbitrary text would still be
+      this issue's defect 1; refusing it as AMBIGUOUS is the S0 rule.
+    * ``archived`` is a DECLARED SYNONYM of ``deprecated``, and
+      ``draft -> deprecated`` IS declared, so it LANDS (stored canonically,
+      silently). It is no longer *"reserved — no v1 write path"*.
+
+    What the test keeps from its original claim: the door distinguishes a WORD
+    problem from a TRANSITION problem, and a refusal writes and journals nothing.
     """
     sdk, events = env
     pid = _multilabel_point(sdk)
     before = _mutations(events, pid)
 
-    with pytest.raises(ValueError) as exc:
-        sdk.update_knowledge(pid, status=word)
-    text = str(exc.value)
-    assert "transition" in text.lower(), (
-        f"the refusal must be about the transition, not the vocabulary: {text!r}")
-    assert "Invalid status" not in text, (
-        f"{word!r} IS Point vocabulary — refusing it as a bad word would be a "
-        f"regression of #3311's fix: {text!r}")
-    assert _status(sdk, pid) == "draft"
-    assert _mutations(events, pid) == before, (
-        "a refused transition must not be journaled")
+    if word == "outdated":
+        with pytest.raises(ValueError) as exc:
+            sdk.update_knowledge(pid, status=word)
+        text = str(exc.value)
+        assert "was refused" in text, (
+            f"`outdated` must be refused as a WORD by the vocabulary door: {text!r}")
+        # The DISCRIMINATING text: the generic "not a lifecycle word" refusal
+        # does not name the successor route, and `_render` quotes the value into
+        # every refusal, so matching on the word alone would stay green if this
+        # arm were deleted (#13143 review finding 3's lesson).
+        assert "supersededBy" in text and "supersede_point" in text, (
+            f"the `outdated` refusal must name the successor route: {text!r}")
+        assert _status(sdk, pid) == "draft"
+        assert _mutations(events, pid) == before, (
+            "a refused word must not be journaled")
+        return
+
+    sdk.update_knowledge(pid, status=word)
+    assert _status(sdk, pid) == "deprecated", (
+        f"{word!r} is a DECLARED SYNONYM of `deprecated` since #11824 S0, and "
+        f"`draft -> deprecated` is a declared transition: {_status(sdk, pid)!r}")
+    assert [r["op"] for r in _mutations(events, pid)] == ["restatus"], (
+        "the synonym's landing must be journaled against the same label")
 
 
 # ── Acceptance 4: the dedicated point guard is untouched ─────────────────
@@ -344,6 +421,16 @@ def test_update_point_still_only_promotes_draft_to_live(env):
     sdk.update_point(pid, status="live")
     assert _status(sdk, pid) == "live"
 
-    for bad in ("archived", "retracted", "not-a-status-word", "", "deprecated"):
-        with pytest.raises(ValueError, match=r"Invalid status|only promotes"):
+    # ⛔ #11824 S0 split this loop, because the two halves are refused by two
+    # DIFFERENT instruments and a single loose regex would pin neither:
+    #   * a DECLARED word this door does not promote → its own promote guard
+    #     (`archived`/`retracted` normalise to `deprecated` first, then `!= 'live'`);
+    #   * a word no door stores → the SHARED vocabulary door, whose message is
+    #     the three-part refusal.
+    # The claim is unchanged: `update_point` still only promotes draft→live.
+    for word in ("archived", "retracted", "deprecated"):
+        with pytest.raises(ValueError, match="only promotes"):
+            sdk.update_point(pid, status=word)
+    for bad in ("not-a-status-word", ""):
+        with pytest.raises(ValueError, match="was refused"):
             sdk.update_point(pid, status=bad)
