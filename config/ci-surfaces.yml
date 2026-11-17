@@ -5128,8 +5128,19 @@ surfaces:
   # readers stop answering it themselves. ⛔ REGISTERED LATE, and this row is the main-red
   # repair: the file landed on main with NO manifest row, so `ci_selection.py --integrity`
   # went red ('manifest drift') and `python-ci`'s manifest-integrity leg went with it —
-  # an unlisted file is a #1262 red AND runs in no leg (#1349/#2938). ⛔ That leg ONLY:
-  # `surface-guard` grades `config/surface-manifest.yml` (`tools/surface_manifest.py:232`)
+  # an unlisted file is a #1262 red AND runs in no leg (#1349/#2938). ⛔ TWO legs, not one:
+  # `tests/test_ci_selection.py` asserts the same `integrity(load_manifest()) == []` against
+  # the real tree, and it is a gating-slow file (`slow_files`, not `carve_out`, not
+  # on-demand), so the drift reds `test-slow` as well — MEASURED on main at `55ec2c71b1`
+  # (run 44025094904): `test-slow (a)` and `test-slow (c)` both failure, with
+  # `test_integrity_covers_all_test_files`,
+  # `test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it`,
+  # `test_the_blank_session_id_guard_keeps_its_core_arm_too`,
+  # `test_the_lane_is_a_classification_for_integrity_too` and
+  # `test_integrity_still_notices_an_absent_stamp_and_exits_zero` among the failures.
+  # Reproduced locally too: `integrity()` over this manifest is `[]`, and over the same
+  # manifest with this one row removed it returns `['test_13034_currency_rule_reads_position.py']`.
+  # ⛔ NOT `surface-guard`: that gate grades `config/surface-manifest.yml` (`tools/surface_manifest.py:232`)
   # and never reads this file (`grep -c ci-surfaces tools/surface-guard.py
   # tools/surface_manifest.py` -> 0, 0), and its job carries no `needs:` on
   # manifest-integrity — so `surface-guard` is red on main for an UNRELATED reason
