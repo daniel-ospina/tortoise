@@ -880,6 +880,21 @@ class _FakeGraph:
         return None
 
 
+#: Every `subprocess.run` argv the stubbed probe received, in order (#13163).
+#: The stub is the ONLY thing holding the durations row's "no docker" claim, so
+#: an arm ASSERTS it was reached rather than trusting that the stub is installed:
+#: with the stub deleted the arms stay green, and `seed_graph` then runs `docker
+#: ps` / `docker exec … redis-cli INFO memory` against the ambient daemon — into
+#: another lane's container at `fg_port=6379` (measured, pre-fix).
+_PROBE_CALLS: list[list[str]] = []
+
+
+def _record_probe_call(*args: object, **_kwargs: object) -> subprocess.CompletedProcess:
+    """Stub for `subprocess.run`: records the argv, answers with empty stdout."""
+    _PROBE_CALLS.append(list(args[0]) if args else [])
+    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+
 def _patch_seed(monkeypatch, graph: _FakeGraph) -> list:
     """Point `seed_graph`'s three real dependencies at fakes — hermetic, no docker.
 
@@ -898,6 +913,8 @@ def _patch_seed(monkeypatch, graph: _FakeGraph) -> list:
 
     import benchmarks.synthetic_corpus as corpus
 
+    _PROBE_CALLS.clear()
+
     seeded: list = []
 
     class _FakeDB:
@@ -912,7 +929,7 @@ def _patch_seed(monkeypatch, graph: _FakeGraph) -> list:
     monkeypatch.setattr(corpus, "seed_corpus", lambda g, points: seeded.append(points) or len(points))
     monkeypatch.setattr(
         subprocess, "run",
-        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr=""),
+        _record_probe_call,
     )
     return seeded
 
@@ -948,6 +965,11 @@ def test_an_absent_graph_is_excused_so_a_first_run_still_seeds(monkeypatch):
     assert graph.deletes == 1
     assert seeded == [[{"id": "p1"}, {"id": "p2"}]], "the seed must still run"
     assert out["points"] == 2
+    assert _PROBE_CALLS == [["docker", "ps", "--filter", "publish=6379",
+                             "--format", "{{.Names}}"]], (
+        "the memory probe did not reach the stub — this run reached a real docker "
+        f"daemon: {_PROBE_CALLS}"
+    )
 
 
 def test_a_wedged_docker_daemon_costs_a_recorded_error_not_the_run(monkeypatch):
