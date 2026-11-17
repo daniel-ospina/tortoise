@@ -198,7 +198,18 @@ _COPY_SESSIONS_PAGE_QUERY = (
 _SESSION_DERIVED = ("turn_count", "turn_max_index")
 #: Keys the envelope owns.
 _SESSION_ENVELOPE = ("id", "event_id", "type", "ts", "initiated_by",
-                     "projection_version", "contains_session")
+                     "projection_version", "contains_session",
+                     # ⛔ ``seq`` IS THE RECORD'S ORDINAL, not a session property
+                     # (#12894 review cycle 11, P1 — measured). This function
+                     # copies EVERY graph property onto the event, and
+                     # `record_projection._carried_position` reads a top-level
+                     # ``seq`` as the carried POSITION and REFUSES a disagreement.
+                     # So a `:Session` node holding a ``seq`` prop made this copy
+                     # refuse the whole session's batch, with a diagnosis that is
+                     # false (the batch is fine) and a remedy that cannot apply
+                     # (`start_seq` / `--enumerated-floor` do not address a
+                     # tenant property). Same treatment as `type` / `event_id`.
+                     "seq")
 
 #: The counts the RECORD already holds — the floor a copy may never lower.
 #: `turn_count` is a COLUMN on both homes (`SessionRecorded` writes it to

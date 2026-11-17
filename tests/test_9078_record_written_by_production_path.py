@@ -905,7 +905,13 @@ def test_env_example_declares_the_record_tenant_pair():
     """
     env = (REPO_ROOT / ".env.example").read_text()
     for name in (record_writer.RECORD_ORG_ENV, record_writer.RECORD_GRAPH_ENV,
-                 record_writer.RECORD_SINGLE_TENANT_ENV):
+                 record_writer.RECORD_SINGLE_TENANT_ENV,
+                 # #12894: the allocate switch decides whether EVERY write on a
+                 # graph is refused, so it belongs in the same contract as the
+                 # tenant pair. Added here in the same commit as the declaration
+                 # — the tuple is hand-maintained, so a declaration alone would
+                 # drift silently.
+                 record_writer.RECORD_ALLOCATE_ENV):
         assert name in env, (
             f"{name} (the #9078 single-tenant arming surface) decides whether an "
             "armed record write is filed or refused, and is not declared in "
