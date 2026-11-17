@@ -519,14 +519,27 @@ def test_the_seed_refuses_a_foreign_graph_before_it_deletes(monkeypatch):
         harness.seed_graph("docker://:p@127.0.0.1:1", "real-graph")
 
 
-def test_the_store_targets_are_named_never_inherited_from_the_environment(monkeypatch, capsys):
-    """⛔ No ambient `TORTOISE_DB_URI` / `TORTOISE_RECORD_DSN` default.
+@pytest.mark.parametrize("axis", [None, "--graph-uri", "--record-dsn"],
+                         ids=["both-omitted", "graph-uri", "record-dsn"])
+def test_the_store_targets_are_named_never_inherited_from_the_environment(monkeypatch, capsys, axis):
+    """⛔ No ambient `TORTOISE_DB_URI` / `TORTOISE_RECORD_DSN` default — PER AXIS.
 
     Both targets defaulted to the PRODUCT's own stores while the seed DELETEs the
     target graph's `:Point` rows and rewrites its tenant's `public.point` rows, so
     a bare invocation in a developer shell could wipe the store that shell pointed
     at (`#13098` review P2-3). They are command-line only now — including when the
     environment DOES name a store.
+
+    ⛔ WHY THIS IS PARAMETRISED AND NOT A SINGLE `main([...])` CALL. The guard it
+    exercises is `if not args.graph_uri or not args.record_dsn`, so with BOTH
+    arguments omitted it fires on whichever axis is still empty — and a regression
+    that restores the OTHER axis from the environment is then invisible to the
+    assertion (`#13098` review F13; measured: reintroducing the ambient
+    `--graph-uri` default left this test GREEN, because the empty `--record-dsn`
+    triggered the refusal first). Each axis is therefore tested with the OTHER
+    target supplied EXPLICITLY, so the only thing that can stop the seed is the
+    axis under test. The `both-omitted` case is kept because it is the guard's own
+    contract and it costs nothing.
     """
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379")
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://postgres:x@127.0.0.1:5432/db")
@@ -538,5 +551,11 @@ def test_the_store_targets_are_named_never_inherited_from_the_environment(monkey
                         lambda *_a, **_k: pytest.fail("must not seed from an ambient target"))
     monkeypatch.setattr(harness, "seed_record",
                         lambda *_a, **_k: pytest.fail("must not seed from an ambient target"))
-    assert harness.main(["--candidate", "point-by-id"]) == 2
+    # The axis NOT under test is supplied explicitly, so the sibling arm of the
+    # `or` cannot answer for it.
+    other = {
+        "--graph-uri": ["--record-dsn", "postgresql://u:p@127.0.0.1:5432/db"],
+        "--record-dsn": ["--graph-uri", "docker://:p@127.0.0.1:1"],
+    }.get(axis, [])
+    assert harness.main(["--candidate", "point-by-id", *other]) == 2
     assert "could not run" in capsys.readouterr().err

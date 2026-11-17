@@ -92,8 +92,13 @@ USAGE
 
 CI: `.github/workflows/cypher-diff.yml` starts a FalkorDB service and a
 `pgvector/pgvector:pg16` service, bootstraps the record from the committed
-migrations, and runs each candidate TWICE — plain (must exit 0) and with
-`--mutate null-order` (must exit 1). Both names are in the job output.
+migrations, and runs the candidates in TWO steps — an agreement step over
+every candidate (each must exit 0), then a mismatch step over the one candidate
+whose SQL has an `ORDER BY` to mutate (`point-listing --mutate null-order`, must
+exit 1). The `null-order` mutation is NOT applicable to every candidate: it is
+refused (exit 2, never a diff) wherever the statement has no
+`ORDER BY created_at DESC`, because a mutation that changes nothing would report
+agreement the harness never tested. Both names are in the job output.
 """
 
 from __future__ import annotations
@@ -265,7 +270,9 @@ CANDIDATES: dict[str, Candidate] = {
 }
 
 #: The mutations that rewrite the SQL rather than append a predicate.
-NULLS_FIRST_SQL = None  # computed per candidate in `_mutated`
+# (The `null-order` rewrite itself lives in `_mutated`; there is no module-level
+# table of rewritten statements — a constant here was DEAD, and a dead constant
+# next to a live mutation reads as if the mutation consulted it.)
 
 
 def _mutated(candidate: Candidate, mutation: str | None) -> str:
