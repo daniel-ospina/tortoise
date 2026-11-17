@@ -563,14 +563,24 @@ def test_status_DISCLOSES_a_salvage_read_and_withdraws_the_completion_claim(
     assert "complete: UNKNOWN" in out
 
 
-def test_status_on_a_SALVAGED_segmented_layout_cannot_claim_completion(
+def test_status_on_a_HAND_BUILT_journal_cannot_claim_completion(
         monkeypatch, capsys):
-    """The segmented arm, SALVAGED — the only segmented state that skips a line.
+    """The NOT-REPORTED arm — now reachable only from a INCONSTRUCTED `Journal`.
 
-    `corrupt is None` means NOT REPORTED, so there is no number to print; and with
-    `salvage=True` a mid-file line WAS skipped, so `fully_consumed` must be `None`
-    and the text must say the damage is unreportable rather than print a
-    reassuring zero.
+    ⛔ THIS ROW USED TO DESCRIBE A SEGMENTED READ (review P2, #13275). It built
+    `Journal(segmented=True, salvage=True, corrupt=None, torn=None)` and asserted
+    the "damage counters NOT REPORTED" render — a state the branch's own change
+    makes IMPOSSIBLE: `read_journal`'s segmented arm now returns the counters it
+    measures (`read_all_segments_reporting_damage`), and the real-directory row
+    below measures `corrupt == 1` plus the "damaged input: 1 mid-file line(s)"
+    sentence for that same logical state. The suite was therefore asserting BOTH
+    renderings for one state, and this row passed only because it hand-built the
+    value the reader can no longer produce.
+
+    What it pins now is the contract that survives: a `Journal` that carries no
+    counters — the `None` DEFAULT, which a bare `Journal(...)` gets — must render
+    damage as UNMEASURED, never as zero. `salvage=True` keeps `fully_consumed`
+    `None` for its own reason (a salvage read skipped a mid-file line).
 
     ⛔ `salvage` is what makes it unknown, NOT `corrupt is None` (review P2,
     #13210): the segmented reader is strict unless asked to salvage, so a clean
@@ -580,7 +590,10 @@ def test_status_on_a_SALVAGED_segmented_layout_cannot_claim_completion(
     """
     journal = Journal(path=FIXTURE,
                       records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
-                      segmented=True, salvage=True, corrupt=None, torn=None)
+                      segmented=True, salvage=True)   # counters DEFAULT to None
+    assert journal.corrupt is None and journal.torn is None, (
+        "a bare Journal must default to NOT REPORTED, not to zero — a `0` default "
+        "asserts 'no damage' over a read that measured nothing")
     monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
     _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
 
@@ -624,7 +637,13 @@ def test_a_REAL_graph_dir_read_keeps_the_completion_claim(tmp_path, monkeypatch,
     journal = read_journal(tmp_path)
     assert journal.segmented is True
     assert journal.salvage is False
-    assert journal.corrupt is None and journal.torn is None
+    # ⛔ MEASURED, not `None` (review F2, #13275): this arm used to return
+    # `corrupt=None, torn=None` for EVERY segmented read — i.e. for every graph
+    # directory — because `read_all_segments` computed both counts and returned
+    # neither. The predicate keys on `salvage`, but the DISCLOSURE had nothing to
+    # print, so its "counters not reported" line described a permanent blind spot
+    # instead of a reading.
+    assert journal.corrupt == 0 and journal.torn == 0, journal
     assert len(journal) == 3
 
     _patched(monkeypatch, checkpoint=Checkpoint(high_seq=3, present=3))
@@ -634,19 +653,26 @@ def test_a_REAL_graph_dir_read_keeps_the_completion_claim(tmp_path, monkeypatch,
     payload = json.loads(capsys.readouterr().out)
     assert payload["fully_consumed"] is True
     assert payload["completeness_unknown"] is False
-    assert payload["journal"]["corrupt_lines"] is None  # still disclosed
+    # ⛔ THE COUNTERS ARE MEASURED NOW, not `None` (review F2, #13275): the
+    # reader computed them and discarded them, so this row used to pin the
+    # disclosure of an ABSENT count. A clean read reports 0.
+    assert payload["journal"]["corrupt_lines"] == 0, payload
 
 
-def test_a_CLEAN_segmented_read_STILL_reports_completion(monkeypatch, capsys):
-    """The other side of the boundary: `--journal <graph dir>`, no damage.
+def test_an_UNMEASURED_counter_does_NOT_void_the_completion_claim(monkeypatch,
+                                                                  capsys):
+    """The other side of the boundary: an UNMEASURED counter does not void a claim.
 
-    A directory IS the segmented arm (`read_journal` marks every graph dir
-    `segmented=True`), so a predicate keyed on `corrupt is None` turned the
-    completion claim off for EVERY documented directory read — measured before
-    this fix: clean dir at completion -> `fully_consumed: None`, while the same
-    records passed as a FILE path gave `True`. The counter is unreported and the
-    render says so (information), but the reader REFUSES damage rather than
-    skipping it, so the claim is supportable and must stay `True`.
+    ⛔ THIS IS THE HAND-BUILT ARM, NOT A SEGMENTED READ (review P3, #13275). A
+    directory IS the segmented arm, and since `read_journal` reports the counters
+    it measures, a real `<graph dir>` read carries `corrupt=0`, not `None` — the
+    real-directory row above asserts exactly that. What survives here is the
+    boundary the `None` value means: `corrupt is None` is a statement about the
+    COUNTER, not about the completion, so it must not withdraw the claim (that
+    regression withdrew it on every documented directory read — measured before
+    #13272: clean dir at completion → `fully_consumed: None`, while the same
+    records passed as a FILE path gave `True`). The unmeasured counter is
+    DISCLOSED — information, not a retraction.
     """
     journal = Journal(path=FIXTURE,
                       records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
@@ -716,6 +742,249 @@ def test_a_MID_FILE_skip_still_voids_the_completeness_claim(monkeypatch, capsys)
     assert "damaged input: 1 mid-file line(s)" in out
     assert "NOT a completeness claim" in out
     assert "UNSHIFTED" not in out
+
+
+def test_every_verb_discloses_the_damage_it_read(monkeypatch, capsys):
+    """⛔ P3 (PR #13210 review): the helper's docstring claimed three verbs.
+
+    `_journal_damage_lines` said it was factored so "the three verbs cannot
+    drift", and `apply` — the WRITE verb, whose report is the one an operator
+    keeps — never called it and printed nothing about a segmented journal. A
+    docstring the code contradicts is the same class as the pinned reason the
+    previous round's finding was about, so this drives all THREE renders over one
+    damaged journal rather than asserting the claim.
+    """
+    damaged = {"path": "j", "records": 1, "segmented": True, "salvage": False,
+               "corrupt_lines": None, "torn_tails": None}
+    damage_line = record_runner._journal_damage_lines(damaged)
+    assert damage_line and "damage counters NOT REPORTED" in damage_line[0]
+
+    plan = record_runner.PlanReport(
+        org_id="o", graph_id="g", journal=damaged, checkpoint=None, cursor=None,
+        start_at=0, events_to_consume=0,
+        totals={"events": 0, "statements": 0, "position_rows": 0,
+                "events_by_type": {}})
+    applied = record_runner.ApplyReport(
+        org_id="o", graph_id="g", journal=damaged, checkpoint_before={},
+        start_at=0)
+    for verb, text in (("plan", record_runner._render_plan(plan)),
+                       ("apply", record_runner._render_apply(applied))):
+        assert "damage counters NOT REPORTED" in text, (
+            f"{verb} dropped the disclosure: {text}")
+
+    # …and the third verb through its real CLI path, not its renderer alone.
+    journal = Journal(path=FIXTURE, records=[{"type": "IngestStarted"}],
+                      segmented=True, salvage=False, corrupt=None, torn=None)
+    monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=1, present=1))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    assert "damage counters NOT REPORTED" in capsys.readouterr().out
+
+    # ⛔ AND THE ARM THAT MATTERS FOR A WRITE (review P2, #13275): the NOT-REPORTED
+    # fixture above is the easy half. Measured before this arm existed, making
+    # `apply` unable to disclose MEASURED damage —
+    # `*(_journal_damage_lines(report.journal) if report.journal["corrupt_lines"]
+    # is None else [])` — left **59 passed**: the write verb's only damaged-journal
+    # warning could be deleted and the suite stayed green.
+    # One sentence per DAMAGE CLASS (#13272): a mid-file skip voids the claim, a
+    # torn tail does not — so the two are named separately and this arm drives both.
+    for damage, sentence in (
+            ({"corrupt_lines": 1, "torn_tails": 0},
+             "damaged input: 1 mid-file line(s)"),
+            ({"corrupt_lines": 0, "torn_tails": 1},
+             "torn tail: 1 fragment(s)")):
+        measured = {"path": "j", "records": 1, "segmented": False,
+                    "salvage": False, **damage}
+        assert sentence in record_runner._journal_damage_lines(measured)[0]
+        applied = record_runner.ApplyReport(
+            org_id="o", graph_id="g", journal=measured, checkpoint_before={},
+            start_at=0)
+        assert sentence in record_runner._render_apply(applied), (
+            "the WRITE verb's report dropped the damage it read")
+        plan = record_runner.PlanReport(
+            org_id="o", graph_id="g", journal=measured, checkpoint=None, cursor=None,
+            start_at=0, events_to_consume=0,
+            totals={"events": 0, "statements": 0, "position_rows": 0,
+                    "events_by_type": {}})
+        assert sentence in record_runner._render_plan(plan)
+
+
+
+def test_apply_help_says_it_refuses_allocate(capsys, monkeypatch):
+    """⛔ P3 (PR #13210 review): the one place an operator learns what it does.
+
+    `apply` registers `--allocate` ON PURPOSE (a refusal that names the allocator
+    beats argparse's "unrecognized arguments"), but `--help` described the mode
+    as available and said nothing about the refusal — so the help text argued
+    with what the verb actually does.
+
+    `COLUMNS` is widened because argparse ELIDES a subparser's help past the
+    terminal width (`[--dsn ...`), which would make this row pass by rendering
+    nothing rather than by the sentence being right.
+    """
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exc:
+        main(["apply", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--allocate" in out
+    assert "`apply` REFUSES it" in out, out
+    # `plan` DOES accept it, so its help must not claim otherwise
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exc:
+        main(["plan", "--help"])
+    assert exc.value.code == 0
+    assert "`plan` only" in capsys.readouterr().out
+
+
+
+
+def test_a_DAMAGED_graph_dir_REFUSES_the_strict_read_and_MEASURES_the_salvaged_one(
+        tmp_path, monkeypatch, capsys):
+    """⛔ F2 (review #13275): the count is MEASURED, not "unmeasurable".
+
+    The render used to assert that on a segmented layout *"a skipped mid-file line
+    would have SHIFTED the enumeration and this run cannot see it"*. Both halves
+    were false: the reader REFUSES that read unless asked to salvage (so strict
+    mode cannot silently skip), and it counts the skipped lines when it does not
+    refuse — the count was computed per segment and then discarded.
+
+    So the damage arm of `--journal <graph dir>` is pinned from both directions
+    here: strict → a refusal that NAMES the damage; salvage → a real number, and
+    a withdrawn completion claim with the mid-file sentence.
+    """
+    from tortoise import journal_segments
+
+    active = tmp_path / journal_segments.ACTIVE_NAME
+    good = json.dumps({"type": "IngestStarted"})
+    active.write_text(good + "\n" + '{"type": "PointRev' + "\n" + good + "\n",
+                      encoding="utf-8")
+
+    with pytest.raises(journal_segments.JournalLayoutError) as exc:
+        read_journal(tmp_path)
+    assert "damaged records" in str(exc.value)
+
+    read = read_journal(tmp_path, salvage=True)
+    assert read.segmented is True and read.salvage is True
+    assert read.corrupt == 1, f"the count the render called unmeasurable: {read.corrupt!r}"
+    assert read.torn == 0, read.torn
+
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(tmp_path), "--salvage", "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["journal"]["segmented"] is True
+    assert payload["journal"]["corrupt_lines"] == 1, payload
+    assert payload["completeness_unknown"] is True
+    assert payload["fully_consumed"] is None, payload
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(tmp_path), "--salvage"])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "damaged input: 1 mid-file line(s)" in out
+    assert "NOT a completeness claim" in out
+    assert "damage NOT REPORTED" not in out
+    assert "cannot see it" not in out
+
+
+
+def test_a_TORN_TAIL_in_a_GRAPH_DIRECTORY_reaches_read_journal(tmp_path):
+    """⛔ P3 (review #13275): the segmented arm's `torn` plumbing was unfenced.
+
+    The row below drives a torn tail through a SINGLE-FILE journal, and the
+    mid-file row drives a graph directory with `torn == 0`. Neither exercises the
+    segmented branch's `torn` argument, so returning `torn=0` from `read_journal`'s
+    directory arm — discarding the count the reporting reader had just produced —
+    left **130 passed**: the counter could be reinstated as unmeasured for every
+    graph-directory read and nothing reddened. (`corrupt` was fenced, `torn` was
+    not.)
+
+    A REAL graph directory, so the assertion is about `read_journal`'s dispatch and
+    the reader's counting, not about a value this test set.
+    """
+    from tortoise import journal_segments
+
+    active = tmp_path / journal_segments.ACTIVE_NAME
+    good = json.dumps({"type": "IngestStarted"})
+    active.write_text(good + "\n" + good + "\n", encoding="utf-8")
+    with active.open("ab") as fh:
+        fh.write(b'{"type": "PointAd')            # SIGKILL mid-append, no newline
+
+    strict = read_journal(tmp_path)               # strict tolerates a torn tail
+    assert strict.segmented is True, "this row must take the DIRECTORY arm"
+    assert len(strict) == 2
+    assert strict.corrupt == 0, "a torn tail is not a mid-file damage count"
+    assert strict.torn == 1, (
+        f"the directory arm stopped passing the reader's torn count: {strict.torn!r} "
+        "— `torn=0` here is the defect this row exists for")
+
+    salvaged = read_journal(tmp_path, salvage=True)
+    assert (salvaged.corrupt, salvaged.torn) == (0, 1), salvaged
+
+
+def test_a_TORN_TAIL_alone_does_NOT_withdraw_the_completion_claim(
+        monkeypatch, capsys, tmp_path):
+    """⛔ F1/F2 (review #13275): a torn fragment shifts NOTHING, so it voids nothing.
+
+    A SIGKILL mid-append leaves a truncated LAST line, which the reader tolerates
+    (S15) without raising and without a mid-file damage count — so a journal of two
+    complete records plus a torn third line reads as `records=2, corrupt=0,
+    torn=1`. That fragment **was never a complete record**, so the sequence of
+    complete records is unshifted and `fully_consumed: true` is SUPPORTABLE.
+
+    This row used to assert the opposite (the fragment "may have truncated the LAST
+    record"), which is the half of this PR's predicate that collided with the
+    open #13269/#13272 reading of the same counter. The external check agrees with
+    a truncating recovery (Kafka truncates to the last valid record; WAL stops at
+    the first incomplete one and discards the tail — a torn tail was never a
+    durable record), and so does `log.py`'s own contract: a fragment sealed by
+    `append` never costs the record appended after it (#5917).
+
+    What the loss CAN do is revive removed state — the replay's #3316 check, and
+    #13280's fold gap — so the fragment is still NAMED, as a non-positional
+    caveat rather than as a retracted completion claim.
+
+    A REAL journal through `read_journal`, so the counter's own plumbing is fenced
+    too: a fixture that hand-set `torn=1` would keep passing if the reader stopped
+    counting.
+    """
+    journal = tmp_path / "events.jsonl"
+    good = json.dumps({"type": "IngestStarted"})
+    journal.write_text(good + "\n" + good + "\n" + '{"type":"PointAd',
+                       encoding="utf-8")
+    read = record_runner.read_journal(journal)      # the STRICT read tolerates it
+    assert len(read) == 2
+    assert read.corrupt == 0, "a torn tail is not a mid-file damage count"
+    assert read.torn == 1, f"the reader stopped counting torn tails: {read.torn}"
+
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(journal), "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["journal"]["torn_tails"] == 1, payload
+    assert payload["events_remaining"] == 0, payload
+    assert payload["completeness_unknown"] is False, (
+        "a torn fragment was never a complete record, so it does not shift the "
+        "enumeration and does not void the completion claim")
+    assert payload["fully_consumed"] is True, payload
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(journal)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "torn tail: 1 fragment(s)" in out
+    assert "UNSHIFTED" in out and "#13280" in out
+    # ⛔ the two sentences that would LIE about this input
+    assert "NOT a completeness claim" not in out
+    assert "mid-file line(s)" not in out
+    assert "complete: UNKNOWN" not in out
+
+
 
 
 def test_plan_allocate_does_not_hand_over_an_acknowledgement(monkeypatch, capsys):
@@ -954,6 +1223,129 @@ def test_apply_folds_ACROSS_BATCHES_and_counts_every_one(monkeypatch, capsys):
     assert conn.committed == 4, "one commit per batch, and there are four batches"
     assert "consumed: 39 events in 4 batch(es)" in out
     assert "seq 1..39" in out
+
+
+def test_the_unknown_completion_sentence_names_the_REASON_it_was_withdrawn(
+        monkeypatch, capsys):
+    """⛔ P2 (review #13275): one sentence for three different reads was false in two.
+
+    `completeness_unknown` is `journal.salvage` (#13272's ruling), so a PRISTINE
+    `--salvage` read — counters `0/0`, no damage line — was told *"this read
+    SKIPPED damaged input"*, which the same payload denies. Measured before this
+    fix (`status` over a clean journal with `--salvage`): the sentence above, with
+    `corrupt_lines: 0, torn_tails: 0`. Nothing asserted it: `grep -rn 'SKIPPED
+    damaged' tests/` had 0 hits, so the wording could be reverted freely.
+
+    One arm per REACHABLE CELL of the counter pair (both measured, one measured,
+    neither measured, and the two damage classes separately), so the sentence is a
+    function of the read's own counters rather than of the flag that happens to
+    have withdrawn the claim. ⛔ And it is checked against the DAMAGE line printed
+    above it in the same report: at `a8c37342b3` the two disagreed for a partial
+    report — the damage line said "this read returned NO counters" while this
+    sentence named three skips (review P3, #13275), which no arm caught because it
+    only forbade the completeness wording.
+    """
+    for counters, expected, forbidden in (
+            # a read that skipped nothing: no invented damage
+            ((0, 0), "taken with --salvage",
+             "SKIPPED damaged input"),
+            # a read that DID skip a line
+            ((1, 0), "SKIPPED damaged input", "counters above measured no damage"),
+            # ⛔ a TORN TAIL is the class `_journal_damage_lines` says shifts NOTHING
+            # (review P2, #13275): attributing the withdrawal to a "SKIP" would
+            # contradict the damage line printed directly above it.
+            ((0, 1), "dropped a torn tail fragment", "SKIPPED damaged input"),
+            # a layout whose reader cannot report: not "skipped", just unmeasured
+            ((None, None), "reports no damage counters",
+             "SKIPPED damaged input"),
+            # ⛔ a PARTIAL report (`corrupt=3, torn=None`) must not claim the reader
+            # "reports no counters" over a payload carrying `corrupt_lines: 3`
+            # (review P3, #13275): the measured skip wins.
+            ((3, None), "SKIPPED damaged input", "reports no damage counters"),
+            # …and with NOTHING measured in the other class it names that class
+            # instead, so the sentence and the damage line above it agree.
+            ((0, None), "the torn tail count was not reported",
+             "reports no damage counters"),
+            ((None, 0), "the mid-file count was not reported",
+             "reports no damage counters")):
+        corrupt, torn = counters
+        journal = Journal(path=FIXTURE,
+                          records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
+                          segmented=corrupt is None, salvage=True,
+                          corrupt=corrupt, torn=torn)
+        # B023: bind the loop's journal, or ruff reds the required lint leg — the
+        # repair belongs here, not in an ignore.
+        monkeypatch.setattr(record_runner, "read_journal",
+                            lambda *a, _j=journal, **k: _j)
+        _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
+        rc = main(["status", "--org-id", "o", "--graph-id", "g",
+                   "--journal", str(FIXTURE), "--salvage"])
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "complete: UNKNOWN" in out, out
+        assert expected in out, f"counters={counters}: {out}"
+        assert forbidden not in out, f"counters={counters}: {out}"
+        # ⛔ the two sentences in one report must not contradict each other: a
+        # PARTIAL report names the class it could not measure, and the completeness
+        # line must not then call the whole read "no counters".
+        if (corrupt is None) != (torn is None):
+            # ⛔ WHICH class, not merely "some class" (review P3, #13275): naming the
+            # one that WAS reported passed this assertion while the report said the
+            # opposite of the truth, so both halves are asserted.
+            missing = "torn tail" if torn is None else "mid-file"
+            reported = "mid-file" if torn is None else "torn tail"
+            assert f"the {missing} count was NOT REPORTED" in out, (
+                f"counters={counters}: the damage line did not name the unmeasured "
+                f"class: {out}")
+            assert f"the {reported} count was NOT REPORTED" not in out, (
+                f"counters={counters}: the damage line called a MEASURED class "
+                f"unreported: {out}")
+
+
+def test_the_counters_REACH_plan_and_apply_from_a_real_graph_directory(
+        tmp_path, monkeypatch, capsys):
+    """⛔ P3 (review #13275): the plumbing into `plan`/`apply` was unfenced.
+
+    The rows above fence the RENDERERS (`_render_plan`/`_render_apply` over a
+    hand-built dict), which left the layer between them open: hard-coding
+    `"corrupt_lines": None, "torn_tails": None` in `build_plan`'s journal dict —
+    or `apply_batches`' — left **131 passed**, and the write verb then announced
+    "damage counters NOT REPORTED" over counters the READ had measured (on every
+    clean `apply` too: a false report in the harmless direction, a missing one in
+    the harmful). `status` had the analogous row through its CLI; `plan` and
+    `apply` did not.
+
+    A REAL graph directory with a SIGKILL-truncated tail, so the assertion is
+    about what the read measured reaching the report.
+    """
+    from tortoise import journal_segments
+
+    active = tmp_path / journal_segments.ACTIVE_NAME
+    good = json.dumps({"type": "IngestStarted"})
+    active.write_text(good + "\n" + good + "\n", encoding="utf-8")
+    with active.open("ab") as fh:
+        fh.write(b'{"type": "PointAd')
+
+    rc = main(["plan", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(tmp_path), "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["journal"]["torn_tails"] == 1, (
+        "`plan` reported the counters as unmeasured for a read that measured 1 "
+        f"torn tail: {payload['journal']}")
+    assert payload["journal"]["corrupt_lines"] == 0, payload["journal"]
+
+    # …and the WRITE path's own report, built from a second journal dict.
+    monkeypatch.setattr(_replay_attr(), "replay", _fold_report_for)
+    journal = record_runner.read_journal(tmp_path)
+    assert journal.torn == 1, journal
+    report = record_runner.apply_batches(
+        journal=journal, org_id="o", graph_id="g", conn=_StubConn(),
+        start_at=0, batch_size=10, limit=None, allocate=False,
+        timeout_ms=1000, echo=lambda line: None)
+    assert report.journal["torn_tails"] == 1, (
+        f"`apply`'s report lost the count the read measured: {report.journal}")
+    assert "torn tail: 1 fragment(s)" in record_runner._render_apply(report)
 
 
 def test_the_write_ledger_is_a_MEASUREMENT_the_fold_populates(monkeypatch):

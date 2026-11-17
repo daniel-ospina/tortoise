@@ -267,9 +267,18 @@ RELEASE_CONDITIONS: dict[str, str] = {
         "the derived defaults of record (``product/pricing.json`` "
         "``_included_amounts_status``)"),
     "vector_index_measurable": (
-        "the HNSW vector index is measurable, so a cap MAY be wired to the graph "
-        "reading (evidence: ``graph_storage.PRECISION_NOTE`` no longer forbids "
-        "it)"),
+        "the HNSW vector index is measurable (evidence: "
+        "``graph_storage.PRECISION_NOTE`` no longer forbids capping FOR THAT "
+        "REASON). ⛔ NECESSARY, NOT SUFFICIENT: a cap also needs "
+        "``per_graph_overhead_attributed``, because an EMPTY graph reads ~346 KiB "
+        "while renting ~1.46 MB — clearing only this one would arm a cap a "
+        "tenant steps around by spreading storage over near-empty graphs"),
+    "per_graph_overhead_attributed": (
+        "the per-graph OVERHEAD is attributed to the graph that causes it, so a "
+        "cap on the graph reading cannot be side-stepped by spreading storage "
+        "over many graphs (evidence: ``graph_storage.EXCLUDED_OVERHEAD`` no "
+        "longer excludes per-graph overhead, and combining readings CHARGES it "
+        "per graph rather than reporting a zero-cost empty graph)"),
 }
 
 
@@ -403,6 +412,108 @@ def _graph_storage_mb(org_id: str) -> MeterReading | None:
     )
 
 
+def _postgres_stored_bytes(org_id: str) -> MeterReading | None:
+    """The org's RESIDENCY gauge: stored Postgres bytes, from the snapshot (#9559).
+
+    ⛔ NOT :func:`metering.get_postgres_bytes_written`. That is the window
+    ADDEND — bytes written since the window opened — and a storage cap held
+    against it does not cap what the org stores (a tenant that wrote 10 GB last
+    window and none this one reads as zero). The block on this dimension named
+    that difference, so wiring the ledger reader as the meter would have armed a
+    cap on the wrong figure: a fail-open for exactly the tenant who grew largest.
+
+    The figure comes from ``metering.get_postgres_residency``, which reads the
+    per-org snapshot the whole-table audit writes offline — one row by primary
+    key, affordable on a write path. ``measured_at`` is the audit's own
+    ``captured_at``, so the dimension's ``stale_after_seconds`` ages the
+    MEASUREMENT, not the row write.
+
+    ⛔ THREE ANSWERS, NOT TWO (review finding, from the owner's own measurement).
+    The reader names WHY it has no figure (``unmeasured_reason``, the
+    ``get_capture_usage`` vocabulary), and this adapter maps each reason to the
+    outcome that reason actually implies:
+
+    * ``absent`` → a **zero reading STAMPED with the gauge's own instant**, so
+      the dimension's ``stale_after_seconds`` ages it like any other figure. The
+      gauge HAS reported and the audit attributed nothing to this org, i.e. its
+      rows store no bytes: a TRUE ZERO. A ``None`` here would refuse a fresh
+      tenant's FIRST write forever — the row only appears once the audit finds
+      rows, and rows only appear once a write is served (measured on the sibling
+      gauge: ``#13084``/``#13102``, a paid tenant's first ``POST /v1/points``
+      returned HTTP 500 from exactly this collapse).
+      ⛔ AND IT IS STAMPED, NOT UNBOUNDED (review round 5, P1, measured): an
+      absent zero carrying no instant would escape the age bound entirely, and
+      the snapshot table only ever GAINS rows — so after one successful refresh
+      "the gauge has reported" stays true forever and every never-snapshotted org
+      would compare as 0 bytes and pass any cap, silently, while an org WITH a row
+      of the same age is refused. The stamp is why this dimension does NOT declare
+      ``absent_is_zero``: that declaration would route absence around ``_stale``.
+    * ``unreported`` → :class:`MeterUnavailable`. The snapshot table is EMPTY, so
+      nothing has ever been measured for ANYONE. A zero here would be a
+      FLEET-WIDE fail-open — every org comparing as 0 bytes and passing any cap —
+      so it refuses, naming the real cause (nothing schedules the refresh).
+    * ``read_error`` → :class:`MeterUnavailable`. Our side, and still a refusal
+      (fail closed, #686), never a zero.
+    * any OTHER reason → :class:`MeterUnavailable`. ⛔ Unknown reasons are NOT
+      folded into ``absent`` for the reason the capture meter's own comment gives:
+      the day the reader grows a reason, folding it here would silently disarm a
+      configured allowance.
+    """
+    from .metering import get_postgres_residency
+
+    reading = get_postgres_residency(org_id)
+    reason = reading.get("unmeasured_reason")
+    if reading.get("measured") is not True:
+        if reason == "absent":
+            gauge_at = reading.get("gauge_measured_at")
+            if not gauge_at:
+                raise MeterUnavailable(
+                    "the postgres residency gauge reports no instant, so a zero "
+                    "by absence could not be aged — refusing rather than "
+                    "enforcing an undefendable zero")
+            # ⛔ A STAMPED zero, NOT ``ABSENT``: the sentinel exists for a
+            # dimension whose absence has NO age (a cumulative flow's fresh
+            # window). A gauge's absence DOES have one — the run that reported —
+            # and ``_reading`` ages a ``MeterReading`` for us. Returning ``ABSENT``
+            # here (or declaring ``absent_is_zero``) would route this zero around
+            # ``_stale``; because the snapshot table only ever gains rows, one
+            # refresh anywhere would then serve every never-snapshotted org at 0
+            # bytes for good (review round 5, P1, measured at gate level).
+            return MeterReading(
+                used=0.0,
+                measured_at=str(gauge_at),
+                estimated=False,
+                note=("the audit attributed no rows to this org as of the gauge's "
+                      "last refresh, i.e. it stores nothing — aged from that "
+                      "refresh, so the evidence bound still applies"))
+        if reason == "unreported":
+            raise MeterUnavailable(
+                "the postgres residency gauge has never reported — the snapshot "
+                "table is empty, so nothing has been measured for ANY org; "
+                "nothing schedules postgres_residency_snapshot(), and a zero "
+                "here would pass every org's cap")
+        raise MeterUnavailable(
+            f"{_describe_fault(reason or 'unmeasured')} (the postgres residency "
+            f"gauge could not be read)")
+    stored = reading.get("stored_bytes")
+    measured_at = reading.get("measured_at")
+    if stored is None or not measured_at:
+        # A row that exists but carries no figure, or no stamp to age, is not a
+        # reading: the instrument reported and the report is unusable.
+        raise MeterUnavailable(
+            "the postgres residency snapshot row for this org carries no "
+            f"stored_bytes/measured_at (stored_bytes={stored!r}, "
+            f"measured_at={measured_at!r}), so it cannot be aged or compared")
+    return MeterReading(
+        used=float(stored),
+        measured_at=str(measured_at),
+        estimated=False,
+        note=("the org's own rows as the audit measured them "
+              "(postgres_per_org_bytes → org_postgres_residency); the "
+              "unattributable residual is never apportioned onto this figure"),
+    )
+
+
 def _describe_fault(reason: str) -> str:
     """The sentence a REFUSAL uses for an our-side metering fault.
 
@@ -531,59 +642,99 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         meter=_graph_storage_mb,
         stale_after_seconds=STALE_AFTER_SECONDS,
         blocked_reason=(
-            "the graph byte meter exists but its own contract forbids capping on "
-            "the ledger figure: the vector-index share is under-reported 8.5x-21.7x "
-            "(~2x on the total) and metering.get_graph_storage_reading returns the "
-            "uncorrected numerics (tortoise/graph_storage.py: 'a cap MUST NOT be "
-            "wired to the ledger figure for vector-bearing tenants'). BLOCKED on "
-            "the corrected ledger figure"),
-        release=("vector_index_measurable",),
+            "TWO independent blindnesses, and the release names both, because "
+            "clearing either ONE still leaves a figure a cap must not be wired "
+            "to. "
+            "(1) THE VECTOR INDEX: the index share is under-reported 8.5x-21.7x "
+            "(~2x on the total) and metering.get_graph_storage_reading returns "
+            "the uncorrected numerics (tortoise/graph_storage.py: 'a cap MUST "
+            "NOT be wired to the ledger figure for vector-bearing tenants'). "
+            "(2) PER-GRAPH OVERHEAD, measured on production 2026-11-16: the "
+            "instance holds 841 MB while the sum of per-graph readings over 182 "
+            "graphs is 419 MB — the meter sees about HALF. Deleting 148 EMPTY "
+            "tenant graphs freed 216 MB, i.e. ~1.46 MB of rent per graph that "
+            "``GRAPH.MEMORY USAGE`` attributes to NO graph (a newly-created "
+            "graph reads ~346 KiB). That is not a rounding error, it is an "
+            "EVASION: a tenant that spreads its storage over empty graphs pays "
+            "~1.46 MB each while the reading sees a few hundred KiB, so a cap "
+            "summed from these readings never fires for the tenant who grows "
+            "that way. BLOCKED on the corrected ledger figure AND on overhead "
+            "attribution — both, not either."),
+        release=(
+            "vector_index_measurable",
+            "per_graph_overhead_attributed",
+        ),
     ),
     _dimension(
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],
-        meter=None,
-        # ⛔ THE PER-ORG ATTRIBUTION IS NO LONGER THE OBSTACLE — it was, and this
-        # reason said so long after #12762 landed it. The correction is the point
-        # of ``release`` below: the condition that HAS fired is recorded in
-        # ``per_org_postgres_attribution`` (satisfied, evidence in the test) and
-        # is deliberately NOT quoted here as the current obstacle.
+        meter=_postgres_stored_bytes,
+        # ⛔ NOT ``absent_is_zero``, deliberately (review round 5, P1, measured).
+        # That declaration routes the ``ABSENT`` sentinel around ``_stale``, which
+        # is right for a cumulative FLOW (a fresh window genuinely has no age) and
+        # wrong for a GAUGE: a zero-by-absence still describes the table as of a
+        # refresh, so it must be aged. The meter therefore returns a STAMPED
+        # zero instead, and this dimension keeps the evidence bound it declares
+        # below. Measured: with ``absent_is_zero`` the same call served 0 bytes at
+        # a 400-day-old gauge age; without it, refused as stale.
+        # The residency gauge is a SNAPSHOT: affordable per write, stale by
+        # construction. The same evidence-age bound the graph gauge uses, for the
+        # same reason — a reading older than this describes rows that may no
+        # longer exist, so enforcing it would decide from a figure we cannot
+        # defend. The gate REFUSES on a stale reading rather than capping from it.
+        stale_after_seconds=STALE_AFTER_SECONDS,
+        # ⛔ NEITHER MEASUREMENT IS THE OBSTACLE ANY MORE, AND THE REASON SAYS SO.
+        # It named the missing attribution long after #12762 landed it, and then
+        # named the missing residency gauge after #9559 wired one. Each correction
+        # is the point of ``release`` below: a condition that HAS fired is
+        # recorded under its own token (satisfied, evidence in the test) and is
+        # deliberately NOT quoted here as the current obstacle.
         #
-        # ⛔ THIS NARROWS THE RECORDED POSITION, AND THE NARROWING IS MARKED.
-        # ``cost_dimensions``, ``postgres_bytes``, ``metering`` and two docs each
-        # recorded that arming waits on ONE thing: the free/anon included
-        # amounts. They are right that that decision is outstanding and
-        # incomplete on what else is — #12762 made the ATTRIBUTION measurable,
-        # and the gate is the consumer that must hold a cap against a figure on
-        # every write, so the FIGURE'S SHAPE is load-bearing too. Without the
-        # second condition, clearing the first arms the dimension with
-        # ``meter=None`` and every gated write answers 500 ("no meter plumbed").
+        # ⛔ THE OVERRIDES THIS ROW CARRIED IS NOW DELIVERED, NOT WITHDRAWN.
+        # It recorded that arming waits on the free/anon included amounts AND on a
+        # per-org residency gauge the gate can read on a write path — because
+        # clearing the first would have armed the dimension with ``meter=None``
+        # and answered 500 on every gated write. The second half is now BUILT:
+        # ``_postgres_stored_bytes`` reads ``org_postgres_residency`` (one row by
+        # primary key, snapshotted offline from the audit that was too expensive
+        # to run per write), aged by ``stale_after_seconds``. So the block is back
+        # on the RECORDED position — one outstanding decision, the included
+        # amounts — and that position was never reversed.
         #
-        # OVERRIDES: the recorded “postgres_storage is armable once the free/anon
-        # included amounts are decided” (cost_dimensions.py, postgres_bytes.py,
+        # OVERRIDES: the recorded "postgres_storage is armable once the free/anon
+        # included amounts are decided" (cost_dimensions.py, postgres_bytes.py,
         # metering.py, docs/ops/postgres-storage-measurement.md,
-        # docs/architecture/CONSUMPTION-MODEL.md) — NARROWED, not reversed: that
-        # decision is still required, AND no per-org RESIDENCY gauge exists that
-        # the gate can read on a write path. If anyone disagrees, the route is a
-        # reopen on #9559, not a quiet edit.
+        # docs/architecture/CONSUMPTION-MODEL.md) — the NARROWING that stood here
+        # is now SATISFIED, so this reason states exactly that decision again. The
+        # OVERRIDES line stays visible because the gauge it added is load bearing:
+        # an arming lane reading only the amounts would need to know a meter is
+        # plumbed, and what shape of figure it must be.
         blocked_reason=(
-            "no per-org RESIDENCY GAUGE, and the included amounts are not "
-            "confirmed. The per-org Postgres BYTE ATTRIBUTION this reason used "
-            "to call missing now EXISTS and is MEASURED (#12762 — "
-            "``postgres_bytes.PerOrgPostgresBytes.for_org``; the "
-            "``cost_dimensions`` attribution carries the OVERRIDES of the #4492 "
-            "'there is no per-org attribution' position). Two things still "
-            "block a cap: (1) no per-org figure this gate can read ON A WRITE "
-            "PATH — the audit (``postgres_bytes.per_org_bytes``, RPC "
-            "``postgres_per_org_bytes``) is a whole-table aggregation with a "
-            "per-row TOAST lookup plus a second pass over the TOAST relation, "
-            "and the ledger reader is the window ADDEND, not the org's stored "
-            "footprint (``metering.get_postgres_bytes_written``: 'the ADDEND of "
-            "the window, not the org's total stored footprint'); (2) the "
-            "free/anon included amounts, which the artifact records as DERIVED, "
-            "NOT OWNER-CONFIRMED (``product/pricing.json`` "
-            "``billing.storage._included_amounts_status``). BLOCKED until a "
-            "per-org gauge exists that is affordable per write AND the included "
-            "amounts are confirmed"),
+            "the free/anon included amounts are not confirmed, so there is no "
+            "number to cap against. Both MEASUREMENTS this reason used to call "
+            "missing now exist and are wired: the per-org Postgres BYTE "
+            "ATTRIBUTION (#12762 — ``postgres_bytes.PerOrgPostgresBytes.for_org``; "
+            "the ``cost_dimensions`` attribution carries the OVERRIDES of the "
+            "#4492 'there is no per-org attribution' position) and the per-org "
+            "RESIDENCY GAUGE this gate can read ON A WRITE PATH (#9559 — "
+            "``org_postgres_residency``, one row by primary key, snapshotted "
+            "offline by ``postgres_residency_snapshot()`` from the whole-table "
+            "audit, and read through ``metering.get_postgres_residency``; aged by "
+            "``stale_after_seconds`` so a snapshot too old to defend is REFUSED, "
+            "not enforced). What remains is the DECISION, not the instrument: "
+            "``product/pricing.json`` records the amounts as DERIVED, NOT "
+            "OWNER-CONFIRMED (``billing.storage._included_amounts_status``). "
+            "BLOCKED until the owner confirms those amounts. "
+            "⛔ AND ARMING HAS ONE OPERATIONAL PRECONDITION a lane lifting this "
+            "block MUST meet first: ``postgres_residency_snapshot()`` has to run "
+            "on a schedule. Nothing calls it yet, so the snapshot table is EMPTY, "
+            "and an empty table is read as UNREPORTED (nothing has been measured "
+            "for ANY org) rather than as every org storing zero — a zero there "
+            "would pass every cap. Configuring an allowance before the refresh "
+            "runs would therefore refuse EVERY gated write with a no-reading "
+            "error rather than cap anything. One successful refresh is what "
+            "distinguishes 'this org stores nothing' (served, as a true zero) "
+            "from 'nothing has ever been measured' (refused); schedule it, verify "
+            "a row exists for a real org, and only then lift this."),
         release=(
             "per_org_postgres_attribution",
             "postgres_residency_gauge",
