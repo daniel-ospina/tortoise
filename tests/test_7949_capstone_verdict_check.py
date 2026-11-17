@@ -26,14 +26,24 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from tests._cite_resolution import locate_hint as _locate_hint  # noqa: E402
 from tools import capstone_verdict_check as cvc  # noqa: E402
 
 LOG = _REPO / "docs/evidence/7949-capstone/capstone.log"
 PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"
+
+#: The bundle document the README/probe cite rules read. A MODULE-LEVEL name so the
+#: pin below can point the rules at a STALE COPY and require the resolved line in the
+#: message they raise (#13033 round-10 review, P2: the seven `_locate_hint` sites in
+#: this file were unpinned — a constant string in every one of them left the suite
+#: green).
+_README = PROBE.parents[1] / "README.md"
 
 #: The ``_MEASUREMENT_RUN_KEYS`` members the emitter writes NESTED rather than at
 #: run-block level, so the run-block scan in
@@ -2074,7 +2084,7 @@ def test_the_readme_does_not_describe_the_retired_extraction_lookup():
     expression was there) and the second reds too (`result = captured` was
     nowhere in it).
     """
-    readme = (PROBE.parents[1] / "README.md").read_text()
+    readme = _README.read_text()
     assert 'captured.get("extraction")' not in readme, (
         "the README names a lookup the probe deleted")
     assert "result = captured" in readme, (
@@ -2098,7 +2108,7 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     `_extract_session_v2`, so the `startswith("def …")` assertion reds, and
     `:9358` carries no call to it, so the call-site assertion reds too.
     """
-    readme = (PROBE.parents[1] / "README.md").read_text()
+    readme = _README.read_text()
     sources = {
         "sdk": (_REPO / "tortoise/sdk.py").read_text().splitlines(),
         "extractor_v2": (_REPO / "tortoise/extractor_v2.py").read_text().splitlines(),
@@ -2110,10 +2120,14 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     def_line, call_line = (int(n) for n in sdk_cites.groups())
     assert sources["sdk"][def_line - 1].lstrip().startswith("def _extract_session_v2("), (
         f"README cites the _extract_session_v2 def at sdk.py:{def_line}, which is "
-        f"{sources['sdk'][def_line - 1].strip()!r} — the line moved and the cite did not")
+        f"{sources['sdk'][def_line - 1].strip()!r} — the line moved and the cite did "
+        f"not: `def _extract_session_v2(` "
+        f"{_locate_hint(sources['sdk'], 'def _extract_session_v2(', 'def', def_line)}")
     assert "self._extract_session_v2(" in sources["sdk"][call_line - 1], (
         f"README cites the call at sdk.py:{call_line}, which is "
-        f"{sources['sdk'][call_line - 1].strip()!r} — the line moved and the cite did not")
+        f"{sources['sdk'][call_line - 1].strip()!r} — the line moved and the cite did "
+        f"not: `self._extract_session_v2(` "
+        f"{_locate_hint(sources['sdk'], 'self._extract_session_v2(', 'line', call_line)}")
     # Anchored on the entry-point SENTENCE, not on the first backticked
     # `extractor_v2.py:NNNN` anywhere in a 40 KB document: the bundle cites
     # dozens of lines in that file (the flag reads, the gates, the surfaces),
@@ -2149,7 +2163,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         text = sources["extractor_v2"][int(lineno) - 1]
         assert symbol.split(".")[-1] in text, (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
-            f"{text.strip()!r} — the line moved and the cite did not")
+            f"{text.strip()!r} — the line moved and the cite did not: "
+            f"`{symbol.split('.')[-1]}` "
+            f"{_locate_hint(sources['extractor_v2'], symbol.split('.')[-1], 'line', int(lineno))}")
     # (c) The probe's nine bare step cites (#10211). They name a SYMBOL and a
     # bare `:NNNN` with no filename, so rule (b) cannot see them (it reads the
     # README) and the bundle's own sweep cannot either (`_BUNDLE_CITE` requires
@@ -2180,7 +2196,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
             f"the probe cites `{first}`"
             + (f" / `{second}`" if second else "")
             + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
-            "the line moved and the cite did not")
+            "the line moved and the cite did not: "
+            + "; ".join(f"`{sym}` {_locate_hint(sources['extractor_v2'], sym, 'line', int(lineno))}"
+                        for sym in named))
     # (d) The probe's ENTRY-POINT sentence, the same (def, call) pair rule (a)
     # pins in the README (#10021 review). Rule (c) covers only the probe's nine
     # bare STEP cites, so this sentence — the one that names the entry point a
@@ -2212,11 +2230,13 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     assert sources["sdk"][p_def - 1].lstrip().startswith("def _extract_session_v2("), (
         f"the probe cites the _extract_session_v2 def at sdk.py:{p_def}, which "
         f"is {sources['sdk'][p_def - 1].strip()!r} — the line moved and the "
-        "cite did not")
+        "cite did not: `def _extract_session_v2(` "
+        f"{_locate_hint(sources['sdk'], 'def _extract_session_v2(', 'def', p_def)}")
     assert "self._extract_session_v2(" in sources["sdk"][p_call - 1], (
         f"the probe cites the call at sdk.py:{p_call}, which is "
-        f"{sources['sdk'][p_call - 1].strip()!r} — the line moved and the cite "
-        "did not")
+        f"{sources['sdk'][p_call - 1].strip()!r} — the line moved and the cite did "
+        f"not: `self._extract_session_v2(` "
+        f"{_locate_hint(sources['sdk'], 'self._extract_session_v2(', 'line', p_call)}")
 
 
 def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():
@@ -2236,7 +2256,7 @@ def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():
     it reds the moment either the README or a re-run of the probe moves without
     the other.
     """
-    readme = (PROBE.parents[1] / "README.md").read_text()
+    readme = _README.read_text()
     log_head = re.search(r"^# head: ([0-9a-f]{40})$", LOG.read_text(),
                          re.MULTILINE)
     assert log_head, "the shipped log carries no `# head:` stamp"
@@ -2352,7 +2372,7 @@ def test_the_readme_names_the_run_s_own_blocker_not_only_the_rows(tmp_path):
     `"#9116" in readme` was False and the Reproduce block asserted no
     precondition beyond `#9075`.
     """
-    readme = (PROBE.parents[1] / "README.md").read_text()
+    readme = _README.read_text()
     assert "#9116" in readme, (
         "the bundle must name the run's own blocker: S2.2/S2.3/S3/S6 are not "
         "observable on capture_session's receipt, so G5 refuses for every input")
@@ -2382,7 +2402,7 @@ def test_the_parser_declares_no_flag_the_run_ignores(tmp_path):
     """
     parser = probe.build_parser()
     help_text = parser.format_help()
-    readme = (PROBE.parents[1] / "README.md").read_text()
+    readme = _README.read_text()
     assert "--e1e2-evidence" not in help_text
     assert "--e5-evidence" not in help_text
     assert "--e1e2-evidence" not in readme
@@ -2563,7 +2583,7 @@ def test_the_readme_documents_the_head_override_it_exposes():
     README's Reproduce block, so a reader could not tell whether a shipped
     log's `head` was the measured commit or an override (#9080 review).
     """
-    readme = (PROBE.parents[1] / "README.md").read_text()
+    readme = _README.read_text()
     assert "--head" in readme, "the Reproduce note must name the override"
     assert "--head" in probe.__doc__
 
@@ -3003,7 +3023,104 @@ def test_the_probes_line_citations_resolve_too():
         text = extractor[lineno - 1]
         assert symbol.split(".")[-1] in text, (
             f"probe cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
-            f"{text.strip()!r} — the line moved and the cite did not")
+            f"{text.strip()!r} — the line moved and the cite did not: "
+            f"`{symbol.split('.')[-1]}` "
+            f"{_locate_hint(extractor, symbol.split('.')[-1], 'line', lineno)}")
+
+
+def test_a_stale_cite_in_the_readme_or_probe_names_the_resolved_line(tmp_path, monkeypatch):
+    """ALL SEVEN `_locate_hint` sites in this file are pinned BY MESSAGE CONTENT.
+
+    ⛔ MEASURED (#13033 round-10 review, P2): replacing every `_locate_hint` site with a
+    constant left the whole suite green (1106 passed, 1 skipped — identical to the
+    unmutated run), so the README/probe rules — the half of the deliverable that lives
+    HERE — could go back to naming only what the cited line *reads*. ⛔ AND MEASURED
+    AGAIN (#13033 round-11 review, P2): the first cut of THIS test drove three sites and
+    left four open — each `(def, call)` pair was pinned on one half only — so a constant
+    at `README`'s call half, the step table, the probe step loop, or the probe `def` half
+    still passed the whole suite. There is now one arm per site.
+
+    Each arm drives the REAL rule with a document whose number is wrong and requires the
+    resolved line in the message the rule raises. Deleting the `_locate_hint` call from
+    the site an arm drives reds that arm; the documents are copied to `tmp_path`, so
+    nothing here mutates the tree.
+
+    Arms, in site order: 1 README entry def, 2 README entry call, 3 README step table,
+    4 probe step loop (inside the README test), 5 probe entry def, 6 probe entry call,
+    7 the probe-step test's own loop.
+    """
+    module = sys.modules[__name__]
+    real_readme, real_probe = _README, PROBE
+    readme = real_readme.read_text()
+    raw_probe = real_probe.read_text()
+    # the probe rules normalise the doubled backticks before matching, so every arm that
+    # drives them does the same or it would mutate a shape the rule never sees
+    probe = re.sub(r"`{2}", "`", raw_probe)
+
+    def stale(name: str, text: str) -> Path:
+        path = tmp_path / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def bump(text: str, number: str) -> str:
+        return text.replace(":" + number, ":" + str(int(number) + 1), 1)
+
+    def drive_readme_test(exc_message: str) -> None:
+        with pytest.raises(AssertionError) as exc:
+            test_the_readmes_line_citations_resolve_to_the_symbols_they_name()
+        assert "is at line" in str(exc.value), exc_message + f": {exc.value}"
+
+    readme_cites = re.search(r"`sdk\.py:(\d+)`; called at `:(\d+)`", readme)
+    assert readme_cites, ("the README's entry-point cite moved — the arms below cannot "
+                          "drive rule (a); re-derive it, do not drop the pin")
+    probe_cites = re.search(r"`sdk\.py:(\d+)`, called at `:(\d+)`", probe)
+    assert probe_cites, ("the probe's entry-point cite moved — the arms below cannot "
+                         "drive rule (d)")
+
+    # ── arm 1: rule (a), the README's entry-point DEF half ──────────────────
+    monkeypatch.setattr(module, "_README", stale("readme-def.md", bump(
+        readme, readme_cites.group(1))))
+    drive_readme_test("the README rule's DEF message must name the resolved line")
+
+    # ── arm 2: rule (a), the README's entry-point CALL half ─────────────────
+    monkeypatch.setattr(module, "_README", stale("readme-call.md", bump(
+        readme, readme_cites.group(2))))
+    drive_readme_test("the README rule's CALL message must name the resolved line")
+
+    # ── arm 3: rule (b), the README's eight-row step table ──────────────────
+    rows = re.search(r"`([A-Za-z_][\w.]*)`\s*`:(\d+)`", readme)
+    assert rows, "the README's step table moved — arm 3 cannot drive rule (b)"
+    monkeypatch.setattr(module, "_README", stale("readme-table.md", bump(
+        readme, rows.group(2))))
+    drive_readme_test("the README step table's message must name the resolved line")
+
+    # ── arm 4: rule (c), the probe's bare step cites, inside the README test ─
+    step = next((mm for mm in re.finditer(r"``:(\d+)``\)", raw_probe)
+                 if "called at" not in raw_probe[max(0, mm.start() - 30):mm.start()]), None)
+    assert step, "the probe's step cites moved — arm 4 cannot drive rule (c)"
+    monkeypatch.setattr(module, "_README", real_readme)
+    monkeypatch.setattr(module, "PROBE", stale("probe-rule-c.md", bump(
+        raw_probe, step.group(1))))
+    drive_readme_test("the probe step loop's message must name the resolved line")
+
+    # ── arm 5: rule (d), the probe's entry-point DEF half ───────────────────
+    monkeypatch.setattr(module, "PROBE", stale("probe-def.md", bump(
+        probe, probe_cites.group(1))))
+    drive_readme_test("the probe DEF message must name the resolved line")
+
+    # ── arm 6: rule (d), the probe's entry-point CALL half ──────────────────
+    monkeypatch.setattr(module, "PROBE", stale("probe-call.md", bump(
+        probe, probe_cites.group(2))))
+    drive_readme_test("the probe CALL message must name the resolved line")
+
+    # ── arm 7: the probe-step test's own loop ───────────────────────────────
+    monkeypatch.setattr(module, "PROBE", stale("probe-steps.md", bump(
+        raw_probe, step.group(1))))
+    with pytest.raises(AssertionError) as step_exc:
+        test_the_probes_line_citations_resolve_too()
+    assert "is at line" in str(step_exc.value), (
+        "the probe step-cite rule's stale-cite message must name the resolved line: "
+        f"{step_exc.value}")
 
 
 # ── V7 across a multi-artifact table (the capstone's own rows) ────────────

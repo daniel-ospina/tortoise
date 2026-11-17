@@ -7795,12 +7795,106 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
             plan.append(allocation_statement(
                 org_id=org_id, graph_id=graph_id, records=records))
         return plan
-    for seq, record in enumerate(records, start=start_seq):
+    for index, record in enumerate(records):
+        # ⛔ THE CARRIED ORDINAL IS VALIDATED ONLY WHERE IT IS WRITTEN. It feeds
+        # `_journal_row` and nothing else, so reading it on the `position=False`
+        # arm refused a record-sourced batch over an ordinal the caller never
+        # asked to write — a false refusal with nothing to repair, since no
+        # position row is emitted at all (#12894 review cycle 9, P2). The sibling
+        # guard above is scoped the same way and for the same reason
+        # (`if position and not allocate and records:`).
+        # ⚠️ THE ORDER IS LOAD-BEARING AND UNCHANGED: the record's own mutations
+        # come first, then its position row (an identity row must precede the
+        # node row it names — `tests/test_record_projection.py` pins four such
+        # legs). Only the READ moved.
         plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
                                   columns=columns, refused=refused))
         if position:
+            seq = _carried_position(record, start_seq + index, index)
             plan.append(_journal_row(record, seq, org_id, graph_id))
     return plan
+
+
+def _carried_position(record: Mapping[str, Any], enumerated: int,
+                      index: int) -> int:
+    """The record's OWN position when it carries one, else the enumeration (#9190).
+
+    THE RULING'S SECOND HALF. `#9190` reopened this issue because replay DERIVED
+    the number (`enumerate(records, start=1)`) instead of reading it: the record
+    allocates the ordinal and the journal record CARRIES it, so a replay of that
+    record must not renumber it. A record built from the record's own rows carries
+    `seq` as a fact (`public.journal_event.seq` is a column); a record read off the
+    JSONL journal carries no `seq` and keeps the enumeration, which is why this is
+    a READ when present rather than a required field.
+
+    ⛔ BUT "NO WRITER EMITS ONE" WAS FALSE, and this read was bitten by it (#12894
+    review cycle 11, P1 — measured). ``seq`` was NOT a reserved prop on the SDK or
+    `EventAPI` doors until this change, so `update_point(pid, seq=42)` could put one
+    on a line; and `tools/backfill_copy_turns.py` copies EVERY graph property onto
+    its event, so a `:Session` holding a ``seq`` prop reached here too and refused
+    the whole session's copy. The doors now RESERVE the name (so no producer can
+    mint one), and that tool's `_SESSION_ENVELOPE` strips it — but the shape test
+    below is still the weak point: it cannot tell a CARRIED POSITION from a
+    tenant property that merely shares the name. The sound fix is an explicit
+    "this batch is record-sourced" flag on `replay`/`replay_plan` rather than
+    inferring it from a key's presence; until then no producer may emit ``seq``
+    at the event's **TOP LEVEL** (a nested snapshot such as ``point.seq`` is
+    unaffected — this reads only the record's top-level key, which is why the
+    turn producer's copy of a legitimate `:Point.seq` is safe), and the refusal
+    below says so.
+
+    ⛔ A DISAGREEMENT IS A REFUSAL, NEVER A RENUMBERING. Silently preferring either
+    side is the `#9190` defect with a new spelling: one number would be overwritten
+    and nobody would learn which was right. The refusal names both numbers and the
+    record's index, so an operator can tell a reordered batch from a corrupted
+    one.
+
+    ⛔ AND "CARRIES A NUMBER" IS `int`, NOT "COERCES TO ONE". An earlier cut used
+    `int(carried)` inside a try/except, which ACCEPTED `5.9` (truncated to 5) and
+    `"5"` (parsed) — i.e. a value that DISAGREES with the enumeration was silently
+    renumbered into agreement, which is precisely the failure the paragraph above
+    says is impossible (#12894 review cycle 4, P2). The type is checked, not
+    coerced: `True`/`False` are rejected too, because `bool` is an `int` subclass
+    and `int(True) == 1` would smuggle a non-position past this check.
+
+    ⚠️ SCOPE, stated because a reader will ask: `seq` is a journal POSITION here.
+    `:GraphEvent.seq` (`event_store_meta.last_seq`) is a DIFFERENT coordinate with
+    its own allocator (`record_allocator`'s docstring says so, and `§A7.7` step 4
+    deletes D-07 from this sequence), and no producer hands a `:GraphEvent` to the
+    record — every caller of this plan passes journal records. A future caller that
+    did would be refused loudly by the check below rather than silently numbered,
+    which is the direction this module wants to fail in.
+    """
+    carried = record.get("seq")
+    if carried is None:
+        return enumerated
+    if isinstance(carried, bool) or not isinstance(carried, int):
+        raise RecordProjectionError(
+            f"record {index} carries seq={carried!r}, which is not an integer: a "
+            f"record that CARRIES its position must carry an integer (or no "
+            f"`seq` at all, which means 'enumerate me'). A value that only "
+            f"COERCES to an integer is refused rather than truncated or parsed: "
+            f"renumbering a disagreement into agreement is the #9190 defect"
+        )
+    carried_seq = carried
+    if carried_seq != enumerated:
+        raise RecordProjectionError(
+            f"record {index} carries journal position {carried_seq} but the "
+            f"enumeration puts it at {enumerated}. The record and the read "
+            f"disagree about the ordinal, so NEITHER is renumbered here -- "
+            f"repair the batch (or the caller's start_seq) and re-run. If this "
+            f"`seq` is a CALLER PROPERTY and not a carried position, the batch "
+            f"is not record-sourced: strip `seq` at the producer (it is a "
+            f"reserved journal-envelope name) and re-run -- the two are "
+            f"indistinguishable here, because this reads a shape, not a claim. "
+            f"⛔ A STRIP AT THE PRODUCER ONLY PREVENTS FUTURE LINES: the journal "
+            f"is append-only, so a line ALREADY on disk keeps its `seq` for "
+            f"ever, and this raises while BUILDING the plan -- no partial "
+            f"repair. No journal-line migration ships today, so a graph whose "
+            f"journal already carries a top-level `seq` cannot have its record "
+            f"rebuilt from that journal until one does"
+        )
+    return carried_seq
 
 
 def to_dollar_placeholders(statement: Statement) -> tuple[str, list[Any]]:
