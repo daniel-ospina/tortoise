@@ -1259,3 +1259,49 @@ def test_the_DRY_RUN_reports_None_for_the_goal_it_is_about_to_CLEAR(sdk):
     live = reconcile_goal_states(sdk)
     live_row = next(g for g in live["goals"] if g["goalId"] == goal["id"])
     assert (live_row["action"], live_row["to"]) == ("cleared", None), live_row
+
+
+def test_the_conflict_arm_is_scoped_to_the_GOAL_axis(sdk):
+    """A merge-exposed scoping defect: rows with NO `goalState` are not goals.
+
+    The `#12592` successor guard grades the successor question over EVERY bound
+    row (`test_12592_supersede_door.py::test_the_verdict_is_over_every_bound_row`),
+    and rows that carry no achievement word have no goal ending to disagree
+    about. MEASURED on the merge of this branch onto `origin/main`: two
+    `:Object`s sharing an id, both `status='live'`, no `goalState` anywhere, one
+    carrying `supersededBy`, differing ONLY on that — `update_knowledge(<id>,
+    status='superseded')` was refused "more than one node … disagree about the
+    goal's ending" instead of the successor guard's own "no successor".
+
+    ⛔ Both directions are asserted, so the gate cannot be widened into a
+    weakening: when the rows DO carry a `goalState`, the disagreement (
+    including one over the successor) is still the conflict arm's.
+    """
+    g = sdk._get_proj().g
+
+    # (a) no goalState anywhere: the successor guard answers, over every row
+    plain = "fanout-no-goal-13035"
+    g.query("CREATE (:Object {id:$id, name:'plain-carried', status:'live', "
+            "supersededBy:'v2'})", params={"id": plain})
+    g.query("CREATE (:Object {id:$id, name:'plain-bare', status:'live'})",
+            params={"id": plain})
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(plain, status="superseded")
+    msg = str(exc.value)
+    assert "no successor" in msg, msg
+    assert "more than one node" not in msg, msg
+    statuses = sorted(r[0] for r in g.query(
+        "MATCH (n:Object {id:$id}) RETURN n.status",
+        params={"id": plain}).result_set)
+    assert statuses == ["live", "live"], statuses
+
+    # (b) the goal axis IS in play: the same successor-only difference is a
+    # conflict, so the verdict cannot be taken from `rows[0]`
+    goal = "fanout-goal-13035"
+    g.query("CREATE (:Object {id:$id, name:'goal-carried', status:'live', "
+            "goalState:'active', supersededBy:'v2'})", params={"id": goal})
+    g.query("CREATE (:Object {id:$id, name:'goal-bare', status:'live', "
+            "goalState:'active'})", params={"id": goal})
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal, status="superseded", goalState="superseded")
+    assert "more than one node" in str(exc.value), str(exc.value)

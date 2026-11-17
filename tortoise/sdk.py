@@ -6183,7 +6183,29 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             _read = True
             if goal_ending is not None:
                 _stored.update(goal_ending() or {})
-            if _stored.get("conflict"):
+            if _stored.get("conflict") and (
+                    # ⛔ THE ARM IS SCOPED TO THE GOAL AXIS, the same way the
+                    # `_stored_ending` arm below is (round 6, finding 1), and for
+                    # the same reason. Rows that carry NO `goalState` and whose
+                    # write names none are not goals, so there is no goal ending
+                    # for them to disagree about — and the successor difference
+                    # among them is not a goal question at all: the `#12592`
+                    # successor guard answers it over EVERY bound row already.
+                    # Measured without this gate (the merge of this branch onto
+                    # `origin/main`): two `:Object`s sharing an id, both
+                    # `status='live'`, no `goalState` anywhere, one carrying
+                    # `supersededBy`, differing ONLY on that — `update_knowledge(
+                    # <id>, status='superseded')` was refused
+                    # "more than one node … disagree about the goal's ending"
+                    # instead of the successor guard's own "no successor",
+                    # reddening `test_12592_supersede_door.py::
+                    # test_the_verdict_is_over_every_bound_row`.
+                    # ⛔ NOT a weakening: when the bag NAMES `goalState` the goal
+                    # axis IS in play, so a stored disagreement is still refused
+                    # (otherwise the successor verdict would come from `rows[0]`,
+                    # the plan-order dependence round 12 pinned).
+                    bag_goal is not _GOAL_ENDING_UNSET
+                    or _stored.get("anyGoalState")):
                 # #13065 review finding 5: MORE THAN ONE node carries this id and
                 # they disagree about whether the goal ended. The write binds
                 # them ALL (the journal fold MERGEs on the id), so grading
@@ -6652,6 +6674,13 @@ def _stored_goal_ending_view(proj, id_val: str, *,
             "outdated": legacy_outdated}
     if len(endings) > 1:
         view["conflict"] = True
+    # ⛔ Does ANY bound row carry an achievement word? The conflict arm is scoped
+    # to the goal axis (see the guard's `_stored_view`), and this is what tells it
+    # the axis is in play when the write itself names no `goalState`: a row with
+    # no `goalState` is not a goal, so a successor-only difference among such rows
+    # is the `#12592` successor guard's question, not this one.
+    view["anyGoalState"] = any(
+        (row[1] is not None) if len(row) > 1 else False for row in rows)
     return view
 
 #: The property that NAMES the successor — the other half of ONTOLOGY §4.3's
