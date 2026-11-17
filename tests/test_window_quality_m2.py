@@ -1477,6 +1477,92 @@ def test_the_record_quotes_the_current_wording_of_the_honesty_item():
         )
 
 
+def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
+    """Each figure the three documents quote is compared to a DERIVATION, not to a SET.
+
+    ⛔ `test_no_doc_states_a_percentage_the_artifact_does_not_hold` is a MEMBERSHIP
+    test: it rejects a figure no arm holds and ACCEPTS any figure some arm holds.
+    So a plausible number lifted from a DIFFERENT arm — a different population, the
+    other policy, the wrong coverage — passes, and the sentence then states the
+    opposite of its own paragraph while the suite is green. Four review rounds have
+    each found another instance (#13126 rounds 1-3), every one measured:
+
+        README/CHANGELOG `:Object` series  8.7 -> 57.1                      green
+        README/§9.1 tie band               9.85 pp -> 0.33 pp              green
+        all three `:Point` scope pair      52.7/41.0 -> 49.3/40.0          green
+        all three complete `misbind@1`     93.0 % -> 94.3 %                green
+        §9.1 coincidence / ceiling         0.11 -> 0.21, 0.7133 -> 0.6133  green
+        README bundle header               git head + all four corpus counts green
+
+    This is deliberately one enumerated table rather than a rewrite of the scan: a
+    binding is a property of a SENTENCE (which arm and metric does this number
+    report?), and no general rule can recover that from prose. Adding a quoted
+    figure means adding a row — which is why the residual is stated here instead of
+    being claimed closed.
+    """
+    obj = _arms(artifact, "object")
+    pt = _arms(artifact, "point")
+    covs = ("0.9", "0.75", "0.5", "0.25", "0.1")
+    readme = _flat(README.read_text(encoding="utf-8"))
+    arch = _flat(ARCH.read_text(encoding="utf-8"))
+    changelog = _flat(CHANGELOG.read_text(encoding="utf-8"))
+    corpus = artifact["corpus"]["corpus"]
+    rep = artifact["reproducibility"]
+
+    def series(arms, key):
+        return " / ".join(f"{arms[f'tail@{c}'][key] * 100:.1f}" for c in covs)
+
+    def rseries(arms, key):
+        return " / ".join(f"{arms[f'random@{c}'][key] * 100:.1f}" for c in covs)
+
+    tail, rand = series(obj, "found_deep"), rseries(obj, "found_deep")
+    # the identity holds before it is quoted: both series ARE resident shares
+    assert tail == series(obj, "resident_share")
+    assert rand == rseries(obj, "resident_share")
+
+    half = pt["tail@0.5"]
+    scope_share = f"{half['resident_share'] * 100:.1f}"
+    scope_found = f"{half['found_deep'] * 100:.1f}"
+    tie = f"{rep['tie_counting_max_delta_pp']:g}"
+    misbind = f"{pt['complete']['misbind_at_1'] * 100:.1f}"
+    coinc = f"{pt['random@0.1']['found_deep']:.2f}"
+    ceiling = f"{pt['complete']['found_deep']:.4f}"
+    plural = "s" if corpus["parse_errors"] != 1 else ""
+    bundle = (f"{corpus['files']}/{corpus['files_contributed']} files, "
+              f"{corpus['lines']} lines, {corpus['parse_errors']} parse error{plural}")
+
+    rows = [
+        # (document, fragment as the document states it, what it must derive from)
+        (readme, tail, "the `:Object` tail series (found@deep, coverage 0.9→0.1)"),
+        (readme, rand, "the `:Object` random series (its own resident shares)"),
+        (changelog, tail, "the `:Object` tail series"),
+        (changelog, rand, "the `:Object` random series"),
+        (readme, f"up to **{tie} pp**", "tie_counting_max_delta_pp"),
+        (arch, f"is {tie} pp, stated in the record", "tie_counting_max_delta_pp"),
+        (readme, f"keeping {scope_share} % finds {scope_found} %",
+         "point/tail@0.5 resident_share -> found_deep"),
+        (arch, f"keeping {scope_share} % of claims finds only {scope_found} %",
+         "point/tail@0.5 resident_share -> found_deep"),
+        (changelog, f"keeping {scope_share} % finds only {scope_found} %",
+         "point/tail@0.5 resident_share -> found_deep"),
+        (readme, f"{misbind} % `misbind@1`", "point/complete misbind_at_1"),
+        (arch, f"{misbind} % `misbind@1`", "point/complete misbind_at_1"),
+        (changelog, f"{misbind} % `misbind@1`", "point/complete misbind_at_1"),
+        (arch, f"merely **coincides** at {coinc}", "point/random@0.1 found_deep"),
+        (arch, f"the complete graph is {ceiling} against 1.0",
+         "point/complete found_deep"),
+        (readme, f"**git head:** `{artifact['git_head'][:12]}`", "artifact.git_head"),
+        (readme, f"**Corpus:** `~/.tortoise/session-events/*.jsonl` — {bundle}",
+         "artifact.corpus.corpus counts"),
+    ]
+    missing = [f"{what}: {frag!r}" for doc, frag, what in rows if frag not in doc]
+    assert not missing, (
+        "these quoted figures no longer match the arm they report — either the "
+        "artifact moved and the prose did not, or the figure was taken from a "
+        "DIFFERENT arm (membership cannot tell the two apart):\n  "
+        + "\n  ".join(missing))
+
+
 def test_every_published_arrow_is_bound_to_the_cell_it_reports(artifact):
     """Every published `A % -> B %` must equal the pair at ITS OWN arm and metric.
 
