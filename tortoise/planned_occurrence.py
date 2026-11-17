@@ -344,8 +344,10 @@ def create_plan(sdk, name: str, *, title: str | None = None,
                 f"not a plan — its kind is {_kind!r}. This call would have "
                 f"RETAGGED that record into {PLAN_PIPELINE_KEY!r} and staged it. "
                 f"Nothing was changed. WHAT TO DO: pick a distinct name for the "
-                f"plan, or use `record_occurrence` if the existing record is "
-                f"what happened.")
+                f"plan; if the existing record IS what happened (or is what an "
+                f"occurrence was about), write the dated fact directly — "
+                f"`create_entity(type='event', aboutObject=<its id>)` — because "
+                f"`record_occurrence` settles a PLAN and this record is not one.")
         _cur = pipeline.current_stage(_graph, _existing)
         _pos = plan_position(_cur.get("stageId"), outcome=_cur.get("outcome"),
                              is_closed=bool(_cur.get("isClosed")),
@@ -366,15 +368,25 @@ def create_plan(sdk, name: str, *, title: str | None = None,
             # "use a distinct name", which would be a no-op for the caller's
             # actual problem.
             raise ValueError(_unresolvable_message(name, _pos, _cur))
-        # A live, unended plan of this name: the documented re-mention. Return the
-        # record's OWN node payload — the same SHAPE the create path returns
-        # (`create_entity`'s `node`), so a caller reading `title`/`description`
-        # does not work on one arm and KeyError on the other. Its position is
-        # already its own, so nothing is re-staged.
-        _node = _graph.query(
-            "MATCH (o:Object {id:$o}) RETURN properties(o)",
-            params={"o": _existing}).result_set
-        return dict(_node[0][0]) if _node else {"id": _existing}
+        # ⛔ ONLY A POSITIONED, unended plan short-circuits. A live plan holder
+        # with NO position has not been staged, and returning it as a successful
+        # re-mention told the caller a plan was on the books when nothing was:
+        # an operator over it was then PROMOTED (a plan with no position does not
+        # suppress — by design), and for the bare `plan` spelling the record could
+        # never be bound at all, so `_resolve_plan`'s "create it with
+        # `create_plan`" remedy stayed refused after being issued. Such a holder
+        # FALLS THROUGH to the normal create+advance below, which re-mentions it
+        # (same kind: `plan` and `core:plan` are ONE kind) and stages it.
+        if _pos["has_position"]:
+            # The documented re-mention. Return the record's OWN node payload —
+            # the same SHAPE the create path returns (`create_entity`'s `node`),
+            # so a caller reading `title`/`description` does not work on one arm
+            # and KeyError on the other. Its position is already its own, so
+            # nothing is re-staged.
+            _node = _graph.query(
+                "MATCH (o:Object {id:$o}) RETURN properties(o)",
+                params={"o": _existing}).result_set
+            return dict(_node[0][0]) if _node else {"id": _existing}
 
     created = sdk.create_entity("object", name, **door_props)
     node = created.get("node") or {}

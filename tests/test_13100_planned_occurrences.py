@@ -660,6 +660,37 @@ class TestThePlanPipeline:
         assert pos["ended"] is False
         assert pos["outcome"] is None
 
+    def test_create_plan_STAGES_a_positionless_live_holder(self, sdk):
+        """A live plan holder with NO position is not a successful re-mention.
+
+        Short-circuiting on it told the caller a plan was on the books when
+        nothing was staged: an operator over it was then PROMOTED (a positionless
+        plan does not suppress, by design), and a bare `plan` spelling could never
+        be bound at all — so the "create it with `create_plan`" remedy stayed
+        refused after being issued. Both spellings are the SAME kind, so
+        re-mentioning and staging it is not a kind clobber.
+        """
+        g = sdk._get_proj().g
+        for label, kind in (("core", "core:plan"), ("bare", "plan")):
+            holder = sdk.create_entity("object", f"positionless {label}",
+                                       objectKind=kind)["node"]
+            created = PO.create_plan(sdk, f"positionless {label}")
+            assert created["id"] == holder["id"], label
+            assert _stage(sdk, holder["id"])["stageId"] == "scheduled", label
+            assert g.query("MATCH (o:Object {id:$o}) RETURN o.objectKind",
+                           params={"o": holder["id"]}).result_set[0][0] == PO.PLAN_PIPELINE_KEY
+            assert PO.record_occurrence(sdk, holder["id"])["move"].applied, label
+
+    def test_the_non_plan_refusal_names_a_remedy_that_works(self, sdk):
+        """`record_occurrence` settles a PLAN, so naming it for a non-plan record
+        points the caller at a call that refuses in turn."""
+        sdk.create_entity("object", "a goal record", objectKind="core:goal")
+        with pytest.raises(ValueError) as exc:
+            PO.create_plan(sdk, "a goal record")
+        message = str(exc.value)
+        assert "create_entity(type='event'" in message, message
+        assert "or use `record_occurrence`" not in message
+
     def test_create_plan_cannot_be_mis_kinded_by_a_caller_prop(self, sdk):
         """The kind is the module's decision, not a `**props` override."""
         node = PO.create_plan(sdk, "sneaky", objectKind="core:goal")
