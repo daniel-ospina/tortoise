@@ -57,6 +57,11 @@ from tortoise.search_engine import (
     run_vector_query,
 )
 
+#: Bound and cadence of the index-settle poll (#13290 review F3). Named so the
+#: hermetic pin below reads the SAME numbers the live lane uses.
+_INDEX_SETTLE_TIMEOUT_S = 30.0
+_INDEX_SETTLE_POLL_S = 0.1
+
 # ── FalkorDB availability check ─────────────────────────────────────────────
 # ⛔ THE PROBE AND THE COHORT MUST USE THE SAME SEAM (review F5). The docker and
 # legacy lanes publish on DIFFERENT ports (#6673: `TORTOISE_TEST_DOCKER_PORT` vs
@@ -171,6 +176,53 @@ def test_a_non_empty_index_answer_does_not_scan():
     assert entry["mechanism"] == MECHANISM_INDEX
 
 
+class _StubSDK:
+    """The whole surface ``_index_leg`` touches: a graph handle it never uses."""
+
+    class _Proj:
+        g = object()
+
+    def _get_proj(self):
+        return _StubSDK._Proj()
+
+
+def test_the_settle_retry_actually_fires(monkeypatch):
+    """#13290 review F3 — the poll must key on the token the code EMITS.
+
+    ``scan_mechanism`` is ``MECHANISM_SCAN_FALLBACK`` on every non-embedded
+    path, so a ``!= "scan"`` condition could never be true and the loop always
+    returned on its FIRST iteration: the async-index-build protection this
+    helper documents did not exist, and the premise assert in the two live
+    COHORT rows was evaluated on one un-retried read.
+
+    RED against that condition (one call, ``scan_fallback`` returned), GREEN
+    here. Hermetic — the dense read is replaced, so no server is needed.
+    """
+    calls: list[int] = []
+
+    def _fake(graph, query, limit=10, is_embedded=False, leg_trace=None):
+        calls.append(1)
+        settled = len(calls) >= 3
+        leg_trace.append({
+            "leg": "vector", "ran": True, "degraded": False,
+            "reason": "ok", "count": 1,
+            "mechanism": MECHANISM_INDEX if settled else MECHANISM_SCAN_FALLBACK,
+        })
+        return [("settled" if settled else "not-yet", 0.5)]
+
+    monkeypatch.setattr(sys.modules[__name__], "run_vector_query", _fake)
+    hits, entry = _index_leg(_StubSDK(), _vec())
+
+    assert entry["mechanism"] == MECHANISM_INDEX, (
+        "the helper returned a NOT-SETTLED answer, so the premise assert in "
+        "the live COHORT rows would red on a loaded runner (#13290 review F3)")
+    assert len(calls) == 3, (
+        f"the dense read ran {len(calls)} time(s) — the settle retry must poll "
+        "on `mechanism != MECHANISM_INDEX`, which is the token a non-embedded "
+        "read actually emits; `!= 'scan'` can never fire")
+    assert "settled" in hits, "the retried read's rows must be the ones returned"
+
+
 def _cohort_uri() -> str:
     """A DEDICATED graph on the seam the PROBE proved (never a second guess).
 
@@ -236,11 +288,22 @@ def _index_leg(sdk, query, limit=10):
     """One dense read through the index lane, with its trace entry.
 
     Retries until the store actually uses the INDEX: the engine's index build is
-    asynchronous, and a read taken before it settles would report `scan` and
-    certify nothing.
+    asynchronous, and a read taken before it settles does not answer from the
+    index, so it would certify nothing.
+
+    ⛔ THE RETRY KEYS ON ``MECHANISM_INDEX``, NOT ON ``"scan"`` (#13290 review
+    F3, the same finding in four reviews). ``index_attempted`` is set ``True`` on
+    EVERY non-embedded path — the index attempt, the measured-absent skip and
+    the record-leg fall-through — so ``scan_mechanism`` is
+    ``MECHANISM_SCAN_FALLBACK`` and ``MECHANISM_SCAN`` is **never** emitted
+    here. A ``!= "scan"`` condition therefore returned on its FIRST iteration,
+    always: the protection this docstring promises did not exist, and the very
+    state it was written for (an index that has not settled) reached the
+    ``MECHANISM_INDEX`` premise assert un-retried and redded on a loaded runner.
+    ``test_the_settle_retry_actually_fires`` pins that the poll can fire.
     """
     import time
-    deadline = time.monotonic() + 30.0
+    deadline = time.monotonic() + _INDEX_SETTLE_TIMEOUT_S
     entry = None
     hits: list = []
     while True:
@@ -249,9 +312,10 @@ def _index_leg(sdk, query, limit=10):
         hits = run_vector_query(sdk._get_proj().g, query, limit=limit,
                                is_embedded=False, leg_trace=trace)
         entry = next(e for e in trace if e["leg"] == "vector")
-        if entry.get("mechanism") != "scan" or time.monotonic() > deadline:
+        if (entry.get("mechanism") == MECHANISM_INDEX
+                or time.monotonic() > deadline):
             return dict(hits), entry
-        time.sleep(0.1)
+        time.sleep(_INDEX_SETTLE_POLL_S)
 
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE,

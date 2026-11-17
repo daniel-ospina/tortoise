@@ -248,6 +248,94 @@ def test_a_wrong_width_TYPED_vector_still_aborts_the_match(tmp_path):
             sdk.close()
 
 
+def test_a_store_with_no_row_readable_at_this_width_is_not_a_healthy_empty(
+        tmp_path):
+    """#8430 review F2 — a DROPPED-everything read is not an empty verdict.
+
+    The width filter is per-row, but nothing used to handle the degenerate case:
+    when EVERY embedded row is a value the seam cannot read at the query's own
+    width, the result set is empty and the zero-row guard counted
+    ``n.embedding IS NOT NULL`` — non-zero — so it recorded ``empty_results``
+    with ``degraded=False``. That is a FALSE PASS: ``_vector_leg_healthy`` counts
+    it as a healthy arm and ``require_hybrid_read`` certifies a hybrid read over
+    a dense leg that answered nothing, which is the "silent `ok`" this same
+    change's #8429 half closes one branch over
+    (docs/architecture/STORAGE-ARCHITECTURE.md §14.3 V4). Before the seam the
+    identical store raised, and the leg recorded ``query_failed`` +
+    ``degraded=True`` — the one diagnosis an operator gets that the encoder and
+    the store disagree (#1349's class).
+
+    RED before the fix (``empty_results``/healthy); GREEN now
+    (``unreadable_embeddings``/degraded).
+    """
+    from tortoise.exceptions import HybridReadUnavailableError
+    from tortoise.search_engine import UNREADABLE_EMBEDDINGS, require_hybrid_read
+
+    with mock.patch(_EMBED_PATCH, _StubEmbedder()):
+        sdk = TortoiseSDK(str(tmp_path / "allwidth.db"))
+        try:
+            only = sdk.create_point("statement", "the only candidate")["id"]
+            # A storable, verbatim (PR #3018) row whose width cannot pair with
+            # the query vector below — the whole cohort is unreadable here.
+            _overwrite_embedding(sdk, only, [0.1, 0.2])
+            assert _typeof(sdk, only) == "List", "premise: a plain List"
+
+            trace: list[dict] = []
+            from tortoise.search_engine import reset_circuit_breakers, run_vector_query
+            reset_circuit_breakers()
+            hits = dict(run_vector_query(
+                sdk._get_proj().g, _vector(0.0), is_embedded=True,
+                leg_trace=trace))
+            entry = next(e for e in trace if e["leg"] == "vector")
+
+            assert hits == {}, "premise: the only candidate is dropped"
+            assert entry["reason"] == UNREADABLE_EMBEDDINGS, (
+                f"the leg recorded {entry['reason']!r} over a store whose only "
+                "row the width test dropped — `empty_results` there claims "
+                "'no near neighbour' over a candidate set the seam emptied "
+                "(#8430 review F2)")
+            assert entry["degraded"] is True, (
+                "a leg that dropped every candidate must not read as healthy")
+            with pytest.raises(HybridReadUnavailableError):
+                require_hybrid_read(trace)
+        finally:
+            sdk.close()
+
+
+def test_a_readable_row_keeps_an_empty_result_a_healthy_verdict(tmp_path):
+    """The other side of the F2 pin: the new reason must not swallow the real one.
+
+    A store whose rows ARE readable at this width has a genuine "no near
+    neighbour" answer, and this guard makes sure the readability probe cannot
+    turn that into a degradation (the probe measures the WHOLE label, while the
+    read's own scope may exclude every row — the excluded row is still proof
+    that the store is readable, so ``empty_results`` is the honest verdict).
+    """
+    from tortoise.search_engine import reset_circuit_breakers, run_vector_query
+
+    with mock.patch(_EMBED_PATCH, _StubEmbedder()):
+        sdk = TortoiseSDK(str(tmp_path / "scoped.db"))
+        try:
+            # #11824 S0 stores the declared synonym `retracted` as `deprecated`,
+            # so the EXCLUDED set names the word the row actually holds.
+            sdk.create_point("statement", "scoped out", status="retracted")
+            trace: list[dict] = []
+            reset_circuit_breakers()
+            hits = run_vector_query(
+                sdk._get_proj().g, _vector(0.0), is_embedded=True,
+                excluded_statuses=("deprecated",), leg_trace=trace)
+            entry = next(e for e in trace if e["leg"] == "vector")
+
+            assert hits == [], "premise: the only row is excluded by the scope"
+            assert entry["reason"] == "empty_results", (
+                f"a store with a READABLE embedding must keep `empty_results` "
+                f"when the zero rows are the scope's doing — got "
+                f"{entry['reason']!r}")
+            assert entry["degraded"] is False
+        finally:
+            sdk.close()
+
+
 # ── #8419: the document vector derives from the surface the node HOLDS ──────
 
 def _doc_node(sdk: TortoiseSDK, did: str) -> dict:

@@ -2313,6 +2313,26 @@ def _trace_entry(leg: str, *, ran: bool, degraded: bool,
 #: leg failure and answer from the TF-IDF fallback.
 BELOW_RELEVANCE_FLOOR = "below_relevance_floor"
 
+#: #8430 review F2 — leg-trace reason recorded when the dense SCAN ran, found
+#: no row, and the rows it would have scored were ALL DROPPED by the read seam
+#: because none could be read at the query vector's own width.
+#:
+#: It exists because ``empty_results`` + ``degraded=False`` is a FALSE PASS in
+#: this state: ``embedded > 0`` counted the stored vectors, so the leg claimed
+#: "there are embeddings, just no near neighbour" over a candidate set the seam
+#: had emptied — and ``_vector_leg_healthy`` counts exactly that as a healthy
+#: arm, so ``require_hybrid_read`` certified a hybrid read over a dense leg that
+#: was entirely dead. Before the #8430 seam the same store raised, and the leg
+#: recorded ``query_failed`` + ``degraded=True``: this reason keeps that
+#: DIAGNOSIS while removing the raise.
+#:
+#: ⛔ Reached by an encoder change with no re-embed (#1349's class) on a store
+#: whose Points were all written caller-supplied (PR #3018's verbatim ``List``),
+#: which is a supported shape — see the seam's own value-preserving test. The
+#: common "no near neighbour" empty read is NOT this: one readable row is
+#: enough for ``empty_results`` to be the honest verdict.
+UNREADABLE_EMBEDDINGS = "unreadable_embeddings"
+
 #: #5412 — leg-trace reason recorded when the caller supplied NO query vector
 #: at all. The dense leg was never asked a question, so it neither ran nor
 #: failed (``ran=False``, ``degraded=False``). Its own term is required:
@@ -4461,6 +4481,48 @@ def run_vector_query(
                 embedded = cnt_rows[0][0] if cnt_rows else 0
             except Exception:  # noqa: BLE001, RUF100
                 embedded = 0
+        # #8430 review F2: ``embedded > 0`` alone does NOT make
+        # ``empty_results`` a verdict. The #8430 seam DROPS a stored value it
+        # cannot read at THIS query's width, so a store whose every embedded row
+        # is such a value returns zero rows for a reason that is not "no near
+        # neighbour" — and recording ``empty_results`` + ``degraded=False`` there
+        # is the "silent `ok`" this same change's #8429 half closes one branch
+        # over (docs/architecture/STORAGE-ARCHITECTURE.md §14.3 V4).
+        #
+        # So when there ARE embedded rows, ask once whether ANY of them is
+        # readable at this width. One row is enough for ``empty_results`` to be
+        # honest; NONE means the leg answered nothing and must say so.
+        #
+        # Population: the WHOLE LABEL, deliberately — the same population the
+        # ``embedded`` count above uses. When ``_scope_embedded`` measured a
+        # narrower scope, "no readable row on the label" still proves the claim
+        # (it is the stronger statement), so the verdict is never recorded on a
+        # weaker measurement than it asserts. An UNMEASURABLE probe (raise, or
+        # an engine that cannot answer `RETURN 1 LIMIT 1`) leaves the existing
+        # reason in place: a redundant `empty_results` is the cheap failure.
+        unreadable = False
+        if embedded > 0:
+            try:
+                _readable_probe = f"{stored_embedding_vector_expr('n', query_dim=len(query_vec))}"
+                probe_rows = graph.query(
+                    f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
+                    f"AND {_readable_probe} IS NOT NULL "
+                    "RETURN 1 LIMIT 1", timeout=_graph_timeout_ms).result_set
+                # An EMPTY result set is the positive proof that no row is
+                # readable at this width — the one state this reason names.
+                unreadable = not probe_rows
+            except Exception as e:  # noqa: BLE001, RUF100
+                logger.debug(
+                    "readable-embedding probe failed (%s) — keeping the "
+                    "count-based reason", e)
+        if unreadable:
+            logger.info(
+                "No Point embedding on %s is readable at this query's width "
+                "(%d embedded) — recording %s", label, embedded,
+                UNREADABLE_EMBEDDINGS)
+            _record(ran=True, degraded=True, reason=UNREADABLE_EMBEDDINGS,
+                    count=0, mechanism=scan_mechanism)
+            return []
         _record(ran=True, degraded=(embedded == 0),
                 reason=("no_embeddings" if embedded == 0 else "empty_results"),
                 count=0, mechanism=scan_mechanism)
