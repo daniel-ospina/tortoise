@@ -450,7 +450,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:843`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:3032-3057`,
-reached from the capture path at `sdk.py:19883` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:19915` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -1184,7 +1184,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 
 The pipeline's OWN path WAS `TortoiseSDK.capture_session` (**DELETED by #4282**, 2026-10-27 —
 this bundle's probes now drive the private `sdk._capture_session`) →
-`sdk._extract_session_v2` (`sdk.py:18456`; called at `:17345`) →
+`sdk._extract_session_v2` (`sdk.py:18488`; called at `:17377`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:14668`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is

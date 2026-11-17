@@ -74,10 +74,30 @@ else, so a caller can parse it.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first, and the
+# resulting `ImportError` reads as "this tool is broken" rather than "your
+# interpreter is too old".
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # #4053: this is an ENVIRONMENT failure, so it exits EXIT_USAGE (2), not 1 —
+    # 1 is REFUSED by the allocator, which means "the graph is unchanged and
+    # working, read the reason". A tool that never ran must not be read as an
+    # allocator refusal. The constant is defined below; this guard necessarily
+    # runs before it (and before the imports, #5128), so the value is spelled out
+    # here rather than referenced.
+    print(
+        f"record-allocator: requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/record_allocator_cli.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)  # EXIT_USAGE — not 1 (REFUSED by the allocator)
+
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
