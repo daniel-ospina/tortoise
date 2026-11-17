@@ -14,6 +14,16 @@ terminal states; #2422). The canonical set is ``TERMINAL_EXCLUDED_STATUSES``
 UNCONDITIONAL: ``include_draft=True`` re-includes DRAFTS only, never terminal
 points.
 
+“Ended” has TWO sources, and the predicate reads BOTH (#13034, design §6 in
+``docs/plans/2026-11-15-state-lifecycle-and-pipelines.md``): the LIFECYCLE WORD
+(the status vocabulary above, plus the legacy ``outdated`` flag) and the
+POSITION AXIS — the durable ``isClosed`` marker, or a stage in the ``terminal``
+pipeline slot (``pipeline.py``). Either axis alone is an ending. The position
+half is what makes an ending durable: once ``isClosed`` is set, re-resolving
+what slot the object's stage plays cannot resurrect it (``pipeline.py:924-943``).
+Its two Python/Cypher surfaces are :func:`is_position_ended` and the position
+conjuncts of :func:`_terminal_excluded` / :func:`is_terminal_status`.
+
 NO reader re-spells the predicate: ``_live_only`` is the ONE spelling, and it is
 called from every factor-extraction, pricing and display site (``ep``, ``sdk``,
 ``analyze``, ``why``, ``projection``, ``weights`` — the census grows with every
@@ -105,10 +115,52 @@ TERMINAL_EXCLUDED_STATUSES = (
     TERMINAL_STATUS_VALUES | LEGACY_NON_CURRENT_STATUS_VALUES)
 
 
+#: The pipeline slot whose role is ENDED (design §4/§6). Declared HERE rather
+#: than imported, because ``live.py`` is the LEAF: ``pipeline.py`` imports
+#: ``entity_identity``, which imports this module, so importing pipeline at
+#: import time would close a cycle. `pipeline.PIPELINE_SLOTS` is the authority
+#: for the slot vocabulary and ``PipelineStage.is_terminal`` is the authority
+#: for this role; `tests/test_13034_currency_rule_reads_position.py` pins the two
+#: together, so this literal cannot drift into a slot pipeline does not have.
+#: ⛔ Do not read the role from a stage NAME anywhere: a pack may call its
+#: terminal stage ``released``/``written-off``/``signed`` (§4.1).
+TERMINAL_STAGE_SLOT = "terminal"
+
+
+def is_position_ended(*, is_closed=None, stage_slot=None) -> bool:
+    """True when the POSITION axis records this thing as ended.
+
+    The second of the two sources the reader rule answers from (§6): the durable
+    ``isClosed`` marker, or a stage in the ``terminal`` slot. Both are ENDINGS
+    and either one alone is enough — ``isClosed`` is what makes an ending
+    durable (``pipeline.py:924-943``: a pack release that reclassifies the stage
+    an object sits in must not resurrect an object the graph records as closed),
+    while a terminal slot still ends an object whose marker was never written.
+
+    ``is_closed`` is read by ``bool()``, matching how
+    :func:`is_terminal_status` reads the legacy ``outdated`` flag and how
+    ``advance_stage`` reads the marker (``bool(cur.get("isClosed"))``): a
+    truthy non-boolean legacy value is an ending on every one of those reads.
+
+    A stage the caller did not resolve (``None``) is NOT an ending, and neither
+    is a slot in ``entry``/``active``/``suspended``: those say how far along a
+    thing is, never whether the commitment still stands (§4).
+
+    ⛔ This answers only the position axis. A caller asking "is this still
+    served as current?" asks :func:`is_terminal_status` (or
+    :func:`_terminal_excluded` in Cypher), which composes this with the
+    lifecycle word — never this alone.
+    """
+    if is_closed is not None and bool(is_closed):
+        return True
+    return isinstance(stage_slot, str) and stage_slot.strip() == TERMINAL_STAGE_SLOT
+
+
 def _terminal_excluded(clause: str, excluded=None, *,
                        include_outdated_flag: bool = True) -> str:
-    """Cypher predicate: the node's status is NOT terminal AND its legacy
-    ``outdated`` flag is not true.
+    """Cypher predicate: the node is NOT ended on EITHER axis — its status is
+    not terminal, its legacy ``outdated`` flag is not true, and its position
+    axis (``isClosed`` / a ``terminal`` pipeline slot) does not record an end.
 
     ``clause`` is an alias-qualified status reference (``"n.status"``); the
     flag lives on the same alias (``"n.outdated"``). ``outdated=true`` is a
@@ -127,6 +179,23 @@ def _terminal_excluded(clause: str, excluded=None, *,
     Object writer sets ``outdated``, so ANDing that Point conjunct would hide
     an Object nobody can mark, and the two families' vocabularies would be
     conflated in one predicate.
+
+    ⛔ THE POSITION AXIS IS NOT PART OF THAT FAMILY SEAM, and must not be made
+    one (#13034, design §6). The family seam chooses WHICH STATUS WORDS end a
+    thing; ``isClosed`` and the pipeline slot are a different SOURCE of the
+    same answer, and the reader rule reads BOTH regardless of family — an
+    ``:Object`` ended by ``isClosed`` is exactly the defect this arm closes. A
+    reader may therefore pick its vocabulary and its flag conjunct; it may not
+    opt out of the position axis, which is why there is no
+    ``include_position_axis`` switch to wire by mistake.
+
+    The position arms are ``TRUE`` (keep) for a node carrying neither property:
+    ``coalesce(NULL, false) = false`` and ``coalesce(NULL, '') <> 'terminal'``.
+    So ``:Point``, ``:Subject`` and ``:Event`` (no pipeline) are unaffected by
+    construction, and a status-less Object or a legacy node still reads live.
+    Skipping the slot conjunct would make the predicate depend on a property
+    only one label has; reading it on all of them costs nothing and cannot
+    silently exempt a label whose pack later declares a pipeline.
     """
     if excluded is None:
         excluded = TERMINAL_EXCLUDED_STATUSES
@@ -136,9 +205,19 @@ def _terminal_excluded(clause: str, excluded=None, *,
         f"{clause} <> '{s}'" for s in sorted(excluded))
     status_part = (f"({clause} IS NULL OR ({chain}))"
                    if chain else "true")
+    # The position axis, in the KEEP direction. ``= false`` (not ``<> true``) so
+    # this stays the exact De Morgan dual of ``_terminal_expression``'s
+    # ``<> false`` arm below — the #7075 excluded-middle lesson, applied to the
+    # new conjunct rather than re-learned on it.
+    position_part = (
+        f"(coalesce({alias}.isClosed, false) = false "
+        f"AND coalesce({alias}.pipelineSlot, '') "
+        f"<> '{TERMINAL_STAGE_SLOT}')"
+    )
     if not include_outdated_flag:
-        return status_part
-    return f"({status_part} AND coalesce({flag}, false) = false)"
+        return f"({status_part} AND {position_part})"
+    return (f"({status_part} AND coalesce({flag}, false) = false "
+            f"AND {position_part})")
 
 
 # #2490 (terminal posterior freeze): a terminalized claim's posterior pins at
@@ -192,20 +271,27 @@ def decay_clause(alias: str) -> str:
 
 
 def _terminal_expression(clause: str) -> str:
-    """Cypher boolean expression: TRUE when the node is terminal.
+    """Cypher boolean expression: TRUE when the node is ended on EITHER axis.
 
     Composes the SAME vocabulary as ``_terminal_excluded`` (status in
-    TERMINAL_EXCLUDED_STATUSES OR the legacy ``outdated=true`` flag) but in
-    the POSITIVE direction, usable in RETURN projections, CASE conditions and
-    WHERE OR-chains.
+    TERMINAL_EXCLUDED_STATUSES OR the legacy ``outdated=true`` flag) PLUS the
+    position axis (``isClosed`` true OR a stage in the ``terminal`` slot, #13034),
+    but in the POSITIVE direction, usable in RETURN projections, CASE conditions
+    and WHERE OR-chains.
 
     It is the EXACT De Morgan dual of ``_terminal_excluded`` — by
     construction, not by hand-written correspondence: the flag half below is
     ``coalesce(flag, false) <> false``, the negation of that predicate's
-    ``coalesce(flag, false) = false``, and the status half negates its
-    ``(status IS NULL OR status <> '…')`` NULL-guard. ``_alive_flag`` (this
+    ``coalesce(flag, false) = false``, the status half negates its
+    ``(status IS NULL OR status <> '…')`` NULL-guard, and the position half is
+    the negation of that predicate's two position conjuncts
+    (``isClosed <> false`` for ``= false``, ``pipelineSlot = 'terminal'`` for
+    ``<> 'terminal'``). ``_alive_flag`` (this
     expression negated) therefore cannot report ALIVE a node the keep-filter
-    drops, on any stored value (#7075). Before #7075 the flag half was
+    drops, on any stored value, on either axis (#7075, extended by #13034 —
+    before that the dual covered only the status and flag halves, so a closed
+    Object could read ALIVE here and "not current" in the keep-filter).
+    Before #7075 the flag half was
     ``= true``, which is NOT ``NOT (… = false)``: FalkorDB compares types
     strictly, so a non-boolean ``outdated`` matched NEITHER comparison and
     such a node was simultaneously "not terminal" here and "not live" in
@@ -230,7 +316,12 @@ def _terminal_expression(clause: str) -> str:
     members = " OR ".join(
         f"{alias}.status = '{s}'" for s in sorted(TERMINAL_EXCLUDED_STATUSES))
     return (f"(({alias}.status IS NOT NULL AND ({members})) "
-            f"OR coalesce({alias}.outdated, false) <> false)")
+            f"OR coalesce({alias}.outdated, false) <> false "
+            # #13034 — the position axis, in the POSITIVE direction: the
+            # durable ``isClosed`` marker or a stage in the ``terminal`` slot.
+            f"OR coalesce({alias}.isClosed, false) <> false "
+            f"OR coalesce({alias}.pipelineSlot, '') "
+            f"= '{TERMINAL_STAGE_SLOT}')")
 
 
 def _alive_flag(clause: str) -> str:
@@ -278,12 +369,15 @@ def is_draft_status(status) -> bool:
     return (status or "") == DRAFT_STATUS
 
 
-def is_terminal_status(status, outdated: bool = False) -> bool:
-    """Python mirror of the Cypher terminal predicate (status in the
-    terminal vocab OR the legacy ``outdated=true`` flag). NULL/absent status
-    is LIVE — the legacy-node rule, and since #9974 R1 the ordinary birth state
-    of a status-less Object/Subject (that fold seeds ``status=$st``,
-    derived-or-absent) — mirrors ``_terminal_excluded``'s NULL handling.
+def is_terminal_status(status, outdated: bool = False, *,
+                       is_closed=None, stage_slot=None) -> bool:
+    """Python mirror of the Cypher terminal predicate: the node is ended on
+    EITHER axis — status in the terminal vocab, the legacy ``outdated=true``
+    flag, or the position axis (``isClosed`` / a ``terminal`` pipeline slot,
+    #13034). NULL/absent status is LIVE — the legacy-node rule, and since #9974
+    R1 the ordinary birth state of a status-less Object/Subject (that fold seeds
+    ``status=$st``, derived-or-absent) — mirrors ``_terminal_excluded``'s NULL
+    handling.
 
     ``outdated`` is contractually a BOOLEAN (server-managed since #2491; the
     journal fold enforces the type). This mirror reads it by ``bool()``
@@ -293,8 +387,23 @@ def is_terminal_status(status, outdated: bool = False) -> bool:
     ``bool()`` is falsy while ``coalesce(v, false) <> false`` holds — e.g.
     numeric ``0``/``0.0`` or the empty string ``""`` (live here, terminal in
     Cypher). Out of contract; no in-repo writer can produce such a value
-    (#7075)."""
-    return (status or "") in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
+    (#7075).
+
+    ``is_closed`` / ``stage_slot`` are the POSITION axis, read by
+    :func:`is_position_ended` (``isClosed`` by ``bool()``; a slot equals
+    ``TERMINAL_STAGE_SLOT``). They are KEYWORD-ONLY and default to ``None``
+    because they are a different SOURCE of the same answer, not a different
+    vocabulary: every existing call site that hands this function a
+    ``(status, outdated)`` pair keeps its exact meaning, and a caller that has
+    the position in hand passes it rather than re-deciding currency itself.
+    ⚠️ A caller that does NOT pass them is answering from the lifecycle word
+    alone — correct for a ``:Point``/``:Subject``/``:Event`` row (no pipeline),
+    and the residual for an ``:Object`` row whose query did not fetch the two
+    props. Fetch them and pass them; do not re-spell the test.
+    """
+    return ((status or "") in TERMINAL_EXCLUDED_STATUSES
+            or bool(outdated)
+            or is_position_ended(is_closed=is_closed, stage_slot=stage_slot))
 
 
 #: The display prefix a mitigation's stored content carries.

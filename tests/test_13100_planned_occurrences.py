@@ -186,49 +186,74 @@ class TestThePlanPipeline:
         with pytest.raises(ValueError, match="not a no-occurrence ending"):
             PO.settle_plan(sdk, plan["id"], PO.STAGE_HELD)
 
-    def test_create_plan_on_a_SETTLED_name_names_the_stage_and_the_route(
+    def test_a_create_after_a_settling_MINTS_a_new_plan_not_the_settled_one(
             self, sdk):
-        """⛔ A create that lands on a settled plan must not read as a create.
+        """⛔ The reachable FAIL-OPEN of ``create_plan`` (#13100 review F1).
 
         A create NAME is the idempotent natural key (#452): ``create_entity``
-        re-mentions the single live holder, and "live" is the
-        ``status``/``outdated`` vocabulary, which does not read the
-        ``pipelineSlot``/``isClosed`` axis a plan's ending is written to. So the
-        second create lands on the SETTLED plan and ``advance_stage`` answers
-        ``applied=False`` (terminal guard) — a NORMAL return. Handing back that
-        id read as "a scheduled, upcoming plan exists"; it does not.
+        re-mentions the single LIVE holder. Before #3590's R5 rule reached the
+        plan axis, a settled plan still counted as live, so
+        ``settle_plan(..., "missed")`` followed by ``create_plan(<same name>)``
+        returned the SETTLED plan's id while ``advance_stage`` answered
+        ``applied=False`` (terminal guard) — a normal return, silently discarded:
+        a caller told it had a scheduled upcoming plan had none, and the next
+        ``record_occurrence`` refused it as "already settled".
 
-        The refusal has to be usable, which is what this pins: it names the stage
-        the plan is ACTUALLY at and the only working route (a new record) — the
-        first version said "a fresh plan carries none", about a plan that is not
-        fresh, leaving no way out (#13100 review F1).
+        Pinned in the direction the model wants (§8): a new incarnation is a NEW
+        record — a distinct id, born ``scheduled`` — and the settled plan keeps
+        its ending (a later mention does not rewrite an earlier one).
+
+        ⚠️ On the MERGED base (origin/main's #3590 R5 live-holder rule) this is a
+        REGRESSION pin — it passes without the fix in ``create_plan``, because the
+        identity layer no longer treats a settled plan as a live holder. It is
+        kept because it fails on the base this review was written against
+        (``c4b87a7f12``: same id, stage ``missed`` — measured), so the fail-open
+        cannot come back unnoticed if that rule is ever narrowed again.
         """
         plan = PO.create_plan(sdk, "Weekly board review")
         PO.settle_plan(sdk, plan["id"], PO.STAGE_MISSED)
 
-        with pytest.raises(ValueError, match="already at 'missed'") as exc:
-            PO.create_plan(sdk, "Weekly board review")
-        assert "distinct name" in str(exc.value)
-        assert "fresh plan carries none" not in str(exc.value)
-        # …and it did not quietly restage the settled record (§8: a later
-        # mention does not rewrite an earlier ending).
+        again = PO.create_plan(sdk, "Weekly board review")
+        assert again["id"] != plan["id"], (
+            "the create re-mentioned the SETTLED plan; its returned id cannot be "
+            "a staged, not-yet-happened plan")
+        assert _stage(sdk, again["id"])["stageId"] == "scheduled"
+        assert _stage(sdk, again["id"])["isClosed"] is False
         cur = _stage(sdk, plan["id"])
         assert cur["stageId"] == "missed"
         assert cur["isClosed"] is True
 
     def test_create_plan_re_mentioning_an_UPCOMING_plan_is_not_a_refusal(
             self, sdk):
-        """The other half: the refusal must not become a false block.
+        """The other half: the guard must not become a false block.
 
         When the name resolves to a plan that is ALREADY ``scheduled`` and open,
         the create's contract ("a scheduled, not-yet-happened plan exists under
-        this name") is satisfied — the stale-``at`` re-mention moves nothing and
-        must not raise.
+        this name") is satisfied — the stale-``at`` re-mention moves nothing
+        (``advance_stage`` answers ``stale-transition``; measured) and must not
+        raise the "could not be put on 'scheduled'" refusal.
         """
         plan = PO.create_plan(sdk, "Standing sync")
         again = PO.create_plan(sdk, "Standing sync", at="2020-01-01T00:00:00Z")
         assert again["id"] == plan["id"]
         assert _stage(sdk, plan["id"])["stageId"] == "scheduled"
+
+    def test_a_DRIFTED_plan_re_mentioned_by_create_names_the_real_cause(
+            self, sdk):
+        """An unapplied move must name the input that actually failed.
+
+        The first version said "…a fresh plan carries none", which is false here:
+        the plan carries a ``pipelineStageId`` that no longer resolves. The repair
+        is the binding/stage id (the same one ``record_occurrence`` prescribes),
+        never "a distinct name" — that would be a no-op.
+        """
+        plan = PO.create_plan(sdk, "Drifted plan")
+        sdk.update_knowledge(plan["id"], pipelineStageId="no-such-stage")
+        with pytest.raises(ValueError, match="not a stage of the") as exc:
+            PO.create_plan(sdk, "Drifted plan")
+        message = str(exc.value)
+        assert "fresh plan carries none" not in message
+        assert "distinct name" not in message
 
     def test_an_unknown_plan_reference_is_refused(self, sdk):
         with pytest.raises(ValueError, match="no plan Object"):

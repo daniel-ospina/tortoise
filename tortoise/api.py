@@ -318,6 +318,19 @@ _NESTED_RECORD_KEYS = frozenset({"point"})
 _ENVELOPE_KEYS = frozenset({
     "type",
     "ts",
+    # ⛔ ``seq`` IS THE RECORD'S ORDINAL (#12894). `#9190` makes the record CARRY
+    # its position and `record_projection._carried_position` READS it, refusing
+    # the write AND every replay when it disagrees with the enumeration — and
+    # `replay_plan` raises while BUILDING the plan, so one forged `seq` makes the
+    # whole journal un-replayable, with no partial repair. It is in this
+    # (REFUSING) set rather than silently stripped because the SDK's
+    # `_RESERVED_ENVELOPE_PROPS` strip is strip-and-ignore, and on a POSITION a
+    # silent drop is the worse posture: the caller believes it set an ordinal.
+    # Measured before this: `add_event` / `add_object` / `emit_belief` each
+    # APPENDED a line carrying the caller's top-level `seq=42` — the SDK door's
+    # reservation closed that intake only, and `EventAPI._emit` is the second
+    # live journal door.
+    "seq",
     "initiated_by",
     "agent_id",
     "actor_user_id",

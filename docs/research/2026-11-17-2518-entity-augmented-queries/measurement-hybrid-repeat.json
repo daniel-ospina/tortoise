@@ -1,0 +1,1814 @@
+{
+ "arms": {
+  "blocking": {
+   "fts_only": {
+    "candidate_set": "pooled union over a capture's derived queries (max_queries=15); the per-query window is `k` candidates per mention",
+    "candidates_mean_per_mention": {
+     "10": 10,
+     "15": 15,
+     "3": 3,
+     "5": 5
+    },
+    "in_window": {
+     "10": 418,
+     "15": 418,
+     "3": 412,
+     "5": 417
+    },
+    "pair_completeness": {
+     "10": 1.0,
+     "15": 1.0,
+     "3": 0.9856,
+     "5": 0.9976
+    },
+    "pooled_candidates_per_capture": 43.15,
+    "pooled_candidates_per_mention": 2.88
+   },
+   "index_stats": {
+    "blocks": 8454,
+    "key_memberships": 11067,
+    "max_block_size": 102,
+    "members": 1000,
+    "oversized_skipped": {},
+    "query_candidate_cap": 200
+   },
+   "multikey": {
+    "candidates_max": 146,
+    "candidates_mean_per_mention": 32.81,
+    "in_block": 418,
+    "k_independent": true,
+    "pair_completeness": 1.0,
+    "reduction_ratio": 0.029
+   },
+   "pairs": 418,
+   "population": 1000
+  },
+  "duplicate_rate": {
+   "pairs": 418,
+   "prior_off": {
+    "attached": 0,
+    "definition": "no prior: every mention mints (not measured)",
+    "minted": 418,
+    "rate": 1.0
+   },
+   "prior_on_norm_only": {
+    "attached": 0,
+    "minted": 418,
+    "rate": 1.0
+   },
+   "prior_on_shipped_folded": {
+    "attached": 203,
+    "minted": 215,
+    "rate": 0.5144
+   },
+   "window_k": 3
+  },
+  "exact": {
+   "3": {
+    "attached": 298,
+    "in_window": 298,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 2,
+    "rank_sum": 331,
+    "rows_zero": 0
+   },
+   "5": {
+    "attached": 299,
+    "in_window": 299,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 1,
+    "rank_sum": 335,
+    "rows_zero": 0
+   },
+   "10": {
+    "attached": 300,
+    "in_window": 300,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 0,
+    "rank_sum": 341,
+    "rows_zero": 0
+   },
+   "15": {
+    "attached": 300,
+    "in_window": 300,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 0,
+    "rank_sum": 341,
+    "rows_zero": 0
+   }
+  },
+  "exact_by_class": {
+   "definite": {
+    "10": {
+     "in_window": 180,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 180,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 178,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 179,
+     "n": 180,
+     "rows_zero": 0
+    }
+   },
+   "ident": {
+    "10": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    }
+   },
+   "path": {
+    "10": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    }
+   }
+  },
+  "exact_misses": [
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the worktree and reading the",
+    "returned": 3,
+    "siblings_2tok": 20,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the worktree report",
+     "the worktree",
+     "the worktree state and reading",
+     "the worktree and reading the",
+     "the worktree being reaped"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the merge",
+    "returned": 3,
+    "siblings_2tok": 11,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the merged",
+     "the merge-base",
+     "the merge base",
+     "the merge gate",
+     "the merge commit"
+    ]
+   }
+  ],
+  "exact_misses_recorded": 2,
+  "exact_misses_total": 2,
+  "gate": {
+   "shipped": {
+    "gated": 79,
+    "gated_and_missed": 0,
+    "names": 300,
+    "noise_rows_freed": 3,
+    "suppressed_correct_by_k": {
+     "15": 79,
+     "3": 78
+    },
+    "suppressed_correct_k_sum": 157
+   },
+   "zep_full_name": {
+    "gated": 14,
+    "gated_and_missed": 0,
+    "names": 300,
+    "noise_rows_freed": 0,
+    "suppressed_correct_by_k": {
+     "15": 14,
+     "3": 14
+    },
+    "suppressed_correct_k_sum": 28
+   }
+  },
+  "gate_by_class": {
+   "definite": {
+    "shipped": {
+     "gated": 65,
+     "names": 180,
+     "suppressed_correct_k_sum": 129
+    },
+    "zep_full_name": {
+     "gated": 0,
+     "names": 180,
+     "suppressed_correct_k_sum": 0
+    }
+   },
+   "ident": {
+    "shipped": {
+     "gated": 14,
+     "names": 90,
+     "suppressed_correct_k_sum": 28
+    },
+    "zep_full_name": {
+     "gated": 14,
+     "names": 90,
+     "suppressed_correct_k_sum": 28
+    }
+   },
+   "path": {
+    "shipped": {
+     "gated": 0,
+     "names": 30,
+     "suppressed_correct_k_sum": 0
+    },
+    "zep_full_name": {
+     "gated": 0,
+     "names": 30,
+     "suppressed_correct_k_sum": 0
+    }
+   }
+  },
+  "gate_gated_names": [
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the diff",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "diff"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tool",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tool"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#2258",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "2258"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the model",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "model"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3484",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3484"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the repo",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "repo"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#2981",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "2981"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3442",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3442"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the rung in the",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "rung"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3377",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3377"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the issue",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "issue"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the open",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "open"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the file",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "file"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the code",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "code"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the end",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "end"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the head",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "head"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the work",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "work"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the sha",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "sha"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the brief",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "brief"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fix",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fix"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tree",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tree"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#1484",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "1484"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3175",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3175"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3441",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3441"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the lane",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "lane"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the body",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "body"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the guard",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "guard"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the suite",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "suite"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#7949",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "7949"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the gate",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "gate"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#5128",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "5128"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the pin",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "pin"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the new",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "new"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the claim",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "claim"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#709",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "709"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the test",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "test"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the doc",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "doc"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the merge",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "merge"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10000",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10000"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the rail",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "rail"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#11824",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "11824"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the row",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "row"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#1193",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "1193"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the delta",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "delta"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the real",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "real"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the three",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "three"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the line",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "line"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the prose",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "prose"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the probe",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "probe"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the diff of",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "diff"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the exact",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "exact"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the arm",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "arm"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the count",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "count"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the owner",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "owner"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the peer",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "peer"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the graph",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "graph"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the block",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "block"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tests",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tests"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the false",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "false"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fixes",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fixes"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the table",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "table"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the log",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "log"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the queue",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "queue"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the four",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "four"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the files",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "files"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the full",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "full"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the old",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "old"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the cause",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "cause"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the loop",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "loop"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the run",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "run"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the pre",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "pre"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the base",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "base"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the error",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "error"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the live",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "live"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the sweep",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "sweep"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the chain",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "chain"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the key",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "key"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the list",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "list"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the note",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "note"
+    ],
+    "wide_rows": 15
+   }
+  ],
+  "gate_variant": {
+   "shipped": {
+    "gated_pairs": 144,
+    "in_window_before": 141,
+    "pairs": 418,
+    "would_attach_before": 76,
+    "would_attach_before_any_k": 79
+   },
+   "zep_full_name": {
+    "gated_pairs": 77,
+    "in_window_before": 74,
+    "pairs": 418,
+    "would_attach_before": 74,
+    "would_attach_before_any_k": 77
+   }
+  },
+  "pooled": {
+   "3": {
+    "captures": 20,
+    "set_max": 45,
+    "set_min": 38,
+    "set_sum": 863
+   },
+   "5": {
+    "captures": 20,
+    "set_max": 75,
+    "set_min": 59,
+    "set_sum": 1403
+   },
+   "10": {
+    "captures": 20,
+    "set_max": 147,
+    "set_min": 113,
+    "set_sum": 2628
+   },
+   "15": {
+    "captures": 20,
+    "set_max": 212,
+    "set_min": 163,
+    "set_sum": 3739
+   }
+  },
+  "pooled_coverage": {
+   "names_in_sample": 300,
+   "names_measured": 300,
+   "names_reached": 300,
+   "skipped_singleton": 0,
+   "truncated": false
+  },
+  "pooled_gate": {
+   "shipped": {
+    "15": {
+     "gated": 79,
+     "lost": 69,
+     "rescued_by_union": 10,
+     "unreachable_regardless": 0
+    },
+    "3": {
+     "gated": 79,
+     "lost": 78,
+     "rescued_by_union": 0,
+     "unreachable_regardless": 1
+    }
+   },
+   "zep_full_name": {
+    "15": {
+     "gated": 14,
+     "lost": 14,
+     "rescued_by_union": 0,
+     "unreachable_regardless": 0
+    },
+    "3": {
+     "gated": 14,
+     "lost": 14,
+     "rescued_by_union": 0,
+     "unreachable_regardless": 0
+    }
+   }
+  },
+  "variant": {
+   "3": {
+    "attached": 203,
+    "attached_folded": 382,
+    "attached_norm_only": 0,
+    "in_multikey_block": 418,
+    "in_window": 412,
+    "in_window_not_attached": 209,
+    "pairs": 418
+   },
+   "5": {
+    "attached": 207,
+    "attached_folded": 387,
+    "attached_norm_only": 0,
+    "in_multikey_block": 418,
+    "in_window": 417,
+    "in_window_not_attached": 210,
+    "pairs": 418
+   },
+   "10": {
+    "attached": 208,
+    "attached_folded": 388,
+    "attached_norm_only": 0,
+    "in_multikey_block": 418,
+    "in_window": 418,
+    "in_window_not_attached": 210,
+    "pairs": 418
+   },
+   "15": {
+    "attached": 208,
+    "attached_folded": 388,
+    "attached_norm_only": 0,
+    "in_multikey_block": 418,
+    "in_window": 418,
+    "in_window_not_attached": 210,
+    "pairs": 418
+   }
+  },
+  "variant_by_class": {
+   "article-drop": {
+    "10": {
+     "attached": 180,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "15": {
+     "attached": 180,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "3": {
+     "attached": 175,
+     "attached_folded": 175,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 175,
+     "pairs": 180
+    },
+    "5": {
+     "attached": 179,
+     "attached_folded": 179,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 179,
+     "pairs": 180
+    }
+   },
+   "basename-only": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    }
+   },
+   "hash-dropped": {
+    "10": {
+     "attached": 14,
+     "attached_folded": 14,
+     "attached_norm_only": 0,
+     "in_multikey_block": 14,
+     "in_window": 14,
+     "pairs": 14
+    },
+    "15": {
+     "attached": 14,
+     "attached_folded": 14,
+     "attached_norm_only": 0,
+     "in_multikey_block": 14,
+     "in_window": 14,
+     "pairs": 14
+    },
+    "3": {
+     "attached": 14,
+     "attached_folded": 14,
+     "attached_norm_only": 0,
+     "in_multikey_block": 14,
+     "in_window": 14,
+     "pairs": 14
+    },
+    "5": {
+     "attached": 14,
+     "attached_folded": 14,
+     "attached_norm_only": 0,
+     "in_multikey_block": 14,
+     "in_window": 14,
+     "pairs": 14
+    }
+   },
+   "hyphen-to-space": {
+    "10": {
+     "attached": 14,
+     "attached_folded": 14,
+     "attached_norm_only": 0,
+     "in_multikey_block": 14,
+     "in_window": 14,
+     "pairs": 14
+    },
+    "15": {
+     "attached": 14,
+     "attached_folded": 14,
+     "attached_norm_only": 0,
+     "in_multikey_block": 14,
+     "in_window": 14,
+     "pairs": 14
+    },
+    "3": {
+     "attached": 14,
+     "attached_folded": 14,
+     "attached_norm_only": 0,
+     "in_multikey_block": 14,
+     "in_window": 14,
+     "pairs": 14
+    },
+    "5": {
+     "attached": 14,
+     "attached_folded": 14,
+     "attached_norm_only": 0,
+     "in_multikey_block": 14,
+     "in_window": 14,
+     "pairs": 14
+    }
+   },
+   "space-to-hyphen": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 179,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 179,
+     "pairs": 180
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    }
+   }
+  }
+ },
+ "code_head": "ade889b487d42bc946f9245f9564718acc409faa",
+ "config": {
+  "fused_rerank_gate_armed": false
+ },
+ "corpus": {
+  "dir": "/home/cmux/.tortoise/session-events",
+  "elapsed_s": 394.2,
+  "files": 14,
+  "graph": "recall11901_1794880924_1085027",
+  "harvested_distinct": {
+   "definite": 123981,
+   "ident": 10928,
+   "path": 4343
+  },
+  "input": {
+   "files": 14,
+   "lines": 10750,
+   "parse_errors": 0,
+   "records_without_text": 0
+  },
+  "population": 1000,
+  "population_digest": "81c6ff3d506a1d2e",
+  "sample": 300,
+  "sample_by_class": {
+   "definite": 180,
+   "ident": 90,
+   "path": 30
+  }
+ },
+ "issue": 11901,
+ "ks": [
+  3,
+  5,
+  10,
+  15
+ ],
+ "measured_at": "2026-11-17T02:08:29Z",
+ "measured_for": 12295,
+ "pooled_budget_note": "a pooled group is `max_queries` (15) names, which is the production BUDGET CAP, not the typical capture \u2014 a capture with 5 entities issues 5 object queries",
+ "retrieval": {
+  "has_embedder": true,
+  "legs_seen": {
+   "fts": true,
+   "structural": true,
+   "vector": true
+  },
+  "note": "hybrid",
+  "uniform_windows": true,
+  "window_modes": {
+   "hybrid": 4372,
+   "keyword_only": 0
+  }
+ }
+}

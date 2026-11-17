@@ -353,11 +353,16 @@ def create_plan(sdk, name: str, *, title: str | None = None,
             # scheduled, not-yet-happened plan exists under this name" — holds.
             # This is the stale-`at` re-mention, and it is not an error.
             return node
+        if pos["unresolvable"]:
+            # The stored position cannot be validated, so NO stage move could be.
+            # ONE home for that refusal (the writers cannot drift), and it names
+            # the input that actually failed — a distinct name does not repair a
+            # drifted binding, so prescribing one here would be a no-op.
+            raise ValueError(_unresolvable_message(name, pos, cur))
         raise ValueError(
             f"Refused: the plan {name!r} resolves to {plan_id!r}, which is "
             f"already at {pos['stageId']!r}"
             f"{' (closed marker set)' if cur.get('isClosed') else ''}"
-            f"{' and its position does not resolve' if pos['unresolvable'] else ''}"
             f", so this create cannot put it on {STAGE_SCHEDULED!r} "
             f"({move.reason}). WHAT TO DO: a settled plan is a closed record, "
             f"and a create does not reopen or restate one — a new incarnation is "
