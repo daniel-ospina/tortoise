@@ -553,21 +553,34 @@ def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
     """#13288 review R2/F1, the half that had no pin: `isClosed=0`.
 
     `create_object(..., isClosed=1)` is documented at the truthy pin BELOW
-    (`test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`); the
-    FALSY half is reachable through the other door, `update_knowledge(id,
-    isClosed=0)`, which stores the INTEGER `0` (measured on the merged head:
-    `typeof(o.isClosed)` → `['Integer']`). The two sides then disagree
-    irreconcilably: this module reads it by `bool()` (→ live), while the fold's
-    live-holder probe compares `coalesce(n.isClosed, false) = false` in Cypher,
-    where `0 = false` is FALSE under FalkorDB's strict types (measured:
-    `RETURN 0 = false, typeof(0)` → `[False, 'Integer']`; vendor-documented, and
-    `toBoolean(0)` is the explicit coercion). So the row has NO live holder, no
-    fold runs on it, and the marker is never repaired.
+    (`test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`).
+    ⛔ EVERY props door stores the marker VERBATIM and none of them coerces, so the
+    door set is NOT a partition: `create_object(..., isClosed=0)` and
+    `update_knowledge(id, isClosed=0)` both store the INTEGER `0` (measured:
+    `typeof(o.isClosed)` → `['Integer']` through either door), just as
+    `create_object(..., isClosed=1)` stores `1`. This pin uses the update path and
+    the truthy sibling uses the create path — which door each exercises, not a claim
+    that either is the only way in.
+    The two sides then disagree irreconcilably: this module reads the marker by
+    `bool()` (→ live), while the fold's live-holder probe compares
+    `coalesce(n.isClosed, false) = false` in Cypher, where `0 = false` is FALSE
+    under FalkorDB's strict types (measured: `RETURN 0 = false, typeof(0)` →
+    `[False, 'Integer']`; vendor-documented, and `toBoolean(0)` is the explicit
+    coercion). So the row has NO live holder, which means the CLOSE fold is never
+    dispatched for it — and because this reader records no transition for the shape
+    below, no fold is triggered on it either, so nothing in THIS path repairs the
+    marker. ⛔ That is a statement about the TRIGGER, not about what a fold could
+    write: a `github.issue.reopened` fold that REACHES such a row DOES replace the
+    marker with a real boolean. That is exactly why the arm withholds the `"open"`
+    answer ONLY — see
+    `test_a_FALSY_isClosed_on_a_LEGACY_status_row_still_records_its_reopen`.
 
     Measured pre-fix on the merged head, four polls of a CLOSED issue: mints
     `[1, 1, 1, 1]`, four permanent `-closed` Events, the row byte-identical. The
-    read now answers `None` (unplaceable) for a falsy non-boolean marker on a
-    position that records no end, which gates the transition arm off.
+    read now converts the `"open"` fall-through to `None` (unplaceable) for a falsy
+    non-boolean marker, and `None` gates the transition arm off. A row the position
+    arms or the word answer already placed as `"closed"` keeps that answer: `None`
+    there would drop a reopen the projection DOES apply, which loses data.
 
     ⛔ The `[0,0,0,0]` polls alone do NOT test that answer (#13326 F2): the
     reading this arm REJECTS, `"closed"`, mints nothing there either, because
@@ -3036,3 +3049,4 @@ def test_7951_registration_probe_failure_fails_open(tmp_path, monkeypatch):
             "the fail-open path did not journal the Object (#7951 P2-b)")
     finally:
         sdk.close()
+
