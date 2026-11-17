@@ -443,9 +443,12 @@ class TestProtectedDoorsStayLive:
       · 3 `rest_spec` doors — the registry entry's own `rest_spec`;
       · 1 paged destination (`tortoise_query`) — the two retired pointers that name it,
         and the paging parameters those pointers and the live door agree on;
-      · 4 "no arm on the recorded container" doors — the container itself:
-        `_ENTITY_ITEM_LABELS` for the two write doors, the parameter SET for the two
-        `check_confidence` doors.
+      · 4 "no arm on the recorded container" doors — the container itself: the two
+        write doors are CALLED with the kind and must still refuse it (that is
+        `create_entity`'s dispatch branch; its `_ENTITY_ITEM_LABELS` map only
+        interpolates into the `unknown type` message and decides nothing, so an edit to
+        it adds no arm and a check on it was green with an arm present); the two
+        `check_confidence` doors are measured from its parameter SET.
 
     The other NINE (`NO_CONTAINER_YET`) have no live container at all, so the only thing
     to measure is "still live, still not retired" — pinned below for them too. The two
@@ -512,23 +515,28 @@ class TestProtectedDoorsStayLive:
         ("tortoise_diary_write", "diary"),
     ])
     def test_create_entity_still_has_no_arm_for_the_write(self, name, kind):
-        """`create_entity`'s "arm" is a TYPE LABEL, so absence is read from the label map.
+        """`create_entity`'s "arm" is a DISPATCH branch, so its absence is DRIVEN.
 
-        Read from `_ENTITY_ITEM_LABELS` — the constant `create_entity` validates against —
-        and not from the registry prose: the reason this table records is that retiring
-        the door would remove the WRITE, and the write exists only if the label routes.
+        ⛔ NOT read from `_ENTITY_ITEM_LABELS` (#13052 review, round 6): that constant is
+        interpolated into the `unknown type` message and decides nothing, which was
+        measured both ways — adding `"point"` to it alone leaves `create_entity` still
+        refusing the type (a false RED), and adding a real `elif t == "point":` arm to
+        the dispatch leaves the map untouched (a false GREEN, on the exact drift this row
+        exists to catch). So the DOOR is called with the kind and must still refuse it:
+        an arm landing is precisely the call that stops raising.
         """
-        from tortoise.sdk import _ENTITY_ITEM_LABELS
-
         destination = _destination(name)
         assert destination == "create_entity", (
             f"{name} is recorded as landing on {destination!r}, not `create_entity` — the "
             "reason this table records for it cannot be asserted against that container")
-        assert kind not in _ENTITY_ITEM_LABELS, (
-            f"`create_entity` now routes type={kind!r}, so {name!r} HAS an arm and its "
-            f"recorded reason ({PROTECTED[name]}) no longer holds: re-check whether it is "
-            "retirable in the batch that added the arm, and move it out of this table in "
-            "that same change")
+        # DID NOT RAISE here IS the drift: `create_entity` accepted the kind, so the door
+        # has an arm and its recorded reason no longer holds — re-check whether it is
+        # retirable in the batch that added the arm, and move it out of this table there.
+        with pytest.raises(ValueError, match="unknown type") as refused:
+            TortoiseSDK.__new__(TortoiseSDK).create_entity(kind, "x")
+        assert kind in str(refused.value), (
+            f"`create_entity` refused {kind!r} with {str(refused.value)!r}, which does not "
+            "name the kind: the refusal this row reads is no longer the arm check")
 
     @pytest.mark.parametrize("name,forbidden", [
         ("tortoise_compute_confidence", ("recompute", "posterior")),
@@ -556,6 +564,21 @@ class TestProtectedDoorsStayLive:
             f"{door} now accepts {arrived}, so {name!r}'s recorded reason "
             f"({PROTECTED[name]}) no longer holds — it may serve the operation now. "
             "Re-check whether it is retirable in the batch that added the arm")
+
+    def test_a_dropped_destination_is_a_named_assertion(self, monkeypatch):
+        """`_destination()`'s assert is only reachable on the DRIFT path, so pin it here.
+
+        Every name in both tables has a map row, so on the green path that assert never
+        runs: reverting it to a bare `DESTINATION[name]` would leave the suite green and
+        hand the next lane a `KeyError` naming neither the map nor the reason — the
+        failure #13052 review round 6 filed (P3). `_destination` imports `DESTINATION` by
+        identity, so deleting from the module's own dict reaches it.
+        """
+        from tools import bridge_table
+
+        monkeypatch.delitem(bridge_table.DESTINATION, "tortoise_recall")
+        with pytest.raises(AssertionError, match="has no recorded destination"):
+            _destination("tortoise_recall")
 
     def test_query_is_still_the_paged_destination_of_two_retired_pointers(self):
         """`tortoise_query`'s reason is a ROLE, so it is read back from the pointers.
