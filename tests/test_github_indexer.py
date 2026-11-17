@@ -502,13 +502,25 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
     `pipelineStageId`, as `apply_stage_fold` resolves the current stage.
 
     ⚠️ Every shape BELOW discriminates, and this loop covers the CLOSE direction
-    only. A truthy non-boolean `isClosed` row is deliberately NOT a member: it
-    already answered `"closed"` on pre-fix `main` (`is_position_ended` reads the
-    marker by `bool()` — round 1's own leg), so its value is fixed by code this
-    change does not touch and NO mutation of this diff can redden it as a row of
-    this dict (#13288 review F2). It is pinned at its own home, and its OPEN
-    direction is the reopen discriminator there:
-    `test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`.
+    only. Two shapes are deliberately NOT members:
+
+    * a truthy non-boolean `isClosed` row — it already answered `"closed"` on
+      pre-fix `main` (`is_position_ended` reads the marker by `bool()` — round 1's
+      own leg), so its value is fixed by code this change does not touch and NO
+      mutation of this diff can redden it as a row of this dict (#13288 review F2).
+      It is pinned at its own home, and its OPEN direction is the reopen
+      discriminator there:
+      `test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`.
+    * a legacy `outdated` flag — #13288 review F2: this dict's contract is "shapes
+      the fold REFUSES", and the fold does not refuse this one. Its latch set is
+      `commit_ops.OBJECT_TERMINAL_STATUSES` (`outdated` is not a member) and
+      `_fold_object_stage` never selects `o.outdated` at all, so a close on such a
+      row MOVES it to `done`/`terminal` and polls 2-3 read `closed` from the
+      POSITION — the assertion could not observe the refusal its message narrated,
+      and that misdescription is exactly what hid F1(b). The row's real mechanism is
+      "the row is not LIVE, so no fold reconciles it", which is a different defect
+      with a different symptom; it is pinned, in BOTH directions, in
+      `test_a_latched_row_never_mints_a_reopen_on_every_poll`.
     """
     oid = "github-issue-acme/repo1-1"
     shapes = {
@@ -517,9 +529,6 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
             "o.pipelineSlot='active', o.isClosed=false"),
         "a terminal STAGE with no slot prop written": (
             "SET o.pipelineStageId='done', o.pipelineSlot=null, o.isClosed=null"),
-        "a legacy `outdated` flag with a live position": (
-            "SET o.outdated=true, o.pipelineStageId='in_progress', "
-            "o.pipelineSlot='active', o.isClosed=false"),
     }
     for why, mutate in shapes.items():
         proj = sdk._get_proj()
@@ -627,9 +636,20 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
         mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
         if mints != [0, 0, 0]:
             bad[why] = mints
+        # …and the CLOSE direction on the SAME frozen row (#13288 review F2). This
+        # is where the `outdated` flag is now pinned, having left the
+        # "fold REFUSES this" dict it did not belong in: `None` means NO transition
+        # is recordable in EITHER direction, so the mirror claim has to be observed
+        # too — answering `"open"` here loops with `-closed` instead.
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="closed", closed_at="2026-07-20T08:00:00Z",
+            updated_at="2026-07-20T08:00:00Z")]
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+        if mints != [0, 0, 0]:
+            bad[f"{why} (CLOSE direction)"] = mints
     assert not bad, (
-        "the row was read as CLOSED while the fold refuses to move it, so every "
-        f"poll minted another reopen: {bad}")
+        "the row was read as CLOSED while the fold cannot reconcile it, so every "
+        f"poll minted another reopen — or as OPEN, minting a close: {bad}")
 
     # …and the CONTROL: deviating to `None` for EVERYTHING would also pass the loop
     # above, so a row with NO latch term must still mint its close exactly once — and

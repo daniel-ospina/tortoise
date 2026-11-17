@@ -32,6 +32,29 @@ Lifecycle decision table (THE rule):
 - first ingest of an already-closed issue → ``-created`` ONLY (kind carries
   the closed state) — the one-time legacy backfill is the only other source
   of ``-closed`` events (marker-gated, T2-P3).
+- a row NO fold can reconcile records NO transition ("cannot place") → the diff
+  answers ``None`` and the transition arm is gated off. Two families: a row whose
+  position the fold cannot resolve (foreign ``pipelineStageKey`` / stage id absent
+  from its declaration), and a row carrying a lifecycle LATCH term (``status`` in
+  ``commit_ops.OBJECT_TERMINAL_STATUSES``, or the legacy ``outdated`` flag/word) —
+  such a row is not LIVE, so no fold ever reaches it. ⚠️ Stated trade, symmetric: it
+  records neither ``-closed`` nor ``-reopened``. Bounded and inspectable; an
+  unbounded mint loop is neither (#13143, #13288 F1). This is NOT the pre-#13143
+  bug returning — that was a real close reading as "first ingest"; both refusals
+  above are shapes for which no fold writes anything.
+
+  **Stated residual (#13288 review, note).** The declaration this reader resolves
+  against is ``core:workitem`` only, because that is the only pipeline the BUILT-IN
+  fold can put on an indexed issue Object. A graph that declares a lifecycle for
+  ``pm:issue`` makes the fold use the PACK declaration
+  (``projection/entities.py:5950-5958``, ``pipeline_key = target_kind``), so such a
+  row's ``pipelineStageKey`` names a pipeline this reader cannot resolve and it
+  answers ``None`` — its close/reopen history stops, re-introducing the #13143
+  symptom (``events_minted: 0`` on a close) for that population. It is BOUNDED (no
+  mint loop) and one config away from being live, so it is stated here rather than
+  guessed at. Resolving the declaration the way the fold does — through the pack
+  index — is the honest close, and it is deliberately NOT done in the loop fix: it
+  would put the pack registry on the indexer's read path as part of it.
 
 The (dormant) statement machinery writes ``statement`` ONLY — never
 ``observation`` (removed kind, §5). DORMANT since #1844: the default path
