@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -483,6 +484,103 @@ def test_the_object_identity_is_a_object_law_not_a_point_one(artifact):
         "or the claim leg has no ceiling and the finding is different")
 
 
+def _flat(text: str) -> str:
+    """One line: so a claim that wraps across lines is still one contiguous string."""
+    return " ".join(text.split())
+
+
+def _scope_bound(text: str, anchor: str, marker: str, window: int = 120) -> bool:
+    """Is `marker` stated as part of the SAME claim as `anchor`?
+
+    ⛔ A section-wide `marker in text` is not a scope check. Measured: `:Object`-only
+    occurs TWICE in §9.1, so replacing `that equality is `:Object`-only` with `that
+    equality holds in every arm` left the assertion satisfied by the OTHER
+    occurrence — the false universal shipped green (#13126 review P1-1, second
+    attempt). "Also present elsewhere" is not "present here": the marker has to sit
+    inside the sentence that makes the claim.
+    """
+    flat = _flat(text)
+    i = flat.find(anchor)
+    if i < 0:
+        return False
+    j = flat.find(marker, i)
+    return 0 <= j - i <= window
+
+
+def test_the_object_only_scope_is_stated_wherever_the_identity_is(artifact):
+    """The identity's SCOPE is the finding: the equality is a `:Object` law only.
+
+    ⛔ Three repair rounds on this branch swapped one false universal for another
+    (`b637f19649`, `df6f89741f`, `bdc0e1706e`), and NONE of them was guarded. The
+    test above pins the artifact's topology and never reads a document, so the
+    wording could go back to a universal with the suite green: replacing the
+    README's "`:Object` identity, not a statement about the text leg as a whole"
+    with "a universal identity", §9.1's "that equality is `:Object`-only" with
+    "holds in every arm", and the changelog's "The identity is `:Object`-only"
+    with "is universal", redded nothing — 46 passed (#13126 review P1-1).
+
+    A claim stated more widely than the population that supports it is the exact
+    error this measurement exists to correct, so the scope is pinned in every
+    document that states the identity, from the artifact, not from the prose.
+    """
+    windowed = {a: v for a, v in _arms(artifact, "point").items() if a != "complete"}
+    meets = sorted(a for a, v in windowed.items()
+                   if v["found_deep"] == pytest.approx(v["resident_share"], abs=5e-4))
+    short = [a for a, v in windowed.items()
+             if v["found_deep"] < v["resident_share"] - 5e-4]
+    assert meets == ["random@0.1"], meets
+    assert len(short) == len(windowed) - 1, len(short)
+
+    # The scope marker each document uses, bound to the CLAIM it scopes. ⛔ Two
+    # spellings because the README states the scope as an identity CLASS and the
+    # other two as `:Object`-only; one token for all three would have to be the
+    # word "only", which the false universal ("holds in every arm") never uses.
+    for name, text, anchor, scope in (
+            ("README", README.read_text(encoding="utf-8"),
+             "Cost equals the eviction share", "`:Object` identity"),
+            ("§9.1", _section(ARCH.read_text(encoding="utf-8"), "### 9.1 M2"),
+             "does NOT hold in every arm", "`:Object`-only"),
+            ("changelog #12186", _section(CHANGELOG.read_text(encoding="utf-8"),
+                                          "## `#12186`"),
+             "The identity is", "`:Object`-only")):
+        assert _scope_bound(text, anchor, scope), (
+            f"{name} no longer scopes the identity to `:Object` at the claim that "
+            f"states it ({anchor!r} … {scope!r}) — the exact false universal "
+            f"three repair rounds removed")
+        assert f"`{meets[0]}`" in text, (
+            f"{name} no longer names the one `:Point` arm the equality coincides "
+            f"at (`{meets[0]}`) — the exception is what makes the scope checkable")
+    # The count of short arms, SPELLED in §9.1 — the figure scan cannot see it
+    # (`eight of the ten` carries no unit), so `nine` could become `eight` green.
+    spell = {7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven"}
+    arch_91 = _section(ARCH.read_text(encoding="utf-8"), "### 9.1 M2")
+    assert f"**{spell[len(short)]} of the ten**" in arch_91, (
+        f"§9.1 no longer states the derived short-arm count "
+        f"({spell[len(short)]} of the ten; the artifact has {len(short)})")
+
+
+def test_s7_states_the_point_ceiling_it_quotes(artifact):
+    """§7 — the section that ARMS the window — publishes three M2 figures.
+
+    ⛔ The figure scan slices §9.1, and a bare rate carries no unit for it to
+    match on, so §7's own sentence was read by nothing: `~11.7 points`, `0.410`
+    and `0.5267` could become `~99.9 points`, `0.430` and `0.5367` with all 46
+    tests green (#13126 review P2-3). That sentence is the arming decision, and
+    §7 is where a reader deciding whether to arm the window stops reading — the
+    #11739/#12295 silent-drop class the tier1 registration exists to close.
+    """
+    arm = _arms(artifact, "point")["tail@0.5"]
+    gap = (arm["resident_share"] - arm["found_deep"]) * 100
+    s7 = _section(ARCH.read_text(encoding="utf-8"), "## 7. The window")
+    for want, what in (
+            (f"~{gap:.1f} points", "the `:Point` ceiling's own cost"),
+            (f"{arm['found_deep']:.3f}", "the windowed `found@deep`"),
+            (f"{arm['resident_share']:.4f}", "that arm's resident share")):
+        assert want in s7, (
+            f"§7 no longer states {what} ({want}) in its arming sentence — "
+            f"re-derive it from the artifact rather than editing the number")
+
+
 def test_the_tie_band_is_below_the_gap_the_verdict_rests_on(artifact):
     """The band must be smaller than the floor, or the verdict cannot be read.
 
@@ -500,6 +598,19 @@ def test_the_tie_band_is_below_the_gap_the_verdict_rests_on(artifact):
     assert rep["tie_counting_max_delta_pp"] < float(low), (
         f"the tie band ({rep['tie_counting_max_delta_pp']} pp) is not below the "
         f"smallest verdict gap ({low} pp) — the ratio the record quotes is void")
+    # ⛔ The RATIO the record quotes, derived and then required of the prose. The
+    # order test above is satisfied by any band below the floor, so the fraction
+    # was unread: `~3/4 of that floor` could become `~1/8` — which contradicts the
+    # sentence's own next clause, "*not* the 'barely 1/8' an earlier cut claimed" —
+    # with all 46 tests green (#13126 review P2-4).
+    ratio = rep["tie_counting_max_delta_pp"] / float(low)
+    frac = Fraction(ratio).limit_denominator(4)
+    assert ratio == pytest.approx(float(frac), abs=0.02), (
+        f"the band is {ratio:.3f} of the floor, which is not near a simple "
+        f"fraction — the record's stated ratio must be re-derived")
+    assert f"~{frac.numerator}/{frac.denominator} of that floor" in README.read_text(encoding="utf-8"), (
+        f"the README no longer states the derived ratio (~{frac.numerator}/"
+        f"{frac.denominator}) of the tie band to the verdict's floor)")
 
 
 def test_the_object_complete_recall_figures_match_the_record(artifact):
@@ -552,23 +663,35 @@ def test_the_policy_choice_is_not_a_lever(artifact):
     fraction of the collapse both of them suffer.
     """
     metrics = ("found_deep", "recall@3", "recall@5", "recall@10", "recall@15")
-    # ⛔ The ceiling IS the number the record publishes ("differ by at most 5.0
-    # points on any gated metric"), not a looser tolerance around it. An earlier
-    # cut bounded at 6.0 pp (and, through the collapse ratio, 7.25 pp) — both
-    # ABOVE the published bound, so the prose could go false with the suite
-    # green: setting `point/random@0.9 recall@10` to 0.252 makes the real
-    # divergence 5.8 pp and all 36 tests still passed.
-    published_bound = 0.05
-    worst = 0.0
-    for pop in ("object", "point"):
-        arms = _arms(artifact, pop)
-        for cov in ("0.9", "0.75", "0.5", "0.25", "0.1"):
-            for m in metrics:
-                d = abs(arms[f"tail@{cov}"][m] - arms[f"random@{cov}"][m])
-                worst = max(worst, d)
-                # 1e-9 absorbs float noise only: the measured maximum is exactly
-                # 5.00 pp (object@0.25 recall@3), so the bound is tight, not slack.
-                assert d <= published_bound + 1e-9, (pop, cov, m, d)
+    divergences = [
+        (pop, cov, m, abs(_arms(artifact, pop)[f"tail@{cov}"][m]
+                          - _arms(artifact, pop)[f"random@{cov}"][m]))
+        for pop in ("object", "point")
+        for cov in ("0.9", "0.75", "0.5", "0.25", "0.1")
+        for m in metrics
+    ]
+    worst = max(d for _pop, _cov, _m, d in divergences)
+    # ⛔ The published bound is DERIVED from the artifact, and the three documents
+    # that publish it must state THIS number. `published_bound = 0.05` used to be
+    # a literal while the docstring below claimed "the ceiling IS the number the
+    # record publishes": editing the bound to **7.7 points** in the README, §9.1
+    # AND the changelog left all 46 tests green (#13126 review P1-2), because the
+    # membership scan only rejects a figure the artifact does not hold SOMEWHERE
+    # and 7.7 is some other arm's rate. A number that seeds its own pin cannot be
+    # wrong, so the prose is compared to the derived value instead.
+    stated = f"{worst * 100:.1f}"
+    assert f"within **{stated} points** of each other" in README.read_text(encoding="utf-8"), (
+        f"the README no longer publishes the artifact's own bound ({stated} points)")
+    arch_91 = _section(ARCH.read_text(encoding="utf-8"), "### 9.1 M2")
+    assert f"at most {stated} points on any gated metric" in arch_91, (
+        f"§9.1 no longer publishes the artifact's own bound ({stated} points)")
+    assert f"at most {stated} points on any gated metric" in CHANGELOG.read_text(encoding="utf-8"), (
+        f"the changelog no longer publishes the artifact's own bound ({stated} points)")
+    # …and the FINDING's own ceiling, which is a statement about the WINDOW rather
+    # than a copy of the prose: "a few percent", whatever a re-run measures.
+    # 1e-9 absorbs float noise only: the measured maximum is exactly 5.00 pp
+    # (object@0.25 recall@3), so the ceiling is tight rather than slack.
+    assert worst <= 0.05 + 1e-9, worst
     # …and the thing that DOES dwarf it, which is what the verdict rests on.
     complete = _arms(artifact, "object")["complete"]
     half = _arms(artifact, "object")["tail@0.5"]
@@ -641,6 +764,21 @@ _NON_ARTIFACT_FIGURES = {
     #   the unreachable 28.7       <- 100 - complete found@deep
     # They are computed into `allowed` by `_derived_figures()` below.
 }
+
+
+def _section(text: str, heading: str) -> str:
+    """One `##`/`###` section: from its heading to the next `---` rule, or to EOF.
+
+    ⛔ A HEADING is the only bound that survives editing, and every pin that reads
+    a claim must name the section that CARRIES it — a whole-document substring
+    check let §9.1 go on publishing a figure §7 had retired. The EOF fallback is
+    load-bearing here: this changelog's `#12186` entry is the LAST block, so there
+    is no `---` after it (the same reason its scan slices to the end rather than
+    to a rule).
+    """
+    start = text.index(heading)
+    end = text.find("\n---", start)
+    return text[start:] if end == -1 else text[start:end]
 
 
 #: Ranges the record states as `A-B %` / `A to B points`. The scan's single-figure
