@@ -1577,9 +1577,16 @@ def test_sc4_deprecation_markers_present():
     # registered" question (and its `getattr` guards), so an upstream fastmcp layout
     # change degrades to "not registered" there instead of an AttributeError in this
     # test — and a second inline copy would be a second owner of that knowledge.
+    # ⛔ Read the name INSIDE the pointer, never a literal (round-4 review of #13085):
+    # a literal made this arm unable to see the pointer at all — a map re-pointed at
+    # an unregistered LOOK-ALIKE that still carries the live name as a substring
+    # (`…_v2(directory, file_type="agent_session")`) satisfied the two substring
+    # asserts above AND this one, so the arm was green over exactly the surface
+    # question it exists to answer.
     import tortoise.mcp_server as _ms
-    assert _ms._local_tool_component("tortoise_index_sources_from_directory") is not None, \
-        "the pointer names a container that is NOT on the registered surface"
+    pointed = ptr.split("(", 1)[0].strip()
+    assert _ms._local_tool_component(pointed) is not None, (
+        f"the pointer names {pointed!r}, which is NOT on the registered surface")
 
     # the divergence is RECORDED (the flag semantics differ between paths)
     doc = inspect.getdoc(TortoiseSDK.ingest_corpus) or ""
