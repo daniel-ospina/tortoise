@@ -913,11 +913,20 @@ rules are arguable here.
   yes, which would make the move a **feed re-pointing** rather than a new store. **Verify the field-for-field
   match on a real tenant before proposing it**; a cursor that moves by one is a silent subscriber gap.
 
-### 6.4 `:Source.embedding` on a non-episodic Source
+### 6.4 `:Source.embedding` on a non-episodic Source — **decided 2026-11-17, cited not reopened**
 
-- **Why it is arguable:** §9.4 makes the *link* mandatory and the *summary vector* optional ("it buys exactly
-  one query class"). Whether a given Source's vector is read by that class is a demand question.
-- **The question:** *what share of vector queries hit a `:Source` embedding?* — P0-c's query-mix measurement.
+- **The decision:** a `:Source` is **to get** a summary vector, **in Postgres** (`STORAGE-ARCHITECTURE.md` §14.3 **V2**, owner
+  2026-11-17, `#13220`). The demand question below no longer decides whether — it sizes what the vector is worth.
+- **The remaining DESIGN question:** *which text* a `:Source` with no session narrative embeds — named as V2's one open
+  choice in `STORAGE-ARCHITECTURE.md` §14.3 and `SEARCH-ARCHITECTURE.md`. The demand measurement below still informs it;
+  it is not a placement question.
+- **A PLACEMENT question the row above does not cover, raised by the writer:** `_upsert_source` computes no embedding and
+  `SourceCreated` is deliberately absent from `_RECORD_EMBEDDING_TEXT` ("the graph holds **0** `:Source` embeddings on
+  NON-DOCUMENT rows"), so a plain `:Source` carries no vector on either side today. Giving it one on **both** legs is a
+  change to where it is WRITTEN; giving it one on the record alone would make the record return sources the graph leg never
+  had. The ruling names neither, and this census poses the question rather than answering it.
+- **The measurement it still wants:** *what share of vector queries hit a `:Source` embedding?* — P0-c's query-mix
+  measurement.
 
 ### 6.5 `UnservedVectorLabels` — already decided, cited not reopened
 
