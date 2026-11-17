@@ -5920,6 +5920,37 @@ def _goal_successor_named(props: dict, stored_view) -> bool:
     return bool(view.get("successor"))
 
 
+def _is_lifecycle_word(value: object, vocabulary) -> bool:
+    """Is ``value`` a WORD of this closed lifecycle vocabulary?
+
+    ⛔ THE TYPE TEST COMES FIRST, and it is not cosmetic. The vocabularies are
+    ``frozenset``s, so ``value in vocabulary`` hashes the value: a list/dict
+    stored in ``status`` (or passed as ``goalState``) raises
+    ``TypeError: unhashable type`` — and this guard runs BEFORE the doors that
+    refuse an invalid status with the documented ``ValueError``, so the crash
+    replaced the refusal the primitive promises (#13065 CI, 27 ids; the shape is
+    pinned by ``test_a_non_string_or_absent_status_cannot_lift_a_dead_row[list]``).
+
+    ⛔ AND ``isinstance`` IS NOT ENOUGH — a ``str`` SUBCLASS can make the same
+    membership raise on its own ``__hash__``/``__eq__`` (``_UnhashHonest``: an
+    honest content that defines ``__eq__``, which nulls ``__hash__``), and it can
+    also ANSWER for a word it does not spell. So the value is normalised with
+    ``str.__str__`` — the settled idiom of the transition guard below: it cannot
+    consult an override and it returns a PLAIN ``str`` — and the gate is
+    ``issubclass(type(value), str)``, NOT ``isinstance``, because an object can
+    claim ``__class__ = str`` while ``str.__str__`` on it RAISES. Both shapes are
+    pinned by ``test_a_str_subclass_cannot_forge_a_dead_word_or_crash_the_guard``.
+
+    The DECISION stays the primitive's: a non-``str`` (or impostor, or
+    subclass whose content is not a word) answers ``False`` here, which
+    under-reaches — never over-refuses — and the write proceeds to the door that
+    owns it.
+    """
+    if not issubclass(type(value), str):
+        return False
+    return str.__str__(value) in vocabulary
+
+
 def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                                      goal_ending=None) -> None:
     """Refuse a goal write that ends it on one field and runs it on the other.
@@ -5970,14 +6001,15 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 and goal_state is not _GOAL_ENDING_UNSET):
             status = _stored_view().get("status")
         elif (goal_state is _GOAL_ENDING_UNSET
-                and status in TERMINAL_EXCLUDED_STATUSES):
+                and _is_lifecycle_word(status,
+                                       TERMINAL_EXCLUDED_STATUSES)):
             goal_state = _stored_view().get("goalState")
 
-    if goal_state in GOAL_ENDING_STATES:
+    if _is_lifecycle_word(goal_state, GOAL_ENDING_STATES):
         wanted = _status_words_for_goal_ending(goal_state)
-        if status not in wanted:
+        if not _is_lifecycle_word(status, wanted):
             _also = ""
-            if status in TERMINAL_EXCLUDED_STATUSES:
+            if _is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES):
                 _also = (f" The two endings are not interchangeable: "
                          f"{sorted(wanted)} spell goalState={goal_state!r}, so "
                          f"status={status!r} says the goal ended the OTHER way.")
@@ -6023,7 +6055,8 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             )
         return
 
-    if status in TERMINAL_EXCLUDED_STATUSES and goal_state in GOAL_LIVE_STATES:
+    if (_is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
+            and _is_lifecycle_word(goal_state, GOAL_LIVE_STATES)):
         want = (_SUPERSEDED_STATUS
                 if status == _SUPERSEDED_STATUS else "abandoned")
         raise ValueError(
