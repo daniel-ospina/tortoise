@@ -824,11 +824,17 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_supersede",
         id="surface.supersede",
-        description="Atomically replace old Point with new — CORRECTS edge + outdated flag. "
-                    "transfer_edges=True (default): full supersede — all edges move from "
-                    "old to new. transfer_edges=False: invalidate behavior — outdated flag "
-                    "+ CORRECTS edge only, no edge transfer. "
-                    "dry_run=True previews exactly which edges would transfer and changes nothing.",
+        description="Atomically replace a node with its successor. The arm follows the OLD "
+                    "node's label: a Point gets a full supersede — CORRECTS edge + outdated "
+                    "flag + every edge moved to the new node; an Object/Subject gets the "
+                    "family supersede — status='superseded' + supersededBy (the successor's "
+                    "NAME) + supersededAt, with no edge transfer. transfer_edges=None "
+                    "(default, not supplied) takes that label-driven arm; True/False are "
+                    "POINT-ONLY and are REFUSED on an Object/Subject rather than silently "
+                    "dropped. dry_run=True previews with the same arm and the same "
+                    "FAMILY-ARM checks, writing nothing — not refusal parity on the hybrid "
+                    ":Object:Event / :Subject:Event / :Object:Source / :Subject:Source "
+                    "shapes (fail-closed; tortoise#13114).",
         risk="destructive",
         http_policy=True,
         sdk_method="supersede_knowledge",  # #11609 lane B: retired into the container
@@ -1705,12 +1711,19 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_supersede_knowledge",
         id="surface.supersede_knowledge",
-        description="Replace a node with a successor, keeping the history. Dispatches on the "
-                    "LINK POLICY: transfer_edges=True (default) → full supersede — CORRECTS "
-                    "edge, outdated flag, and every edge moves from old to new; "
-                    "transfer_edges=False → invalidate only — mark outdated with a CORRECTS "
-                    "edge and transfer nothing. dry_run=True previews the edge transfer and "
-                    "changes nothing.",
+        description="Replace a node with a successor, keeping the history. The arm follows "
+                    "the OLD node's label: a Point gets a full supersede — CORRECTS edge, "
+                    "outdated flag, and every edge moved from old to new; an Object/Subject "
+                    "gets the family supersede — status='superseded' + supersededBy (the "
+                    "successor's NAME) + supersededAt, no edge transfer. transfer_edges=None "
+                    "(default, not supplied) takes that label-driven arm; True/False are "
+                    "POINT-ONLY and are REFUSED on an Object/Subject rather than silently "
+                    "dropped. dry_run=True previews with the same arm and the same "
+                    "FAMILY-ARM checks, writes nothing, and reports the node count the "
+                    "write would touch; it is NOT refusal parity on the hybrid shapes "
+                    ":Object:Event / :Subject:Event / :Object:Source / :Subject:Source, "
+                    "where the preview says would-supersede and the write refuses "
+                    "(fail-closed; tortoise#13114).",
         risk="destructive",
         http_policy=True,
         sdk_method="supersede_knowledge",
@@ -2718,9 +2731,12 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # migrating caller lands on the same body, not a re-implementation.
     #
     # Arguments are shown where the door took them (`props=`, `days=`,
-    # `point_kinds=` precedent): a caller who drops `transfer_edges=False` gets a
-    # FULL supersede — it moves every edge — which is a different operation, not a
-    # smaller one.
+    # `point_kinds=` precedent). ⛔ Dropping `transfer_edges` does NOT select the
+    # full supersede any more (#12914): the arm follows the OLD node's label — a
+    # Point gets the full supersede (every edge moves), an Object/Subject gets the
+    # family supersede (status + successor name, no edge transfer). An explicit
+    # `True` is POINT-ONLY and is REFUSED on an Object/Subject, so the pointer
+    # passes the caller's value rather than a default.
     "tortoise_update": 'tortoise_update_knowledge(id, props=...)',
     "tortoise_update_point": 'tortoise_update_knowledge(id, props=...)',
     "tortoise_update_entity": 'tortoise_update_knowledge(id, props=...)',
@@ -2733,8 +2749,11 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # different operation, not a smaller one. The pointer below passes
     # `invalid_at=...` for exactly that reason.
     "tortoise_retract_point": 'tortoise_update_knowledge(id, invalid_at=...)',
-    # `transfer_edges=False` is the INVALIDATE arm; it is named explicitly because
-    # the default is the full supersede and the two differ in what they destroy.
+    # `transfer_edges=False` is the INVALIDATE arm. It is still named explicitly
+    # because it differs in what it destroys — but it is POINT-ONLY: on an
+    # Object/Subject an explicit `False` is REFUSED, while OMITTING the keyword
+    # takes the label's arm (Point: full supersede, every edge moves;
+    # Object/Subject: family supersede, no edge transfer) (#12914).
     "tortoise_supersede": 'tortoise_supersede_knowledge(old_id, new_id, transfer_edges=...)',
     "tortoise_invalidate":
         'tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)',
