@@ -23004,7 +23004,7 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     `config/ci-surfaces.yml:351`) and `test_12941_read_your_writes.py` (`:352`)
     each record for themselves — those are the two rows ABOVE this one. The
     `['api', 'core']` siblings are `test_12941_read_your_writes.py` and
-    `test_11892_health_quota.py` (`:1815` / `:2531` — elsewhere in the map, NOT
+    `test_11892_health_quota.py` (`:1816` / `:2532` — elsewhere in the map, NOT
     above this row). ⛔ NOT "the only hosted-door guard registered
     single-surface": on `main` this file was registered on **zero** surfaces,
     and several hosted-door guards legitimately live on `api` alone
@@ -23045,7 +23045,7 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     )
 
     # The registration itself: `api` is the arm the `hosted_api.py` diff class
-    # needs, `core` is the arm that covers the four `core`-classified consumers
+    # needs, `core` is the arm that covers the three `core`-classified CONSUMERS
     # (`core` was NOT pre-existing on `main` — this PR added BOTH rows). The rows
     # are the subject because a selection assert alone would pass the day any
     # second surface also lists the file (the #12645 pin records that lesson).
@@ -23055,9 +23055,16 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
         "runs none of the assertions written to hold that file"
     )
     assert pin in manifest["surfaces"]["core"], (
-        "`surfaces.core` must keep its row — it is what covers `tortoise/"
-        "live.py`, `topic_summarization.py`, `derived_invalidation.py` and "
-        "`consistency.py`, the four `core`-classified consumers of the census"
+        "`surfaces.core` must keep its row — it is what covers the three "
+        "`core`-classified CONSUMERS of the census, `topic_summarization.py`, "
+        "`derived_invalidation.py` and `consistency.py` (all three `select()` "
+        "-> ['core'], measured). ⛔ `tortoise/live.py` is NOT one of them: it "
+        "is the DEFINITION site the census holds constant (`:159 "
+        "_terminal_excluded`, `:372 is_terminal_status`) and is deliberately "
+        "absent from `_CENSUS_MODULES` — so `core` reaches it as a SOURCE, "
+        "never as a consumer. "
+        "3 core consumers; `mcp_server.py`/`sdk.py` are `full: True`; "
+        "`hosted_api.py` is the `api` row"
     )
 
     # The hosted door: `hosted_api.py` is an EXACT `api` match, so `core` must be
@@ -23072,11 +23079,12 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     )
 
     # …and the `core` arm still reaches a diff no SOURCE_PATTERN claims, so the
-    # fix did not MOVE the hole from the hosted door to the other four consumers.
+    # fix did not MOVE the hole from the hosted door to the other core sources.
     core_arm = _sel(["tortoise/live.py"])
     assert core_arm["surfaces"] == ["core"], core_arm["surfaces"]
     assert pin in core_arm["test_files"], (
         "the `core` arm regressed — `tortoise/live.py` is where the shared "
-        "predicate itself lives and no longer selects the census"
+        "predicate itself is DEFINED (`_terminal_excluded`, `is_terminal_status`) "
+        "and no longer selects the census that holds it constant"
     )
 
