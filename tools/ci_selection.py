@@ -3522,6 +3522,29 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # replayed snapshot) and `core` is where it is registered. Pinned by
              # tests/test_ci_selection.py::test_curate_graph_tool_change_selects_core_not_tier1.
              "tools/curate_graph.py",
+             # #7879: `tools/record_runner.py` is the RUNNER for the record fold — the only
+             # production entry point that executes `record_projection.replay()`, and the thing
+             # whose gates (the `--acknowledge-plan` refusal, the cut-over refusal, the derived
+             # checkpoint, the rollback-and-claim-nothing path) `tests/test_record_runner.py`
+             # pins. ⛔ THE SAME SILENT-DROP SHAPE AS THE TWO ENTRIES ABOVE: `tools/` is a flat
+             # `NON_PYTHON_PREFIXES` entry and no `SOURCE_PATTERNS` row matches it, so a
+             # RUNNER-ONLY diff — the diff most able to weaken the gates — filtered to
+             # `changed == []` and took the tier-1 smoke path, where `test_record_runner.py` is
+             # NOT registered. That would also mean the PR adding the runner never ran its own
+             # suite (measured: `--integrity` reported `manifest drift: ['test_record_runner.py']`
+             # before the `core` row was added). CORE_ALSO (not TOOL_CARVEOUTS) because the suite
+             # is hermetic: no DB, no URI, no network — `open_record`/`read_checkpoint` are
+             # replaced, and the one live proof is the PR body's, not the suite's.
+             # ⛔ PINNED, BECAUSE FOR A WHILE IT WAS NOT (review P2): this row landed with the
+             # argument above and NOTHING reddened if it was deleted — the suite's tests import
+             # the module directly, `--integrity` is satisfied by the separate classification
+             # and `durations` rows, and no `ci_selection` test named the runner. So the claim
+             # whose failure mode is "the whole suite silently does not run on the thing it
+             # pins" was the one claim with no evidence behind it. Pinned by
+             # tests/test_ci_selection.py::test_record_runner_tool_change_selects_core_not_tier1
+             # (tool arm + module arm; the module arm alone is carried by the `core` row in
+             # `config/ci-surfaces.yml`, which is why both are asserted).
+             "tools/record_runner.py",
              # #11609: the surface ARCHIVE and its gate. `tools/archive_surface.py` is the only
              # writer of `archive/MANIFEST.json` and the only thing that can lower the guard
              # `tests/test_archive.py` holds (an archived symbol must not reappear on the live
