@@ -1251,6 +1251,29 @@ class GitHubIndexer:
             _key = str(stage_key or CORE_WORK_ITEM_PIPELINE_KEY)
             if _key not in _PIPELINE_DECLS or declared_slot is None:
                 return None                  # the fold refuses (see above)
+        # ⛔ A NON-BOOLEAN `isClosed` IS THE SAME EXCLUDED MIDDLE, one field over.
+        # The doors store it VERBATIM — `update_knowledge(id, isClosed=0)` stores the
+        # INTEGER `0` (measured on the merged head: `typeof(o.isClosed)` →
+        # `['Integer']`) — and the two sides then read it differently: this file
+        # (and `apply_stage_fold`) read it by `bool()`, while the fold's LIVE-holder
+        # probe compares it in Cypher, `coalesce(n.isClosed, false) = false`, where
+        # `0 = false` is FALSE under FalkorDB's strict types. So the row has NO live
+        # holder, no fold ever reaches it, and NOTHING repairs it (unlike the truthy
+        # half, which the reopen arm repairs by writing a real boolean).
+        # Measured on the merged head, four polls of a CLOSED issue over a row at
+        # `update_knowledge(id, isClosed=0)`: mints `[1, 1, 1, 1]`, four `-closed`
+        # Events, the row byte-identical (`[0, 'active', 'in_progress', None]`) and
+        # the graph saying open for ever.
+        # `None` is the only loop-free answer here: it gates the transition arm off
+        # (`if prev_state is not None:`), the worst cost is ONE lost transition on a
+        # row no in-contract writer produces, and an unbounded mint is not a
+        # defensible alternative. The truthy half is deliberately NOT answered here —
+        # it reaches the position arms below and reads `"closed"`, which is right:
+        # the reopen arm resolves such a row BY NAME and REPLACES the marker with a
+        # real boolean (measured `1/active/in_progress` → `False/active/in_progress`),
+        # so it self-heals after one repairing `-reopened`.
+        if is_closed is not None and not isinstance(is_closed, bool) and not is_closed:
+            return None                      # 0 / 0.0 / "" — unplaceable, never live
         if is_position_ended(is_closed=is_closed, stage_slot=slot):
             return "closed"
         if is_position_ended(is_closed=is_closed, stage_slot=declared_slot):
