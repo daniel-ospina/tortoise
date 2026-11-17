@@ -37,6 +37,7 @@ from tortoise import code_freshness as _code_freshness
 # ``create_direct_edge`` / 2a-DIRECT transfer probe it in this exact order) —
 # imported, never re-listed, so the preview cannot drift from the write.
 from tortoise.live import EPISTEMIC_LABELS
+from tortoise.live import is_terminal_status as _is_terminal_status  # #12502/#13034
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
@@ -476,7 +477,8 @@ def _hold_mcp_dispatch_after_request(task) -> None:
 
 
 def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
-                                         name: str) -> None:
+                                         name: str,
+                                         stages: dict | None = None) -> None:
     """Schedule the shared breach writer OFF the event loop (#3834 G1).
 
     The writer is ``hosted_api._emit_wait_bound_breach`` — the SAME single emit
@@ -535,7 +537,8 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
         try:
             from tortoise import hosted_api as _ha
             _ha._emit_wait_bound_breach(
-                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name)
+                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name,
+                stages=stages)
         except Exception:  # telemetry must never turn a refusal into an error
             _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
 
@@ -1419,7 +1422,8 @@ def _write_retry_safety(name: str, arguments=None) -> bool:
 
 
 def _wait_bound_refusal_result(name: str | None = None,
-                               arguments=None, *, dispatched: bool = True) -> ToolResult:
+                               arguments=None, *, dispatched: bool = True,
+                               stages: dict | None = None) -> ToolResult:
     """The ONE refusal result both wait-bound paths return.
 
     The message and the advertised delay come from the single module both
@@ -1511,6 +1515,16 @@ def _wait_bound_refusal_result(name: str | None = None,
     default, because there the dispatch really was started and abandoned.
     """
     data: dict = {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}
+    if stages:
+        # #10893: ADDITIVE, and only when a timeline was bound — the envelope
+        # (`code` + the exact neutral `message`) is the refusal's IDENTITY for
+        # `tests/_verdict.py::is_transport_wait_bound_refusal` and does not move.
+        # ⛔ It rides BOTH arms deliberately, including the `committed: "none"`
+        # write arm: "which stage was it in" is a fact about the WAIT, not a
+        # claim about the write, so it cannot contradict `committed`.
+        data["stage"] = stages.get("stage")
+        if stages.get("stages_ms"):
+            data["stages_ms"] = stages["stages_ms"]
     # The human channel. Not in the write set, so the shape it always had stands.
     # NOT a claim that nothing was mutated: non-write-set tools can write (see the
     # docstring's `_cas_write_onboarding_state` case).
@@ -1797,6 +1811,19 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     # its route path for. Escape it for the log line (the analytics sink
     # sanitizes its own copy).
     safe_name = _mcp_auth._sanitize_for_log(name)
+    # #10893: WHICH read stage the budget went to — read from the timeline the
+    # REST middleware bound around this request (this dispatch task inherits it),
+    # so the MCP refusal and the REST refusal of the SAME request cannot describe
+    # the same stall two different ways. Two views, on purpose: `stages_view`
+    # (telemetry + log, ALWAYS when a timeline is bound) and `wire_stages`
+    # (the refusal body, only once the read actually started — see
+    # `read_stages.ReadStages.wire_snapshot`). ``None`` when nothing is bound
+    # (stdio MCP, an in-process SDK call): both calls below then add nothing,
+    # keeping those refusals byte-identical to the pre-#10893 shape.
+    from tortoise.read_stages import stage_view as _read_stage_view
+    from tortoise.read_stages import stage_wire_view as _read_stage_wire_view
+    stages_view = _read_stage_view()
+    wire_stages = _read_stage_wire_view()
     # #3834 F-2 / #9762: RE-READ the flag here, not only at entry. The entry
     # short-circuit only sees a refusal that already happened; a transport that
     # does not start its response before dispatching (fastmcp's
@@ -1817,11 +1844,13 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # a ``hosted_api`` import, and neither must the breach path, where that
         # import froze the loop and delivered the refusal seconds late.
         _emit_mcp_wait_bound_breach_off_loop(
-            _current_org_id.get() or "", latency_ms, name)
+            _current_org_id.get() or "", latency_ms, name, stages=stages_view)
+        from tortoise.read_stages import log_suffix as _stage_log_suffix
         _log.warning(
             "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
-            "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
-    return _wait_bound_refusal_result(name, arguments)
+            "refusing legibly%s", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name,
+            _stage_log_suffix(stages_view))
+    return _wait_bound_refusal_result(name, arguments, stages=wire_stages)
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -4467,10 +4496,14 @@ def tortoise_query(kind: str | None = None,
       nothing else, and tag mode reads EVERY kind of tagged Point, so a named
       kind narrows nothing while looking like it did.
     - include_retracted=True surfaces tombstones on every path (structural,
-      paginated, text, and tag modes); default False excludes them. Known gap, tracked
-      in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
-      it still serves superseded/archived/outdated/deprecated rows by default,
-      where the structural and fts arms exclude the whole terminal vocabulary.
+      paginated, text, and tag modes); default False excludes them. The TAG
+      arm excluded only `status != "retracted"` until #13034 — a narrower
+      vocabulary that served superseded/archived/outdated/deprecated rows as
+      current on the one arm whose contract says otherwise (the gap #12502
+      filed). It now asks the same shared predicate as the structural and fts
+      arms (`live.is_terminal_status`), so every mode excludes the whole
+      terminal vocabulary plus the position axis (a closed Object, or one in a
+      `terminal` pipeline stage).
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
     a structured error dict. A `kind` that is SET but not a string (`True`, `1`,
@@ -4967,9 +5000,11 @@ def tortoise_query(kind: str | None = None,
     # `filters` into its own parameter above, and the `text=` arm now forwards it
     # as the fts leg's `include_terminal`. Refusing a name that is not a property
     # filter would be a false block; leaving it unapplied was the same defect one
-    # level down. NOTE the `tag=` arm APPLIES the flag but with a narrower
-    # vocabulary than the other arms (`status != "retracted"` only) — a real gap
-    # filed as #12502, and the reason this comment does not say the arms agree.
+    # level down. NOTE the `tag=` arm APPLIES the flag through the SAME shared
+    # predicate the other arms use (#12502, closed by #13034): it used to carry
+    # its own `status != "retracted"` test — a narrower vocabulary than every
+    # sibling arm — and now asks `live.is_terminal_status`, position axis
+    # included.
     if filters and (text or tag is not None):
         _arm = "tag=" if tag is not None else "text="
         # A caller who set BOTH must drop both to reach the structural path —
@@ -4998,10 +5033,22 @@ def tortoise_query(kind: str | None = None,
         rows = _safe(_get_org_sdk().query_points_by_tag, tag, _record_reads=False)
         if not isinstance(rows, list):
             return rows
-        # query_points_by_tag has no retracted exclusion in the SDK — mirror
-        # the tombstone contract of the other paths here (Epic #888).
+        # #12502: this arm used to carry its OWN tombstone test
+        # (``status != "retracted"``) — a hand-written SUBSET of the terminal
+        # vocabulary, so a superseded / deprecated / archived / ``outdated``
+        # row was served as current on the one arm whose docstring promises
+        # tombstones on every path. #13034: it now asks the ONE shared predicate
+        # (``live.is_terminal_status``) instead of re-spelling a status set, and
+        # passes the POSITION axis too — the rows are full ``properties(p)``
+        # dicts, so a closed Object (``isClosed``) or one parked in a
+        # ``terminal`` pipeline stage is excluded like any other ended record.
+        # ``include_retracted`` is still the escape hatch: an audit caller
+        # asking for tombstones gets every ended row.
         if not include_retracted:
-            rows = [r for r in rows if r.get("status") != "retracted"]
+            rows = [r for r in rows if not _is_terminal_status(
+                r.get("status"), bool(r.get("outdated")),
+                is_closed=r.get("isClosed"),
+                stage_slot=r.get("pipelineSlot"))]
         if not paginated:
             # #10602 review 3: a lone `limit=` used to be ignored HERE too, so a caller
             # asking for 2 rows of a large tag got the whole tagged population back —
