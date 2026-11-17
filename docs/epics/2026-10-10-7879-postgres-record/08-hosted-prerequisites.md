@@ -1242,8 +1242,20 @@ message that names the GUC as the reason a wrong tenant's UPDATE matches zero ro
 erroring) — 9 → 11 when that statement landed, and #10000's turn read added the twelfth,
 `tortoise/record_read.py` (`session_turns`' docstring, recording WHY the tenant scope is installed
 by the turn read itself: an unscoped connection reads ZERO rows under this policy, so the scope
-cannot be the opener's caller's job) — 11 → 12. ⛔ The sites are named by CONTENT and
-NOT by offset: the projection's two have moved on every change that touched that file (this note
+cannot be the opener's caller's job) — 11 → 12.
+
+⚠️ **Re-measured 2026-11-17 (#13320's lane, at `34bd33d22a`): 19 again** — the count the
+sentence above carries. ⛔ **Its attribution is wrong on the third line**, and only blame settles
+it: the `tortoise/record_allocator.py` mention that landed with `#13043`'s work (commit
+`0a82790893`, PR `#13137`) is in the **`scope_tenant`** docstring — a function that commit
+introduced — not in `seed()`. `git log -L` puts all three delta lines in that one commit:
+`scope_tenant`'s docstring, and `tools/record_allocator_cli.py` twice (a `tools/` site, in scope).
+The number is re-derived on every run by
+`tests/test_deploy_workflow.py::test_the_census_freshness_claim_is_scoped_to_the_lines_it_actually_re_measured`,
+so the next main-side edit reds THAT test rather than silently ageing this sentence.
+
+⛔ The sites are named by CONTENT and NOT by offset: the projection's two have moved on every
+change that touched that file (this note
 listed `:227`/`:3269`, then `:228`/`:3296`, then `:230`/`:3359`, and #9555's own registry entry moved
 them again) — a third offset in a note whose next sentence says the offsets are unusable is how a
 census note starts certifying a line nobody can find. The
