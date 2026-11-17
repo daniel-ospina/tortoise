@@ -16,7 +16,8 @@ argument order alike — measured on ``falkordb/falkordb-server:v4.20.6`` (the p
 ``tools/dense_leg_probe_13108.py``, where the two refused round trips cost
 **20.17 ms of a 34.78 ms ``:Object`` dense read at 1,000 nodes** (58.0 %). ⛔ **Both figures come
 from the SAME artifact** — ``fix-1000-paired-at-rest.json``: 20.17 is ``index_attempt[0].elapsed_ms``
-(10.18 + 9.97) and 34.78 is that artifact's own ``arms["object[nohint]@c1"].latency_ms.p50``.
+(the pair's measured total; its two attempts read 10.18 and 9.97 ms, which **sum to 20.15** — the
+artifact reports its own total, so quote 20.17 and never the sum) and 34.78 is that artifact's own ``arms["object[nohint]@c1"].latency_ms.p50``.
 ``34.45 ms`` is the *un-paired probe* run's ``:Object`` p50 (``probe-1000-at-rest-and-concurrent.json``,
 a different run at a different ``code_head``); round 14 removed the pairing that quoted it here.
 ⛔ ``#13121`` rounds 4/5/8 corrected an earlier ``≈23 ms of 36.5 ms (63 %)`` here. ``23.45 ms`` is
@@ -359,6 +360,70 @@ def test_a_parsed_catalogue_populates_BOTH_halves_identically():
 
     assert stub._vector_indexed_labels == {"Point"}
     assert stub._vector_indexed_labels_for_reads == {"Point"}
+
+
+class _RaisingCatalogueGraph:
+    """`CALL db.indexes()` RAISES — the fail-open (`except`) lane."""
+
+    def query(self, _cypher):
+        raise RuntimeError("catalogue unavailable (#13121 F3)")
+
+
+class _NoneAnsweringCatalogueGraph:
+    """`CALL db.indexes()` answers `None` — the answered-`None` lane."""
+
+    def query(self, _cypher):
+        return _Result(None)
+
+
+@pytest.mark.parametrize("second_graph", [
+    pytest.param(_RaisingCatalogueGraph, id="raising-except-lane"),
+    pytest.param(_NoneAnsweringCatalogueGraph, id="answered-None-lane"),
+])
+@pytest.mark.parametrize("rows,populated", [
+    pytest.param([], set(), id="was-measured-EMPTY-set()"),
+    pytest.param([("Point", ["embedding"], {"embedding": ["VECTOR"]})],
+                 {"Point"}, id="was-measured-{Point}"),
+])
+def test_a_re_read_that_cannot_measure_clears_the_BEHAVIOURAL_half(second_graph,
+                                                                    rows, populated):
+    """⛔ The two NOT-MEASURED `= None` resets for the BEHAVIOURAL half are
+    load-bearing, and only a MEASURE-THEN-FAIL sequence can see a missing one.
+
+    `#13108` sets `_vector_indexed_labels_for_reads = None` in TWO fail-open
+    lanes — the `rows is None` lane and the `except` lane. Every negative pin in
+    this file starts from a stub whose `__init__` default is ALREADY `None`, so
+    "is `None` afterwards" there is also satisfied by a read that never entered
+    the lane: both assignments could be deleted and the suite stayed green
+    (`#13121` review F3).
+
+    It is not cosmetic. A store that measured `set()` (or `{"Point"}`) and then
+    meets an unreadable catalogue would keep ACTING on the stale answer while
+    the REPORTING half had correctly gone `None` — the read keeps skipping index
+    attempts on evidence the store no longer has, which is the same
+    reporting/behavioural asymmetry round 4's P0 fix exists to prevent, one lane
+    over.
+    """
+    from tortoise.projection import FalkorProjection
+
+    # 1. A real measurement, so the behavioural half is POPULATED not defaulted.
+    stub = _measure_inventory(rows)
+    assert stub._vector_indexed_labels_for_reads == populated, (
+        "precondition: the first read must have measured, or the assertion "
+        f"below cannot distinguish a cleared value from a default: "
+        f"{stub._vector_indexed_labels_for_reads!r}")
+
+    # 2. The SAME store, re-read through a catalogue that cannot be measured.
+    stub.g = second_graph()
+    FalkorProjection._record_vector_index_inventory(stub)  # must not raise
+
+    assert stub._vector_indexed_labels_for_reads is None, (
+        "a re-read that measures NOTHING must CLEAR the behavioural half — "
+        f"keeping {populated!r} would let the read skip on stale evidence while "
+        "the reported pair says unknown")
+    assert stub._vector_indexed_labels is None
+    assert stub._vector_index_served_labels is None, (
+        "the pair must stay coherent on this lane too")
 
 
 def test_the_sdk_forwards_the_BEHAVIOURAL_half_at_every_call_site():
