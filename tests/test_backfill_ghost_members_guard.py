@@ -48,8 +48,8 @@ def _install_fake_sdk(monkeypatch, resolved_name: str) -> dict:
         # #12901 wave 2 PRIVATISED the door this script reaches:
         # `graph-scripts/backfill_invite_ghost_members.py` now calls
         # `sdk._sweep_invite_ghost_memberships(dry_run=...)`, so the fake must answer to
-        # that name or the sweep reaches nothing and the `--yes` arm under test passes
-        # VACUOUSLY (the same defect the #1890 schedule test carried).
+        # that name — else the call raises AttributeError (:105) and the dry-run arm that
+        # reads `sweep_dry_run` REDs; it does not pass vacuously.
         def _sweep_invite_ghost_memberships(self, *, dry_run=False):
             calls["sweep_dry_run"] = dry_run
             return {"found": 0, "ghosts": 0, "deleted": 0}
