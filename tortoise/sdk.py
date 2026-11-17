@@ -5913,9 +5913,29 @@ def _goal_successor_named(props: dict, stored_view) -> bool:
     side and the read side of one field agree. ``""`` stays a carrier for the
     record's ``IS NOT NULL`` fold (#10192); it just does not name anybody.
     """
-    for spelling, column in _lifecycle_carrier_keys(props).items():
-        if column == "superseded_by" and props.get(spelling) not in (None, ""):
+    from tortoise.record_projection import snake  # local: avoids import weight
+
+    named_in_write = False
+    for key, value in props.items():
+        if snake(key) != "superseded_by":
+            continue
+        named_in_write = True
+        if value not in (None, ""):
             return True
+    if named_in_write:
+        # ⛔ #13065 review finding 2: the write NAMES this carrier and names
+        # nobody (`supersededBy=None`/`""`). Falling back to the stored view
+        # here let a write discharge the obligation with the very value it
+        # CLEARS — measured: a superseded goal with `supersededBy='succ-1'`
+        # admitted `update_knowledge(g, goalState='superseded',
+        # supersededBy=None)` and left `supersededBy=None`. The guard grades the
+        # state the write LEAVES, so the write's own value decides this column
+        # and the stored half is not consulted for it.
+        #
+        # The scan is over the RAW keys (not `_lifecycle_carrier_keys`, which
+        # drops a present `None` as "not a carrier") because a CLEAR is exactly
+        # the shape this finding is about.
+        return False
     view = stored_view() or {}
     return bool(view.get("successor"))
 
@@ -5979,12 +5999,41 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
     REFUSED IN EITHER DIRECTION, with BOTH repairs named (the AX rule: say that
     it refused, exactly what failed, and exactly what to do): add the ending to
     the other field, or drop it from the one that carries it.
-    """
-    if "goalState" not in props and "status" not in props:
-        return
 
-    bag_goal = props.get("goalState", _GOAL_ENDING_UNSET)
-    bag_status = props.get("status", _GOAL_ENDING_UNSET)
+    ⛔ THE PRESENCE TEST AND THE READS ARE SHAPE-INDEPENDENT (#13065 review
+    finding 3). `"goalState" in props` hashes the LITERAL name, so a `str`
+    SUBCLASS key that renders as ``goalState`` is missed by the test while the
+    live transport still files it under that column (`tortoise/live.py`'s
+    two-renderer contract, measured on the sibling guard at #11825/#9649: the
+    pair was written through the door that claims to refuse it). The read goes
+    through `lifecycle_props_by_rendering`, and a call that names a guarded
+    field MORE THAN ONCE is refused rather than guessed — `_status_write_is_ambiguous`'s
+    rule, applied to both guarded names.
+    """
+    rendered = lifecycle_props_by_rendering(props, ("status", "goalState"))
+    if not rendered:
+        return
+    doubled = sorted(
+        name for name in ("status", "goalState")
+        if len(keys_rendering_as(props, {name})) > 1)
+    if doubled:
+        # ⛔ ONE WORDING WITH THE DOOR'S OWN CHECK (`update_entity`'s
+        # `_status_write_is_ambiguous` refusal, #12786): a caller that trips this
+        # at the payload boundary and a caller that trips it one branch below must
+        # see the SAME diagnosis, or the same shape gets two explanations.
+        fields = " and ".join(f"`{n}`" for n in doubled)
+        raise ValueError(
+            f"{surface} refused a CONFLICTING status write: more than one key in "
+            f"this call renders as {fields} and they ask for different words. "
+            f"A `str` subclass whose content and `__str__` differ is filed under "
+            f"one name by the live write and the other by the journal, so which "
+            f"word lands cannot be known here — and guessing it is a bypass "
+            f"(#13065 review finding 3). Pass each field ONCE, as a plain str, "
+            f"with the word you mean."
+        )
+
+    bag_goal = rendered.get("goalState", _GOAL_ENDING_UNSET)
+    bag_status = rendered.get("status", _GOAL_ENDING_UNSET)
     goal_state, status = bag_goal, bag_status
     _stored: dict = {}
     _read = False
@@ -5995,7 +6044,40 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             _read = True
             if goal_ending is not None:
                 _stored.update(goal_ending() or {})
+            if _stored.get("conflict"):
+                # #13065 review finding 5: MORE THAN ONE node carries this id and
+                # they disagree about whether the goal ended. The write binds
+                # them ALL (the journal fold MERGEs on the id), so grading
+                # `rows[0]` would make the verdict PLAN-ORDER dependent — refuse
+                # rather than answer from one row. Raised from the view so a
+                # write that never needs the stored half never pays for it.
+                raise ValueError(
+                    f"REFUSED: more than one node carries this id and they "
+                    f"disagree about the goal's ending (through {surface}). "
+                    f"#13035: the write lands on EVERY node carrying the id, so "
+                    f"the state it leaves cannot be named from one row."
+                    f"\nOne way to fix it: resolve the duplicate ids first (the "
+                    f"shape is mintable through `create_point(..., id=…)`), then "
+                    f"re-issue the write."
+                )
         return _stored
+
+    if may_target_existing_node and _stored_view() and (
+            _is_lifecycle_word(_stored.get("status"), TERMINAL_EXCLUDED_STATUSES)
+            or _is_lifecycle_word(_stored.get("goalState"), GOAL_ENDING_STATES)):
+        # #13065 review finding 4: on a door that can land on an ALREADY
+        # EXISTING node, the STORED ending is part of the state the write
+        # leaves — even when the caller names BOTH fields. Otherwise
+        # `create_point(id=<retired goal>, goalState="met")` writes a coherent
+        # LIVE pair over an ended node and resurrects it, while the identical
+        # transition through `update_knowledge` is refused.
+        #
+        # ⛔ THIS ARM IS LAST (see the end of this function): the two branches
+        # above name the pair that failed and the repair for it, so a write they
+        # can already describe keeps their more specific refusal.
+        _stored_ending = True
+    else:
+        _stored_ending = False
 
     if goal_state is _GOAL_ENDING_UNSET or status is _GOAL_ENDING_UNSET:
         # The write does not name both endpoints. Ask the node for the missing one
@@ -6037,12 +6119,12 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 f"every other reader.{_also}\n"
                 f"Two ways to fix it, either is accepted:\n"
                 f"  1. add the ending to `status` — pass "
-                f"status={GOAL_ENDING_STATUS[goal_state]!r}"
-                + (" together with the successor's id, "
+                + ("status='superseded' together with the successor's id, "
                     "supersededBy=<successor id>"
                     if goal_state == _SUPERSEDED_STATUS else
-                    " (or status='archived'/'retracted', the legacy "
-                    "spellings of the same ending)")
+                    "status='archived' (or 'retracted'; the legacy "
+                    "'deprecated' spelling is accepted on goals whose door "
+                    "carries it)")
                 + f";\n"
                 f"  2. drop the ending from `goalState` — pass a word that "
                 f"describes a live commitment {sorted(GOAL_LIVE_STATES)} (or "
@@ -6089,6 +6171,30 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             "to end the goal."
         )
 
+    if _stored_ending and not (_is_lifecycle_word(status,
+                                                 TERMINAL_EXCLUDED_STATUSES)
+                               and _is_lifecycle_word(goal_state,
+                                                     GOAL_ENDING_STATES)):
+        # #13065 review finding 4, LAST so the two branches above keep their more
+        # specific refusals. Reaching here means the requested pair is itself
+        # COHERENT and ends nothing — but the node this door can land on is
+        # ALREADY ENDED, and an ending is final. Without this the create door's
+        # injected default status made `create_point(id=<retired goal>,
+        # goalState="met")` a coherent LIVE pair written over an ending.
+        raise ValueError(
+            f"REFUSED: this node is ALREADY ENDED and this write would leave "
+            f"it running (through {surface} — an ending is final). #13035: "
+            f"`status`/`goalState` may not disagree about whether the goal "
+            f"ended, and an ending cannot be undone by writing a live pair "
+            f"over it: the node keeps the ending it had.\n"
+            f"Two ways to fix it, either is accepted:\n"
+            f"  1. keep the ending — pass status='archived' with "
+            f"goalState='abandoned' (or status='superseded' plus "
+            f"supersededBy=<successor id>);\n"
+            f"  2. if this is genuinely a NEW goal, give it its own id "
+            f"instead of reusing the ended one."
+        )
+
 
 def _stored_goal_ending_view(proj, id_val: str, *,
                             label: str | None = None) -> dict:
@@ -6117,11 +6223,21 @@ def _stored_goal_ending_view(proj, id_val: str, *,
     ).result_set
     if not rows:
         return {}
+    # ⛔ #13065 review finding 5: the write binds EVERY node carrying this id
+    # (the journal fold MERGEs on it), so answering from `rows[0]` made the
+    # admit/refuse verdict PLAN-ORDER dependent — measured with two :Point
+    # duplicates, where two identical statements in one process returned the
+    # rows in different orders. Disagreement is reported instead of picked: the
+    # guard refuses (see its `conflict` arm) rather than answer from one row.
+    endings = {(row[0], row[1]) for row in rows}
     status, goal_state, carrier, corrects = rows[0][:4]
     named = carrier if carrier not in (None, "") else None
     if named is None and corrects:
         named = next((c for c in corrects if c), None)
-    return {"status": status, "goalState": goal_state, "successor": named}
+    view = {"status": status, "goalState": goal_state, "successor": named}
+    if len(endings) > 1:
+        view["conflict"] = True
+    return view
 
 
 # ── #9964: the kind decides the layer ──────────────────────────────────────

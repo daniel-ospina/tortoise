@@ -84,7 +84,10 @@ def test_an_ending_on_goalState_alone_is_refused_and_names_both_repairs(sdk):
     # ...what failed: the two surfaces that used to disagree about this goal
     assert "derived_invalidation" in msg and "CURRENT" in msg
     # ...and BOTH repairs, each with the value to pass
-    assert "status='deprecated'" in msg            # add the ending to `status`
+    # #13065 review finding 7: repair 1 names a word the POINT doors also accept
+    # ('deprecated' is an OBJECT word, so naming it first made the first-named
+    # repair unperformable on `create_point`/`update_point` — AX rule 2)
+    assert "status='archived'" in msg              # add the ending to `status`
     assert "goalState=None" in msg                 # or drop it from `goalState`
     assert "'met'" in msg or "'active'" in msg     # ...naming the live words
     # nothing landed: the refusal is before the first write
@@ -150,7 +153,7 @@ def test_the_two_endings_are_not_interchangeable(sdk):
                              status="superseded")
     msg = str(exc.value)
     assert "not interchangeable" in msg
-    assert "status='deprecated'" in msg
+    assert "status='archived'" in msg
     assert "goalState='abandoned'" in msg
 
 
@@ -231,24 +234,42 @@ def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
     # instead, so it never even pays for the read. Proven by handing the probe a
     # view that WOULD refuse (stored deprecated/abandoned): if the door graded
     # the bag, this call raises.
+    # ⛔ REVIEW ROUND 3, FINDING 4 CHANGED THIS ARM'S PREMISE. It used to assert
+    # that the door NEVER reads the stored half when the caller names both
+    # endpoints. That premise is what let `create_point(id=<retired goal>,
+    # goalState="met")` write a coherent LIVE pair over an ending: the CREATE
+    # always lands a status (the door's default `"live"` when the caller names
+    # none), so "both endpoints named" does not mean "the stored ending is
+    # irrelevant". The door now reads the stored half on this leg WHATEVER the
+    # caller names, and a stored ENDING refuses the resurrection (the test below
+    # pins that). What survives, and is what this arm still proves: when the
+    # stored node is NOT ended the write LANDS — the read cannot manufacture a
+    # false refusal.
     import tortoise.sdk as sdk_mod
     calls = []
     real = sdk_mod._stored_goal_ending_view
 
-    def refusing_probe(*args, **kwargs):
+    def recording_probe(*args, **kwargs):
         calls.append(args)
-        return {"status": "deprecated", "goalState": "abandoned",
-                "successor": None}
+        return real(*args, **kwargs)          # the node's OWN values
 
-    sdk_mod._stored_goal_ending_view = refusing_probe
+    sdk_mod._stored_goal_ending_view = recording_probe
     try:
         sdk.create_point("goal", "GOAL - revived [create-door]",
                          id=goal["id"], goalState="active")
     finally:
         sdk_mod._stored_goal_ending_view = real
-    assert calls == [], (
-        "both endpoints are named by the write, so the stored half must not be "
-        f"read — read {len(calls)} time(s)")
+    assert calls, ("the explicit-id create leg must read the stored half — an "
+                   "ending there is final, so the pair alone cannot decide")
+    revived = sdk.get_point(goal["id"])
+    # the write was NOT refused (this call is the false-refusal arm): the node is
+    # still live on both surfaces. ⚠️ The create door does not overwrite a
+    # ``goalState`` on a colliding explicit id (measured here: it stays 'met'),
+    # which is a separate question from this guard and is why the assertion is
+    # about the PAIR's polarity rather than a specific word.
+    assert not live.is_terminal_status(revived.get("status"))
+    assert revived["goalState"] in GOAL_STATE_VALUES
+    assert revived["goalState"] not in RETIRED_GOAL_STATES
 
 
 def test_the_create_door_grades_the_DEFAULT_status_of_an_EXPLICIT_id(sdk):
@@ -406,6 +427,8 @@ def test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing(sdk):
     every other acceptance of that shape.
     """
     failures = []
+    accepted = 0
+    landed: set = set()
     for goal_state in sorted(GOAL_STATE_VALUES):
         for status in _WRITABLE_STATUSES:
             props = {"goalState": goal_state}
@@ -420,6 +443,8 @@ def test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing(sdk):
                     f"pair [{goal_state}/{status}]", objectKind="goal", **props)
             except ValueError:
                 continue        # refused: the pair cannot exist to disagree
+            accepted += 1
+            landed.add((goal_state, status))
             node = sdk.get_entity(goal["id"])
             retired = node.get("goalState") in RETIRED_GOAL_STATES
             current = not live.is_terminal_status(
@@ -430,6 +455,17 @@ def test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing(sdk):
     assert failures == [], (
         "a writable goal is retired to the invalidation path and current to the "
         f"reading rule (or the reverse): {failures}")
+
+    # ⛔ #13065 review finding 8: a POSITIVE CONTROL. `failures == []` alone also
+    # holds if EVERY create in the product were refused — the sweep would then
+    # never have a pair to disagree about, and the test would pass vacuously
+    # while the vocabulary it claims to sweep was entirely unusable.
+    assert accepted >= 3, (
+        f"the sweep accepted only {accepted} pair(s) of {len(GOAL_STATE_VALUES) * len(_WRITABLE_STATUSES)} — "
+        "a total refusal would make the agreement assertions above vacuous")
+    assert ("active", "live") in landed, (
+        "the ordinary coherent pair ('active', 'live') must land, or this sweep "
+        f"is measuring refusals rather than agreement: {sorted(landed)}")
 
     # and the defect's own pair is REFUSED outright, not merely absent
     with pytest.raises(ValueError):
@@ -579,3 +615,95 @@ def test_the_stored_half_is_read_ONLY_when_the_write_cannot_answer(sdk):
         assert len(calls) == 2
     finally:
         sdk_mod._stored_goal_ending_view = real
+
+
+# ── 9. review round 3: findings 2-5, one test per bypass ──────────────────────
+
+
+def test_a_superseded_write_that_CLEARS_the_successor_is_refused(sdk):
+    """#13065 review finding 2 — the obligation is not discharged by the value
+    the write DESTROYS.
+
+    Measured before the fix: a superseded goal carrying ``supersededBy='succ-1'``
+    admitted ``update_knowledge(g, goalState='superseded', supersededBy=None)``
+    and left ``supersededBy=None`` — the stored carrier the guard read was the
+    one this same write was clearing, so the write satisfied the rule by erasing
+    the evidence for it. The guard grades the state the write LEAVES.
+    """
+    goal = sdk.create_object("GOAL - replaced [clear]", objectKind="goal",
+                             goalState="active")
+    sdk.update_knowledge(goal["id"], status="superseded",
+                         goalState="superseded", supersededBy="succ-1")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="superseded",
+                             supersededBy=None)
+    msg = str(exc.value)
+    assert "names no successor" in msg, msg
+    # nothing landed: the named successor is still there
+    assert sdk.get_entity(goal["id"])["supersededBy"] == "succ-1"
+
+
+def test_a_RENDERED_goalState_key_cannot_walk_past_the_guard(sdk):
+    """#13065 review finding 3 — the PRESENCE TEST must be as shape-independent
+    as the refusal it guards.
+
+    ``"goalState" in props`` hashes the literal name, while the live transport
+    files a key by ``str(key)``. A ``str`` subclass whose ``__str__`` renders
+    ``goalState`` therefore slipped a write past the guard entirely: the defect
+    pair (``goalState='abandoned'`` beside a live ``status``) was accepted
+    through the door that claims to refuse it.
+    """
+    class Rendered(str):
+        def __str__(self):                      # files as `goalState`
+            return "goalState"
+
+        def __hash__(self):                     # ...and misses `in props`
+            return hash("not-the-literal-name")
+
+    goal = sdk.create_object("GOAL - rendered [key]", objectKind="goal",
+                             goalState="active")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], **{Rendered("zzz"): "abandoned"})
+    assert "REFUSED" in str(exc.value), str(exc.value)
+    # the node is untouched
+    assert sdk.get_entity(goal["id"])["goalState"] == "active"
+
+
+def test_the_create_door_cannot_RESURRECT_an_ended_goal_by_naming_both(sdk):
+    """#13065 review finding 4 — an ending is final on the create door too.
+
+    The door injects its resolved default ``status``, so "one endpoint missing"
+    was never true once the caller named ``goalState``: a retired Point goal
+    admitted ``create_point(..., id=<that goal>, goalState='met')`` and the fold
+    landed a coherent LIVE pair over the ending. The identical transition through
+    ``update_knowledge`` was already refused.
+    """
+    goal = sdk.create_point("goal", "GOAL - retired [resurrect]",
+                            goalState="abandoned", status="archived")
+    with pytest.raises(ValueError) as exc:
+        sdk.create_point("goal", "GOAL - resurrect [named]",
+                         id=goal["id"], goalState="met", status="live")
+    assert "ALREADY ENDED" in str(exc.value), str(exc.value)
+    after = sdk.get_point(goal["id"])
+    assert after["goalState"] == "abandoned"          # the ending survived
+    assert live.is_terminal_status(after["status"])
+
+
+def test_DUPLICATE_ids_that_disagree_refuse_rather_than_answer_from_one(sdk):
+    """#13065 review finding 5 — ``rows[0]`` is not the node set the write binds.
+
+    Two nodes carrying one id are mintable through ``create_point(..., id=…)``,
+    and the write lands on BOTH. Answering from ``rows[0]`` made the verdict
+    plan-order dependent (measured: two identical statements in one process
+    returned the rows in different orders).
+    """
+    goal = sdk.create_point("goal", "GOAL - dup ids [a]",
+                            goalState="met", status="live")
+    sdk._get_proj().g.query(
+        "CREATE (:Point {id:$id, name:'GOAL - dup ids [b]', "
+        "status:'archived', goalState:'abandoned'})",
+        params={"id": goal["id"]},
+    )
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="abandoned")
+    assert "more than one node" in str(exc.value), str(exc.value)
