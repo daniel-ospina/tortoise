@@ -95,15 +95,36 @@ HNSW_ITERATIVE_SCAN = "strict_order"
 
 #: ``entity_type -> (table, id column, kind filter, recency columns)``.
 #:
-#: ONLY the three labels whose vector the RECORD carries are here, and the
-#: absence of ``object``/``subject`` is a decision, not an omission: their
-#: vector is derived inside the graph fold from ``name`` (#7845) and rides no
-#: journal record, so there is no column to read and nothing to move
-#: (`20261109000001_record_embedding_vector.sql` states both rejected
-#: candidates). They keep the brute-force graph scan they ALREADY used — the
-#: graph has exactly one vector index, on `Point`, so those two were never
-#: ann-served (`#4997`). :data:`LABEL_SERVED` is what tells the caller to take
-#: the graph branch instead of pretending the record answered.
+#: ⛔ `object`/`subject` ARE STILL ABSENT, AND THE REASON CHANGED (#13220). It is
+#: no longer "the record has no column" — since
+#: `20261117000001_record_object_subject_embedding.sql` both tables carry
+#: `embedding` + a generated `embedding_vec` + an HNSW index, and the write seam
+#: fills them (`record_writer.derived_embedding_columns`). What still blocks them
+#: is the `#689` TERMINAL-STATUS CAGE, and it is a correctness gate rather than a
+#: missing feature:
+#:
+#:   * `search_engine._STATUS_FILTERED_LABELS` is ``("Point", "Object", "Subject")``,
+#:     so BOTH graph branches drop a superseded/deprecated/archived/retracted
+#:     entity out of the dense leg, and :func:`_status_predicates` exists precisely
+#:     so the record leg is not a loophole around that;
+#:   * the RECORD has no `status` column for these two labels — it is a
+#:     projection-owned CACHE (`OpDispatch.never_store`, §2.6) and
+#:     `chk_object_props_no_derived` refuses it in the props tail;
+#:   * its procedural fold (`public.object_current_status`) answers only
+#:     `live`/`superseded`, while the graph's vocabulary has four terminal
+#:     members: `deprecated`/`archived`/`retracted` arrive as
+#:     `EntityMutated op=restatus` and the record DROPS them.
+#:
+#: ⇒ serving these two from the record today would return entities the graph leg
+#: hides — `#689`'s regression on the branch that would carry production traffic.
+#: They keep the brute-force graph scan they have always used (they were never
+#: ann-served: the graph's only vector index was `Point`'s, `#4997`), and the
+#: COLUMN + index this change adds is what makes them queryable AT ALL — by the
+#: noun-resolution step the 2026-11-17 ruling names, and by the dense leg the
+#: moment the record can apply the cage. :data:`LABEL_SERVED` is what tells the
+#: caller to take the graph branch instead of pretending the record answered;
+#: `tests/test_13220_record_label_embeddings.py` pins both halves (the columns
+#: exist, the two labels are NOT served).
 #:
 #: The ``id column`` mirrors `search_engine`'s ``id_field`` derivation exactly
 #: (#448): ``source``/``document`` answer the canonical key ``url``, ``event``
@@ -575,9 +596,10 @@ def vector_search(
     THREE outcomes, and the third is the one that is easy to get wrong:
 
     * ``None`` — this ``entity_type`` is NOT served from the record at all
-      (``object``/``subject``: no column, see :data:`LABEL_SERVED`). The caller
-      MUST take its graph branch; this is not an empty answer and must never be
-      rendered as one.
+      (``object``/``subject``: the record holds their vectors since #13220 but
+      cannot apply the `#689` terminal-status cage — see :data:`LABEL_SERVED`).
+      The caller MUST take its graph branch; this is not an empty answer and
+      must never be rendered as one.
     * ``[]`` — served, asked, and the filter genuinely selects nothing.
     * rows — the answer.
 
@@ -610,7 +632,9 @@ def vector_search(
     """
     mapping = LABEL_SERVED.get(entity_type)
     if mapping is None:
-        # object / subject — see LABEL_SERVED. NOT an empty result: the caller's
+        # object / subject — see LABEL_SERVED (#13220: the record HOLDS their
+        # vectors now, but cannot apply the `#689` terminal-status cage, so the
+        # label stays on its graph branch). NOT an empty result: the caller's
         # graph branch is this label's real path and always was.
         return None
     table, id_column, kind_filter, recency_columns = mapping
