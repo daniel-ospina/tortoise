@@ -3014,6 +3014,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_purge_legacy_turns_guard_runs_on_a_tools_only_change.
              "tools/purge_legacy_turns.py",
+             # #12855: the stored-rows REWRITE. Same hole as the purge tool above
+             # and the same reason it is dangerous unguarded: `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry, the tool matches no SOURCE_PATTERNS row,
+             # so a tool-only diff takes the docs-only early return and the
+             # `core` registration on `test_12855_outdated_rewrite.py` is never
+             # SELECTED — measured `select(["tools/rewrite_object_status.py"])`
+             # -> `surfaces=[]`, suite absent from `test_files`. The suite is the
+             # only thing that measures the durability gate (a live-only write is
+             # reverted by `rebuild_all`, #4240), so an unguarded tool-only change
+             # could remove it silently. Pinned by
+             # tests/test_ci_selection.py::
+             # test_rewrite_object_status_suite_runs_on_a_tools_only_change.
+             "tools/rewrite_object_status.py",
              # #8491: the meeting→CRM bridge. `integrations/` is a flat
              # NON_PYTHON_PREFIXES entry and bridge.py matches no
              # SOURCE_PATTERNS row, so a bridge.py-only change was filtered out

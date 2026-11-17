@@ -1251,8 +1251,16 @@ def render(rep: Report) -> str:
             f"  ⛔ {len(rep.pending)} row(s) may be LIVE-ONLY from a previous "
             "run that did not finish cleanly "
             f"({', '.join(rep.pending[:5])}{'…' if len(rep.pending) > 5 else ''}): "
-            "their live status was written but their journal record may not "
-            "have landed, so `rebuild_all` can restore the legacy word. "
+            # ⛔ THE MARKER PROVES INTENT, NOT PROGRESS. An id is written to it
+            # BEFORE the write door is called, so a killed run leaves ids whose
+            # live write never happened at all — and the marker cannot tell those
+            # apart from one whose live write landed with no durable record. Say
+            # BOTH, or the report accuses a row of state it may not hold.
+            "each of these was about to be rewritten when the previous run "
+            "stopped, and this marker cannot tell how far it got: its live "
+            "status may be the legacy word still, or the new one with no journal "
+            "record behind it — in the latter case `rebuild_all` restores the "
+            "legacy word. "
             "The `0 rows` reading on this graph is NOT a measurement until they "
             "are repaired — re-run `--execute` after `rebuild_all`.")
     if rep.flag_count:

@@ -8767,12 +8767,18 @@ surfaces:
   # class is not a docs-only diff.
   - test_published_artifact_canary.py
   - test_embedded_choke_point.py
-  # #12855: the stored-rows rewrite — `tools/rewrite_object_status.py` (a `tools/`
-  # diff falls to the docs-only early return, so `core` is the surface that must
-  # carry it) plus its suite, which drives the SDK's journaled update path and the
-  # `assembly` filter pin. DUAL-REGISTERED `core` + `sdk` because a
-  # `tortoise/assembly.py`-only diff selects `sdk`, and a named-surface match
-  # REPLACES the `core` fallback — one row would sleep through the other half.
+  # #12855: the stored-rows rewrite — `tools/rewrite_object_status.py` plus its
+  # suite, which drives the SDK's journaled update path and the `assembly` filter
+  # pin. ⛔ THE `tools/` HALF IS NOT CLOSED BY THIS ROW: `tools/` is a flat
+  # `NON_PYTHON_PREFIXES` entry, so a tool-only diff takes the docs-only early
+  # return and NO surface is selected — measured before the fix:
+  # `--changed-files tools/rewrite_object_status.py` → `surfaces: []`, suite
+  # absent. What closes it is the `CORE_ALSO` entry in `tools/ci_selection.py`
+  # (the same hole the purge tool has); after it, that diff selects `core` and
+  # this row is what carries the suite. DUAL-REGISTERED `core` + `sdk` because the
+  # suite also pins `tortoise/assembly.py`, whose diff takes the `core` fallback,
+  # while a `tortoise/retrieval.py`-class diff selects `sdk` and a named-surface
+  # match REPLACES the `core` fallback — one row would sleep through the other.
   - test_12855_outdated_rewrite.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
@@ -10004,7 +10010,7 @@ surfaces:
   # cheap. Pinned by
   # `tests/test_ci_selection.py::test_the_2684_census_is_selected_on_every_surface_that_moves_it`.
   - eval/write_path/test_value_span_census_2684.py
-  - test_12855_outdated_rewrite.py  # #12855: dual-registered with `core` (see the `core` row) — a `tortoise/assembly.py`-only diff selects `sdk`
+  - test_12855_outdated_rewrite.py  # #12855: dual-registered with `core` (see the `core` row) — an `sdk`-selecting diff (e.g. `tortoise/retrieval.py`) REPLACES the `core` fallback, so the suite needs its own `sdk` row
   classify:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
