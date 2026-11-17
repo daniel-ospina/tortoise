@@ -1784,7 +1784,7 @@ def test_a_marker_holding_INVALID_UTF8_refuses_BY_NAME_not_with_a_traceback(env)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = tool.main(["--db-path", str(sdk._db_path),
-                              "--event-log-path", journal] + extra)
+                              "--event-log-path", journal, *extra])
         arm = "execute" if extra else "preview"
         assert code == 2, f"a non-UTF-8 marker exited {code} on the {arm} arm"
         assert tool.REFUSE_PENDING_UNREADABLE in err.getvalue(), err.getvalue()
