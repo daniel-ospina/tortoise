@@ -220,40 +220,41 @@ _PIPELINE_DECLS = {CORE_WORK_ITEM_PIPELINE_KEY: CORE_WORK_ITEM_PIPELINE}
 
 
 def _row_is_frozen(status, outdated) -> bool:
-    """True when THIS read's answer can never change, so a state diff against it
-    can never converge (#13289 F1).
+    """True when a WIDE lifecycle term is set — one the FOLD does NOT latch on.
 
-    The two LIFECYCLE terms of ``live.is_terminal_status`` are written once and
-    never cleared: ``_upsert_object`` writes ``o.status`` ON CREATE only
-    (``projection/entities.py:5121-5123`` — *"status ON CREATE only — ON MATCH
-    never touches it (the clobber guard)"*), ``pipeline.stage_move_props`` clears
-    only the pending pair (``pipeline.py:129-131``), and no door writes
-    ``outdated`` any more (``commit_ops.py:131``). A row carrying either is
-    therefore frozen, in one of two ways:
-
-    * ``status in commit_ops.OBJECT_TERMINAL_STATUSES`` → ``_fold_object_stage``
-      returns ``False`` BEFORE any position test (``entities.py:6219``), in BOTH
-      directions (a reopen runs through the same fold), so the projection cannot
-      move the row at all;
-    * terminal on these terms but NOT latched by the fold (``status='outdated'``,
-      the legacy ``outdated=true`` flag) → the fold is dispatched ASYMMETRICALLY, and
-      that asymmetry is the reason this helper cannot answer for both terms at once:
-      see `_status_is_latched` and the reader below (``#13289`` round-4 finding 2).
+    ⛔ This is the REMAINDER, not the whole rule, and the two helpers must be read
+    together or the reader looks inconsistent. `_status_is_latched` answers "the
+    fold refuses this in BOTH directions" and is asked FIRST; this helper answers
+    "the row carries a terminal-on-the-READ-vocabulary term the fold does not
+    latch on" (`status='outdated'`, the legacy ``outdated=true`` flag), and is
+    asked only after the position is known. Its call site is the `outdated` arm:
+    a CLOSE can never move such a row, so it takes ``None``; a REOPEN can, and
+    that direction is answered from the position before this helper is consulted.
+    See `_status_is_latched` and the reader below (``#13289`` round-4 finding 2).
 
     ⚠️ The SET is the shared ``live`` predicate's, whose vocabulary
     (``live.TERMINAL_EXCLUDED_STATUSES``) is deliberately WIDER than the fold's
     ``OBJECT_TERMINAL_STATUSES``. ``_fold_object_stage`` does not fetch
     ``o.outdated`` and its set has no ``outdated`` member
     (``entities.py:6196-6199``, ``commit_ops.py:88``; ``commit_ops.py:82-83``
-    says so from the other
-    side: the render-time probe *"adds `outdated` … which this fold does not"*).
-    The wider set is correct HERE because the invariant this helper tests is "no
-    writer can clear it", not "the fold latches on it".
+    says so from the other side: the render-time probe *"adds `outdated` …
+    which this fold does not"*).
+
+    ⚠️ The invariant is "the CLOSING direction has no live holder", NOT "no
+    writer can clear it" — the stronger claim is false. A coherent un-supersede
+    (``update_entity(obj, status='live', supersededBy=None, supersededAt=None)``,
+    admitted at ``sdk.py:53952-53962`` and documented as the NOT MONOTONE
+    exception at ``sdk.py:6030-6048``) DOES clear ``superseded``, and this read
+    resumes the moment it does because the answer is derived from the stored row
+    and never cached. What ``_upsert_object`` guarantees is narrower and is the
+    part this module relies on: ``o.status`` is written ON CREATE only
+    (``projection/entities.py:5121-5123`` — *"status ON CREATE only — ON MATCH
+    never touches it (the clobber guard)"*), so an unrelated re-mention cannot
+    reset the word out from under a poll.
 
     ⚠️ It is the SHARED predicate, not a local re-spelling, and the POSITION axis
-    is deliberately not passed: this helper answers only whether the LIFECYCLE
-    terms have latched. Position is the axis a diff CAN converge on, so it is
-    read separately below.
+    is deliberately not passed: this helper answers only the lifecycle question.
+    Position is the axis a diff CAN converge on, so it is read separately.
     """
     return is_terminal_status(status, outdated)
 
@@ -1289,9 +1290,14 @@ class GitHubIndexer:
         # F4 made to F2. F2's rule ("the caller falls back to the stored
         # `pipelineSlot` prop, which the pack's OWN fold writes") is right for a row a
         # PACK fold owns — but this read is only ever asked about an INDEXED ISSUE
-        # Object, `github_map` writes no `objectKind`, and so no pack fold can address
-        # one: the connector fold is the only fold that will ever see this row, and it
-        # refuses a foreign key with `cross-pipeline`. Nothing clears that prop, so the
+        # Object. ⛔ The reason no pack fold can address one is NOT "no
+        # `objectKind`": `github_map.issue_to_object` writes `object_kind:
+        # "pm:issue"` (`github_map.py:274`). It is that no pack declares a PIPELINE
+        # for that kind — `packs/dev/manifest.yaml` maps `issue` → `pm:issue` under
+        # `equivalentTo:` and has no `pipelines:` block at all — so no pack fold
+        # exists that could ever see this row. The connector fold is the only one,
+        # and it refuses a foreign key with `cross-pipeline`. Nothing clears that
+        # prop, so the
         # fallback answers the same state for ever while GitHub moves — measured with
         # `pipelineSlot='terminal'`: the row froze at "closed" and minted a `-reopened`
         # on every poll (the mirror direction). `declared_slot is None` is exactly
