@@ -44,7 +44,7 @@ beside them. ⚠️ **It is a PLACEMENT ruling, and placement is what makes it c
 mechanism is an `embedding_vec` column plus a pgvector index on the table that owns the rows, the shape
 `public.point`/`public.source`/`public.event` already carry — **`#11901`'s *"not earned"* verdict answered
 the FalkorDB question** (four more HNSW structures, five total, on provisioned RAM with no eviction —
-`STORAGE-ARCHITECTURE.md` §12.1c) **and does not reach a pgvector index.** ✅ **The 2026-11-10 KEEP ruling stands UNCHANGED** (owner, `#11395` comment `6781921075`): `:Object`/`:Subject`
+`STORAGE-ARCHITECTURE.md` §12.1c) **and does not reach a pgvector index.** ✅ **The 2026-11-10 KEEP ruling is in force today** (owner, `#11395` comment `6781921075`): `:Object`/`:Subject`
 keep their stored embedding and **no pass may remove it or stop writing it**. The 2026-11-17 ruling below decides the
 **INDEX** half — yes, in Postgres — and its state is **decided, implementation in flight — `#13220`**; removal becomes permissible only once the
 record holds **and** indexes that label (`#11395` comment `6956793300`) — a condition not met while implementation is
