@@ -300,6 +300,103 @@ def test_a_failed_run_leaves_a_marker_that_stops_the_zero_rows_conclusion(env):
                       "--event-log-path", str(events / "events.jsonl")]) == 1
 
 
+def test_a_peer_record_for_another_row_does_not_certify_ours(env, monkeypatch):
+    """The durability proof is IDENTITY-based, not "the journal grew".
+
+    A peer writing this graph's journal lands `EntityMutated` records too. If the
+    gate accepted ANY record in the window (or any `EntityMutated`), a failed
+    append for our row would be certified by the peer's record — measured: the
+    row then rebuilt back to `outdated` while the run reported success. This test
+    lands exactly that decoy while our append fails.
+    """
+    sdk, events = env
+    oid = sdk.create_object("ours", objectKind="test:widget")["id"]
+    other = sdk.create_object("theirs", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+
+    real_append = EventLog.append
+    journal_path = events / "events.jsonl"
+
+    def failing_append(self, event):
+        # Drop OUR record, but let a peer's record for another row land in the
+        # same window — the decoy a delta gate cannot see through. The journal
+        # record carries `id`/`label`/`state`, not the entity's name, so the
+        # match is on the id.
+        if not getattr(self, "_decoys_landed", False) and \
+                str(event.get("id")) == str(oid):
+            self._decoys_landed = True
+            real_append(self, {
+                "type": "EntityMutated", "label": "Object",
+                "id": other, "op": "restatus",
+                "state": {"status": tool.REWRITE_TO}})
+            raise OSError("journal is read-only for our record")
+        return real_append(self, event)
+
+    EventLog.append = failing_append
+    try:
+        rep = tool.run(sdk, execute=True)
+    finally:
+        EventLog.append = real_append
+
+    assert rep.rewritten == [], (
+        "a peer's record must not certify OUR row: "
+        f"rewritten={rep.rewritten!r}")
+    assert [f.get("id") for f in rep.failures] == [oid], rep.failures
+    assert "OWN journal record" in rep.failures[0]["error"], rep.failures[0]["error"]
+    assert journal_path.exists()
+
+
+def test_the_record_matcher_rejects_lookalikes():
+    """`_row_recorded` matches on all four fields, not on `EntityMutated`."""
+    good = {"type": "EntityMutated", "label": "Object", "id": "r1",
+            "state": {"status": tool.REWRITE_TO}}
+    assert tool._row_recorded([good], "r1") is True
+    assert tool._row_recorded([good], "r2") is False, "a different row's record"
+    assert tool._row_recorded([{**good, "label": "Point"}], "r1") is False
+    assert tool._row_recorded([{**good, "state": {"status": "live"}}], "r1") is False
+    assert tool._row_recorded([{**good, "type": "ObjectRegistered"}], "r1") is False
+    assert tool._row_recorded([{**good, "state": "not-a-dict"}], "r1") is False
+    assert tool._row_recorded([], "r1") is False
+
+
+def test_a_second_execute_cannot_erase_a_previous_failure_marker(env):
+    """The marker survives a follow-up `--execute` that rewrites nothing.
+
+    After a failed run the live-only rows read `deprecated`, so they are NOT in
+    the next run's legacy population: a marker written by replacement would drop
+    them, the clean run would clear it, and the preview would print the false
+    "0 rows ⇒ dead weight". The marker is therefore MERGED, and cleared only when
+    the ids are discharged by an actual rewrite.
+    """
+    sdk, events = env
+    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+
+    real_append = EventLog.append
+
+    def boom(self, event):
+        raise OSError("journal is read-only")
+
+    EventLog.append = boom
+    try:
+        first = tool.run(sdk, execute=True)
+    finally:
+        EventLog.append = real_append
+    assert first.failures, "precondition: the run must have failed"
+    assert oid in first.pending, first.pending
+
+    # The follow-up execute has NOTHING to rewrite (the row reads clean live) —
+    # and must not be able to declare the graph measured.
+    second = tool.run(sdk, execute=True)
+
+    assert second.rewritten == [], second.rewritten
+    assert oid in second.pending, (
+        "a later clean run erased a marker it did not discharge: "
+        f"pending={second.pending!r}")
+    assert "dead weight" not in tool.render(second)
+    assert second.total == 0
+
+
 def test_the_rewrite_survives_a_rebuild_all(env):
     """ACCEPTANCE: the post-rewrite state reproduces from the journal.
 

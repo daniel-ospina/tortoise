@@ -194,6 +194,8 @@ REFUSE_UNADDRESSABLE = "unaddressable-row"
 REFUSE_TRUNCATED = "truncated-read"
 REFUSE_FANOUT = "id-fanout-or-foreign-label"
 REFUSE_AMBIGUOUS_TARGET = "ambiguous-target-flag"
+REFUSE_PENDING_UNWRITABLE = "durability-marker-unwritable"
+REFUSE_PENDING_UNREADABLE = "durability-marker-unreadable"
 
 #: Knowledge labels a ``:Object`` must NOT also carry. ``update_knowledge``
 #: dispatches on the label, so a dual-labelled row takes the other family's arm
@@ -206,22 +208,6 @@ REFUSE_AMBIGUOUS_TARGET = "ambiguous-target-flag"
 _FOREIGN_KNOWLEDGE_LABELS = frozenset({"Point", "Subject"})
 
 
-def _journal_position(log):
-    """`log.position()`, or ``None`` when it cannot be read.
-
-    A guard that CRASHED the run on an unreadable position would turn a
-    journal-integrity question into a traceback — so this returns ``None``.
-    ⛔ ``None`` is NOT leniency and it is not skipped: both the per-row probe and
-    the batch gate FAIL CLOSED on it (a row whose durability cannot be measured
-    is reported, not counted as rewritten), because "unreadable" and "recorded"
-    are different answers and only one of them is true.
-    """
-    try:
-        return log.position()
-    except (OSError, AttributeError, TypeError):
-        return None
-
-
 def _journal_cursor(log):
     """An opaque end-of-log cursor, or ``None`` when it cannot be taken.
 
@@ -232,10 +218,18 @@ def _journal_cursor(log):
     this graph's journal during our failed append therefore satisfies a delta gate
     and leaves a LIVE-ONLY row certified as recorded — measured. A cursor lets us
     read back the records appended in the window and look for OUR row's record.
+
+    ⛔ ONE cursor per RUN, not per row: `read_after` re-parses the whole journal
+    (`EventLog.read_all`, no cache) — measured ≈30 ms per call at a 535 KiB /
+    5,000-record journal, so a per-row probe costs minutes on a real one. The
+    window only has to bound "after the run's first write", and matching the
+    wider window per row is not weaker: a record for THIS row with the target
+    status means the journal replays the target for it, which is the property
+    being certified.
     """
     try:
         return log.cursor_at_end()
-    except (AttributeError, OSError, TypeError):
+    except (AttributeError, OSError, TypeError, ValueError):
         return None
 
 
@@ -245,7 +239,7 @@ def _journal_records_since(log, cursor):
         return None
     try:
         return log.read_after(cursor)
-    except (AttributeError, OSError, TypeError):
+    except (AttributeError, OSError, TypeError, ValueError):
         return None
 
 
@@ -259,10 +253,13 @@ def _row_recorded(records, rid) -> bool:
     for rec in records or ():
         if not isinstance(rec, dict):
             continue
+        state = rec.get("state")
+        if not isinstance(state, dict):
+            continue
         if (rec.get("type") == "EntityMutated"
                 and rec.get("label") == "Object"
                 and str(rec.get("id")) == str(rid)
-                and (rec.get("state") or {}).get("status") == REWRITE_TO):
+                and state.get("status") == REWRITE_TO):
             return True
     return False
 
@@ -275,21 +272,39 @@ def _pending_path(journal: str | None):
     disk records that. The next PREVIEW then sees 0 rows and prints the sentence
     that authorises dropping the `assembly` member — a false measurement produced
     by the tool itself, and the one thing this migration must not do. The marker
-    is written BEFORE the first write and removed only by a run that ends clean,
-    so a killed run is covered too.
+    is written BEFORE the first write and removed only by a run that discharges
+    it, so a killed run is covered too.
+
+    ⛔ NORMALISED: `/x/j.jsonl`, `/x/./j.jsonl` and a symlinked base dir name ONE
+    journal but would otherwise produce three different marker files — an
+    `--execute` that failed via one spelling would leave a marker a preview via
+    another spelling cannot see, restoring the false reading with no re-run.
     """
     if not journal:
         return None
-    return Path(str(journal) + ".rewrite-pending")
+    return Path(journal).expanduser().resolve().with_name(
+        Path(journal).name + ".rewrite-pending")
 
 
-def _write_pending(journal: str | None, ids: list) -> None:
-    """Record the intent to write these ids. Best effort, never fatal."""
+def _write_pending(journal: str | None, ids: list) -> bool:
+    """MERGE ``ids`` into the marker; ``False`` when it cannot be written.
+
+    ⛔ MERGE, never replace. The rows a previous run left live-only now read
+    `deprecated` LIVE, so they are absent from the current legacy population: a
+    replace would drop them from the marker, and the clean run that follows would
+    clear it — restoring the false "0 rows" reading this marker exists to
+    prevent (measured: one `--execute` after a failed run was enough).
+    """
     path = _pending_path(journal)
     if path is None:
-        return
-    with contextlib.suppress(OSError):
-        path.write_text("\n".join(str(i) for i in ids) + "\n", encoding="utf-8")
+        return True
+    pending = set(_read_pending(journal) or ())
+    pending.update(str(i) for i in ids if i is not None)
+    try:
+        path.write_text("\n".join(sorted(pending)) + "\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def _clear_pending(journal: str | None) -> None:
@@ -300,17 +315,24 @@ def _clear_pending(journal: str | None) -> None:
         path.unlink()
 
 
-def _read_pending(journal: str | None) -> list[str]:
-    """The ids a previous run may have left live-only, or ``[]``."""
+def _read_pending(journal: str | None) -> list[str] | None:
+    """The ids a previous run may have left live-only; ``None`` when unreadable.
+
+    ⛔ ``None`` and ``[]`` are DIFFERENT answers: an unreadable marker is not
+    "no marker", and collapsing them lets a permission error read as a clean
+    graph.
+    """
     path = _pending_path(journal)
     if path is None:
+        return []
+    if not path.exists():
         return []
     try:
         return [line.strip()
                 for line in path.read_text(encoding="utf-8").splitlines()
                 if line.strip()]
     except (OSError, AttributeError):
-        return []
+        return None
 
 
 def _nodes_sharing_id(g, rid: str) -> list[list[str]]:
@@ -648,11 +670,6 @@ def rewrite(sdk, rep: Report) -> Report:
     if refusal is not None:
         rep.executed = False
         raise refusal
-    # ⛔ WRITE THE MARKER BEFORE THE FIRST WRITE, not after a failure: a run
-    # killed mid-loop leaves live-only rows and no stdout. Only a run that ends
-    # clean clears it (end of this function).
-    _write_pending(rep.journal, [r.get("id") for r in rep.rows
-                                 if r.get("id") is not None])
     log = sdk._get_event_log()
     # ⛔ THE JOURNAL PRECONDITION BELONGS HERE TOO (review finding, 2026-11-17).
     # `run` answers it, but `rewrite` is the public writer the docstring above
@@ -668,6 +685,26 @@ def rewrite(sdk, rep: Report) -> Report:
         rep.journal_records_before = log.position()
     except (OSError, AttributeError) as exc:          # pragma: no cover
         rep.failures.append({"phase": "journal-position", "error": str(exc)})
+
+    # ⛔ WRITE THE MARKER BEFORE THE FIRST WRITE, not after a failure: a run
+    # killed mid-loop leaves live-only rows and no stdout. It is MERGED with any
+    # marker a previous failed run left (those rows now read clean LIVE, so they
+    # are no longer in this population — replacing would drop them), and ONLY a
+    # run that discharges it clears it (end of this function). An unwritable
+    # marker refuses: it is the tool's own measurement guard, and "best effort"
+    # would make it inert exactly when a write is about to happen.
+    _planned = sorted(set(rep.pending or ())
+                      | {str(r.get("id")) for r in rep.rows
+                         if r.get("id") is not None})
+    if not _write_pending(rep.journal, _planned):
+        rep.executed = False
+        raise Refused(REFUSE_PENDING_UNWRITABLE, (
+            f"the durability marker {_pending_path(rep.journal)} could not be "
+            "written, so a failed or killed run would leave rows LIVE-ONLY with "
+            "no trace and the next preview would read a false 0 rows."))
+    # ⛔ ONE journal cursor for the whole run (see `_journal_cursor`).
+    _run_cursor = _journal_cursor(log)
+    _written_ok: list = []
 
     for row in rep.rows:
         rid = row["id"]
@@ -693,7 +730,7 @@ def rewrite(sdk, rep: Report) -> Report:
                 "error": _binding_refusal(rid, nodes_now),
             })
             continue
-        _row_cursor = _journal_cursor(log)
+        _row_cursor = _run_cursor
         try:
             landed = sdk.update_knowledge(rid, status=REWRITE_TO)
         except Exception as exc:
@@ -736,9 +773,13 @@ def rewrite(sdk, rep: Report) -> Report:
         # writing this graph's journal in the same window satisfies a delta gate
         # over OUR failed append — measured, and the row then rebuilt back to
         # `outdated` while the run reported success. So the records appended in
-        # this row's window are read back and searched for THIS row's own
-        # `EntityMutated{label: Object, id: rid, state.status: deprecated}`.
-        _records = _journal_records_since(log, _row_cursor)
+        # ⛔ The durability verdict is taken AFTER the loop, from ONE journal
+        # read (see `_journal_cursor`): per-row `read_after` calls re-parse the
+        # whole journal and cost ≈30 ms each at a 535 KiB one.
+        _written_ok.append(rid)
+
+    _records = _journal_records_since(log, _run_cursor)
+    for rid in _written_ok:
         if _records is None:
             # FAIL CLOSED on an unreadable cursor: "could not measure" is not
             # "recorded". The batch gate fails on a `None` delta for the same
@@ -787,11 +828,21 @@ def rewrite(sdk, rep: Report) -> Report:
     for row in after.fanout:
         if row.get("id") not in written and row.get("id") not in _listed:
             rep.fanout.append(row)
-    # ⛔ CLEAR THE MARKER ONLY ON A CLEAN END. Anything else — a failed row, a
-    # truncated post-read, a row still carrying a legacy word — leaves it in
-    # place, so the next PREVIEW cannot present "0 rows" as a measurement.
-    if not (rep.failures or rep.truncated or rep.unaddressable or rep.fanout
+    # ⛔ CLEAR THE MARKER ONLY WHEN THIS RUN DISCHARGED IT. A row left live-only
+    # by a PREVIOUS run now reads `deprecated` LIVE, so it is not in this
+    # population and cannot be rewritten here — only a `rebuild_all` (which
+    # restores the legacy word) followed by this tool can discharge it. Any such
+    # id, any failed row, a truncated post-read or a row still carrying a legacy
+    # word keeps the marker, so the next PREVIEW cannot present "0 rows" as a
+    # measurement.
+    _discharged = {str(i) for i in rep.rewritten}
+    _still = [i for i in _planned if i not in _discharged]
+    if (rep.failures or rep.truncated or rep.unaddressable or rep.fanout
+            or _still
             or any(rep.remaining.get(w, 0) for w in LEGACY_WORDS)):
+        rep.pending = _still
+        _write_pending(rep.journal, _still)
+    else:
         _clear_pending(rep.journal)
         rep.pending = []
     return rep
@@ -875,7 +926,7 @@ def render(rep: Report) -> str:
         # fan-out / dual-labelled row is NOT one of those (it is a per-row
         # refusal — the safe rows still get rewritten), so it does not gate this
         # advice; it is named beside them instead.
-        blockers = bool(rep.truncated or rep.unaddressable)
+        blockers = bool(rep.truncated or rep.unaddressable or rep.pending)
         if rep.total == 0 and not rep.truncated and not rep.pending:
             lines.append(
                 "  ⇒ 0 rows carry 'outdated' or 'retracted' on this graph. No rewrite "
@@ -996,6 +1047,14 @@ def run(sdk, *, execute: bool = False, sample: int = 20,
     # A previous run may have left rows LIVE-ONLY; that makes this graph's "0
     # rows" state unmeasurable, so it must travel with the report.
     rep.pending = _read_pending(rep.journal)
+    if rep.pending is None:
+        # An UNREADABLE marker is not "no marker" — collapsing the two lets a
+        # permission error read as a clean graph, which is the false measurement
+        # the marker exists to prevent. Fail closed, before any write.
+        raise Refused(REFUSE_PENDING_UNREADABLE, (
+            f"the durability marker {_pending_path(rep.journal)} exists but "
+            "could not be read, so it is unknown whether a previous run left "
+            "rows LIVE-ONLY. Nothing was written."))
     if not execute:
         return rep
     # ⛔ THE REFUSALS ARE MADE HERE, not only in `main`. `main` answers them with
