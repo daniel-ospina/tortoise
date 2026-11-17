@@ -2425,7 +2425,7 @@ than a peer issue, because the lane that implements the answer owns them.
 Applies an owner instruction of 2026-11-17: the **INDEX** half stays *decided, implementation in flight — `#13220`*,
 and the 2026-11-10 KEEP ruling's prohibition is kept intact and is what binds **today**.
 
-Three status-word corrections, content unchanged:
+Status-word corrections, content unchanged:
 
 - **§12.1c's decided marker** called the KEEP half *"STANDS, unchanged"*. It now says the KEEP half's **prohibition**
   is what binds today, and names the same day's **second** ruling (`#11395` comment `6956793300`, with its
@@ -2437,10 +2437,19 @@ Three status-word corrections, content unchanged:
 - **§14.3's lead** attributed the *"the record must hold a label's vectors before anything else about that label's
   storage is decided"* constraint to the index answer. It is in the **second** ruling, not a corollary of the first,
   and the attribution is corrected.
+- **Six templated sites** (§12.1b ×2, §12.1c ×2, §12.2c, §13 — `:216`, `:980`, `:1118`, `:1126`, `:1541`, `:1592`)
+  each opened *"THE 2026-11-10 KEEP RULING IS IN FORCE TODAY"*. The ruling is not: its **prohibition** binds today
+  because the later ruling's condition is unmet. Each site now says that, and says the ruling itself is superseded
+  for the GRAPH COPY only. Left alone they contradicted §12.1c and the V3 row in the same file — six statements
+  that the ruling was in force beside two that it was superseded.
+- **§14.3's V3 row** also carried an internal contradiction of its own: the same cell said `:Object`, `:Subject`
+  **and** `:Event` are to be indexed in Postgres, then said the index answer *"does not reach"* the `:Event`/`:Source`
+  pair. It does reach them — for indexing. What it does not do is **retire** their graph copy, and the cell now says
+  that instead.
 
 ⛔ **Why this entry exists.** The entry above states that a ⛔ marker sits **immediately after** the KEEP quotation
 saying *"that it is the 2026-11-10 ruling and not the current one"*. An intermediate revision of the wording removed
-that distinction while this changelog still asserted it, and left two sites saying the ruling was unchanged *and*
-unchallenged — a record contradicting its own record. The marker is restored; the operative rule is untouched:
+that distinction while this changelog still asserted it, and left the sites above saying the ruling was unchanged
+*and* unchallenged — a record contradicting its own record. The marker is restored; the operative rule is untouched:
 **while `#13220` is in flight, nothing may be removed and nothing may stop being written.** No measurement was
 re-read and no figure was retired.

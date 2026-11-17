@@ -292,16 +292,17 @@ and the 2026-11-10 KEEP ruling's prohibition — `:Object`/`:Subject` keep their
 remove it or stop writing it — is kept intact and is what binds **today**, because the later ruling's own condition
 is unmet.
 
-What changed is the **status wording only**. The design document had drifted to calling the 2026-11-10 ruling "the
-ruling on removal TODAY", which is not what the record says: `#11395` comment `6956793300` is itself headed
+What changed is the **status wording only**. The decision block at the head of the document — not a §3 paragraph;
+§3's change is the vector-search table row — had replaced the reopen's own statement with a bare "the KEEP ruling is
+in force today". That is not what the record says: `#11395` comment `6956793300` is itself headed
 **"SUPERSEDED 2026-11-17 — the KEEP ruling's *reason* no longer holds, so the graph copy retires"** and carries an
-`OVERRIDES:` line. `SEARCH-ARCHITECTURE.md` §3's decision paragraph now names that second ruling as the one that
-governs removal, scopes its permission to the **GRAPH COPY only**, and cites its `OVERRIDES:` marker — so the
-operative effect is unchanged (nothing may be removed or stop being written while `#13220` is in flight) and both
-owner statements are recorded rather than one cancelling the other.
+`OVERRIDES:` line. The block now names that second ruling as the one that governs removal, scopes its permission to
+the **GRAPH COPY only**, and cites its `OVERRIDES:` marker — so the operative effect is unchanged (nothing may be
+removed or stop being written while `#13220` is in flight) and both owner statements are recorded rather than one
+cancelling the other.
 
-⛔ **Why this entry exists.** The 2026-11-17 entry above states that a ⛔ marker sits after the KEEP quotation saying
-*"this is the 2026-11-10 ruling and not the current one"*. An intermediate revision of the wording removed that
-distinction while this changelog still asserted it — a changelog claiming a document says something it no longer
-said. The marker is restored; this entry is the record that the wording moved and the content did not. **No
-measurement was re-read and no figure was retired.**
+⛔ **Why this entry exists.** `origin/main`'s decision block carried the reopen explicitly — *"The same day's SECOND
+ruling reopens the KEEP half — for the GRAPH COPY only … `OVERRIDES:` recorded there"* — and this change replaced it
+with a sentence that kept the condition but dropped the reopen's status, its scope and its `OVERRIDES:` citation.
+The reopen's statement is restored with all three. This entry is the record that the wording moved and the content
+did not. **No measurement was re-read and no figure was retired.**
