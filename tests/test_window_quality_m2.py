@@ -455,6 +455,53 @@ def test_the_object_window_is_exactly_lossy(artifact):
         assert data["found_deep"] == pytest.approx(data["resident_share"]), arm
 
 
+def test_the_object_identity_is_a_object_law_not_a_point_one(artifact):
+    """`found@deep == resident_share` is a `:Object` LAW; on `:Point` it COINCIDES.
+
+    ⛔ The verdict block used to say the identity holds "in **no** `:Point` arm",
+    and that absolute is false: `random@0.1` lands on it exactly (0.11 == 0.11),
+    because at 10 % coverage the claim leg's own ceiling happens to bind at the
+    resident share. Nothing pinned the `:Point` side —
+    `test_the_object_window_is_exactly_lossy` reads `:Object` only — so an
+    absolute the artifact refutes shipped green.
+
+    The property worth pinning is the TOPOLOGY, not the coincidence: exactly one
+    windowed `:Point` arm meets the share and every other one falls short. A
+    re-run that turned the coincidence into a law (or a second coincidence into a
+    pattern) would red here rather than quietly softening the finding.
+    """
+    windowed = {a: v for a, v in _arms(artifact, "point").items() if a != "complete"}
+    meets = [a for a, v in windowed.items()
+             if v["found_deep"] == pytest.approx(v["resident_share"], abs=5e-4)]
+    assert meets == ["random@0.1"], (
+        f"the :Point coincidence moved: {meets} — the record names `random@0.1`, "
+        f"and a second one would make the identity a `:Point` law")
+    short = [a for a, v in windowed.items()
+             if v["found_deep"] < v["resident_share"] - 5e-4]
+    assert len(short) == len(windowed) - 1, (
+        "every other windowed :Point arm must fall SHORT of its resident share, "
+        "or the claim leg has no ceiling and the finding is different")
+
+
+def test_the_tie_band_is_below_the_gap_the_verdict_rests_on(artifact):
+    """The band must be smaller than the floor, or the verdict cannot be read.
+
+    ⛔ This is the invariant behind the record's "~3/4 of the gap" sentence, and
+    it was unenforced: the prose could claim any ratio while the artifact's
+    `conclusions_rest_on_gap_pp` floor stayed above the tie band only by luck.
+    The claim is only meaningful while `tie_counting_max_delta_pp` < the floor;
+    once the band reaches the floor, the smallest gap the verdict leans on is
+    inside the noise and the record must stop quoting it as a gap.
+    """
+    rep = artifact["reproducibility"]
+    low, sep, high = rep["conclusions_rest_on_gap_pp"].partition(" to ")
+    assert sep, "conclusions_rest_on_gap_pp is not a 'A to B' range"
+    assert float(low) < float(high), rep["conclusions_rest_on_gap_pp"]
+    assert rep["tie_counting_max_delta_pp"] < float(low), (
+        f"the tie band ({rep['tie_counting_max_delta_pp']} pp) is not below the "
+        f"smallest verdict gap ({low} pp) — the ratio the record quotes is void")
+
+
 def test_the_object_complete_recall_figures_match_the_record(artifact):
     """The BASELINE the whole curve is read against, pinned as properties.
 

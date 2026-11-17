@@ -213,10 +213,13 @@ populations).
 retrieval. The bundle weights nothing and no row here is a production rate.
 The identity is `:Object`-only: on `:Point` keeping 52.7 % finds only 41.0 %, because the
 claim leg has a ceiling of its own — the loss there is the eviction PLUS a ranking weakness the window did
-not cause. At §8's own solo target — about
+not cause (it coincides at exactly one `:Point` arm, `random@0.1`, and falls short in every other
+windowed arm). At §8's own solo target — about
 half the complete graph — `recall@3` falls 88.3 % → 46.0 % and the top-1-is-wrong rate rises
 27.7 % → 41.0 %. On the claim population every demoted query returns **another claim**, never an empty
-answer.
+answer — ⛔ a property of the **LEG**, not a window effect: `:Point` `empty` is 0.0 in all 11 arms
+including `complete`, so the rate is 100 % for any demoted subset by arithmetic, and the complete graph
+already reads 93.0 % `misbind@1`.
 
 **Why the answer is architectural rather than statistical.** A `db.idx.fulltext` index covers only the
 nodes the graph holds, and the record does not serve set-shaped reads — `record_serve.ANCHORED_READS` marks

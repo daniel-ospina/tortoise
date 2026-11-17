@@ -21,8 +21,9 @@ this configuration's, not a guarantee the shipped path makes**: `tortoise/cache_
 issues a bare `DETACH DELETE` and never invalidates `fallback_snapshot`, so today's evictor leaves a
 demoted node returnable for up to 60 s (Finding 6, filed as **#13123**). ⛔ **And "Cost equals
 the eviction share" is a `:Object` identity, not a statement about the text leg as a whole.**
-`found@deep` equals the resident share in every `:Object` arm but in **no** `:Point` arm, where the loss
-is the eviction **plus** a ranking weakness the window did not cause — and the two must not be added
+`found@deep` equals the resident share in every `:Object` arm, and on `:Point` it merely **coincides at
+one arm** (`random@0.1`, 0.11 == 0.11) while every other windowed `:Point` arm falls short — where the
+loss is the eviction **plus** a ranking weakness the window did not cause, and the two must not be added
 into one number (Finding 2).
 At §8's own target size (≈50 % of the complete graph) lexical recall@3 on entity names falls
 **88.3 % → 46.0 %** and the wrong-answer rate at rank 1 rises **27.7 % → 41.0 %**.
@@ -248,8 +249,10 @@ finding is therefore about the *static* axis — which is the axis §7 says rece
 conclusion is narrower than "the policy does not matter":
 
 - **a smarter *static* ranking cannot buy back quality** — the two static orders (referenced-first vs
-  random) land on the same curve, because *a demoted node is unretrievable whatever reason selected
-  it*;
+  random) are **bounded by the same ceiling**: what the window keeps it can still find, and *a demoted
+  node is unretrievable whatever reason selected it*. They coincide at the mid coverages and are
+  **not** one curve at the low ones (20.3 vs 25.3 at 0.25; 8.7 vs 12.0 at 0.10 — the tail order is the
+  worse of the two), so read this as "neither re-ranking moves the ceiling", never as "the two agree";
 - **§7's actual claim — that *recency* beats static ranking — was NOT re-tested here** and this record
   does not overturn it on the retrieval axis. It refines it: recency may well pick a better 50 % to
   keep, and the curve above says the *kept* half then still loses exactly the evicted half. Whether
@@ -303,7 +306,9 @@ OR-unions the query terms (`sparse.build_or_query`) and ranks by RediSearch scor
 coordination factor and no length normalisation** (§6.2 records the same class), so a document holding
 **every** query term can rank below documents holding only common subsets. The instrument also chose
 these queries by a selectivity proxy the leg does not use (see `query_span`), and its adopted rule costs
-~3 points of ceiling against the first-window rule it replaced (15.7 % vs 19.0 % on a complete graph) —
+~3 points of ceiling against the first-window rule it replaced (15.7 % vs 19.0 % on a complete graph —
+⚠️ a **development observation from the superseded run and NOT in `measurement.json`**, quoted the same
+way as the invariant's first-run numbers above, not as evidence a reader can check) —
 so part of this ceiling is the **query set**, not the leg, and the leg's share is not separable here. ⚠️ This is **M3's** territory and M3 has already been measured and declined
 (`#12349`); it is recorded here because it bounds what a *labelled* window could ever deliver.
 
@@ -370,14 +375,17 @@ every arm is measured on its own fresh graph, and why **a tie-counting result is
 and an ordering only, never as a single-run magnitude**.
 
 ⛔ **The ratio, stated honestly, because the first version of this paragraph flattered it.** The
-gaps the **verdict** rests on run **13.3 to 48.3 points** (the artifact records the range as `13.3 to
-48.3`): 13.3 is the misbind move against the complete graph, 48.3 is `found@deep` at §8's target size. So
-the tie band is up to **~3/4 of the SMALLEST of those gaps** — *not* the "barely 1/8" an earlier cut
-claimed, and *not* a small fraction of any of them. Two secondary sentences below rest on smaller gaps
-(~3 points for the superseded first-window rule, 7.3 for `:Point` `recall@3`); they are labelled as an
-approximation and as a ranking-ceiling attribution there, and the verdict does not rest on them. The
-27.7 % → 41.0 % misbind move is exactly such a tie-counting rate: its 13.3-point gap carries a
-~9.9-point band. **The verdict does not depend on it** — `found_deep_of_demoted == 0` and
+gaps the **verdict** rests on run **13.3 to 48.3 points** — the `27.7 % → 41.0 %` misbind move at the
+floor (13.3) and `found@deep` at §8's target size at the top (48.3); the recall drops sit between them,
+42.3 at depth 3 and 47.3 at depth 15. The artifact records that range under `conclusions_rest_on_gap_pp`
+as `13.3 to 48.3`, and a pin RECOMPUTES it from those four rates, so the constant cannot certify itself.
+So the tie band is up to **~3/4 of that floor** — *not* the "barely 1/8" an earlier cut claimed.
+⚠️ **This is the VERDICT's range, not every claim in the record.** Two sub-findings rest on
+much smaller gaps and must not be read as magnitudes: `tail`-vs-`random` separates by **5.0 points** at
+coverage 0.25 (Finding 4 — a DIRECTION claim, deliberately not a magnitude), and the first-window rule
+costs **~3 points** of ceiling against the adopted one (Finding 7 — a superseded run, not in the
+artifact). The band is larger than either of those, which is exactly why neither is quoted as a number
+to act on. **The verdict does not depend on any of them** — `found_deep_of_demoted == 0` and
 `recall@k <= resident_share` are *not* tie-counting quantities, they held in every arm of every run, and
 they are what make the loss equal to the eviction. A reader comparing two runs of their own should
 expect the same split — the bound is a property of the instrument, and the artifact records it rather

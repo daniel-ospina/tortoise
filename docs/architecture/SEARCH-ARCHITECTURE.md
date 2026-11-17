@@ -597,7 +597,9 @@ of the production mix". Nothing in the bundle weights it; it is kept because it 
 comparable with the recall figures the epic already carries. ⛔ That equality is `:Object`-only.
 On `:Point` it does **not** hold: keeping 52.7 % of claims finds only 41.0 %, because the claim leg has its
 own ceiling (below) — so on claims the loss is the eviction **plus** a ranking weakness the window did not
-cause, and the two must not be added into one number. At §8's own solo target (≈77 MB against an ≈150 MB
+cause, and the two must not be added into one number. (The identity **coincides** at exactly one windowed
+`:Point` arm, `random@0.1`, where both are 0.11; it falls short in every other one, so it is a `:Object`
+law, not a `:Point` one.) At §8's own solo target (≈77 MB against an ≈150 MB
 complete graph, i.e. about half) **recall@3 falls 88.3 % → 46.0 %** and the top-1-is-a-different-node
 rate **rises 27.7 % → 41.0 %** (a tie-counting rate: read its direction, not its decimal — the band
 is 9.85 pp, stated in the record). On the claim population (`:Point`) `found@deep` falls **71.3 % →
