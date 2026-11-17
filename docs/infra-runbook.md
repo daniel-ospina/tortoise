@@ -4242,7 +4242,7 @@ The three modes (`tortoise/record_serve.py` — `serve_mode()`, ONE parser and O
 |---|---|---|
 | *unset* / `off` (**DEFAULT**) | the cache, exactly as before #12941 | the shipped default. A typo reads OFF too — an unrecognised value is OFF by design |
 | **`prefer`** | **the record first**, then the cache with a NAMED, COUNTED fallback | ✅ **RECOMMENDED.** Every armed read reads its own writes, and the dogfood keeps working when the record is slow, down, unasked or has no tenant to ask |
-| `record` | the record only — a miss is an absence, an outage RAISES | strict / verification lanes. **No cache branch**: any record failure is a 500 or a refusal on every read. ⚠️ One door qualifies the middle clause: the BARE by-id entity door (`tortoise_get_entity(<id>)`, #13093) serves only the labels whose record parity is measured, so a miss there is `not-hot` for a label it does not serve (`Event`, `Source` — #9721) rather than an absence, and it can never answer an absence while a `Source` can be named by a bare `id` the record addresses by `url` (`record_serve.ENTITY_UNION_ADDRESS_RESIDUALS`) |
+| `record` | the record only — a miss is an absence, an outage RAISES | strict / verification lanes. **No cache branch**: any record failure is a 500 or a refusal on every read. ⚠️ One door qualifies the middle clause: the BARE by-id entity door (`tortoise_get_entity(<id>)`, #13093) serves only the labels whose record parity is measured, and it can never answer an absence while EITHER blocker stands — an unserved label (`Event`, `Source` — #9721) **or** a `Source` nameable by a bare `id` that the record only addresses by `url` (`record_serve.ENTITY_UNION_ADDRESS_RESIDUALS`, #13351). So TODAY **every** miss on that door — including one for a label it DOES serve — is `not-hot`, never an absence, and nothing is counted for it |
 
 ⚠️ **`prefer` is RECORD-FIRST, not "cache when warm".** `_from_record()` runs before any cache
 consult — that is deliberate (`record_serve`'s `MODES` block, #10602's lane design). The
@@ -4283,6 +4283,8 @@ read its absence as "no fallbacks happened". (`record-label-not-served` is the b
 own reason — #13093: the record answered `no row` for the labels that door serves, and the labels it
 does NOT serve could still hold the node. Its repairs are per-label parity (#9721) *and* a
 Source-by-`id` probe, so it is kept apart from `record-miss`, whose repair is a backfill.)
+⚠️ It is counted in `prefer` mode only: the `record` arm of that door names and counts NOTHING,
+because nothing fell back there — read the `residency` marker for that arm, not the counter.
 
 ⛔ **On an armed deployment the union door's FALSY absent answer is unreachable for a NAMED id.**
 Because coverage is incomplete, every absent name — including one neither store holds — answers
