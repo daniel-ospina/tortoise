@@ -59159,7 +59159,7 @@ class TortoiseSDK:
             "outcomes": outcomes[:20],  # cap for readability
         }
 
-    def get_entity(self, id_val: str) -> dict:
+    def get_entity(self, id_val: str, *, cache_only: bool = False) -> dict:
         """Get any entity by ID, eventId or url (Point · Subject · Object ·
         Source · Event). Returns the node's properties, or ``{}`` when absent.
 
@@ -59181,6 +59181,17 @@ class TortoiseSDK:
           ``Source``'s (#9721). The verdict is ``record_serve.entity_absent_wire``'s,
           one home for the coverage rule.
 
+        ⛔ `cache_only=True` IS THE INTERNAL ACCESSOR MODE, and the internal
+        read paths pass it: `derived_invalidation` (a mid-write sweep) and
+        `goal_judgement` must see the CACHE's answer and must not be handed a
+        TRUTHY `{"residency": …}` where they test `or MISSING`. The flag
+        forwards to `_get_entity`, which stays the one cache-only accessor —
+        it is a call-site DECLARATION, not a second implementation, and it is
+        deliberately a keyword on this method rather than a second method name:
+        an interception by name (`sdk.get_entity` patched to fail a read) is
+        how the internal-reader tests pin those arms, and their contract says
+        the interception must work `regardless of how it is spelled`.
+
         ``off`` — the default — is byte-identical to the pre-#13093 call: one
         cache query through the accessor, no record consult, no added key, and
         no residency marker (this door does not read the ``partial``
@@ -59200,6 +59211,8 @@ class TortoiseSDK:
         method split because a bare ``get_entity`` caller carries no parameter by
         which a mid-write one could be told apart.
         """
+        if cache_only:
+            return self._get_entity(id_val)
         return self._get_entity_served(id_val)
 
     def _get_entity_served(self, id_val: str) -> dict:

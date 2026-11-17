@@ -315,14 +315,14 @@ class _Nodes:
         if key in self._cache:
             return self._cache[key]
         try:
-            # ⛔ THE PRIVATE ACCESSOR ON PURPOSE (#13093). `sdk.get_entity` is
-            # the caller-facing door and now honours the record seam
+            # ⛔ `cache_only=True` ON PURPOSE (#13093). `sdk.get_entity` is the
+            # caller-facing door and now honours the record seam
             # (`TORTOISE_RECORD_SERVE`), so on an armed deployment it can answer
             # from the record or with a TRUTHY `{"residency": "not-hot"}`
             # marker — neither of which this mid-sweep path may read. It wants
-            # the CACHE's own answer, `{}` for "not there", which is what
-            # `_get_entity` is and always was.
-            node = self._sdk._get_entity(key) or MISSING
+            # the CACHE's own answer, `{}` for "not there", which is what the
+            # flag forwards to (`_get_entity`, the cache-only accessor).
+            node = self._sdk.get_entity(key, cache_only=True) or MISSING
         except Exception:
             # ⛔ NOT cached: a transient failure must not become this sweep's
             # answer for every judgement on the node.
@@ -1127,11 +1127,11 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
         return {"checked": False,
                 "reason": "no goalId was supplied to the reconcile"}
     try:
-        # ⛔ `_get_entity` (the cache-only accessor), not `get_entity`: this
-        # reconcile must read the CACHE's answer, and since #13093 the public
-        # method honours `TORTOISE_RECORD_SERVE` and can answer from the record
-        # or with a truthy `{"residency": "not-hot"}` marker.
-        goal = sdk._get_entity(goal_id)
+        # ⛔ `cache_only=True`, not the plain call: this reconcile must read the
+        # CACHE's answer, and since #13093 the public method honours
+        # `TORTOISE_RECORD_SERVE` and can answer from the record or with a
+        # truthy `{"residency": "not-hot"}` marker.
+        goal = sdk.get_entity(goal_id, cache_only=True)
     except Exception as exc:
         return {"checked": False,
                 "error": f"{type(exc).__name__}: {exc}"}
@@ -2050,7 +2050,7 @@ def mark_definition_change(
         raise ValueError(
             "mark_definition_change needs the indicator whose definition changed"
         )
-    node = sdk._get_entity(indicator_id) or {}
+    node = sdk.get_entity(indicator_id, cache_only=True) or {}
     if not node:
         raise ValueError(
             f"indicator {indicator_id!r} does not exist — a boundary cannot be "
@@ -2105,7 +2105,7 @@ def mark_definition_change(
 def _read_claim(sdk: Any, judgement_id: str) -> Any:
     """The claim's properties, :data:`MISSING`, or ``None`` for a failed read."""
     try:
-        node = sdk._get_entity(judgement_id)
+        node = sdk.get_entity(judgement_id, cache_only=True)
     except Exception:
         return None
     return node or MISSING

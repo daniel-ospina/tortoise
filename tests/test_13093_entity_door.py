@@ -423,23 +423,30 @@ def test_the_served_labels_are_the_ones_with_measured_parity():
 
 
 def test_the_INTERNAL_accessor_never_consults_the_record(monkeypatch):
-    """⛔ `_get_entity` is the write echo and the mid-sweep read path.
+    """⛔ `_get_entity` / `get_entity(..., cache_only=True)` is the write echo and
+    the mid-sweep read path.
 
     Serving it would make a writer read a store the same write has not finished
     projecting, and would hand `derived_invalidation` / `goal_judgement` a
     TRUTHY `{"residency": "not-hot"}` where they test `or MISSING` and read it
-    as a found node. So the seam is on `get_entity` only.
+    as a found node. So both spellings of the internal read stay cache-only, and
+    only the plain caller-facing call reaches the seam.
     """
     monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
-    conn, opened = _TableConn({"object": [_object_row()]}), None
-    opened = _opener(conn)
+    opened = _opener(_TableConn({"object": [_object_row()]}))
     monkeypatch.setattr(rs, "open_record", opened)
     sdk = _sdk_class()(nodes=[])
 
     assert sdk._get_entity("obj-1") == {}, (
         "the internal accessor answered from something other than the cache")
+    assert sdk.get_entity("obj-1", cache_only=True) == {}, (
+        "`cache_only=True` did not stay cache-only")
     assert opened.calls == [], (
-        "the internal accessor opened the record — a mid-write reader must not")
+        "an internal read opened the record — a mid-write reader must not")
+    # …and the caller-facing call in the same armed state DOES reach it, so the
+    # absence of a record consult above is the flag's effect, not an unarmed env.
+    assert sdk.get_entity("obj-1").get("id") == "obj-1"
+    assert opened.calls
 
 
 # ── 6. the default does not move ───────────────────────────────────────────
