@@ -7305,43 +7305,6 @@ def tortoise_check_connection(key_id: str | None = None) -> dict:
     return _safe(_get_org_sdk().check_connection, key_id)
 
 
-def _entity_verdict(answer: Any) -> Any:
-    """Say ``not-hot`` when an ARMED deployment's entity answer is EMPTY.
-
-    WHY (#12947 finding 2, P1). `tortoise_get_entity` is the LIVE canonical tool
-    (`tool_registry.py`; `tortoise_get_point` is its RETIRED alias) and the ONLY
-    by-id door for Objects and Events — which are the issue's own measured
-    population (8 objects, 39 events, against a cache holding 1/0). It reads the
-    cache only, so on a cold cache it answered a bare ``{}`` for a node the
-    record holds: #12941's defect, at the most-used door, with no error and no
-    signal. `_safe` returns the answer or a `_SafeError`, so an absent node and a
-    failed call were both a falsy dict.
-
-    ⛔ WHAT THIS DELIBERATELY DOES NOT DO: it does not consult the record. The
-    coordinate here is `_resolve_entity`'s per-label UNION (id | eventId | url),
-    which is not ONE label's anchor, so serving the entity from the record needs
-    per-label parity measured first (#9721) — that half stays out of scope and
-    is named in the PR rather than quietly claimed. The VERDICT needs no parity
-    claim at all: *nobody who could see the node was consulted* is knowable from
-    this door's own behaviour plus the mode, which is exactly the distinction
-    #7952 draws.
-
-    ⚠️ ARMED ONLY. ``off`` consults no record, so an empty answer establishes
-    nothing and the pre-#12941 ``{}`` is the honest shape — the same rule the
-    point doors follow when their separate ``TORTOISE_RESIDENCY`` marker is
-    unarmed. A found node (and any `_SafeError`) is returned untouched.
-    """
-    if not isinstance(answer, dict) or isinstance(answer, _SafeError) or answer:
-        return answer
-
-    from tortoise.record_serve import MODE_OFF, serve_mode
-    from tortoise.residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
-
-    if serve_mode() == MODE_OFF:
-        return answer
-    return {RESIDENCY_FIELD: RESIDENCY_NOT_HOT}
-
-
 def tortoise_get_entity(id: str | None = None, type: str | None = None,
                         limit: int = 20) -> Any:
     """Get any entity by ID, eventId, or url.
@@ -7355,11 +7318,7 @@ def tortoise_get_entity(id: str | None = None, type: str | None = None,
     """
     if type is not None or id is None:
         return tortoise_get(id, type=type, limit=limit)
-    # #12947 finding 2: an EMPTY answer from an armed deployment is a
-    # `not-hot` verdict, never an absence claim (#7952). `type="entity"` and
-    # `type="event"` reach this same line through `tortoise_get` above, so the
-    # three doors cannot disagree.
-    return _entity_verdict(_safe(_get_org_sdk().get_entity, id))
+    return _safe(_get_org_sdk().get_entity, id)
 
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
     """Update any entity's properties."""

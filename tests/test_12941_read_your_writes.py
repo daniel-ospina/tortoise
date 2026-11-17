@@ -672,62 +672,25 @@ def test_hosted_off_mode_does_not_mark_a_RETRACTED_point_not_hot(monkeypatch):
 # ── the POST-MERGE findings on #12947 ──────────────────────────────────────
 #
 # A fresh-context review of PR #12947 (comment IC_kwDOToroq88AAAABnSEWl_) returned
-# seven findings. Two of them are the P1s pinned here — the ones that leave the
-# dogfood's own verify-after-write broken at the door an agent actually uses:
+# seven findings. ONE of them is pinned here — the P1 that leaves the dogfood's
+# own verify-after-write broken with no signal at all:
 #
 #   1. the MCP door's RECORD leg had no elapsed bound, so a slow record produced
 #      the transport's `-32009` ("the work may still complete") instead of the
-#      cache answer with a NAMED reason the `prefer` contract promises;
-#   2. `tortoise_get_entity` — which `tool_registry.py` names as the LIVE
-#      canonical tool, `tortoise_get_point` being its RETIRED alias — returned a
-#      bare `{}` on a cold cache with no `not-hot`, and it is the only by-id door
-#      for the issue's OWN measured population (8 Objects, 39 Events).
+#      cache answer with a NAMED reason the `prefer` contract promises.
 #
-# ⚠️ Finding 3 (the `if props:` texts) and finding 6 (the PR body's test counts)
-# were already closed by the rounds that shipped; finding 7's "retired-description
+# ⚠️ Finding 2 (`tortoise_get_entity` answering a bare `{}`) is NOT fixed here and
+# its tests are deliberately absent rather than weakened: `tortoise_get_entity` is
+# the LIVE canonical tool, so `tools/surface-guard.py` fingerprints its handler's
+# code object, and a verdict emitted inside that handler is a served-surface change
+# that needs Daniel's approval plus a baseline re-cut (CONTRIBUTING.md → "The MCP
+# tool surface… cannot grow by accident"). #12947 could wire the point/operator
+# doors freely only because those are RETIRED aliases. Tracked on #13093.
+#
+# ⚠️ Findings 3 (the `if props:` texts) and 6 (the PR body's test counts) were
+# already closed by the rounds that shipped; finding 7's "retired-description
 # line-count rule" does not exist at the lines it cites (that region is
-# `tortoise_get_operator`'s docstring). Those three are verified in the PR body,
-# not re-fixed here.
-
-
-@pytest.fixture
-def mcp_door():
-    """The MCP auth context WITHOUT pinning `_get_org_sdk`.
-
-    `mcp_harness` always patches the SDK to the `get_point` stub; the ENTITY
-    door needs `get_entity`, so it supplies its own stub through
-    `_get_org_sdk`. Without `http` transport `_safe` short-circuits and the
-    door's seam is never reached, which would make these tests vacuous.
-    """
-    from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
-                                   _transport_mode)
-
-    _transport_mode.set("http")
-    _current_org_id.set("org_t")
-    _current_org_limits.set(None)
-    try:
-        yield
-    finally:
-        _transport_mode.set(None)
-        _current_org_id.set(None)
-        _current_org_limits.set(None)
-
-
-class _EntitySDK:
-    """A cache that holds nothing — the entity door's cold-cache answer.
-
-    `get_entity` is the ONLY method the bare entity door reaches, so stubbing it
-    here keeps the DOOR (which is what the finding is about) under test rather
-    than the SDK's per-label resolution (#9721).
-    """
-
-    def __init__(self, answer=None):
-        self.answer = {} if answer is None else answer
-        self.calls: list[str] = []
-
-    def get_entity(self, id):
-        self.calls.append(id)
-        return dict(self.answer)
+# `tortoise_get_operator`'s docstring). Verified in the PR body, not re-fixed.
 
 
 def _slow_opener(delay):
@@ -808,83 +771,6 @@ def test_SDK_record_mode_refuses_on_a_bound_miss(monkeypatch):
 
     with pytest.raises(rs.RecordUnavailable):
         stub.get_point("p-1", served_out={})
-
-
-def test_MCP_the_ENTITY_door_says_not_hot_instead_of_an_empty_answer(
-        monkeypatch, mcp_door):
-    """#12947 finding 2 (P1): the LIVE canonical tool must not answer `{}`.
-
-    `tool_registry.py` names `tortoise_get_entity` as the live canonical tool
-    and `tortoise_get_point` as its RETIRED alias, and the entity door is the
-    only by-id door for Objects and Events — the issue's own measured
-    population (8 objects, 39 events). It returned a bare `{}` on a cold cache
-    with no `not-hot`, so an agent writing an Object and verifying with
-    `tortoise_get_entity(written_id)` read the write back as ABSENT with no
-    error and no signal — #12941's defect, at the most-used door.
-
-    NOTE the scope: only the VERDICT is emitted. The record-SERVED half needs
-    per-label parity (#9721) and is deliberately absent, so this asserts
-    `not-hot` and never asserts a served node.
-    """
-    from tortoise import mcp_server
-
-    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
-    stub = _EntitySDK()
-    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
-
-    out = mcp_server.tortoise_get_entity("o-1")
-
-    assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
-        "the canonical entity door reported 'it does not exist' for a node "
-        f"nobody who could see it was asked about — got {out!r}")
-    assert stub.calls == ["o-1"], "the door must still be the one that answered"
-
-
-def test_MCP_the_entity_TYPE_dispatcher_says_not_hot_too(monkeypatch, mcp_door):
-    """`tortoise_get(id, type="entity"|"event")` is the same door, so same rule."""
-    from tortoise import mcp_server
-
-    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
-    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _EntitySDK())
-
-    for kind in ("entity", "event"):
-        out = mcp_server.tortoise_get("o-1", type=kind)
-        assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
-            f"type={kind!r} bypassed the verdict — got {out!r}")
-
-
-def test_MCP_the_ENTITY_door_is_byte_identical_when_unarmed(monkeypatch,
-                                                           mcp_door):
-    """The default must not move: unarmed, the entity door still answers `{}`.
-
-    `off` consults no record, so an empty answer establishes nothing and the
-    pre-#12941 shape (`{}`) is the honest one — the same rule the point doors
-    follow for an `off` deployment whose `TORTOISE_RESIDENCY` marker is unarmed.
-    """
-    from tortoise import mcp_server
-
-    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
-    monkeypatch.delenv("TORTOISE_RESIDENCY", raising=False)
-    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _EntitySDK())
-
-    out = mcp_server.tortoise_get_entity("o-1")
-
-    assert out == {}, f"off mode changed shape at the entity door — got {out!r}"
-    assert not out
-
-
-def test_MCP_the_ENTITY_door_leaves_a_FOUND_node_alone(monkeypatch, mcp_door):
-    """The verdict rides only an EMPTY answer — a found node keeps its shape."""
-    from tortoise import mcp_server
-
-    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
-    monkeypatch.setattr(mcp_server, "_get_org_sdk",
-                        lambda: _EntitySDK({"id": "o-1", "name": "n"}))
-
-    out = mcp_server.tortoise_get_entity("o-1")
-
-    assert out == {"id": "o-1", "name": "n"}, (
-        f"a found node must not gain a marker — got {out!r}")
 
 
 def test_the_three_modes_and_the_absent_verdict():
