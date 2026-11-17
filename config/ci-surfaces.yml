@@ -11123,6 +11123,26 @@ tier1:
 # `tier1` size figures in `tests/test_ci_selection.py`'s sibling docstring are
 # MEASUREMENTS that move with this row; re-derive them, never read them as fixed.
 - test_12184_shifted_cites.py
+# #13352 review finding (P2, no-op gate / inert enforcer): THIS FILE IS THE ONE
+# THING THAT MEASURES whether `postgres_residency_snapshot()` still carries its
+# fail-closed arm, and on the only diff class that can remove that arm it did not
+# RUN. `api` + `core` register it (above), but `supabase/` is a flat
+# NON_PYTHON_PREFIXES entry: a migration-only diff filters to `changed == []` and
+# takes `select()`'s docs-only early return, which emits tier1 ONLY — measured at
+# this head, `_sel(['supabase/migrations/20261117000003_…zero_vanished.sql'])` ->
+# `surfaces: []`, suite ABSENT (the same measurement on the CURRENT migrations, so
+# it is the shape, not a future one). The jobs that DO run on a migration diff
+# (`migration-unique-prefix`, `schema-drill`, `migration-append-only`) execute
+# SQL through PGlite, which reaches the GUARD but not the `RAISE WARNING` arm or
+# the `v_written + v_zeroed` accounting — this file's own docstring says so — and
+# reviewer round 9 measured that deleting the whole warning arm left the suite
+# green. Without this row a corrective migration that keeps the guard and drops
+# the warning merges GREEN on every leg: the false PASS this suite exists to
+# close, reachable through the front door. Hermetic and fast (source scans over
+# `supabase/migrations`, no DB, no graph, no network — a few seconds), so it
+# rides the URI-less tier1 legs. Pinned by
+# tests/test_ci_selection.py::test_the_residency_gate_runs_on_a_migration_only_diff
+- test_9559_blocked_release_conditions.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 slow_files:

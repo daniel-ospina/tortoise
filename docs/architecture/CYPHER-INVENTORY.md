@@ -424,33 +424,45 @@ directions:** `#9559` (`a218f8867b`) ADDED the two door calls this PR removes, s
 **1569 / 258** — `main`'s **1571 / 260** minus this branch's two — and a lane that carried either
 parent's figure forward (or reused this branch's pre-merge cut) would have written a pin `--check`
 then accepted. Only running the tool says which tree you are holding.
-⚠️ Those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
-below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
+⚠️ THREE of those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as
+the row below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
 `MERGE (s:Source {url:$id})`, and this census counts LINES — so the tool reads 2,343 / 143 where it
 read 2,342 / 142, and `rg` reads 2,330 / 142, 2,064 and 2,402 where it read 2,329 / 141, 2,063 and
-2,401. The 13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED
-(the added match is single-line, not cross-line), and §1's `record_projection.py:4777` citation is
-corrected to `:4830` because that same commit moved it.
-⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
-inside files that already carried sites, so re-cutting the appendix moves ROWS while every SCALAR
-stays put. Measured on THIS cut against `origin/main` **`34bd33d22a`**: exactly **one row** differs
-(the symmetric difference is 2 of the 1,311 rows — one added, one dropped) —
-`tortoise/record_projection.py:7689` → `:7804`, the `replay` door's unresolvable `cursor.execute`, and
-all 25 pins are unchanged. That row is `main`'s OWN staleness, inherited by this rebase and corrected
-here: `#13317` regenerated the appendix at `4cbff33e49`, and **`#13265` (`34bd33d22a`) then moved that
-statement 115 lines down** — so `--check` passes on `main` (the pins are 25 SCALARS, and this row is
-not one of them) while the appendix's `file:line` is stale. That is the exact `file:line`-versus-SCALAR
-gap this section describes, caught by regenerating rather than by trusting the pins. (Two earlier
-revisions of this sentence are RETIRED rather than reconciled, because each named a unit, a metric or
-a base it did not measure. It said "31 of 1,313 rows": `1,313` is the table's LINE count — it is
-**1,311 rows over 1,313 lines**, of which **1,310** are distinct, the duplicate being the two
-unresolved door calls on `tortoise/session_source_migration.py:235` — and `31` was attributed to no
-metric. It then said "137 of 1,311 rows", measured against the pre-rebase `origin/main`, which
-`#13317` has since regenerated. Neither is restated: at THIS base the number is **one row**, and that
-is the only count in this paragraph a reader can reproduce from the tree
-(`git show 34bd33d22a:docs/architecture/CYPHER-INVENTORY.md` versus a fresh `--markdown`). A count
-taken off the wrong unit, off a base that has since moved, or off an unnamed metric is the defect
-class this paragraph exists to name.)
+2,401. ⛔ The other TWO did NOT move, and the reason is the predicate, not the commit: the DOOR figure
+(`1,624` / `108` at `34bd33d22a`; `1,622` / `108` here, `#13249` having removed two door calls since)
+and the bare-door figure (`1,630` → `1,628` for that same reason) are drawn from a predicate
+`#13265` did not touch — it added **0** door calls and exactly **1** verb occurrence
+(`git show 34bd33d22a -- tortoise/ | grep '^+' | grep -cE '\.(ro_)?(query|execute)\s*\('` → `0`;
+`… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`). The 13-occurrence one-file whole-text gap and the
+nine-prose/four-Cypher split are UNCHANGED by it (the added match is single-line, not cross-line).
+⚠️ That regeneration is not decorative at this head. The appendix pins `file:line` COORDINATES and
+`--check` cannot see them — its 25 pins are SCALARS, and an insertion is not a new statement — so
+re-cutting the appendix moves ROWS while every SCALAR stays put. Measured at THIS head against
+`origin/main` **`9cebd72ad7`**: the appendix `main` carried was stale in **709 of its 1,311 rows**,
+over exactly five files — the same 1,311 statements, renumbered:
+
+| file | rows | shift |
+|---|---|---|
+| `tortoise/sdk.py` | 384 | +51 (355 rows), +48 (2), +26 (6), +23 (2), +9 (19) |
+| `tortoise/hosted_api.py` | 240 | +22 (230) |
+| `tortoise/projection/__init__.py` | 92 | +38 (83) |
+| `tortoise/indexer/github_indexer.py` | 11 | +97 (4), +24 (7) |
+| `tortoise/record_projection.py` | 1 | +22 |
+
+reproduced by `git show origin/main:docs/architecture/CYPHER-INVENTORY.md` versus a fresh
+`--markdown` at this tree. It is regenerated HERE because every commit that moved those statements
+has already merged without regenerating them (the rule assigns the refresh to the commit that moves
+the code; none of those commits did it), while
+`tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` is RED at
+`origin/main` today — the generated table is the only artifact in this document that no pin reaches.
+(Two earlier revisions of this paragraph are RETIRED rather than reconciled, because each named a
+unit, a metric or a base it did not measure: "31 of 1,313 rows" — `1,313` is the table's LINE count,
+it is **1,311 rows over 1,313 lines**, of which **1,310** are distinct, the duplicate being the two
+unresolved door calls on `tortoise/session_source_migration.py:235` — with `31` attributed to no
+metric; then "137 of 1,311 rows", measured against an `origin/main` that `#13317` has since
+regenerated; then "one row", measured at `34bd33d22a`, a base seven commits old by the time it was
+read. All three are the same defect — a count taken off the wrong unit, off a base that has since
+moved, or off an unnamed metric — which is why the figure above names its base and its command.)
 
 The paragraph below is `main`'s cut, kept as the record of it.
 
