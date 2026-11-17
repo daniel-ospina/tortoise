@@ -63,6 +63,17 @@ def _stage(sdk, plan_id):
     return pipeline.current_stage(sdk._get_proj().g, plan_id)
 
 
+def _pos(sdk, plan_id):
+    """The WRITER's position answer for a stored plan (``current_stage`` keys
+    are exactly ``plan_position``'s inputs — ``test_13100`` review verified the
+    mapping, so the tests cannot read a different question than the gate)."""
+    cur = _stage(sdk, plan_id) or {}
+    return PO.plan_position(
+        cur.get("stageId"), outcome=cur.get("outcome"),
+        is_closed=bool(cur.get("isClosed")),
+        pipeline_key=cur.get("pipelineKey"))
+
+
 #: The ingest states an ``eventStatus`` write may carry (#13100 §8): ``pending``
 #: when the record arrives, ``indexed`` when it reaches the index. A lifecycle
 #: word here is the retired third case wearing the marker's name.
@@ -895,15 +906,65 @@ class TestThePromotionSuppressionIsRehomed:
         assert op not in _promote(sdk, point), (
             "a broken stage key switched the suppression off for a mid-pipeline plan")
 
-    def test_an_UNRESOLVABLE_STAGE_does_not_suppress(self, sdk):
-        """The fail-open half: a stage id that does not resolve has no slot, so
-        there is no evidence the plan is mid-pipeline."""
+    def test_an_UNRESOLVABLE_STAGE_ID_does_not_turn_the_suppression_off(
+            self, sdk):
+        """R2 fails CLOSED on BOTH unresolvable axes, not only the key one.
+
+        An unknown stage id is the SAME reachability as a cleared key: one
+        supported, customer-callable write —
+        `update_knowledge(id, pipelineStageId="Held")` — and the gate used to
+        read the unresolvable slot as "no evidence the plan is mid-pipeline",
+        promoting the operator over an occurrence that had not happened.
+
+        ⛔ For THIS axis that was also PERMANENT: `record_occurrence`,
+        `settle_plan` and `pipeline.advance_stage` refuse every move on such a
+        plan, so it could never reach a terminal stage and the suppression could
+        never be earned back. It is recoverable only through the stage-id repair
+        (`_unresolvable_message`), which the next test drives.
+
+        The Q5 read must answer the same row the same way (`ended: False`) —
+        the two readers of one plan cannot disagree about whether it happened.
+        """
         point = sdk.create_point("statement", "a live point")["id"]
         plan = PO.create_plan(sdk, "Unknown stage id")
         op = f"op-badstage-{plan['id']}"
         _operator_over(sdk, (point, plan["id"]), op)
         sdk.update_knowledge(plan["id"], pipelineStageId="Held")
-        assert op in _promote(sdk, point)
+
+        pos = _pos(sdk, plan["id"])
+        assert pos["unresolvable"] is True and pos["ended"] is False, (
+            "precondition: the stage id does not resolve and the plan has "
+            "not ended")
+        q5 = {row["id"]: row for row in
+              PO.planned_without_occurrence(sdk._get_proj().g)}
+        assert q5[plan["id"]]["ended"] is False, (
+            "the Q5 read says this plan has not ended, so the gate cannot "
+            "promote as if it had")
+
+        assert op not in _promote(sdk, point), (
+            "an unresolvable stage id switched the suppression off for an "
+            "occurrence that can never be recorded as having happened")
+
+    def test_the_STAGE_ID_repair_route_lifts_the_suppression(self, sdk):
+        """Fail-closed here is not a dead end — the remedy the module's own
+        refusal names (`update_knowledge(id, pipelineStageId=<declared id>)`)
+        puts the plan back on a stage the writers can move, after which the
+        ordinary ending lifts the suppression."""
+        point = sdk.create_point("statement", "a live point")["id"]
+        plan = PO.create_plan(sdk, "Repairable stage id")
+        op = f"op-repaired-{plan['id']}"
+        _operator_over(sdk, (point, plan["id"]), op)
+        sdk.update_knowledge(plan["id"], pipelineStageId="Held")
+        assert op not in _promote(sdk, point)
+
+        sdk.update_knowledge(plan["id"], pipelineStageId=PO.STAGE_SCHEDULED)
+        assert _pos(sdk, plan["id"])["unresolvable"] is False
+        assert op not in _promote(sdk, point), (
+            "repaired to scheduled — still not happened, so still suppressed")
+
+        PO.record_occurrence(sdk, plan["id"], name="it happened")
+        assert op in _promote(sdk, point), (
+            "a repaired, then settled plan must not keep suppressing for ever")
 
     def test_the_LEGACY_event_path_still_suppresses(self, sdk):
         """The acceptance bullet says "on the Event path", not "on draft Points".

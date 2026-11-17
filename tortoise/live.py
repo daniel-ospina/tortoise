@@ -1119,24 +1119,37 @@ def endpoint_permits_operator_promotion(
       terminal stage) is a settled record, and a plan with **no position at all**
       is not evidence of anything (an extractor-minted ``core:plan`` Object was
       promoted over before this change; inventing a "not yet" for it would block
-      that operator). So the arm fires only on a plan that is demonstrably
-      mid-pipeline.
+      that operator). So the arm fires on exactly one condition: the plan HAS a
+      position and has NOT ended.
+
+      ⛔ Both UNRESOLVABLE axes fail CLOSED, deliberately. An unknown
+      ``pipelineStageId`` resolves to no slot exactly as a cleared/foreign
+      ``pipelineStageKey`` does, and either is ONE supported, customer-callable
+      write (``update_knowledge(id, pipelineStageId="Held")`` /
+      ``pipelineStageKey=None``). Reading either as "no position, so no evidence"
+      switched the suppression off for an occurrence that demonstrably has not
+      happened — and did so PERMANENTLY for the stage-id axis, because the plan
+      writers and ``advance_stage`` refuse every move on such a plan, so it can
+      never reach a terminal stage. Neither axis loses the repair route (both
+      are repaired by writing a declared stage id, which
+      ``planned_occurrence._unresolvable_message`` prescribes), so denying here
+      is recoverable; the durability bounds above are unchanged.
     """
     if is_terminal_status(status, bool(outdated)):
         return False
     if (status or "live") != "live":
         return False
     if plan_state is not None:
-        # A plan that HAS a position, is not ended, and RESOLVES to a
-        # non-terminal stage has not happened yet. ⛔ The discriminant is the
-        # resolved SLOT, not `unresolvable`: a plan whose stored stage key is
-        # missing still resolves its stage, so treating "unresolvable" as
-        # fail-open let one supported write on the plan
-        # (`update_knowledge(id, pipelineStageKey=None)`) turn the suppression
-        # off for an occurrence that demonstrably has not happened. A stage id
-        # that does not resolve at all has no slot, and stays fail-open.
-        not_yet = (plan_state["has_position"] and not plan_state["ended"]
-                   and plan_state["slot"] not in (None, "terminal"))
+        # A plan that HAS a position and has not ENDED has not happened yet.
+        # ⛔ The discriminant is NOT the resolved SLOT or `unresolvable`: a plan
+        # whose stored stage key is missing, or whose stage id is not declared,
+        # has no slot — and treating either as fail-open let one supported write
+        # on the plan switch the suppression off for an occurrence that has not
+        # happened (the key axis was fixed that way; the stage-id axis is the
+        # identical reachability through the identical door). `ended` already
+        # encodes every terminal answer (the durable marker, and a stage that
+        # RESOLVES terminal), so the slot adds nothing here but the hole.
+        not_yet = plan_state["has_position"] and not plan_state["ended"]
         return not not_yet
     return True
 

@@ -186,6 +186,18 @@ def plan_position(stage_id, *, outcome=None, is_closed=False,
     is neither ended nor "not yet" — that is why the promotion gate needs the
     distinction rather than a boolean.
 
+    ⛔ ``has_position`` and ``ended`` are the ONLY two fields the promotion gate
+    reads (`live.endpoint_permits_operator_promotion`), and it reads them as
+    "has a position AND has not ended" — so an UNRESOLVABLE row (either cause)
+    suppresses exactly as a resolvable non-terminal one does. `unresolvable`
+    answers a different question (can a stage MOVE be validated) and must never
+    be the gate's discriminant: an unknown stage id is one supported write away
+    (`update_knowledge(id, pipelineStageId=...)`) and a plan the writers refuse
+    every move on could otherwise never stop suppressing — the fail-OPEN shape
+    this helper exists to remove. The repair route keeps it recoverable, which is
+    `update_knowledge(id, pipelineStageId=<a declared id>)`
+    (see :func:`_unresolvable_message`).
+
     ⚠️ **STATED RESIDUAL (#13100 review round 3):** this resolves against the
     DECLARED pipeline, not a per-graph `:Pipeline` override — it takes no graph,
     while ``advance_stage`` resolves through ``effective_pipeline``, where an
