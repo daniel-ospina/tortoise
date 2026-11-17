@@ -8819,8 +8819,14 @@ def _refuse_unencodable_object_status(props, *, door: str, target: object) -> No
     try:
         _json.dumps(word)
     except (TypeError, ValueError):
+        # ⛔ BOTH OPERANDS THROUGH `_refusal_repr` (#12910 review, P2-1). A
+        # caller's `__repr__` that raises replaces the promised `ValueError`
+        # with its own class (measured: `RuntimeError: repr-boom`), which is a
+        # contract break — see that helper's docstring, which states this as a
+        # rule for EVERY refusal naming a caller operand.
         raise ValueError(
-            f"{door} refused a non-string status for {target!r}: {word!r} "
+            f"{door} refused a non-string status for {_refusal_repr(target)}: "
+            f"{_refusal_repr(word)} "
             f"is {word.__class__.__name__}, which has no JSON form, and this "
             f"door records every write. The NODE would drop the value "
             f"(#7369) but the record cannot carry it, so the write would "
@@ -8981,7 +8987,8 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     # `None` first key hid a `['live']` second key at the create door.
     if _status_write_is_ambiguous(props):
         raise ValueError(
-            f"{door} refused a CONFLICTING status write for {target!r}: more "
+            f"{door} refused a CONFLICTING status write for "
+            f"{_refusal_repr(target)}: more "
             f"than one key in this call renders as `status`. A `str` subclass "
             f"whose content and `__str__` differ is filed under one name by "
             f"the live write and the other by the journal, so which value "
@@ -9014,7 +9021,8 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     # of the three callers (`create_entity(type, …)`), so the shadow-free
     # spelling is used uniformly rather than per-caller.
     raise ValueError(
-        f"{door} refused a non-string status for {target!r}: {word!r} is "
+        f"{door} refused a non-string status for {_refusal_repr(target)}: "
+        f"{_refusal_repr(word)} is "
         f"{word.__class__.__name__}, not a `str`. ONTOLOGY §4.3 declares "
         f"`status` as a STRING, and the Object family's word set is "
         f"deliberately OPEN — a pack kind validates against its own declared "
@@ -50709,10 +50717,19 @@ class TortoiseSDK:
                 _np_foreign = [s for s in _np_stored
                                if s is not None and not isinstance(s, str)]
                 if _np_foreign:
+                    # ⛔ EVERY OPERAND THROUGH `_np_safe_repr` (#12910 review,
+                    # P2-1). This raise sits ~170 lines ABOVE the two refusals
+                    # that already use it, inside the very block whose comment
+                    # promises "ONE helper for BOTH operands, so a later refusal
+                    # cannot be added with the raw `!r` again" — and it was
+                    # added with the raw `!r`. The stored operand goes through
+                    # it too: it is caller-written by the route this refusal
+                    # documents (a raw Cypher producer / a replay).
                     raise ValueError(
                         f"update_entity refused the status write "
-                        f"{_np_status!r} on {_np_label} {id_val!r}: this row's "
-                        f"STORED status is {_np_foreign[0]!r} "
+                        f"{_np_safe_repr(_np_status)} on {_np_label} "
+                        f"{_np_safe_repr(id_val)}: this row's "
+                        f"STORED status is {_np_safe_repr(_np_foreign[0])} "
                         f"({type(_np_foreign[0]).__name__}), which is not a "
                         f"lifecycle word. ONTOLOGY {_np_section} declares "
                         f"`status` as a STRING, so this guard cannot tell "

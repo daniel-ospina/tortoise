@@ -2839,11 +2839,12 @@ class TestNonScalarStatus12869:
             self, tmp_path):
         """§4.3's open vocabulary is NOT narrowed by the type guard.
 
-        This is the restatement of the pin the brief names
+        The companion arm to
         `test_a_non_string_status_on_a_LIVE_row_is_still_the_undeclared_word_hole`
-        (which lives on the unmerged `#12882` branch, not on this base): its
-        UNDECLARED-WORD half survives exactly, and only its NON-SCALAR half
-        changes, because a non-scalar was never a word.
+        — which is on `main` (`2dfbb5d455` landed `#12882`) and in THIS file at
+        :1648, restated there by this PR: its UNDECLARED-WORD half survives
+        exactly, and only its NON-SCALAR half changes, because a non-scalar was
+        never a word.
 
         FALSIFIABLE BY: adding `or _obj_word not in <some closed set>` to either
         door reds this — which is the #10371 regression this test exists to catch.
@@ -2974,6 +2975,145 @@ class TestNonScalarStatus12869:
             assert _carrier_row(sdk, "Object", "alpha")[1] == "live", (
                 "the coherent un-supersede (#12825) was refused — the new guard "
                 "narrowed an existing allowance")
+        finally:
+            sdk.close()
+
+    # ── THE CONTRACT OF THE REFUSAL ITSELF: the exception CLASS ──────────────
+
+    def test_every_new_refusal_survives_a_hostile_repr(self, tmp_path):
+        """P2-1 (#12910 review): the four refusals this PR adds name their
+        operands through `_refusal_repr` / `_np_safe_repr`, never the raw `!r`.
+
+        The rule is already stated in this tree — `_refusal_repr`'s docstring:
+        *"A refusal's contract is the exception CLASS — `ValueError` — so a
+        `__repr__` that raises would replace it with its own class … ONE
+        definition for EVERY refusal that names a caller operand"*. The four
+        sites below were added with the raw `!r` anyway, and **nothing in the
+        tree red on it** (`grep -r '_refusal_repr' tests/` was empty), so the
+        contract was prose-only until this pin.
+
+        ⛔ EACH OPERAND IS ITS OWN ARM, because they are evaluated in SOURCE
+        ORDER inside one f-string — `{target!r}` before `{word!r}` — so an arm
+        that makes only the VALUE hostile cannot see a broken TARGET, and an
+        arm that makes only the TARGET hostile cannot see a broken VALUE.
+
+        FALSIFIABLE BY: reverting any ONE site to the raw `!r` reds its own arm
+        with the caller's exception (`RuntimeError: repr-boom` /
+        `RuntimeError: id-repr-boom`) instead of `ValueError` — MEASURED at the
+        pre-fix head. One arm per site, so no single revert can mask another.
+        """
+
+        class RaisingRepr:
+            """A caller-controlled operand whose `__repr__` raises.
+
+            `__str__` is a literal `str` so ONLY `repr` raises: the defect this
+            pins is the `!r` interpolation, not a broken `str()`.
+            """
+
+            def __str__(self):
+                return "raising-repr"
+
+            def __repr__(self):
+                raise RuntimeError("repr-boom")
+
+        class RaisingReprStr(str):
+            """Same, on the `id` operand — which must be a `str` to reach a door."""
+
+            def __repr__(self):
+                raise RuntimeError("id-repr-boom")
+
+        class RaisingReprInt(int):
+            """Same, on a value the #7369 gate KEEPS, so the TYPE arm sees it.
+
+            `_PERSISTABLE_SCALAR_TYPES` is `(str, bool, int, float)` tested with
+            `isinstance`, so an `int` subclass is a persistable non-`str` — the
+            only shape that reaches the type refusal's `{word!r}` at all.
+            """
+
+            def __repr__(self):
+                raise RuntimeError("repr-boom")
+
+        class KHash(str):
+            def __hash__(self):          # a different bucket, same rendering
+                return 424242
+
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        sdk = TortoiseSDK(str(tmp_path / "t12869rr.db"))
+        try:
+            api = EventAPI(EventLog(str(tmp_path / "rr.jsonl")),
+                           initiated_by="user", projection=sdk._get_proj())
+
+            # (a) `_refuse_unencodable_object_status` — the VALUE operand
+            #     (a `dict`/`bytes` arm cannot see this: their `repr` is safe).
+            with pytest.raises(ValueError) as ei:
+                api.add_object("rr-enc", "core:strategy", status=RaisingRepr())
+            assert "RaisingRepr" in str(ei.value), (
+                "the refusal lost the operand instead of escaping it: "
+                + str(ei.value))
+            assert "repr-boom" not in str(ei.value)
+            assert _carrier_row(sdk, "Object", "rr-enc") is None
+
+            # (b) `_refuse_non_string_object_status`, the AMBIGUITY arm — the
+            #     TARGET operand (its `{target!r}` is the whole message).
+            sdk.create_object("rr-amb", "core:strategy", status="live")
+            amb_id = _carrier_row(sdk, "Object", "rr-amb")[0]
+            with pytest.raises(ValueError) as ei:
+                sdk.update_knowledge(RaisingReprStr(amb_id),
+                                     **{"status": "live",
+                                        KHash("status"): ["live"]})
+            assert "RaisingReprStr" in str(ei.value), (
+                "the ambiguity refusal did not use `_refusal_repr` on its "
+                "target: " + str(ei.value))
+
+            # (c) `_refuse_non_string_object_status`, the TYPE arm — the SAME
+            #     target operand, reached with a value that is a plain `list`
+            #     (so the target is the only hostile one) …
+            with pytest.raises(ValueError) as ei:
+                sdk.update_knowledge(RaisingReprStr(amb_id), status=["live"])
+            assert "RaisingReprStr" in str(ei.value), (
+                "the type refusal did not use `_refusal_repr` on its target: "
+                + str(ei.value))
+            assert _carrier_row(sdk, "Object", "rr-amb")[1] == "live", (
+                "a refused status write changed the row")
+
+            # …and the VALUE operand of that same raise, which needs a target
+            # that renders safely and a value the #7369 gate KEEPS (a
+            # non-persistable one is dropped, not refused, so it never reaches
+            # this raise).
+            with pytest.raises(ValueError) as ei:
+                sdk.update_knowledge(amb_id, status=RaisingReprInt(123))
+            assert "RaisingReprInt" in str(ei.value), (
+                "the type refusal did not use `_refusal_repr` on its value: "
+                + str(ei.value))
+            assert "repr-boom" not in str(ei.value)
+
+            # (d) `_np_foreign` — the STORED-side refusal, which sits ~170 lines
+            #     ABOVE the two in the same block that already use
+            #     `_np_safe_repr`. Reachable only from the row shape it names:
+            #     a non-scalar already on the row, which only a raw Cypher
+            #     producer / a replay / a pre-fix SDK can create.
+            sdk.create_object("rr-stored", "core:strategy", status="live")
+            stored_id = _carrier_row(sdk, "Object", "rr-stored")[0]
+            sdk._get_proj().g.query(
+                "MATCH (n:Object {id:$i}) SET n.status = $s",
+                params={"i": stored_id, "s": ["archived"]})
+            with pytest.raises(ValueError) as ei:
+                sdk.update_knowledge(stored_id, status=RaisingRepr())
+            assert "RaisingRepr" in str(ei.value), (
+                "`_np_foreign` did not use `_np_safe_repr` on its value: "
+                + str(ei.value))
+            assert "repr-boom" not in str(ei.value)
+            # …and its TARGET operand.
+            with pytest.raises(ValueError) as ei:
+                sdk.update_knowledge(RaisingReprStr(stored_id),
+                                     status=RaisingRepr())
+            assert "RaisingReprStr" in str(ei.value), (
+                "`_np_foreign` did not use `_np_safe_repr` on its id: "
+                + str(ei.value))
+            assert _carrier_row(sdk, "Object", "rr-stored")[1] == ["archived"], (
+                "a refused stored-side write changed the row")
         finally:
             sdk.close()
 
