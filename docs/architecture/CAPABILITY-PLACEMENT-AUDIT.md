@@ -251,7 +251,7 @@ The **remainder** (`capture_redactions`, `machine_id`, `model`, `client_captured
 - **No shipped query NAMES it — but it IS read back as a WHOLE NODE:** `capture_redactions`. `sdk.py:2682` and
   `:2705` only WRITE it (`SET s.capture_redactions=$redactions`) and no product `RETURN`/`WHERE` names the
   property — the one Cypher read that does name it is a TEST assertion
-  (`tests/test_capture_secret_redaction_4911.py:250-254`), which §6.1's own standard does not count — but two
+  (`tests/test_capture_secret_redaction_4911.py:250-254`), which is not a PRODUCT read — but two
   whole-node reads carry it, and a whole-node read is a reader by this document's own vocabulary
   (row 14 counts `sdk.py:27210`'s `get_point` — *"Returns dict of all properties"* — as one). `tools/backfill_copy_turns.py:188-192`
   is `RETURN id(s), s.id, properties(s)`, and its own comment at `:177-183` names this key explicitly as one
@@ -435,8 +435,8 @@ vector and text that a graph operation genuinely reads."*
 
 ## 5. The moves
 
-**The census found the verdicts; two PRECONDITIONS decide which of them can move today, and the census names
-both precisely.** One move was built and then withdrawn — not because the mechanism cannot express it, but
+**The census found the verdicts; three PRECONDITIONS decide which of them can move today, and the census
+names all three precisely.** One move was built and then withdrawn — not because the mechanism cannot express it, but
 because two policy pins in `tests/test_cache_projection.py` refuse the declaration until someone deliberately
 widens them, and that decision belongs to the issue that owns the route.
 
@@ -555,7 +555,7 @@ the graph-side data it needed becomes a candidate for `record_only` in the next 
 and the `:GraphEvent` record home is **`#13094`**. ⛔ Nothing here arms a cap, a retention rule or an
 eviction policy — that is `#13084` and P0-c.
 
-### 5.3 The two preconditions, side by side
+### 5.3 The three preconditions, side by side
 
 | precondition | shapes it blocks | what unblocks it |
 |---|---|---|
@@ -594,9 +594,9 @@ from `OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point)`; and `entity_links_created`/`en
 compared against `live_edges` at `:906-917`, computed from two `aboutObject` walks. `:892`
 (`WHERE s.capture_ok = true RETURN count(s)`) and `sdk.py:17082` (the `session_existed` retry decision) are
 `none` on their own — but the rule is *at least one reader*, and two of these readers need adjacency, so the
-four are **`graph`** (verdict row 7) and **must not move**. The docstring of `orphan_use_case`'s neighbour is
-not the point; the QUERY STRUCTURE is, and a projection can sit inside an adjacency query without looking
-like one. Note the earlier draft's own remedy — *"if nothing reads them but a test, they are dead weight …
+four are **`graph`** (verdict row 7) and **must not move**. A projection can sit inside an adjacency query
+without looking like one, which is why the QUERY STRUCTURE is what this row is classified on. Note the earlier
+draft's own remedy — *"if nothing reads them but a test, they are dead weight …
 drop, not tier"* — would have deleted data two shipped audit classes depend on.
 
 What remains arguable is the **remainder** of the family — `capture_redactions`, `machine_id`, `model`,
