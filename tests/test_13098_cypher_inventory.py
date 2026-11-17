@@ -501,6 +501,66 @@ def test_the_same_nan_on_both_sides_is_not_a_difference():
     assert nan_fp["fingerprint"] != str_fp["fingerprint"], "a NaN and the string 'NaN' render alike"
 
 
+def test_a_numeric_spelling_change_is_one_number_but_a_rounded_one_is_not():
+    """`Decimal`/`float`/`int` compare NUMERICALLY — and EXACTLY.
+
+    ⛔ `_norm` converted a `Decimal` to `float`, which ROUNDS: two distinct numerics
+    beyond the float mantissa became the same number and a real difference read
+    EQUAL — a false PASS in the value pass (`#13098` review P3).
+    """
+    from decimal import Decimal
+
+    candidate = harness.Candidate(name="numeric", cypher="", sql="",
+                                 columns=("id", "v"), ordered=False)
+    cols = ["id", "v"]
+    for left, right in ((Decimal("1"), 1), (Decimal("1.0"), 1), (Decimal("1"), 1.0),
+                        (Decimal("NaN"), float("nan"))):
+        result = harness.diff(candidate, [("a", left)], cols, [("a", right)], cols, ["a"])
+        assert result["equal"] is True, (left, right, result["differences"])
+    # …and the two values `float()` folds together are NOT one number
+    for left, right in ((Decimal("9007199254740993"), Decimal("9007199254740992")),
+                        (Decimal("9007199254740993"), 9007199254740992)):
+        result = harness.diff(candidate, [("a", left)], cols, [("a", right)], cols, ["a"])
+        assert result["equal"] is False, (left, right)
+
+
+def test_a_bytes_like_compares_and_renders_by_content_not_by_address():
+    """`str(memoryview(b"x"))` is an ADDRESS, so rendering it reported a false `value`.
+
+    psycopg2 returns `memoryview` for `bytea`, so this is the common bytea path, and
+    the fingerprint of one row changed per object (`#13098` review P3).
+    """
+    candidate = harness.Candidate(name="bytes", cypher="", sql="",
+                                 columns=("id", "v"), ordered=False)
+    cols = ["id", "v"]
+    same = harness.diff(candidate, [("a", memoryview(b"x"))], cols,
+                       [("a", memoryview(b"x"))], cols, ["a"])
+    assert same["equal"] is True, same["differences"]
+    # the two driver spellings of one `bytea` are one family
+    across = harness.diff(candidate, [("a", b"x")], cols, [("a", memoryview(b"x"))], cols, ["a"])
+    assert across["equal"] is True, across["differences"]
+    # …and different content is a difference, not a representation one
+    differ = harness.diff(candidate, [("a", b"x")], cols, [("a", b"y")], cols, ["a"])
+    assert differ["equal"] is False and [d["kind"] for d in differ["differences"]] == ["value"]
+    # ⛔ TWO rows in BOTH orders: rendering the ADDRESS sorted the same data into two
+    # different orders, so the multiset pass could pair the wrong rows and invent a
+    # `value` difference on identical data.
+    for rows in ([("a", memoryview(b"x")), ("b", memoryview(b"y"))],
+                 [("b", memoryview(b"y")), ("a", memoryview(b"x"))]):
+        same_rows = harness.diff(candidate, rows, cols, rows, cols, ["a"])
+        assert same_rows["equal"] is True, same_rows["differences"]
+    # ⛔ the FINGERPRINT is a function of the data, not of the object: at the parent
+    # commit these two measurements of the identical row differed (`#13098` review P3)
+    one = harness.diff(candidate, [("a", memoryview(b"x"))], cols,
+                       [("a", memoryview(b"x"))], cols, ["a"])
+    two = harness.diff(candidate, [("a", memoryview(b"x"))], cols,
+                       [("a", memoryview(b"x"))], cols, ["a"])
+    assert one["fingerprint"] == two["fingerprint"], "the fingerprint follows object identity"
+    other = harness.diff(candidate, [("a", memoryview(b"y"))], cols,
+                        [("a", memoryview(b"y"))], cols, ["a"])
+    assert one["fingerprint"] != other["fingerprint"]
+
+
 def test_a_non_string_dict_key_does_not_take_the_diff_down():
     """A map KEY of any type must not raise after every comparison has succeeded.
 

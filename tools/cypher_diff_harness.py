@@ -567,6 +567,11 @@ def _family(value: Any) -> str:
         return "number"
     if isinstance(value, str):
         return "str"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        # ONE family for the three driver spellings of the same `bytea` — psycopg2
+        # answers `memoryview` and FalkorDB answers `bytes`, and `_norm` compares them
+        # by content, so the family must not redden a representation difference
+        return "bytes"
     if isinstance(value, (list, tuple)):
         return "list"
     if isinstance(value, dict):
@@ -578,8 +583,8 @@ class _NaN:
     """A singleton standing in for NaN, so a NaN compares EQUAL to itself.
 
     ⛔ Python says `nan != nan`, so the same NaN on both sides reddened forever on a
-    column that can legitimately hold one (`public.point.confidence` is `double
-    precision`, per `_norm_row`'s docstring) — and NESTED the verdict depended on
+    column that can legitimately hold one (`public.point.mitigation_strength` is
+    `double precision`) — and NESTED the verdict depended on
     whether the driver handed back one object or two, i.e. on allocation rather
     than on data (`#13098` review P3).
 
@@ -679,11 +684,27 @@ def _norm(value: Any) -> Any:
     ⛔ A NaN must compare EQUAL to itself: Python says `nan != nan`, so a column
     that legitimately holds one reddened forever — and nested it depended on
     whether the driver handed back one object or two (`#13098` review P3).
+
+    ⛔ A `Decimal` is NOT converted to `float`: `float()` ROUNDS, so
+    `Decimal("9007199254740993")` and `Decimal("9007199254740992")` became the same
+    number and a real difference read EQUAL (`#13098` review P3). `Decimal` compares
+    exactly against `int`/`float`/`Decimal` alike, so leaving it alone is both exact
+    and numeric:
+
+        Decimal("1") == 1 == 1.0 == Decimal("1.0")   -> True   (one number)
+        Decimal("9007199254740993") vs ...992        -> False  (was True)
     """
     if isinstance(value, Decimal):
-        value = float(value)
+        return NAN if value.is_nan() else value
     if isinstance(value, float) and value != value:
         return NAN
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        # ⛔ BY CONTENT: `bytes(b"x") == memoryview(b"x")` is True, but
+        # `str(memoryview(b"x"))` is `"<memory at 0x…>"` — the address — so two rows
+        # holding the SAME bytes rendered differently and reported a false `value`
+        # difference, with a fingerprint that changed per object (`#13098` review P3).
+        # psycopg2 returns `memoryview` for `bytea`, so this is the bytea path.
+        return bytes(value)
     if isinstance(value, (list, tuple)):
         return [_norm(v) for v in value]
     if isinstance(value, dict):
@@ -717,9 +738,9 @@ def _norm_row(row: Sequence[Any]) -> tuple:
     strings while `_norm` already treats them as one number — which made an
     ordered numeric candidate report `order` on two forms the value pass had just
     certified identical (`#13098` review P2). The two stores really do disagree
-    on Python type here: `public.point.confidence` is `double precision`, so the
-    record answers `float`/`Decimal` while FalkorDB answers the `int` the property
-    was written with. A tuple compares element-wise with `==`, so numerics compare
+    on Python type here: `public.point.mitigation_strength` is `double precision`, so
+    the record answers `float` while FalkorDB answers the `int` the property was
+    written with. A tuple compares element-wise with `==`, so numerics compare
     numerically and nested lists/dicts compare by value.
 
     ⛔ `==` therefore equates `bool` and `number` (`0 == False`) where the value pass
@@ -770,11 +791,18 @@ def _render_canonical(value: Any) -> Any:
         return {_key_identity(k): _render_canonical(v) for k, v in value.items()}
     if isinstance(value, int):
         return value
-    # ⛔ TYPE-TAGGED, for the same reason as `_key_identity`: a `date`/`bytes` cell
-    # and the string that spells it rendered alike, so two different rows shared one
-    # fingerprint (`#13098` review P3). A real `str` leaf returns above, un-tagged, so
-    # no string can produce this rendering.
-    return f"{type(value).__name__}\x00{value}"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        # content, never `str(memoryview)` — that is an ADDRESS (`_norm` normalises
+        # bytes-likes to `bytes`, so this is the common path for `bytea`)
+        return f"{type(value).__name__}\x00{bytes(value).hex()}"
+    # ⛔ TYPE-TAGGED and `repr`-based: a `date` cell and the string that spells it
+    # rendered alike, so two different rows shared one fingerprint (`#13098` review
+    # P3). `repr` rather than `str` because `str()` is not injective for a container
+    # or a custom type. A real `str` returns above, un-tagged — the residual is a
+    # string that itself contains the NUL separator, which a `jsonb`/`text` value
+    # cannot (`jsonb` forbids `\u0000`), and two distinct classes sharing a
+    # `__name__` AND a `__str__`, which only a custom row type could produce.
+    return f"{type(value).__name__}\x00{value!r}"
 
 
 def _sort_key(row: Sequence[Any]) -> tuple:
