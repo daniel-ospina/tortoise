@@ -4936,7 +4936,8 @@ _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     # ONE, and it is `_hydrate_evidence`'s only handle reach: the baseline-load
     # read whose f-string interpolates `live._terminal_excluded('n.status')`
     # (#13034). Measured with the module's own enumerator on this head:
-    # `writes == [(38824, 'query', '<unresolved>')]`, `_is_unresolved_only` True.
+    # `writes == [(38824, 'query', '<unresolved>', 0)]` (the fourth element is the
+    # control-flow depth), `_is_unresolved_only` True.
     ("tortoise/sdk.py", "TortoiseSDK._hydrate_evidence"): ("query",),
 }
 
