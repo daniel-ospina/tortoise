@@ -162,12 +162,23 @@ def _namespace_index(cp) -> dict[str, dict]:
       (``org_{org_id}_{gid}``), carrying its ``id`` so the reaper can also drop
       that graph's per-graph ACL user (:func:`reap`).
 
-    ⛔ TWO refusals, both fail-closed:
+    ⛔ THREE refusals, all fail-closed:
 
-    1. a ``graphs`` row whose namespace is not PROVABLY the row org's
+    1. **An unreadable ``graphs`` read is a REFUSAL, not a degradation.** That
+       read is the ONLY source of ``gid``s, and a gid is what makes a custom
+       graph's ACL user droppable — so degrading to "default graphs only" would
+       let a PROMOTED org's default (whose ``graph_name`` IS a
+       ``org_{id}_{gid}`` namespace) resolve from the organizations row with
+       ``gid: None``, classify as reapable, and be deleted with its global
+       ``tenant_<gid>`` credential left live (review round 4). The same applies
+       to a read truncated at the deployment's ``max_rows``: `query` never
+       reports truncation, so an incomplete read cannot be told from a complete
+       one — and a missing gid must never authorise a deletion. `classify_graph`
+       adds an independent gate for the same shape (see its docstring).
+    2. a ``graphs`` row whose namespace is not PROVABLY the row org's
        (:func:`_owns_namespace`) is DISCARDED — never indexed, so the graph it
        names reads as unresolved and is refused; and
-    2. a name claimed by more than one org is dropped from the index entirely
+    3. a name claimed by more than one org is dropped from the index entirely
        and reported as ambiguous. The old `setdefault` over an unordered query
        made the keeper depend on PostgREST's row order, i.e. the keep/reap
        decision was nondeterministic on an estate with registry-era rows.
@@ -183,12 +194,11 @@ def _namespace_index(cp) -> dict[str, dict]:
     try:
         graph_rows = cp.query("graphs", select=["id", "org_id", "namespace"])
     except Exception as e:
-        # A schema one migration behind has no `graphs` table; the default-graph
-        # spellings still resolve, so degrade to default-only rather than
-        # refusing the whole run — and SAY so on stderr.
-        print(f"[warn] graphs read failed ({e}) — resolving default graphs only; "
-              f"custom-graph names will be REFUSED, not reaped", file=sys.stderr)
-        graph_rows = []
+        raise Refusal(
+            f"graphs read failed ({e}) — the gid of every CUSTOM graph comes "
+            f"from this table, and a custom graph without its gid cannot have "
+            f"its ACL user dropped; refusing rather than reaping on a partial "
+            f"view") from e
     claims: dict[str, dict] = {}
     ambiguous: set[str] = set()
 
@@ -248,6 +258,23 @@ def is_test_org(org: dict, explicitly_named: frozenset[str] = frozenset()) -> bo
     return bool(TEST_ORG_NAME_RE.match(name) or TEST_ORG_EMAIL_RE.match(email))
 
 
+def _looks_custom(graph_name: str, org: dict) -> bool:
+    """Is this a PER-GRAPH namespace (``org_{id}_{gid}``) rather than a default?
+
+    A custom graph is minted with a global ``tenant_<gid>`` ACL user, so it can
+    only be reaped safely when its gid is known. A DEFAULT graph is
+    ``org_{id}``/``team_{id}``/the registry ``org_{name}`` and has no per-graph
+    user — so the shape decides, not the presence of a row.
+    """
+    org_id = str(org.get("id") or "")
+    if not org_id:
+        return False
+    if graph_name in (canonical_org_graph_name(org_id), f"team_{org_id}",
+                      f"org_{org_id}", str(org.get("graph_name") or "")):
+        return False
+    return graph_name.startswith((f"org_{org_id}_", f"team_{org_id}_"))
+
+
 def classify_graph(graph_name: str, *, org_index: dict[str, dict],
                    node_count: int | None,
                    explicitly_named: frozenset[str] = frozenset()
@@ -278,6 +305,18 @@ def classify_graph(graph_name: str, *, org_index: dict[str, dict],
     if node_count is None:
         return (BUCKET_REFUSED_UNREADABLE,
                 "node-count read failed — emptiness is never assumed")
+    if entry.get("gid") is None and _looks_custom(graph_name, org):
+        # ⛔ The independent gate for the round-4 finding: a CUSTOM namespace
+        # (`org_{id}_{gid}`/`team_{id}_{gid}`) reached the index with no gid, so
+        # its per-graph ACL user is unnameable — deleting it would orphan a live
+        # credential. That can only happen on an incomplete/truncated `graphs`
+        # read, which `_namespace_index` now refuses outright; this refuses the
+        # single graph anyway, so the safety does not depend on that read's
+        # completeness.
+        return (BUCKET_REFUSED_UNRESOLVED,
+                "custom-shaped graph with no gid — its per-graph ACL user "
+                "cannot be dropped, so deleting it would orphan a live "
+                "credential")
     if node_count != 0:
         return (BUCKET_KEPT_NOT_EMPTY, f"holds {node_count} node(s)")
     return (BUCKET_REAPABLE, "empty graph owned by a test/agent org")

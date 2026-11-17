@@ -223,9 +223,16 @@ class TestDeprovisionOnDelete:
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "team_o1"}]))
         assert ha._org_graph_names("o1", "team_o1") == ["team_o1", "org_o1"]
-    def test_an_unreadable_enumeration_still_drops_the_derived_names(self, monkeypatch):
-        """A listing failure must not block the erasure of the derived names —
-        and must not silently widen it either."""
+    def test_an_unreadable_enumeration_REFUSES_rather_than_erasing_a_subset(self, monkeypatch):
+        """⛔ A failure to ask is not an answer (review round 4, P1).
+
+        Degrading to "the derived names only" would let the purge delete the org
+        rows while every custom `org_{id}_{gid}` graph stays resident — and once
+        `purge_org_control_plane` has run, those namespaces exist NOWHERE: no
+        resolver derives them and the reaper refuses an unresolved graph, so the
+        erasure is committed, incomplete and unrecoverable. Raising keeps the
+        org row as the #926 retry anchor, and the next sweep completes it.
+        """
         from tortoise import hosted_api as ha
 
         class _Broken:
@@ -236,7 +243,39 @@ class TestDeprovisionOnDelete:
                             lambda: True)
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: _Broken())
-        assert ha._org_graph_names("o1", "org_o1") == ["team_o1", "org_o1"]
+        with pytest.raises(RuntimeError, match="refusing to deprovision a SUBSET"):
+            ha._org_graph_names("o1", "org_o1")
+
+    def test_a_failed_enumeration_keeps_the_org_row_as_the_retry_anchor(self, monkeypatch):
+        """The #926 anchor, end to end: the sweep logs and skips the org, so the
+        row (and therefore the retry) survives an enumeration failure."""
+        from tortoise import hosted_api as ha
+
+        def _boom(org_id, graph_name=None):
+            raise RuntimeError("graph enumeration failed for org o1: postgrest down")
+
+        monkeypatch.setattr(ha, "_drop_org_graphs_strict", _boom)
+        rows = [{"id": "o1", "graph_name": "org_o1", "deleted_at": "2000-01-01T00:00:00+00:00",
+                 "grace_hours": 0}]
+        purged: list[str] = []
+
+        class _CP:
+            def query(self, table, **kw):
+                if table == "organizations":
+                    return rows
+                return []
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: _CP())
+        monkeypatch.setattr(ha, "_drop_org_acl_users", lambda oid: None)
+        monkeypatch.setattr("tortoise.supabase_control.purge_org_control_plane",
+                            lambda cp, oid: purged.append(oid))
+        ha._purge_deleted_orgs()
+        assert purged == [], (
+            "the control-plane rows were deleted after a failed enumeration — "
+            "the custom graphs are now unrecoverable")
 
     def test_the_whole_org_is_ACTUALLY_GONE_from_a_live_store(self, monkeypatch):
         """THE FALSIFIER for the ordering rule — a live store, the real seam.
@@ -460,6 +499,36 @@ class TestReaperRefusesRatherThanGuesses:
         index = reaper._namespace_index(cp)
         assert index["org_agent-1_g_abc"]["gid"] == "g_abc"
         assert index["org_agent-1"]["gid"] is None
+
+    def test_an_unreadable_graphs_read_is_a_refusal(self):
+        """⛔ The `graphs` read is the ONLY source of gids, so degrading to
+        "default graphs only" would let a PROMOTED org's default (its
+        `graph_name` IS a `org_{id}_{gid}` namespace) resolve from the
+        organizations row with `gid: None`, classify as reapable, and be deleted
+        with its global `tenant_<gid>` credential left live (round-4 review)."""
+        class _Broken:
+            def query(self, table, **kw):
+                if table == "organizations":
+                    return [_org("agent-1", "agent-signup")]
+                raise RuntimeError("PGRST: statement timeout")
+
+        with pytest.raises(reaper.Refusal, match="graphs read failed"):
+            reaper._namespace_index(_Broken())
+
+    def test_a_custom_shaped_graph_with_no_gid_is_refused(self):
+        """The independent gate: even if an incomplete read somehow produced no
+        gid for a CUSTOM namespace, that graph is refused rather than deleted —
+        deleting it would orphan its live `tenant_<gid>` credential."""
+        org = _org("agent-1", "agent-signup")
+        bucket, reason = reaper.classify_graph(
+            "org_agent-1_g_9", org_index={"org_agent-1_g_9": _owned(org, None)},
+            node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED
+        assert "ACL user" in reason
+        assert reaper._looks_custom("org_agent-1_g_9", org) is True
+        # the DEFAULT graph is not custom-shaped, so it needs no gid
+        assert reaper._looks_custom("org_agent-1", org) is False
+        assert reaper._looks_custom("team_agent-1", org) is False
 
     def test_a_promoted_default_keeps_its_gid(self):
         """⛔ The gid must survive a DOUBLE claim by the SAME org (round-3 review).

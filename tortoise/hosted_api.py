@@ -34268,26 +34268,34 @@ def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
     the enumerator supplies candidates, this function decides, and the two are
     not the same trust level.
 
-    Enumeration is BEST-EFFORT and that is deliberate: the three derived names
-    above need no read at all, so an unreadable control plane (or a schema a
-    migration behind, or the registry lane with no ``graphs`` table) still
-    drops the default instead of failing the whole purge on a listing error.
-
     ⛔ THE CANONICAL NAME IS RETURNED **LAST**, and that ordering is a
     CORRECTNESS requirement, not tidiness. Every drop goes through
     :func:`_drop_org_graph_impl`, which obtains its DB handle by BINDING
     ``org_{org_id}`` (``_make_sdk(namespace=org_id)._get_proj()``). Binding a
-    graph the store does not hold MATERIALISES it — that is measured and
-    documented at ``projection.FalkorProjection.__init__`` (#11113: the
-    open-time health probe creates the graph; write-freedom needs the PAIR
-    ``skip_health_check=True, ensure_indexes=False``) — and on the live lane a
-    bind after a ``GRAPH.DELETE`` brings the graph back WITH ITS NODES
-    (reproduced 2026-11-17 on ``falkordb-server:v4.20.6``: delete → bind →
-    ``GRAPH.LIST`` holds it again, ``MATCH (n) RETURN count(n)`` = 1). So a list
-    that dropped the canonical name FIRST and then bound it again on the next
-    name would end the purge with the tenant's data graph still present — the
-    erasure silently undone by its own deprovision loop. Putting the bind
-    target last means every bind happens BEFORE its delete.
+    graph the store does not hold MATERIALISES it — measured and documented at
+    ``projection.FalkorProjection.__init__`` (#11113: the open-time health probe
+    creates the graph; write-freedom needs the PAIR ``skip_health_check=True,
+    ensure_indexes=False``) — and on the live lane a bind after a
+    ``GRAPH.DELETE`` brings the graph back WITH ITS NODES (reproduced 2026-11-17
+    on ``falkordb-server:v4.20.6``: delete → bind → ``GRAPH.LIST`` holds it
+    again, ``MATCH (n) RETURN count(n)`` = 1). So a list that dropped the
+    canonical name FIRST and then bound it again on the next name would end the
+    purge with the tenant's data graph still present — the erasure silently
+    undone by its own deprovision loop. Putting the bind target last means every
+    bind happens BEFORE its delete. Pinned by
+    ``test_the_whole_org_is_ACTUALLY_GONE_from_a_live_store``, which reds when
+    the order is reversed.
+
+    Enumeration can FAIL, and it must fail LOUD (review round 4, P1). A failed
+    enumeration is not "no custom graphs": the caller is about to commit an
+    IRREVERSIBLE erasure by deleting the control-plane rows, and after
+    ``purge_org_control_plane`` the custom namespaces exist nowhere — no
+    resolver can derive them and the reaper refuses an unresolved graph, so a
+    partial drop is unrecoverable. `_purge_deleted_orgs_locked` wraps each org in
+    its own try/except, so a raise here keeps the org row as the #926 retry
+    anchor and the next sweep completes the erasure. This is the same rule
+    `record_projection` states about a failed cutover probe: a failure to ask is
+    not an answer.
 
     ⚠️ Residual, stated rather than hidden: the bind still TRANSIENTLY
     materialises ``org_{org_id}`` on a legacy org whose only other graph is
@@ -34322,9 +34330,17 @@ def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
             ).result_set
             candidates += [r[0] for r in nodes]
     except Exception as e:
-        _logger.warning(
-            "graph enumeration failed for %s — dropping the derived names only "
-            "(the purge must not be blocked by a listing error): %s", org_id, e)
+        # ⛔ A FAILURE TO ASK IS NOT AN ANSWER (review round 4, P1). Degrading to
+        # "the derived names only" would commit an erasure that leaves every
+        # custom `org_{org_id}_{gid}` graph resident with its control-plane row
+        # gone — unnameable, unreapable, permanent. Raising keeps the org row as
+        # the #926 retry anchor, which is the whole point of that anchor.
+        raise RuntimeError(
+            f"graph enumeration failed for org {org_id}: {e} — refusing to "
+            f"deprovision a SUBSET of the org's graphs (the custom "
+            f"`org_{{id}}_{{gid}}` namespaces exist nowhere once the org rows "
+            f"are deleted); the org row stays so the next sweep retries"
+        ) from e
     out: list[str] = []
     for name in candidates:
         if not name or not isinstance(name, str):
