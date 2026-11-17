@@ -2090,10 +2090,22 @@ class FakeControlPlane:
         `cursor`-in-`select` check above makes, applied to the half that actually
         decides the certificate.
         """
+        if not rows:
+            # An EMPTY page is the sound end-of-walk signal (`if not page:
+            # exhausted = True`) — the ONE thing the real walk trusts — so it
+            # certifies unless a stated total says more rows exist.
+            return total is None or total <= 0
         cursors = [r.get(cursor) if isinstance(r, dict) else None for r in rows]
         if not any(cursors):
             return False
-        return total is None or len(rows) >= total
+        # The stated-total arm compares DISTINCT CURSOR VALUES, not rows — the
+        # real certificate is `len(seen) >= total` where `seen` is the set of
+        # cursor values (a page may carry a row whose cursor could not be read,
+        # and that row is kept in `rows` but cannot satisfy a total). Counting
+        # rows here would certify a walk production refuses.
+        if total is None:
+            return True
+        return len({c for c in cursors if c}) >= total
 
     def _query_impl(self, table: str, *, select: list[str] | None = None,
                     filters: list[tuple[str, str, object]] | None = None,

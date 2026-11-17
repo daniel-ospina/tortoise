@@ -162,15 +162,23 @@ class TestDeprovisionOnDelete:
                 # real store refuses.
                 assert kw.get("cursor") == "id", kw.get("cursor")
                 assert "id" in (kw.get("select") or []), kw.get("select")
-                # The certificate is DERIVED, not taken on trust: the real walk
-                # cannot advance from a row carrying no cursor value, so a fixture
-                # that omits `id` is a page production would REFUSE — and
-                # `_org_graph_names` then raises. Three fixtures here used to omit
-                # it and were green only because this double certified
+                # The certificate is DERIVED, not taken on trust, and with the
+                # REAL rule: the walk refuses a page only when NO row carries a
+                # cursor value (`advanceable = [c for c in cursors if c]; if not
+                # advanceable: break`) — a MIXED page still advances from its
+                # cursored rows, so `all(...)` here would be STRICTER than
+                # production and would red a walk the real store completes.
+                # Three fixtures below used to omit `id` on EVERY row — a page
+                # with no cursor anywhere, which real and double both refuse —
+                # and were green only because this double certified
                 # unconditionally. `complete` still lets a test SAY "this walk was
                 # truncated" (`test_a_truncated_graphs_walk_…`).
                 rows = graphs or []
-                certified = all(isinstance(r, dict) and r.get("id") for r in rows)
+                # An EMPTY page certifies (the real walk's only trusted
+                # end-of-walk signal); a page with no cursor ANYWHERE does not.
+                certified = (True if not rows
+                             else any(isinstance(r, dict) and r.get("id")
+                                      for r in rows))
                 return rows, bool(complete and certified)
         return _CP()
 
