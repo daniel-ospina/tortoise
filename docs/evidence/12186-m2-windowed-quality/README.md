@@ -45,8 +45,10 @@ instrument (`tools/window_quality_m2.py`).
 `SEARCH-ARCHITECTURE.md` §9 M2 asks for *"retrieval quality under a windowed vs complete graph, on a
 fixed query set"* and §7 says the window is *"armed only after M2"*. §7 states the honesty item
 plainly: **the bounded-cache literature measures latency and hit rate, not answer quality, and
-whether a windowed graph harms retrieval quality is unmeasured anywhere.** There is no published
-number to import.
+whether a windowed graph harms retrieval quality is answered nowhere in that literature.** There is no
+published number to import — which is what makes this record the measurement rather than a
+transcription. (§7 said *"unmeasured anywhere"* until this PR; that wording is retired, because §9
+measures it and an absolute like that is refuted by the artifact it introduces.)
 
 **The leg that decides it is the text leg, and that is the whole architectural finding.** §3 splits
 the read surface:

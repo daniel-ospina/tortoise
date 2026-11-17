@@ -1231,3 +1231,39 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
     assert clause is not None, "the loss-range clause is not in its expected form"
     got = tuple(float(x) for x in clause.groups())
     assert got == pytest.approx((tail_lo, tail_hi, rand_lo, rand_hi), abs=0.05), got
+
+
+def test_the_record_quotes_the_current_wording_of_the_honesty_item():
+    """The README quotes §7's honesty item — the quotation must be §7's CURRENT text.
+
+    §7 used to say a windowed graph's retrieval cost was "unmeasured anywhere". This
+    PR corrected that to "answered nowhere in that literature", because §9 IS the
+    measurement: the absolute is refuted by the artifact it introduces. The README
+    kept presenting the superseded sentence as "§7 states the honesty item plainly",
+    so the record and the document it quotes contradicted each other — and nothing
+    guarded it, because the doc scan reads figures with UNITS and this is a
+    unit-less absolute in prose.
+
+    Binding the quotation to its source is the fix: a future reword of §7 reds here
+    instead of silently leaving the record quoting a retired claim.
+    """
+    def _norm(s: str) -> str:
+        # markdown wraps mid-sentence and bolds across the break; compare prose, not
+        # line breaks or emphasis markers
+        return " ".join(s.replace("*", "").split()).lower()
+
+    readme = README.read_text()
+    arch = (ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md").read_text()
+
+    clause = "whether a windowed graph harms retrieval quality is answered nowhere in that literature"
+    assert clause in _norm(arch), "§7 no longer carries the corrected clause"
+    assert clause in _norm(readme), (
+        "the README does not quote §7's current wording of the honesty item"
+    )
+
+    # The retired absolute may appear ONLY as an explicitly retired quotation.
+    if "unmeasured anywhere" in readme:
+        assert "retired" in readme, (
+            "the README still asserts the retired absolute 'unmeasured anywhere' "
+            "without marking it as retired — §9 is that measurement"
+        )
