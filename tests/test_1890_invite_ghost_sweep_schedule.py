@@ -37,8 +37,8 @@ class _FakeSDK:
         self.sweeps = 0
 
     # #12901 wave 2 PRIVATISED the door this caller reaches: `hosted_api` now calls
-    # `sdk._sweep_invite_ghost_memberships()`, so the fake must answer to that name or the
-    # sweep reaches nothing and this test's "it has a live caller" contract goes vacuous.
+    # `sdk._sweep_invite_ghost_memberships()`, so the fake must answer to that name — else the
+    # AttributeError is caught+logged, `calls` stays empty and the live-caller asserts RED.
     def _sweep_invite_ghost_memberships(self) -> dict:
         self.calls.append("_sweep_invite_ghost_memberships")
         self.sweeps += 1
