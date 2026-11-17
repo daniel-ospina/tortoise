@@ -52,8 +52,9 @@ squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
 52 of this document's 164 `file:line` pairs no longer name the same line (counted as the unique
-`path.py:NNNN` pairs in this file, each path spelled as written; normalising a bare `sdk.py:` to
-`tortoise/sdk.py:` dedupes them to 151, which is why the as-written spelling is the one quoted), and
+`path.py:NNNN` pairs in this file, each path spelled as written; normalising **every** bare
+`name.py:` to `tortoise/name.py:` dedupes them to 151 — 13 collisions, 3 of them `sdk.py` — which is why
+the as-written spelling is the one quoted), and
 not one of them names a symbol that went away. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 Most rows name the writer beside the cite, or quote the Cypher on it, and that handle is what makes the line
