@@ -989,3 +989,44 @@ def test_a_PARTIALLY_unreadable_catalogue_speaks(monkeypatch, caplog):
         "silent — the withheld verdict reached no reader")
     assert "could not be fully parsed" in warnings[0], warnings[0]
     assert "did NOT take effect" not in warnings[0], warnings[0]
+
+
+class _NoneCatalogue(_EngineLikeGraph):
+    """`CALL db.indexes()` answers with NO row list (`result_set is None`).
+
+    A pinned, supported input shape (`_record_vector_index_inventory` documents it
+    as NOT MEASURED; `tests/test_4997_vector_index_parity.py`'s
+    `_NoneCatalogueGraph` drives it). The gate read used to treat it as "no vector
+    index here", so an armed store got no DROP — correct — and no line above a
+    DEBUG nobody reads: the silence #13320 was filed on, one input shape over.
+    """
+
+    def query(self, cypher, params=None, timeout=None):
+        if "db.indexes()" in cypher.lower():
+            self.calls.append(cypher)
+            return _Result(None)
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+def test_an_ANSWERED_None_catalogue_is_not_read_as_no_index(monkeypatch, caplog):
+    """An empty RESPONSE is not an empty CATALOGUE (#13330 review P2)."""
+    _arm(monkeypatch)
+    graph = _NoneCatalogue()
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+
+    assert not [d for d in graph.drops if "embedding" in d.lower()], (
+        "a DROP was issued blind against a catalogue that answered nothing")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, (
+        "an ARMED store whose catalogue answered with no row list was silent above "
+        "DEBUG — 'cannot read it' and 'there is none' are indistinguishable "
+        f"(records: {[(r.levelname, r.getMessage()[:70]) for r in caplog.records]})")
+    joined = " ".join(warnings)
+    assert "could not read the index catalogue" in joined, (
+        f"the unreadable arm must report it: {joined!r}")
+    assert "NO row list" in joined, f"the line must name the shape it saw: {joined!r}"
+    assert "cannot say whether arming took effect" in joined, (
+        f"the unreadable arm must not claim an outcome it cannot measure: {joined!r}")

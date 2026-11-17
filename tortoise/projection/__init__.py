@@ -21610,9 +21610,16 @@ class FalkorProjection(
         # (`index_catalogue.vector_index_drop_statement`, imported here) shared by
         # both sites, so a third caller cannot re-derive the guess.
         # The forms are tried in order (`vector_index_drop_statements`), the
-        # measured one first; only a store that HAS the index pays for the attempt,
-        # so this is one failed DDL on the ONE migration sweep at worst — and the
-        # sweep now reports a survivor at WARNING instead of failing only at DEBUG.
+        # measured one first, so a store with NO index issues no DDL at all (the
+        # gate above read the catalogue first) and a store that HAS it pays one
+        # statement on the migration sweep.
+        # A store whose engine REFUSES the drop is different, and the first cut of
+        # this comment claimed otherwise (#13330 review P2): the gate keeps seeing
+        # the index, so EVERY setup re-issues all three candidates — 3 failed DDL
+        # round trips per setup on a method the hosted path reaches PER REQUEST,
+        # and 2 before this change. That is the #4465 repeated-bootstrap shape the
+        # gate above cites; the latch silences the LINE, not the retries. Stated as
+        # a residual with its measurement; cutting the retries is a follow-up.
         # A store that HAS the index loses it here, once, on the next setup — that
         # is the migration for every already-deployed graph, and it is idempotent
         # because the second run finds nothing to drop.
@@ -21730,7 +21737,18 @@ class FalkorProjection(
                             break
                 except Exception:  # noqa: BLE001, RUF100 — a malformed row is skipped
                     continue
-            if _rows and not _parsed_rows:
+            if _rows is None:
+                # AN ANSWERED `None` IS NOT AN EMPTY CATALOGUE (#13330 review P2).
+                # `_record_vector_index_inventory`'s own contract puts this shape
+                # in NOT-MEASURED ("the call raised, or it answered None"), and a
+                # pinned input shape drives it, but the gate read treated it as
+                # "no vector index here": an ARMED store got no DROP (correct) and
+                # NO LINE above a DEBUG nobody reads — the silence #13320 was filed
+                # on, one input shape over. Routes into the same latched WARNING.
+                _catalogue_unreadable = (
+                    "the catalogue answered with NO row list at all — an empty "
+                    "response, which is not the same as an empty catalogue")
+            elif _rows and not _parsed_rows:
                 _catalogue_unreadable = (
                     f"the catalogue answered {len(_rows)} row(s) and not one of "
                     "them parsed as a `CALL db.indexes()` row")
@@ -21747,9 +21765,11 @@ class FalkorProjection(
                 _log.warning(
                     "#13320: could not read the index catalogue on %s (%s) — any "
                     "in-graph Point.embedding vector index was left in place this "
-                    "sweep, because a DROP is never issued blind. Arming therefore "
-                    "did NOT take effect on this store (LATCHED: reported once per "
-                    "store per process), and it retries on the next setup",
+                    "sweep, because a DROP is never issued blind. This arm "
+                    "cannot say whether arming took effect (LATCHED: reported "
+                    "once per store per process): with no measurement, a store "
+                    "that has no index at all and a store whose index survives "
+                    "are the same reading here — it retries on the next setup",
                     getattr(self, "_graph_name", "<unknown graph>"),
                     _catalogue_unreadable)
             _has_vector_index = False
