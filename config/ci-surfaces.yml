@@ -2505,6 +2505,15 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
+  # #13034: the currency predicate reads BOTH axes (`status` and the position
+  # axis). `core` is the classifying surface and it is MEASURED: every subject
+  # it guards (`tortoise/live.py`, `pipeline.py`, `assembly.py`, `commit_ops.py`)
+  # resolves to `core` through the fallback, so the file runs on the diff class
+  # it exists for. It was left UNREGISTERED when #13075 landed, which is drift
+  # the manifest-integrity check reports (`--integrity` -> manifest drift) and
+  # means CI never selected it on an axis-only change. DB-free: pure predicate
+  # and resolver reads over hand-built nodes.
+  - test_13034_currency_rule_reads_position.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
