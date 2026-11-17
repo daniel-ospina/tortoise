@@ -538,9 +538,12 @@ response_fields:
     uses), false otherwise. It is a CATEGORICAL order dimension, not a tuned weight: rows with it true sort
     ahead of every scored row (#12184, the #2598 draft shape), and it is deliberately BOOLEAN — a second
     fuzzy similarity constant is a REFUSED row (#11901 §7). The surface compared is `content` as the search
-    row carries it (SearchResult.to_dict has no `name`), which IS the entity''s name for Object/Subject; for
-    source/document the FTS leg indexes `_searchText` (title+summary+topics), so there the term is effectively
-    inert rather than wrong. Absent from a point/event row by design — a claim has no identity property'
+    row carries it (SearchResult.to_dict has no `name`), and the SDK''s own entity fetch fills that column:
+    from n.name for Object/Subject, and from n.title for source/document — so those two row types are compared
+    on their TITLE. The term is therefore RARE there (the query must equal the whole title) but LIVE, not
+    inert: when it fires, that row sorts ahead of every scored row. `_searchText` — the column the Source
+    fulltext index is declared on — is a DIFFERENT column and is never the surface compared here. Absent from
+    a point/event row by design — a claim has no identity property'
   unchanged_when_off: NO — additive key on an existing payload (present only on entity rows). Not flag-gated
 - response: tortoise_search
   field: graph_ranking.signal_family

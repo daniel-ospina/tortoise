@@ -452,3 +452,56 @@ def test_confidence_order_over_objects_uses_the_mean_claim_belief(sdk):
         "though the belief-less row names the query verbatim — if it does "
         "not, `order_by='confidence'` is still reading the Object's own "
         "absent belief (the pre-#12184 point read)")
+
+
+# ── 6. The identity surface the FIELD CONTRACT publishes ────────────────
+
+def test_identity_match_fires_on_a_source_title(sdk):
+    """Review round 3 — the recorded contract must describe the shipped code.
+
+    ``graph_ranking.identity_match``'s recorded ``emitted_when`` said the term
+    was "effectively inert" on ``source``/``document`` rows because "the FTS
+    leg indexes ``_searchText``". Both halves of that sentence were wrong, and
+    both are asserted here, because the field is emitted precisely so a
+    consumer can account for an order identity produced:
+
+      1. the surface the ranker COMPARES is ``content``, and the SDK's entity
+         fetch fills ``content`` from ``n.title`` on the source/document
+         branches — ``_searchText`` is a different column, the one the
+         fulltext index is DECLARED on, not the one compared;
+      2. so an exact TITLE query really does set ``identity_match`` true, and
+         that row sorts AHEAD of every scored row: rare, but LIVE.
+
+    Pinned because the claim is about a product path (``tortoise_search``
+    with ``entity_type="source"``), not an internal: if the entity fetch
+    starts filling ``content`` from ``_searchText``, or ``_identity_match``
+    stops reading ``content``, this reddens and the contract has moved.
+    """
+    title = f"quarterly ranking review {uuid.uuid4().hex[:8]}"
+    url = f"https://example.test/src/{uuid.uuid4().hex[:8]}"
+    # ``documentKind`` NULL ⇒ this row IS a ``source`` (the discriminator
+    # ``run_fts_query`` applies: document ⇒ documentKind NOT NULL, source ⇒
+    # NULL). ``_searchText`` carries the title AND a topic tail on purpose: it
+    # is the column the Source fulltext index is DECLARED on (so the row is
+    # retrievable), and it is deliberately NOT equal to the title — the whole
+    # point of the pin is that these are two different columns and the ranker
+    # compares ``n.title`` (via ``content``), not the indexed text.
+    sdk._get_proj().g.query(
+        "CREATE (s:Source {url: $url, title: $title, sourceKind: 'web', "
+        "_searchText: $st})",
+        params={"url": url, "title": title,
+                "st": f"{title}, supplementary topic"})
+
+    rows = sdk.tortoise_fts_query(title, entity_type="source",
+                                  order_by="graph", limit=10)
+    hit = next((r for r in rows if r["id"] == url), None)
+    assert hit is not None, (
+        "the seeded Source must be retrieved by its own title, or the pin is "
+        "vacuous")
+    assert hit["content"] == title, (
+        "the SDK's entity fetch fills `content` from n.title on the source "
+        "branch; if this is `_searchText`, the field contract would be right "
+        "that the FTS column is the compared surface")
+    assert hit["graph_ranking"]["identity_match"] is True, (
+        "an exact TITLE query must set identity_match on a source row — the "
+        "recorded contract called the term inert on source/document rows")
