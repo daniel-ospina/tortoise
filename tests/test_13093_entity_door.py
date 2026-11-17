@@ -667,35 +667,122 @@ _EVENT_KEY_CONSTRAINT = "chk_event_node_key_is_contract_key"
 #: reflow is not a change.
 _EVENT_KEY_CHECK = "(event_id is not null and node_key = event_id)"
 
-#: The name as it appears in DDL — optionally DOUBLE-QUOTED (a re-key written
-#: with a quoted identifier is the same constraint), and always followed by a
+#: The name as it appears in DDL — optionally QUOTED (a re-key written with a
+#: quoted identifier is the same constraint), and always followed by a
 #: non-identifier character so a SIBLING name (`…_v2`) is never read as ours.
 #: ⛔ Without the `(?![A-Za-z0-9_$])` boundary the `DROP` arm cleared the premise
 #: on `DROP CONSTRAINT chk_event_node_key_is_contract_key_v2` — a false RED on a
 #: constraint that is not this one.
 _EVENT_KEY_NAME_RE = r"[\"']?" + _EVENT_KEY_CONSTRAINT + r"[\"']?(?![A-Za-z0-9_$])"
 
-#: ONE statement that touches the constraint, in file order — a re-declaration
-#: (`CONSTRAINT <name> CHECK (…)`, in the landed `CREATE TABLE` or behind a
-#: forward `ADD CONSTRAINT`), a `DROP CONSTRAINT`, or a `RENAME CONSTRAINT`.
-#: The `[^;]*?` body runs to the statement boundary, so a nested paren in a
-#: re-keyed expression still reaches the real closing paren; a trailing quote is
-#: allowed before the terminator because the house style for conditional DDL is
-#: `DO $$ … EXECUTE 'ALTER TABLE …' … $$`
-#: (`20261025000001_record_tenancy_role_and_guc.sql:113,142`), where the literal
-#: ends `'` before the `;`.
+#: `DROP CONSTRAINT [IF EXISTS] <name>` — the premise's owner is removed.
 _EVENT_KEY_DROP_RE = re.compile(
     r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?" + _EVENT_KEY_NAME_RE,
     re.IGNORECASE)
+
+#: `[ADD] CONSTRAINT <name> CHECK` — the head of a re-declaration. The
+#: parenthesised expression after it is captured by :func:`_balanced_parens`,
+#: NOT by a `[^;]*?` regex: a nested paren, a `;` inside a call argument, a `)`
+#: inside a literal, or the enclosing `CREATE TABLE`'s trailing `)` otherwise
+#: cuts the expression short or swallows a paren (both measured).
 _EVENT_KEY_DECL_RE = re.compile(
-    r"(?:ADD\s+)?CONSTRAINT\s+(?P<name>" + _EVENT_KEY_NAME_RE
-    + r")\s+CHECK\s*(?P<expr>\([^;]*?\))\s*(?:NOT\s+VALID\s*)?[\"']*[,;]",
-    re.IGNORECASE | re.DOTALL)
+    r"(?:ADD\s+)?CONSTRAINT\s+" + _EVENT_KEY_NAME_RE + r"\s+CHECK\s*",
+    re.IGNORECASE)
+
+#: `RENAME CONSTRAINT <old> TO <new>` — the premise moved to another name.
 _EVENT_KEY_RENAME_RE = re.compile(
     r"RENAME\s+CONSTRAINT\s+(?P<old>[\"']?[A-Za-z0-9_]+[\"']?)\s+TO\s+"
     r"(?P<new>[\"']?[A-Za-z0-9_]+[\"']?)",
     re.IGNORECASE)
 
+
+def _strip_sql_line_comments(sql: str) -> str:
+    """`-- … <newline>` comments removed, string literals left intact.
+
+    A migration may QUOTE the superseded DDL in a comment written AFTER the
+    forward statement that moved it. Left in, that quotation is read as the LAST
+    declaration and the reader reports the HISTORICAL expression as the enforced
+    one — a false green (measured on the previous reader).
+    """
+    out: list[str] = []
+    i, n, in_literal = 0, len(sql), False
+    while i < n:
+        char = sql[i]
+        if in_literal:
+            out.append(char)
+            if char == "'":
+                if i + 1 < n and sql[i + 1] == "'":      # the `''` escape
+                    out.append(sql[i + 1])
+                    i += 2
+                    continue
+                in_literal = False
+            i += 1
+        elif char == "'":
+            in_literal = True
+            out.append(char)
+            i += 1
+        elif char == "-" and i + 1 < n and sql[i + 1] == "-":
+            end = sql.find("\n", i)
+            if end < 0:
+                break
+            out.append("\n")
+            i = end + 1
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out)
+
+
+def _collapse_string_continuations(sql: str) -> str:
+    """Adjacent string literals joined, as Postgres concatenates them.
+
+    The repo writes a long statement as a literal SPLIT across lines —
+    `EXECUTE 'CREATE ROLE tortoise_record_app '` newline `'NOLOGIN …'`
+    (`20261025000001_record_tenancy_role_and_guc.sql:113-114`) — and an
+    `EXECUTE 'ALTER TABLE …'` inside `DO $$ … $$`
+    (`20261023000002_blog_author_backfill_atomic.sql:91,109`). A re-key written
+    in that style is invisible to a reader that requires the name to be adjacent
+    (measured: the reader returned the HISTORICAL expression, a false green).
+
+    The `''` escape has no whitespace between its two quotes, so it is untouched.
+    """
+    return re.sub(r"'\s+'", "", sql)
+
+
+def _balanced_parens(text: str, start: int) -> str:
+    """The parenthesised expression at `start`, running to ITS closing paren.
+
+    Counts depth and steps over string literals, so a nested paren, a `;` inside
+    a call argument (`regexp_replace(payload, ';', '', 'g')`), a `)` inside a
+    literal, or the enclosing `CREATE TABLE`'s trailing `)` cannot cut the
+    expression short or swallow a paren.
+    """
+    if text[start:start + 1] != "(":
+        raise AssertionError(
+            f"`CHECK` at offset {start} is not followed by a parenthesised "
+            f"expression — got {text[start:start + 40]!r}")
+    depth, i = 0, start
+    while i < len(text):
+        char = text[i]
+        if char == "'":
+            i += 1
+            while i < len(text):
+                if text[i] == "'":
+                    if i + 1 < len(text) and text[i + 1] == "'":
+                        i += 2
+                        continue
+                    break
+                i += 1
+            i += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+        i += 1
+    raise AssertionError("unbalanced parentheses in the constraint expression")
 
 def _effective_event_node_key_check(sql: str) -> str | None:
     """The `node_key = …` expression the record ENFORCES, or `None` if dropped.
@@ -736,24 +823,30 @@ def _effective_event_node_key_check(sql: str) -> str | None:
       * no migration names the constraint at all (the landed `CREATE TABLE`
         edited away or the migration set replaced);
       * a `RENAME CONSTRAINT` either FROM or TO this name. ⛔ A rename is NOT
-        caught by the first `assert`: the landed `CREATE TABLE` keeps the
-        original name for ever in append-only history, so `stated` stays `True`
-        through a rename and a returned historical expression would be a false
-        green (measured before this arm existed).
+        caught by the first assertion: the landed `CREATE TABLE` keeps the
+        original name for ever in append-only history, so the constraint is
+        still "named" through a rename and a returned historical expression
+        would be a false green (measured before this arm existed).
 
-    ⚠️ SEEN, NOT OMNISCIENT: it reads LITERAL statements, so the re-key spellings
-    this repo's house style produces are covered — a plain `ALTER TABLE`, a
-    double-quoted identifier, and an `EXECUTE '…'` inside `DO $$ … $$`. A re-key
-    assembled at RUNTIME from parts (`format()` into a variable, a name built
-    from a catalog query) is invisible here and is NOT claimed to be covered; a
-    migration written that way must update this reader deliberately.
+    ⚠️ SEEN, NOT OMNISCIENT: it reads LITERAL statements, and the re-key
+    spellings this repo's house style produces ARE covered — a plain
+    `ALTER TABLE`, a quoted identifier, an `EXECUTE '…'` inside `DO $$ … $$`,
+    and a long statement written as a literal SPLIT across lines
+    (`20261025000001_record_tenancy_role_and_guc.sql:113-114`). `--` comments
+    are stripped first, so a migration that QUOTES the superseded DDL in a
+    comment cannot be read as the last declaration. A re-key assembled at
+    RUNTIME from parts (`format()` into a variable, a name built from a catalog
+    query) is invisible here and is NOT claimed to be covered; a migration
+    written that way must update this reader deliberately.
     """
+    text = _collapse_string_continuations(_strip_sql_line_comments(sql))
     events: list[tuple[int, str, str | None]] = []
-    for match in _EVENT_KEY_DROP_RE.finditer(sql):
+    for match in _EVENT_KEY_DROP_RE.finditer(text):
         events.append((match.start(), "drop", None))
-    for match in _EVENT_KEY_DECL_RE.finditer(sql):
-        events.append((match.start(), "decl", match.group("expr")))
-    for match in _EVENT_KEY_RENAME_RE.finditer(sql):
+    for match in _EVENT_KEY_DECL_RE.finditer(text):
+        events.append((match.start(), "decl",
+                       _balanced_parens(text, match.end())))
+    for match in _EVENT_KEY_RENAME_RE.finditer(text):
         old = match.group("old").strip('"').lower()
         new = match.group("new").strip('"').lower()
         if _EVENT_KEY_CONSTRAINT in (old, new):
@@ -839,8 +932,8 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
         "reach the expression the record now enforces")
 
     # 1c. The house style for CONDITIONAL DDL: the statement inside
-    #     `DO $$ … EXECUTE '…' … $$`
-    #     (`20261025000001_record_tenancy_role_and_guc.sql:113,142`). The literal
+    #     `DO $$ … EXECUTE 'ALTER TABLE …' … $$`
+    #     (`20261023000002_blog_author_backfill_atomic.sql:91,109`). The literal
     #     ends `'` before the `;`, and the first reader could not see past it.
     dynamic = landed + (
         "\nDO $$ BEGIN\n"
@@ -878,6 +971,84 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
         f"{_EVENT_KEY_CONSTRAINT}_v2;\n")
     with pytest.raises(AssertionError, match="RENAMEs"):
         _effective_event_node_key_check(renamed)
+
+    # 1f. The SAME re-key written the way the repo's house style SPLITS a long
+    #     literal (`20261025000001_record_tenancy_role_and_guc.sql:113-114`:
+    #     `EXECUTE 'CREATE ROLE tortoise_record_app '` newline `'NOLOGIN …'`).
+    #     Both halves are split, so as written neither the DROP nor the ADD is
+    #     adjacent to the name — measured on the previous reader: it returned the
+    #     HISTORICAL expression, i.e. the row stayed green through a real re-key.
+    split = landed + (
+        "\nDO $$ BEGIN\n"
+        "  EXECUTE 'ALTER TABLE public.event DROP CONSTRAINT '\n"
+        f"          '{_EVENT_KEY_CONSTRAINT}';\n"
+        "  EXECUTE 'ALTER TABLE public.event ADD CONSTRAINT '\n"
+        f"          '{_EVENT_KEY_CONSTRAINT} '\n"
+        "          'CHECK (event_id IS NOT NULL AND node_key = payload ->> ''ref'')';\n"
+        "END $$;\n")
+    assert _effective_event_node_key_check(split) == (
+        "(event_id is not null and node_key = payload ->> ''ref'')"), (
+        "a re-key SPLIT across adjacent literals was invisible — the reader "
+        "reported the HISTORICAL expression (a false green)")
+
+    # 1g. A `--` comment that QUOTES the superseded DDL on ONE LINE, written
+    #     AFTER the forward statement that moved it. Comments are stripped before
+    #     matching, so the quotation cannot be read as the last declaration
+    #     (measured on the previous reader: it reported the superseded
+    #     expression, a false green).
+    commented = landed + (
+        "\nALTER TABLE public.event\n"
+        f"    DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        "ALTER TABLE public.event\n"
+        f"    ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT}\n"
+        "    CHECK (event_id IS NOT NULL AND node_key = payload ->> 'ref');\n"
+        "-- Before: ALTER TABLE public.event ADD CONSTRAINT "
+        f"{_EVENT_KEY_CONSTRAINT} "
+        "CHECK (event_id IS NOT NULL AND node_key = event_id);\n")
+    assert _effective_event_node_key_check(commented) == re_keyed_expr, (
+        "a `--` comment quoting the OLD DDL was read as the last declaration — "
+        "the reader reported the superseded expression (a false green)")
+
+    # 1g2. Prose in a comment that merely NAMES the constraint must not clear
+    #      the premise either — that was the false RED on the previous reader,
+    #      and it sends a lane to re-derive an invariant that did not move.
+    prose = landed + (
+        "\nALTER TABLE public.event\n"
+        f"    DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        "ALTER TABLE public.event\n"
+        f"    ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT}\n"
+        "    CHECK (event_id IS NOT NULL AND node_key = payload ->> 'ref');\n"
+        f"-- we never run DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT} here.\n")
+    assert _effective_event_node_key_check(prose) == re_keyed_expr, (
+        "prose in a comment that names the constraint cleared OUR premise — a "
+        "false red on a constraint that never moved")
+
+    # 1h. A re-key whose CHECK contains a `;` inside a call argument. A
+    #     `[^;]*?` body cut the expression short, so the DROP stood alone.
+    semicolons = landed + (
+        "\nALTER TABLE public.event\n"
+        f"    DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        "ALTER TABLE public.event\n"
+        f"    ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT}\n"
+        "    CHECK (event_id IS NOT NULL AND node_key = "
+        "regexp_replace(payload, ';', '', 'g'));\n")
+    assert _effective_event_node_key_check(semicolons) == (
+        "(event_id is not null and node_key = "
+        "regexp_replace(payload, ';', '', 'g'))"), (
+        "a `;` inside the CHECK expression cut it short — the reader lost the "
+        "re-key and reported the premise as removed")
+
+    # 1i. The constraint as the LAST element of a `CREATE TABLE`, with no
+    #     trailing comma. A lazy `\([^;]*?\)` swallowed the table's own `)`.
+    last_element = (
+        "CREATE TABLE public.example (\n"
+        "    id text NOT NULL,\n"
+        f"    CONSTRAINT {_EVENT_KEY_CONSTRAINT} "
+        "CHECK (event_id IS NOT NULL AND node_key = event_id)\n"
+        ");\n")
+    assert _effective_event_node_key_check(last_element) == _EVENT_KEY_CHECK, (
+        "the constraint as the last `CREATE TABLE` element (no trailing comma) "
+        "was mis-read — the table's own closing paren was swallowed")
 
     # 2. A forward DROP with no re-declaration. The constraint is GONE, so no
     #    expression is enforced and the premise is not merely different — it is
