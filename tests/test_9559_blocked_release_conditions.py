@@ -1671,6 +1671,11 @@ def test_the_restore_verb_still_exists():
 #    *"File-name order and version order only agree while versions are the same
 #    width: `20260420010000_b.sql` sorts before `20260420_a.sql` by name (`'0'` <
 #    `'_'`) but after it by version."*
+#    ⚠️ Quoted, not adopted: that sentence's necessity is loose, and this tree is
+#    its counterexample — 72 fourteen-digit and 16 four-digit prefixes, and the
+#    two orders are IDENTICAL over them, because unequal WIDTH alone does not
+#    disagree. The operative condition is a version that is a proper PREFIX of
+#    another, which is what the fixture below exercises.
 #    So `sorted(<Path>)` is WRONG for a prefix PAIR: with the guarded definition in
 #    `2026111700_…` and the guard dropped in `20261117000003_…` (`'0'` < `'_'`),
 #    the filename compare picks the SUPERSEDED file and the gate reads a body the
@@ -1990,7 +1995,7 @@ def test_the_live_definition_is_the_LAST_BY_VERSION_and_only_applied_names_quali
     # (b) the numeric trap — lexical and integer order disagree the other way round.
     numeric_live = "9999999999999_postgres_residency_fix1.sql"
     got = _write(tmp_path / "numeric",
-                 ("0001_postgres_residency_gauge.sql", live, numeric_live))
+                 ("0001_postgres_residency_gauge.sql", live, numeric_live, unapplied))
     assert got[-1] == numeric_live, (
         "the live definition must be the last file in the applier's STRING order — "
         f"`9…` sorts after `2026…` lexically; selected {got[-1]!r} of {got}")
