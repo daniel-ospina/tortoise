@@ -23047,6 +23047,10 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     )
     assert pin not in set(load_manifest()["slow_files"]), (
         f"{pin} is in `slow_files` — a file named by two surfaces is dropped "
-        "from the fast pool and never re-added to `slow_selected` (#6234), so "
-        "one of the two legs would stop running it"
+        "from the fast pool and, WHEN THE SECOND SURFACE IS THE MATCHED ONE, "
+        "never re-added to `slow_selected` (#6234) — so it then runs on NEITHER "
+        "leg. (Qualified on purpose: when the matched surface is the one that "
+        "owns it, `slow_selected` DOES carry it and only the fast leg is lost, "
+        "which is why the neither-leg case is the one this comment names — the "
+        "rule is stated whole at the #6234 note above.)"
     )
