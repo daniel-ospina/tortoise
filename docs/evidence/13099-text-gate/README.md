@@ -46,7 +46,7 @@ background worker, no restart-level config, and a **64 KB** GIN index on this co
 artifact actually measured: the index figures are INDEX-ONLY, while the store figures are not
 interchangeable either. `sizes_bytes.tg_docs` is `pg_total_relation_size` — **heap + every index on
 the table** — so the table's own bytes are **4.23 MB** (7.58 MB total − 3.13 MB BM25 index − 0.14 MB
-GIN − 0.08 MB pkey). Store-to-store, `ts_rank` is heap + its GIN ≈ **4.3 MB** against the FalkorDB
+GIN − 0.08 MB pkey). Store-to-store, `ts_rank` is table + its GIN ≈ **4.3 MB** against the FalkorDB
 graph's **7.73 MiB** of `used_memory` for the same content + embeddings — **≈ 8.11 MB** in the decimal
 units the Postgres figures use (Redis prints `used_memory_human` in 1024-based units, so `7.73M` is
 7.73 × 1 024² bytes), i.e. **~47 % smaller**, because the
@@ -268,8 +268,9 @@ Measured from the deployed artifacts (no vendor page was consulted; see §2):
 ⚠️ **Index size is not store size, and `tg_docs` is not the table.** The GIN/BM25 cells are
 INDEX-ONLY, so index-to-index the GIN index is 48× smaller (64 KB vs 3.13 MB). The Postgres store
 figures are `pg_total_relation_size`, which is **heap + every index on the table** — so they are not
-comparable to each other until the indexes are separated: the heap is **4.23 MB** (7.58 MB total −
-3.13 MB BM25 − 0.14 MB GIN − 0.08 MB pkey). Store-to-store, `ts_rank` is heap + GIN ≈ **4.3 MB**
+comparable to each other until the indexes are separated: the table's own bytes are **4.23 MB**
+(7.58 MB total − 3.13 MB BM25 − 0.14 MB GIN − 0.08 MB pkey — that subtraction is `pg_table_size`:
+heap + TOAST + FSM/VM, not the bare main fork). Store-to-store, `ts_rank` is table + GIN ≈ **4.3 MB**
 against the FalkorDB graph's **7.73 MiB** `used_memory` for the same content + embeddings (≈ **8.11 MB**
 in decimal units — Redis prints `used_memory_human` 1024-based — hence ~47 %
 smaller), while `pg_search` — which carries the 3.13 MB index — lands at ≈ **7.4 MB**, comparable to
@@ -360,8 +361,8 @@ cells of every non-baseline row (21 per class, not "six"), and the `returned` co
 §5's row set to equal the artifact's (a deleted arm row is drift). §6 is pinned **by row**: its build,
 size and memory figures, including the repeat run's, must appear in the row of the backend that
 produced them — a whole-section presence check would pass a table whose two labels had been swapped,
-which is the shape §6's figures were actually wrong in. §0/§6's store-to-store figures are pinned with
-the heap derivation they rest on (`tg_docs` is `pg_total_relation_size`, i.e. heap + every index). §6's
+which is the shape §6's figures were actually wrong in. §0's own adoption-cost figures are pinned IN
+§0, and §6's duplicate of them in §6, with the `pg_table_size` derivation they rest on (`tg_docs` is `pg_total_relation_size`, i.e. heap + every index). §6's
 prose facts are held to the same rule, **by row**: the licence cell, the `pg_search` version, the
 `requires`/relocatability cell and the exact `shared_preload_libraries` list are each required to
 appear in the row of the backend that produced them. They are not *derived* from `artifact.json` —
@@ -381,8 +382,9 @@ differ structurally from them, not only in timings. Five keys need reading with 
   run on. ⚠️ The two are the **same** quantity by construction, and deliberately not the bare main
   fork: `pg_total_relation_size = pg_table_size + pg_indexes_size`, so the subtraction is
   `pg_table_size` = heap **+ TOAST + FSM/VM**. Recording `pg_relation_size` (main fork only) under
-  that name would agree here — TOAST is empty on this corpus — and silently diverge on the first run
-  whose content TOASTs.
+  that name is simply a DIFFERENT quantity: it differs from `pg_table_size` by FSM + VM (32 kB on a
+  multi-page relation, measured) even with nothing TOASTed, so the recorded field would not have
+  reproduced the figure derived from the totals even on this corpus.
 - `tokenizer_fallbacks` **is** present, but it was appended when the `verdict` blocks were regenerated
   (it sits AFTER `verdict` in the file; a fresh `run()` writes it BEFORE), so its `[]` is not a
   reading taken by the original run — it is a separate measurement over the committed query set

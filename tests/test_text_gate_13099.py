@@ -496,9 +496,9 @@ def _postgres_table_bytes(art: dict) -> int:
     subtraction exactly `pg_table_size` — heap **plus TOAST plus FSM/VM**, not the
     bare main fork. That is deliberately the SAME quantity the harness now records
     as `tg_docs_table` (and NOT `pg_relation_size`, which is the main fork alone:
-    the two agree only while TOAST is empty, and diverging silently on the first
-    run whose content TOASTs is exactly the kind of stale field this record
-    exists not to have).
+    the two differ by FSM + VM — 32 kB on a multi-page relation, measured — even
+    with nothing TOASTed, so a field named for the wrong quantity would not
+    reproduce the derived figure even on this corpus).
     """
     s = art["corpus"]["postgres_seed"]["sizes_bytes"]
     indexes = (s["tg_docs_tsv_en"] + s["tg_docs_tsv_simple"]
@@ -552,6 +552,16 @@ def test_the_like_for_like_store_comparison_is_quoted():
     assert missing == [], (
         "§0 does not carry these adoption-cost figures, so the like-for-like claim "
         "cannot be checked where it is made: " + repr(missing))
+
+    # §6 repeats every one of them in its own prose paragraph. It is checked
+    # SEPARATELY (not left to §0): a whole-document check let §0 go entirely
+    # wrong un-noticed, and a §0-only check would leave §6's copy unguarded while
+    # the README says both are pinned.
+    sec6 = _readme_section("6. Operational facts")
+    missing6 = [f"{what} ({val})" for what, val in expected.items() if val not in sec6]
+    assert missing6 == [], (
+        "§6's prose repeats the adoption-cost figures and they have drifted: "
+        + repr(missing6))
 
 
 def test_an_arm_that_raised_is_disqualified_not_scored_as_a_loss():
