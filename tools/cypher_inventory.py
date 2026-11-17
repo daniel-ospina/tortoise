@@ -161,6 +161,23 @@ DDL = re.compile(
     r"|^\s*CALL\s+db\.idx\.(?:fulltext|vector)\.(?:create|drop)",
     re.IGNORECASE | re.MULTILINE,
 )
+#: A `CALL` whose procedure name the TEXT CANNOT PROVE — folded by the resolver
+#: (`CALL {}('Point')`, `CALL ???('Point')`) or outside the engine's own `db.*`
+#: namespace (`CALL apoc.…`), where read-vs-write is the plugin's business and not
+#: visible in the statement. ⛔ The live defect this closes (`#13098` review P1):
+#: `tortoise/projection/__init__.py` loops over
+#: `("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex")` and calls
+#: `CALL {drop_proc}('Point')`, so the resolver folded the NAME — and a fulltext-index
+#: DROP was classified `plain`/`read` and published as a migration CANDIDATE, the one
+#: direction a verdict flips, inside the headline count. Its un-folded spellings both
+#: classify `ddl`/`ddl`, which is what proves the loss was in the folding, not in DDL.
+#: `db.*` procedures stay classifiable: that is how fulltext/vector READS reach their
+#: own shapes, and a blanket "any CALL is unknown" would swallow them.
+CALL_PROC_UNPROVABLE = re.compile(
+    r"\bCALL\s+(?:\{\}|\?\?\?|(?!db\.)[\w.]+\s*\()",
+    re.IGNORECASE,
+)
+
 EP_FIELD = re.compile(
     r"\b(?:ep_alpha|ep_beta|ep_[a-z_]+|posterior_[a-z_]+|baseline_(?:alpha|beta|source)|confidence)\b"
 )
@@ -185,7 +202,7 @@ WRITE_VERB = re.compile(
 #:       never at a line start, so the `^`-anchored arm above cannot see it;
 #:   `MATCH … REMOVE {}`                                 → the same folded form.
 WRITE_INLINE = re.compile(
-    r"\bSET\s+(?:[\w`]+\s*(?:[.\[]|\+=|=|:)|[{\[]|\?\?\?)"
+    r"\bSET\s+(?:(?:`[^`]*`|[\w]+)\s*(?:[.\[]|\+=|=|:)|[{\[]|\?\?\?)"
     r"|\b(?:MERGE|CREATE)\s*\("
     r"|\bDETACH\s+DELETE\b"
     r"|\b(?:DELETE|REMOVE|DROP)\s+(?:\w|[{\[]|\?\?\?)",
@@ -399,6 +416,11 @@ def _digest(text: str, limit: int = 68) -> str:
 
 def classify(text: str) -> tuple[str, str]:
     """(shape, role) for a resolved statement."""
+    if CALL_PROC_UNPROVABLE.search(text):
+        # The polarity the census already applies to an unresolvable STATEMENT
+        # applies one level down to an unresolvable PROCEDURE: not provably a read
+        # is not a candidate. Counted and named, never dropped (`#9124`).
+        return "unresolved", "unresolved"
     if DDL.search(text):
         return "ddl", "ddl"
     if FULLTEXT.search(text):

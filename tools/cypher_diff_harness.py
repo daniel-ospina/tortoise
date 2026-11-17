@@ -600,6 +600,29 @@ def _norm_row(row: Sequence[Any]) -> tuple:
     return tuple(_norm(v) for v in row)
 
 
+def _sort_key(row: Sequence[Any]) -> tuple:
+    """A total order over rows that AGREES with `_norm_row`'s equality.
+
+    ⛔ The multiset pass sorted by `_canon` and then compared by `_norm`, so the two
+    sides could sort into OPPOSITE orders and the positional pairing compared
+    different rows: `[("a", 1), ("a", 10)]` sorts `["\"a\", 10", "\"a\", 1"]`
+    because `]` > `,` > `.`, while the `1.0`/`10.0` side sorts the other way — a
+    false `value` difference on multisets that are equal (`#13098` review P3). Each
+    element renders as `(type_rank, text)` with integral floats written as integers,
+    so `1`, `1.0` and `Decimal("1")` produce the same key and equal rows always sort
+    to the same place on both sides.
+    """
+    def part(value: Any) -> tuple[int, str]:
+        value = _norm(value)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return (1, json.dumps(value, sort_keys=True, default=str))
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        return (0, repr(value))
+
+    return tuple(part(v) for v in row)
+
+
 def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
          sql_rows: list[tuple], sql_cols: list[str], seeded_ids: list[str]) -> dict:
     """Rows · order · null handling · row shape. Empty `differences` == equal."""
@@ -634,13 +657,14 @@ def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
 
     # 3. ROW SET (as a MULTISET) + NULL HANDLING
     # ⛔ The comparison is multiset-first even for an ORDERED statement: a pure
-    # reordering must be reported as `order`, never as a wall of value differences
-    # (which is what positional comparison produces, and what a test caught here
-    # before it shipped). Rows are sorted by canonical form so the per-value pass
-    # compares like with like.
+    # ⛔ SORTED BY `_sort_key`, so the pairing compares like with like — and the key
+    # is built from `_norm`, so the sort agrees with the equality one line below.
+    # Sorting by `_canon` here paired rows from OPPOSITE orders whenever a numeric
+    # column was decimal-prefix-related (`1` vs `10`), producing two `value`
+    # differences on multisets that are equal (`#13098` review P3).
     width = min(len(cypher_cols), len(sql_cols))
-    c_sorted = sorted(cypher_rows, key=_canon)
-    s_sorted = sorted(sql_rows, key=_canon)
+    c_sorted = sorted(cypher_rows, key=_sort_key)
+    s_sorted = sorted(sql_rows, key=_sort_key)
     value_diffs: list[dict] = []
     # `strict=False` for the same reason as the column pass: a row-count mismatch is
     # its own finding (step 2), and the per-value pass must still compare what both

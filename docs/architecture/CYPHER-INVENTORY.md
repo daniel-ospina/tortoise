@@ -27,21 +27,21 @@ this document classifies **statements**.
 | product surface (`tortoise/**/*.py`, test modules excluded) | **295** files scanned |
 | files carrying at least one statement site | **97** |
 | **statement sites (this census)** | **1301** |
-| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **854** (573 read, 281 write) |
-| **`plain` READS — the migration candidates** | **573** |
+| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **852** (571 read, 281 write) |
+| **`plain` READS — the migration candidates** | **571** |
 | `adjacency` (edge pattern, fixed length) | 289 |
 | `ep` (the epistemic scalars) | 32 |
 | `traversal` (variable length) | 3 |
 | `fulltext` | 2 |
 | `ddl` | 17 |
-| `unresolved` (statement not statically resolvable) | 104 |
+| `unresolved` (statement not statically resolvable) | 106 |
 | non-Cypher door calls (excluded from every shape total) | 256 |
 | **AST door calls** = census + non-Cypher | **1557** |
 
-> **The finding, with its count: 573 of 1301 product statements (44.0 %) need none of the
+> **The finding, with its count: 571 of 1301 product statements (43.9 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
-> not an adjective; it is 573 statements.
+> not an adjective; it is 571 statements.
 
 ---
 
@@ -189,18 +189,25 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 
 | shape | total | roles |
 |---|---|---|
-| `plain` | **854** | read=573, write=281 |
+| `plain` | **852** | read=571, write=281 |
 | `adjacency` | **289** | read=189, write=100 |
 | `ep` | **32** | read=21, write=11 |
 | `ddl` | **17** | ddl=17 |
 | `traversal` | **3** | read=3 |
 | `fulltext` | **2** | read=2 |
-| `unresolved` | **104** | unresolved=104 |
+| `unresolved` | **106** | unresolved=106 |
 
-**What the unresolved bucket is.** 104 sites hand a door a statement built where no static reader
+**What the unresolved bucket is.** 106 sites hand a door a statement built where no static reader
 can follow: a **parameter** (`def _count(proj, query: str)` in `tortoise/audit.py:247`), a
-**call-built** string (`proj.g.query(cypher, …)` where `cypher` is an argument), or a helper's return
-value. They are not "probably fine" — they are exactly the sites a flip would have to re-derive by
+**call-built** string (`proj.g.query(cypher, …)` where `cypher` is an argument), a helper's return
+value, or — since `#13098` review P1 — a `CALL` whose procedure NAME the text cannot prove
+(`CALL {}('Point')` where the name was folded out of a loop variable, and `CALL apoc.…` where
+read-vs-write is the plugin's business). The last arm exists because two of these WERE published as
+migration candidates: `tortoise/projection/__init__.py` loops over `("db.idx.fulltext.drop",
+"db.idx.fulltext.dropIndex")`, the resolver folded the name, and a fulltext-index DROP was counted
+as a `plain` READ — the one direction a verdict flips. Both of its un-folded spellings classify
+`ddl`, which is what showed the loss was in the folding and not in the DDL arm. They are not
+"probably fine" — they are exactly the sites a flip would have to re-derive by
 hand, so they are counted and named rather than classified by guesswork. 313 further sites
 are **partial**: the literal half carries the shape (e.g.
 `"MATCH (op:Point)-[:" + safe_rel + "]->(t)"` is an adjacency read) and the digest shows `{}`/`???`
@@ -232,8 +239,8 @@ The order a campaign should take, derived from §3 rather than chosen:
 | # | class | why here | size |
 |---|---|---|---|
 | 1 | `plain` reads already served by `record_serve` (`point-by-id`, `node-by-key`) | simplest shape (one node, one key) **and** the seam serving it already shipped with a parity rule | 2 reads, measured in §5 |
-| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 573 |
-| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 573 |
+| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 571 |
+| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 571 |
 | 4 | `plain` writes | **not a Cypher→SQL move** — these disappear with the node when `#13083` makes the shape `record_only` | 281 |
 | — | `adjacency` / `traversal` / `ep` / `fulltext` | **do not flip without a reopen on `#4051`** | 326 |
 
@@ -392,16 +399,16 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:sites = 1301 -->
 <!-- cypher-inventory:files = 97 -->
 <!-- cypher-inventory:files_scanned = 295 -->
-<!-- cypher-inventory:unresolved = 104 -->
-<!-- cypher-inventory:candidates = 573 -->
+<!-- cypher-inventory:unresolved = 106 -->
+<!-- cypher-inventory:candidates = 571 -->
 <!-- cypher-inventory:shape_adjacency = 289 -->
 <!-- cypher-inventory:shape_ddl = 17 -->
 <!-- cypher-inventory:shape_ep = 32 -->
 <!-- cypher-inventory:shape_fulltext = 2 -->
-<!-- cypher-inventory:shape_plain = 854 -->
+<!-- cypher-inventory:shape_plain = 852 -->
 <!-- cypher-inventory:shape_traversal = 3 -->
-<!-- cypher-inventory:shape_unresolved = 104 -->
-<!-- cypher-inventory:shape_plain_read = 573 -->
+<!-- cypher-inventory:shape_unresolved = 106 -->
+<!-- cypher-inventory:shape_plain_read = 571 -->
 <!-- cypher-inventory:shape_plain_write = 281 -->
 <!-- cypher-inventory:shape_adjacency_read = 189 -->
 <!-- cypher-inventory:shape_adjacency_write = 100 -->
@@ -410,7 +417,7 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_ddl_ddl = 17 -->
 <!-- cypher-inventory:shape_traversal_read = 3 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
-<!-- cypher-inventory:shape_unresolved_unresolved = 104 -->
+<!-- cypher-inventory:shape_unresolved_unresolved = 106 -->
 <!-- cypher-inventory:non_cypher_door_calls = 256 -->
 <!-- cypher-inventory:ast_door_calls = 1557 -->
 <!-- cypher-inventory:partial = 313 -->
@@ -1076,7 +1083,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/projection/__init__.py:20672` | `FalkorProjection._array_valued_fts_prop_exists` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/projection/__init__.py:20688` | `FalkorProjection._array_fts_prop_rows` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/projection/__init__.py:20728` | `FalkorProjection._fix_point_array_fts_props` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/projection/__init__.py:20746` | `FalkorProjection._fix_point_array_fts_props` | plain | read | candidate:SQL-shaped | `CALL {}('Point')` |
+| `tortoise/projection/__init__.py:20746` | `FalkorProjection._fix_point_array_fts_props` | unresolved | unresolved | unclassified:statement not resolvable statically | `CALL {}('Point')` |
 | `tortoise/projection/__init__.py:20763` | `FalkorProjection._fix_point_array_fts_props` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true` |
 | `tortoise/projection/__init__.py:20811` | `FalkorProjection._create_fulltext_index` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/projection/__init__.py:21044` | `FalkorProjection._ensure_indexes_declared` | ddl | ddl | stays:graph-maintenance | `CREATE INDEX FOR (n:Point) ON (n.{})` |
@@ -1088,7 +1095,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/projection/__init__.py:21203` | `FalkorProjection._ensure_indexes_declared` | ddl | ddl | stays:graph-maintenance | `CREATE INDEX FOR (s:Session) ON (s.id)` |
 | `tortoise/projection/__init__.py:21245` | `FalkorProjection._ensure_indexes_declared` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true` |
 | `tortoise/projection/__init__.py:21302` | `FalkorProjection._ensure_indexes_declared` | plain | read | candidate:SQL-shaped | `MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1` |
-| `tortoise/projection/__init__.py:21336` | `FalkorProjection._ensure_indexes_declared` | plain | read | candidate:SQL-shaped | `CALL {}('Event')` |
+| `tortoise/projection/__init__.py:21336` | `FalkorProjection._ensure_indexes_declared` | unresolved | unresolved | unclassified:statement not resolvable statically | `CALL {}('Event')` |
 | `tortoise/projection/__init__.py:21347` | `FalkorProjection._ensure_indexes_declared` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:Meta {key:'event_fts_v2'}) SET m.v = true` |
 | `tortoise/projection/__init__.py:21518` | `FalkorProjection._ensure_vector_index_api` | ddl | ddl | stays:graph-maintenance | `CALL db.indexes()` |
 | `tortoise/projection/__init__.py:21555` | `FalkorProjection._ensure_vector_index_api` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |

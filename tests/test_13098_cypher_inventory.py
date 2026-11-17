@@ -208,6 +208,33 @@ def test_an_inline_write_clause_is_a_write_not_a_candidate(statement, shape):
     assert not census.VERDICTS[(shape, role)].startswith(("candidate", "measure"))
 
 
+def test_a_call_whose_procedure_name_the_text_cannot_prove_is_not_a_candidate():
+    """A `CALL` naming no provable procedure must not be published as a READ.
+
+    ⛔ The live defect (`#13098` review P1): `tortoise/projection/__init__.py` loops
+    over `("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex")` and calls
+    `CALL {drop_proc}('Point')`. The resolver folds a loop variable to `{}`, so the
+    NAME left the text — and a fulltext-index DROP was classified `plain`/`read`,
+    which the verdict table maps to `candidate:SQL-shaped`: two graph WRITES inside
+    the headline migration-candidate count. The un-folded spellings are the
+    premise-check for this test: they classify `ddl`, so the loss was the folding,
+    not the DDL arm.
+    """
+    for statement in ("CALL db.idx.fulltext.drop('Point')",
+                      "CALL db.idx.fulltext.dropIndex('Event')"):
+        assert census.classify(statement) == ("ddl", "ddl"), statement
+    for statement in ("CALL {}('Point')",
+                      "CALL ???('Point')",
+                      # outside the engine's own namespace: read-vs-write is the
+                      # plugin's business and is not visible in the statement
+                      "CALL apoc.create.node(['X'], {}) YIELD node RETURN node"):
+        assert census.classify(statement) == ("unresolved", "unresolved"), statement
+    # …and the `db.*` procedures that ARE provable keep their own shapes: a blanket
+    # "any CALL is unknown" would swallow every fulltext/vector READ.
+    assert census.classify("CALL db.idx.fulltext.queryNodes('Point', 'x') YIELD node RETURN node") \
+        == ("fulltext", "read")
+
+
 def test_a_read_clause_is_still_a_read():
     """The other direction: the fix must not make every statement a write.
 
@@ -322,6 +349,30 @@ def test_the_order_pass_uses_the_value_pass_equality_for_numbers():
     )
     assert reversed_rows["equal"] is False
     assert [d["kind"] for d in reversed_rows["differences"]] == ["order"]
+
+
+def test_the_multiset_pass_pairs_rows_with_the_equality_it_compares_with():
+    """A multiset that is equal must not report `value` differences.
+
+    ⛔ The pass sorted by `_canon` (a json string) and compared by `_norm`: `1`
+    serialises `"1"` and `1.0` as `"1.0"`, and `]` > `,` > `.`, so the two sides
+    sorted into OPPOSITE orders and the positional pairing compared different rows
+    — two `value` differences on multisets that are equal (`#13098` review P3).
+    Reachable from the real stores for the same reason the order pass was: the
+    record's numeric columns arrive as `float`/`Decimal`.
+    """
+    candidate = harness.Candidate(name="numeric", cypher="", sql="",
+                                 columns=("id", "confidence"), ordered=False)
+    cols = ["id", "confidence"]
+    equal = harness.diff(candidate, [("a", 1), ("a", 10)], cols,
+                        [("a", 1.0), ("a", 10.0)], cols, ["a"])
+    assert equal["equal"] is True, equal["differences"]
+    # …and a REAL value difference in the same shape is still reported
+    different = harness.diff(candidate, [("a", 1), ("a", 10)], cols,
+                            [("a", 1.0), ("a", 11.0)], cols, ["a"])
+    assert different["equal"] is False
+    assert [(d["kind"], d["cypher"], d["sql"]) for d in different["differences"]] == \
+        [("value", 10, 11.0)]
 
 
 def test_a_projection_that_drifts_on_both_sides_still_reddens_against_the_declaration():
