@@ -1855,11 +1855,23 @@ class EventLog:
         follows), because one process appending repeatedly is the common shape;
         it is REFRESHED here on every answer a caller paid for, so a
         ``position()`` does not re-read the journal on every call. Writing it
-        here cannot race: the memo is this instance's, and both call sites hold
-        the per-path THREAD lock, which is what excludes another thread of this
-        process. (It does NOT exclude another PROCESS — the ``flock`` is
-        conditional, `_lock_exclusive` may return ``False`` — so the memo's
-        validity rests on the ``(size, mtime_ns)`` identity, not on exclusion.)
+        here cannot race: the memo is this instance's, and both WRITE-path call
+        sites (`append`, `position`) hold the per-path THREAD lock, which is what
+        excludes another thread of this process. (It does NOT exclude another
+        PROCESS — the ``flock`` is conditional, `_lock_exclusive` may return
+        ``False`` — so the memo's validity rests on the ``(size, mtime_ns)``
+        identity, not on exclusion.)
+
+        ⛔ THE THIRD CALL SITE IS DELIBERATELY LOCK-FREE:
+        :meth:`position_readonly` reads the journal from the REQUEST path, where
+        taking the append lock is the defect it exists to avoid (#13331 review
+        F2). Do NOT "fix" that by holding the thread lock here — that would put
+        a search inside the append critical section, which is half of what
+        ``position()``'s lock cost. What makes the unlocked memo write safe is
+        the identity check above, not mutual exclusion: a racing write installs
+        an entry that is only ever read back when ``(raw, size, mtime_ns)``
+        match the reader's own observation, so the worst outcome is a cheaper
+        miss, never a number for a state nobody saw.
 
         ``None`` is a NAMED absence, not a zero: the journal could not be READ
         (``OSError`` — EACCES/EIO, not a parse problem, which ``read_all``

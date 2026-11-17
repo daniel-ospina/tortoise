@@ -491,13 +491,24 @@ _READINESS: dict[tuple[str, str, str, str], tuple[float, bool]] = {}
 _READINESS_LOCK = threading.Lock()
 
 
-def _readiness_key(scope: _Scope, record_dsn: str | None) -> tuple[str, str, str, str]:
+def _readiness_key(scope: _Scope, record_dsn: str | None) -> tuple[str, str, str, str] | None:
+    """The cache key, or ``None`` when the DSN cannot be resolved.
+
+    ⛔ A MALFORMED DSN IS "NOT READY", not an exception into the search path.
+    `searcher` resolves the DSN before calling this, so the arm is unreachable
+    from there — but this function is also reachable from the public
+    :func:`journal_ready`, and the read path's rule is that a check which cannot
+    run keeps the graph branch (it never turns a search into a 500).
+    """
     # The DSN is keyed by its FINGERPRINT, never by value (#2903/#2796): this
     # dict is process-global and a raw DSN is secret material.
     from .record_writer import dsn_fingerprint
     from .record_writer import record_dsn as _resolve
 
-    dsn = _resolve(record_dsn) or ""
+    try:
+        dsn = _resolve(record_dsn) or ""
+    except Exception:
+        return None
     return (dsn_fingerprint(dsn) if dsn else "", scope.org_id,
             scope.graph_id, os.environ.get(RECORD_JOURNAL_ENV, ""))
 
@@ -585,6 +596,8 @@ def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
         return False
     clock = time.monotonic() if now is None else now
     key = _readiness_key(scope, record_dsn)
+    if key is None:
+        return False
     with _READINESS_LOCK:
         cached = _READINESS.get(key)
     if cached is not None and clock - cached[0] < READINESS_TTL_SECONDS:
@@ -649,6 +662,38 @@ def _journal_declaration_applies() -> bool:
 
 #: One warning per process for the multi-tenant refusal, like the undeclared one.
 _WARNED_MULTITENANT = False
+
+#: A THIRD absence, and the one an operator is most likely to cause: the journal
+#: IS declared and the tenancy IS declared, but the path cannot be counted
+#: (a typo, a reader deployment that does not mount the writer's volume). Keyed
+#: by path so the message can name the one to fix.
+_WARNED_UNMEASURABLE: set[str] = set()
+
+
+def _warn_readiness_unmeasurable(path: str | None) -> None:
+    """Say ONCE PER PATH that a declared journal could not be counted.
+
+    ⛔ WARNING, not DEBUG (#13331 review F2, point 3). The gate is CORRECTLY
+    off — a check that cannot run is not ready — but this is the one failure the
+    operator CAUSED, by declaring a path, and it was the quietest of the three:
+    "nothing declared" warns (`_warn_readiness_undeclared`) and "cannot be
+    attributed" warns (`_warn_readiness_multitenant`), so a typo in the path was
+    the only way to disable the dense leg with nothing in the default log. The
+    review priced exactly that: *"the dense leg is silently off for ever on that
+    box with no operator-visible signal in the default log level"*. Once per
+    path, because a read path must not log per read.
+    """
+    key = path or ""
+    with _WARN_LOCK:
+        if key in _WARNED_UNMEASURABLE:
+            return
+        _WARNED_UNMEASURABLE.add(key)
+    logging.getLogger(LOG_NAME).warning(
+        "record dense leg: %s declares %r, which this process cannot count — "
+        "it is missing, unreadable, or not a regular file. An uncountable "
+        "journal is NOT an empty one, so every tenant keeps the graph branch "
+        "until the path is fixed (#13331, #5090 Q2). Reported once per path.",
+        RECORD_JOURNAL_ENV, key)
 
 
 def _warn_readiness_multitenant() -> None:
@@ -720,10 +765,8 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
         # is the shape a mistyped value or an unmounted volume takes, and a `0`
         # here makes `unprojected` 0 for any tenant whose record holds a row —
         # i.e. the gate reports a journal it never counted as fully projected.
-        logging.getLogger(LOG_NAME).debug(
-            "record dense leg: the declared journal %r does not exist (or is "
-            "not a readable regular file), so this tenant's coverage is "
-            "UNMEASURED — keeping the graph branch", path)
+        # WARNED once per path, not DEBUG: see `_warn_readiness_unmeasurable`.
+        _warn_readiness_unmeasurable(path)
         return False
     conn = None
     try:

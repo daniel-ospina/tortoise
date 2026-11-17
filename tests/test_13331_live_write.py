@@ -22,6 +22,7 @@ import types
 import pytest
 
 from tortoise import live_write
+from tortoise.reconciliation import ReconciliationReport
 from tortoise.record_projection import JournalCoverage
 from tortoise.record_reconcile import (
     EXIT_CLEAN,
@@ -35,9 +36,7 @@ from tortoise.record_reconcile import (
     log_result,
     reconcile_record_and_cache,
 )
-from tortoise.reconciliation import ReconciliationReport
 from tortoise.residency import ResidencyDeclaration
-
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -466,6 +465,7 @@ def vector(monkeypatch):
     record_vector.reset_readiness_cache()
     monkeypatch.setattr(record_vector, "_WARNED_UNDECLARED", False)
     monkeypatch.setattr(record_vector, "_WARNED_MULTITENANT", False)
+    monkeypatch.setattr(record_vector, "_WARNED_UNMEASURABLE", set())
     yield record_vector
     record_vector.reset_readiness_cache()
 
@@ -675,6 +675,37 @@ def test_the_gate_refuses_a_process_global_journal_it_cannot_apply_to_every_tena
     monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
     assert vector.journal_ready(scope) is True
     assert measured == [1]
+
+
+def test_an_uncountable_declared_journal_is_LOUD_once_per_path(
+        vector, single_tenant, monkeypatch, tmp_path, caplog):
+    """⛔ Declaring a WRONG path must not be quieter than declaring NONE.
+
+    #13331 review F2 point 3 / F3. The gate is CORRECTLY off when it cannot
+    count the journal — but "correctly off and SILENT" is the shape the review
+    priced: *"the dense leg is silently off for ever on that box with no
+    operator-visible signal in the default log level."* "Nothing declared"
+    warns, and "cannot be attributed to a tenant" warns, so the one failure an
+    operator caused THEMSELVES (a typo in the path, an unmounted writer volume)
+    was the quietest of the three.
+    """
+    missing = tmp_path / "nope" / "events.jsonl"
+    monkeypatch.setenv(vector.RECORD_JOURNAL_ENV, str(missing))
+    scope = vector._Scope(org_id="org-1", graph_id="graph-1")
+
+    assert vector._measure_readiness(scope, record_dsn=None) is False
+    named = [rec for rec in caplog.records
+             if vector.RECORD_JOURNAL_ENV in rec.message
+             and "cannot count" in rec.message]
+    assert named and named[0].levelname == "WARNING", (
+        "a declared-but-uncountable journal disabled the dense leg silently — "
+        "the operator who declared it gets less signal than the one who did not")
+
+    caplog.clear()
+    assert vector._measure_readiness(scope, record_dsn=None) is False
+    assert not [rec for rec in caplog.records
+                if vector.RECORD_JOURNAL_ENV in rec.message], (
+        "the warning repeats on every read; a request path must log once")
 
 
 # ── 5. the journal count a READ path is allowed to make ────────────────────

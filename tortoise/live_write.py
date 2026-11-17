@@ -208,9 +208,12 @@ def write(event: Mapping[str, Any], *,
     if project is None:
         from . import record_writer
 
-        def project(record: Mapping[str, Any], seq: int | None) -> Any:
+        def _default_project(record: Mapping[str, Any],
+                             seq: int | None) -> Any:
             return record_writer.write_live_record(
                 record, durable=durable, seq=seq, tenant=tenant)
+
+        project = _default_project
     try:
         outcome = project(event, seq)
     except Exception as exc:
