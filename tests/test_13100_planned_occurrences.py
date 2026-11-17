@@ -661,6 +661,175 @@ class TestThePlanPipeline:
         assert again["id"] == created["id"]
         assert again.get("title") == "A title"
 
+    def test_create_plan_over_a_POSITIONLESS_plan_STAGES_it(self, sdk):
+        """A plan with no stage is not a plan the caller was promised.
+
+        ⛔ The re-mention arm returned the record unchanged and said "its
+        position is already its own" — false for the extractor-minted
+        ``core:plan`` Object, which carries NO position. `has_position` is
+        exactly the input the promotion gate is BOUNDED on (a position-less plan
+        suppresses nothing, deliberately), so the caller was told it had created
+        the shape that keeps a draft operator down while the suppression was
+        silently OFF (#13100 review round 3, F1(b)). The sibling test
+        (`test_create_plan_STAGES_a_positionless_live_holder`) pins both
+        spellings; THIS one pins the two consequences the fix is FOR — the
+        suppression is actually in force afterwards, and the STORED prop moved.
+        """
+        point = sdk.create_point("statement", "a live point")["id"]
+        bare = sdk.create_entity("object", "extractor plan",
+                                 objectKind=PO.PLAN_PIPELINE_KEY)["node"]
+        assert PO.plan_position(_stage(sdk, bare["id"])["stageId"])[
+            "has_position"] is False
+        staged = PO.create_plan(sdk, "extractor plan")
+        assert staged["id"] == bare["id"], (
+            "the create must re-mention the existing record, not mint a twin")
+        assert _stage(sdk, bare["id"])["stageId"] == PO.STAGE_SCHEDULED
+        # The consequence the reviewer named: the suppression the create's
+        # contract implies must actually be in force afterwards.
+        op = f"op-positionless-{bare['id']}"
+        _operator_over(sdk, (point, bare["id"]), op)
+        assert op not in _promote(sdk, point), (
+            "the create returned a plan whose position it had just staged, but "
+            "the operator over it was still promoted")
+        # ⛔ NOT `planned_without_occurrence(...)[0]["stage"] == "scheduled"`:
+        # that read is `pos["stageId"] or STAGE_SCHEDULED`, so a POSITION-LESS
+        # record reports `scheduled` by default and the assertion held with the
+        # fix reverted (#13100 review round 4, F3 — measured identical both
+        # ways). The STORED prop is the discriminating input.
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$o}) RETURN o.pipelineStageId",
+            params={"o": bare["id"]}).result_set[0][0] == PO.STAGE_SCHEDULED
+
+    def test_a_POSITIONED_bare_spelling_holder_is_BOUND_by_the_create(self, sdk):
+        """The create door must never hand back a plan no pipeline can bind.
+
+        ``is_plan_kind`` accepts both spellings; every writer's ``_resolve_plan``
+        requires the NAMESPACED one (a pipeline keys on it, #2767). A positioned
+        bare-kind record short-circuited the re-mention arm and was returned as a
+        SUCCESS, so the caller's very next write refused with "…which no pipeline
+        can bind … create it with `create_plan`" — which returned this same
+        record again: a refusal loop with no exit (#13100 review round 3,
+        F1(a)). The sibling test above covers the POSITION-LESS bare spelling
+        (staged on the way through); this one is the positioned one, where the
+        create must still repair the binding rather than report success.
+        """
+        g = sdk._get_proj().g
+        bare = sdk.create_entity("object", "bare but staged",
+                                 objectKind="plan")["node"]
+        # A BOUND but bare-kind plan: a declared stage id AND the pipeline key, so
+        # the position resolves and the record is not refused as unresolvable
+        # (that refusal is a different input and has its own arms above).
+        sdk.update_knowledge(bare["id"], pipelineStageId=PO.STAGE_SCHEDULED,
+                             pipelineStageKey=PO.PLAN_PIPELINE_KEY)
+        created = PO.create_plan(sdk, "bare but staged")
+        assert created["id"] == bare["id"]
+        assert g.query(
+            "MATCH (o:Object {id:$o}) RETURN o.objectKind",
+            params={"o": bare["id"]}).result_set[0][0] == PO.PLAN_PIPELINE_KEY, (
+            "the create returned a plan the writers cannot bind")
+        # The contract that a refusal loop broke: the returned plan is settlable.
+        assert PO.record_occurrence(sdk, bare["id"])["move"].applied
+
+    def test_a_SETTLED_plan_is_addressable_BY_NAME(self, sdk):
+        """The name coordinate must reach the settled plan the writers settle.
+
+        ``resolve_entity_id``'s NAME arm applies the currency predicate by
+        default, and since #13034 that predicate reads the position axis — so a
+        plan this module had just settled (``record_occurrence`` / ``settle_plan``
+        leave ``isClosed=True``) was unresolvable BY NAME. Every crafted
+        "already settled" refusal was therefore unreachable on the coordinate the
+        API advertises, and the one that fired instead advised ``create_plan``,
+        which resolves LIVE holders only — so following it minted a SECOND plan
+        under the same name (#13100 review round 3, F2). ``live_only=False`` is
+        the same mode ``pipeline._resolve_object`` takes, for the same reason.
+        """
+        plan = PO.create_plan(sdk, "Weekly board review")
+        PO.record_occurrence(sdk, plan["id"])
+        assert _stage(sdk, plan["id"])["isClosed"] is True
+        with pytest.raises(ValueError, match="already settled") as exc:
+            PO.record_occurrence(sdk, "Weekly board review")
+        assert "no plan Object" not in str(exc.value)
+        with pytest.raises(ValueError, match="already settled"):
+            PO.settle_plan(sdk, "Weekly board review", PO.STAGE_CANCELLED)
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Object {name:$n}) RETURN count(o)",
+            params={"n": "Weekly board review"}).result_set[0][0] == 1, (
+            "the settled record is the only plan of that name; the refusal must "
+            "not have prescribed a twin")
+
+    def test_a_name_held_by_a_SETTLED_and_a_LIVE_plan_resolves_the_LIVE_one(
+            self, sdk):
+        """Widening the name arm must not over-block the shape this module mints.
+
+        `create_plan`'s own pre-flight resolves LIVE holders only, so after a
+        settling, `create_plan(<same name>)` mints a live successor and the name
+        is held by one settled plan AND one open one (legal, #3590 D2).
+        `resolve_entity_id`'s documented rule is "exactly one LIVE holder -> its
+        id", so that coordinate must keep resolving the OPEN plan: an
+        unconditional `live_only=False` saw two holders and refused as ambiguous,
+        turning a by-name call that worked into a permanent refusal with only ids
+        as an exit (#13100 review round 4, F2).
+        """
+        first = PO.create_plan(sdk, "Quarterly review")
+        PO.settle_plan(sdk, first["id"], PO.STAGE_MISSED)
+        second = PO.create_plan(sdk, "Quarterly review")
+        assert second["id"] != first["id"]
+        PO.record_occurrence(sdk, "Quarterly review")
+        assert _stage(sdk, second["id"])["stageId"] == PO.STAGE_HELD
+        assert _stage(sdk, first["id"])["stageId"] == PO.STAGE_MISSED, (
+            "the settled predecessor must not be the record the write landed on")
+
+    def test_two_SETTLED_holders_of_one_name_still_refuse(self, sdk):
+        """With nothing live, ambiguity is still an answer — never a silent pick."""
+        from tortoise.entity_identity import AmbiguousEntityName
+
+        a = PO.create_plan(sdk, "Duplicated ending")
+        PO.settle_plan(sdk, a["id"], PO.STAGE_MISSED)
+        b = PO.create_plan(sdk, "Duplicated ending")
+        PO.settle_plan(sdk, b["id"], PO.STAGE_CANCELLED)
+        with pytest.raises(AmbiguousEntityName):
+            PO.record_occurrence(sdk, "Duplicated ending")
+
+    def test_a_STATUS_RETIRED_plan_is_refused_before_any_write(self, sdk):
+        """The name arm drops the STATUS axis, so it is gated explicitly.
+
+        `live_only=False` disables the whole currency predicate — the lifecycle
+        word and the `outdated` flag as well as the position pair — while
+        `plan_position` reads only the position axis. Without this gate a plan
+        retired with a status word resolved, reported `ended: False`, and was
+        WRITTEN to: a durable, journaled settlement of a record the currency rule
+        calls ended (#13100 review round 4, F1 — measured).
+        """
+        plan = PO.create_plan(sdk, "Retired plan")
+        sdk.update_knowledge(plan["id"], status="archived")
+        events = ("MATCH (:Event)-[:aboutObject]->(:Object {id:$o}) "
+                  "RETURN count(*)")
+        with pytest.raises(ValueError, match="already settled") as exc:
+            PO.record_occurrence(sdk, "Retired plan")
+        assert "archived" in str(exc.value)
+        with pytest.raises(ValueError, match="already settled"):
+            PO.settle_plan(sdk, "Retired plan", PO.STAGE_CANCELLED)
+        assert sdk._get_proj().g.query(
+            events, params={"o": plan["id"]}).result_set[0][0] == 0, (
+            "the refused call left an :Event behind")
+        assert _stage(sdk, plan["id"])["stageId"] == PO.STAGE_SCHEDULED, (
+            "the refused call moved the retired plan's stage")
+
+    def test_the_LEGACY_outdated_flag_is_the_same_gate(self, sdk):
+        """The other half of the status axis — `outdated` is not a vocabulary.
+
+        Written straight to the store: `outdated` is server-managed, no in-repo
+        `update_knowledge` accepts it (measured — the door refuses it), which is
+        exactly why the gate must read it as an INPUT rather than trust that the
+        writers keep it in step.
+        """
+        plan = PO.create_plan(sdk, "Outdated plan")
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$o}) SET o.outdated = true",
+            params={"o": plan["id"]})
+        with pytest.raises(ValueError, match="outdated marker set"):
+            PO.record_occurrence(sdk, plan["id"])
+
     def test_an_unresolvable_stage_never_reports_a_stale_outcome(self, sdk):
         """`outcome` is the STAGE's outcome; with no resolution it is None, never
         the stored `pipelineOutcome` prop (which would pair `ended: False` with

@@ -277,7 +277,11 @@ def create_plan(sdk, name: str, *, title: str | None = None,
                 at: str | None = None, **props) -> dict:
     """Create a plan Object and put it on the ``scheduled`` stage.
 
-    Returns the created node (``create_entity``'s ``node`` payload).
+    Returns the created node (``create_entity``'s ``node`` payload), or — on the
+    has-position re-mention arm, which writes nothing — the existing record's own
+    stored properties. ⛔ Neither payload promises a POSITION: the door-props
+    node this call returns from the create path is the pre-advance shape, so a
+    caller that needs the stage reads it back (``pipeline.current_stage``).
 
     The Object is created with the NAMESPACED kind so the pipeline can bind to
     it, then advanced to ``scheduled`` from birth: a plan with no stage would
@@ -288,11 +292,19 @@ def create_plan(sdk, name: str, *, title: str | None = None,
 
     ⛔ The returned node is only a *staged* plan if the advance actually applied.
     A create **name** is a natural key that re-mentions its single live holder
-    (#452), so this call can land on a plan that already exists — and a plan that
-    is settled cannot be restaged. That case RAISES, naming the stage it is
-    actually at and the route to a new record; an existing plan that is already
-    ``scheduled`` and open is a no-op success, because that is exactly what was
-    asked for.
+    (#452), so this call can land on a plan that already exists. THREE arms, and
+    only the second leaves the graph untouched:
+
+    * **live, open and POSITION-LESS** (the extractor-minted `core:plan`): the
+      call falls through the re-mention and STAGES the record — "created" is not
+      true of a plan with no position, and a position-less plan is exactly the
+      shape the promotion gate is bounded on, so returning it would leave the
+      suppression OFF;
+    * **live, open and already ``scheduled``**: a no-op success, nothing
+      re-staged, because that is exactly what was asked for;
+    * **settled / ENDED** — the durable marker, a terminal stage, or a retired
+      status word: RAISES, naming the stage it is at and the route to a new
+      record.
     """
     from . import pipeline
 
@@ -380,16 +392,28 @@ def create_plan(sdk, name: str, *, title: str | None = None,
             # "use a distinct name", which would be a no-op for the caller's
             # actual problem.
             raise ValueError(_unresolvable_message(name, _pos, _cur))
-        # ⛔ ONLY A POSITIONED, unended plan short-circuits. A live plan holder
-        # with NO position has not been staged, and returning it as a successful
-        # re-mention told the caller a plan was on the books when nothing was:
-        # an operator over it was then PROMOTED (a plan with no position does not
-        # suppress — by design), and for the bare `plan` spelling the record could
-        # never be bound at all, so `_resolve_plan`'s "create it with
-        # `create_plan`" remedy stayed refused after being issued. Such a holder
-        # FALLS THROUGH to the normal create+advance below, which re-mentions it
-        # (same kind: `plan` and `core:plan` are ONE kind) and stages it.
-        if _pos["has_position"]:
+        # ⛔ ONLY A POSITIONED, unended plan of the BINDABLE spelling short-circuits.
+        # A live plan holder with NO position has not been staged, and returning
+        # it as a successful re-mention told the caller a plan was on the books
+        # when nothing was: an operator over it was then PROMOTED (a plan with no
+        # position does not suppress — by design). Such a holder FALLS THROUGH to
+        # the normal create+advance below, which re-mentions it (same kind: `plan`
+        # and `core:plan` are ONE kind) and stages it.
+        #
+        # ⛔ AND THE BARE SPELLING FALLS THROUGH EVEN WHEN IT HAS A POSITION.
+        # `is_plan_kind` accepts `plan`, but every writer's `_resolve_plan`
+        # requires the NAMESPACED kind (a pipeline keys on it, #2767), so
+        # returning a positioned bare-kind record as a create's SUCCESS payload
+        # left the caller holding a plan whose very next write refused with
+        # "…no pipeline can bind … create it with `create_plan`" — which returned
+        # this same record again: a refusal loop with no exit, and the docstring
+        # contract ("only a *staged* plan if the advance actually applied") broken
+        # on the first arm (#13100 review round 3, F1(a)). Falling through BINDS
+        # it: `create_entity` re-mentions the record and the door's
+        # `objectKind` is the namespaced one, so the kind is repaired rather than
+        # reported as a success.
+        if (_pos["has_position"]
+                and str.__str__(_kind) == PLAN_PIPELINE_KEY):
             # The documented re-mention. Return the record's OWN node payload —
             # the same SHAPE the create path returns (`create_entity`'s `node`),
             # so a caller reading `title`/`description` does not work on one arm
@@ -399,6 +423,7 @@ def create_plan(sdk, name: str, *, title: str | None = None,
                 "MATCH (o:Object {id:$o}) RETURN properties(o)",
                 params={"o": _existing}).result_set
             return dict(_node[0][0]) if _node else {"id": _existing}
+
 
     created = sdk.create_entity("object", name, **door_props)
     node = created.get("node") or {}
@@ -660,12 +685,55 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
     The SAME resolver the stage write uses (``pipeline._resolve_object``), so the
     link and the stage move cannot address two carriers of one name (#3590 D2 /
     #12120).
+
+    ⛔ ``live_only=False``, for the reason ``pipeline._resolve_object`` states
+    (#13034): the position axis's own read/write must be able to name a CLOSED
+    object, or the terminal guard becomes unreachable by name. This module SETTLES
+    plans — ``record_occurrence`` leaves ``isClosed=True`` — so a live-only
+    coordinate could not address a settled plan by name at all, and the three
+    refusals crafted below ("already settled", the closed-marker arm,
+    ``_unresolvable_message``) were dead code on the coordinate the API
+    advertises. Worse, the refusal they never got to reach advised
+    ``create_plan``, which resolves LIVE holders only — so following the advice
+    minted a SECOND plan under the same name instead of reporting the settled one
+    (#13100 review round 3, F2).
+
+    ⛔ WIDEN ONLY WHEN THE LIVE ARM FINDS NOTHING. `live_only` drops the WHOLE
+    currency predicate — the lifecycle word and the ``outdated`` flag as well as
+    the position pair (``live._terminal_excluded``) — and `resolve_entity_id`'s
+    documented rule is "exactly one LIVE holder -> its id". Widening
+    unconditionally over-blocked a name this module's own ``create_plan``
+    produces (a settled plan plus its same-name live successor, legal under #3590
+    D2): where the live arm resolved the one open plan, the widened arm saw two
+    holders and refused as ambiguous, so a by-name call that worked stopped
+    working, permanently, with only ids as an exit (#13100 review round 4, F2).
+    Live-first keeps a unique open plan resolving and still reaches the settled
+    record when nothing is live.
+
+    ⛔ AND THE DROPPED STATUS AXIS IS GATED EXPLICITLY, because `plan_position`
+    reads the POSITION axis only: a plan retired by a status word
+    (``archived`` / ``deprecated`` / ``superseded``) or by the legacy
+    ``outdated`` flag would otherwise resolve here, report ``ended: False`` and be
+    WRITTEN to — a durable, journaled settlement of a record the currency rule
+    calls ended, and in the ``supersede_knowledge`` shape the occurrence would
+    land on the retired predecessor whose successor never sees it (#13100 review
+    round 4, F1).
     """
     from . import pipeline
     from .entity_identity import resolve_entity_id_same_entity
+    from .live import is_terminal_status
 
     graph = sdk._get_proj().g
-    plan_id = resolve_entity_id_same_entity(graph, "Object", plan_ref)
+    # `record_misses=False` on the first probe: it is SPECULATIVE — the caller
+    # retries the same coordinate over the wider arm — and a successful widened
+    # resolve must not leave a phantom `no-live-holder` refusal in the R8 record
+    # for a name that resolved (#12047 N6/N1). The widened call keeps the
+    # default, so a genuinely absent name is still recorded as a miss.
+    plan_id = resolve_entity_id_same_entity(graph, "Object", plan_ref,
+                                            record_misses=False)
+    if plan_id is None:
+        plan_id = resolve_entity_id_same_entity(graph, "Object", plan_ref,
+                                                live_only=False)
     cur = pipeline.current_stage(graph, plan_id) if plan_id else {}
     if not plan_id or not cur:
         raise ValueError(
@@ -678,9 +746,11 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
     # only then hit the pipeline's kind-binding refusal — a refusal that leaves
     # an orphan occurrence behind and names the wrong problem (#13100 review).
     rows = graph.query(
-        "MATCH (o:Object {id:$o}) RETURN o.objectKind",
+        "MATCH (o:Object {id:$o}) RETURN o.objectKind, o.status, "
+        "coalesce(o.outdated, false)",
         params={"o": plan_id}).result_set
-    object_kind = rows[0][0] if rows else None
+    object_kind, stored_status, outdated = (rows[0][:3] if rows
+                                           else (None, None, False))
     if not is_plan_kind(object_kind):
         raise ValueError(
             f"Refused: {plan_ref!r} is not a plan — its kind is "
@@ -703,6 +773,19 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
             f"`create_plan` (kind {PLAN_PIPELINE_KEY!r}), or update its "
             f"objectKind to {PLAN_PIPELINE_KEY!r} before recording the "
             f"occurrence. Nothing has been written.")
+    if is_terminal_status(stored_status, bool(outdated)):
+        # ⛔ The STATUS axis, which the widened name arm no longer filters: an
+        # archived/deprecated/superseded plan (or the legacy `outdated` flag) is
+        # a record the currency rule calls ENDED, so it is not one this write may
+        # settle. `plan_position` cannot answer this — it reads the position axis
+        # only — so the gate lives here, at the ONE resolver both writers share,
+        # and lands before any write.
+        raise ValueError(
+            f"Refused: the plan {plan_ref!r} is already settled — its status is "
+            f"{stored_status!r}"
+            f"{' (outdated marker set)' if outdated else ''}, so the record has "
+            f"ENDED. WHAT TO DO: a plan ends once; a new incarnation is a NEW "
+            f"plan, so give it a distinct name.")
     return plan_id, cur
 
 
