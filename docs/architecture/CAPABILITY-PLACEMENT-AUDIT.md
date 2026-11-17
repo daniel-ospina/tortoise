@@ -93,8 +93,9 @@ named, so nothing is hidden behind the omission.** Post-D10 a document **is** a 
 (`projection/edges.py:834-843`), so the label only exists on a graph that has not yet run the relabel. Its only
 readers are that migration's own whole-node property read (`migrate_kinds.py:296-300`, `MATCH
 (n:{_LEGACY_DOCUMENT_LABEL}) RETURN ID(n), n.id, n.url, …` — capability **`none`**) and the deprecated-alias
-acceptance at `projection/edges.py:2965-2966`; its only writers are the relabel itself (`migrate_kinds.py:430-437`,
-`SET n:Source … REMOVE n:Document`) and its enumerator at `:297`. **No placement verdict is available on it**: the
+acceptance at `projection/edges.py:2965-2966`; its only writer is the relabel itself (`migrate_kinds.py:430-437`,
+`SET n:Source … REMOVE n:Document`) — `:297`/`:296-300` is its ENUMERATOR, a reader, named two sentences above and
+deliberately not repeated here as a writer. **No placement verdict is available on it**: the
 label is removed by the migration, so "what may be resident" is not a question that has an answer — the population
 question is "has this graph been relabelled yet", which is `#5140`'s. ⛔ An earlier draft gave it its own censused
 row (the first `:Document` row, immediately before this one) while giving it no §2 reader census and no §3 verdict,
@@ -156,8 +157,9 @@ marked **none**.
 
 **Verdict: `graph`.** Seventeen reader rows, **fourteen of them capability-carrying** (three are deliberately
 `none`: `search_engine.py:4350-4352`, a plain label scan; `domain_validators.py:105`, a property-equality join;
-and the whole-node accessor family above), across six files (`projection/propagation.py`,
-`sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`, `domain_validators.py`); a
+and the whole-node accessor family above), **fourteen of them across six files** (`projection/propagation.py`,
+`sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`, `domain_validators.py`) — the three
+`none` rows bring `record_serve.py`, `projection/__init__.py` and `record_reconcile.py` as well; a
 record-backed copy could not answer any of them without re-implementing belief
 propagation, the **variable-length hop walk**, the fulltext index or HNSW in SQL (which is `#13082` Phase 2 and its stop condition).
 
@@ -220,7 +222,7 @@ capability **`none`**, so they add no capability and change no verdict — they 
 | `tortoise/sdk.py:2917`, `:3499`, `:52258`, `:52381` | the same `CONTAINS` walk from the SDK door | **adjacency** |
 | `tortoise/session_reinjection.py:561` | `MATCH (s:Session)-[:CONTAINS]->(seed)` — multi-session evidence pooling | **adjacency** |
 | `tortoise/activation_scorecard.py:395` | `(s:Session)-[:CONTAINS]->(p:Point)` | **adjacency** |
-| `tortoise/session_schema.py:855-862`, `:892`, `:906-917` (`audit_session_retrofit`, reached by the shipped CLI `tools/session_retrofit_audit.py`) | the short-turns query counts `stored_turns` through `OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point)` before returning `s.capture_ok, s.capture_extractor, s.harness, s.capture_lane` (the RETURN list is FOUR properties, not two); `WHERE s.capture_ok = true RETURN count(s)`; and the entity-link under-count, `OPTIONAL MATCH (s)-[r1:aboutObject]->()` + `(s)-[:CONTAINS]->(t:Point)-[r2:aboutObject]->()`, `WHERE live_edges > s.entity_links_created` | **adjacency** |
+| `tortoise/session_schema.py:855-862`, `:892`, `:906-917` (`audit_session_retrofit`, reached by the shipped CLI `tools/session_retrofit_audit.py`) | the short-turns query counts `stored_turns` through `OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point)` before returning `s.capture_ok, s.capture_extractor, s.harness, s.capture_lane` — **four of the seven expressions** in that RETURN (`s.id, s.turn_count, stored_turns` precede them), so the guard against reading it as a two-property projection is "four of seven", not "four, not two"; `WHERE s.capture_ok = true RETURN count(s)`; and the entity-link under-count, `OPTIONAL MATCH (s)-[r1:aboutObject]->()` + `(s)-[:CONTAINS]->(t:Point)-[r2:aboutObject]->()`, `WHERE live_edges > s.entity_links_created` | **adjacency** |
 | `tortoise/quota.py:1155` | `MATCH (s:Session) RETURN count(s)` | **none** |
 
 **Verdict: `graph`.** ⚠️ Its **property families are another matter, and the family SPLITS.**
@@ -409,14 +411,23 @@ figure is derived from the width, never read off the rendered column.
 | … of which `embedding` | | 474,348 (rendered) | **101,376** (66 × 384 × 4 B, `float32`) | **69.4 %** |
 | … of which `content` | | 93,287 (exact — a string) | 93,287 | **13.7 %** |
 | … of which `story_arc` (this arm only) | | 90,000 (exact) | 90,000 | 13.2 % |
-| `:GraphEvent` | 67 | **12,768** | 12,768 | **1.87 %** |
-| `:Source` | 2 | 916 | 916 | 0.13 % |
-| `:Event` | 3 | 680 | 680 | 0.10 % |
-| `:Session` | 7 | 303 | 303 | 0.04 % |
-| `:Object` | 2 | 198 | 198 | 0.03 % |
-| `:Subject` | 2 | 139 | 139 | 0.02 % |
-| `:GraphEventMeta` / `:EpMeta` | 2 | 4 | 4 | 0.001 % |
+| `:GraphEvent` | 67 | **12,768** | 12,768 (text-dominated — see the caption) | **1.87 %** |
+| `:Source` | 2 | 916 | 916 (text-dominated) | 0.13 % |
+| `:Event` | 3 | 680 | 680 (text-dominated) | 0.10 % |
+| `:Session` | 7 | 303 | 303 (text-dominated) | 0.04 % |
+| `:Object` | 2 | 198 | 198 (text-dominated) | 0.03 % |
+| `:Subject` | 2 | 139 | 139 (text-dominated) | 0.02 % |
+| `:GraphEventMeta` / `:EpMeta` | 2 | 4 | 4 (text-dominated) | 0.001 % |
 | **total (rendered)** | | **683,022** | | |
+
+⚠️ **The `stored footprint` cells above the `:Point` rows are the RENDERED figure, and they are a few percent
+low — read them as rendered.** The two columns coincide only for a **string**: an integer scalar stores 8 bytes
+while rendering shorter, so e.g. `:GraphEvent.seq` is 67 × 8 = **536 B stored** against **125 B rendered**
+(`measurement-before.json`), and the label totals inherit that gap. Seven of these labels are text-dominated, so
+the error is within a few percent and **no conclusion in §4 or §5 depends on it** — but a cell that is neither a
+rendered nor a stored figure is exactly what this table exists to avoid, so it is labelled rather than implied.
+The `:Point` rows, where the vector and the prose live, are the ones that are exact (a string) or width-derived
+(the vector).
 
 (Percentages are of the rendered total, 683,022 — the only total the instrument can produce without a
 per-type conversion for every property. They are used for SHAPE, not for a billing estimate.)
@@ -490,11 +501,15 @@ records the finding and the number; it does not widen another issue's pin.
 ⛔ **And the fix must be a projection-only deny, not a fold deny — but for a narrower reason than an earlier
 draft gave, and that draft's mechanism was wrong.** ⚠️ **An earlier draft said a `_POINT_DENY` entry would make a
 `rebuild_all` DELETE the property from every legacy `:Point`. That is false.** `_POINT_DENY`
-(`projection/entities.py:2472`) has one operational consumer: it is passed as a skip set into
+(`projection/entities.py:2472`) has one operational consumer on the WRITE path: it is passed as a skip set into
 `_persist_extra_props(…, self._POINT_HANDLED | self._POINT_DENY, …)` at `:3183-3192`, which **drops the key from
-the `SET n += $extra` map** — nothing is REMOVEd — plus a warning check at `:3228`. No code path derives a
-`REMOVE`/`DELETE` from that set (`rg -n '_POINT_DENY' tortoise/` returns the definition, that call site, and
-comments).
+the `SET n += $extra` map** — nothing is REMOVEd. It has three other executable readers, and naming them is the
+point: two warning filters in the same file (`:3228`, `for key in self._POINT_DENY - self._POINT_HANDLED`; `:3278`,
+`or key in self._POINT_DENY or key in self._META_KEYS`) and two in `tortoise/consistency.py` (`:136` re-exports it,
+`:260` builds `_DENY_REASON` entries from it). ⚠️ **An earlier draft of this paragraph wrote "`rg -n '_POINT_DENY'
+tortoise/` returns the definition, that call site, and comments" — that is false: it returns 20 hits across four
+files, including the four sites just named.** Verified by opening all four: **none of them derives a
+`REMOVE`/`DELETE`**, so the conclusion stands and the evidence sentence around it did not.
 
 **The real reason the fold deny is the wrong instrument is a different one, and the code names it.** The
 destruction the tree actually documents is a **whole-graph restore wipe** — `MATCH (n) DETACH DELETE n`, which
@@ -502,7 +517,8 @@ destruction the tree actually documents is a **whole-graph restore wipe** — `M
 all: copy that prose out first, because the wipe destroys the only copy"* (`projection/entities.py:2327-2333`,
 §17.2, `#11325`). That hazard is **independent of which deny carries the entry**, which is why a fold deny does not
 mitigate it. What does separate the two denies is **which payload the key arrives in**: the journal fold handles a
-payload key (`_POINT_DENY` is *"for payload keys the replay must not re-apply"*, `:1826`), while this route's key
+payload key (`_POINT_DENY`, whose own comment at `:1826-1827` describes it as the list *"for payload keys the
+replay DELIBERATELY drops"*), while this route's key
 arrives in a **record row's `props` tail** and is denied by `_props_from_row`'s `tail_denied` (`cache_projection.py:2710`).
 
 ⚠️ **And a graph-side clear DOES ship — scoped, and not to this population.** `update_point(<id>, story_arc=None)`
