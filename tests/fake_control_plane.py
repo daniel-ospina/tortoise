@@ -2045,6 +2045,20 @@ class FakeControlPlane:
                 f"query_all: select must include the cursor column {cursor!r} "
                 "— the cursor is read from the rows to continue the walk")
         del page_size, max_pages  # no paging: the fake is uncapped
+        # ⛔ READ THROUGH `query_with_total` WHEN THE SEAM HAS IT — the real walk
+        # does (``supabase_control.py:679``), and a fake that bypassed it would
+        # SHADOW a subclass's total-aware override: the override becomes dead
+        # code and its test stays green while exercising the other branch. That
+        # defect was measured once already on this very fake (`test_billing`'s
+        # `_Cp`, which had to grow a `query_all = None` hatch because of it).
+        # No `limit`: the double is uncapped, so one page IS the whole set and
+        # certifying it is the honest answer.
+        total_aware = getattr(self, "query_with_total", None)
+        if callable(total_aware):
+            rows, _total = total_aware(
+                table, select=select, filters=filters, order=cursor,
+                timeout=timeout, count_exact=True)
+            return list(rows), True
         return list(self.query(table, select=select, filters=filters,
                                timeout=timeout)), True
 

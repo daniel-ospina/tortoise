@@ -3345,20 +3345,24 @@ class TestReconcileSweep:
             enumeration correctly refuses — so this double states one, the
             only thing a server-side count can supply (#5388).
 
-            ⛔ ``query_all = None`` ON PURPOSE: this test exists to exercise the
-            TOTAL-AWARE leg, and ``_enumerate_billed_orgs`` prefers
-            ``query_all`` whenever the seam has it. ``FakeControlPlane`` gained
-            that method for #13205, so without this the ``query_with_total``
-            override below became dead code and this test stayed green while
-            testing the other branch — the total-certification leg's only
-            remaining coverage was its refusal arm."""
-
-            query_all = None
+            ⛔ This test exercises the TOTAL-AWARE leg. ``_enumerate_billed_orgs``
+            prefers ``query_all`` whenever the seam has it, and ``FakeControlPlane``
+            gained that method for #13205 — so ``query_all`` READS THROUGH
+            ``query_with_total`` when it is callable (mirroring the real walk at
+            ``supabase_control.py:679``). Without that dispatch the override below
+            was dead code and this test stayed green while testing the other
+            branch."""
 
             def query_with_total(self, table, **kw):
+                total_aware_calls.append(table)
                 kw.pop("count_exact", None)
                 rows = self.query(table, **kw)
                 return rows, len(rows)
+
+        #: Pins that the TOTAL-AWARE leg is the one this test walks. Without it
+        #: the assertion is vacuous: bypassing the fake's `query_all` dispatch
+        #: (so this override is never called) left the test green (measured).
+        total_aware_calls: list[str] = []
 
         cp = _Cp({"organizations": [{
             "id": org_id,
@@ -3387,6 +3391,10 @@ class TestReconcileSweep:
         assert [d["direction"] for d in summary["drift"]] == ["up"]
         assert summary["drift"][0]["from_max_nodes"] == 25000
         assert summary["drift"][0]["to_max_nodes"] == 100000
+        assert "organizations" in total_aware_calls, (
+            "the enumeration did not take the TOTAL-AWARE leg — a `query_all` "
+            "that bypasses `query_with_total` leaves this override dead and the "
+            "test green while exercising the other branch (#13205)")
         row = cp.tables["organizations"][0]
         assert row["tier"] == "pro", "the org row was not repaired"
         assert row["graph_size_cap"] == 100000, (
