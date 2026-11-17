@@ -222,6 +222,41 @@ class TestThePlanPipeline:
             "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
             params={"p": plan["id"]}).result_set[0][0] == 0
 
+    def test_a_stage_BESIDE_A_CLEARED_OR_FOREIGN_KEY_is_unadvanceable(self, sdk):
+        """The stored `pipelineStageKey` is part of the resolution.
+
+        `pipeline.advance_stage` resolves the current stage only when
+        `cur_key == pipeline_key`, so a stage id beside a cleared or foreign key is
+        exactly as unadvanceable as an unknown id — and a pre-check that read the
+        id alone wrote and journaled the Event first, with every retry compounding
+        it.
+        """
+        g = sdk._get_proj().g
+        for label, mutate in (
+                ("cleared", "SET p.pipelineStageKey=null"),
+                ("foreign", "SET p.pipelineStageKey='core:goal'")):
+            plan = PO.create_plan(sdk, f"key {label}")
+            g.query(f"MATCH (p:Object {{id:$p}}) {mutate}",
+                    params={"p": plan["id"]})
+            for _ in range(2):
+                with pytest.raises(ValueError, match="already settled"):
+                    PO.record_occurrence(sdk, plan["id"])
+            assert g.query(
+                "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+                params={"p": plan["id"]}).result_set[0][0] == 0, label
+
+    def test_a_nested_props_map_cannot_park_a_position_at_creation(self, sdk):
+        """`create_entity` flattens `props={...}`, so the guard must read the map
+        the DOOR writes — not the kwargs shape."""
+        g = sdk._get_proj().g
+        for label, nested in (("stage", {"pipelineStageId": "held"}),
+                              ("closed", {"isClosed": True})):
+            with pytest.raises(ValueError, match="cannot be set on a plan at CREATION"):
+                PO.create_plan(sdk, f"phantom {label}", props=nested)
+            assert g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
+                           params={"n": f"phantom {label}"}
+                           ).result_set[0][0] == 0, label
+
     def test_the_gate_reads_the_RESOLVED_end_of_a_plan(self, sdk):
         """R2's other direction: a plan that ENDED must not suppress for ever."""
         point = sdk.create_point("statement", "a live point")["id"]

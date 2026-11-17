@@ -611,11 +611,13 @@ _EVENT_LIFECYCLE_STATE_REFUSAL = (
     "record a correction, write a NEW :Event — a dated fact is corrected by a "
     "later fact, never by a status flip on an earlier one. For ingest "
     "bookkeeping use `eventStatus` (`pending` -> `indexed`), which is a plain "
-    "prop and not a lifecycle. To un-mark a legacy status on an existing Event, "
+    "prop and not a lifecycle. To un-mark a legacy status on a plain :Event, "
     "pass `status=None` to the UPDATE door (`update_knowledge`) — ⛔ it is the "
     "one door that REMOVES a property; the record doors (`add_event`, "
     "`emit_belief`) drop a null on the way to the fold, so a clear sent there "
-    "writes nothing."
+    "writes nothing. On a :Point:Event HYBRID that door refuses `None` (the "
+    "Point vocabulary has no null word), so clear the hybrid through its Point "
+    "door: `update_point(id, status='live')`."
 )
 
 

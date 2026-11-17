@@ -147,8 +147,14 @@ _STAGE_OWNED_PROPS: tuple[str, ...] = (
 )
 
 
+#: "the caller did not supply the stored key" — distinct from "the key is
+#: absent on the node", which is a real (and unadvanceable) state.
+_KEY_UNSPECIFIED = object()
+
+
 def plan_position(stage_id, slot=None, outcome=None, *,
-                  is_closed=False, declared: dict | None = None) -> dict:
+                  is_closed=False, declared: dict | None = None,
+                  pipeline_key=_KEY_UNSPECIFIED) -> dict:
     """The plan's current position, resolved the way the WRITE resolves it.
 
     ⛔ This is the ONE answer to "is this plan still open, ended, or
@@ -168,7 +174,12 @@ def plan_position(stage_id, slot=None, outcome=None, *,
       pipeline;
     * a ``stage_id`` that does not resolve at all — the writer refuses any move
       on such a plan (`unresolvable-current-stage`), so a pre-check must not
-      attempt one either.
+      attempt one either. ⛔ **The stored ``pipelineStageKey`` is part of that
+      resolution**, not decoration: the writer resolves the current stage only
+      when ``cur_key == pipeline_key`` (`pipeline.advance_stage`), so a stage id
+      beside a MISSING or FOREIGN key is exactly as unadvanceable as an unknown
+      id — reading the id alone let a refused call write and journal the
+      ``:Event`` first, with every retry compounding it.
 
     ``has_position`` says whether any stage was recorded: a plan with NO position
     (an extractor-minted ``core:plan`` Object) is not evidence of anything, so it
@@ -190,13 +201,31 @@ def plan_position(stage_id, slot=None, outcome=None, *,
     pipe = _pipeline._pipeline_from_decl(
         PLAN_PIPELINE_KEY, declared if declared is not None else PLAN_PIPELINE_DECL)
     stage = pipe.by_id(stage_id) if stage_id else None
+    # ⛔ The key must be EXACTLY this pipeline's. `None` is not "unjudged" — a
+    # stage id beside a cleared or foreign key is precisely what the writer
+    # refuses as `unresolvable-current-stage` (it resolves the current stage only
+    # when `cur_key == pipeline_key`), so it is unresolvable here too. Only a
+    # caller that did not supply the key at all gets the benefit of the doubt.
+    if pipeline_key is _KEY_UNSPECIFIED:
+        bound_elsewhere = False
+    else:
+        bound_elsewhere = (pipeline_key is None
+                           or str.__str__(pipeline_key) != PLAN_PIPELINE_KEY)
+    unresolvable = bool(stage_id) and (stage is None or bound_elsewhere)
     return {
         "stageId": stage_id,
-        "slot": stage.slot if stage is not None else slot,
-        "outcome": (stage.outcome if stage is not None else outcome) or None,
+        "slot": stage.slot if stage is not None and not bound_elsewhere else slot,
+        # ⛔ An UNRESOLVABLE row must not report a stale outcome: `ended: False`
+        # beside `outcome: 'lost'` is the same mixed-cache contradiction round 3
+        # removed from `ended`, one field over.
+        "outcome": (None if unresolvable
+                    else ((stage.outcome if stage is not None else outcome)
+                          or None)),
         "has_position": bool(stage_id),
-        "ended": bool(is_closed) or (stage is not None and stage.is_terminal),
-        "unresolvable": bool(stage_id) and stage is None,
+        "ended": bool(is_closed) or (stage is not None
+                                     and not bound_elsewhere
+                                     and stage.is_terminal),
+        "unresolvable": unresolvable,
     }
 
 
@@ -219,14 +248,24 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     # reverse order a `create_plan(..., objectKind="core:goal")` wrote a
     # core:goal Object and THEN raised the pipeline's kind-binding refusal — a
     # refused create that left a record in the graph behind it.
-    shadowed = sorted(k for k in _STAGE_OWNED_PROPS if k in props)
+    # ⛔ The guard must read the map the DOOR will write, not the kwargs shape:
+    # `create_entity` flattens a nested `props=` (top level wins), so a guard that
+    # tested the top level only let `create_plan(props={"pipelineStageId": …})`
+    # park a position on a fresh plan — the exact record the guard exists to
+    # prevent, and one the Q5 read then reports as ended-and-never-happened.
+    merged: dict[str, Any] = dict(props)
+    _nested = merged.get("props")
+    if isinstance(_nested, dict):
+        for _k, _v in _nested.items():
+            merged.setdefault(_k, _v)
+    shadowed = sorted(k for k in _STAGE_OWNED_PROPS if k in merged)
     if shadowed:
         raise ValueError(
             f"Refused: {', '.join(shadowed)} cannot be set on a plan at CREATION "
             f"— the stage write owns them. WHAT TO DO: create the plan, then "
             f"advance it (`record_occurrence` / `settle_plan`), or write the "
             f"position through the pipeline's own verb.")
-    door_props: dict[str, Any] = {**props, "objectKind": PLAN_PIPELINE_KEY}
+    door_props: dict[str, Any] = {**merged, "objectKind": PLAN_PIPELINE_KEY}
     if title is not None:
         door_props.setdefault("title", title)
     created = sdk.create_entity("object", name, **door_props)
@@ -282,7 +321,8 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     # and journaled before the terminal guard refused, so every retry compounded
     # an occurrence behind a refusal.
     pos = plan_position(cur.get("stageId"), cur.get("slot"), cur.get("outcome"),
-                        is_closed=bool(cur.get("isClosed")))
+                        is_closed=bool(cur.get("isClosed")),
+                        pipeline_key=cur.get("pipelineKey"))
     if pos["ended"] or pos["unresolvable"]:
         raise ValueError(
             f"Refused: the plan {plan_ref!r} is already settled at "
@@ -349,7 +389,8 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
             f"plan at {STAGE_HELD!r}.")
     plan_id, cur = _resolve_plan(sdk, plan_ref)
     pos = plan_position(cur.get("stageId"), cur.get("slot"), cur.get("outcome"),
-                        is_closed=bool(cur.get("isClosed")))
+                        is_closed=bool(cur.get("isClosed")),
+                        pipeline_key=cur.get("pipelineKey"))
     if pos["ended"] or pos["unresolvable"]:
         # The same resolved answer `record_occurrence` uses, and the only place
         # that NAMES the marker when the stage itself does not.
@@ -450,10 +491,11 @@ def planned_without_occurrence(graph) -> list[dict]:
         "OPTIONAL MATCH (e:Event)-[:aboutObject]->(p) "
         "WITH p, collect(DISTINCT e.id) AS occurrences "
         "RETURN p.id, p.name, p.pipelineStageId, p.pipelineSlot, "
-        "       p.pipelineOutcome, coalesce(p.isClosed, false), occurrences",
+        "       p.pipelineOutcome, coalesce(p.isClosed, false), "
+        "       p.pipelineStageKey, occurrences",
         params={"kinds": sorted(PLAN_KINDS)}).result_set
     out: list[dict] = []
-    for pid, name, stage, slot, outcome, closed, occurrences in rows:
+    for pid, name, stage, slot, outcome, closed, key, occurrences in rows:
         # The link is the proof. A plan whose plan-side words say "held" but
         # with no Event wired to it has no occurrence in the graph, and this
         # read does not take the plan's word for it.
@@ -463,7 +505,8 @@ def planned_without_occurrence(graph) -> list[dict]:
         # the read cannot answer from a different input than they do: the stored
         # `pipelineSlot` PROP is not the writer's answer (a plan ended through the
         # generic door carries a terminal `pipelineStageId` beside a stale slot).
-        pos = plan_position(stage, slot, outcome, is_closed=bool(closed))
+        pos = plan_position(stage, slot, outcome, is_closed=bool(closed),
+                            pipeline_key=key)
         out.append({
             "id": pid,
             "name": name,

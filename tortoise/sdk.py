@@ -25012,7 +25012,8 @@ class TortoiseSDK:
                 f"WHERE {epistemic_disjunction('s')} "
                 "RETURN s.id, s.status, coalesce(s.outdated, false), "
                 "       s.objectKind, s.pipelineStageId, s.pipelineSlot, "
-                "       s.pipelineOutcome, coalesce(s.isClosed, false)",
+                "       s.pipelineOutcome, coalesce(s.isClosed, false), "
+                "       s.pipelineStageKey",
                 params={"oid": oid},
             ).result_set
             if not eps:
@@ -25038,9 +25039,11 @@ class TortoiseSDK:
                     # stale slot, and reading the prop kept a settled plan
                     # suppressing promotion for ever.
                     plan_state=(plan_position(stage_id, slot, outcome,
-                                              is_closed=bool(closed))
+                                              is_closed=bool(closed),
+                                              pipeline_key=key)
                                 if is_plan_kind(kind) else None))
-                for _, st, od, kind, stage_id, slot, outcome, closed in eps
+                for (_, st, od, kind, stage_id, slot, outcome, closed,
+                     key) in eps
             )
             if not all_live:
                 continue  # keep draft until every endpoint is live
