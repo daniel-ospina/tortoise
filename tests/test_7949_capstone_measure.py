@@ -7945,12 +7945,22 @@ def test_a_past_the_end_cite_is_a_finding_not_a_traceback(tmp_path):
     assert miss and "PAST THE END" in miss[0], miss
 
     doc = tmp_path / "doc.md"
-    doc.write_text("the row says :3 here\n", encoding="utf-8")
+    # ⛔ THE NUMBER IS ON THE LINE ON PURPOSE (#13033 round-10 review, P3): with
+    # `:3` here and the row citing `:7`, `f":{number}" not in line` was True and this
+    # fixture took the BARE-CONTINUATION arm, so deleting the `_cite_failure`-path
+    # source-key guard left it green (measured: 1 passed with the guard removed) while
+    # the test's own docstring claimed to cover that crash. The row now CITES the
+    # number the sentence carries, which is the path that would `KeyError`.
+    doc.write_text("the row says :7 here\n", encoding="utf-8")
     # A row whose SOURCE KEY is not in the map: a finding naming the key, not a KeyError.
     failures = _pin_row_failures(
         [("doc.md", "the row says", [("7", "a")], "unregistered")],
         {"doc.md": doc}, {"src": three})
-    assert failures and "SOURCE key is not in the source map" in failures[0], failures
+    assert failures and "is not in the source map" in failures[0] \
+        and "unregistered" in failures[0], failures
+    # and it is the NUMBERED path that reported: the bare-continuation arm's message
+    # says "does not cite", which is the arm this fixture used to take.
+    assert "does not cite" not in failures[0], failures
 
 
 def test_the_resolver_refuses_the_anchors_that_would_pass_everything():
