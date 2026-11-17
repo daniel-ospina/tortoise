@@ -5998,9 +5998,15 @@ def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool | None = N
     manufacture that choice on the caller's behalf by defaulting to it. It passes
     the value through UNCHANGED; the SDK owns the one dispatch rule.
 
-    dry_run=True previews what would change — same arm, same refusals, nothing
-    written — and reports the node count the write would touch. dry_run=False
-    (default) applies the supersede.
+    dry_run=True previews what would change — the same arm and the same FAMILY-ARM
+    checks, nothing written — and reports the node count the write would touch.
+    ⛔ It is NOT refusal parity with the write on every shape: the write continues
+    into `update_knowledge` -> `_update_entity`, whose label-surface guards an
+    `:Event` row and a `:Source` row fail, and the preview does not run those. On
+    the hybrid shapes `:Object:Event` / `:Subject:Event` / `:Object:Source` /
+    `:Subject:Source` the preview says "would supersede" and the write refuses
+    (fail-closed, nothing written; tortoise#13114). dry_run=False (default)
+    applies the supersede.
     """
     if dry_run:
         return _safe(_preview_supersede, _get_org_sdk(),
