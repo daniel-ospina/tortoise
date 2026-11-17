@@ -711,10 +711,14 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #: deployment — how a real alarm stops being read. Latched on
 #: `(endpoint, graph, KIND)` with the same fallback rule, so a different store
 #: still gets its own warning.
-#: ⛔ `KIND` is not decoration (#13330 review P1). The three unable-to-retire
-#: arms — `catalogue-unreadable`, `removal-unconfirmed` and `index-survived` —
-#: share this REGISTER but not one BUCKET: each kind reports at most once per
-#: store per process. With one bucket per store, a TRANSIENT unreadable catalogue
+#: ⛔ `KIND` is not decoration (#13330 review P1). The unable-to-retire arms —
+#: `catalogue-unreadable`, `catalogue-partially-unreadable`,
+#: `removal-unconfirmed` and `index-survived` — share this REGISTER but not one
+#: BUCKET: each kind reports at most once per store per process. (The list is the
+#: call sites'; a new arm adds a KIND rather than sharing a bucket, and this
+#: comment is not a place to keep a count — the `_retirement_failure_is_news(`
+#: calls are.)
+#: With one bucket per store, a TRANSIENT unreadable catalogue
 #: spent the budget, and the sweep that LATER measured the index really present
 #: (the permanent state, and the one line this work exists to guarantee) reported
 #: nothing for the life of the process. The outcome is shared; the diagnosis is
