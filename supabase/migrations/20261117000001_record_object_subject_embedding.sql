@@ -151,6 +151,26 @@
 -- across both writers is a follow-up. This file claims no cost figure.
 -- ============================================================================
 
+-- ⛔ THIS FILE DECLARES ITS OWN pgvector DEPENDENCY, on purpose.
+--
+-- It cannot be applied without `public.vector` and
+-- `public.record_embedding_vector(jsonb)`, which `20261109000001` creates. It must
+-- therefore be treated exactly as that file is by the PGlite drill, whose skip
+-- predicate (`supabase/tests/pglite/validate.mjs`, `PGLITE_MISSING_EXTENSIONS`)
+-- decides "does this migration need pgvector" by looking for a
+-- `CREATE EXTENSION … vector` statement in the file ITSELF.
+--
+-- ⚠️ MEASURED DEFECT this line fixes: a first cut of this file had no
+-- `CREATE EXTENSION` (correctly — `20261109000001` already made one), so the
+-- drill APPLIED it while SKIPPING the file that defines everything it calls, and
+-- `schema-drill` (a REQUIRED context — `docs/ci/required-contexts.json`) failed
+-- with `type "vector" does not exist` / `function public.record_embedding_vector
+-- does not exist`. `IF NOT EXISTS` makes this a no-op wherever the extension is
+-- already installed, and `SCHEMA public` matches `20261109000001` so the type
+-- resolves the same way. The declaration is the fix rather than a wider
+-- detector: a migration knows what it needs, and this is how the harness is told.
+CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;
+
 -- ── object ──────────────────────────────────────────────────────────────────
 ALTER TABLE public.object
     ADD COLUMN IF NOT EXISTS embedding jsonb;

@@ -1822,10 +1822,22 @@ def derived_embedding_columns(
     Anything that cannot be derived returns NO columns: an uninstalled embedder
     (`compute_embeddings` answers `None`, #4280), an encode that raised, blank
     text (the graph skips it for the same reason — an empty string earned a junk
-    vector in the HNSW index, #331), and a non-string part in the composed text
-    (the graph's `" ".join` raises and its `except Exception` swallows the
-    vector — mirroring the refusal is what keeps the two stores' population
-    identical).
+    vector in the HNSW index, #331), and a non-string part in the composed text.
+
+    ⛔ ON THAT LAST ARM, corrected because an earlier cut of this docstring
+    asserted a parity that does not exist: the graph does NOT swallow a
+    non-string part. Its `" ".join(...)` sits OUTSIDE the `try` that guards the
+    encode (`projection/entities.py` — the document path's join, then
+    `try: encode_for_row(…) except Exception: pass`; the event path is the same
+    shape), so a non-string part makes the FOLD RAISE, not silently skip. The
+    record's refusal therefore does not mirror the graph here — it is the
+    quieter of the two, and this module does not claim otherwise.
+
+    It is still the right arm: raising out of the record's derivation would make
+    a malformed journal line poison a fold the graph's own writer already aborts,
+    and "no vector" is a state the record can hold (the column is nullable by
+    construction). The divergence is bounded and stated rather than papered over
+    — the same treatment the width arm above gets.
     """
     record_type = record.get("type")
     keys = (_RECORD_EMBEDDING_TEXT.get(record_type)

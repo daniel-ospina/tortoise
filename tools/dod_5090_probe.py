@@ -1766,8 +1766,10 @@ WRITER_LABEL_OVERRIDES: dict[str, str] = {
     # (`Subject`), `::_event_plain_merge` (`Event`) and the document path via
     # `set_embedding_clause("s")` (`Source`) — so an unserved label cannot hide
     # behind this entry. What the override must NOT do is name a label the function
-    # never touches, which is why it is the first rule in the table and not the
-    # joined set.
+    # never touches. (An earlier cut of this sentence added "which is why it is the
+    # first rule in the table" — false: `tortoise.api::_point` sits directly above
+    # it, so this is the SECOND entry. The ordering carries no meaning at all; the
+    # claim was merely wrong and is struck rather than reworded.)
     "tortoise.record_writer::derived_embedding_columns": "Object",
 }
 

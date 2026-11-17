@@ -98,18 +98,45 @@ SELECT tests.assert(
 -- ── 2b. #13220: the two fingerprints ARE columns, and only the fingerprints ──
 -- The positive half of the override above: it is not enough that the ban was
 -- narrowed, the columns the ruling requires have to EXIST and be INDEXABLE.
-SELECT tests.assert(
-  (SELECT count(*) FROM information_schema.columns
-   WHERE table_schema = 'public'
-     AND ((table_name = 'object' AND column_name IN ('embedding','embedding_vec'))
-       OR (table_name = 'subject' AND column_name IN ('embedding','embedding_vec')))) = 4,
-  '13220: object/subject carry `embedding` + `embedding_vec` (owner ruling 2026-11-17)');
+--
+-- ⛔ GUARDED ON THE CONVERTER, because this suite has exactly ONE runner and it
+-- cannot provide pgvector: `supabase/tests/pglite/validate.mjs` (the only place
+-- this file is executed — `grep -rn 20261012000001_record_schema` confirms it)
+-- SKIPS `20261109000001_record_embedding_vector.sql`, which is what creates
+-- `public.vector` and `public.record_embedding_vector(jsonb)`; `20261117000001`
+-- declares the same dependency so it is skipped too. Without the guard these
+-- three assertions are RED in the only harness that runs them and absent
+-- everywhere else — a false RED here, and no coverage gained anywhere.
+--
+-- The guard makes the ABSENCE DISCLOSED rather than silent (a NOTICE, the same
+-- shape as the drill's own `⊘ … SKIPPED` line), and keeps the assertions live on
+-- any pgvector-capable runner. Their real coverage today is the probe-backed
+-- evidence, not this file: `tests/test_13220_record_label_embeddings.py` reads
+-- the applied schema through `record_projection.table_columns()`/
+-- `column_types()`, and the migration was applied for real (all 20
+-- `RECORD_MIGRATIONS`, `applied=20 rc=0`) against a `pgvector/pgvector:pg16`
+-- container as recorded on #13265 — see also `test-record-postgres`
+-- (`tests/test_11642_vector_move_live.py`), the job that owns pgvector coverage.
+DO $$
+BEGIN
+  IF to_regprocedure('public.record_embedding_vector(jsonb)') IS NULL THEN
+    RAISE NOTICE '13220: SKIPPED — public.record_embedding_vector(jsonb) is absent on this harness (PGlite cannot provide pgvector; the migration that creates it is skipped here). Coverage of these columns is test-record-postgres plus #13265''s applied-migration evidence.';
+    RETURN;
+  END IF;
 
-SELECT tests.assert(
-  (SELECT count(*) FROM pg_indexes
-   WHERE schemaname = 'public'
-     AND indexname IN ('idx_object_embedding_vec_hnsw','idx_subject_embedding_vec_hnsw')) = 2,
-  '13220: both labels carry their HNSW index — an unindexed column is the §14.3 V3 defect again');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND ((table_name = 'object' AND column_name IN ('embedding','embedding_vec'))
+         OR (table_name = 'subject' AND column_name IN ('embedding','embedding_vec')))) = 4,
+    '13220: object/subject carry `embedding` + `embedding_vec` (owner ruling 2026-11-17)');
+
+  PERFORM tests.assert(
+    (SELECT count(*) FROM pg_indexes
+     WHERE schemaname = 'public'
+       AND indexname IN ('idx_object_embedding_vec_hnsw','idx_subject_embedding_vec_hnsw')) = 2,
+    '13220: both labels carry their HNSW index — an unindexed column is the §14.3 V3 defect again');
+END $$;
 
 -- ⛔ The `props` refusal is NOT relaxed by the column: the fingerprint's home is
 -- the COLUMN, and a payload still cannot smuggle the name into the open tail.

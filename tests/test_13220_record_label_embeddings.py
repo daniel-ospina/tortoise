@@ -258,7 +258,13 @@ def test_blank_text_derives_nothing(encoder):
 
 
 def test_a_non_string_part_derives_nothing(encoder):
-    """The graph's `" ".join` raises and its `except Exception` swallows the vector."""
+    """A non-string part refuses on the RECORD side; the graph fold raises.
+
+    ⛔ Not "mirroring the graph", which an earlier cut of this docstring claimed:
+    the graph's `" ".join` sits OUTSIDE its `try` (`projection/entities.py`), so
+    a non-string part aborts the fold instead of swallowing the vector. The
+    record is deliberately the quieter of the two — see `derived_embedding_columns`.
+    """
     out = rw.derived_embedding_columns({
         "type": "EventRecorded", "eventId": "e1", "subject": ["not", "a", "str"],
         "eventKind": "met", "object": "C",
