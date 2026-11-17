@@ -230,8 +230,11 @@ exactly the half a rate change moves.
 ⛔ **`--dsn` is for an EMPTY database, and the harness enforces it.** The stand-in
 tables are `DROP`ped and recreated, so a non-empty target is **refused before any
 DDL** (`_refuse_destructive_target`) — pointing this at the record's own database
-would delete `public.point`/`source`/`event` and leave eight-column stand-ins in
-their place, which is unrecoverable. "Current production volume" is reproduced by
+would delete `public.point`/`source`/`event` and leave stand-ins of the same name
+carrying only the columns a write touches — 11 columns in `public.point`, 7 in each
+of the other two (`STAND_IN_COLUMNS`, pinned against the DDL by
+`tests/test_11691_vector_leg_budget.py`) — and none of the record's rows, policies,
+triggers or foreign keys. That is unrecoverable. "Current production volume" is reproduced by
 `--scale-rows`, never by aiming the harness at production. `--allow-non-empty-dsn`
 is the deliberate override for a target you know is disposable, and it still
 prints every table it is about to empty.

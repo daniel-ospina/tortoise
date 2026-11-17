@@ -217,10 +217,15 @@ ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 #: slow for its share" from "the store did not answer". The whole-budget
 #: alternative is not available (it is the defect this change fixes: the graph
 #: fallback then misses its own deadline), so what a reader needs is the bound the
-#: leg was given: it is ``min(RECORD_STATEMENT_TIMEOUT_MS, read budget //
-#: RECORD_LEG_STATEMENTS_PER_READ)``, computable from the read's configured budget,
-#: and it is NOT recorded in the trace today — that gap is named here rather than
-#: implied to be observable.
+#: leg was given: it is ``min(RECORD_STATEMENT_TIMEOUT_MS,
+#: record_statement_ms(read budget))`` — :func:`record_statement_ms` is that
+#: division WITH its ``max(1, …)`` floor, and the floor is not decoration: written
+#: as a bare ``read budget // RECORD_LEG_STATEMENTS_PER_READ`` the bound reads
+#: ``0`` for a 1–2 ms budget, which Postgres takes as NO TIMEOUT AT ALL — the exact
+#: trap this change exists to close, so a reader diagnosing a fallback must not be
+#: sent to the unfloored form (#11691 review, P2). That bound is computable from
+#: the read's configured budget, and it is NOT recorded in the trace today — that
+#: gap is named here rather than implied to be observable.
 RECORD_LEG_STATEMENTS_PER_READ = 3
 
 

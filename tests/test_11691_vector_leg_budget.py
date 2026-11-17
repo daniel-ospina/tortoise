@@ -49,6 +49,7 @@ from __future__ import annotations
 import ast
 import inspect
 import pathlib
+import re
 import time
 
 import pytest
@@ -980,3 +981,66 @@ def test_the_harness_accepts_an_empty_target_and_a_deliberate_override():
     harness.build_schema(overridden, allow_non_empty=True)  # must not raise
     assert overridden.ddl, (
         "--allow-non-empty-dsn did not reach the DDL, so it is not an override")
+
+
+def _derived_stand_in_widths(ddl: list[str]) -> dict[str, int]:
+    """The width each stand-in ACTUALLY gets, parsed from the executed DDL.
+
+    Deliberately derived rather than restated: `STAND_IN_COLUMNS` exists because
+    the operator-facing refusal carried a remembered number twice (#11691 review,
+    P2), so the pin must not carry one either.
+    """
+    widths: dict[str, int] = {}
+    for statement in ddl:
+        text = " ".join(statement.split())
+        created = re.fullmatch(
+            r"CREATE TABLE public\.(point|source|event) \((.*)\)", text, re.S)
+        if created:
+            depth = 0
+            columns = 1
+            for char in created.group(2):
+                depth += {"(": 1, ")": -1}.get(char, 0)
+                columns += int(char == "," and depth == 0)
+            widths[created.group(1)] = columns
+            continue
+        altered = re.fullmatch(
+            r"ALTER TABLE public\.(point|source|event) (.*)", text, re.S)
+        if altered:
+            widths[altered.group(1)] = (widths.get(altered.group(1), 0)
+                                       + altered.group(2).count("ADD COLUMN"))
+    return widths
+
+
+def test_the_destructive_warning_names_the_width_the_ddl_actually_builds():
+    """The refusal's width is DERIVED from the DDL, not remembered (#11691 review, P2).
+
+    Non-vacuity: the pre-fix texts answered this one question three ways — the
+    docstring said "four-column", the `SystemExit` and the artifact README said
+    "eight-column", and the DDL builds 11 columns in `public.point` and 7 in
+    `public.source`/`public.event`. Two different wrong numbers in operator-facing
+    text about a DESTRUCTIVE operation is the signal that the number was never
+    derived, so this arm re-derives the same mapping from the statements
+    `build_schema` actually executes and compares it with the one the refusal
+    formats from: add a column to the base CREATE TABLE, or to the migration's
+    `ALTER`, and this reds until the warning says the new width.
+    """
+    harness = _harness_module()
+    cur = _FakeDatabase({})
+    harness.build_schema(cur, allow_non_empty=True)
+    derived = _derived_stand_in_widths(cur.ddl)
+
+    assert derived, f"no stand-in DDL was captured, so nothing was derived: {cur.ddl}"
+    assert derived == harness.STAND_IN_COLUMNS, (
+        f"the refusal quotes {harness.STAND_IN_COLUMNS} but the DDL it warns about "
+        f"builds {derived}")
+
+    # …and what an operator READS carries those numbers: the constant is not the
+    # text, so a refusal that kept a literal would still be wrong on the page.
+    occupied = _FakeDatabase({"point": 5})
+    with pytest.raises(SystemExit) as refused:
+        harness._refuse_destructive_target(occupied)
+    message = str(refused.value)
+    for table, width in derived.items():
+        assert f"{width} columns in public.{table}" in message, (
+            f"the refusal does not state the derived width of public.{table} "
+            f"({width} columns): {message}")

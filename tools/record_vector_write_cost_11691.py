@@ -217,6 +217,38 @@ def _migration_statements(kind: str) -> list[str]:
 #: not to this tuple would be dropped without being checked.
 STAND_IN_TABLES = ("point", "source", "event", "point_gen_only", "point_plain")
 
+#: How WIDE each stand-in ends up, DERIVED from `build_schema`'s own DDL rather
+#: than counted by hand (#11691 review, P2: the docstring said "four-column" and
+#: the refusal said "eight-column" while the DDL builds neither — two different
+#: wrong numbers in operator-facing text about a DESTRUCTIVE operation is the
+#: signal that the number was never derived). `build_schema` emits six base
+#: columns; the `point` shape adds the four predicate columns the dense leg reads
+#: (`status`, `is_operator`, `op_type`, `outdated`); and the migration's extracted
+#: `ALTER TABLE … ADD COLUMN` adds the generated ``embedding_vec`` to each of the
+#: three. The two controls are `LIKE`-derived (`point_gen_only` IS `point`,
+#: `point_plain` is `point` minus ``embedding_vec``), so they are not restated.
+#:
+#: ⛔ PINNED, not asserted: `tests/test_11691_vector_leg_budget.py::
+#: test_the_destructive_warning_names_the_width_the_ddl_actually_builds`
+#: re-derives this mapping from the statements `build_schema` actually executes and
+#: reds if the two disagree — so a column added to the CREATE TABLE or to the
+#: migration's ALTER cannot leave the refusal quoting a stale width. That test, not
+#: this comment, is what makes the number derived.
+STAND_IN_COLUMNS = {"point": 11, "source": 7, "event": 7}
+
+
+def _stand_in_widths() -> str:
+    """The stand-in widths, FORMATTED from :data:`STAND_IN_COLUMNS`.
+
+    The refusal is the text an operator reads on the way into a DESTRUCTIVE move,
+    so its number is formatted from the one mapping a test re-derives from the DDL
+    (#11691 review, P2). A literal here is how the same claim came to say
+    "eight-column" in the refusal while the docstring said "four-column" — two
+    different remembered numbers, neither of them the width the DDL builds.
+    """
+    return ", ".join(f"{width} columns in public.{table}"
+                     for table, width in STAND_IN_COLUMNS.items())
+
 
 def _refuse_destructive_target(cur: Any, *, allow_non_empty: bool = False) -> None:
     """Refuse a `--dsn` whose stand-in tables already hold rows (#11691 review, P2).
@@ -226,8 +258,11 @@ def _refuse_destructive_target(cur: Any, *, allow_non_empty: bool = False) -> No
     hurt anything — it starts a throwaway container — but `--dsn` is offered as
     "a Postgres you already have", and the obvious way to reproduce "current
     production volume" is the DSN of the record itself. That run destroys the
-    record's three tables and replaces them with four-column stand-ins of the
-    same name: unrecoverable data loss, protected only by prose in a docstring.
+    record's three tables and replaces them with stand-ins of the same name that
+    carry ONLY the columns a write touches (:data:`STAND_IN_COLUMNS` — 11 columns in
+    ``public.point``, 7 in each of ``public.source``/``public.event``): none of the
+    record's rows, RLS policies, triggers or foreign keys come back. That is
+    unrecoverable data loss, protected only by prose in a docstring.
 
     The check is the DATA, not the name: an empty database has nothing to lose,
     so it needs no ceremony, while no database name can make a populated table
@@ -277,7 +312,9 @@ def _refuse_destructive_target(cur: Any, *, allow_non_empty: bool = False) -> No
         f"Use the default (a throwaway pgvector container, nothing of yours is "
         f"touched): drop `--dsn` and re-run. If the target really is disposable, "
         f"pass `--allow-non-empty-dsn` and know that the tables above are "
-        f"emptied and recreated as eight-column stand-ins.")
+        f"emptied and recreated as stand-ins of the same name carrying only the "
+        f"columns a write touches ({_stand_in_widths()}) — none of the record's "
+        f"rows, RLS policies, triggers or foreign keys come back.")
 
 
 def build_schema(cur: Any, *, allow_non_empty: bool = False) -> None:
