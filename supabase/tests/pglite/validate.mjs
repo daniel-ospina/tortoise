@@ -3368,12 +3368,13 @@ try {
   // coincidence is COARSER than it looks: `Date.parse` on the `Date` objects
   // pglite returns coerces through `toString`, which drops milliseconds, so these
   // comparisons resolve at ONE SECOND, not one millisecond (MEASURED:
-  // `Date.parse(d)` 1794951920000 against `d.getTime()` 1794951920912 — two
-  // stamps 999 ms apart compare EQUAL). Pinning the pre-state two hours back
-  // makes a carried-over stamp detectable at ANY clock resolution — at second
-  // resolution two refreshes inside the same second are simply indistinguishable
-  // — and it is the truthful description of the state being fixed: the org's
-  // figure is as old as its last real measurement.
+  // `Date.parse(d)` 1794951920000 against `d.getTime()` 1794951920912 — the
+  // truncation discards up to 999 ms, so two stamps INSIDE THE SAME SECOND
+  // compare EQUAL, and the pair quoted here happens to be 912 ms apart). Pinning
+  // the pre-state two hours back makes a carried-over stamp detectable at ANY
+  // clock resolution — at second resolution two refreshes inside the same second
+  // are simply indistinguishable — and it is the truthful description of the state
+  // being fixed: the org's figure is as old as its last real measurement.
   await db.exec(`UPDATE public.org_postgres_residency
      SET measured_at = pg_catalog.now() - interval '2 hours'
      WHERE org_id = '9559-gauge-b'`);
