@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **301** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **297** files scanned |
 | files carrying at least one statement site | **99** |
 | **statement sites (this census)** | **1311** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **859** (578 read, 281 write) |
@@ -38,9 +38,12 @@ this document classifies **statements**.
 | non-Cypher door calls (excluded from every shape total) | 260 |
 | **AST door calls** = census + non-Cypher | **1571** |
 
-> ⛔ **`files_scanned` is 301 at THIS (merged) head, and it was 297 on EACH parent alone** — the
-> two sides each added new `tortoise/` modules and the merge carries the union, so neither parent's
-> pin could have shown this. The pins and Appendix A below are re-derived from the merged tree
+> ⛔ **`files_scanned` is 297 at this (merged) head.** The `301` this note used to carry does NOT
+> reproduce — not at this tree, and not at `main` either (measured at `1d10fb3b` in a detached
+> worktree: `tools/cypher_inventory.py --check` → `DRIFT files_scanned: doc=301 tool=297`, RC=1, so
+> the pin was red on `main` before this merge). It is re-derived here from the tree the pin is
+> checked against rather than carried forward: a number inherited from a different union reads as a
+> measurement of THIS population and is not one. The pins and Appendix A below are re-derived from the merged tree
 > (`python tools/cypher_inventory.py --markdown`, `--check` → "25 pinned counts match"); the
 > narrative figures below that still say "297" are the measurements they were taken over — §1's
 > two `rg` reconciliation counts are per-297-file runs and are left at that population rather than
@@ -488,7 +491,7 @@ the order was fixed (`#13098` review F8).
 
 <!-- cypher-inventory:sites = 1311 -->
 <!-- cypher-inventory:files = 99 -->
-<!-- cypher-inventory:files_scanned = 301 -->
+<!-- cypher-inventory:files_scanned = 297 -->
 <!-- cypher-inventory:unresolved = 106 -->
 <!-- cypher-inventory:candidates = 578 -->
 <!-- cypher-inventory:shape_adjacency = 292 -->
