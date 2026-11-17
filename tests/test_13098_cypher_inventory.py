@@ -1032,10 +1032,19 @@ def test_the_published_decomposition_names_the_measured_operands():
     14). Nothing could see it: `check()` reads only the HTML pins, and the
     reconciliation test recomputes from MEASURED values, never from this prose.
 
-    The narrative in §0 and the `--all-surface` comparison table in §1 publish the
+    The narrative in §0 and the `--all-surface` comparison table in §0 publish the
     same two quantities, so they are pinned by the same test — they were wrong at
     the same commit and for the same reason (the pins were re-cut, the prose was
     not). A re-cut that moves any of these numbers must move this line with it.
+
+    ⛔ WHAT THIS DOES NOT GRADE, stated because the claim above is narrower than it
+    reads (`#13249` review round 15 F6): the `--all-surface` ROW in §0 is NOT
+    asserted here. It is deliberately not a pin — that population includes
+    `tests/`, so it moves on any test edit and a pin would red an unrelated PR —
+    so no gate reads it, and a merge resolution shipped it at `8,971` against a
+    measured `8,965` with every test in this file green. Only §0's product-surface
+    decomposition, §0's `N of M … (P %)` pair and §1's PRODUCT-SURFACE row are
+    asserted. A re-cut of this document must re-measure the mode table BY HAND.
     """
     doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
     result = census.census(("tortoise",))

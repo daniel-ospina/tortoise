@@ -81,7 +81,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1311** | **99** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **8,971** | **811** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at this head — `#13249` merged with `origin/main` **`54682177bc`**), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,965 here, none of which reproduces at this tree; the number beside this row now names the tree it does) |
+| every tracked surface (`--all-surface`) | **8,965** | **811** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at this head — `#13249` merged with `origin/main` **`54682177bc`**), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 here, none of which reproduces at this tree; the number beside this row now names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -144,7 +144,7 @@ over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone 
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
 which is why the tool's verb total is an upper bound.
-(A bare case-sensitive `rg` gives 2,060, and `-i` without the exclusion 2,401 — which is why the
+(A bare case-sensitive `rg` gives 2,063, and `-i` without the exclusion 2,401 — which is why the
 number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
@@ -490,6 +490,22 @@ and one in `tortoise/postgres_bytes.py`. This change regenerates Appendix A with
 that head (verified byte-identical to a fresh run) and adds
 `tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` so the next
 main-move cannot repeat it — which is step 1 of the procedure above enforced instead of trusted.
+
+⛔ **And neither of those two carriers covers the numbers this file QUOTES, which is the third place
+the same cut can leave stale.** The pins are 25 scalars and the appendix is `file:line` rows; §0's
+`--all-surface` row (not a pin, deliberately), §1's `rg` cross-check and the prose that explains it
+are neither. Measured at `a218f8867b`, with `--check` printing `25 pinned counts match`: that row
+still said `8,908 / 805` against `8,939 / 810` on this tree, §1's bare case-sensitive count said
+`2,060` against `2,063`, and its stated CAUSE for the 13-occurrence gap was wrong outright — see
+§1. Re-derive the quoted prose too, not just the two carriers that are checked.
+
+⛔ **This head is the third instance of exactly that, and it is worth recording because a MERGE
+did it.** `#13249` combines two lanes that resolved this file independently; the resolution briefly
+shipped `--all-surface` at **8,971** (a value from a mid-merge tree where both sides' test files were
+still present) against **8,965 / 811** measured here, and reverted `main`'s `#13251` `2,063` back to
+`2,060` — while keeping `2,063` in §7, so the document contradicted itself. `--check` was GREEN
+through all of it. Both are corrected above, and this paragraph — which the merge had DELETED — is
+restored.
 
 <details><summary>the previous cut (kept as history)</summary>
 
