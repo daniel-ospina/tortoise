@@ -2029,8 +2029,22 @@ class FakeControlPlane:
         TRUNCATED or uncertifiable walk must override this method (the same rule
         :meth:`query_with_total` states), which is the only way to exercise the
         complete-vs-truncated decision.
+
+        ⛔ THE ``cursor``-IN-``select`` PRECONDITION IS MIRRORED, not dropped.
+        The real seam raises ``ValueError`` when a caller asks for a walk but
+        leaves the cursor column out of ``select`` (the cursor is read from the
+        rows to advance) — and a fake that ``del``s the argument can never red
+        on it. That matters the moment a call site STARTS depending on it (this
+        was measured: ``_org_graph_names`` changed ``select=["namespace"]`` to
+        ``select=["id", "namespace"]`` precisely to satisfy it). Without the
+        mirror, dropping ``id`` back out leaves every caller's tests green while
+        the real store refuses the walk and the org is never purged.
         """
-        del cursor, page_size, max_pages  # no paging: the fake is uncapped
+        if select is not None and cursor not in select:
+            raise ValueError(
+                f"query_all: select must include the cursor column {cursor!r} "
+                "— the cursor is read from the rows to continue the walk")
+        del page_size, max_pages  # no paging: the fake is uncapped
         return list(self.query(table, select=select, filters=filters,
                                timeout=timeout)), True
 

@@ -3343,7 +3343,17 @@ class TestReconcileSweep:
         class _Cp(FakeControlPlane):
             """The fake reports NO stated total (``total=None``), which the
             enumeration correctly refuses — so this double states one, the
-            only thing a server-side count can supply (#5388)."""
+            only thing a server-side count can supply (#5388).
+
+            ⛔ ``query_all = None`` ON PURPOSE: this test exists to exercise the
+            TOTAL-AWARE leg, and ``_enumerate_billed_orgs`` prefers
+            ``query_all`` whenever the seam has it. ``FakeControlPlane`` gained
+            that method for #13205, so without this the ``query_with_total``
+            override below became dead code and this test stayed green while
+            testing the other branch — the total-certification leg's only
+            remaining coverage was its refusal arm."""
+
+            query_all = None
 
             def query_with_total(self, table, **kw):
                 kw.pop("count_exact", None)

@@ -154,6 +154,14 @@ class TestDeprovisionOnDelete:
                 return []
 
             def query_all(self, table, **kw):
+                # Mirror the real seam's precondition (``supabase_control.
+                # query_all`` raises when the cursor column is not selected):
+                # this diff makes `_org_graph_names` DEPEND on it by changing
+                # ``select=["namespace"]`` to ``select=["id", "namespace"]``,
+                # so dropping ``id`` again must red here, not ship a walk the
+                # real store refuses.
+                assert kw.get("cursor") == "id", kw.get("cursor")
+                assert "id" in (kw.get("select") or []), kw.get("select")
                 return (graphs or []), complete
         return _CP()
 
