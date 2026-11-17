@@ -1403,12 +1403,19 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # branches' index-manifest work), so the declaration 20346 -> 20401, the def
     # 20774 -> 20829 and the loop 21224 -> 21279. Re-derived by CONTENT at the
     # stacked head, never by adding a delta.
-    ("tortoise/projection/__init__.py", 20401, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20401`"),
-    ("tortoise/projection/__init__.py", 20829, "def _create_fulltext_index(",
-     "`:20829`"),
-    ("tortoise/projection/__init__.py", 21279,
-     "self._create_fulltext_index(label, fields)", "`:21279`"),
+    # ⛔ RE-DERIVED AT THIS MERGE HEAD: the three projection locators below were +141/+141/+141
+    # stale against `tortoise/projection/__init__.py` as `origin/main` carries it (measured with
+    # `grep -n -F '"Object", "name", "FULLTEXT"' tortoise/projection/__init__.py` -> 20542,
+    # `grep -n -F 'def _create_fulltext_index('` -> 20970,
+    # `grep -n -F 'self._create_fulltext_index(label, fields)'` -> 21420). The arm that reads this
+    # row resolves the SYMBOL by content and then holds the brief's own number equal to it, so a
+    # stale triple here is a PERMANENT red that says nothing about the mechanism it guards.
+    ("tortoise/projection/__init__.py", 20542, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20542`"),
+    ("tortoise/projection/__init__.py", 20970, "def _create_fulltext_index(",
+     "`:20970`"),
+    ("tortoise/projection/__init__.py", 21420,
+     "self._create_fulltext_index(label, fields)", "`:21420`"),
 )
 
 

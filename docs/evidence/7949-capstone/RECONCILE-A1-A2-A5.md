@@ -788,14 +788,17 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:15092`) that derives the doc's cite, two are the
+                                                          # (`:15097`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
                                                           # because this branch's own added rows move the scan
                                                           # line — so it was RE-DERIVED (`_self_scan_line` in
                                                           # `tests/test_7949_capstone_measure.py`, measured
-                                                          # at the merge, `:15092` on the resolved tree) rather than side-picked.
+                                                          # at the merge, `:15092` on that resolved tree — RE-DERIVED ONCE MORE at the
+                                                          # `#13248` merge of `origin/main` `31bddb1dd9`: this lane's
+                                                          # own re-derived rows move it to `:15097`, which is the
+                                                          # live value `_self_scan_line` asserts) rather than side-picked.
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
