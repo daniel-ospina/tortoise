@@ -61,22 +61,22 @@ _CP = "tortoise/cache_projection.py"
 _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md (search_engine.py +3, cache_projection.py +2)
     (_AUDIT, "cache_projection.py:3635", _CP, 3635, 'if table == "point"'),
-    (_AUDIT, "search_engine.py:4425-4429", _SE, 4429, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)"),
-    (_AUDIT, "search_engine.py:6300", _SE, 6300, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
-    (_AUDIT, "search_engine.py:6659", _SE, 6659, "(n:Point)-[r:aboutSubject]->(:Subject)"),
-    (_AUDIT, "search_engine.py:6661", _SE, 6661, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
+    (_AUDIT, "search_engine.py:4528-4532", _SE, 4532, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)"),
+    (_AUDIT, "search_engine.py:6415", _SE, 6415, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
+    (_AUDIT, "search_engine.py:6774", _SE, 6774, "(n:Point)-[r:aboutSubject]->(:Subject)"),
+    (_AUDIT, "search_engine.py:6776", _SE, 6776, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
     # Row 149's TWO BARE range cites carry no `search_engine.py` prefix, so the token-level pins for
     # `6659`/`6661` above do not reach them — they are the only shifted mentions in this document the
     # first pin set missed. Both were already correct at the pre-fix head, so these two are
     # COMPLETENESS pins: they catch the re-point/double-shift that DID happen in this class (`:4549`
     # re-pointed to `:4552`), which is the failure the whole file exists for.
-    (_AUDIT, "`:6658-6661`", _SE, 6658, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
-    (_AUDIT, "`:6664-6677`", _SE, 6664, "def subject_binding_available"),
-    (_AUDIT, "search_engine.py:3042", _SE, 3042, "CALL db.idx.fulltext.queryNodes"),
-    (_AUDIT, "search_engine.py:4353-4355", _SE, 4353, "MATCH (n:{label_str})"),
-    (_AUDIT, "search_engine.py:3941", _SE, 3941, "CALL db.idx.vector.queryNodes"),
-    (_AUDIT, "search_engine.py:2947", _SE, 2947, 'label = "Source" if entity_type == "document"'),
-    (_AUDIT, "`:3014`", _SE, 3014, "the fulltext index is on Source._searchText"),
+    (_AUDIT, "`:6773-6776`", _SE, 6773, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
+    (_AUDIT, "`:6779-6792`", _SE, 6779, "def subject_binding_available"),
+    (_AUDIT, "search_engine.py:3053", _SE, 3053, "CALL db.idx.fulltext.queryNodes"),
+    (_AUDIT, "search_engine.py:4456-4458", _SE, 4456, "MATCH (n:{label_str})"),
+    (_AUDIT, "search_engine.py:4044", _SE, 4044, "CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit"),
+    (_AUDIT, "search_engine.py:2958", _SE, 2958, 'label = "Source" if entity_type == "document"'),
+    (_AUDIT, "`:3025`", _SE, 3025, "the fulltext index is on Source._searchText"),
     (_AUDIT, "cache_projection.py:2650-2657", _CP, 2650, "it is the ONLY field the Source FTS index"),
     (_AUDIT, "cache_projection.py:2660-2662", _CP, 2660, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     # Row 387's bare range, quoting "un-indexes a restored session". Its sibling pins (`2660-2662`,
@@ -85,13 +85,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:2650-2651`", _CP, 2651, "un-indexes a restored session"),
     (_AUDIT, "cache_projection.py:2712", _CP, 2712, "tail_denied = forbidden | {"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
-    (_SUBSTRATE, "tortoise/search_engine.py:3393", _SE, 3393, "``:Source``/``:Document`` row must not contribute"),
-    (_SUBSTRATE, "`:3391`", _SE, 3391, "# #11682: the corpus join is PER FAMILY"),
+    (_SUBSTRATE, "tortoise/search_engine.py:3404", _SE, 3404, "``:Source``/``:Document`` row must not contribute"),
+    (_SUBSTRATE, "`:3402`", _SE, 3402, "# #11682: the corpus join is PER FAMILY"),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
-    (_M3_BRIEF, "tortoise/search_engine.py:2830", _SE, 2830, "def run_fts_query"),
-    (_M3_BRIEF, "search_engine.py:2672", _SE, 2672, "def recency_tie_clause"),
-    (_M3_BRIEF, "tortoise/search_engine.py:4549", _SE, 4549, "for rank, (pid, _score) in enumerate(ranked)"),
-    (_M3_BRIEF, "`search_engine.py:4549`", _SE, 4549, "for rank, (pid, _score) in enumerate(ranked)"),
+    (_M3_BRIEF, "tortoise/search_engine.py:2841", _SE, 2841, "def run_fts_query"),
+    (_M3_BRIEF, "search_engine.py:2683", _SE, 2683, "def recency_tie_clause"),
+    (_M3_BRIEF, "tortoise/search_engine.py:4652", _SE, 4652, "for rank, (pid, _score) in enumerate(ranked)"),
+    (_M3_BRIEF, "`search_engine.py:4652`", _SE, 4652, "for rank, (pid, _score) in enumerate(ranked)"),
     # --- docs/architecture/ENTITY-VERDICT-BANDS.md — the D-1 row "the retrieval filter is status-only"
     # ⚠️ This row is a SECOND false correction, of the same class this file exists for. The document
     # cited `search_engine.py:2973-2997`; other PRs' inserts had already moved the status filter to
@@ -99,7 +99,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `+3` (`2973-2997` -> `2976-3000`) therefore preserved the staleness while reading as a correction,
     # and `2976-3000` is the `build_or_query` byte-identity comment block, not the filter. The pin below
     # is anchored on the line that IS the filter, so the next offset-only edit reds instead of shipping.
-    (_EVIDENCE, "search_engine.py:3023-3038", _SE, 3023, "if label in _STATUS_FILTERED_LABELS"),
+    (_EVIDENCE, "search_engine.py:3034-3049", _SE, 3034, "if label in _STATUS_FILTERED_LABELS"),
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2712", _CP, 2712, "tail_denied = forbidden | {"),
 )
@@ -146,11 +146,11 @@ def test_the_resolver_reds_on_a_double_applied_offset() -> None:
     the shipped row with the cite token LEFT INTACT, so the failure is reported by the CONTENT arm and
     cannot be satisfied by the token arm (which is what a re-pointed token would trip first).
     """
-    row = (_M3_BRIEF, "tortoise/search_engine.py:4549", _SE, 4549, "for rank, (pid, _score) in enumerate(ranked)")
-    doubled = (row[0], row[1], row[2], 4552, row[4])
+    row = (_M3_BRIEF, "tortoise/search_engine.py:4652", _SE, 4652, "for rank, (pid, _score) in enumerate(ranked)")
+    doubled = (row[0], row[1], row[2], 4655, row[4])
     errors = _resolve((doubled,))
     assert errors, "a spurious +3 must red the resolver"
-    assert ":4552" in errors[0] and "#7704" in errors[0]
+    assert ":4655" in errors[0] and "#7704" in errors[0]
     assert "is gone" not in errors[0], "the content arm must be the one that fires"
 
 

@@ -1362,8 +1362,8 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # `run_fts_query` sits at 2830, its brief cited 2800), and this branch's own
     # #12360 insert inside `run_fts_query` moves the two LATE rows a further +22.
     # Re-derived against the live file, not nudged by a constant.
-    ("tortoise/search_engine.py", 2830, "def run_fts_query(",
-     "`tortoise/search_engine.py:2830`"),
+    ("tortoise/search_engine.py", 2841, "def run_fts_query(",
+     "`tortoise/search_engine.py:2841`"),
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
     # moves the two LATE rows and only them: the FTS call +1 (3038 -> 3039,
     # span 3039-3048) and the rank loop +2 (4544 -> 4546). Re-derived against
@@ -1374,19 +1374,28 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # (2830) and `recency_tie_clause` (2672) sit above the insert and do NOT move.
     # Re-derived against the live file (`grep -n 'CALL db.idx.fulltext.queryNodes'
     # tortoise/search_engine.py`), never nudged by a constant.
-    ("tortoise/search_engine.py", 3042, "CALL db.idx.fulltext.queryNodes",
-     "`:3042-3051`"),
-    ("tortoise/search_engine.py", 2672, "def recency_tie_clause(",
-     "`search_engine.py:2672`"),
-    ("tortoise/search_engine.py", 4549,
+    # #11081 merge stack: the branches stacked above this one insert further into
+    # `search_engine.py` (`#13108`'s dense-leg inventory + `#13084`'s RAM-cap block),
+    # which moves the FTS call 3042 -> 3053 (span 3053-3062), the tie clause
+    # 2672 -> 2683 and the rank loop 4549 -> 4652. Re-derived by CONTENT at the
+    # stacked head with that same grep, never by adding the insert's delta.
+    ("tortoise/search_engine.py", 3053, "CALL db.idx.fulltext.queryNodes",
+     "`:3053-3062`"),
+    ("tortoise/search_engine.py", 2683, "def recency_tie_clause(",
+     "`search_engine.py:2683`"),
+    ("tortoise/search_engine.py", 4652,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4549`"),
-    ("tortoise/projection/__init__.py", 20346, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20346`"),
-    ("tortoise/projection/__init__.py", 20774, "def _create_fulltext_index(",
-     "`:20774`"),
-    ("tortoise/projection/__init__.py", 21224,
-     "self._create_fulltext_index(label, fields)", "`:21224`"),
+     "`tortoise/search_engine.py:4652`"),
+    # #11081 merge stack: the projection module grew above these three (the stacked
+    # branches' index-manifest work), so the declaration 20346 -> 20401, the def
+    # 20774 -> 20829 and the loop 21224 -> 21279. Re-derived by CONTENT at the
+    # stacked head, never by adding a delta.
+    ("tortoise/projection/__init__.py", 20401, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20401`"),
+    ("tortoise/projection/__init__.py", 20829, "def _create_fulltext_index(",
+     "`:20829`"),
+    ("tortoise/projection/__init__.py", 21279,
+     "self._create_fulltext_index(label, fields)", "`:21279`"),
 )
 
 

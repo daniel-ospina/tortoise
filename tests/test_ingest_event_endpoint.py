@@ -695,41 +695,29 @@ def test_direct_route_entity_unhashable_status_is_a_violation_not_a_crash(
     assert _count(sdk, "MATCH (n:Subject {name:'Gamma'}) RETURN count(n)") == 0
 
 
-def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
+def test_direct_route_object_status_values_not_over_rejected(sdk):
     """#7925 review P3 (the other direction — guards the fix from over-rejecting).
 
     Only `:Subject`'s writer validates its `status` vocabulary. The `:Object`
-    and `:Event` writers do NOT: a NON-PERSISTABLE value (a dict, bytes, a set)
-    is **dropped** by the writer — measured on this head, the node keeps NO
-    `status` at all (absent READS live since #9974 R1) — so refusing it would
-    reject a bundle the writer
-    accepts. That is the over-rejection class round 4 of this PR already fixed
-    once, and it is why the array refusal (a PERSISTABLE unhashable value,
-    which IS stored and then breaks the direct-edge terminal check) is scoped by
-    `_status_is_stored_unhashable` rather than by "not a string".
+    writer does NOT: a NON-PERSISTABLE value (a dict, bytes, a set) is
+    **dropped** by the writer — measured, the node keeps NO `status` at all
+    (absent READS live since #9974 R1) — so refusing it would reject a bundle
+    the writer accepts. That is the over-rejection class round 4 of this PR
+    already fixed once, and it is why the array refusal (a PERSISTABLE unhashable
+    value, which IS stored and then breaks the direct-edge terminal check) is
+    scoped by `_status_is_stored_unhashable` rather than by "not a string".
 
-    ⛔ PREMISE CHANGE (#9974 R1): the dropped value used to leave the node at a
-    FABRICATED `status = 'live'` (the door's `out["status"] = "live"`, now
-    deleted, and the fold's `coalesce($st,'live')`, now `$st`). An Object is now
-    born DERIVED-OR-ABSENT, so "the dict was DROPPED" is pinned as the property
-    being ABSENT (`[[None]]`) — strictly stronger than `'live'`, which a
-    reinstated fabrication would still satisfy.
-
-    Pre-fix this test fails too: the frozenset membership test raised
-    `TypeError` before any of these writes could be reached.
+    ⛔ SCOPE CHANGE (#13100): the Event half this test used to cover is GONE from
+    it — an `:Event` now refuses ANY `status` declaration (terminal or not, and
+    whatever its type), so the non-over-rejection rule it pins applies to
+    `:Object` only. The Event refusal is pinned in
+    `tests/test_11825_event_terminal_status_refused.py` and
+    `tests/test_13100_planned_occurrences.py`.
     """
     bundle = {
         "entities": [{"ref": "o1", "type": "object", "name": "Alpha",
                       "status": {"a": 1}},
-                     {"ref": "o2", "type": "object", "name": "Beta"},
-                     # The `:Event` half of the same claim — a non-persistable
-                     # status is dropped there too, so it must stay accepted
-                     # (review round 4: the name promised an Event and the
-                     # fixture had none).
-                     # `eventKind` is required by the Event writer itself, so
-                     # the item must carry one to reach the status path at all.
-                     {"ref": "e1", "type": "event", "name": "Happened",
-                      "eventKind": "sessionCaptured", "status": {"a": 1}}],
+                     {"ref": "o2", "type": "object", "name": "Beta"}],
         "connections": [{"from": "o1", "to": "o2", "operator": "IMPL"}],
     }
     assert sdk._validate_bundle(bundle) == []
@@ -742,7 +730,6 @@ def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
     # (an absent status READS live via `live._terminal_excluded`).
     assert sdk._get_proj().g.query(
         "MATCH (n:Object {name:'Alpha'}) RETURN n.status").result_set == [[None]]
-    assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 1
 
 
 @pytest.mark.parametrize("spelling", ["top", "nested"])
@@ -813,12 +800,14 @@ def test_direct_route_event_outdated_flag_rejected_phase1(sdk, spelling):
     assert _count(sdk, "MATCH (n:Event {name:'Launch'}) RETURN count(n)") == 0
 
 
-def test_direct_route_live_event_not_over_rejected(sdk):
-    """#7925 review P1 (Event arm's OTHER edge): only TERMINAL declared values
-    reject. A bundle-local Event declaring `status: 'live'` is not born
-    terminal, so the direct Event<->Object edge is legal and must be written
-    operator-less. Without this pin the Event arm could over-reject every
-    declared status."""
+def test_direct_route_live_event_status_is_refused(sdk):
+    """#13100 reopens #7925's non-terminal allowance on an `:Event`.
+
+    #7925 pinned that a bundle-local Event declaring `status: 'live'` was
+    accepted (only terminal words rejected). The approved model has no Event
+    lifecycle at all — a thing that has not happened yet is a PLAN — so the
+    declaration is refused at Phase 1, and nothing commits.
+    """
     bundle = {
         "entities": [
             {"ref": "evt", "type": "event", "name": "Launch",
@@ -827,9 +816,22 @@ def test_direct_route_live_event_not_over_rejected(sdk):
         ],
         "connections": [{"from": "evt", "to": "o", "operator": "IMPL"}],
     }
-    assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
-    assert res["created"]["connections"] == 1
+    violations = sdk._validate_bundle(bundle)
+    assert violations, "a non-terminal Event status passed Phase 1"
+    assert any("for an :Event" in v["message"] for v in violations)
+    # ZERO mutation — the point of a Phase-1 refusal.
+    assert _count(sdk, "MATCH (n:Event {name:'Launch'}) RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (:Event)-[r:IMPL]->(:Object) RETURN count(r)") == 0
+    assert _operator_count(sdk) == 0
+
+    # …and a status-less Event still reaches the direct route operator-less.
+    ok = {"entities": [
+        {"ref": "evt", "type": "event", "name": "Launch",
+         "eventKind": "sessionCaptured"},
+        {"ref": "o", "type": "object", "name": "Delta"}],
+        "connections": [{"from": "evt", "to": "o", "operator": "IMPL"}]}
+    assert sdk._validate_bundle(ok) == []
+    assert sdk.ingest(ok)["created"]["connections"] == 1
     assert _count(sdk, "MATCH (:Event)-[r:IMPL]->(:Object) RETURN count(r)") == 1
     assert _operator_count(sdk) == 0
 

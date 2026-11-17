@@ -776,7 +776,7 @@ def main():
                             "prs": metadata.get("prs", []),
                             "critical_decisions": metadata.get("critical_decisions", []),
                         }),
-                        "eventStatus": "completed",
+                        "eventStatus": "indexed",
                         "classificationLevel": "internal",
                     }
                     # #9122 (§17.1): this CLI wrote `:Event` nodes straight at
