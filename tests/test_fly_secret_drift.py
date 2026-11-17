@@ -1960,6 +1960,37 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     assert "REGISTRY_STREAM_KEY" not in workflow_refs, (
         "REGISTRY_STREAM_KEY must stay OUT of the GitHub trust boundary (#661)"
     )
+    # ── #13209: the hosted READ-MODE lever, the second decision-backed exception ─
+    # `TORTOISE_RECORD_SERVE` is armed by an operator (`flyctl secrets set`) and
+    # reverted by the same lever (`flyctl secrets unset`) — the runbook's arming
+    # surface, which states the ruling verbatim: "Arming is an OWNER action.
+    # Nothing in the code arms it, and no deploy sets it."
+    #
+    # Pinned by KIND and by DIRECTION, because each wrong route is one plausible
+    # edit away and only one of them reds the gate immediately:
+    #   * `gh-secret:` would make the deploy the managing source (reversing the
+    #     ruling) AND fail closed today — no such GitHub Actions secret exists;
+    #   * `fly-toml-env` would version today's value into `fly.toml [env]`, which
+    #     both re-introduces a deploy-set value and breaks the published revert
+    #     (`fly secrets unset` would return the [env] value, not the shipped
+    #     `off` default);
+    #   * `unmanaged` is the #4126 defect the gate exists to refuse.
+    # So this asserts BOTH halves of "out-of-band": declared `fly-only:`, and
+    # present in NEITHER the deploy payload NOR `fly.toml [env]`. A revert to
+    # `unmanaged` fails HERE, in review, and so does a "helpful" move of the value
+    # into version-controlled env.
+    record_serve = "TORTOISE_RECORD_SERVE"
+    assert declared[record_serve] == "fly-only:#13209", declared[record_serve]
+    assert record_serve not in workflow_refs, (
+        "TORTOISE_RECORD_SERVE must stay OUT of the GitHub trust boundary — arming "
+        "is an operator action and no deploy sets it (#13209)"
+    )
+    assert record_serve not in module.workflow_secret_refs(REAL_WORKFLOW.read_text())
+    assert record_serve not in env_keys, (
+        "TORTOISE_RECORD_SERVE is versioned in fly.toml [env], so it is NOT "
+        "out-of-band any more — declare it fly-toml-env and drop the Fly secret "
+        "(#13209)"
+    )
     assert debt == set(), f"recorded debt remains: {sorted(debt)}"
     assert r.returncode == 0, r.stdout + r.stderr
 

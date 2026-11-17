@@ -4275,6 +4275,22 @@ the bound. `tests/test_record_serve.py` owns the seam's own unit contract.
 
 ⛔ **Arming is an OWNER action.** Nothing in the code arms it, and no deploy sets it.
 
+**Provenance — the deploy's gate knows this name is out-of-band BY DESIGN.** It is declared
+`fly-only:#13209` in `.github/scripts/fly-managed-secrets.txt` (#13209), and that is why the
+fail-closed Fly secret-provenance check no longer reports it as `UNDECLARED`: the ruling above
+("no deploy sets it") *is* the property the `fly-only:` token records, so the absence of a
+version-control managing source is deliberate, not drift. Two consequences follow, and both are
+load-bearing:
+
+- ⛔ **Do not "fix" it by declaring `gh-secret:` or by moving the value into `fly.toml [env]`.**
+  Either one makes the deploy the managing source — the ruling above, reversed — and `fly-toml-env`
+  also breaks the revert: `fly secrets unset` would then return the `[env]` value instead of the
+  shipped `off` default, so turning the mode off would need a code change rather than the one
+  operator step below.
+- ⚠️ **The declaration is a LIVE state, not a permanent one.** The checker refuses a `fly-only:`
+  name that no longer exists on Fly, so the `flyctl secrets unset` below must delete that line in
+  the same change — fail-closed on purpose, so a revert is visible in review.
+
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 
 > ✅ **AUTHORISED AND PARTLY DONE — BUT THE 2026-11-01 POSTPONEMENT BELOW IS NO LONGER LIVE. READ
