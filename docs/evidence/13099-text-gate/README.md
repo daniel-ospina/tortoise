@@ -6,6 +6,7 @@ doc_status: draft
 created: 2026-11-17
 updated: 2026-11-17
 issue: "#13099"
+subjects.team: epistemic-team
 aboutSubjects: text ranking, FalkorDB fulltext index, Postgres full-text search, ParadeDB pg_search, BM25
 aboutObjects: SEARCH-ARCHITECTURE.md §6.2 / M3, #13082 phase 2, #4051, #1144 retrieval eval, #12298 M3 recall, #12350 tokenizer contract
 ---
@@ -41,12 +42,16 @@ not license.
 
 **What it costs to adopt the winner.** `ts_rank` is **Postgres built-in**: no extension, no
 background worker, no restart-level config, and a **64 KB** GIN index on this corpus — against
-**3.1 MB** for ParadeDB's BM25 index, and **48×** smaller. ⚠️ Compare like with like: those two are
-INDEX figures. Stored end to end, the two options are the same size — the Postgres table holding
-content + `vector(384)` + both `tsvector` columns is **7.58 MB**, and the FalkorDB graph holding the
-same content + embeddings is **7.73 MB** of `used_memory`. The saving is the index *and the
-extension* (no preload, no worker, no AGPL), **not** an order of magnitude of storage. `ts_rank` is
-the cheapest of the four candidates, and on storage it is cheap by a few percent — not a factor.
+**3.1 MB** for ParadeDB's BM25 index, **48×** smaller. ⚠️ Compare like with like, and read what the
+artifact actually measured: the index figures are INDEX-ONLY, while the store figures are not
+interchangeable either. `sizes_bytes.tg_docs` is `pg_total_relation_size` — **heap + every index on
+the table** — so the table's own bytes are **4.23 MB** (7.58 MB total − 3.13 MB BM25 index − 0.14 MB
+GIN − 0.08 MB pkey). Store-to-store, `ts_rank` is heap + its GIN ≈ **4.3 MB** against the FalkorDB
+graph's **7.73 MB** of `used_memory` for the same content + embeddings — **~44 % smaller**, because the
+BM25 index is what made the Postgres row look as large as the graph. `pg_search` carries that index,
+so IT is the one that lands at ≈ **7.4 MB**, i.e. comparable to the graph. The saving for `ts_rank`
+is real but ordinary in size; the decisive part is the dependency (no extension, no preload, no
+worker, no AGPL).
 
 ---
 
@@ -256,12 +261,15 @@ Measured from the deployed artifacts (no vendor page was consulted; see §2):
 | **`pg_search` BM25** | `pg_search` **0.26.6**, `requires = 'vector'`, **not relocatable** | **0.026 s** (repeat 0.025 s) | **3.13 MB** — **48× the GIN index** | **`shared_preload_libraries` change required** (`pg_search,pg_cron,pg_stat_statements` in this image) plus a `paradedb.min_rows_per_worker = 300000` parallel-build threshold | **AGPL-3.0-or-later** |
 | **hybrid (RRF)** | needs both legs in one store | — | — | none of its own — RRF is application-side | — |
 
-⚠️ **Index size is not store size, and the two rows above are not comparable across that line.**
-Index-to-index the GIN index is 48× smaller than the BM25 index (64 KB vs 3.13 MB). Store-to-store
-they are the same size: the Postgres table holding content + `vector(384)` + both `tsvector`
-columns is **7.58 MB** (`sizes_bytes.tg_docs`), against the FalkorDB graph's **7.73 MB**
-`used_memory` for the same content + embeddings. The win is the dependency (no extension, no preload,
-no worker, no AGPL) and the index, **not** an order of magnitude of storage.
+⚠️ **Index size is not store size, and `tg_docs` is not the table.** The GIN/BM25 cells are
+INDEX-ONLY, so index-to-index the GIN index is 48× smaller (64 KB vs 3.13 MB). The Postgres store
+figures are `pg_total_relation_size`, which is **heap + every index on the table** — so they are not
+comparable to each other until the indexes are separated: the heap is **4.23 MB** (7.58 MB total −
+3.13 MB BM25 − 0.14 MB GIN − 0.08 MB pkey). Store-to-store, `ts_rank` is heap + GIN ≈ **4.3 MB**
+against the FalkorDB graph's **7.73 MB** `used_memory` for the same content + embeddings (~44 %
+smaller), while `pg_search` — which carries the 3.13 MB index — lands at ≈ **7.4 MB**, comparable to
+the graph. The win for `ts_rank` is the dependency (no extension, no preload, no worker, no AGPL) and
+the index, not an order of magnitude of storage.
 
 **Two deployment caveats, stated rather than buried:**
 
@@ -342,17 +350,26 @@ never be read as a disqualification; an arm that raised is **disqualified rather
 (inherited by the hybrids built from it), and a run whose **baseline** raised publishes no verdict at
 all.
 
-The same file recomputes §5's numbers — every arm's three metrics, all six Δ values and the
-`returned` column — from `artifact.json`, and requires §6's build, size and memory figures to appear
-in the row of the backend that produced them. It does **not** recompute §6's prose (licence, preload
-list, `pg_search` version, `copy_s`): those are presence-checked, not derived.
+The same file recomputes §5's numbers from `artifact.json` — every arm's three metrics, all three Δ
+cells of every non-baseline row (21 per class, not "six"), and the `returned` column — and requires
+§5's row set to equal the artifact's (a deleted arm row is drift). §6 is pinned **by row**: its build,
+size and memory figures, including the repeat run's, must appear in the row of the backend that
+produced them — a whole-section presence check would pass a table whose two labels had been swapped,
+which is the shape §6's figures were actually wrong in. §0/§6's store-to-store figures are pinned with
+the heap derivation they rest on (`tg_docs` is `pg_total_relation_size`, i.e. heap + every index). It
+does **not** recompute §6's prose (licence, preload list, `pg_search` version, `copy_s`): those are
+presence-checked, not derived.
 
 ⚠️ **The two committed artifacts predate record keys this harness now writes**, and a rerun will
-differ structurally from them, not only in timings. Three keys need reading with that in mind:
+differ structurally from them, not only in timings. Four keys need reading with that in mind:
 
 - `corpus.queries_sha256` and `results[*].arm_errors` are **absent** — they only appear on the next
   measurement run, which is why the query digest is also stated in prose above, and why the
   disqualification path is pinned by unit tests rather than by the committed artifacts.
+- `corpus.postgres_seed.sizes_bytes.tg_docs_heap` / `tg_docs_indexes` are **absent** for the same
+  reason, so §6's heap figure is DERIVED here from the recorded per-relation totals
+  (`tg_docs` − every index) rather than read; the harness records the split directly from the next
+  run on, and the pin derives it the same way so the committed record stays auditable.
 - `tokenizer_fallbacks` **is** present, but it was appended when the `verdict` blocks were regenerated
   (it sits AFTER `verdict` in the file; a fresh `run()` writes it BEFORE), so its `[]` is not a
   reading taken by the original run — it is a separate measurement over the committed query set

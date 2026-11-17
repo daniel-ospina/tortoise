@@ -23,6 +23,7 @@ Run without a graph (the repo's suite needs its DB seam, so use the lane form)::
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -271,8 +272,6 @@ _SEC5_HEAD = re.compile(r"^### 5\.\d\s+`(?P<cls>[a-z_]+)`")
 
 
 def _artifact() -> dict:
-    import json
-
     return json.loads(ARTIFACT.read_text())
 
 
@@ -419,30 +418,73 @@ def test_the_operational_facts_table_quotes_the_artifact():
             if e.replace("x", "\u00d7") in row or e in row:
                 continue
             drift.append(f"§6 row {label!r} is missing {e!r} (row: {row.strip()[:120]})")
+    # …and the REPEAT-run figures printed in the same cells. They come from the
+    # other artifact, so they were unguarded until now: mutating every one of the
+    # four left the pin green.
+    repeat = json.loads(ARTIFACT_REPEAT.read_text())
+    r_graph = repeat["corpus"]["graph_seed"]
+    r_pg = repeat["corpus"]["postgres_seed"]
+    repeat_expected = {
+        "in-graph": [
+            f"{r_graph['seed_s']:.3f} s",
+            f"{r_graph['graph_memory_usage']['used_memory_human'].rstrip('M')} MB",
+        ],
+        "ts_rank": [f"{r_pg['gin_index_build_s']:.3f} s"],
+        "pg_search": [f"{r_pg['bm25_index_build_s']:.3f} s"],
+    }
+    for label, expected in repeat_expected.items():
+        row = _sec6_row(label)
+        for e in expected:
+            if e not in row:
+                drift.append(f"§6 row {label!r} is missing its repeat-run figure {e!r}")
     assert drift == [], "\n".join(drift)
+
+
+def _postgres_heap_bytes(art: dict) -> int:
+    """The table's own bytes: `sizes_bytes.tg_docs` MINUS every index on it.
+
+    ⛔ `tg_docs` is `pg_total_relation_size` (= heap + indexes + TOAST, per
+    docs/ops/postgres-storage-measurement.md), so reading it as "the store" charges
+    the 3.13 MB BM25 index to the `ts_rank` candidate. The split is derived from
+    the artifact's own per-relation figures so the committed record stays
+    auditable; the harness records `tg_docs_heap` / `tg_docs_indexes` directly
+    from the next run on.
+    """
+    s = art["corpus"]["postgres_seed"]["sizes_bytes"]
+    indexes = (s["tg_docs_tsv_en"] + s["tg_docs_tsv_simple"]
+               + s["tg_docs_bm25"] + s["tg_docs_pkey"])
+    return s["tg_docs"] - indexes
 
 
 def test_the_like_for_like_store_comparison_is_quoted():
     """The adoption-cost claim compares INDEX to INDEX and STORE to STORE.
 
-    §0's "cheapest by a wide margin" sets a 64 KB GIN index against the whole
-    FalkorDB store (7.73 MB `used_memory`, embeddings included). The like-for-like
-    Postgres figure is the table itself — content + `vector(384)` + both
-    tsvectors — and the artifact holds it (`sizes_bytes.tg_docs`). Quoting only
-    the index would overstate the difference by two orders of magnitude, so it is
-    pinned: the two store figures must appear together.
+    §0's "cheapest" comparison used to set a 64 KB GIN index against the whole
+    FalkorDB store (7.73 MB `used_memory`), and then set `sizes_bytes.tg_docs`
+    (which is `pg_total_relation_size`: heap + EVERY index) against it as if that
+    were the `ts_rank` store — charging ParadeDB's 3.13 MB BM25 index to an option
+    that does not use it. Both halves are pinned here: the heap-only derivation
+    must be the one quoted, and the two store figures must appear together.
     """
     art = _artifact()
-    store_pg_mb = art["corpus"]["postgres_seed"]["sizes_bytes"]["tg_docs"] / 1e6
-    store_fg_mb = float(
+    sizes = art["corpus"]["postgres_seed"]["sizes_bytes"]
+    heap_mb = _postgres_heap_bytes(art) / 1e6
+    ts_rank_mb = (_postgres_heap_bytes(art) + sizes["tg_docs_tsv_en"]) / 1e6
+    graph_mb = float(
         art["corpus"]["graph_seed"]["graph_memory_usage"]["used_memory_human"].rstrip("M"))
     readme = README.read_text()
-    sec0 = readme.split("## 0.", 1)[1].split("\n## ", 1)[0]
-    assert f"{store_pg_mb:.1f} MB" in sec0 or f"{store_pg_mb:.2f} MB" in sec0, (
-        f"§0 never quotes the Postgres store ({store_pg_mb:.2f} MB from "
-        "sizes_bytes.tg_docs), so its index-vs-store comparison is not like-for-like")
-    assert f"{store_fg_mb:.2f} MB" in sec0 or f"{store_fg_mb:.1f} MB" in sec0, (
+
+    assert abs(heap_mb - 4.23) < 0.02, "the heap derivation moved — recheck the relation"
+    assert f"{heap_mb:.2f} MB" in readme or f"{heap_mb:.1f} MB" in readme, (
+        f"§0/§6 never quote the Postgres HEAP ({heap_mb:.2f} MB); quoting "
+        "`tg_docs` as the store charges the BM25 index to ts_rank")
+    assert f"{ts_rank_mb:.1f} MB" in readme, (
+        f"§0 never quotes the ts_rank store figure (heap + its GIN = {ts_rank_mb:.1f} MB)")
+    assert f"{graph_mb:.2f} MB" in readme or f"{graph_mb:.1f} MB" in readme, (
         "§0 never quotes the FalkorDB store figure from `used_memory`")
+    assert f"{heap_mb + sizes['tg_docs_bm25'] / 1e6:.1f} MB" in readme, (
+        "§0 never quotes the pg_search store (heap + BM25 index), so the reader "
+        "cannot see that IT is the option comparable to the graph")
 
 
 def test_an_arm_that_raised_is_disqualified_not_scored_as_a_loss():
@@ -518,8 +560,6 @@ def test_both_committed_verdicts_are_what_this_code_produces():
     against ITS results too — copying one verdict onto the other would be
     fabricated agreement.
     """
-    import json
-
     for path in (ARTIFACT, ARTIFACT_REPEAT):
         art = json.loads(path.read_text())
         assert art["verdict"] == verdict(art["results"], art.get("errors")), (

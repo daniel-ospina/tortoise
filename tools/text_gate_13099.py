@@ -122,6 +122,18 @@ USAGE
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE every other import — a module-level
+# 3.11+-only import would raise ImportError first, so a later guard could never
+# run. Pinned by tests/test_entry_point_python_guard.py.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/text_gate_13099.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/text_gate_13099.py`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -381,6 +393,16 @@ def seed_postgres(dsn: str, points: list[dict]) -> dict:
                     "tg_docs_pkey"):
             cur.execute("SELECT pg_total_relation_size(%s)", (rel,))
             sizes[rel] = cur.fetchone()[0]
+        # `pg_total_relation_size` above INCLUDES the relation's indexes
+        # (docs/ops/postgres-storage-measurement.md), so `tg_docs` is heap + TOAST
+        # + every index on it, NOT the table's own bytes. Record the split
+        # explicitly: a store-to-store comparison against FalkorDB's
+        # `used_memory` needs the HEAP, and reading `tg_docs` as "the store"
+        # silently charges the BM25 index to the ts_rank candidate (#13107).
+        cur.execute("SELECT pg_relation_size('tg_docs')")
+        sizes["tg_docs_heap"] = cur.fetchone()[0]
+        cur.execute("SELECT pg_indexes_size('tg_docs')")
+        sizes["tg_docs_indexes"] = cur.fetchone()[0]
         cur.execute("SELECT extversion FROM pg_extension WHERE extname='pg_search'")
         pg_search_ver = cur.fetchone()[0]
         cur.execute("SELECT extversion FROM pg_extension WHERE extname='vector'")
@@ -931,11 +953,28 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
     candidates = [a for a in qualifying
                   if a not in not_candidates and a not in control_arms]
 
-    # ⛔ NO `decision` IS BUILT HERE. It used to be, into a local that nothing
-    # read, while the returned `decision` below was rebuilt from scratch — so the
-    # dead copy said the rule decides "at nDCG@10" and the live one said "any
-    # published metric", and editing the visible block changed nothing. The
-    # return dict is the single place the text is produced.
+    # ⛔ ONE construction of the decision string, and it is the one that is
+    # returned. It used to be built into a local that nothing read, while the
+    # returned `decision` was rebuilt from scratch — so the dead copy said the
+    # rule decides "at nDCG@10" and the live one said "any published metric",
+    # and editing the visible block changed nothing. `decision += …` counts as
+    # a use, so no linter could see it.
+    if baseline_disqualified:
+        decision = (
+            "NO VERDICT — the baseline arm (`in_graph_fulltext`) raised during the "
+            "run, so every candidate delta is measured against an empty result "
+            "list. Re-run before reading ANY number here, including the tables.")
+    else:
+        decision = (
+            ("a Postgres option does not lose to the in-graph leg on any query "
+             "class at any published metric (" + ", ".join(METRICS_CHECKED) + "): "
+             + ", ".join(candidates)
+             if candidates else
+             "every Postgres option loses significantly on at least one query "
+             "class; the text index stays")
+            + (f" — but {len(disqualified)} arm(s) were DISQUALIFIED by a "
+               f"recorded error and are not scored: {', '.join(sorted(disqualified))}"
+               if disqualified else ""))
 
     return {
         "rule": ("a candidate qualifies unless it is significantly WORSE "
@@ -954,21 +993,7 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
         "control_arms_not_candidates": sorted(control_arms),
         "disqualified_arms": sorted(disqualified),
         "baseline_disqualified": baseline_disqualified,
-        "decision": (
-            "NO VERDICT — the baseline arm (`in_graph_fulltext`) raised during the "
-            "run, so every candidate delta is measured against an empty result "
-            "list. Re-run before reading ANY number here, including the tables."
-            if baseline_disqualified else
-            ("a Postgres option does not lose to the in-graph leg on any query "
-             "class at any published metric (" + ", ".join(METRICS_CHECKED) + "): "
-             + ", ".join(candidates)
-             if candidates else
-             "every Postgres option loses significantly on at least one query "
-             "class; the text index stays")
-            + (f" — but {len(disqualified)} arm(s) were DISQUALIFIED by a "
-               f"recorded error and are not scored: {', '.join(sorted(disqualified))}"
-               if disqualified else "")
-        ),
+        "decision": decision,
     }
 
 
