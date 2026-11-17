@@ -477,5 +477,10 @@ certified by the strict per-window predicate (`search_engine.require_hybrid_read
 **What is pinned by tests:** the harness's structural facts and the two pre-existing artifacts
 (`tests/test_candidate_recall_11901.py`). ⛔ The five artifacts in this directory are **not** pinned by
 that suite — they are a dated measurement of a live corpus, and a pin would rot exactly as the corpus
-does. The numbers the dispatch can re-check are the decompositions above, and each is re-derivable from
-the committed JSON with `jq '.arms.exact'`.
+does. (The suite pins the two `#11901` artifacts, which live in
+`docs/research/2026-11-12-11901-candidate-recall/`, never these.) The numbers the dispatch can
+re-check are the decompositions above, and each is re-derivable from the committed JSON — the per-k
+cells with `jq '.arms.exact'`, the class split with `jq '.arms.exact_by_class'`, and the zero-row set
+with `jq '[.arms.exact_misses[] | select(.returned==0)]'`. The emitted-query bytes in §3.2 are the one
+exception: they are reproduced by **calling** `sparse.build_or_query` (under
+`TORTOISE_UNDERSCORE_TERMS=1` and `=0`), not stored in any artifact.
