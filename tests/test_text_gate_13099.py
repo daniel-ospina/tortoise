@@ -486,15 +486,19 @@ def test_the_operational_facts_table_quotes_the_artifact():
     assert drift == [], "\n".join(drift)
 
 
-def _postgres_heap_bytes(art: dict) -> int:
-    """The table's own bytes: `sizes_bytes.tg_docs` MINUS every index on it.
+def _postgres_table_bytes(art: dict) -> int:
+    """The table's OWN bytes: `sizes_bytes.tg_docs` MINUS every index on it.
 
-    ⛔ `tg_docs` is `pg_total_relation_size` (= heap + indexes + TOAST, per
-    docs/ops/postgres-storage-measurement.md), so reading it as "the store" charges
-    the 3.13 MB BM25 index to the `ts_rank` candidate. The split is derived from
-    the artifact's own per-relation figures so the committed record stays
-    auditable; the harness records `tg_docs_heap` / `tg_docs_indexes` directly
-    from the next run on.
+    ⛔ `tg_docs` is `pg_total_relation_size` (= heap + TOAST + indexes, per
+    docs/ops/postgres-storage-measurement.md), so reading it as "the store"
+    charges the 3.13 MB BM25 index to the `ts_rank` candidate. The identity
+    `pg_total_relation_size = pg_table_size + pg_indexes_size` makes the
+    subtraction exactly `pg_table_size` — heap **plus TOAST plus FSM/VM**, not the
+    bare main fork. That is deliberately the SAME quantity the harness now records
+    as `tg_docs_table` (and NOT `pg_relation_size`, which is the main fork alone:
+    the two agree only while TOAST is empty, and diverging silently on the first
+    run whose content TOASTs is exactly the kind of stale field this record
+    exists not to have).
     """
     s = art["corpus"]["postgres_seed"]["sizes_bytes"]
     indexes = (s["tg_docs_tsv_en"] + s["tg_docs_tsv_simple"]
@@ -502,48 +506,52 @@ def _postgres_heap_bytes(art: dict) -> int:
     return s["tg_docs"] - indexes
 
 
+def _readme_section(heading: str) -> str:
+    """One README section, from its `## <heading>` line to the next `## `."""
+    text = README.read_text()
+    start = text.index(f"## {heading}")
+    return text[start:].split("\n## ", 1)[0]
+
+
 def test_the_like_for_like_store_comparison_is_quoted():
     """The adoption-cost claim compares INDEX to INDEX and STORE to STORE.
 
     §0's "cheapest" comparison used to set a 64 KB GIN index against the whole
-    FalkorDB store (7.73 MB `used_memory`), and then set `sizes_bytes.tg_docs`
-    (which is `pg_total_relation_size`: heap + EVERY index) against it as if that
-    were the `ts_rank` store — charging ParadeDB's 3.13 MB BM25 index to an option
-    that does not use it. Both halves are pinned here: the heap-only derivation
-    must be the one quoted, and the two store figures must appear together.
+    FalkorDB store and then quote `sizes_bytes.tg_docs` (`pg_total_relation_size`:
+    heap + EVERY index) as if that were the `ts_rank` store — charging ParadeDB's
+    3.13 MB BM25 index to an option that does not use it. Both halves are pinned
+    here, and ⛔ **in §0 SPECIFICALLY**: §6's prose repeats every one of these
+    figures, so a whole-document presence check was blind to §0 going entirely
+    wrong (measured: corrupting §0's figures left it green). §0 is the headline a
+    reader acts on, so it is the section that has to carry them.
     """
     art = _artifact()
     sizes = art["corpus"]["postgres_seed"]["sizes_bytes"]
-    heap_mb = _postgres_heap_bytes(art) / 1e6
-    ts_rank_mb = (_postgres_heap_bytes(art) + sizes["tg_docs_tsv_en"]) / 1e6
+    table_mb = _postgres_table_bytes(art) / 1e6
+    ts_rank_mb = (_postgres_table_bytes(art) + sizes["tg_docs_tsv_en"]) / 1e6
     # ⛔ Redis prints `used_memory_human` in 1024-BASED units, so `7.73M` is
     # 7.73 MiB = 8.11 MB in the decimal units the Postgres figures use. Reading it
-    # as 7.73 MB — what this pin used to do — made the quoted saving 44 % instead
-    # of 47 %, i.e. it compared MiB against MB while the paragraph beside it told
-    # the reader to compare like with like.
+    # as 7.73 MB made the quoted saving 44 % instead of 47 % — comparing MiB
+    # against MB while the paragraph tells the reader to compare like with like.
     graph_mib = float(
         art["corpus"]["graph_seed"]["graph_memory_usage"]["used_memory_human"].rstrip("M"))
     graph_mb = graph_mib * 1024 * 1024 / 1e6
     saving_pct = (1 - ts_rank_mb / graph_mb) * 100
-    readme = README.read_text()
+    sec0 = _readme_section("0. Verdict")
 
-    assert abs(heap_mb - 4.23) < 0.02, "the heap derivation moved — recheck the relation"
-    assert f"{heap_mb:.2f} MB" in readme or f"{heap_mb:.1f} MB" in readme, (
-        f"§0/§6 never quote the Postgres HEAP ({heap_mb:.2f} MB); quoting "
-        "`tg_docs` as the store charges the BM25 index to ts_rank")
-    assert f"{ts_rank_mb:.1f} MB" in readme, (
-        f"§0 never quotes the ts_rank store figure (heap + its GIN = {ts_rank_mb:.1f} MB)")
-    assert f"{graph_mib:.2f} MiB" in readme, (
-        "§0 never quotes the graph's own `used_memory_human` reading as MiB, so the "
-        "1024-based unit cannot be checked by the reader")
-    assert f"{graph_mb:.2f} MB" in readme, (
-        f"§0 never gives the graph figure in DECIMAL MB ({graph_mb:.2f}), the unit the "
-        "Postgres sizes are quoted in — the two are then compared across bases")
-    assert f"{saving_pct:.0f} %" in readme, (
-        f"§0's store-to-store saving is not the consistent-unit figure ({saving_pct:.1f} %)")
-    assert f"{heap_mb + sizes['tg_docs_bm25'] / 1e6:.1f} MB" in readme, (
-        "§0 never quotes the pg_search store (heap + BM25 index), so the reader "
-        "cannot see that IT is the option comparable to the graph")
+    assert abs(table_mb - 4.23) < 0.02, "the table derivation moved — recheck the relation"
+    expected = {
+        "the table's own bytes": f"{table_mb:.2f} MB",
+        "the ts_rank store (table + its GIN)": f"{ts_rank_mb:.1f} MB",
+        "the graph's reading in its own (1024-based) unit": f"{graph_mib:.2f} MiB",
+        "the graph figure in decimal MB": f"{graph_mb:.2f} MB",
+        "the store-to-store saving": f"{saving_pct:.0f} %",
+        "the pg_search store (table + BM25 index)": f"{table_mb + sizes['tg_docs_bm25'] / 1e6:.1f} MB",
+    }
+    missing = [f"{what} ({val})" for what, val in expected.items() if val not in sec0]
+    assert missing == [], (
+        "§0 does not carry these adoption-cost figures, so the like-for-like claim "
+        "cannot be checked where it is made: " + repr(missing))
 
 
 def test_an_arm_that_raised_is_disqualified_not_scored_as_a_loss():

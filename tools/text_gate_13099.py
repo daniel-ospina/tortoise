@@ -399,11 +399,16 @@ def seed_postgres(dsn: str, points: list[dict]) -> dict:
         # `pg_total_relation_size` above INCLUDES the relation's indexes
         # (docs/ops/postgres-storage-measurement.md), so `tg_docs` is heap + TOAST
         # + every index on it, NOT the table's own bytes. Record the split
-        # explicitly: a store-to-store comparison against FalkorDB's
-        # `used_memory` needs the HEAP, and reading `tg_docs` as "the store"
-        # silently charges the BM25 index to the ts_rank candidate (#13107).
-        cur.execute("SELECT pg_relation_size('tg_docs')")
-        sizes["tg_docs_heap"] = cur.fetchone()[0]
+        # explicitly, in the SAME definitions the identities use:
+        # `pg_total_relation_size = pg_table_size + pg_indexes_size`, so
+        # `tg_docs_table` (heap + TOAST + FSM/VM) is exactly `tg_docs` minus the
+        # indexes and can be compared store-to-store against FalkorDB's
+        # `used_memory` (#13107). ⛔ NOT `pg_relation_size` (= the main fork only):
+        # that is a SMALLER quantity, so recording it under this name would make
+        # the field disagree with the figure derived from the totals the moment
+        # the table TOASTs.
+        cur.execute("SELECT pg_table_size('tg_docs')")
+        sizes["tg_docs_table"] = cur.fetchone()[0]
         cur.execute("SELECT pg_indexes_size('tg_docs')")
         sizes["tg_docs_indexes"] = cur.fetchone()[0]
         cur.execute("SELECT extversion FROM pg_extension WHERE extname='pg_search'")

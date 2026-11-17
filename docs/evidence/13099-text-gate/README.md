@@ -375,10 +375,14 @@ differ structurally from them, not only in timings. Five keys need reading with 
 - `corpus.queries_sha256` and `results[*].arm_errors` are **absent** — they only appear on the next
   measurement run, which is why the query digest is also stated in prose above, and why the
   disqualification path is pinned by unit tests rather than by the committed artifacts.
-- `corpus.postgres_seed.sizes_bytes.tg_docs_heap` / `tg_docs_indexes` are **absent** for the same
-  reason, so §6's heap figure is DERIVED here from the recorded per-relation totals
+- `corpus.postgres_seed.sizes_bytes.tg_docs_table` / `tg_docs_indexes` are **absent** for the same
+  reason, so the table's own-bytes figure is DERIVED here from the recorded per-relation totals
   (`tg_docs` − every index) rather than read; the harness records the split directly from the next
-  run on, and the pin derives it the same way so the committed record stays auditable.
+  run on. ⚠️ The two are the **same** quantity by construction, and deliberately not the bare main
+  fork: `pg_total_relation_size = pg_table_size + pg_indexes_size`, so the subtraction is
+  `pg_table_size` = heap **+ TOAST + FSM/VM**. Recording `pg_relation_size` (main fork only) under
+  that name would agree here — TOAST is empty on this corpus — and silently diverge on the first run
+  whose content TOASTs.
 - `tokenizer_fallbacks` **is** present, but it was appended when the `verdict` blocks were regenerated
   (it sits AFTER `verdict` in the file; a fresh `run()` writes it BEFORE), so its `[]` is not a
   reading taken by the original run — it is a separate measurement over the committed query set

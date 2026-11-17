@@ -181,10 +181,10 @@ noise band**; at depth it is **significantly ahead**. On the exact-name surface 
 matching 2 of a query's 7 terms scores 9.0 while the document matching all 7 scores 4.14 and ranks
 99th, which is the `#8488`/`#12350` defect class and is **fixable in place**.
 
-**What changed in this document: nothing about the decision.** The `#6.2` decision to keep the text
+**What changed in this document: nothing about the decision.** The §6.2 decision to keep the text
 index **stands**, and the external 8–23 figure is **not refuted** — that compares Postgres to BM25 on
 foreign datasets, while this compares *our* leg to Postgres on *ours*. What changed is one factual
-claim: the qualifier §6.2 recorded as **unmeasured** is now measured, and `#6.2` says so with a pointer
+claim: the qualifier §6.2 recorded as **unmeasured** is now measured, and §6.2 says so with a pointer
 to the record. The reopen, if any, is argued on `#4051` / `#13082` phase 2 with these figures.
 
 **Adoption cost, measured from the artifacts** (no vendor page was reachable on the measuring box):
