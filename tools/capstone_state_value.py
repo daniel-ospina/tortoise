@@ -955,16 +955,6 @@ def _signal_refs(answer: Answer, refs: dict[str, str], spec: dict) -> None:
         pid = refs.get(ref)
         if pid:
             answer.signals.append(f"{'found' if pid in served else 'NOT-SERVED'}: {ref} ({pid})")
-    # A ref that was never ingested used to be SKIPPED here (`if pid:`), so the reader saw
-    # nothing at all about the commitment it was asked about and could score the row `right`
-    # on a graph missing it. Absence is evidence: say so, in the same field a reader reads.
-    named = set(spec.get("must_appear") or []) | set(spec.get("must_not_appear") or [])
-    for ref in sorted(named):
-        if not refs.get(ref):
-            answer.signals.append(
-                f"NOT-INGESTED: {ref} — this question names an identity the run never created, "
-                "so an answer that omits it is a gap in the RUN, not a finding about the product"
-            )
     for call in answer.calls:
         if call.surface != "search" or not call.ok:
             continue
@@ -1273,7 +1263,18 @@ RECIPE_REFS = {
     ],
     "plan_vs_occurrence": ["launch_plan"],
     "why_changed": ["q3_pricing", "q4_pricing"],
-    "goal_met": ["uptime_goal", "uptime_target"],
+    "goal_met": [
+        "uptime_goal",
+        "uptime_target",
+        # Q4's key turns on the LATEST reading being 99.72 (November, below target). A
+        # refused `create_event` for the November reading leaves the product's own judgement
+        # `met` from October's 99.95 — so without these two the question is asked, the reader
+        # scores it `wrong`, and it names a PRODUCT defect for the instrument's refused write.
+        # They were the only two ingest refs in the whole narrative that no question waited
+        # for; a pin now asserts no ingest ref can be unwatched again.
+        "uptime_oct",
+        "uptime_nov",
+    ],
     "planned_never_happened": ["partner_call"],
     "withdrawn": ["beach_club_claim"],
 }

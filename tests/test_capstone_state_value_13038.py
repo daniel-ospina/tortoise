@@ -260,8 +260,7 @@ def test_judge_refuses_a_document_that_is_not_a_judge_packet(tmp_path):
                 {
                     "schema": "capstone-state-value-scoreboard/v1",
                     "questions": [
-                        {"id": "Q1", "question": "q", "key": "k",
-                         "what_a_wrong_answer_means": "m"}
+                        {"id": "Q1", "question": "q", "key": "k", "what_a_wrong_answer_means": "m"}
                     ],
                 },
             ),
@@ -296,13 +295,14 @@ def test_judge_refuses_a_verdicts_file_that_is_not_a_verdicts_map(tmp_path):
         (ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json").read_text()
     )
     baseline = d / "run-local.json"
-    baseline.write_text("{\"keep\": true}")
+    baseline.write_text('{"keep": true}')
     before = baseline.read_bytes()
 
     bad = d / "run-as-verdicts.json"
     bad.write_text(json.dumps({"schema": "capstone-state-value-scoreboard/v1"}))
-    args = type("A", (), {"packet": str(packet), "verdicts": str(bad), "judge_cmd": None,
-                          "out": None})()
+    args = type(
+        "A", (), {"packet": str(packet), "verdicts": str(bad), "judge_cmd": None, "out": None}
+    )()
     assert cap.cmd_judge(args) == 2
     assert baseline.read_bytes() == before
     assert not (d / "scoreboard-local.md").exists()
@@ -489,6 +489,17 @@ def test_every_recipe_declares_the_refs_it_needs(narrative):
             f"{recipe} needs refs the narrative never produces: {sorted(unknown)} — it "
             "would read as `blocked` on every run, including a healthy one"
         )
+    # The other direction, and the one that cost a P1 (#13303 review cycle 5): an ingest
+    # ref that NO recipe waits for can be refused without blocking anything, so the
+    # question whose answer key depends on it is asked against a graph the scenario never
+    # created. `uptime_nov` was exactly that — a refused November reading left the
+    # product's own judgement `met` from October, and the reader scored the instrument's
+    # failed write as a product defect.
+    watched = set().union(*cap.RECIPE_REFS.values())
+    assert produced <= watched, (
+        "these ingest refs are waited for by no question, so their refusal blocks nothing: "
+        f"{sorted(produced - watched)}"
+    )
 
 
 def test_an_unresolved_ref_is_reported_and_never_silently_ignored():
@@ -613,7 +624,9 @@ def test_run_judge_file_refuses_a_verdicts_document_before_measuring(tmp_path, n
     assert not list(out.iterdir()), "a refused verdicts document must leave the board alone"
 
     # …and the shared loader accepts the REAL verdicts map, so both doors stay walkable.
-    real = cap._load_verdicts_map(ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json")
+    real = cap._load_verdicts_map(
+        ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json"
+    )
     assert "_provenance" not in real and all(isinstance(v, dict) for v in real.values())
 
 
@@ -793,14 +806,6 @@ def test_every_question_declares_the_refs_its_ANSWER_KEY_judges(narrative):
         )
 
 
-def test_a_ref_that_was_never_ingested_is_said_out_loud():
-    """Absence used to be silent (`if pid:`), so the reader saw nothing about the gap."""
-    ans = cap.Answer("Q1")
-    cap._signal_refs(ans, {}, {"must_appear": ["q4_pricing"], "must_not_appear": ["q3_pricing"]})
-    joined = " | ".join(ans.signals)
-    assert "NOT-INGESTED: q4_pricing" in joined and "NOT-INGESTED: q3_pricing" in joined
-
-
 def test_the_reader_is_spawned_without_tools_in_an_empty_sandbox(monkeypatch):
     """The property that makes a later scoreboard meaningful: independence.
 
@@ -809,9 +814,8 @@ def test_the_reader_is_spawned_without_tools_in_an_empty_sandbox(monkeypatch):
     reproduce the PREVIOUS run's verdicts, so a later run could not show that a slice moved
     the product. Pinned hermetically: no model, no real subprocess.
     """
-    import subprocess as real_subprocess
-
     seen: dict = {}
+    orig_run = cap.subprocess.run
 
     def fake_run(argv, **kwargs):
         seen["argv"] = argv
@@ -839,7 +843,12 @@ def test_the_reader_is_spawned_without_tools_in_an_empty_sandbox(monkeypatch):
     assert out["ok"] is False and out["verdicts"] == {}, (
         "an unparseable reply must yield no verdicts — never a default"
     )
-    assert isinstance(real_subprocess, type(cap.subprocess))
+    # Restoration, PROVED rather than asserted by tautology: the old line compared the
+    # module to itself (`real is cap.subprocess` is always True) and read as a
+    # restore-check while testing nothing.
+    assert cap.subprocess.run is fake_run
+    monkeypatch.undo()
+    assert cap.subprocess.run is orig_run
 
 
 def test_the_verdicts_file_write_creates_its_directory(tmp_path):
