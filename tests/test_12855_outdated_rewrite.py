@@ -516,6 +516,15 @@ def test_a_dual_labelled_point_row_is_reported_not_silently_skipped(env):
     assert [f.get("id") for f in rep.failures] == [oid], rep.failures
     assert "dead claim" in rep.failures[0]["error"], rep.failures[0]["error"]
     assert _legacy_rows(sdk) == [[oid]], "the row is untouched, and still counted"
+    # ⛔ THE ORDER, measured. Without the pre-write label refusal the call is the
+    # documented ECHO and appends a record; with it, nothing is appended at all.
+    # The post-state alone cannot tell the two apart — the row is unchanged
+    # either way — so an assertion on status only would not discriminate the
+    # refusal from the post-write guard that would otherwise have caught it
+    # (review finding, 2026-11-17).
+    assert (rep.journal_delta or 0) == 0, (
+        "a pre-write refusal must append nothing to the journal — a non-zero "
+        "delta means the write was attempted and only the post-write guard saved it")
 
 
 def test_a_missing_journal_refuses_before_any_write(tmp_path, monkeypatch):
@@ -611,3 +620,23 @@ def test_main_execute_rewrites_the_population_and_exits_zero(tmp_path, monkeypat
             assert _status(sdk, ids[name]) == tool.REWRITE_TO, name
     finally:
         sdk.close()
+
+
+def test_an_unreadable_journal_position_fails_the_row_instead_of_skipping(env, monkeypatch):
+    """The per-row probe FAILS CLOSED on `None`, which is what its docstring says.
+
+    `_journal_position` answers `None` when the position cannot be read. The batch
+    gate treats a `None` delta as failure, so a per-row probe that instead SKIPPED
+    would certify rows on a measurement it never took — the two gates opposite,
+    and the weaker one guarding the finer-grained question (review finding,
+    2026-11-17).
+    """
+    sdk, _events = env
+    _seed(sdk)
+    monkeypatch.setattr(tool, "_journal_position", lambda log: None)
+
+    rep = tool.run(sdk, execute=True)
+
+    assert rep.rewritten == [], "nothing may be certified on an unread position"
+    assert len(rep.failures) == 3, rep.failures
+    assert all("UNPROVEN" in f["error"] for f in rep.failures), rep.failures

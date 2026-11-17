@@ -194,8 +194,11 @@ def _journal_position(log):
     """`log.position()`, or ``None`` when it cannot be read.
 
     A guard that CRASHED the run on an unreadable position would turn a
-    journal-integrity question into a traceback. ``None`` makes the per-row
-    check skip (as the batch one already does) rather than invent a verdict.
+    journal-integrity question into a traceback — so this returns ``None``.
+    ⛔ ``None`` is NOT leniency and it is not skipped: both the per-row probe and
+    the batch gate FAIL CLOSED on it (a row whose durability cannot be measured
+    is reported, not counted as rewritten), because "unreadable" and "recorded"
+    are different answers and only one of them is true.
     """
     try:
         return log.position()
@@ -295,13 +298,19 @@ def _binding_refusal(rid: str, nodes: list[list[str]]) -> str:
 
 
 def _is_clean_object_row(nodes: list[list[str]]) -> bool:
-    """True only when the id is bound by EXACTLY ONE node, and that node is an
-    `:Object` carrying no other KNOWLEDGE label.
+    """True only when the write can bind EXACTLY ONE node, and that node is an
+    `:Object` carrying no other `:Point`/`:Subject` label.
 
-    A second binding with the same id is what lets `update_knowledge` write a row
-    this tool never read; a `Point`/`Subject` label on the single binding is the
-    dual-label case (that family's arm gets the write). Either is refused. A
-    non-knowledge extra label is tolerated — it selects no different arm.
+    A second binding is what lets `update_knowledge` write a row this tool never
+    read; a `Point`/`Subject` label on the single binding is the dual-label case
+    (that family's arm gets the write). Either is refused.
+
+    ⚠️ A further label that selects ANOTHER arm is tolerated, not filtered —
+    measured 2026-11-17: a `[Object, Source]` row takes the Source arm as well
+    and journals TWO records for one set of values, so the batch gate's
+    `delta < len(rewritten)` is a LOWER bound on records, never an equality. The
+    write itself is still correct (same node, same value); the count is simply
+    not `len(rewritten)` on such a row.
     """
     if len(nodes) != 1:
         return False
@@ -507,8 +516,17 @@ def rewrite(sdk, rep: Report) -> Report:
     write that `_update_entity` journals as `EntityMutated{state: {status}}`.
     A raw `SET` is never issued here: it would not reach the journal, and the
     next `rebuild_all` would revert it (see the module docstring).
+
+    ⛔ The pre-write refusals are re-applied HERE, not only in :func:`run`: this
+    is a public writer, and a caller that reaches it with a report from an
+    incomplete read would write the visible share — the partial rewrite the
+    refusals exist to prevent.
     """
     rep.executed = True
+    refusal = _refusal(rep)
+    if refusal is not None:
+        rep.executed = False
+        raise refusal
     log = sdk._get_event_log()
     try:
         rep.journal_records_before = log.position()
@@ -576,15 +594,26 @@ def rewrite(sdk, rep: Report) -> Report:
         # reverts — with no exception anywhere. A batch delta cannot attribute
         # that to a row; this probe can.
         _row_after = _journal_position(log)
-        if _row_before is not None and _row_after is not None:
-            if _row_after - _row_before < 1:
-                rep.failures.append({
-                    "id": rid,
-                    "error": ("the write landed but appended NO journal record: "
-                              "it is LIVE-ONLY and the next `rebuild_all` will "
-                              "revert it (#4240). Not counted as rewritten."),
-                })
-                continue
+        if _row_before is None or _row_after is None:
+            # FAIL CLOSED on an unreadable position: "could not measure" is not
+            # "recorded". The batch gate fails on a `None` delta for the same
+            # reason, and a row must not be certified on a probe that never ran.
+            rep.failures.append({
+                "id": rid,
+                "error": ("the journal's record position could not be read "
+                          "around this write, so its durability is UNPROVEN: "
+                          "the row may be LIVE-ONLY and reverted by the next "
+                          "`rebuild_all` (#4240). Not counted as rewritten."),
+            })
+            continue
+        if _row_after - _row_before < 1:
+            rep.failures.append({
+                "id": rid,
+                "error": ("the write landed but appended NO journal record: "
+                          "it is LIVE-ONLY and the next `rebuild_all` will "
+                          "revert it (#4240). Not counted as rewritten."),
+            })
+            continue
         rep.rewritten.append(rid)
 
     try:
