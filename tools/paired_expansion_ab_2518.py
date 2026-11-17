@@ -1263,7 +1263,9 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
             ("expansion_fired_items", _has_ids_digests),
             ("expansion_identical_items", _has_ids_digests),
             ("ranked_lists_compared", _has_ids_digests),
-            ("seed_effect", _has_seed_ranks and arm == "point"),
+            # `_has_seed_ranks` already gates on `arm == "point"`; the arm split
+            # below is what makes that guard observable (`#13267` review 7 F6)
+            ("seed_effect", _has_seed_ranks),
         ) if datum]
         out_arms[arm].update({
             "expansion_provenance_entries": {"off": prov_off, "on": prov_on},

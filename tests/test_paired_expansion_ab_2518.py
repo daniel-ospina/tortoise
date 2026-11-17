@@ -2786,3 +2786,97 @@ def test_every_bare_percentage_the_brief_prints_is_a_recorded_ratio():
     assert not strays, (
         f"the brief prints {sorted(strays)} %, which is not a ratio any artifact "
         f"records (allowed: {sorted(allowed)})")
+
+
+def test_the_annotation_count_is_the_count_of_groups_actually_listed():
+    """F2 — the count was corrected three times and pinned none of them.
+
+    `#13267` reviews 6 F6 and 7 F2: §8 declared FIVE groups, listed five, then
+    called the derived-figure declaration "the fifth" — two groups called fifth and
+    a count one short. Corrected to SIX, the prose still survived `SIX -> FIVE`
+    GREEN, because a count in a sentence is a figure like any other. So the count is
+    derived from the ARTIFACTS (what each file actually carries) and every group it
+    counts must be named in §8.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    #: each entry is (marker the prose must name, a detector over one artifact)
+    groups = {
+        "identity_measured": lambda a: any(
+            "identity_measured" in b for b in a["arms"].values()),
+        "ranked_lists_compared_note": lambda a: any(
+            "ranked_lists_compared_note" in b for b in a["arms"].values()),
+        "construction_unrecorded": lambda a: "construction_unrecorded" in a,
+        "repeat_check": lambda a: any("repeat_check" in b
+                                      for b in a["arms"].values()),
+        "provenance": lambda a: "provenance" in a,
+        "derived_note": lambda a: "derived_note" in next(
+            iter(a["arms"].values())),
+    }
+    carried = {marker for marker, detected in groups.items()
+               if any(detected(_artifact(name)) for name in _ARTIFACTS)}
+    assert len(carried) == len(groups), (
+        f"an annotation group named here is carried by no artifact: "
+        f"{sorted(set(groups) - carried)}")
+    words = {4: "FOUR", 5: "FIVE", 6: "SIX", 7: "SEVEN"}
+    marker = re.search(r"\*\*And (FOUR|FIVE|SIX|SEVEN) field groups", brief)
+    assert marker, "§8 states the annotation-group count"
+    declared = {v: k for k, v in words.items()}[marker.group(1)]
+    assert declared == len(groups), (
+        f"§8 says {declared} annotation groups; the artifacts carry "
+        f"{len(groups)}: {sorted(groups)}")
+    # the whole §8 region, because the derived-figure group is named in the
+    # paragraph that FOLLOWS the enumeration
+    section = brief[brief.index(marker.group(0)):]
+    section = section[:section.index("\n## ", 1)] if "\n## " in section[1:] else section
+    for name in groups:
+        assert f"`{name}`" in section or name in section.replace("`", ""), (
+            f"§8 counts `{name}` as an annotation group but does not name it")
+    ordinal = {4: "fourth", 5: "fifth", 6: "sixth", 7: "seventh"}[declared]
+    assert f"The {ordinal} and last annotation group is the derived-figure" in brief, (
+        f"the enumeration is {declared} long, so the derived-figure declaration is "
+        f"the {ordinal} — the summary calls it something else")
+
+
+def test_the_tool_does_not_declare_point_only_figures_on_the_object_arm():
+    """F6 — the artifacts said the object arm's `seed_effect` was recomputed.
+
+    `#13267` review 7 F6: `_recomputable` / `_PER_ITEM_DERIVED` were built for
+    every arm, so a tool-produced OBJECT artifact declared `seed_effect`
+    recomputable and `off_topk_displacement` unpinned — figures that arm emits
+    nowhere, which the helper then `continue`d over. Fixing the artifacts without
+    pinning the TOOL left the generator free to re-introduce it.
+    """
+    names = [f"item-{n:06d}" for n in range(8)]
+    point_off = {i: [f"{i}-a"] for i in names}
+    point_on = {i: [f"{i}-a", f"{i}-b"] for i in names}
+    object_off = {i: [f"{i}-a"] for i in names}
+    art, _ = _build_fake_artifact(point_off=point_off, point_on=point_on,
+                                  object_off=object_off, object_on=object_off)
+    # ⛔ and again with per-item seed ranks present on the OBJECT arm, so the
+    # `arm == "point"` guard is itself witnessable: without it the object arm
+    # sees `_has_seed_ranks` true and declares a figure it never emits
+    seeded = _build_fake_artifact(
+        point_off=point_off, point_on=point_on,
+        object_off=object_off, object_on=object_off,
+        arms={"point": {"off": _fake_arm(point_off, seed_ranks={i: 0 for i in names}),
+                        "on": _fake_arm(point_on, seed_ranks={i: 0 for i in names})},
+              "object": {"off": _fake_arm(object_off, seed_ranks={i: 0 for i in names}),
+                         "on": _fake_arm(object_off, seed_ranks={i: 0 for i in names})}})[0]
+    assert "seed_effect" not in set(seeded["arms"]["object"]["derived_recomputable"]) | \
+        set(seeded["arms"]["object"]["derived_unpinned"]), (
+        "the object arm carries seed ranks in this build, and still emits no "
+        "`seed_effect` cell — the `arm == \"point\"` guard must hold")
+    for arm in ("point", "object"):
+        block = art["arms"][arm]
+        declared = set(block["derived_recomputable"])
+        unpinned = set(block["derived_unpinned"])
+        emitted = block["per_k"]["k=3"]
+        for field in _POINT_ONLY_DERIVED:
+            if arm == "point":
+                assert field in declared or field in unpinned, (
+                    f"the point arm emits `{field}`, so the tool must classify it")
+            else:
+                assert field not in declared and field not in unpinned, (
+                    f"the object arm emits `{field}` NOWHERE (cells: "
+                    f"{sorted(emitted)}), so declaring it is a claim about a field "
+                    "a reader will not find")
