@@ -188,7 +188,13 @@ def _storage_included_amounts_confirmed() -> tuple[bool, str]:
 
 
 def _vector_index_measurable() -> tuple[bool, str]:
-    """The HNSW vector index is measurable, so the graph reading may carry a cap."""
+    """The HNSW vector index is measurable — NECESSARY, not sufficient, for a cap.
+
+    ⛔ This condition alone never makes the graph reading cappable: an EMPTY
+    graph reads ~346 KiB while it rents ~1.46 MB, so the parallel
+    ``per_graph_overhead_attributed`` token is the other half of the same block.
+    A lane that clears this one and lifts the block arms an evadable cap.
+    """
     note = str(graph_storage.PRECISION_NOTE)
     forbids = "until the vector index is measurable" in note
     excluded = graph_storage.VECTOR_INDEX_EXCLUDED in graph_storage.EXCLUDED_OVERHEAD
@@ -237,8 +243,14 @@ def _per_graph_overhead_attributed() -> tuple[bool, str]:
             for i in range(2)
         ]
         combined = graph_storage.combine_graph_storage_readings(synthetic)
-        charged = bool(combined and combined.ok
-                       and float(combined.total_mb or 0.0) > 0.0)
+        # ⛔ A MAGNITUDE, not "some positive number": review round 7 measured a
+        # +1e-9 MB per-graph charge as SATISFIED, which would leave the evasion
+        # intact while ticking the box. The measurement is ~1.46 MB/graph, so two
+        # graphs must combine to at least 1 MB each (2.0) — deliberately below
+        # 1.46 so a conservative per-graph charge still passes, and far above any
+        # token amount.
+        total = float(combined.total_mb or 0.0) if combined else 0.0
+        charged = bool(combined and combined.ok and total >= 2.0)
     except Exception as e:
         return False, (
             f"the combined-reading probe could not be built ({type(e).__name__}: "
@@ -246,8 +258,8 @@ def _per_graph_overhead_attributed() -> tuple[bool, str]:
     return (not excluded and not note_excludes and charged), (
         f"EXCLUDED_OVERHEAD still declares per-graph overhead={excluded}; "
         f"PRECISION_NOTE still says it EXCLUDES per-graph={note_excludes}; "
-        f"two EMPTY graphs combine to a positive total (overhead charged)="
-        f"{charged}")
+        f"two EMPTY graphs combine to >= 1 MB each (overhead charged)={charged}; "
+        f"combined total={total:.4f} MB")
 
 
 _PREDICATES = {

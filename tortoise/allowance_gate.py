@@ -267,9 +267,12 @@ RELEASE_CONDITIONS: dict[str, str] = {
         "the derived defaults of record (``product/pricing.json`` "
         "``_included_amounts_status``)"),
     "vector_index_measurable": (
-        "the HNSW vector index is measurable, so a cap MAY be wired to the graph "
-        "reading (evidence: ``graph_storage.PRECISION_NOTE`` no longer forbids "
-        "it)"),
+        "the HNSW vector index is measurable (evidence: "
+        "``graph_storage.PRECISION_NOTE`` no longer forbids capping FOR THAT "
+        "REASON). ⛔ NECESSARY, NOT SUFFICIENT: a cap also needs "
+        "``per_graph_overhead_attributed``, because an EMPTY graph reads ~346 KiB "
+        "while renting ~1.46 MB — clearing only this one would arm a cap a "
+        "tenant steps around by spreading storage over near-empty graphs"),
     "per_graph_overhead_attributed": (
         "the per-graph OVERHEAD is attributed to the graph that causes it, so a "
         "cap on the graph reading cannot be side-stepped by spreading storage "
