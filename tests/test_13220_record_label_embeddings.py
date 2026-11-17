@@ -122,10 +122,13 @@ class _Recorder:
 
     def __init__(self, vector: list[float] | None = None):
         self.calls: list[tuple[str, int | None]] = []
+        self.bounded: list[bool] = []
         self.vector = vector
 
-    def __call__(self, content: str, expected_dim: int | None = None):
+    def __call__(self, content: str, expected_dim: int | None = None, *,
+                 bounded: bool = False):
         self.calls.append((content, expected_dim))
+        self.bounded.append(bounded)
         if self.vector is not None:
             return list(self.vector)
         return [0.125] * 384
@@ -307,7 +310,7 @@ def test_an_embedder_that_answers_nothing_derives_nothing(monkeypatch):
     """The #4280 shape — an uninstalled embedder is `None`, never a junk vector."""
     import tortoise.embeddings as embeddings
 
-    monkeypatch.setattr(embeddings, "encode_for_row", lambda c, d=None: None)
+    monkeypatch.setattr(embeddings, "encode_for_row", lambda c, d=None, **k: None)
     out = rw.derived_embedding_columns(
         {"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"})
     assert out.columns == {}
@@ -317,7 +320,7 @@ def test_an_encode_that_raises_derives_nothing(monkeypatch):
     """Every failure is "this row has no vector", never a refused write."""
     import tortoise.embeddings as embeddings
 
-    def _boom(content, expected_dim=None):
+    def _boom(content, expected_dim=None, **kwargs):
         raise RuntimeError("model exploded")
 
     monkeypatch.setattr(embeddings, "encode_for_row", _boom)
@@ -327,15 +330,36 @@ def test_an_encode_that_raises_derives_nothing(monkeypatch):
 
 
 def test_the_width_is_NOT_the_encoders_business(encoder):
-    """`expected_dim=None`: the record's width rule is the CONVERTER's.
+    """The width is the CONVERTER's, and the WAIT is bounded (`#13265` cycle-2 P1).
 
-    Passing a width here would make `encode_for_row` DROP a vector the graph
-    holds whenever the store's embedder is not 384-wide — a second width rule in
-    the record, which is the §12.2a defect this change must not create.
+    Two separate claims about the one seam call, both load-bearing and both
+    invisible to every other test here:
+
+    * `expected_dim=None` — passing `required_embedding_dim` would make
+      `encode_for_row` DROP a vector the graph holds whenever the store's
+      embedder is not 384-wide — a second width rule in the record, which is the
+      §12.2a defect this change must not create.
+    * `bounded=True` — this call runs on the CALLER's thread, inside
+      `write_live_record`, BEFORE any cache fold, so an unbounded wait for a cold
+      embedder stalls the user's request: `get()` blocks up to
+      `_LOAD_TIMEOUT_S` (90 s) and, in a warm window, on the load another thread
+      is already running (measured 504 at 18.4 s, #13224/#13229). The graph's own
+      folds already opt in; without this keyword the record's duplicate encode
+      re-introduces the stall the graph bounded.
+
+    The bound is safe for this column on the reasoning that makes the derived
+    folds the only opt-in: the vector is a DERIVED copy of the journal payload, so
+    a live decline is repairable by `replay(derived=…)`, and `_in_replay_scope()`
+    suppresses the bound inside a replay window, so parity holds on both sides.
     """
     rw.derived_embedding_columns(
         {"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"})
-    assert encoder.calls[0][1] is None
+    assert encoder.calls == [("Acme Corp", None)], encoder.calls
+    assert encoder.bounded == [True], (
+        "the record's derivation took an UNBOUNDED embedder wait — it runs on the "
+        "caller's request thread before any cache fold, so a cold embedder would "
+        "stall live writes for up to `_LOAD_TIMEOUT_S` (90 s). See #13224/#13229 "
+        "for the graph's own `bounded=True` opt-in and the measured 18.4 s 504")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -426,22 +450,34 @@ def test_the_live_seam_threads_the_derived_columns_into_replay(encoder, monkeypa
         return rp.ReplayReport(events=1, statements=1, first_seq=1, last_seq=1)
 
     monkeypatch.setattr(rw.record_projection, "replay", _spy)
+    # ⛔ TWO records, and the FIRST one derives nothing on purpose (review
+    # cycle-2 P2): with a single record every index IS 0, so `derived[index] ==
+    # derived[0]` and the map's KEY went unpinned — measured, mutating
+    # `derived[index] = …` to `derived[0] = …` left this whole file green while
+    # the real two-record plan bound the Object's fingerprint on the SOURCE row.
+    # `SourceCreated` has no text of its own, so it contributes no entry and the
+    # surviving key is 1.
     rw.RecordWriter(dsn="postgresql://record/db",
                     connect=lambda _dsn: FakeConnection()).write(
-        [{"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"}],
+        [{"type": "SourceCreated", "id": "src-1", "title": ""},
+         {"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"}],
         org_id="org", graph_id="g", position=False)
 
     assert seen["records"] == [
+        {"type": "SourceCreated", "id": "src-1", "title": ""},
         {"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"}], (
-        "the spy did not receive the caller's record — the assertion below would "
+        "the spy did not receive the caller's records — the assertion below would "
         "pass over a call that never happened")
     derived = seen["derived"]
     assert derived is not None, (
         "the seam passed `derived=None`: `derived_embedding_columns`' result is "
         "computed and then DROPPED, so the two fingerprint columns would never "
         "be filled on the live path")
-    assert set(derived) == {0}, derived
-    assert derived[0] == {"embedding": [0.125] * 384}, derived
+    assert set(derived) == {1}, (
+        f"expected exactly the SECOND record's entry, got {sorted(derived)} — "
+        "`derived[0]` would put the Object's fingerprint on the `SourceCreated` "
+        "record, i.e. bind it to `public.source` instead of `public.object`")
+    assert derived[1] == {"embedding": [0.125] * 384}, derived
 
 
 def test_a_label_with_no_rule_binds_no_embedding_column():

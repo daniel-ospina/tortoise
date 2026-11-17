@@ -1830,7 +1830,7 @@ def derived_embedding_columns(
     "every row it folds", which an earlier cut said: `embedding` is absent from
     the node UPSERT's column list AND from `ON CONFLICT … DO UPDATE SET` (both
     name only the BOUND columns — the SET list is built from `col_values`,
-    `record_projection.py:3447`), so a row that already HAS a vector keeps it
+    `record_projection.py:3446`), so a row that already HAS a vector keeps it
     through a no-derived re-fold (measured: `payload_SURVIVED=t vec_SURVIVED=t`).
     The scope matters — it is the difference between "the backfill mints blank
     rows" and "the backfill wipes the population". The long form, with the
@@ -1910,7 +1910,29 @@ def derived_embedding_columns(
     except Exception:  # noqa: BLE001, RUF100 — an unimportable seam derives nothing
         return _DerivedEmbedding(skipped="the embedding seam is unimportable")
     try:
-        vec = encode_for_row(text, None)
+        # ⛔ `bounded=True` IS LOAD-BEARING HERE (`#13265` review cycle-2 P1). This
+        # call runs on the CALLER's thread, inside `write_live_record`, BEFORE any
+        # cache fold (`write_live_record`'s docstring says so verbatim) — so an
+        # unbounded wait for a cold embedder stalls the user's request, not a
+        # background fold. `get()` blocks up to `_LOAD_TIMEOUT_S` (90 s) and, in a
+        # warm window, on the load another thread is running; the graph's own
+        # folds already opt in (`projection/entities.py`: `_upsert_object`,
+        # `_upsert_subject`, the document and Event arms) precisely so a live
+        # create does not pay it (#13224/#13229, measured 504 at 18.4 s).
+        #
+        # The bound is SAFE for this column on exactly the reasoning that makes
+        # the derived folds the only opt-in: the vector is a DERIVED copy of the
+        # journal payload, so a live decline is repairable (`replay(derived=…)`
+        # recomputes it) and nothing here is record-TRUTH. `_in_replay_scope()`
+        # suppresses the bound inside a replay WINDOW, so `derived =
+        # replay(journal)` stays timing-free on both sides — no timing state is
+        # introduced here that a non-deriving caller could observe.
+        #
+        # `None` for the width is deliberate and separate: passing
+        # `required_embedding_dim` would make the seam DROP a vector of another
+        # declared width while the pair's `GENERATED` `embedding_vec` simply stays
+        # NULL (see the test that pins it).
+        vec = encode_for_row(text, None, bounded=True)
     except Exception:  # noqa: BLE001, RUF100 — every failure is "this row has no vector"
         return _DerivedEmbedding(skipped="the encode raised")
     if not vec:

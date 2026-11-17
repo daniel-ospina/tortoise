@@ -95,16 +95,36 @@ def schema():
 
 
 @pytest.fixture()
-def point_rows(schema):
-    """A clean, uniquely-seeded tenant for one test, and its teardown."""
-    conn = schema
-    with conn.cursor() as cur:
+def tenant(schema):
+    """The `organizations`/`graphs` rows every seeded table FKs to.
+
+    ⛔ ITS OWN FIXTURE, not a preamble inside `point_rows` (`#13265` review
+    cycle-2 P2). `node_identity` carries FK `…_org_id_fkey` to `organizations`,
+    so a test that seeds identities but takes only `schema` raises
+    `ForeignKeyViolation` the moment it runs ALONE — measured on a fresh
+    `pgvector/pgvector:pg16` with every record migration applied:
+
+        Key (org_id)=(org_11642_live) is not present in table "organizations".
+
+    It passed whole-file only because an earlier test's `point_rows` had already
+    seeded the tenant. `check-test-isolation.sh` is a MODULE-level URI-capture
+    lint and cannot see a cross-test fixture dependency, so nothing caught it.
+    """
+    with schema.cursor() as cur:
         cur.execute(
             "INSERT INTO public.organizations (id, name) VALUES (%s, %s) "
             "ON CONFLICT (id) DO NOTHING", (ORG, ORG))
         cur.execute(
             "INSERT INTO public.graphs (id, org_id, name) VALUES (%s, %s, %s) "
             "ON CONFLICT (id) DO NOTHING", (GRAPH, ORG, GRAPH))
+    return schema
+
+
+@pytest.fixture()
+def point_rows(tenant):
+    """A clean, uniquely-seeded tenant for one test, and its teardown."""
+    conn = tenant
+    with conn.cursor() as cur:
 
         def _seed(node_id, *, embedding, status=None, outdated=None,
                   is_operator=None, op_type=None, updated_at=None,
@@ -404,7 +424,7 @@ def test_an_unserved_label_answers_None_not_empty(schema):
 
 # ── #13220: object/subject carry their fingerprints, and the index is real ──
 
-def test_the_two_fingerprints_are_columns_on_object_and_subject(schema):
+def test_the_two_fingerprints_are_columns_on_object_and_subject(tenant):
     """#13220's APPLIED half — on the only leg that can apply the migration.
 
     ⛔ WHY THIS FILE. The PGlite drill has exactly one runner
@@ -430,7 +450,7 @@ def test_the_two_fingerprints_are_columns_on_object_and_subject(schema):
         ("Subject", "fp-subject-ok"): _vec(0),
         ("Subject", "fp-subject-bad"): json.dumps(bad),
     }
-    with schema.cursor() as cur:
+    with tenant.cursor() as cur:
         for (label, key) in rows:
             cur.execute(
                 "INSERT INTO public.node_identity "
@@ -498,8 +518,8 @@ def test_the_two_fingerprints_are_columns_on_object_and_subject(schema):
         #    open tail. Asserted as a NEGATIVE CONTROL, not as a string.
         for table in ("object", "subject"):
             cur.execute(
-                f"SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                f"WHERE conname = %s", (f"chk_{table}_props_no_derived",))
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = %s", (f"chk_{table}_props_no_derived",))
             row = cur.fetchone()
             assert row and "embedding" in row[0], (table, row)
         with pytest.raises(Exception) as excinfo:
