@@ -27999,15 +27999,20 @@ class TortoiseSDK:
         # ── the CALLER-FACING read (#12941) — opt-in, so an unarmed caller and
         # every mid-write caller above keep the pre-#12941 shape exactly.
         from .record_serve import (
+            FALLBACK_RECORD_BOUND_MISS,
             FALLBACK_RECORD_TENANT_UNRESOLVED,
             MODE_OFF,
+            MODE_PREFER,
             MODE_RECORD,
             READ_POINT_BY_ID,
+            CacheAnswerRequired,
+            RecordReadBoundMiss,
             RecordServeError,
+            RecordUnavailable,
             answered_by_cache,
             point_residency,
             serve_mode,
-            serve_point,
+            serve_point_bounded,
         )
         from .residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
 
@@ -28050,9 +28055,59 @@ class TortoiseSDK:
                 props=_cache_answer(),
                 reason=FALLBACK_RECORD_TENANT_UNRESOLVED)
         else:
-            answer = serve_point(
-                tenant=tenant, point_id=id, cache_answer=_cache_answer,
-                mode=mode)
+            # ⛔ ONE BOUND FOR ALL THREE DOORS (#12947 finding 1, P1). The hosted
+            # route already submits this same call to
+            # `_read_offload(..., timeout=record_read_timeout_s())`; the SDK and
+            # the MCP door called it on the caller's thread and nothing bounded
+            # it, so a slow record produced the transport's `-32009` ("the work
+            # may still complete") instead of this seam's NAMED fallback, and
+            # `FALLBACK_RECORD_BOUND_MISS` was unreachable from those doors.
+            # `record_read_timeout_s()` is resolved HERE rather than imported at
+            # module scope so the bound a lane refuses on is the one a test can
+            # shrink to prove the refusal (`monitoring.py` pins it below the
+            # transport's wait bound).
+            from .monitoring import record_read_timeout_s
+
+            bound_s = record_read_timeout_s()
+
+            def _cache_answered(reason: str):
+                """The caller's OWN cache read — the deferred shape's fallback.
+
+                It runs HERE, on the caller's thread, so the bounded worker
+                touches the RECORD and never a graph handle: the same split
+                `hosted_api.get_point` makes, and the reason `cache_answer=None`
+                is passed below for `prefer`.
+                """
+                return answered_by_cache(
+                    read=READ_POINT_BY_ID, coordinate=coordinate,
+                    props=_cache_answer(), reason=reason)
+
+            try:
+                answer = serve_point_bounded(
+                    bound_s=bound_s,
+                    tenant=tenant, point_id=id,
+                    # ⛔ `prefer` takes the DEFERRED shape: the seam still
+                    # decides and NAMES the fallback, but the cache read then
+                    # happens on this lane instead of inside the worker.
+                    # `record` never calls the callback and must pass one at all
+                    # (`serve_point` refuses `None` outside `prefer`).
+                    cache_answer=(None if mode == MODE_PREFER else _cache_answer),
+                    mode=mode)
+            except CacheAnswerRequired as needed:
+                # `prefer` only: the record missed or could not be asked, so the
+                # reason is the SEAM's and the answer is the cache's.
+                answer = _cache_answered(needed.reason)
+            except RecordReadBoundMiss as bound_miss:
+                if mode == MODE_RECORD:
+                    # No cache branch exists, so "too slow" must RAISE: turning a
+                    # capacity condition into an absence is the §17.2 inversion
+                    # this whole module exists to prevent. Chained from the seam's
+                    # own miss so the cause survives the translation.
+                    raise RecordUnavailable(
+                        f"the record did not answer {coordinate} inside "
+                        f"{bound_s:.1f}s — in 'record' mode there is no cache "
+                        f"branch, so an absence is NOT established") from bound_miss
+                answer = _cache_answered(FALLBACK_RECORD_BOUND_MISS)
         served_out.update(answer.as_wire())
         # ⛔ THE SEAM DECIDES HERE, NOT THE DECLARATION. In an armed mode the
         # record was (or could have been) asked, so `answer.not_hot` already
