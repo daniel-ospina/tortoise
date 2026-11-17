@@ -160,21 +160,28 @@ def _clean_tenant(schema):
     survives here is ambient state the next file can pass on.
 
     ⛔ `object`/`subject` are swept because that test writes them (the tuple only
-    ever named the two tables the point tests used). ⛔ The rollback is because
-    the test ends on a NEGATIVE CONTROL — an `INSERT` the props CHECK refuses —
-    which leaves the transaction aborted, and a plain `DELETE` in teardown would
-    raise InFailedSqlTransaction instead of cleaning.
+    ever named the two tables the point tests used).
+
+    ⛔ NO ROLLBACK, AND HERE IS WHY — this fixture's connection is AUTOCOMMIT.
+    `_conn()` sets `conn.autocommit = True` (:57) and `_ensure_record_schema`
+    never turns it off, so every statement commits as it runs and the test's
+    closing NEGATIVE CONTROL (an `INSERT` the props CHECK refuses) raises into an
+    IDLE session, not an aborted transaction: measured, `status: 0` after the
+    refusal, and a plain `DELETE` immediately after it succeeds. An earlier form
+    of this fixture carried a `rollback()` justified by an aborted transaction
+    that does not exist — a stated mechanism the code contradicted, which is the
+    class of comment this change exists to remove. If that connection ever stops
+    being autocommit, the teardown fails LOUDLY (`InFailedSqlTransaction`) rather
+    than silently skipping the sweep, which is the right direction.
     """
     conn = schema
 
     def _sweep() -> None:
-        conn.rollback()
         with conn.cursor() as cur:
             for table in ("point", "node_identity", "object", "subject"):
                 cur.execute(
                     f"DELETE FROM public.{table} WHERE org_id=%s AND graph_id=%s",
                     (ORG, GRAPH))
-        conn.commit()
 
     _sweep()
     yield

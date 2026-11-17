@@ -1876,8 +1876,17 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #: the body it had already captured. On a three-declaration text (object, then
 #: subject, then subject SHRUNK to `ARRAY['status']`) the old pattern saw **0**
 #: subject declarations and the new one sees **2** — so the shrinking
-#: re-declaration went from invisible to in-force-and-red. Declarations in this
-#: tree sit ~200-600 characters apart, the same order as the window itself.
+#: re-declaration went from invisible to in-force-and-red.
+#:
+#: ⚠️ AND THE EXPOSURE IS LATENT TODAY, WHICH IS NOT THE SAME AS ABSENT: in the
+#: tree as it stands the two parsers agree exactly (9 declarations, identical
+#: per-table counts) because the closest pair of declarations is **2,082**
+#: characters apart — comfortably outside the 400-character window (measured
+#: gaps: 2,244 · 2,091 · 3,168 · 2,082 · 6,581 · 3,938 · 44,793 · 109,490).
+#: Append-only history adds a NEW FILE per re-declaration, so a pair landing
+#: within 400 characters of each other is a matter of when, not whether — and a
+#: parser whose correctness depends on today's spacing is a gate that will one
+#: day certify a ban the database no longer has.
 _PROPS_BAN_PIN_HEADER_RE = re.compile(
     r"(ADD\s+)?CONSTRAINT\s+chk_(\w+)_props_no_derived\s+CHECK\b",
     re.I,

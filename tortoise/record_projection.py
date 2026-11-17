@@ -3076,10 +3076,11 @@ GENERATED_COLUMNS: frozenset[str] = frozenset({
 #:     NOTHING when the record already carries a vector, so the two routes cannot
 #:     disagree.
 #:   * **`source`** — the same NAME, a different property. `_upsert_source`
-#:     computes no vector at all and `_upsert_document` derives one
-#:     unconditionally from `title`+`content` WITHOUT ever reading a carried
-#:     `embedding`, so no `:Source` writer honours one and a `source.embedding` is
-#:     not "record-truth the graph also holds".
+#:     computes no vector at all and `_upsert_document` derives one from
+#:     `title`+`content` wherever the GRAPH derives one (`suppress_embedding`
+#:     suppresses both, which `derived_embedding_columns` mirrors) — and it never
+#:     READS a carried `embedding`, so no `:Source` writer honours one and a
+#:     `source.embedding` is not "record-truth the graph also holds".
 #:     ⚠️ CONSEQUENCE, stated because nothing pins it: for a `DocumentCreated`
 #:     record the derived binding runs AFTER the split (`col_values[column] =
 #:     value` in `_declared_mutations`), so a CARRIED `source.embedding` is
