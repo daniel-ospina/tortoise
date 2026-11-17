@@ -27,7 +27,7 @@ comment [`6713838871`](https://github.com/daniel-ospina/tortoise/issues/4051#iss
 2. **The text index stays in FalkorDB for now.** Moving it to a Postgres ranker is a *measured*
    regression (§6.2), so it is deferred behind a measurement, not adopted on a hunch.
 3. **Traversal, writes and EP stay in FalkorDB.** The Cypher surface — an order-of-magnitude **~1,900 statements**, an estimate rather than a census — is untouched.
-4. **The graph stays complete for private-beta and becomes a bounded window only after M2 measures it AND a decision it cannot make on its own is taken**, sized by the tier's cost budget — §1.5, §7. ⛔ M2 has now been measured and it does **not** arm the window: the measurement says the cost is its eviction, and arming needs a decision §9.1/§10 name and this document does not make. The cost during private-beta is **knowingly above** the 30 % target (§8).
+4. **The graph stays complete for private-beta and becomes a bounded window only after M2 measures it AND a decision it cannot make on its own is taken**, sized by the tier's cost budget — §1.5, §7. ⛔ M2 has now been measured and it does **not** arm the window: the measurement says the cost is its eviction **on `:Object`** (on `:Point` it is the eviction plus the claim leg's own ceiling — §9.1 Finding 2), and arming needs a decision §9.1/§10 name and this document does not make. The cost during private-beta is **knowingly above** the 30 % target (§8).
 
 **The product goal, as this document records it:** a high quality search system with manageable cost, where
 speed matters but is **not** the top criterion. That ranking is **this document's rationale, not a quoted
@@ -418,7 +418,7 @@ literature measures latency and hit rate, not answer quality, and the best trace
 hit rate for 2-hop expansions — so arming it on a guess is exactly the quality risk this document ranks
 first. Private-beta therefore runs **complete** and **above the 30 % target, knowingly** — **193 % of it on the
 total per-tenant basis, §8.1** (the RAM line alone is 154 %, and it is also above the older <\$9 total-cost
-ceiling) — bounded by a small known tenant count, and the window is armed only when M2 says it is safe — which it does not: §9.1 measures the cost as exactly the eviction, so arming additionally needs a decision §10 names and no measurement can make. **The guardrails that make it
+ceiling) — bounded by a small known tenant count, and the window is armed only when M2 says it is safe — which it does not: §9.1 measures the cost as exactly the eviction **on `:Object`**, where `found@deep` equals the resident share in every arm; on `:Point` the cost is the eviction **plus** the lexical leg's own ceiling (~11.7 points of it at `tail@0.5`, where `found@deep` is 0.410 against a resident share of 0.5267), so arming additionally needs a decision §10 names and no measurement can make. **The guardrails that make it
 safe ship before private-beta regardless**, so the eventual switch is a configuration change with measured
 justification, not a redesign in front of customers.
 
@@ -670,10 +670,11 @@ record carries its own reproducibility bound, in the artifact: across three runs
 most 9.9 — the gaps the verdict rests on run 13.3 to 48.3 points, and the two quantities the verdict turns
 on (`found_deep_of_demoted == 0`, and `recall@k <= resident_share`) held in every arm of every run.
 ⛔ **`found@deep == resident_share` does NOT hold in every arm** — that equality is `:Object`-only. On
-`:Point` the lexical leg's own ceiling keeps `found@deep` below the resident share in all ten windowed
-arms and on the complete graph (0.7133 against 1.0), so quoting it as a universal invariant is the same
-overclaim as the `:Point` 100 % wrong-answer figure: a property of the LEG, read as a property of the
-window (Finding 2).
+`:Point` the lexical leg's own ceiling keeps `found@deep` AT OR BELOW the resident share in every arm:
+**nine of the ten** windowed arms fall short, and the tenth (`random@0.1`) merely **coincides** at 0.11
+— none exceeds it, and the complete graph is 0.7133 against 1.0. So quoting the equality as a universal
+invariant is the same overclaim as the `:Point` 100 % wrong-answer figure: a property of the LEG, read as
+a property of the window (Finding 2).
 
 **Consequence for §7 — and §10's reopen trigger has FIRED.** Arming needs a decision this measurement
 cannot make on its own. §10 lists *"M2 showing a windowed graph loses retrieval quality beyond an

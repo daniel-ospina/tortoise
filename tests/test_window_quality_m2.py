@@ -1109,8 +1109,6 @@ def test_the_tool_refuses_without_a_live_graph():
 
 def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
     """Each published `A vs B at COV` pair must be the real `:Object` recall@3 pair."""
-    import re
-
     raw = README.read_text()
     obj = _arms(artifact, "object")
 
@@ -1142,12 +1140,28 @@ def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
     d = (pt["tail@0.9"]["recall@10"] - pt["random@0.9"]["recall@10"]) * 100
     assert f"**{d:.2f} pp on `:Point` `recall@10` at 0.90**" in body, d
 
-    # The two loss ranges, each bound to its own order.
-    for order in ("tail", "random"):
+    # The two loss ranges, bound to their own ORDER — not merely present.
+    # ⛔ `want in body` for each order separately is a MEMBERSHIP test: both range
+    # strings appear under either labelling, so swapping them (or swapping the
+    # order NAMES) stayed green while the document became false. Bind the whole
+    # clause as one unit, so the label and the range cannot be detached.
+    def _range(order):
         drops = [
             abs(obj["complete"][m] - obj[f"{order}@0.5"][m]) * 100
             for m in ("found_deep", "recall@3", "recall@5", "recall@10", "recall@15")
         ]
-        lo, hi = min(drops), max(drops)
-        want = f"**{lo:.1f} to {hi:.1f}"
-        assert want in body, (order, want, lo, hi)
+        return min(drops), max(drops)
+
+    tail_lo, tail_hi = _range("tail")
+    rand_lo, rand_hi = _range("random")
+    # the two ranges must actually differ, or the binding below proves nothing
+    assert (tail_lo, tail_hi) != (rand_lo, rand_hi), (tail_lo, tail_hi)
+
+    clause = re.search(
+        r"cold-tail arm loses\s+\*\*(\d+\.\d) to (\d+\.\d) points\*\*\s+"
+        r"to the eviction and the random control\s+\*\*(\d+\.\d) to (\d+\.\d)\*\*",
+        body,
+    )
+    assert clause is not None, "the loss-range clause is not in its expected form"
+    got = tuple(float(x) for x in clause.groups())
+    assert got == pytest.approx((tail_lo, tail_hi, rand_lo, rand_hi), abs=0.05), got
