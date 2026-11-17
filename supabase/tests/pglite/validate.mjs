@@ -181,12 +181,15 @@ await db.exec(`
 // ENUMERATED FROM DISK, in the APPLIER'S order — the VERSION substring compared
 // as a string, never the whole filename. `supabase db push` re-sorts local paths
 // by the version before applying (`sortMigrationPathsByVersion` in
-// `apps/cli/src/command-internal/migration-history.ts`, v2.122.1), and filename
-// order only agrees with it while every prefix has the same width — which this
-// tree does not guarantee (`check-migration-append-only` accepts ANY digit
-// count). A plain `.sort()` therefore replays in an order production never runs:
-// `20261117000003_b.sql` sorts before `2026111700_a.sql` by name (`'0'` < `'_'`)
-// but after it by version. "Supabase's own migration order" is the version order.
+// `apps/cli/src/command-internal/migration-history.ts`, v2.122.1), so the replay
+// below should use its key. The two orders agree UNLESS one version is a proper
+// PREFIX of another (`2026111700_…` vs `20261117000003_…`: `'0'` < `'_'` sorts
+// the older name last by filename, while the version compare puts the longer one
+// last) — unequal WIDTH alone is not enough, and this tree has 72 fourteen-digit
+// and 16 four-digit prefixes yet no prefix pair, so both orders are identical
+// here today: this is a guard against a permitted shape, not a repair of today's
+// replay. (`check-migration-append-only` accepts ANY digit count, so the shape
+// is reachable by a future correction.)
 // A hand-pinned array is what silently drifted: at #3543 it listed 31 of the
 // 38 migrations on disk, so 20260817000001 / 20260829000001 / 20260830000001 /
 // 20260907000001 / 2026090900000{1,2,3} were never applied by the harness,

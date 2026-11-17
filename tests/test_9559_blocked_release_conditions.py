@@ -1662,9 +1662,12 @@ def test_the_restore_verb_still_exists():
 #    keys on the `[1]` group of `/^([0-9]+)_(.*)\.sql$/u` (`:67`), compared by
 #    `compareMigrationVersions = (a, b) => a < b ? -1 : a > b ? 1 : 0`
 #    (`migration-timestamp.format.ts:56-57`) — a LEXICAL compare of the version
-#    string. Both `findPendingMigrations` (`:51`) and `includeAllPending` (`:97`,
-#    the `--include-all` path this repo's deploy uses) pass through it, and the
-#    CLI's own comment (`:317-322`) states the divergence from filename order:
+#    string. Both `findPendingMigrations` and `includeAllPending` (the
+#    `--include-all` path this repo's deploy uses) pass through it — they live in
+#    `apps/cli/src/command-internal/migration-pending.ts` (:51 and :97 are the two
+#    `sortMigrationPathsByVersion(localMigrations)` call sites there), reached from
+#    `db-push-core.ts:10-13`, and the CLI's own comment (`migration-history.ts:
+#    317-322`) states the divergence from filename order:
 #    *"File-name order and version order only agree while versions are the same
 #    width: `20260420010000_b.sql` sorts before `20260420_a.sql` by name (`'0'` <
 #    `'_'`) but after it by version."*
