@@ -2304,9 +2304,12 @@ def create_backup(
 # urllib3 close and discard the overflow connection on every wave — each dropped
 # connection re-pays TCP+TLS, i.e. the exact latency this fixes, plus a
 # "Connection pool is full" warning per dropped connection. Staying under the
-# pool keeps every GET on a reused connection; the pool itself is per PROCESS and
-# per client, so this bound stays per invocation by design (a shared semaphore
-# would let one slow listing starve a peer request).
+# pool keeps every GET of THIS invocation on a reused connection. ⚠️ That budget
+# is shared, not per call: `_backup_storage()` caches ONE `R2Storage` with ONE
+# client, so concurrent listings and the sweep's writes draw on the same pool —
+# two simultaneous `/v1/backups` requests can still saturate it. The bound is
+# therefore per invocation by design: a process-wide semaphore would let one slow
+# listing starve a peer request.
 # `test_the_manifest_concurrency_bound_stays_under_the_client_pool` pins the
 # coupling, so raising this number requires touching that test.
 _LIST_MANIFEST_MAX_INFLIGHT = 8
@@ -2356,12 +2359,25 @@ def list_backups(storage: BackupStorage, org_id: str,
         caught: a partial outage must not masquerade as "no backups exist"
         during disaster recovery. KeyError (concurrently pruned object) and the
         decode errors are the same unreadable-manifest class and are skipped.
+
+        The SHAPE check is part of that same rule, not a second one: `None` is
+        this function's "skip" sentinel, so a manifest body of JSON `null`
+        (which is a legal `json.loads` result) must take the documented skip path
+        explicitly — otherwise it would be silently dropped by the sentinel, while
+        a non-dict body such as `[1,2]` would instead reach the sort and raise
+        `AttributeError`. One rule for malformed manifests, whichever shape.
         """
         try:
-            return json.loads(storage.download(key))
+            manifest = json.loads(storage.download(key))
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError, KeyError) as e:
             logger.warning("unreadable/vanished backup manifest %s: %s", key, e)
             return None
+        if not isinstance(manifest, dict):
+            logger.warning(
+                "backup manifest %s is not an object (%s) — skipped",
+                key, type(manifest).__name__)
+            return None
+        return manifest
 
     if not keys:
         return []

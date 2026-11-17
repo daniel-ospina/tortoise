@@ -2096,6 +2096,70 @@ def test_list_backups_still_skips_an_unreadable_manifest_inside_the_pool():
     assert bad_id not in {m["backup_id"] for m in listed}
 
 
+def test_list_backups_skips_a_manifest_that_is_not_a_json_object():
+    """#13097 review: `None` is the skip sentinel, so a JSON `null` body must be
+    skipped explicitly — not silently swallowed by the sentinel while a non-dict
+    body like `[1,2]` instead reaches the sort and raises `AttributeError`.
+
+    One rule for every malformed manifest, whichever shape it arrives in.
+    """
+    store = _SlowCountingStorage(delay=0.005)
+    org_id = "team_shapes"
+    _seed_manifests(store, org_id, 3)
+    for suffix, body in (("null", b"null"), ("list", b"[1,2]"), ("str", b'"hi"')):
+        bad = f"{org_id}/g_test/19990101T000000Z-{suffix}"
+        store.upload(f"backups/{bad}/manifest.json", body)
+
+    listed = list_backups(store, org_id)
+
+    assert len(listed) == 3  # all three malformed shapes skipped, 3 good ones kept
+    assert all(isinstance(m, dict) for m in listed)
+
+
+def test_r2storage_builds_exactly_one_client_under_concurrent_first_callers(monkeypatch):
+    """#13097 review: `R2Storage._s3()`'s lazy init must be ATOMIC.
+
+    The manifest pool makes simultaneous first-callers routine. Without the lock,
+    each thread builds its own boto3 client (each with its own urllib3 pool) and
+    all but one are dropped unclosed — the connection budget splits and
+    construction is re-paid on the first request after a deploy. Deleting the
+    lock must fail THIS test.
+    """
+    constructed: list[object] = []
+    record = threading.Lock()
+
+    class _SlowCountingBoto3:
+        def client(self, *args, **kwargs):
+            time.sleep(0.05)  # widen the window: unserialised, all 8 threads get here
+            with record:
+                client = object()
+                constructed.append(client)
+                return client
+
+    monkeypatch.setitem(sys.modules, "boto3", _SlowCountingBoto3())
+    store = R2Storage(
+        endpoint_url="https://acct.r2.cloudflarestorage.com",
+        access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
+    )
+    got: list[object] = []
+    barrier = threading.Barrier(8)
+
+    def _call() -> None:
+        barrier.wait(timeout=10)
+        got.append(store._s3())
+
+    threads = [threading.Thread(target=_call) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(constructed) == 1  # exactly ONE client constructed
+    assert len(got) == 8  # every caller got a client ...
+    assert len({id(c) for c in got}) == 1  # ... and it was the SAME one
+    assert not any(t.is_alive() for t in threads)  # and nobody deadlocked
+
+
 def test_prune_keep_hourly_day_anchor_semantics(monkeypatch):
     """keep_hourly>0 REPLACES the daily keep-all rule with a bounded retention:
 
