@@ -459,11 +459,19 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         status=SERVED,
         cypher="the BARE by-id entity union — label-scoped indexed lookups by "
                "each label's interface-E key, first hit wins",
-        coordinate=("Label", "interface-E key"),
+        # ⚠️ The label slot says `union` because there is no ONE label: the
+        # field's contract is `(label, property)`, and a placeholder like
+        # `("Label", …)` would name a label that does not exist, so
+        # `declared_key(*coordinate)` would mint a coordinate nobody can resolve.
+        # The property slot is honest — each member is addressed by its OWN
+        # contract key (`KEY_PROPERTY`).
+        coordinate=("union", "interface-E key"),
         parity="tortoise.record_serve.parity_difference",
         reason="the read behind the LIVE bare door `tortoise_get_entity(<id>)` "
-               "-> `TortoiseSDK.get_entity` -> `_get_entity`, which resolves "
-               "across FIVE labels and answered a bare `{}` for a node the "
+               "-> `TortoiseSDK.get_entity` (the seam) -> "
+               "`record_serve.read_entity`, whose CACHE side is `_get_entity` — "
+               "the index-backed `_resolve_entity` union over FIVE labels, "
+               "which answered a bare `{}` for a node the "
                "record held (#13093's production measurement: 8 objects / 39 "
                "events in the record, `tortoise_get_entity(id=<goal id>)` -> "
                "`{}`). Served for the labels whose row reproduces the cache "
@@ -472,8 +480,10 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "(`residency: \"not-hot\"`) for the rest rather than answering "
                "an absence it cannot establish: `Event` and `Source` carry the "
                "OPEN parity gap in #9721 (a served `:Event` would lose `id` and "
-               "six other fold-written keys; a `:Source`'s record coordinate is "
-               "`url`, not the `id` the cache resolver also matches). ⚠️ THE "
+               "six other fold-written keys), and `Source` ALSO sits in "
+               ":data:`ENTITY_UNION_ADDRESS_RESIDUALS` (its record key is `url`, "
+               "while the cache resolves one by `id` too — so a bare Source id "
+               "names a node this read would miss). ⚠️ THE "
                "ABSTENTION IS THE POINT, not a shortfall: a union read that "
                "served only what it covers and answered `{}` for the rest "
                "would invent an absence for a whole label class — the "
