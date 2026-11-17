@@ -753,6 +753,31 @@ def test_DUPLICATE_ids_differing_ONLY_on_the_legacy_flag_are_a_CONFLICT(sdk):
     assert "more than one node" in str(exc.value), str(exc.value)
 
 
+def test_DUPLICATE_ids_differing_ONLY_on_the_SUCCESSOR_are_a_CONFLICT(sdk):
+    """#13065 review ROUND 12, finding 1 (P2) — the successor is part of the
+    ending, so it belongs in the disagreement key.
+
+    `goalState='superseded'` is admitted or refused on whether a successor is
+    named, but the successor was still read from `rows[0]`: MEASURED — two rows
+    agreeing on `status`/`goalState`/`outdated` and differing only on
+    `supersededBy` set no `conflict`, and the same call
+    (`update_knowledge(id, status='superseded', goalState='superseded')`) was
+    ADMITTED on one row and REFUSED "names no successor" on two, with no
+    `conflict` raised. The verdict was literally taken from an unstable row order.
+    """
+    goal = sdk.create_point("goal", "GOAL - dup successor [a]",
+                            goalState="active", status="live")
+    sdk._get_proj().g.query(
+        "CREATE (:Point {id:$id, name:'GOAL - dup successor [b]', "
+        "status:'live', goalState:'active', supersededBy:'succ-1'})",
+        params={"id": goal["id"]},
+    )
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], status="superseded",
+                             goalState="superseded")
+    assert "more than one node" in str(exc.value), str(exc.value)
+
+
 def test_DUPLICATE_ids_that_disagree_refuse_rather_than_answer_from_one(sdk):
     """#13065 review finding 5 — ``rows[0]`` is not the node set the write binds.
 

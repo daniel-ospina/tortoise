@@ -6234,16 +6234,21 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
         # non-terminal). AX rule 2: say exactly what to do, in one step.
         _headline = (f"status={status!r} ends the goal" if _by_status else
                      "the stored row is ended by the LEGACY `outdated` flag")
-        _repair1 = (("pass status='archived' together with goalState='abandoned'"
-                     " — one write, both fields")
+        _repair1 = (("end it the way THIS carrier allows: on an Object/Subject goal "
+                     "pass status='archived' together with goalState='abandoned' in ONE "
+                     "write; on a :Point goal that route is refused as a dead claim "
+                     "(#2498), so mint the replacement with "
+                     "create_point(..., status='archived') (or supersede_point(goal, "
+                     "successor)) and let the retired row keep its flag")
                     if not _by_status else
                     ("add the ending to `goalState` — pass goalState="
                      f"{want!r}"
                      + (" together with the successor's id, supersededBy=<successor "
                         "id>" if want == _SUPERSEDED_STATUS else "")))
-        _repair2 = (("if the row should not be ended at all, clear the legacy "
-                     "flag itself (`outdated=False` on the row) rather than "
-                     "writing a live achievement word over it")
+        _repair2 = (("leave the achievement word alone — writing a LIVE word over a "
+                     "row the legacy flag already retired is what this guard refuses "
+                     "(`outdated=False` is server-managed, so it is not a repair "
+                     "this door can perform)")
                     if not _by_status else
                     ("drop the ending from `status` — pass status='live' (or "
                      "'draft'), or leave `status` out of the call if you did "
@@ -6449,9 +6454,31 @@ def _stored_goal_ending_view(proj, id_val: str, *,
     # REFUSED on the re-run once the landed write shifted the row order — a
     # plan-order-dependent verdict, exactly what the conflict arm exists to
     # prevent. Every field the ended-predicate reads must be in this key.
-    endings = {_ending_key(row[0]) + "\x00" + _ending_key(row[1])
-               + "\x00" + _ending_key(row[4] if len(row) > 4 else None)
-               for row in rows}
+    # ⛔ #13065 review ROUND 12, findings 1 and 3: the key must mirror the
+    # PREDICATE, not the column list.
+    #   * the SUCCESSOR is "part of the ending" (this module's own text), and
+    #     `goalState='superseded'` is admitted or refused on whether one exists —
+    #     but it was still read from `rows[0]`, so two rows differing only on
+    #     `supersededBy`/`CORRECTS` gave a plan-order-dependent verdict (measured:
+    #     ADMITTED on one row, "names no successor" on two, no `conflict`);
+    #   * `outdated` is compared by the predicate as TRUTHINESS (`bool(...)`), so
+    #     the key must normalise it the same way — `repr` made `None` and `False`
+    #     (both NOT ended) "disagree" and refused a write that legitimately lands.
+    def _row_ending_key(row) -> str:
+        _carrier = row[2] if len(row) > 2 else None
+        _corrects = row[3] if len(row) > 3 else []
+        _flag = row[4] if len(row) > 4 else None
+        _row_named = _carrier if _carrier not in (None, "") else None
+        if _row_named is None and _corrects:
+            _row_named = next((c for c in _corrects if c), None)
+        return "\x00".join((
+            _ending_key(row[0]),
+            _ending_key(row[1]),
+            "outdated:1" if bool(_flag) else "outdated:0",
+            _ending_key(_row_named),
+        ))
+
+    endings = {_row_ending_key(row) for row in rows}
     status, goal_state, carrier, corrects = rows[0][:4]
     legacy_outdated = rows[0][4] if len(rows[0]) > 4 else None
     named = carrier if carrier not in (None, "") else None
