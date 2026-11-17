@@ -187,11 +187,21 @@ EXIT CODES
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first with an UNATTRIBUTED error.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/rewrite_object_status.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/rewrite_object_status.py`"
+    )
+
 import argparse
 import contextlib
 import json
 import os
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -552,11 +562,19 @@ def _read_pending(journal: str | None) -> list[str] | None:
     if not path.exists():
         return []
     try:
-        return [line.strip()
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if line.strip()]
+        text = path.read_text(encoding="utf-8")
     except (OSError, AttributeError):
         return None
+    ids = [line.strip() for line in text.splitlines() if line.strip()]
+    if not ids:
+        # ⛔ AN EMPTY MARKER IS NOT "NO MARKER". A kill inside `write_text`'s
+        # truncate-then-write window leaves exactly this, and reading it as
+        # "clean" restores the false `0 rows ⇒ dead weight` conclusion the marker
+        # exists to prevent (measured). `_write_pending` is now atomic, so an
+        # empty file can only mean a marker a previous version half-wrote — still
+        # a state whose content is unknown, so fail closed.
+        return None
+    return ids
 
 
 def _nodes_sharing_id(g, rid: str) -> list[list[str]]:
@@ -894,6 +912,16 @@ def rewrite(sdk, rep: Report) -> Report:
     if refusal is not None:
         rep.executed = False
         raise refusal
+    # `_refusal` covers the population gates; the MARKER gate is separate (it is
+    # `run`'s, because it needs the journal path). Re-applied here as well: a
+    # caller that built its own Report skipped that read, and an unknown marker
+    # state is exactly what must stop a write.
+    if getattr(rep, "pending", None) is None:
+        rep.executed = False
+        raise Refused(REFUSE_PENDING_UNREADABLE, (
+            f"the durability marker {_pending_path(rep.journal)} could not be "
+            "read, so it is unknown whether a previous run left rows LIVE-ONLY. "
+            "Nothing was written."))
     log = sdk._get_event_log()
     # ⛔ THE JOURNAL PRECONDITION BELONGS HERE TOO (review finding, 2026-11-17).
     # `run` answers it, but `rewrite` is the public writer the docstring above

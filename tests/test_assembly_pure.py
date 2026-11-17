@@ -2380,7 +2380,9 @@ def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
     # stored `retracted`) Object status to `deprecated` through the SDK's
     # journaled update path, and the member is dropped — with this assertion
     # restated as the bare canonical set — once that has run on the target (its
-    # preview is the measurement: 0 rows). That is #12855's acceptance and S4's,
+    # preview is the measurement: 0 rows, WHERE the target has no dual-labelled
+    # `:Point`/`:Object` row — such a row is refused by design and resolved by
+    # hand first, see `tortoise/assembly.py`). That is #12855's acceptance and S4's,
     # not S0's; the write-door half of the precondition is already met by S0.
     # Until the rewrite has run, asserting the WIDER set is what keeps a silent
     # drop from shipping ahead of it — so the pin is UNCHANGED here, and it

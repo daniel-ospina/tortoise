@@ -4413,6 +4413,13 @@ def collect_class_slices(port, window: ClassWindow, *,
 # surviving row to the verified link this comment documents. The tool's preview
 # IS that measurement; run it first. Once it reports 0 rows on the target, the
 # member is dropped and the pin below moves with it, in the same change.
+# ⚠️ ZERO IS NOT ALWAYS REACHABLE BY THE TOOL ALONE: a stored legacy `:Object`
+# that also carries `:Point` (or `:Subject`) is REFUSED by the tool — by design,
+# since that family's arm owns the write (#2498 / #11824 S0) — and reported by
+# id, so on such a target the preview reads `population: 1` with a fan-out row
+# and exits 1. That row is resolved BY HAND first (mint a successor, or correct
+# the label) and only then is the preview a `0 rows` measurement. The canonical
+# instance measures exactly this shape (2026-11-17: one row, a probe graph).
 #
 # The divergence is FROZEN by tests/test_assembly_pure.py, which asserts this
 # set equal to ``OBJECT_TERMINAL_STATUSES | {"outdated"}`` — a silent drop or
