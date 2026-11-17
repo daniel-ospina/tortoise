@@ -191,6 +191,113 @@ def test_a_boolean_element_list_no_longer_costs_the_healthy_neighbour(tmp_path):
             sdk.close()
 
 
+def test_a_numeric_string_list_no_longer_costs_the_healthy_neighbour(tmp_path):
+    """#8430 review F1(b) — the shape that CONVERTS but cannot be CAST.
+
+    A ``List`` of numeric STRINGS is what a JSON/HTTP ingest with stringified
+    floats writes, and it is the one non-numeric shape whose elements all pass a
+    CONVERTIBILITY test: ``toFloat('0.5')`` is ``0.5``. Under
+    ``toFloat(_e) IS NULL`` every element passed, ``vecf32`` then raised
+    ``expects an array of numbers``, and the whole ``MATCH`` went down — the
+    defect #8430 claims to close, surviving inside its own guard.
+
+    Distinct from the ``["x"] * DIM`` pin above, which is the UNCONVERTIBLE
+    half: a ``typeof`` allow-list drops both, a ``toFloat`` test drops only that
+    one. GREEN now, RED against the ``toFloat`` guard (verified).
+    """
+    with mock.patch(_EMBED_PATCH, _StubEmbedder()):
+        sdk = TortoiseSDK(str(tmp_path / "numstr.db"))
+        try:
+            healthy = sdk.create_point("statement", "healthy neighbour")["id"]
+            junk = sdk.create_point("statement", "stringified")["id"]
+            _overwrite_embedding(sdk, junk, ["0.5"] * DIM)
+            assert _typeof(sdk, junk) == "List", "premise: a plain List"
+
+            hits, reason = _dense(sdk, _vector(0.0))
+            assert reason == "ok", (
+                f"the dense leg recorded {reason!r} — a List of numeric STRINGS "
+                "still aborts the whole MATCH: the element check asks whether a "
+                "value CONVERTS (toFloat) while vecf32 demands a numeric TYPE "
+                "(#8430 review F1)")
+            assert healthy in hits, (
+                "the healthy Point vanished because a neighbour holds a "
+                "stringified-float embedding (#8430)")
+            assert junk not in hits, (
+                "the numeric-string row reached the result set — vecf32 rejects "
+                "it, so it must be dropped, not returned")
+        finally:
+            sdk.close()
+
+
+def test_a_nested_element_list_no_longer_costs_the_healthy_neighbour(tmp_path):
+    """#8430 review F1(c) — the guard itself must not be a raise path.
+
+    ``toFloat([1, 2])`` RAISES ``Type mismatch: expected String, Integer, Float,
+    or Null but was List`` (measured on all three engines), so a verbatim
+    ``List`` whose elements are themselves lists — ``typeof`` is ``'List'``, the
+    width matches, and the depth-capped persistable-value allowlist makes it
+    writable — made the expression added to make the read TOTAL take the whole
+    ``MATCH`` down. ``typeof(_e)`` cannot raise, so the allow-list is total where
+    the negative ``toFloat`` form was not. GREEN now, RED against it (verified).
+    """
+    with mock.patch(_EMBED_PATCH, _StubEmbedder()):
+        sdk = TortoiseSDK(str(tmp_path / "nested.db"))
+        try:
+            healthy = sdk.create_point("statement", "healthy neighbour")["id"]
+            junk = sdk.create_point("statement", "nested")["id"]
+            _overwrite_embedding(sdk, junk, [[i, i + 1] for i in range(DIM)])
+            assert _typeof(sdk, junk) == "List", "premise: a plain List"
+
+            hits, reason = _dense(sdk, _vector(0.0))
+            assert reason == "ok", (
+                f"the dense leg recorded {reason!r} — a List whose ELEMENTS are "
+                "lists aborts the whole MATCH: the element guard evaluates "
+                "toFloat on a nested value, and toFloat RAISES on it (#8430)")
+            assert healthy in hits, (
+                "the healthy Point vanished because a neighbour holds a "
+                "nested-element embedding (#8430)")
+            assert junk not in hits, (
+                "the nested-element row reached the result set — vecf32 rejects "
+                "it, so it must be dropped, not returned")
+        finally:
+            sdk.close()
+
+
+def test_an_integer_verbatim_list_is_still_readable(tmp_path):
+    """The allow-list must ADMIT ``Integer`` — measured, not assumed.
+
+    FalkorDB's docs say ``vecf32`` requires every element to be of type
+    ``Float``, so the obvious narrowing is ``typeof(_e) = 'Float'``. Measured on
+    embedded FalkorDBLite, ``falkordb/falkordb:6.0.1`` and
+    ``falkordb-server:v4.20.6``, ``vecf32([1, 0, 0])`` is ACCEPTED and read as
+    ``[1.0, 0.0, 0.0]`` — so ``[1] * DIM`` (and a one-hot ``[1, 0, 0, …]``) is a
+    READABLE caller-supplied verbatim ``List``, and a ``Float``-only allow-list
+    would trade #8430 for #8316.
+
+    GREEN against the fix as written; its mutant is the OVER-BROAD variant
+    (verified: ``typeof(_e) <> 'Float'`` reds this row).
+    """
+    caller = [1] * DIM
+    query = [1.0] * DIM
+    with mock.patch(_EMBED_PATCH, _StubEmbedder()):
+        sdk = TortoiseSDK(str(tmp_path / "intlist.db"))
+        try:
+            pid = sdk.create_point("statement", "integer vector")["id"]
+            _overwrite_embedding(sdk, pid, caller)
+            assert _typeof(sdk, pid) == "List", "premise: verbatim"
+
+            hits, reason = _dense(sdk, query)
+            assert reason == "ok", reason
+            assert pid in hits, (
+                "a right-width List of INTEGERS became unreadable — vecf32 "
+                "accepts and coerces Integer elements (measured on all three "
+                "engines), so the element allow-list is over-broad")
+            assert hits[pid] == pytest.approx(1.0, abs=1e-3), (
+                f"a self-query did not score ~1.0 ({hits[pid]!r})")
+        finally:
+            sdk.close()
+
+
 def test_a_readable_verbatim_list_is_still_read_and_value_preserving(tmp_path):
     """The narrowing must not cost a RIGHT-width numeric List its read.
 
