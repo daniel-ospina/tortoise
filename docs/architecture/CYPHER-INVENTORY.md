@@ -391,19 +391,40 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where these numbers were last cut:** the re-cut into **`05fe46e94ebe`** (`#12910`, "a non-scalar
-`status` is refused at the Object doors") — `sites` 1309→1311, `files_with_sites` 98→99,
-`ast_door_calls` 1567→1569, `plain` 857→859 (read 576→578; the 281 write half is unchanged),
-`candidates` 576→578; `files_scanned` 297 and `non-Cypher door calls` 258 unchanged. The two sites
-are the SAME existence read, `MATCH (n:Object {id:$id}) RETURN count(n)` — one at
-`tortoise/api.py:2929`, one in `tortoise/sdk.py` — because the Object doors now read the row before
-refusing a non-scalar `status` instead of raising on deserialise. ⚠️ `#12910` re-cut the PINS and left
-this paragraph naming the previous cut, which is this document's own subject one level up: measured
-with `--json`, `05fe46e94ebe` prints 1311 sites / 99 files / 258 non-Cypher calls and its parent
-`534f3e1bee63` prints 1309 / 98 / 258. The previous cut, kept as history: the re-cut into
-**`2060c92fd3`** — `sites` 1308→1309, `plain` 856→857 (read 575→576; the 281 write half is
-unchanged), `candidates` 575→576, `non-Cypher door calls` 257→258, `ast_door_calls` 1565→1567,
-`files_with_sites` unchanged at 98. The two sites are `hosted_api.py::_org_graph_names` (#13218) and `indexer/github_indexer.py::GitHubIndexer._object_state_to_issue_state` (#13222) — both landed on main WITHOUT re-cutting this document, which is the drift the `--check` gate exists to catch. The previous cut, kept as history:  
+**Where these numbers were last cut:** the PINS by `main`'s **`05fe46e94e`**, re-derived at
+`origin/main` **`b8f56fdec4`**. ⚠️ Both columns below are the CENSUS's own measurements at those two
+commits, not the marker values — the markers `main` carried into the re-cut were themselves stale,
+which is why the two sets differ:
+
+| what | measured at `534f3e1bee` (parent of the re-cut) | measured at `b8f56fdec4` |
+|---|---|---|
+| `sites` | 1309 (its marker said **1308**) | 1311 |
+| `files` | 98 | 99 |
+| `shape_plain` | 857 (its marker said **856**) | 859 |
+| `ast_door_calls` | 1567 (its marker said **1565**) | 1569 |
+| `files_scanned` | 297 | 297 (unchanged) |
+
+`tools/cypher_inventory.py --check` was **RC=1** at `534f3e1bee` on six counts, so `05fe46e94e`
+corrected six, not three: the three rows above (their stale markers in parentheses) **plus**
+`candidates` (575→576), `shape_plain_read` (575→576) and `non_cypher_door_calls` (257→258).
+(`files` 98→99 did NOT drift: the population stayed at 297 scanned files, and `tortoise/api.py`
+gained its FIRST statement site inside `#12910`'s own diff — a file newly carrying sites, not a
+count that was wrong.) Re-derived by running the tool at both commits and diffing the sets of
+carrying files; nothing here is arithmetic on the marker values.
+
+⛔ **Appendix A, however, was NOT re-cut by that commit, and this is the defect that keeps
+recurring here:** the pins are 25 SCALARS, so an insertion inside a file that already carries
+sites moves the `file:line` rows and moves no count. Measured at `b8f56fdec4`: `--check` prints
+`25 pinned counts match` while **6 appendix rows name lines that no longer carry their statement** —
+five in `tortoise/metering.py` (`measure_write_ops`, `_record_graph_storage_reading_locked`,
+`get_graph_storage_reading`, `record_postgres_bytes_written`, and the reading writer below them)
+and one in `tortoise/postgres_bytes.py`. This change regenerates Appendix A with `--markdown` at
+that head (verified byte-identical to a fresh run) and adds
+`tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` so the next
+main-move cannot repeat it — which is step 1 of the procedure above enforced instead of trusted.
+
+<details><summary>the previous cut (kept as history)</summary>
+
 `origin/main` **`97fd713ffb`** — `sites` 1306→1308, `plain`
 854→856 (read 573→575; the 281 write half is unchanged), `candidates` 573→575, `files_scanned`
 296→297, `ast_door_calls` 1563→1565, the `rg` reconciliation in §1 re-measured on this tree, and
@@ -416,7 +437,9 @@ the pin it inherited (`1302` + its own four) instead of re-deriving from the mer
 measured on `7c1df6e7d6` — stayed absorbed only on paper. Measured, not inferred: `--json` at
 `7c1df6e7d6` reports 1304 sites with 0 in `tortoise/planned_occurrence.py`; at `97fd713ffb` it reports
 1308 with that one file carrying exactly 4, and `tortoise/projection/entities.py` reads 54 at BOTH.
-The numbers above are re-derived from `97fd713ffb`'s tree; this PR adds no statement site of its own.
+The numbers above are re-derived from `97fd713ffb`'s tree; that PR added no statement site of its own.
+
+</details>
 
 `.github/workflows/cypher-diff.yml` runs the **differential harness steps first and this census step
 LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers are then wrong), but
