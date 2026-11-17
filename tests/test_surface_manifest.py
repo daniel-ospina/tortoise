@@ -426,26 +426,33 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # stripped and all whitespace (including hard wraps) collapsed to single spaces. That single
     # step subsumes every spelling above, so this pin can no longer trail the next one.
     # WHAT THE PIN READS, EXACTLY: within a paragraph, EVERY statement of the form
-    # `<subject> population is [now] <number>` is checked against the count its SUBJECT names —
-    # `retired`/unqualified -> the retired rows (what this pin is here for), `served` ->
-    # live + retired, `advertised`/`live` -> counts.tools, `sdk` -> counts.sdk_public_methods — and
-    # every `N of N verified` in the CLAUSE that contains that number must agree with it. Two
-    # boundaries are written as classes, not as spellings (#13052 review at 4d9c8c70 and 71afedb3,
-    # P3 each): the CLAUSE is cut at any sentence terminator FOLLOWED BY closing quotes/brackets if
-    # present (`"measurement."` and `measurement.)` end a sentence just as `measurement.` does),
-    # and the SUBJECT is read and COMPARED, not merely skipped — a skipped statement is an unchecked
-    # number, which is a false PASS on a figure this same test derives two blocks above.
-    # OUT OF REACH, by construction and disclosed here: a paraphrase that never says `population
-    # is`; a figure stated only in a FOLLOWING sentence; and a reworded sentence whose new wording
-    # drops the number from that clause. The durable closure for any of those is to stop restating
-    # the count in free prose — not to widen this matcher again; a reworded statement must update
-    # this pin in the same change.
+    # `<subject> population is [any single word] <number>` is checked against the count its
+    # SUBJECT names — `retired`/unqualified -> the retired rows (what this pin is here for),
+    # `served` -> live + retired, `advertised`/`live`/`live surface` -> counts.tools, `sdk` ->
+    # counts.sdk_public_methods — and every `N of N verified` in the CLAUSE that contains that
+    # number must agree with it. Two boundaries are written as classes, not as spellings (#13052
+    # review at 4d9c8c70 and 71afedb3, P3 each): the CLAUSE is cut at any sentence terminator
+    # FOLLOWED BY closing quotes/brackets if present (`"measurement."` and `measurement.)` end a
+    # sentence just as `measurement.` does), and the SUBJECT is read and COMPARED, not merely
+    # skipped — a skipped statement is an unchecked number, which is a false PASS on a figure this
+    # same test derives two blocks above.
+    # OUT OF REACH, by construction and disclosed here (#13052 review at 71afedb3 and 8b7481e2):
+    # a paraphrase that never says `population is`; a figure stated only in a FOLLOWING sentence;
+    # a reworded sentence whose new wording drops the number from that clause; and a statement
+    # about a DIFFERENT population whose subject word is not one of `served`/`advertised`/`live`/
+    # `live surface`/`sdk`/`retired` — that one is read as the RETIRED count, so a correct figure
+    # for it reds and a wrong one can pass. The durable closure for any of those is to stop
+    # restating the count in free prose — not to widen this matcher again; a reworded statement
+    # must update this pin in the same change.
     clause_break = re.compile(r"[.!?;:][\"')\]]*\s|\s\u2014\s")
-    #: subject word -> the count the manifest derives for THAT population. `endswith` is enough for
-    #: the two-word form too: `live surface` ends in `live` (#13052 review at 71afedb3, P3 — the
-    #: tuple said `live surface` while the comment said `live`, and a `live` subject was read as a
-    #: retired claim).
+    #: subject word -> the count the manifest derives for THAT population. ⛔ LONGEST FORM FIRST and
+    #: both spellings listed: `"the live surface".endswith("live")` is FALSE (the window ends in
+    #: `surface`), so the two-word form needs its own entry — measured, without it a correct
+    #: `The live surface population is 48.` REDS as a retired claim and a wrong `… is 60.` PASSES
+    #: (#13052 review at 8b7481e2, P2). A claim in this comment that `endswith` subsumes the
+    #: two-word form is exactly the kind of unmeasured sentence this whole pin exists to stop.
     population_subjects = (
+        ("live surface", "live surface", live),
         ("served", "served", live + retired),
         ("advertised", "advertised", live),
         ("live", "live", live),
@@ -455,7 +462,7 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     for paragraph in canonical.split("\n\n"):
         flat = re.sub(r"\s+", " ", re.sub(r"[*`_]", "", paragraph))
         breaks = [m.end() for m in clause_break.finditer(flat)]
-        for statement in re.finditer(r"population is (?:now )?(\d+)", flat, re.I):
+        for statement in re.finditer(r"population is (?:\w+ )?(\d+)", flat, re.I):
             stated = int(statement.group(1))
             subject = flat[max(0, statement.start() - 40): statement.start()].lower().rstrip()
             named = next(((suffix, word, value) for suffix, word, value in population_subjects
