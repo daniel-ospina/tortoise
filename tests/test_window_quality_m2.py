@@ -1954,6 +1954,73 @@ def test_the_measured_findings_are_stated_and_cannot_be_inverted_green(artifact)
     assert not found, f"a measured finding is stated INVERTED: {found}"
 
 
+def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
+    """Each claim that decides something is bound WHERE IT IS MADE, with a direction.
+
+    ⛔ An enumerated list of NOMINATED clauses is a whack-a-mole guard: rounds 7-9
+    each closed the clauses the previous round named and the next round found the
+    sentences that were not on the list (#13126 rounds 7, 8, 9 — 5, 11 and 22
+    inversions respectively, every one measured GREEN before it was pinned). The
+    durable shape is a LEDGER: one row per decision-carrying claim, each bound by
+    ADJACENCY (anchor + a required token near it + a forbidden inverted spelling),
+    so an inversion reds at the claim site and a re-wording that keeps the
+    direction passes. Adding a claim to the record means adding a row here; the
+    docstring of this module's binder says the same thing about figures.
+
+    The rows are the claims a reader acts on: whether anything compensates,
+    whether the loss is labelled, whether the candidate leg is record-served,
+    whether route 1 is an adoption or a reopen, and which leg decides.
+    """
+    readme = _flat(README.read_text(encoding="utf-8"))
+    arch = _flat(ARCH.read_text(encoding="utf-8"))
+    changelog = _flat(CHANGELOG.read_text(encoding="utf-8"))
+    pt = _arms(artifact, "point")
+
+    # the facts, re-derived: the loss is the eviction, nothing compensates, and the
+    # candidate leg is NOT record-served.
+    assert pt["tail@0.5"]["found_deep_of_demoted"] == 0.0
+    assert (pt["tail@0.5"]["resident_share"] - pt["tail@0.5"]["found_deep"]) > 0
+    import tortoise.record_serve as record_serve
+    assert getattr(record_serve.ANCHORED_READS["whole-graph"], "status",
+                   record_serve.ANCHORED_READS["whole-graph"]) in (
+        record_serve.NOT_SERVED, "not-served")
+
+    rows = [
+        # (document, anchor, required near the anchor, what it must NOT say)
+        (readme, "the measured answer is", "equal to the eviction on", "smaller than the eviction"),
+        (readme, "the measured answer is", "the eviction plus the claim leg's",
+         "no more than the claim leg"),
+        (readme, "passes neither", "`read_status_out`", "passes both"),
+        (readme, "`TORTOISE_RESIDENCY` is", "**unarmed**", "`TORTOISE_RESIDENCY` is **armed**"),
+        (readme, "appear in no module of the tree", "appear in no module", "appear in several modules"),
+        (readme, "Q2 —", "is violated", "is satisfied"),
+        (arch, "Q2 (", "is violated", "is satisfied"),
+        (arch, "The leg that decides it is the", "text leg", "The leg that decides it is the vector leg"),
+        (arch, "the record does not serve set-shaped reads", "does not serve", "does serve set-shaped"),
+        (changelog, "the record does not serve set-shaped reads", "does not serve",
+         "does serve set-shaped"),
+        (arch, "the index cannot mint an id", "nothing to materialise",
+         "can mint an id for"),
+        (arch, "contradicts §6.2's decision item 2", "reopen", "aligns with §6.2"),
+        (readme, "**contradicts a recorded decision**", "**reopen**", "consistent with a recorded decision"),
+        (readme, "says that read does not exist", "does not exist", "says that read now exists"),
+        (arch, "a record-served set read", "the record does not have", "the record already has"),
+        (readme, "It does not say the *vector* leg is bounded", "it is not",
+         "does say the *vector* leg is bounded"),
+        (arch, "armed only when M2 says it is safe", "in every arm", "in no arm"),
+    ]
+    bad = []
+    for doc, anchor, required, forbidden in rows:
+        if not _scope_bound(doc, anchor, required, window=200):
+            bad.append(f"claim lost its direction: {anchor!r} no longer says {required!r} nearby")
+        # the inverted spelling must not appear anywhere near the anchor either
+        i = doc.find(anchor)
+        window_text = doc[i:i + 400] if i >= 0 else ""
+        if forbidden in window_text:
+            bad.append(f"claim inverted at the site: {anchor!r} now reads {forbidden!r}")
+    assert not bad, "\n  ".join(bad)
+
+
 def test_the_arming_decision_is_stated_and_cannot_be_inverted_green(artifact):
     """The PR's PRODUCT is a decision, and the decision had no reader.
 
