@@ -20099,6 +20099,18 @@ class FalkorProjection(
                     parsed_rows += 1
                     for _field, type_list in types.items():
                         if not isinstance(type_list, (list, tuple, set)):
+                            # ⛔ AN ENTRY THAT DOES NOT PARSE IS AN UNPARSED ROW
+                            # (#13330 review 3, P1). This used to `continue`
+                            # without counting, so a row shaped
+                            # `{"embedding": "VECTOR"}` — the stringified-cell
+                            # shape `index_catalogue` warns about — counted as
+                            # fully parsed, contributed nothing, and published
+                            # `_vector_index_props == {}`: the report then printed
+                            # `confirmed absent` over a catalogue row that says
+                            # VECTOR. The third shape of the same false PASS,
+                            # after a non-dict cell and after "answered, none
+                            # parsed".
+                            unparsed_rows += 1
                             continue
                         if any(str(t).upper() == "VECTOR" for t in type_list):
                             measured.add(label)
@@ -21823,6 +21835,30 @@ class FalkorProjection(
         # it never reaches this code — these lines describe an ARMED sweep only.
         # The unarmed lane is `main`'s silent success path, unchanged (#11660
         # review round 7, P2-3).
+        #
+        # ⛔ #13330 review 3 (P1): a PARTIALLY unreadable catalogue used to be
+        # SILENT. The gate flags only "answered and NONE parsed"; the inventory
+        # withholds `_vector_index_props` whenever ANY row failed to parse —
+        # deliberately fail-closed — but this report block requires
+        # `_has_vector_index`, which is False in that state, so the withheld
+        # verdict reached no reader at all. The one line emitted was the
+        # `#4997/#11642` `RETIRED, not missing` INFO, over an index nobody had
+        # measured. A state the sweep could not verify must SAY so (#13330's own
+        # criterion), under its own latch kind so the unreadable-read arm cannot
+        # swallow it.
+        if (not _has_vector_index
+                and getattr(self, "_vector_index_props", None) is None
+                and getattr(self, "_vector_index_served_labels", None) is not None
+                and self._retirement_failure_is_news(
+                    "catalogue-partially-unreadable")):
+            _log.warning(
+                "#13320: the index catalogue on %s could not be fully parsed — "
+                "some rows were readable and at least one was not, so whether an "
+                "in-graph Point.embedding vector index is present could not be "
+                "VERIFIED this sweep. No DROP was issued (never blind), and the "
+                "sweep retries on the next setup (LATCHED: reported once per "
+                "store per process)",
+                getattr(self, "_graph_name", "<unknown graph>"))
         if _has_vector_index:
             # ⛔ THE VERDICT IS THE MEASUREMENT, ONE LEVEL DOWN (#13330 review):
             # `_vector_index_props` — the property the retirement targets — not

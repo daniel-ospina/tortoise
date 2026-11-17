@@ -647,11 +647,40 @@ class _MixedParsePostDrop(_EngineLikeGraph):
         ]
 
 
-def _retirement_warnings(caplog):
-    return [
-        r.getMessage() for r in caplog.records
-        if r.levelno >= logging.WARNING and "#13320" in r.getMessage()
-    ]
+class _PostDropEntryStringy(_EngineLikeGraph):
+    """The post-drop catalogue reports the SAME index with a stringified cell.
+
+    `{"embedding": "VECTOR"}` — the shape `index_catalogue` warns an engine may
+    emit — is a `types` MAPPING, so the row counted as fully parsed while its
+    entry contributed nothing: `_vector_index_props` came out as `{}` and the
+    report printed `confirmed absent` over a row that says VECTOR (#13330
+    review 3, P1). An uninterpretable ENTRY is an unparsed row.
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="vector")
+
+    def _drop_row(self):
+        self._rows = [("Point", ["embedding"], {"embedding": "VECTOR"},
+                       0, 0, 0, "NODE", "OPERATIONAL", "")]
+
+
+class _PartiallyUnreadableGate(_EngineLikeGraph):
+    """The GATE read holds one parseable row (a foreign label) and one it cannot
+    interpret.
+
+    Nothing arms, nothing is dropped (correct), and `_vector_index_props` is
+    withheld — which used to reach no reader at all, because the report block
+    required the index to have been FOUND (#13330 review 3, P1).
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="vector")
+        self._rows = [
+            _catalogue_row("Object", "embedding", "VECTOR"),
+            ("Point", ["embedding"], "a reshaped cell", 0, 0, 0, "NODE",
+             "OPERATIONAL", ""),
+        ]
 
 
 def test_an_UNCONFIRMED_sweep_does_not_swallow_the_CONFIRMED_survivor(
@@ -906,3 +935,57 @@ def test_a_lane_that_cannot_measure_clears_the_previous_verdict():
     assert proj._vector_index_props is None, (
         "a <4.x engine skipped the measurement and kept a PREVIOUS verdict: "
         f"{proj._vector_index_props!r}")
+
+
+def test_a_stringified_types_ENTRY_is_not_a_measurement_of_absence(
+        monkeypatch, caplog):
+    """An uninterpretable ENTRY is an unparsed row (#13330 review 3, P1).
+
+    `{"embedding": "VECTOR"}` is a `types` mapping, so the row counted as parsed
+    while its entry was skipped silently: `_vector_index_props` published `{}` and
+    the report printed `confirmed absent` over a catalogue row that says VECTOR.
+    The third shape of the same false PASS — after a non-dict cell and after
+    "rows returned, none parsed".
+    """
+    _arm(monkeypatch)
+    graph = _PostDropEntryStringy()
+    proj = _bare(graph, graph="test_13320_stringy_entry")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    infos = [r.getMessage() for r in caplog.records
+             if r.levelno == logging.INFO and "confirmed absent" in r.getMessage()]
+    assert not infos, (
+        "the sweep claimed a CONFIRMED removal over a catalogue row reporting "
+        f"the index with a stringified cell: {infos}")
+    assert _retirement_warnings(caplog), (
+        "an unmeasurable removal was silent: the entry did not parse, so the "
+        "index's state is NOT MEASURED")
+
+
+def test_a_PARTIALLY_unreadable_catalogue_speaks(monkeypatch, caplog):
+    """Nothing armed, nothing dropped — and the sweep must still SAY it could not verify.
+
+    The inventory deliberately withholds `_vector_index_props` when ANY row fails
+    to parse (fail-closed), but the report block required `_has_vector_index`, so
+    the withheld verdict reached no reader (#13330 review 3, P1).
+    """
+    _arm(monkeypatch)
+    graph = _PartiallyUnreadableGate()
+    proj = _bare(graph, graph="test_13320_partial")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert proj._vector_index_props is None, (
+        "the fixture must withhold the property half (a row did not parse): "
+        f"{proj._vector_index_props!r}")
+    assert not [d for d in graph.drops if "embedding" in d.lower()], (
+        f"nothing may be dropped blind: {graph.drops!r}")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, (
+        "a partially unreadable catalogue left the retirement UNVERIFIED and "
+        "silent — the withheld verdict reached no reader")
+    assert "could not be fully parsed" in warnings[0], warnings[0]
+    assert "did NOT take effect" not in warnings[0], warnings[0]
