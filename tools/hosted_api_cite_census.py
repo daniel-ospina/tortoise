@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 24903
+    uv run python tools/hosted_api_cite_census.py --pivot 25005
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -151,9 +151,14 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: TOGETHER — the constant is the third of the three, and the pin reds when it lags.
 #: The #13000 re-cut then merged main's `cde3e7743c` forward and this branch's own
 #: #12992 block sits above the site, so it was re-derived once more, 24762 -> 24903
-#: (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)' tortoise/hosted_api.py`
-#: -> 24903): the tool that owns these figures wrote it, not a hand.
-DEFAULT_PIVOT = 24903
+#: and then again after the forward merge onto `aa8413ca38`, where `#13043` moved it
+#: once more, 24903 -> 25005 (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)'
+#: tortoise/hosted_api.py` -> 25005): the tool that owns these figures wrote it, not a hand.
+#: ⛔ THIS CONSTANT IS THE ONE THE `--check` VERB CANNOT SEE — `_NOTES` covers the notes and
+#: the test's `_PIVOT`, so a stale DEFAULT_PIVOT leaves `--check` at exit 0 while every
+#: defaulted call (`census()`, `pivot_is_the_lifetime_site()`) answers about a comment line.
+#: `tests/test_demo_session_read_exclusion_8290.py` is the pin that reds on it (#13000 review P1).
+DEFAULT_PIVOT = 25005
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
