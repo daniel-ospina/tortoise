@@ -108,17 +108,31 @@ SELECT tests.assert(
 -- three assertions are RED in the only harness that runs them and absent
 -- everywhere else — a false RED here, and no coverage gained anywhere.
 --
--- The guard makes the ABSENCE DISCLOSED rather than silent (a NOTICE, the same
--- shape as the drill's own `⊘ … SKIPPED` line), and keeps the assertions live on
--- any pgvector-capable runner. Their real coverage today is the probe-backed
--- evidence, not this file: `tests/test_13220_record_label_embeddings.py` pins
--- the DECLARED schema through `record_projection.table_columns()`/
--- `column_types()` — which PARSE `supabase/migrations/` rather than reading a
--- database (that is their own docstring's contract) — and the applied side is
--- carried by the separate fact that the migration was applied for real (all 20
--- `RECORD_MIGRATIONS`, `applied=20 rc=0`) against a `pgvector/pgvector:pg16`
--- container as recorded on #13265 — see also `test-record-postgres`
--- (`tests/test_11642_vector_move_live.py`), the job that owns pgvector coverage.
+-- ⛔ THE GUARD IS SILENT ON PGlite, AND SAYING OTHERWISE WOULD BE FALSE. An
+-- earlier cut of this comment claimed the `NOTICE` below makes the absence
+-- "DISCLOSED … the same shape as the drill's own `⊘ … SKIPPED` line". It does
+-- not: PGlite's `db.exec` DISCARDS `RAISE NOTICE` (measured on
+-- `@electric-sql/pglite` 0.5.4 — a minimal `DO $$ BEGIN RAISE NOTICE 'x'; END $$`
+-- prints nothing around the call), whereas the drill's `⊘ migration … SKIPPED`
+-- IS visible because `validate.mjs` writes it with `console.log`. So the two are
+-- NOT the same shape, and the ONE real disclosure is the drill's own two lines
+-- (`⊘ 20261117000001_… SKIPPED` and the `⚠ 2 migration(s) NOT applied` summary),
+-- which is where a reader learns this harness did not apply the file. The
+-- `NOTICE` is kept because it costs nothing and announces the skip on a runner
+-- that DOES surface notices — it is not the disclosure.
+--
+-- The guard keeps the assertions live on any pgvector-capable runner. Their real
+-- coverage today is the probe-backed evidence, not this file:
+-- `tests/test_13220_record_label_embeddings.py` pins the DECLARED schema through
+-- `record_projection.table_columns()`/`column_types()` — which PARSE
+-- `supabase/migrations/` rather than reading a database (that is their own
+-- docstring's contract) — and the applied side is carried by the separate fact
+-- that the migration was applied for real (all 20 `RECORD_MIGRATIONS`,
+-- `applied=20 rc=0`) against a `pgvector/pgvector:pg16` container as recorded on
+-- #13265 — see also `test-record-postgres` (`tests/test_11642_vector_move_live.py`),
+-- the job that owns pgvector coverage. Those three assertions were additionally
+-- executed green against a real `pgvector/pgvector:pg16` in review (stubbing
+-- `tests.assert`), so the block is live wherever the objects exist.
 DO $$
 BEGIN
   IF to_regprocedure('public.record_embedding_vector(jsonb)') IS NULL THEN

@@ -125,14 +125,22 @@
 -- this paragraph claimed the opposite and was wrong:
 --
 --   * `record_projection.replay()` does NOT, on its own. `derived=` is a
---     KEYWORD DEFAULTING TO `None`, and `tools/record_runner.py:761` (the
+--     KEYWORD DEFAULTING TO `None`, and `tools/record_runner.py:769` (the
 --     `record_runner` bulk/backfill fold, #13210) calls `replay(batch, conn,
---     org_id=…, graph_id=…, start_seq=…, allocate=…)` without it. So a
---     `record_runner` re-fold of a historic journal lands `object.embedding` /
---     `subject.embedding` / `event.embedding` NULL and the two HNSW indexes
---     below stay empty for that population. Threading `derived=` through the
---     runner (which needs an embedder in a tool that is deliberately
---     embedder-free) is a FOLLOW-UP, not something this file delivers.
+--     org_id=…, graph_id=…, start_seq=…, allocate=…)` without it. ⛔ THE SCOPE,
+--     stated exactly because an earlier cut of this paragraph over-claimed it:
+--     a `record_runner` re-fold leaves the vector ALONE on rows that already
+--     have one — `embedding` is absent from the node UPSERT's column list, and
+--     `ON CONFLICT … DO UPDATE SET` names only the BOUND columns, so a live-written
+--     vector survives a no-derived re-fold untouched (measured against a
+--     a real Postgres carrying the extension: `payload_SURVIVED=t vec_SURVIVED=t
+--     dims=384`). The image is deliberately not named here — this census counts
+--     lines matching the extension's own name, and a citation is not a use.
+--     What lands NULL is every row the re-fold **CREATES** — i.e. the historic
+--     population this file's backfill would mint — and for those the two HNSW
+--     indexes below stay empty. Threading `derived=` through the runner (which
+--     needs an embedder in a tool that is deliberately embedder-free) is a
+--     FOLLOW-UP, not something this file delivers.
 --   * the same `replay()` divergence is why `mutations_for`'s long-standing
 --     "a replay in journal order builds the same row the live path built"
 --     invariant now holds only WHEN the caller passes `derived=` — that
