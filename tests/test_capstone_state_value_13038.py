@@ -132,19 +132,49 @@ def test_the_verdict_vocabulary_is_closed():
     )
 
 
-def test_blocked_is_never_folded_into_wrong(narrative):
-    """A question the instrument could not ask is `blocked`, whatever the judge said."""
+@pytest.mark.parametrize("verdict", ["wrong", "right", "unjudged", "blocked", None])
+def test_blocked_is_never_folded_into_wrong(narrative, verdict):
+    """A question the instrument could not ask is `blocked`, whatever the judge said.
+
+    `right` is in the list on purpose (#13303 review P1): it was the ONE verdict the
+    guard used to let through, so a reader that answered `right` over a row the
+    instrument could not ask scored the product for a question never put to it — and
+    the run exited 0, because nothing was `blocked` either.
+    """
     blocked = cap.Answer("Q1", status="blocked", reason="target lacks capability: events")
     board = cap.build_scoreboard(
         narrative={"questions": [narrative["questions"][0]]},
         header={},
         answers=[blocked],
-        judged={"Q1": {"verdict": "wrong", "because": "the judge guessed"}},
+        judged={"Q1": {"verdict": verdict, "because": "the judge guessed"}}
+        if verdict
+        else {},
         ingest=[],
     )
     assert board["rows"][0]["verdict"] == "blocked"
-    assert board["rows"][0]["verdict"] != "wrong"
-    assert board["tally"]["blocked"] == 1 and board["tally"]["wrong"] == 0
+    assert board["rows"][0]["verdict"] not in ("wrong", "right")
+    assert board["tally"]["blocked"] == 1
+    assert board["tally"]["wrong"] == board["tally"]["right"] == 0
+    # …and the run must not report as a completed score over it.
+    assert cap.exit_code(board["tally"]) != 0
+
+
+def test_a_reader_that_could_not_run_leaves_every_row_unjudged_and_exits_nonzero(narrative):
+    """The reader-failure path, pinned end to end without a model (#13303 review P2).
+
+    `judge_fresh` returns `verdicts={}` when it cannot run or parse, so the scoreboard
+    is built with no verdicts: every row must be `unjudged` and the run non-zero. That
+    is the claim README.md makes; this is the pin behind it.
+    """
+    answers = [cap.Answer(q["id"]) for q in narrative["questions"]]
+    board = cap.build_scoreboard(
+        narrative=narrative, header={}, answers=answers, judged={}, ingest=[]
+    )
+    assert {r["verdict"] for r in board["rows"]} == {"unjudged"}
+    assert board["tally"]["unjudged"] == len(narrative["questions"])
+    assert cap.exit_code(board["tally"]) != 0
+    # The other direction, so the pin cannot pass on a constant.
+    assert cap.exit_code({"right": 6, "wrong": 0, "blocked": 0, "unjudged": 0}) == 0
 
 
 def test_no_verdict_is_unjudged_never_a_default_verdict(narrative):

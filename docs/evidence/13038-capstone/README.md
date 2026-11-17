@@ -95,9 +95,19 @@ uv run python tools/capstone_state_value.py judge \
     --out docs/evidence/13038-capstone
 ```
 
-`--judge fresh` spawns the fresh reader itself (`pi -p --no-session`) and writes its verdicts; if
-the reader cannot run (a refusal, a timeout, no parseable JSON) the rows are recorded `unjudged`
-and the run exits non-zero. **A score is never invented to fill a row.**
+`--judge fresh` spawns the fresh reader itself as `pi -p --no-session --no-tools`, in an EMPTY
+sandbox directory rather than the repo root, and writes its verdicts. Both halves of that are
+load-bearing: the reader is spawned while this run's *previous* `run-{target}.json` and
+`scoreboard-{target}.md` are still on disk beside the packet, so a reader holding tools or sitting
+in the repo could reproduce the previous verdicts and the instrument could not show that a slice
+moved the product. If the reader cannot run (a refusal, a timeout, no parseable JSON) its
+`verdicts` are empty, every row is recorded `unjudged`, and `exit_code` makes the run non-zero —
+`A score is never invented to fill a row.` Both halves are pinned without a model or a subprocess
+by `tests/test_capstone_state_value_13038.py`:
+`test_a_reader_that_could_not_run_leaves_every_row_unjudged_and_exits_nonzero` (empty verdicts →
+all `unjudged` → non-zero, with the clean-tally direction so it cannot pass on a constant) and
+`test_blocked_is_never_folded_into_wrong` (parametrized over every judge verdict, `right`
+included).
 
 **Cost:** one throwaway FalkorDB container (a fresh graph, `header.store`) and **17 ingestion ops**
 (`run-local.json` → `ingest`); **20 product calls** (11 `search`, 6 `read_entity`, 2 `read_events`,
@@ -129,8 +139,12 @@ produced is asserted beyond that:
   only what the calls support: Q1's answer is assembled from an `entity_type`-scoped read, so an
   Object commitment is absent unless the caller guesses its name.
 * **No judge, no verdict.** If the reader cannot run (a refusal, a timeout, no parseable JSON),
-  every row is recorded `unjudged` and the run exits non-zero — that path is pinned by
-  `tests/test_capstone_state_value_13038.py`, and it is why no row is ever filled by guessing.
+  every row is recorded `unjudged` and the run exits non-zero — both halves are pinned by
+  `tests/test_capstone_state_value_13038.py`
+  (`test_a_reader_that_could_not_run_leaves_every_row_unjudged_and_exits_nonzero`), and it is why
+  no row is ever filled by guessing. A question the instrument could not ASK is `blocked` over
+  every judge verdict, `right` included — a reader that answers `right` there is reading the
+  packet's own framing, not a product response.
 * **Q3's `right` is more favourable than the product's own structure warrants**, and the record
   says so: the replaced Point carries `status='superseded'` but no successor property (a Point
   names its successor by the `CORRECTS` edge, by design), and the signal this run records on it
