@@ -293,7 +293,7 @@ def test_the_armed_cap_refuses_only_its_own_WRITE_doors():
 
     ⚠️ ``sessions`` serving here is NOT a virtue: the capture lane writes turn
     Points into the tenant's graph and this dimension does not gate it, so the
-    armed cap can be walked past on that door — tracked on #13140. This line is
+    armed cap can be walked past on that door — tracked on #13134. This line is
     also what reddens the day the door set is widened to close it, so the change
     is made deliberately rather than silently.
     """
