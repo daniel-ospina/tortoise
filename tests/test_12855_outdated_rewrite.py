@@ -326,6 +326,12 @@ def test_a_dual_labelled_point_row_is_reported_not_silently_skipped(env):
     tool must not work around that — overriding it would be a REOPEN of #2498 —
     but it also must not let the row vanish from the count: the operator has to
     see the id and the refusal, or a graph holding such a row would read clean.
+
+    ⚠️ The arm does not RAISE on this head (#11824 S0): a stored `retracted`
+    already MEANS `deprecated`, so the write is an ECHO — it lands, journals the
+    word the row already holds, and leaves the row untouched. So the tool
+    refuses the row from its own labels BEFORE the write, and the post-write
+    status check is the second guard; either way the id is reported.
     """
     sdk, _events = env
     oid = sdk.create_object("dual", objectKind="test:widget")["id"]

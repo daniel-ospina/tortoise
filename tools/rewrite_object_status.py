@@ -71,12 +71,22 @@ WHAT IT REWRITES, AND WHAT IT DELIBERATELY DOES NOT
 ⛔ A ROW LABELLED **BOTH** `:Point` AND `:Object` IS REFUSED, AND THAT IS
 DELIBERATE. `update_knowledge` dispatches on the label, so such a row takes the
 Point arm, where a terminal Point declares NO outgoing transition (#2498: *a
-dead claim is answered by minting a successor, never by re-stamping it*) and the
-write raises `update_entity refused ['status'] on a dead claim`. This tool does
-NOT work around that: overriding it is a REOPEN of #2498, not a migration step,
-and nothing here is authorised to reverse a recorded decision. The row is
-reported as a FAILURE by id and the run exits 1 — never silently skipped, and
-never counted as rewritten. Measured on the canonical instance (2026-11-17):
+dead claim is answered by minting a successor, never by re-stamping it*). This
+tool does NOT work around that: overriding it is a REOPEN of #2498, not a
+migration step, and nothing here is authorised to reverse a recorded decision.
+
+The row is reported as a FAILURE by id and the run exits 1 — never silently
+skipped, and never counted as rewritten. ⚠️ THE REFUSAL IS MADE **HERE**, from
+the row's own labels, and NOT by catching an exception — because on this head
+the Point arm does not raise at all. It ECHOES: a stored ``retracted`` already
+MEANS ``deprecated`` there (#11824 S0's meaning mapping), so the door writes the
+word the row already holds and the row is left untouched (`sdk.py`, "AN ECHO
+WRITES THE WORD THE ROW ALREADY HOLDS", #11824 S0 review P2). Measured
+2026-11-17: ``update_knowledge(dual_id, status='deprecated')`` returns the row
+with ``status='retracted'`` and no exception. The post-write status check below
+is the second guard, for any other silent no-op; a no-op counted as a rewrite is
+exactly the false PASS this module must not produce. The echo is not this tool's
+rule to reverse: #12855 keeps both words on Points. Measured on the canonical instance (2026-11-17):
 exactly one such row exists (`org_probe8884b_5d1a9fd5`, a probe graph), and it
 is the ONLY `:Object` row in the whole instance carrying a legacy word — so this
 refusal, not a rewrite, is what an operator sees there. Read that as the tool
@@ -129,6 +139,14 @@ REFUSE_EMPTY_FLAG = "empty-target-flag"
 REFUSE_UNADDRESSABLE = "unaddressable-row"
 REFUSE_TRUNCATED = "truncated-read"
 
+#: Knowledge labels a ``:Object`` must NOT also carry. ``update_knowledge``
+#: dispatches on the label, so a dual-labelled row takes the other family's arm
+#: — and on the Point arm a stored legacy word already MEANS the rewrite target
+#: (#11824 S0), so the write ECHOES the stored word instead of restamping it.
+#: See the module docstring: the refusal is made from these, not from an
+#: exception, because that arm returns the row unchanged without raising.
+_FOREIGN_KNOWLEDGE_LABELS = frozenset({"Point", "Subject"})
+
 
 def _word_predicate() -> str:
     """The status predicate, built from :data:`LEGACY_WORDS` (never retyped).
@@ -142,7 +160,8 @@ def _word_predicate() -> str:
 def _rows_cypher() -> str:
     return (
         "MATCH (n:Object) WHERE id(n) >= $cursor AND (" + _word_predicate() + ") "
-        "RETURN id(n), n.id, n.status, n.name, n.supersededBy, n.supersededAt "
+        "RETURN id(n), n.id, n.status, n.name, n.supersededBy, n.supersededAt, "
+        "labels(n) "
         "ORDER BY id(n) LIMIT $batch"
     )
 
@@ -251,10 +270,11 @@ def collect(proj, *, sample: int = 20) -> Report:
     rep.total = len(rows)
 
     by_word = {w: 0 for w in LEGACY_WORDS}
-    for graph_id, rid, status, name, sup_by, sup_at in rows:
+    for graph_id, rid, status, name, sup_by, sup_at, labels in rows:
         word = status if isinstance(status, str) else repr(status)
         by_word[word] = by_word.get(word, 0) + 1
-        row = {"id": rid, "graph_id": graph_id, "status": status, "name": name}
+        row = {"id": rid, "graph_id": graph_id, "status": status, "name": name,
+               "labels": list(labels or [])}
         rep.rows.append(row)
         if len(rep.sample) < sample:
             rep.sample.append(row)
@@ -299,6 +319,25 @@ def rewrite(sdk, rep: Report) -> Report:
                 "id": None, "graph_id": row.get("graph_id"),
                 "error": ("UNADDRESSABLE: this :Object carries a legacy status "
                           "word and no `id`, so the SDK cannot rewrite it"),
+            })
+            continue
+        foreign = [lbl for lbl in row.get("labels") or []
+                   if lbl in _FOREIGN_KNOWLEDGE_LABELS]
+        if foreign:
+            rep.failures.append({
+                "id": rid, "graph_id": row.get("graph_id"),
+                "error": (
+                    "REFUSED (dual-labelled): this :Object also carries "
+                    f"{', '.join(':' + lbl for lbl in foreign)} — "
+                    "update_knowledge dispatches on the label, so the write "
+                    "takes that family's arm, and that arm ECHOES: the stored "
+                    "word already MEANS the rewrite target there (#11824 S0), "
+                    "so it writes the word the row already holds and the row "
+                    "is left untouched (a dead claim is answered by minting a "
+                    "successor, never by re-stamping it — #2498). The call "
+                    "returns without raising, so a silent echo must never be "
+                    "counted as a rewrite: the row is reported here instead. "
+                    "Mint a successor, or correct the label, and re-run."),
             })
             continue
         try:
