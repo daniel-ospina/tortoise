@@ -22966,3 +22966,86 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
         "if this file joins `tier1` the `api`/`core` rows stop being load-bearing, and "
         "this pin must be re-derived rather than assumed"
     )
+
+
+def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
+    """#13074 review P1: the census must RUN on the file it converted.
+
+    `tests/test_13034_currency_rule_reads_position.py` was registered `core`
+    ONLY. Its cross-cutting guard is a repo-wide census over `_CENSUS_MODULES`
+    (`:600-611`), whose FIRST named consumer is `tortoise/hosted_api.py` — the
+    file #13034 converted — and whose second arm (`:717-731`) asserts
+    `"tortoise/hosted_api.py": "_terminal_excluded"` is still true.
+
+    `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match, and a named
+    match REPLACES the `core` fallback in `select()` (`core` is added only when
+    nothing named matched). MEASURED before this pin, with the shipped selector
+    and this manifest: `select(['tortoise/hosted_api.py'], 'pull_request',
+    manifest)` -> `surfaces=['api', 'onboarding']`, `full: False`, and this file
+    ABSENT from `test_files`. So BOTH census arms slept on the diff class they
+    exist for: a re-spelled `status != 'superseded'` filter, or a deleted
+    `_terminal_excluded` usage in the hosted door, merged green.
+
+    That is the #1349/#2938/#3154 silent-drop class in its harmful direction,
+    and it is the exact defect the two rows above record for themselves
+    (`test_12941_read_your_writes.py`, `test_11892_health_quota.py` are the
+    `['api', 'core']` siblings; this was the only hosted-door guard registered
+    single-surface). `tortoise/sdk.py` and `tortoise/mcp_server.py` are
+    `full: True` SHARED_MODULES, which is why the gap hid from a census of the
+    other five consumers.
+
+    `integrity()` is not a substitute: it answers only "is every `tests/**/
+    test_*.py` classified SOMEWHERE", so it reports `[]` with or without the
+    `api` row (measured) — a lost arm leaves no unclassified file and no
+    duplicate row. Asserted on the ROWS and on the SELECTION, both.
+    """
+    pin = "test_13034_currency_rule_reads_position.py"
+
+    # The registration itself: `core` is where the row was, `api` is the arm the
+    # `hosted_api.py` diff class needs. The rows are the subject because a
+    # selection assert alone would pass the day any second surface also lists
+    # the file (the #12645 pin records that lesson).
+    manifest = load_manifest()
+    assert pin in manifest["surfaces"]["api"], (
+        "`surfaces.api` must list this census by NAME — without it a "
+        "`tortoise/hosted_api.py`-only diff selects `['api','onboarding']` and "
+        "runs none of the assertions written to hold that file"
+    )
+    assert pin in manifest["surfaces"]["core"], (
+        "`surfaces.core` must keep its row — it is what covers `tortoise/"
+        "live.py`, `topic_summarization.py`, `derived_invalidation.py` and "
+        "`consistency.py`, the four `core`-classified consumers of the census"
+    )
+
+    # The hosted door: `hosted_api.py` is an EXACT `api` match, so `core` must be
+    # REPLACED here — that replacement is the premise of this whole pin.
+    api_arm = _sel(["tortoise/hosted_api.py"])
+    assert api_arm["surfaces"] == ["api", "onboarding"], api_arm["surfaces"]
+    assert pin in api_arm["test_files"], (
+        "a `tortoise/hosted_api.py`-only diff does not run the terminal-currency "
+        "census — the `api` row is what carries that arm, and both census arms "
+        f"(`_CENSUS_MODULES`, `_terminal_excluded`) sleep on it. selected "
+        f"{len(api_arm['test_files'])} files"
+    )
+
+    # …and the `core` arm still reaches a diff no SOURCE_PATTERN claims, so the
+    # fix did not MOVE the hole from the hosted door to the other four consumers.
+    core_arm = _sel(["tortoise/live.py"])
+    assert core_arm["surfaces"] == ["core"], core_arm["surfaces"]
+    assert pin in core_arm["test_files"], (
+        "the `core` arm regressed — `tortoise/live.py` is where the shared "
+        "predicate itself lives and no longer selects the census"
+    )
+
+    # NON-VACUITY: `tier1` is unioned into EVERY PR selection, and a `slow_files`
+    # entry is dropped from the fast set for a second surface's diff (#6234), so
+    # either would make the rows above stop being what selects this file.
+    assert pin not in load_manifest()["tier1"], (
+        "if this census joins `tier1` its surface rows stop being load-bearing "
+        "and this pin must be re-derived rather than assumed"
+    )
+    assert pin not in set(load_manifest()["slow_files"]), (
+        f"{pin} is in `slow_files` — a file named by two surfaces is dropped "
+        "from the fast pool and never re-added to `slow_selected` (#6234), so "
+        "one of the two legs would stop running it"
+    )

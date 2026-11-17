@@ -350,6 +350,32 @@ surfaces:
   # half is `test_record_serve_live.py`.
   - test_record_serve.py
   - test_12941_read_your_writes.py    # #12941: dual: core
+  # #13034: the terminal-currency CENSUS — no module outside `live.py` may
+  # re-spell a terminal-status predicate, and no converted consumer may drop
+  # the shared answer. DUAL-REGISTERED with `core` (the row that existed was
+  # `core`-only until the #13074 review measured this), and BOTH arms are
+  # load-bearing: the census's own `_CENSUS_MODULES` names
+  # `tortoise/hosted_api.py` FIRST (`tests/test_13034_currency_rule_reads_position.py`
+  # `:600-611`, and `:717-731` asserts `"tortoise/hosted_api.py":
+  # "_terminal_excluded"`), and `hosted_api.py` is an EXACT `api`
+  # SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()`.
+  # MEASURED on a `core`-only row, with this manifest and `tools/ci_selection.py`
+  # (`select(['tortoise/hosted_api.py'], 'pull_request', manifest)`):
+  # `surfaces=['api','onboarding']`, `full: False`, and this file ABSENT from
+  # `test_files` — so BOTH census arms slept on the one file #13034 converted
+  # (a re-spelled `status != 'superseded'` filter, or a deleted
+  # `_terminal_excluded` usage, would have merged green). The sibling
+  # `core`-classified sources — `live.py`, `topic_summarization.py`,
+  # `derived_invalidation.py`, `consistency.py` — DO reach it (measured), and
+  # `sdk.py` / `mcp_server.py` are `full: True` shared modules, which is exactly
+  # why the gap hid. Same #1349/#2938/#3154 silent-drop class as the two rows
+  # above; hand-curated membership is the recorded design (#2938), so this is
+  # one added row, not a derived rule. Safe in this leg: the DB cases are
+  # `_needs_db` (`:79-80`) and skip where no live FalkorDB is provisioned, and
+  # the census itself is AST + file reads (no graph, no URI, no server).
+  # Pinned by
+  # tests/test_ci_selection.py::test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards.
+  - test_13034_currency_rule_reads_position.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
