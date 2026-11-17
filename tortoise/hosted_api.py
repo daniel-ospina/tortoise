@@ -253,6 +253,7 @@ from tortoise.sdk import (
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _journal_write_failure_warning,  # #4240 F1: the shared "a journal append failed" receipt warning
+    _refuse_inconsistent_goal_ending,  # #13065: the status/goalState AGREEMENT refusal, ONE home
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
@@ -261,6 +262,7 @@ from tortoise.sdk import (
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk._capture_session)
     canonical_org_graph_name,  # #13205: the ONE idempotent `org_{bare id}` composition
+    validate_goal_state,  # #13110: the ONE goal-achievement guard (REST refuses before the write)
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
@@ -11712,6 +11714,33 @@ from pydantic import (  # noqa: E402
 )
 
 
+def _refuse_goal_axes_disagreeing_at_the_door(
+        status: str | None, goal_state: str | None, surface: str) -> None:
+    """Refuse a CREATE whose two goal axes disagree — at the DOOR, as a 422.
+
+    #13110's placement rule, applied to #13065's two-field guard. The SDK runs
+    ``_refuse_inconsistent_goal_ending`` inside ``_sanitize_props``; left to
+    reach it, this route's blanket ``except Exception`` answers a bare 500 that
+    names nothing (measured at #13116's merge: ``POST /v1/objects
+    {"goalState": "abandoned"}`` was ``500 {"detail":"Internal server
+    error"}``). The vocabulary half of #13110 was refused here for exactly this
+    reason; the agreement half is the same failure shape and gets the same home.
+
+    The bag is built EXACTLY as the route forwards it — a ``None`` ``goalState``
+    is OMITTED (the #13110 no-clobber rule) and a falsy ``status`` is OMITTED
+    (the route's own ``if body.status``) — so this judges the state the write
+    actually lands, never a stricter one. An empty bag is a no-op, which is what
+    keeps ``{goalState: null}`` and a bare create working unchanged.
+    """
+    bag: dict[str, object] = {}
+    if status:
+        bag["status"] = status
+    if goal_state is not None:
+        bag["goalState"] = goal_state
+    if bag:
+        _refuse_inconsistent_goal_ending(bag, surface=surface)
+
+
 class CreatePointRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
     kind: str = Field(default="statement")
@@ -11750,6 +11779,46 @@ class CreatePointRequest(BaseModel):
     # the baseline it already has otherwise (with a logged warning) — never a
     # silent drop either way (#7980).
     credibility: str | int | float | None = None
+    # #13110: the SAME class #4032 fixed above, for the other ontology field a
+    # customer must be able to set. `goalState` is declared on the §4.1 Point
+    # table too (a legacy goal POINT — the objective map's goals are Points,
+    # #7856), the SDK persists it through the props passthrough, and this
+    # model dropped it the same way `confidence`/`authoredBy` were dropped. So
+    # the Field description above is the class: **a value the store can hold
+    # must never be a 200 with the value missing.**
+    goalState: str | None = None
+
+    @field_validator("goalState")
+    @classmethod
+    def valid_goal_state(cls, v: str | None) -> str | None:
+        """Same rule and same sentence as the objects door (`CreateObjectRequest`)
+        — and the same SDK function, so there is still ONE vocabulary.
+
+        Refused at the door rather than left to the SDK because this route's
+        blanket ``except Exception`` would turn the SDK's ValueError into a bare
+        500 that names nothing.
+        """
+        validate_goal_state(v)  # raises ValueError → 422 naming the set
+        return v
+
+    @model_validator(mode="after")
+    def goal_axes_agree(self):
+        """#13065's ending rule, refused HERE so the answer is a 422.
+
+        The route forwards these two fields to one SDK write, and the SDK's
+        ``_sanitize_props`` refuses an ending ``goalState`` beside a live
+        ``status``. Reaching it through the route's ``except Exception`` is a
+        bare 500, so the door runs the SAME guard (one home) before the write.
+
+        ⛔ The points door has NO ``status`` field (#13110 did not add one, and
+        this is not the place to), so the bag carries only ``goalState``: the
+        create reading then refuses an ENDING word outright — which is honest,
+        because this door cannot express the agreeing lifecycle status an
+        ending requires. It is a 422 naming both repairs, not a 500.
+        """
+        _refuse_goal_axes_disagreeing_at_the_door(
+            getattr(self, "status", None), self.goalState, "POST /v1/points")
+        return self
 
     @field_validator("kind")
     @classmethod
@@ -13815,6 +13884,48 @@ class CreateObjectRequest(BaseModel):
     # caller NAMES — there is no 'live' default to splat over since #9974 R1)
     # — the onboarding STATE seed passes in_progress.
     status: str | None = None
+    # #13110: ``goalState`` is a SEPARATE axis from ``status`` (ONTOLOGY §4.3,
+    # #7856) and was reachable only from Python: pydantic's default
+    # ``extra='ignore'`` DROPPED it here, so ``POST /v1/objects
+    # {"goalState": "unmet"}`` answered 200 with the value silently gone —
+    # and an INVALID word was dropped just as silently, so the door failed in
+    # the worst direction (no error, no vocabulary). Same class, same fix shape
+    # as #4032 on the points door (``confidence``/``authoredBy``).
+    goalState: str | None = None
+
+    @field_validator("goalState")
+    @classmethod
+    def valid_goal_state(cls, v: str | None) -> str | None:
+        """Refuse an unknown word HERE, naming the closed set.
+
+        The guard is the SDK's own (``sdk.validate_goal_state``, the same one
+        ``_sanitize_props`` runs) — never a second copy of the vocabulary:
+        this door only decides WHEN it runs, not WHAT it accepts.
+
+        It MUST run at the door. Left to the SDK, the ValueError is raised
+        inside ``sdk.create_object`` and caught by this route's blanket
+        ``except Exception``, which answers a bare 500 — a status that names
+        nothing and tells the client nothing (measured on today's tree: the
+        same request was 200 with the field dropped; with the field declared
+        but unvalidated it would be 500). A pydantic validator turns it into
+        FastAPI's 422, whose body carries the SDK's own sentence and therefore
+        the whole closed set.
+        """
+        validate_goal_state(v)  # raises ValueError → 422 naming the set
+        return v
+
+    @model_validator(mode="after")
+    def goal_axes_agree(self):
+        """#13065's ending rule, refused HERE so the answer is a 422.
+
+        Same home as the vocabulary refusal above and for the same reason: the
+        route's blanket ``except Exception`` turns the SDK's ValueError into a
+        bare 500 (measured at #13116's merge: ``{"goalState": "abandoned"}``
+        answered ``500``), so the door runs the SDK's own guard before the write.
+        """
+        _refuse_goal_axes_disagreeing_at_the_door(
+            self.status, self.goalState, "POST /v1/objects")
+        return self
 
 
 @app.post("/v1/objects")
@@ -13854,6 +13965,17 @@ async def create_object(body: CreateObjectRequest, request: Request,
             props["status"] = body.status
         if _okind is not None:
             props["objectKind"] = _okind
+        # #13110: forward ``goalState`` only when the caller NAMED a value.
+        # ⛔ `is not None`, not `model_fields_set`: an explicit ``null`` must be
+        # treated EXACTLY like an absent field here, because this door MERGEs by
+        # name and a forwarded `None` reaches whichever fold the SDK takes —
+        # measured (#13110 review round 2), the POINTS door's dedup fold REMOVES
+        # the property on a `None` (`create_point` -> `update_point(pid, **props)`)
+        # while this one preserves it, so the two doors deleted vs kept the same
+        # request. One rule for both: a create door never clears, and
+        # `update_knowledge(…, goalState=None)` is the clear (as the test pins).
+        if body.goalState is not None:
+            props["goalState"] = body.goalState
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;
@@ -13967,6 +14089,15 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                 _author_props["authoredBy"] = body.authoredBy
             if body.credibility is not None:
                 _author_props["credibility"] = body.credibility
+            # #13110: `goalState` on the same rule as the objects door — a value
+            # the caller NAMED, never a `None`. ⛔ This is not cosmetic here: with
+            # `dedup=True` this route folds onto the existing Point through
+            # `update_point`, where a forwarded `None` DELETES the property —
+            # measured on this branch, `{goalState: null, dedup: true}` wiped a
+            # stored `met` while the objects door preserved it. A create door does
+            # not clear; `update_knowledge` does.
+            if body.goalState is not None:
+                _author_props["goalState"] = body.goalState
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,
