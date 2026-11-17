@@ -823,20 +823,67 @@ def test_the_graph_block_names_BOTH_grounds_the_meter_is_blind_to():
     one.
 
     Mutation this REDs: drop either token from ``release`` (measured).
+
+    ⛔ **AMENDED at the `#13102` merge (`81956063cc` + the `origin/main` integration), and the
+    amendment is stated here rather than made silently.** The invariant main's row encodes — *no lane
+    may lift the graph block on ONE cleared blindness* — is kept and made STRONGER, because the block
+    here is not merely worded: it is a check on the STATE the merged tree is in. `#13084` armed this
+    dimension deliberately as a **LOWER-BOUND** cap (the estimate rule: all exclusions push the reading
+    DOWN, so a refusal at `reading >= X` only fires when the true bytes are already `>= X`; sampling
+    error is stated to the customer, and the hard stop is declared at a margin rather than claimed as a
+    measured error). Arming is therefore allowed here ONLY while both blindnesses remain DECLARED and
+    UNSATISFIED — i.e. nobody may report them cleared — and while the arming still discloses its
+    direction. A lane that "cleared" either token to justify arming still REDs this row.
     """
     dim = _dim("graph_storage")
-    assert set(dim.release) >= {
-        "vector_index_measurable", "per_graph_overhead_attributed"}, (
-        "the graph block must name BOTH blindnesses — the vector index AND the "
-        f"per-graph overhead a tenant can multiply (got {dim.release!r})")
-    reason = dim.blocked_reason or ""
-    assert "1.46 MB" in reason and "841 MB" in reason, (
-        "the reason must carry the PRODUCTION measurement the second ground "
-        "rests on: a paraphrase is what let the first ground go stale (" +
-        reason[:200] + ")")
-    assert "BOTH" in reason.upper(), (
-        "the reason must say the block waits on both conditions, or a lane "
-        "reads it as a checklist and lifts on the cheaper one")
+    tokens = ("vector_index_measurable", "per_graph_overhead_attributed")
+    # Leg 1 — BOTH blindnesses stay declared. Not "were once": present in the
+    # registry this tree exposes today, with a revalidating predicate each (the row
+    # below pins predicate≈declaration coverage).
+    assert set(tokens) <= set(RELEASE_CONDITIONS), (
+        "the graph block's grounds are no longer DECLARED in RELEASE_CONDITIONS — "
+        f"dropping a token retires a blindness nobody measured away: {sorted(RELEASE_CONDITIONS)}")
+    # Leg 2 — and neither is SATISFIED. This is what makes the arming honest: the
+    # meter is still blind, and the cap is denominated accordingly rather than on a
+    # claim that the reading became exact.
+    for token in tokens:
+        satisfied, evidence = _PREDICATES[token]()
+        assert satisfied is False, (
+            f"{token!r} reports SATISFIED at this head, so the graph cap is being enforced "
+            f"against a figure this tree just called usable — re-derive the claim or "
+            f"re-point the arming: {evidence}")
+    if dim.blocked:
+        # The state main's row was written for: blocked, and the block names both.
+        assert set(dim.release) >= set(tokens), (
+            "the graph block must name BOTH blindnesses — the vector index AND the "
+            f"per-graph overhead a tenant can multiply (got {dim.release!r})")
+        reason = dim.blocked_reason or ""
+        assert "1.46 MB" in reason and "841 MB" in reason, (
+            "the reason must carry the PRODUCTION measurement the second ground "
+            "rests on: a paraphrase is what let the first ground go stale (" +
+            reason[:200] + ")")
+        assert "BOTH" in reason.upper(), (
+            "the reason must say the block waits on both conditions, or a lane "
+            "reads it as a checklist and lifts on the cheaper one")
+        return
+    # The state #13084 ships: ARMED, with no block to name (the tokens are retired
+    # FROM THE DIMENSION, not from the registry — legs 1 and 2 above prove that).
+    # What replaces the block is the estimate rule, and it has to be checkable, not
+    # merely commented: the arming refuses above a declared margin (a hard stop of
+    # 1.0 would enforce the estimate as if it were exact) and the customer-facing
+    # note says LOWER BOUND.
+    assert dim.release == (), (
+        "an armed dimension still citing release conditions is a half-lifted block: "
+        f"either arm it with the estimate rule or keep it blocked (release={dim.release!r})")
+    assert allowance_gate.HARD_STOP_MULTIPLE > 1.0, (
+        "the armed graph cap must refuse ABOVE its declared margin: a hard stop of "
+        f"{allowance_gate.HARD_STOP_MULTIPLE} enforces a sampled estimate as if it were "
+        "an exact figure, which is the claim the arming's own docstring refuses")
+    note = str(graph_storage.PRECISION_NOTE).upper()
+    assert "LOWER BOUND" in note and "NEVER AN EXACT CAP INPUT" in note, (
+        "the armed cap is denominated against a LOWER BOUND, so the note carried on "
+        "every reading must say so — otherwise the arming is enforcing an estimate "
+        f"the meter itself calls unusable: {note[:200]}")
 
 
 @pytest.mark.parametrize("dim", [d for d in DIMENSIONS if d.blocked],
