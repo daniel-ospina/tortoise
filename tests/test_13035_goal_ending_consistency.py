@@ -225,7 +225,7 @@ def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
     # node does not exist, the probe answers `{}`, and the same write lands
     fresh = sdk.create_point("goal", "GOAL - fresh [create-door]",
                              id=ulid(), status="archived")
-    assert fresh["status"] == "archived"
+    assert fresh["status"] == "deprecated"   # #11824 S0: `archived`/`retracted` are declared synonyms and store as `deprecated`
 
     # ⛔ THE FALSE-REFUSAL ARM: this write LANDS ``status="live"`` (the create
     # default, which the caller never names), so the pair it leaves is
@@ -305,7 +305,7 @@ def test_the_create_door_grades_the_DEFAULT_status_of_an_EXPLICIT_id(sdk):
     # read it the same way
     after = sdk.get_point(goal["id"])
     assert after["goalState"] == "abandoned"
-    assert after["status"] == "archived"
+    assert after["status"] == "deprecated"
     assert (after["goalState"] in RETIRED_GOAL_STATES) != (
         not live.is_terminal_status(after.get("status"),
                                     bool(after.get("outdated"))))
@@ -412,6 +412,9 @@ def test_retiring_with_the_ordinary_verb_ends_both_fields_and_the_surfaces_agree
     assert found[0].invalidation.reason == "goal-retired"
     report = invalidate_stale(sdk, goal_id=goal["id"])
     assert report["counts"]["retired"] == 1
+    # ⚠️ THIS row is written by the INVALIDATION FOLD, not by the write door, so
+    # S0's `retracted`→`deprecated` synonym does NOT apply to it — measured at this
+    # head, the stored word is still `retracted`.
     assert sdk.get_entity(made["point_id"])["status"] == "retracted"
 
 
@@ -889,9 +892,24 @@ def test_an_UNHASHABLE_stored_status_reaches_the_documented_ValueError(sdk):
     stored value — storable through the public door — raised ``TypeError:
     unhashable type: 'list'`` from inside ``_sanitize_props`` on any write that
     needed the stored half, where the doors promise the documented ``ValueError``.
+
+    ⛔ THE FIXTURE WRITES THE ROW WITH RAW CYPHER (#12869 merge reconciliation).
+    The sentence above ("storable through the public door") stopped being true
+    when `#12869` landed: every SDK door now REFUSES a non-string `status`
+    before it can store one, so `update_knowledge(goal, status=["live"])` raises
+    at the fixture line instead of building the row this test is about. What the
+    test asserts is unchanged and still matters — such a row remains reachable
+    from a raw Cypher producer, a JSONL replay or a pre-fix SDK, which is the
+    route `#12869`'s own suite documents
+    (`test_a_row_that_ALREADY_holds_a_non_scalar_is_REFUSED_not_crashed`).
+    ⚠️ Non-vacuity is unaffected: the assertion still reds as
+    `TypeError: unhashable type: 'list'` if the stored-side hardening is
+    reverted, because the fixture no longer depends on the door it is bypassing.
     """
     goal = _goal(sdk, tag="unhashable")
-    sdk.update_knowledge(goal["id"], status=["live"])   # the shape is storable
+    sdk._get_proj().g.query(
+        "MATCH (n {id:$i}) SET n.status = $s",
+        params={"i": goal["id"], "s": ["live"]})
     with pytest.raises(ValueError) as exc:              # NOT TypeError
         sdk.update_knowledge(goal["id"], goalState="abandoned")
     assert isinstance(exc.value, ValueError)
@@ -1134,7 +1152,7 @@ def test_judging_a_RETIRED_goal_writes_no_cache_and_keeps_its_ending(sdk):
     assert made["goalState"] is None, made          # the cache was NOT written
     node = sdk.get_entity(goal["id"])
     assert node["goalState"] == "abandoned", node   # the human's ending survived
-    assert node["status"] == "archived", node
+    assert node["status"] == "deprecated", node
 
 
 class _UnreadableSdk:
@@ -1222,7 +1240,7 @@ def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
     sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
     node = sdk.get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
-    assert node["status"] == "retracted", node
+    assert node["status"] == "deprecated", node
 
 
 def test_the_DRY_RUN_reports_None_for_the_goal_it_is_about_to_CLEAR(sdk):
@@ -1806,7 +1824,7 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
     sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
     node = sdk.get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
-    assert node["status"] == "retracted", node
+    assert node["status"] == "deprecated", node
     # both surfaces agree the goal is over — the rule the message serves
     assert (node["goalState"] in RETIRED_GOAL_STATES,
             not live.is_terminal_status(node.get("status"),
@@ -1836,4 +1854,4 @@ def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
     # the ending survived the refused write
     after = sdk.get_point(ended["id"])
     assert after["goalState"] == "abandoned", after
-    assert after["status"] == "retracted", after
+    assert after["status"] == "deprecated", after
