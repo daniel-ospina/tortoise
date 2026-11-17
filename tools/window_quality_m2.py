@@ -88,8 +88,9 @@ METRICS, AND WHAT EACH ONE WOULD MAKE US DO
                       wires a signal moves this field instead of leaving the doc
                       claiming silence forever.
 
-FOUR INVARIANTS, ASSERTED — because they falsify the INSTRUMENT
------------------------------------------------------------------
+THREE INVARIANTS, ASSERTED IN `run()` — because they falsify the INSTRUMENT
+--------------------------------------------------------------------------
+(and one further property held as a CONSTANT, which is number 4 below)
  1. A demoted node cannot be returned, so
     ``recall@k(windowed) <= resident_share`` for every k and every arm.
  2. The graph must hold EXACTLY the intended resident set after eviction.
@@ -102,12 +103,19 @@ FOUR INVARIANTS, ASSERTED — because they falsify the INSTRUMENT
     population whose complete-graph ceiling is below 1.0 (``:Point`` on this
     corpus: 0.410 against a resident share of 0.5267) a leak of demoted queries
     sits UNDER (1)'s bound and passes it. (3) has no ceiling to hide behind.
- 4. The query-sample seed and the ``random`` eviction seed must not collide
+ 4. ⛔ CONSTANT, NOT ASSERTED IN `run()`. The query-sample seed and the ``random`` eviction seed must not collide
     (``EVICT_SEED_OFFSET``). They are permutations of the SAME list, so one shared
     seed makes the retained suffix and the sampled prefix DISJOINT by
     construction — measured on this instrument's first run, which reported
     ``resident_share`` 0.667 / 0.167 / 0.000 at coverage 0.90 / 0.75 / 0.50: true
     about the graph, useless as a control.
+
+    Nothing in ``run()`` compares the two seeds — it applies ``EVICT_SEED_OFFSET``
+    as an offset and records it in the artifact, which is not an assertion that they
+    cannot collide. This one is a CONSTANT, and the record says so ("a constant in
+    the instrument, and it is not counted among the invariants"). An earlier header
+    claimed all four were ASSERTED, which nothing enforced;
+    ``tests/test_window_quality_m2.py`` pins the distinction.
 
  An instrument that cannot fail its own arithmetic is not evidence. These are the
  checks that caught the #8919 ``_upsert_object`` ON-CREATE gap in the sibling
@@ -731,7 +739,10 @@ def run(args: argparse.Namespace) -> int:
     # reloaded graph carries the engine's internal document ids forward, and the
     # lexical leg breaks near-ties on them: measured across two runs of identical
     # input, every `:Object` arm was bit-identical while the `:Point` arm's
-    # `recall@3` moved by up to 2 points at random@0.50 (0.120 vs 0.117). A fresh
+    # `recall@3` moves on a `:Point` arm. The MAGNITUDE is not restated here: the
+    # only bound the instrument may quote is `REPRODUCIBILITY_BOUND`, and an earlier
+    # cut of this comment said "up to 2 points at random@0.50 (0.120 vs 0.117)" —
+    # 0.120 vs 0.117 is 0.3 pp, and it contradicted that very block. A fresh
     # graph per arm makes each arm an independently reproducible graph state, which
     # is what the artifact claims to record.
     graph_name = args.graph or f"m2win_{int(time.time())}_{os.getpid()}"
@@ -1002,11 +1013,20 @@ def run(args: argparse.Namespace) -> int:
         "cleanup": {
             "graphs_created": len(graphs),
             "graphs_dropped": 0,
-            "note": "each arm is measured on its own graph (params.graph_prefix); "
-                    "nodes are cleared after each population, but the graphs "
-                    "themselves are left behind. On a lane container "
-                    "`test_lane.py down` disposes of them, which is the "
-                    "intended path — a shared server accumulates one set per run",
+            #: ⛔ `reset()` runs ONCE PER POPULATION and acts on `cur["proj"]`, which the
+            #: last arm rebound — so only the FINAL arm's graph per population is
+            #: emptied. An earlier version said "nodes are cleared after each
+            #: population, but the graphs themselves are left behind", which reads as
+            #: 22 empty graphs; it is 20 POPULATED ones, and a reader sizing the lane's
+            #: footprint needs that number.
+            "note": "each arm is measured on its own graph (params.graph_prefix) "
+                    "and NO graph is dropped. reset() runs once per population and "
+                    "acts on the graph the last arm left current, so only the final "
+                    "arm's graph per population is emptied: a run leaves "
+                    "2 * (1 + policies * coverages) - 2 graphs still POPULATED "
+                    "(20 of 22 at the committed parameters), not 20 empty ones. On a "
+                    "lane container `test_lane.py down` disposes of them, which is the "
+                    "intended path — a shared server accumulates one full set per run",
         },
         "populations": result,
     }

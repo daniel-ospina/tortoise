@@ -896,6 +896,182 @@ def test_the_stated_empty_range_is_the_artifact_range(artifact):
         f"({min(windowed) * 100:.1f}–{max(windowed) * 100:.1f} %)")
 
 
+def test_s91_headline_series_is_pinned_per_position(artifact):
+    """§9.1's most-quoted claim, pinned POSITION BY POSITION — not by membership.
+
+    ⛔ The `N.N %` scan is a MEMBERSHIP test, so it cannot tell a correct binding
+    from a figure that merely exists somewhere in the artifact — the weakness
+    `26a4f501a5` names in its own message while fixing it only for the ceiling pin.
+    §9.1's central sentences were pinned by NOTHING: measured at `ef4af0fb4b8`,
+    mutating the series' last element to `57.1`, `88.3` to `89.0`, the misbind
+    `41.0` to `46.9`, and the `:Point` pair's right-hand side to `52.7` EACH LEFT
+    THE SUITE GREEN. The series carries no `%` sign, so the scan never saw it; the
+    others are figures the artifact holds from OTHER arms, so membership could not
+    have caught them either.
+
+    Parse the sentences' own shape and compare each slot to the arm it names.
+    """
+    arch = ARCH.read_text(encoding="utf-8")
+    start = arch.index("### 9.1 M2")
+    section = arch[start:arch.index("\n---", start)]
+
+    m = re.search(
+        r"((?:\d+\.\d\s*/\s*){4}\d+\.\d)\s+at coverage\s+"
+        r"((?:\d+\.\d\d\s*/\s*){4}\d+\.\d\d)",
+        section,
+    )
+    assert m, "§9.1 no longer states the tail-arm series in the pinned shape"
+    figures = [f.strip() for f in m.group(1).split("/")]
+    coverages = [c.strip() for c in m.group(2).split("/")]
+    assert coverages == ["0.90", "0.75", "0.50", "0.25", "0.10"], coverages
+
+    obj = _arms(artifact, "object")
+    for fig, cov in zip(figures, coverages, strict=True):
+        data = obj[f"tail@{float(cov):g}"]
+        assert fig == f"{data['found_deep'] * 100:.1f}", (
+            f"§9.1 states {fig} at coverage {cov}; the artifact holds "
+            f"{data['found_deep'] * 100:.1f}")
+        # the sentence's CLAIM is that found@deep EQUALS the resident share
+        assert fig == f"{data['resident_share'] * 100:.1f}", (
+            f"{fig} != the resident share at coverage {cov}")
+
+
+def test_s91_arrow_pairs_are_derived_per_metric(artifact):
+    """Each `X % -> Y %` in §9.1 must be THAT metric's complete/windowed pair."""
+    arch = ARCH.read_text(encoding="utf-8")
+    start = arch.index("### 9.1 M2")
+    section = arch[start:arch.index("\n---", start)]
+    obj = _arms(artifact, "object")
+    pt = _arms(artifact, "point")
+
+    m = re.search(
+        r"recall@3 falls\s*\*{0,2}\s*(\d+\.\d) %\s*\u2192\s*\*{0,2}\s*(\d+\.\d) %",
+        section)
+    assert m, "§9.1 no longer states the recall@3 pair"
+    assert m.group(1) == f"{obj['complete']['recall@3'] * 100:.1f}", m.group(1)
+    assert m.group(2) == f"{obj['tail@0.5']['recall@3'] * 100:.1f}", m.group(2)
+
+    m = re.search(
+        r"rises\s*\*{0,2}\s*(\d+\.\d) %\s*\u2192\s*\*{0,2}\s*(\d+\.\d) %", section)
+    assert m, "§9.1 no longer states the wrong-top-1 pair"
+    assert m.group(1) == f"{obj['complete']['misbind_at_1'] * 100:.1f}", m.group(1)
+    assert m.group(2) == f"{obj['tail@0.5']['misbind_at_1'] * 100:.1f}", m.group(2)
+
+    # the :Point pair — must NOT be a cross-population figure; the doc wraps it
+    m = re.search(
+        r"`:Point`\).{0,80}?`found@deep` falls\s*\*{0,2}\s*(\d+\.\d)\s*%\s*\u2192\s*"
+        r"\*{0,2}\s*(\d+\.\d)\s*%",
+        section, re.S)
+    assert m, "§9.1 no longer states the :Point found@deep pair"
+    assert m.group(1) == f"{pt['complete']['found_deep'] * 100:.1f}", m.group(1)
+    assert m.group(2) == f"{pt['tail@0.5']['found_deep'] * 100:.1f}", m.group(2)
+
+
+def test_every_record_discloses_the_point_self_retrieval():
+    """`:Point` queries are self-retrieval; the records must say so.
+
+    ⛔ This is the single caveat a reader needs to interpret the `:Point` table:
+    every query is a verbatim span of its OWN target document, so `recall@3` 15.7 %
+    and `found@deep` 71.3 % are an UPPER bound on the leg's usefulness, not answer
+    quality. The instrument declares it under "what is real and what is not";
+    neither record did, and nothing red on the omission.
+    """
+    arch = ARCH.read_text(encoding="utf-8")
+    start = arch.index("### 9.1 M2")
+    section = arch[start:arch.index("\n---", start)]
+    readme = README.read_text(encoding="utf-8")
+    for name, text in (("§9.1", section), ("README", readme)):
+        assert "SELF-RETRIEVAL" in text, (
+            f"{name} does not disclose that :Point queries are self-retrieval")
+        assert re.search(r"NOT\s+a\s+measure of answer quality", text), (
+            f"{name} discloses the construction but not what it does NOT measure")
+    assert "self-retrieval" in TOOL.read_text(encoding="utf-8")
+
+
+def test_no_record_counts_the_degenerate_complete_arm_as_an_observation():
+    """"0.0 in every arm" is misleading for `found_deep_of_demoted`.
+
+    ⛔ `_rate(x, 0)` returns 0.0, so the `complete` arm's `found_deep_of_demoted`
+    is 0.0 by a ZERO DENOMINATOR — it has no demoted queries — not by measurement:
+    20 arms measured it, not 22. ⚠️ Deliberately scoped to the
+    `found_deep_of_demoted` claim and not to "0.0 in every arm" in general:
+    `:Point` `empty` legitimately IS 0.0 in every arm including `complete`.
+    """
+    arch = ARCH.read_text(encoding="utf-8")
+    start = arch.index("### 9.1 M2")
+    section = arch[start:arch.index("\n---", start)]
+    readme = README.read_text(encoding="utf-8")
+    chg = (ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE-CHANGELOG.md").read_text(encoding="utf-8")
+    for name, text in (("§9.1", section), ("README", readme), ("CHANGELOG", chg)):
+        # ⛔ Require "windowed" to sit IMMEDIATELY after "in every", not merely
+        # somewhere nearby: a 220-char window passes on the corrective sentence
+        # that follows ("Scoped to the windowed arms deliberately: ..."), which
+        # re-supplies the word even after the claim itself is de-scoped.
+        for m in re.finditer(r"found_deep_of_demoted", text):
+            claim = text[m.start(): m.start() + 220]
+            if "0.0" not in claim:
+                continue
+            assert re.search(r"0\.0\**\s+in every\s+\**windowed", claim), (
+                f"{name} claims found_deep_of_demoted is 0.0 without scoping it "
+                f"to the windowed arms — the complete arm has no demoted "
+                f"queries, so its 0.0 is a degenerate denominator")
+
+
+def test_s91_records_that_the_s10_reopen_trigger_fired():
+    """§9.1 must not attribute its three shapes to §10, and must not bury the trigger.
+
+    ⛔ §9.1 said "§10 names its shape" — §10 lists TRIGGERS, not shapes, so the
+    citation pointed at text that does not say what was claimed. And §10 lists
+    *"M2 showing a windowed graph loses retrieval quality beyond an accepted
+    bound"* among what reopens §7; on this record that trigger is MET, and nothing
+    in §7, §9.1, §10 or the changelog recorded it.
+    """
+    arch = ARCH.read_text(encoding="utf-8")
+    start = arch.index("### 9.1 M2")
+    section = arch[start:arch.index("\n---", start)]
+    assert "§10 names" not in section, (
+        "§9.1 attributes its three shapes to §10; §10 lists triggers, not shapes")
+    assert "§10's reopen trigger has FIRED" in section, (
+        "§9.1 must record that §10's reopen trigger has fired on this evidence")
+    assert "reopened" in section
+    tail = arch[arch.index("## 10. What would reopen this decision"):]
+    assert "M2 showing a windowed graph loses retrieval quality" in tail, (
+        "§10 no longer carries the trigger §9.1 cites")
+
+
+def test_the_tool_declares_the_invariants_it_actually_asserts():
+    """The header must not claim an assertion `run()` does not make.
+
+    ⛔ "FOUR INVARIANTS, ASSERTED" overstated it: number 4 (the seed-collision
+    property) is a CONSTANT — `run()` applies `EVICT_SEED_OFFSET` as an offset and
+    records it, which is not an assertion that the two seeds cannot collide. The
+    record itself says so ("a constant in the instrument, and it is not counted
+    among the invariants"). A header that overstates enforcement is how a real
+    invariant gets dropped later with nobody noticing.
+    """
+    src = TOOL.read_text(encoding="utf-8")
+    for bad in ("FOUR INVARIANTS, ASSERTED", "THREE INVARIANTS, ASSERTED\n"):
+        assert bad not in src, f"the header claims {bad.strip()!r} without the qualifier"
+    assert "THREE INVARIANTS, ASSERTED IN `run()`" in src
+    assert "CONSTANT, NOT ASSERTED IN `run()`" in src, (
+        "invariant 4 must be labelled a constant, not an assertion")
+
+
+def test_the_cleanup_note_says_the_graphs_are_populated(artifact):
+    """`reset()` empties only the last arm's graph per population — not all of them."""
+    note = artifact["cleanup"]["note"]
+    assert "POPULATED" in note, (
+        "the cleanup note must say the surviving graphs are POPULATED; "
+        "'nodes are cleared after each population' reads as 22 empty graphs")
+    assert artifact["cleanup"]["graphs_dropped"] == 0
+    # the tool's note is CONCATENATED literals — scan the region, not one token
+    src = TOOL.read_text(encoding="utf-8")
+    anchor = src.find('"note": "each arm is measured on its own graph')
+    assert anchor != -1, "the tool no longer emits a cleanup note"
+    assert "POPULATED" in src[anchor: anchor + 900], (
+        "the tool still emits the misleading cleanup note")
+
+
 def test_the_tool_refuses_without_a_live_graph():
     """A figure measured on the embedded backend is not a figure (S3's rule)."""
     import os

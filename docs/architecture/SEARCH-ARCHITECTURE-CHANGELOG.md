@@ -205,7 +205,8 @@ five coverages under two eviction policies.
 the resident share in **every windowed `:Object` arm of both policies**; the five `tail` arms read
 91.3 / 77.3 / 51.7 / 23.3 / 8.7 and the `random` arms read their **own** shares
 91.7 / 76.3 / 49.7 / 25.3 / 12.0, so what the window keeps it can still find, and what it demotes it
-never returns (`found_deep_of_demoted` is 0.0 in every arm of both
+never returns (`found_deep_of_demoted` is 0.0 in every **windowed**
+arm of both,
 populations).
 ⛔ Those `:Object` figures describe `#11901`'s deliberately class-stratified oversample (60 % `definite`,
 30 % `ident`, 10 % `path`) against a real mix the artifact holds at ~8.0 % / ~3.4 % — the shapes
