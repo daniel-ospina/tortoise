@@ -541,9 +541,39 @@ def test_blocked_is_never_folded_into_wrong_or_overridden_by_a_right(narrative):
         "the reader's `right` overrode a question the instrument could not ask"
     )
     assert board["tally"]["blocked"] == 1 and board["tally"]["right"] == 0
-    assert any("could not be asked" in n for n in blocked.notes), (
-        "the disagreement must stay visible rather than be silently discarded"
+    assert any("could not be asked" in n for n in row["notes"]), (
+        "the disagreement must stay visible in the ROW THAT SHIPS — `ans.notes` is the "
+        "in-memory object, and a note written only there reaches no artifact (#13303 "
+        "cycle 4, P2)"
     )
+
+
+def test_run_judge_file_refuses_a_verdicts_document_before_measuring(tmp_path, narrative):
+    """`run --judge file` has the SAME `--verdicts` door as `judge` (#13303 cycle 4, P1).
+
+    Both write into `--out`, whose default is the committed evidence directory. This
+    door was open after cycle 3 fixed only `judge`: a run file scored nothing and wrote
+    `0 right · 0 wrong · 0 blocked · 6 unjudged` over the board — after spending the full
+    measurement. The refusal must come BEFORE the target is built, so the pin asserts
+    exit 2 and an empty output directory.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    nar = tmp_path / "narrative.json"
+    nar.write_text(json.dumps(narrative))
+    bad = tmp_path / "run-as-verdicts.json"
+    bad.write_text(json.dumps({"schema": "capstone-state-value-scoreboard/v1"}))
+    args = type(
+        "A",
+        (),
+        {"narrative": str(nar), "out": str(out), "judge": "file", "verdicts": str(bad)},
+    )()
+    assert cap.cmd_run(args) == 2
+    assert not list(out.iterdir()), "a refused verdicts document must leave the board alone"
+
+    # …and the shared loader accepts the REAL verdicts map, so both doors stay walkable.
+    real = cap._load_verdicts_map(ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json")
+    assert "_provenance" not in real and all(isinstance(v, dict) for v in real.values())
 
 
 def test_an_unknown_verdict_is_unjudged_and_never_vanishes_from_the_tally(narrative):
