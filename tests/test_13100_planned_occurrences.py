@@ -748,14 +748,58 @@ class TestThePlanPipeline:
         assert _stage(sdk, plan["id"])["isClosed"] is True
         with pytest.raises(ValueError, match="already settled") as exc:
             PO.record_occurrence(sdk, "Weekly board review")
-        assert "no plan Object" not in str(exc.value)
+        message = str(exc.value)
+        assert "no plan Object" not in message
+        # ⛔ A count(:Object) assertion here would be VACUOUS — nothing in this
+        # test mints, so it holds under every implementation (#13100 review round
+        # 5, same class as R4 F3). The discriminating inputs are the words: the
+        # refusal must name the settled stage, and must not prescribe the create
+        # that minted a duplicate.
+        assert PO.STAGE_HELD in message, message
+        assert "create the plan first" not in message, (
+            "the refusal prescribed the very create that mints a twin")
         with pytest.raises(ValueError, match="already settled"):
             PO.settle_plan(sdk, "Weekly board review", PO.STAGE_CANCELLED)
-        assert sdk._get_proj().g.query(
-            "MATCH (o:Object {name:$n}) RETURN count(o)",
-            params={"n": "Weekly board review"}).result_set[0][0] == 1, (
-            "the settled record is the only plan of that name; the refusal must "
-            "not have prescribed a twin")
+
+    def test_a_NON_STRING_status_is_foreign_not_a_crash(self, sdk):
+        """The currency predicate cannot hash an arbitrary stored value.
+
+        `update_knowledge(id, status=[…])` is ACCEPTED and stored verbatim, and
+        `is_terminal_status` does membership, so the gate used to raise a bare
+        `TypeError: unhashable type: 'list'` — an unnamed 500 with no remedy on a
+        plan the rest of the system reads as LIVE (no list equals a status word
+        in the Cypher arm). The shape is normalised to "no word", so the write
+        proceeds exactly as it did before the status gate existed.
+        """
+        plan = PO.create_plan(sdk, "Listy")
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$o}) SET o.status = ['archived']",
+            params={"o": plan["id"]})
+        assert PO.record_occurrence(sdk, plan["id"])["move"].applied
+
+    def test_an_AMBIGUOUS_plan_name_still_leaves_its_R8_record(self, sdk):
+        """The speculative probe must not suppress the record it cannot retry.
+
+        `record_misses=False` exists so a successful WIDENED resolve leaves no
+        phantom `no-live-holder` entry (#12047 N6/N1) — but on an ambiguous name
+        the live arm raises before the widened call runs, so suppressing there
+        dropped the only evidence of the ambiguity (measured: 0 entries vs 1 for
+        the same lookup at the default).
+        """
+        from tortoise.entity_identity import AmbiguousEntityName, non_folded_entries
+
+        g = sdk._get_proj().g
+        # Two HOLDERS, not two creates: `create_entity` re-mentions the single
+        # live holder (#452), so a second create cannot mint a same-name twin.
+        for oid in ("twin-plan-1", "twin-plan-2"):
+            g.query(
+                "CREATE (o:Object {id:$id, name:'Twin plan', objectKind:$k})",
+                params={"id": oid, "k": PO.PLAN_PIPELINE_KEY})
+        before = len(non_folded_entries())
+        with pytest.raises(AmbiguousEntityName):
+            PO.record_occurrence(sdk, "Twin plan")
+        assert len(non_folded_entries()) > before, (
+            "the ambiguity refusal left no R8 record")
 
     def test_a_name_held_by_a_SETTLED_and_a_LIVE_plan_resolves_the_LIVE_one(
             self, sdk):

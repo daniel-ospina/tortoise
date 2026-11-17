@@ -292,7 +292,7 @@ def create_plan(sdk, name: str, *, title: str | None = None,
 
     ⛔ The returned node is only a *staged* plan if the advance actually applied.
     A create **name** is a natural key that re-mentions its single live holder
-    (#452), so this call can land on a plan that already exists. THREE arms, and
+    (#452), so this call can land on a plan that already exists. FOUR arms, and
     only the second leaves the graph untouched:
 
     * **live, open and POSITION-LESS** (the extractor-minted `core:plan`): the
@@ -300,8 +300,13 @@ def create_plan(sdk, name: str, *, title: str | None = None,
       true of a plan with no position, and a position-less plan is exactly the
       shape the promotion gate is bounded on, so returning it would leave the
       suppression OFF;
-    * **live, open and already ``scheduled``**: a no-op success, nothing
-      re-staged, because that is exactly what was asked for;
+    * **live, open, positioned, and of the BINDABLE spelling**: a no-op success,
+      nothing re-staged, because that is exactly what was asked for. This is the
+      only arm that writes nothing;
+    * **live, open and positioned but stored under a spelling no pipeline can
+      bind** (the bare `plan` kind): also falls through, and the door's
+      namespaced `objectKind` REPAIRS the binding — a write, deliberately: a
+      success here would hand the caller a plan whose next write refuses;
     * **settled / ENDED** — the durable marker, a terminal stage, or a retired
       status word: RAISES, naming the stage it is at and the route to a new
       record.
@@ -720,17 +725,25 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
     round 4, F1).
     """
     from . import pipeline
-    from .entity_identity import resolve_entity_id_same_entity
+    from .entity_identity import AmbiguousEntityName, resolve_entity_id_same_entity
     from .live import is_terminal_status
 
     graph = sdk._get_proj().g
-    # `record_misses=False` on the first probe: it is SPECULATIVE — the caller
-    # retries the same coordinate over the wider arm — and a successful widened
+    # `record_misses=False` on the first probe: it is SPECULATIVE — an empty
+    # answer is retried over the wider arm below — and a successful widened
     # resolve must not leave a phantom `no-live-holder` refusal in the R8 record
     # for a name that resolved (#12047 N6/N1). The widened call keeps the
     # default, so a genuinely absent name is still recorded as a miss.
-    plan_id = resolve_entity_id_same_entity(graph, "Object", plan_ref,
-                                            record_misses=False)
+    # ⛔ AMBIGUITY is the case that justification does NOT cover: the live arm
+    # raises before the retry can run, so suppressing the record there would drop
+    # the only evidence of an ambiguous plan name. Re-raise through the recording
+    # arm — same answer, and the refusal is recorded (#13100 review round 5).
+    try:
+        plan_id = resolve_entity_id_same_entity(graph, "Object", plan_ref,
+                                                record_misses=False)
+    except AmbiguousEntityName:
+        resolve_entity_id_same_entity(graph, "Object", plan_ref)
+        raise
     if plan_id is None:
         plan_id = resolve_entity_id_same_entity(graph, "Object", plan_ref,
                                                 live_only=False)
@@ -773,7 +786,18 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
             f"`create_plan` (kind {PLAN_PIPELINE_KEY!r}), or update its "
             f"objectKind to {PLAN_PIPELINE_KEY!r} before recording the "
             f"occurrence. Nothing has been written.")
-    if is_terminal_status(stored_status, bool(outdated)):
+    # ⛔ A NON-STRING `status` NEVER REACHES THE PREDICATE. The store keeps what a
+    # caller wrote — `update_knowledge(<id>, status=[…])` is accepted — and
+    # `is_terminal_status` does `(status or "") in TERMINAL_EXCLUDED_STATUSES`,
+    # which raises `TypeError: unhashable type` for a list. That is an unnamed
+    # 500-class with no remedy, on a plan the REST of the system reads as live
+    # (the Cypher arm compares against strings, so no list can equal a status
+    # word), so the shape is normalised to "no word" here — the same rule
+    # `plan_position` applies to a non-string pipeline key (FOREIGN, not a
+    # crash). The legacy `outdated` FLAG is still read: it is a boolean whatever
+    # the status is (#13100 review round 5).
+    if is_terminal_status((stored_status if isinstance(stored_status, str)
+                           else None), bool(outdated)):
         # ⛔ The STATUS axis, which the widened name arm no longer filters: an
         # archived/deprecated/superseded plan (or the legacy `outdated` flag) is
         # a record the currency rule calls ENDED, so it is not one this write may
