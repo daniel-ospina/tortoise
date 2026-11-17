@@ -1,7 +1,7 @@
 # #9556 (#9189 follow-on) — S2 wiring census: production call sites of the two-store chain
 #   (reconciliation.reconcile / record_projection.replay /
 #   cache_projection.read_record_view / FalkorProjection.rebuild_from_record).
-# Measured at: feat/13220-vectors-postgres@973d11ab3ee on 2026-11-17, re-cut for #13220 (the code
+# Measured at: feat/13220-vectors-postgres@8f03a876de on 2026-11-17, re-cut for #13220 (the code
 #   measured is that commit's; this log is re-cut on top of it). TWO things
 #   moved since the last cut (fix/9556-record-restore@b5768749e, 2026-10-22, R8):
 #   #13210 added `tools/record_runner.py`, a SECOND production caller of
@@ -36,7 +36,7 @@ production population: ['tortoise', 'tools', 'scripts']/**/*.py
 == reconciliation.reconcile: 0 production call site(s) ==
 
 == record_projection.replay: 2 production call site(s) ==
-  tortoise/record_writer.py:2070: report = record_projection.replay(
+  tortoise/record_writer.py:2076: report = record_projection.replay(
   tools/record_runner.py:738: from tortoise.record_projection import replay
 
 == cache_projection.read_record_view: 2 production call site(s) ==
