@@ -1782,11 +1782,19 @@ def _find_closing_tag(code: str, start: int, tag: str) -> int:
 
 
 #: What may legally FOLLOW a function's dollar-quoted body — the `CREATE
-#: FUNCTION` tail (postgresql.org → CREATE FUNCTION, the `{ LANGUAGE … |
-#: TRANSFORM … | IMMUTABLE | … }` block) or the statement's own `;`. ⛔ This is a
-#: GRAMMAR test, not a lexer, and that distinction is the whole point: it is exact
-#: (a valid file MUST continue with one of these, or the file does not parse), so
-#: it can never red a loadable migration the way a hand-rolled quote scanner can.
+#: FUNCTION` tail: the synopsis's `{ … }` alternation VERBATIM (postgresql.org →
+#: CREATE FUNCTION: `LANGUAGE` / `TRANSFORM` / `WINDOW` / `IMMUTABLE|STABLE|VOLATILE` /
+#: `[NOT] LEAKPROOF` / `CALLED` / `RETURNS` / `STRICT` / `EXTERNAL` / `SECURITY` /
+#: `PARALLEL` / `COST` / `ROWS` / `SUPPORT` / `SET` / `AS`), or the statement's own
+#: `;`. ⛔ A GRAMMAR test, not a lexer, and that distinction is the whole point: it is
+#: exact (a loadable file MUST continue with one of these, or it does not parse), so
+#: it cannot red a loadable migration the way a hand-rolled quote scanner can.
+#:
+#: Residual, stated rather than hidden: a tail token PostgreSQL ADDS in a later
+#: version (or a `CREATE FUNCTION` spelling outside this synopsis) would be missing
+#: here and RED a valid file. The failure is fail-closed, and the message prints the
+#: offending token, so the repair is one line — it can never false-PASS a body that
+#: closed early.
 _FUNCTION_FOOTER = re.compile(
     r"\s*(?:;|\Z"
     r"|LANGUAGE\b|TRANSFORM\b|WINDOW\b|IMMUTABLE\b|STABLE\b|VOLATILE\b"
