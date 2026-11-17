@@ -6083,17 +6083,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
         # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`, the
         # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s, in
-        # `tortoise-capture.ts`, and re-derived no cite, so the pair is
-        # **`:1023`/`:1015`** here — measured at this head
-        # (`grep -nF 'export function postCapture(' …`) and re-measured at the head this
-        # de-conflict merges at (`0449273b`), which still reads `:1023`/`:1015`; repaired
+        # `tortoise-capture.ts`, and re-derived no cite: `:1023`/`:1015` was the pair's
+        # value at `0449273b` (the head that narration was written against) — NOT here:
+        # the pin below is **`:1030`/`:1022`**, re-derived by CONTENT on THIS tree
+        # (`grep -n 'export function postCapture(\|export function postInstallProbe('
+        # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart); repaired
         # at this head rather than carried, because a red on `main` blocks every head.
-        # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only, and the
-        # rows above it are pins on files under `tortoise/` (`sdk.py`, `search_engine.py`,
-        # `pack_registry.py`), which this branch does not touch — `git diff --stat`
-        # `origin/main...HEAD -- tortoise/` is EMPTY. Read "repaired" as "this pair is
-        # re-pointed", never as a claim about any other row. (Written at `b6003e180e`,
-        # when the `sdk` rows sat one line behind; `main` re-derived them — GREEN here.)
+        # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only; the rows
+        # above pin `tortoise/sdk.py`, `search_engine.py`, `pack_registry.py` — THOSE THREE,
+        # not the directory: `git diff --stat origin/main...HEAD -- <those>` is EMPTY,
+        # `-- tortoise/` is NOT (the branch also carries a `tortoise/tool_registry.py` 3+/2-
+        # edit). "Repaired" means this pair is re-pointed, never a claim about any other row.
         # The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
@@ -6101,9 +6101,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `6916a6cd89` `:957` is a comment and that list is at `:1009`. Re-open the
         # line; the row is held by CONTENT, so a wrong pair reds rather than
         # silently resolving.
-        # RE-DERIVED by CONTENT on the merged tree (the de-conflict of `main` into
-        # `#12295`): `grep -n 'export function postCapture(\|export function postInstallProbe('
-        # tortoise/pi-hooks/tortoise-capture.ts` -> 1023 / 1015, still 8 apart. The
+        # RE-DERIVED by CONTENT on the merged tree (re-measured for THIS head):
+        # `grep -n 'export function postCapture(\|export function postInstallProbe('
+        # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart. The
         # `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
         # and is RED here, measured: main's tortoise-capture.ts carries +16 lines above
         # both `def`s that neither of that row's two sides moved.
