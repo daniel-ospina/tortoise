@@ -97,11 +97,11 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,622 occurrences of the door predicate across 108 files
-2,343 occurrences of the verb predicate across 143 files   (upper-bound shape, see below)
+1,623 occurrences of the door predicate across 108 files
+2,343 occurrences of the verb predicate across 144 files   (upper-bound shape, see below)
 
-1,622  regex door-pattern occurrences
-  −53  occurrences on a line carrying NO door call (comments and docstrings)
+1,623  regex door-pattern occurrences
+  −54  occurrences on a line carrying NO door call (comments and docstrings)
 = 1,569  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
 = 1,569  AST door calls
@@ -113,13 +113,13 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,622** across **108** files: exactly the
-tool's number. A bare `rg … tortoise/` gives 1,628 / 109, the 6 extra occurrences living in
-`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,622 / 108 on this tree, because
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,623** across **108** files: exactly the
+tool's number. A bare `rg … tortoise/` gives 1,629 / 109, the 6 extra occurrences living in
+`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,623 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **142** files, while the tool
-reports 2,343 / 143. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **143** files, while the tool
+reports 2,343 / 144. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — **nine** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
@@ -142,7 +142,7 @@ exclusion dropped they read **2,063** and **2,333**. The 69-occurrence 2,333→2
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
-The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
+The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** and
 the **= 1,569 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
@@ -429,8 +429,10 @@ the row below and from the same commit: `tortoise/record_writer.py:1723` is a CO
 `MERGE (s:Source {url:$id})`, and this census counts LINES — so the tool reads 2,343 / 143 where it
 read 2,342 / 142, and `rg` reads 2,330 / 142, 2,064 and 2,402 where it read 2,329 / 141, 2,063 and
 2,401. ⛔ The other TWO did NOT move, and the reason is the predicate, not the commit: the DOOR figure
-(`1,624` / `108` at `34bd33d22a`; `1,622` / `108` here, `#13249` having removed two door calls since)
-and the bare-door figure (`1,630` → `1,628` for that same reason) are drawn from a predicate
+(`1,624` / `108` at `34bd33d22a`, `1,623` / `108` at this head — `#13249` removed two door calls and
+`#13330` (`3bcb6c6531`) added one back in a COMMENT, which is why `door_occurrences_without_a_call`
+reads 54 while the AST total is still 1,569) and the bare-door figure (`1,630` at `34bd33d22a` →
+`1,629` here, for those same two commits) are drawn from a predicate
 `#13265` did not touch — it added **0** door calls and exactly **1** verb occurrence
 (`git show 34bd33d22a -- tortoise/ | grep '^+' | grep -cE '\.(ro_)?(query|execute)\s*\('` → `0`;
 `… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`). The 13-occurrence one-file whole-text gap and the
