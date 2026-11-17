@@ -482,7 +482,8 @@ def searcher(
     ``CONNECT_TIMEOUT_SECONDS`` (10 s) — or a ``connect_timeout`` the operator put
     in the DSN — and neither is reachable from here, because the handle is pooled
     (#9558) and its connect parameters are the pool's, not this read's. So the
-    statement is bounded by the read's budget and the connect is not. It is named
+    STATEMENTS are bounded by a share of the read's budget
+    (:func:`record_statement_ms`) and the connect is not. It is named
     rather than fixed because bounding it means changing what the POOL hands
     every other borrower; the measured failure this issue prices (a 15 s
     STATEMENT on a 500 ms read) is the one that was observed.
