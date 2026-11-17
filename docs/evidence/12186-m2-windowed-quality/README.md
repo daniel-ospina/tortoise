@@ -13,9 +13,11 @@ aboutObjects: "#12186, SEARCH-ARCHITECTURE.md §7, SEARCH-ARCHITECTURE.md §9, #
 
 **Verdict: §7's window is NOT SAFE AS SPECIFIED — it must not be armed.**
 On the **text leg** — the one §6.2 keeps in the graph, and the read this run exercised: the
-`db.idx.fulltext` leg plus the structural kind-scan, and the degraded snapshot tier was **reached**
-(the artifact records that the tier RAN, not that it served rows — Finding 6 says what that
-qualifies); the **vector** leg did not run — the
+`db.idx.fulltext` leg plus the structural kind-scan, and a `fallback` entry **ran** (the artifact
+records only that some fallback entry ran, not WHICH reason fired — `snapshot`, `legacy` or
+`no-fallback-applicable`, the last of which fires on a read that returned nothing and is
+entailed by the `:Object` arms' own `empty` rates; Finding 6 says what the tier qualifies); the
+**vector** leg did not run — the
 window's retrieval cost is **the eviction itself, with nothing compensating**: in a run that invalidates
 the degraded snapshot after each demotion, a demoted node is never
 handed back as a candidate at any rank **of the depth-50 read**, the caller is never told a store was partial, and on the claim

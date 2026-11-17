@@ -1867,6 +1867,56 @@ def test_the_record_quotes_the_current_wording_of_the_honesty_item():
         )
 
 
+def test_the_arming_decision_is_stated_and_cannot_be_inverted_green(artifact):
+    """The PR's PRODUCT is a decision, and the decision had no reader.
+
+    ⛔ Every number in this record is pinned; the five sentences that state what
+    the numbers DECIDE were not (#13126 round 7). Measured at 57 green, each alone:
+
+        README verdict      "NOT SAFE AS SPECIFIED — it must not be armed"
+                            -> "SAFE AS SPECIFIED — it may now be armed"
+        README §what §7 means  "must not be armed on the strength of these numbers"
+                            -> "should now be armed"
+        §1.5 phase rule     "it does not arm the window"  -> "it arms the window"
+        §7 arming sentence  "which it does not"           -> "and it does"
+        §9.1 heading        "and it does not arm the window" -> "and it arms the window"
+
+    An edit that inverts the conclusion — on the sentence a reader of §7 takes
+    away — would have shipped as a record saying the opposite of what it measured.
+    The direction is pinned, not the wording: each row is the clause that carries
+    the decision, so a re-phrasing that keeps the direction passes and an
+    INVERSION reds.
+    """
+    obj = _arms(artifact, "object")
+    half = obj["tail@0.5"]
+    readme = README.read_text(encoding="utf-8")
+    arch = ARCH.read_text(encoding="utf-8")
+
+    # the decision the artifacts support, re-derived before it is quoted
+    assert half["found_deep_of_demoted"] == 0.0
+    assert half["recall@3"] < 0.55 and obj["complete"]["recall@3"] > 0.85
+
+    decisions = [
+        (readme, "**Verdict: §7's window is NOT SAFE AS SPECIFIED — it must not be armed.**"),
+        (readme, "**The window must not be armed on the strength of these numbers.**"),
+        (arch, "it does not arm the window (§9.1)"),
+        (arch, "armed only when M2 says it is safe — which it does not"),
+        (arch, "### 9.1 M2 — measured, and it does not arm the window"),
+    ]
+    missing = [frag for doc, frag in decisions if frag not in _flat(doc)]
+    assert not missing, (
+        "these sentences carry the ARMING DECISION and no longer state it — the "
+        "record can ship saying the opposite of what it measured: "
+        + "; ".join(missing))
+
+    # …and the inverted spellings must be absent, so a reworded flip reds too.
+    inverted = ("may now be armed", "should now be armed", "and it arms the window",
+                "SAFE AS SPECIFIED — it may")
+    found = [frag for frag in inverted
+             if frag in _flat(readme) or frag in _flat(arch)]
+    assert not found, f"the arming decision is stated inverted: {found}"
+
+
 def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
     """Each figure the three documents quote is compared to a DERIVATION, not to a SET.
 
@@ -2067,8 +2117,19 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
         # `empty` shows the `count: 0` path firing. A reader judging route 1 would
         # take a graph-bound tier (built by `MATCH (n:Point)`) as a serving leg the
         # text-index move does not shift.
-        (readme, "and the degraded snapshot tier was **reached**",
-         "retrieval.legs_seen.fallback (RAN, not served)"),
+        # ⛔ The artifact records that SOME fallback entry ran — a boolean OR over
+        # `entry["ran"]` — and nothing else: the instrument drops each entry's
+        # `reason` and `count`. The SDK emits `ran=True` for THREE reasons
+        # (`tfidf_snapshot`, `tfidf_legacy`, and `no_fallback_applicable`, the last
+        # with `count=0` on a read that returned nothing), and the `:Object`
+        # population's `entity_type` can only take the third — so
+        # `legs_seen.fallback == true` is entailed by the `:Object` arms' own
+        # `empty` rates with the snapshot tier never reached (#13126 rounds 6-7:
+        # "serving" was wrong, and so was "reached"; only "ran" is supportable).
+        (readme, "records only that some fallback entry ran, not WHICH reason fired",
+         "retrieval.legs_seen.fallback (RAN, not which reason)"),
+        (readme, "the **vector** leg did not run",
+         "retrieval.legs_seen.vector is False"),
         (readme, "at any rank **of the depth-50 read**",
          "the read the ranking claim is bounded to"),
         # ── round 4 ────────────────────────────────────────────────────────
