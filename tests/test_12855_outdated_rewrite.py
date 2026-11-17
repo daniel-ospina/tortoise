@@ -1628,3 +1628,44 @@ def test_a_dual_arm_row_needs_a_record_that_names_the_OBJECT(env, monkeypatch):
     assert rep.rewritten == [], (
         "the :Object arm's record never landed, so the row is not durable")
     assert [f.get("id") for f in rep.failures] == [oid], rep.failures
+
+
+def test_the_pending_report_HEDGES_and_never_accuses_a_row(env, monkeypatch):
+    """The marker proves INTENT, not progress — the report must say so.
+
+    An id is written to the marker BEFORE the write door is called, so a run
+    killed in that window leaves a row whose live write never happened at all.
+    A report that asserts "their live status WAS WRITTEN but their journal record
+    may not have landed" accuses that row of a state it never reached, and then
+    prescribes `rebuild_all` — a destructive replay — as the single remedy for a
+    row that may need none (review findings, 2026-11-17; the wording was
+    unpinned, so reverting it left every row green).
+    """
+    sdk, events = env
+    oid = sdk.create_object("marked", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    journal = str(events / "events.jsonl")
+
+    real_write = tool._write_pending
+
+    def die_after_marking(journal_arg, ids):
+        real_write(journal_arg, ids)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(tool, "_write_pending", die_after_marking)
+    with pytest.raises(KeyboardInterrupt):
+        tool.run(sdk, execute=True)
+    monkeypatch.setattr(tool, "_write_pending", real_write)
+
+    assert tool._read_pending(journal) == [oid], "precondition: the row is marked"
+    assert _status(sdk, oid) == "outdated", (
+        "precondition: the write never happened — the marker is intent, not progress")
+
+    text = tool.render(tool.run(sdk, execute=False))
+
+    assert "may be the legacy word still" in text, (
+        "the report must allow the row's live write to have never happened: " + text)
+    assert "their live status was written" not in text, (
+        "the report accused a row that may never have been written: " + text)
+    assert "written without a durable journal record" not in text, (
+        "the second arm still asserts the write happened: " + text)

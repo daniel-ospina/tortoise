@@ -1354,9 +1354,11 @@ def render(rep: Report) -> str:
             # that works.
             lines.append(
                 f"  ⇒ preview only; nothing was written. ⛔ {len(rep.pending)} row(s) "
-                "may be LIVE-ONLY from a previous run (written without a durable "
-                "journal record), so the reading above is NOT a measurement: run "
-                "`rebuild_all` to restore the legacy word, then re-run `--execute`.")
+                "may be LIVE-ONLY from a previous run (about to be rewritten when "
+                "it stopped — the live write may not have happened at all), so "
+                "the reading above is NOT a measurement: re-run `--execute` to "
+                "finish them, and run `rebuild_all` only for the ids whose live "
+                "status is already the new word with no record behind it.")
         elif blockers:
             lines.append(
                 "  ⇒ preview only; nothing was written. ⛔ `--execute` would REFUSE "
@@ -1479,11 +1481,10 @@ def run(sdk, *, execute: bool = False, sample: int = 20,
             f"the durability marker {_pending_path(rep.journal)} exists but "
             "could not be read, so it is unknown whether a previous run left "
             "rows LIVE-ONLY. Nothing was written. Repair: both arms refuse until "
-            "this file is readable, so it cannot be discharged by running the "
-            "tool — fix what blocks the read (permissions, or a replacement file "
-            "with one row id per line), and delete it only once every id in it "
-            "either reads `deprecated` live or has a `deprecated` record as the "
-            "LAST record for it in the journal. This tool will not guess."))
+            "this file is readable, so fix what blocks the read (permissions, or "
+            "replace it with one row id per line) — once it is readable the tool "
+            "discharges it itself, so do NOT hand-delete ids you have not "
+            "verified. This tool will not guess."))
     if rep.pending and log is not None:
         # ⛔ The PREVIEW gets the same discharge test the write arm applies, or a
         # marker left by a killed run (naming only ids whose records landed)
