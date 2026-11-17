@@ -438,16 +438,14 @@ nine-prose/four-Cypher split are UNCHANGED by it (the added match is single-line
 ⚠️ That regeneration is not decorative at this head. The appendix pins `file:line` COORDINATES and
 `--check` cannot see them — its 25 pins are SCALARS, and an insertion is not a new statement — so
 re-cutting the appendix moves ROWS while every SCALAR stays put. Measured at THIS head against
-`origin/main` **`9cebd72ad7`**: the appendix `main` carried was stale in **709 of its 1,311 rows**,
-over exactly five files — the same 1,311 statements, renumbered:
+`origin/main` **`31bddb1d`**: the appendix `main` carried was stale in **107 of its 1,311 rows**,
+over exactly three files — the same 1,311 statements, renumbered:
 
 | file | rows | shift |
 |---|---|---|
-| `tortoise/sdk.py` | 384 | +51 (355 rows), +48 (2), +26 (6), +23 (2), +9 (19) |
-| `tortoise/hosted_api.py` | 240 | +22 (230) |
-| `tortoise/projection/__init__.py` | 92 | +38 (83) |
-| `tortoise/indexer/github_indexer.py` | 11 | +97 (4), +24 (7) |
-| `tortoise/record_projection.py` | 1 | +22 |
+| `tortoise/projection/__init__.py` | 92 | +53 (49), +103 (21), +391 (11), +39 (8), +60 (1), +138 (1), +194 (1) |
+| `tortoise/indexer/github_indexer.py` | 11 | +5 (6), +16 (4), +10 (1) |
+| `tortoise/sdk.py` | 4 | +33 (4) |
 
 reproduced by `git show origin/main:docs/architecture/CYPHER-INVENTORY.md` versus a fresh
 `--markdown` at this tree. It is regenerated HERE because every commit that moved those statements
@@ -455,13 +453,16 @@ has already merged without regenerating them (the rule assigns the refresh to th
 the code; none of those commits did it), while
 `tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` is RED at
 `origin/main` today — the generated table is the only artifact in this document that no pin reaches.
-(Two earlier revisions of this paragraph are RETIRED rather than reconciled, because each named a
+(Four earlier revisions of this paragraph are RETIRED rather than reconciled, because each named a
 unit, a metric or a base it did not measure: "31 of 1,313 rows" — `1,313` is the table's LINE count,
 it is **1,311 rows over 1,313 lines**, of which **1,310** are distinct, the duplicate being the two
 unresolved door calls on `tortoise/session_source_migration.py:235` — with `31` attributed to no
 metric; then "137 of 1,311 rows", measured against an `origin/main` that `#13317` has since
 regenerated; then "one row", measured at `34bd33d22a`, a base seven commits old by the time it was
-read. All three are the same defect — a count taken off the wrong unit, off a base that has since
+read; then "709 of 1,311 rows over exactly five files", measured at `9cebd72ad7`, where the same
+method gives **745 over eight** (`search_engine.py` 21, `cache_projection.py` 2 and `ranking.py` 4
+are shifted there and are absent from its table) and two bases have moved since. All four are the
+same defect — a count taken off the wrong unit, off a base that has since
 moved, or off an unnamed metric — which is why the figure above names its base and its command.)
 
 The paragraph below is `main`'s cut, kept as the record of it.
