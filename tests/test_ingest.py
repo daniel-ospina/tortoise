@@ -1570,9 +1570,17 @@ def test_sc4_deprecation_markers_present():
     ptr = RETIRED_USE_INSTEAD.get("tortoise_index_sessions") or ""
     assert "tortoise_index_sources_from_directory" in ptr, (
         f"the retired session-index door must name its live container: {ptr!r}")
-    assert "file_type" in ptr and "agent_session" in ptr, (
-        "the pointer must carry the agent_session discriminator that makes it the "
-        f"same question: {ptr!r}")
+    # ⛔ Match the CALL's keyword form, not the words' PRESENCE (round-7 review of
+    # #13085): `"file_type" in ptr and "agent_session" in ptr` is satisfied by prose —
+    # `tortoise_index_sources_from_directory(directory)  # file_type, agent_session`
+    # passes it with NO arguments at all, and `file_type` then defaults to `"auto"`,
+    # which is a different selection than agent-session-only (`sdk.py:57191-57194`:
+    # `file_type` is the discriminator the members collapse onto). Measured GREEN that
+    # way, so the arm asserted the words, not the question.
+    assert re.search(r"file_type\s*=\s*(['\"])agent_session\1", ptr), (
+        "the pointer must pass file_type=\"agent_session\" as an ARGUMENT — the "
+        "discriminator is what makes it the same question, and naming the words is "
+        f"not passing them: {ptr!r}")
     # ...and the named container is ON the surface, not merely a string in the map:
     # naming a retired destination is the two-hop class `#12948` F1 recorded.
     # ⛔ Read it through `mcp_server._local_tool_component`, never by reaching into
@@ -1588,9 +1596,12 @@ def test_sc4_deprecation_markers_present():
     # question it exists to answer.
     # ⛔ …and PIN the target while resolving it (round-6 review of #13085). Resolving
     # alone only asks "is the callee SOME registered tool": a pointer to a DIFFERENT
-    # registered container that merely carries the live name as decoration
-    # (`tortoise_manage_sources(…) # tortoise_index_sources_from_directory`) resolves
-    # and stayed green — and it was measurably WEAKER than the literal it replaced,
+    # registered container that merely carries the live name as decoration —
+    # `tortoise_manage_sources(directory, file_type="agent_session")  # tortoise_index_sources_from_directory`
+    # — resolves and stayed green. (Quote the arguments, not `(…)`: without them the
+    # pointer fails the discriminator arm above and never reaches this one, so the
+    # elided form is not the shape that escaped — round-7 review.) It was also
+    # measurably WEAKER than the literal it replaced,
     # because it stopped asserting the live container is on the surface whenever the
     # pointer was decorated. Two independent facts, so two assertions: the pointer must
     # name the live container, AND that container must be registered.
