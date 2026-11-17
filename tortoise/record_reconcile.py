@@ -1014,7 +1014,10 @@ def log_result(result: RecordReconcileResult,
         line += (f" [journal: {cov.unprojected} of {cov.enumerated} enumerated "
                  f"position(s) NOT in the record (present={cov.present}, "
                  f"high={cov.high_seq}, first_gap={cov.first_gap}) — the record "
-                 f"LAGS the journal; heal with `tools/record_runner.py apply`]")
+                 f"LAGS the journal; on a graph with no `record_cursor` row the "
+                 f"repair is `tools/record_runner.py apply` (idempotent), and on "
+                 f"a CUT-OVER graph that enumerated replay is refused by design "
+                 f"(#9190) and no shipped verb heals it yet (#13338)]")
     (logger or logging.getLogger(LOG_NAME)).log(
         _LOG_LEVEL[verdict], "%s", line)
     return line

@@ -278,6 +278,10 @@ def test_the_rendered_line_names_the_lag_and_its_repair():
     assert "verdict=unprojected_journal" in line
     assert "record_runner.py apply" in line
     assert "1 of 3" in line
+    # ⛔ and it must NOT promise that heal on a cut-over graph, where the
+    # enumerated replay is refused by design (#9190, #13338).
+    assert "#13338" in line
+    assert "CUT-OVER" in line
 
 
 def test_passing_the_journal_leg_through_the_pure_composition():
