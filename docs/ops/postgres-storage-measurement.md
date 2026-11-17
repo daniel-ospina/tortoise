@@ -283,9 +283,22 @@ them is either a fail-open or a deadlock, so they are separate:
 | `unmeasured_reason` | when | what it means | gate outcome |
 |---|---|---|---|
 | — (`measured: true`) | a row exists for the org | the audit's figure, aged by `measured_at` | compared against the cap |
-| `absent` | no row for this org, **but other orgs have rows** | the gauge has reported and this org's rows store nothing — a **true zero** | **served**, as 0 bytes |
+| `absent` | no row for this org, **but other orgs have rows** | the gauge has reported and this org's rows store nothing — a **true zero**, stamped with the gauge's NEWEST refresh | **served** as 0 bytes, and **refused as stale** once that refresh ages past the bound |
 | `unreported` | the snapshot table is **EMPTY** | nothing has been measured for **any** org | **refused** (a named no-reading error) |
 | `read_error` | the control plane failed | our fault | **refused** (named, logged at ERROR) |
+
+⛔ **The zero-by-absence is STAMPED, not unbounded** — and that is the difference
+between a deadlock fix and a silent permanent bypass. The snapshot table only ever
+GAINS rows (orgs are not deleted here), so "the gauge has reported at least once"
+becomes true forever after a single run. A zero carrying no instant would then
+serve every never-snapshotted org at 0 bytes for good, while an org WITH a row of
+the same age is refused — the operator's signal pointing the wrong way. So the
+reader returns the newest `measured_at` with the absence, the meter emits a
+`MeterReading(used=0.0, measured_at=<that>)`, and the dimension's existing
+`stale_after_seconds` ages it. That is also why the dimension does **not** declare
+`absent_is_zero`: that declaration routes the unageable `ABSENT` sentinel around
+the bound, which is right for a cumulative flow (a fresh window genuinely has no
+age) and wrong for a gauge.
 
 Why `absent` is served and not refused — and why that is not a fail-open: the
 snapshot row is **derived from the org's rows**, and rows only exist once a write

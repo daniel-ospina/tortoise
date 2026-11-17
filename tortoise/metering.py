@@ -3014,7 +3014,13 @@ def get_postgres_residency(org_id: str) -> dict:
       holds at least one row, so ``postgres_residency_snapshot()`` has run and
       the audit attributed SOMETHING to somebody) and this org holds nothing.
       That is a TRUE ZERO, not an unknown: an org whose rows the audit cannot
-      find stores no bytes in its tables.
+      find stores no bytes in its tables. It carries ``gauge_measured_at``, the
+      NEWEST report's instant, so the gate ages this zero against the same bound
+      it ages a stored figure against. ⛔ WITHOUT THAT STAMP THE ZERO IS
+      UNBOUNDED: the table only ever gains rows, so "the gauge has reported"
+      becomes true permanently after ONE run, and a never-snapshotted org would
+      then pass any cap for good — silently, while an org WITH a row of the same
+      age is refused (review round 5, measured at gate level).
     * ``unmeasured_reason="unreported"`` — the table is EMPTY: the gauge has
       NEVER reported. Reading that as a zero would be a FLEET-WIDE fail-open
       (every org compares as 0 bytes and passes any cap), so it is no reading.
@@ -3064,8 +3070,16 @@ def get_postgres_residency(org_id: str) -> dict:
         # nothing" (serve, as a true zero) vs "nothing has ever been measured
         # for anyone" (refuse — a zero here would pass every org's cap).
         try:
+            # ⛔ NEWEST FIRST, because the answer is not just "has the gauge ever
+            # reported" — it is "and WHEN". A zero-by-absence must be AGED or it
+            # escapes the dimension's ``stale_after_seconds`` bound, and a table
+            # that only ever gains rows makes "ever reported" true forever: one
+            # run 400 days ago would then serve every never-snapshotted org at 0
+            # bytes indefinitely and silently, while an org WITH a row of the same
+            # age is refused. Measured in review round 5.
             anywhere = plane.query("org_postgres_residency",
-                                   select=["measured_at"], limit=1)
+                                   select=["measured_at"],
+                                   order="measured_at.desc", limit=1)
         except Exception as e:
             _logger.warning(
                 "postgres residency gauge-state probe failed (NO READING): "
@@ -3074,7 +3088,17 @@ def get_postgres_residency(org_id: str) -> dict:
             return _unmeasured("read_error")
         # One row per ORG, so this stays O(orgs) at worst and is off the hot
         # path: only an org with no row of its own pays for it.
-        return _unmeasured("absent" if anywhere else "unreported")
+        if not anywhere:
+            return _unmeasured("unreported")
+        gauge_at = anywhere[0].get("measured_at")
+        if not gauge_at:
+            # The gauge reports but carries no instant to age it by: an absence
+            # aged by nothing is an absence we cannot defend, so not a reading.
+            return _unmeasured("unreported")
+        # ``gauge_measured_at`` travels WITH ``absent`` so the gate can age this
+        # zero against the same bound it ages a stored figure against.
+        return {**view, "unmeasured_reason": "absent",
+                "gauge_measured_at": gauge_at}
     row = rows[0]
     return {
         "measured": True,

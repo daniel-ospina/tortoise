@@ -51,6 +51,7 @@ from __future__ import annotations
 import dataclasses
 import re
 import tokenize
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -331,12 +332,32 @@ def test_the_residency_meter_is_the_gauge_and_never_the_addend(monkeypatch):
 
     monkeypatch.setattr(
         metering, "get_postgres_residency",
-        lambda org_id: _unmeasured("absent"), raising=True)
-    assert allowance_gate._postgres_stored_bytes("org_fresh") is allowance_gate.ABSENT, (
+        lambda org_id: _unmeasured("absent")
+        | {"gauge_measured_at": "2026-11-17T00:00:00+00:00"}, raising=True)
+    fresh = allowance_gate._postgres_stored_bytes("org_fresh")
+    assert isinstance(fresh, allowance_gate.MeterReading) and fresh.used == 0.0, (
         "an org with NO row while the gauge HAS reported stores nothing: that is "
-        "a TRUE ZERO (ABSENT), not a refusal — the snapshot row is derived from "
+        "a TRUE ZERO reading, not a refusal — the snapshot row is derived from "
         "rows only a served write can create, so refusing here deadlocks a fresh "
-        "tenant's first write forever (#13084 measured it as HTTP 500)")
+        f"tenant's first write forever (#13084 measured it as HTTP 500) ({fresh!r})")
+    # ⛔ AND IT IS STAMPED. An unstamped zero escapes the dimension's age bound:
+    # the snapshot table only ever gains rows, so one refresh would serve every
+    # never-snapshotted org at 0 bytes for good (review round 5, P1, measured).
+    assert fresh.measured_at == "2026-11-17T00:00:00+00:00", (
+        "the zero-by-absence must carry the GAUGE's own instant so "
+        f"stale_after_seconds can age it ({fresh!r})")
+    monkeypatch.setattr(
+        metering, "get_postgres_residency",
+        lambda org_id: _unmeasured("absent"), raising=True)
+    try:
+        allowance_gate._postgres_stored_bytes("org_fresh")
+    except allowance_gate.MeterUnavailable:
+        pass
+    else:
+        raise AssertionError(
+            "an absence the gauge cannot STAMP must be refused, not served: a "
+            "zero nobody can age is the unaged bypass this dimension's evidence "
+            "bound exists to prevent")
 
     for reason in ("unreported", "read_error", "some_future_reason"):
         monkeypatch.setattr(
@@ -449,6 +470,14 @@ def test_the_reader_names_why_it_has_no_figure(monkeypatch):
     assert plane.calls[1].get("limit") == 1, (
         "the gauge-state probe must be bounded — it runs on the write path, so "
         f"it may not read the whole table ({plane.calls[1]!r})")
+    assert plane.calls[1].get("order") == "measured_at.desc", (
+        "the probe must ask for the NEWEST report: 'has the gauge ever run' is "
+        "true forever in a table that only gains rows, so an unordered probe "
+        "hands the gate an arbitrary age and lets a 400-day-old refresh serve "
+        f"every never-snapshotted org at 0 bytes ({plane.calls[1]!r})")
+    assert absent["gauge_measured_at"] == "2026-11-17T00:00:00+00:00", (
+        "the absence must carry the probe's instant so the gate can age it "
+        f"against stale_after_seconds ({absent!r})")
 
     # 5. NO ROW AND the table is EMPTY → `unreported`: nothing measured for
     #    anyone, which a zero would turn into a fleet-wide fail-open.
@@ -504,18 +533,38 @@ def test_a_fresh_org_is_served_at_zero_instead_of_deadlocking(monkeypatch):
     # the issue's whole ordering rule ("before any allowance is configured").
     dim = dataclasses.replace(
         _dim("postgres_storage"), blocked_reason=None,
-        meter=lambda org_id: allowance_gate.ABSENT)
-    assert dim.absent_is_zero, (
-        "postgres_storage must declare absent_is_zero, or a fresh org's ABSENT "
-        "answer degrades to no-reading and deadlocks its first write")
+        meter=lambda org_id: allowance_gate.MeterReading(
+            used=0.0,
+            measured_at=datetime.now(UTC).isoformat(),
+            estimated=False,
+            note="no rows attributed to this org at the gauge's last refresh"))
+    assert dim.absent_is_zero is False, (
+        "postgres_storage must NOT declare absent_is_zero: that routes the "
+        "unageable ABSENT sentinel around _stale, and a GAUGE's absence does "
+        "have an age (the refresh that reported it). Measured: with the "
+        "declaration the same call served 0 bytes at a 400-day-old gauge age")
 
     reading = allowance_gate._reading(dim, "org_fresh", None, observed_only=False)
     assert reading is not None and reading.used == 0.0, (
         "a fresh org with no residency row must read as a TRUE ZERO, not "
         f"refuse: refusing deadlocks its first write (#13084) ({reading!r})")
-    assert reading.measured_at is None, (
-        "zero-by-absence has no measurement instant — nothing was measured, so "
-        f"inventing a stamp would make the age bound meaningless ({reading!r})")
+
+    # ★ THE HALF THAT MAKES IT SAFE: the same zero, aged, is REFUSED. Without
+    # this the deadlock fix would be a permanent bypass — in a table that only
+    # ever gains rows, "the gauge has reported" is true forever after one run.
+    stale_dim = dataclasses.replace(
+        dim,
+        meter=lambda org_id: allowance_gate.MeterReading(
+            used=0.0,
+            measured_at=(datetime.now(UTC)
+                         - timedelta(seconds=400_000)).isoformat(),
+            estimated=False,
+            note=""))
+    with pytest.raises(allowance_gate.QuotaCheckError) as stale_exc:
+        allowance_gate._reading(stale_dim, "org_fresh", None, observed_only=False)
+    assert "stale" in str(stale_exc.value).lower(), (
+        "a zero-by-absence measured at a gauge age beyond the bound must be "
+        f"REFUSED as stale, not served ({stale_exc.value})")
 
 
 def test_a_never_scheduled_refresh_refuses_instead_of_reading_zero(monkeypatch):

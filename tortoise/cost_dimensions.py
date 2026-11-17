@@ -543,7 +543,11 @@ DIMENSIONS: tuple[Dimension, ...] = (
             "as a true zero, because the snapshot row is derived from rows only "
             "a SERVED write can create — refusing it would deadlock a fresh "
             "tenant's first write (#13084/#13102 measured that collapse as "
-            "HTTP 500)."),
+            "HTTP 500). That zero is STAMPED with the gauge's newest refresh and "
+            "ages out like any other reading; it is deliberately not "
+            "``absent_is_zero``, which would route it around the age bound and, "
+            "in a table that only gains rows, let one refresh serve every "
+            "never-snapshotted org at 0 bytes for good."),
         limits=(
             "``live_rows`` is a PLANNER STATISTIC (``n_live_tup``) that can lag "
             "the truth; the exact per-org count comes from the row-growth row.",

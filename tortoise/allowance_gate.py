@@ -424,13 +424,21 @@ def _postgres_stored_bytes(org_id: str) -> MeterReading | None:
     ``get_capture_usage`` vocabulary), and this adapter maps each reason to the
     outcome that reason actually implies:
 
-    * ``absent`` → :data:`ABSENT`. The gauge HAS reported and the audit attributed
-      nothing to this org, i.e. its rows store no bytes. That is a TRUE ZERO. A
-      ``None`` here would refuse a fresh tenant's FIRST write forever — the row
-      only appears once the audit finds rows, and rows only appear once a write is
-      served. Measured on the sibling gauge: ``#13084``/``#13102``, where a paid
-      tenant's first ``POST /v1/points`` returned HTTP 500 from exactly this
-      collapse. (``absent_is_zero`` is therefore declared on the dimension below.)
+    * ``absent`` → a **zero reading STAMPED with the gauge's own instant**, so
+      the dimension's ``stale_after_seconds`` ages it like any other figure. The
+      gauge HAS reported and the audit attributed nothing to this org, i.e. its
+      rows store no bytes: a TRUE ZERO. A ``None`` here would refuse a fresh
+      tenant's FIRST write forever — the row only appears once the audit finds
+      rows, and rows only appear once a write is served (measured on the sibling
+      gauge: ``#13084``/``#13102``, a paid tenant's first ``POST /v1/points``
+      returned HTTP 500 from exactly this collapse).
+      ⛔ AND IT IS STAMPED, NOT UNBOUNDED (review round 5, P1, measured): an
+      absent zero carrying no instant would escape the age bound entirely, and
+      the snapshot table only ever GAINS rows — so after one successful refresh
+      "the gauge has reported" stays true forever and every never-snapshotted org
+      would compare as 0 bytes and pass any cap, silently, while an org WITH a row
+      of the same age is refused. The stamp is why this dimension does NOT declare
+      ``absent_is_zero``: that declaration would route absence around ``_stale``.
     * ``unreported`` → :class:`MeterUnavailable`. The snapshot table is EMPTY, so
       nothing has ever been measured for ANYONE. A zero here would be a
       FLEET-WIDE fail-open — every org comparing as 0 bytes and passing any cap —
@@ -448,7 +456,27 @@ def _postgres_stored_bytes(org_id: str) -> MeterReading | None:
     reason = reading.get("unmeasured_reason")
     if reading.get("measured") is not True:
         if reason == "absent":
-            return ABSENT
+            gauge_at = reading.get("gauge_measured_at")
+            if not gauge_at:
+                raise MeterUnavailable(
+                    "the postgres residency gauge reports no instant, so a zero "
+                    "by absence could not be aged — refusing rather than "
+                    "enforcing an undefendable zero")
+            # ⛔ A STAMPED zero, NOT ``ABSENT``: the sentinel exists for a
+            # dimension whose absence has NO age (a cumulative flow's fresh
+            # window). A gauge's absence DOES have one — the run that reported —
+            # and ``_reading`` ages a ``MeterReading`` for us. Returning ``ABSENT``
+            # here (or declaring ``absent_is_zero``) would route this zero around
+            # ``_stale``; because the snapshot table only ever gains rows, one
+            # refresh anywhere would then serve every never-snapshotted org at 0
+            # bytes for good (review round 5, P1, measured at gate level).
+            return MeterReading(
+                used=0.0,
+                measured_at=str(gauge_at),
+                estimated=False,
+                note=("the audit attributed no rows to this org as of the gauge's "
+                      "last refresh, i.e. it stores nothing — aged from that "
+                      "refresh, so the evidence bound still applies"))
         if reason == "unreported":
             raise MeterUnavailable(
                 "the postgres residency gauge has never reported — the snapshot "
@@ -616,16 +644,14 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
     _dimension(
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],
         meter=_postgres_stored_bytes,
-        # ⛔ A TRUE zero, not "flow" semantics — and declared HERE (on the
-        # dimension) rather than branched in the meter, so the gate consumes it
-        # at one place (``_reading``) like every other dimension. The reader only
-        # says ``absent`` once the GAUGE has reported and this org holds nothing;
-        # a gauge that has never reported is ``unreported`` and still refuses, so
-        # this declaration cannot become a fleet-wide fail-open. Refusing
-        # ``absent`` instead would deadlock a fresh tenant's first write forever:
-        # the snapshot row is derived from rows that only a served write can
-        # create (#13084/#13102 measured the same collapse as HTTP 500).
-        absent_is_zero=True,
+        # ⛔ NOT ``absent_is_zero``, deliberately (review round 5, P1, measured).
+        # That declaration routes the ``ABSENT`` sentinel around ``_stale``, which
+        # is right for a cumulative FLOW (a fresh window genuinely has no age) and
+        # wrong for a GAUGE: a zero-by-absence still describes the table as of a
+        # refresh, so it must be aged. The meter therefore returns a STAMPED
+        # zero instead, and this dimension keeps the evidence bound it declares
+        # below. Measured: with ``absent_is_zero`` the same call served 0 bytes at
+        # a 400-day-old gauge age; without it, refused as stale.
         # The residency gauge is a SNAPSHOT: affordable per write, stale by
         # construction. The same evidence-age bound the graph gauge uses, for the
         # same reason — a reading older than this describes rows that may no
