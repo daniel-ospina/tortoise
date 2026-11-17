@@ -6294,10 +6294,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
         # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
         # pointer to a row that no longer exists). ⛔ RE-DERIVED AGAIN at the `#13000` rebase
-        # (this branch's own #12992 block sits above all of them and costs `+141`): measured at
-        # THIS head, not copied: `@app.post("/v1/sessions")` is `:19026` and
-        # `@app.post("/v1/sessions/install-probe")` is `:21581` (they were `:18885`/`:21440` at
-        # `main`'s `c4f6170cc3` and `:18854`/`:21409` at `#12947`'s head), each the file's ONLY
+        # (this branch's own #12992 block sits above both and costs `+141`, and `main`'s `#13043`
+        # then moved the whole file again by `+102` — `+243` in total from `main`'s `c4f6170cc3`):
+        # measured at THIS head, not copied: `@app.post("/v1/sessions")` is `:19128` and
+        # `@app.post("/v1/sessions/install-probe")` is `:21683` (they were `:18885`/`:21440` at
+        # `c4f6170cc3` and `:18854`/`:21409` at `#12947`'s head), each the file's ONLY
         # occurrence of its needle.
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("19128", ("exact", '@app.post("/v1/sessions")')),
@@ -6544,8 +6545,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # that message says what it says. ⛔ Those `:14575`/`:14604`/`:14614`/`:14652` figures are
         # the `#12947` HEAD's, and the range has since moved TWICE — by a uniform +31 (main's
         # `#12993`/`#12926`/`#12989` via the re-cut) and then by this branch's own #12992
-        # insertion, which sits above the whole span and costs `+141` on every cite in this
-        # file (the same offset the capture-route rows above take at the #13000 re-cut) — so
+        # insertion, which sits above the whole span and costs `+141`, and `main`'s `#13043` then
+        # moved the file by a further `+102` (`+243` total — the same offset the capture-route
+        # rows above take at this head) — so
         # they are kept as history and NOT as this head's. Measured at THIS head, which is
         # what the row below pins:
         # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:14849`,
