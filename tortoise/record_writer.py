@@ -204,6 +204,7 @@ import contextvars
 import hashlib
 import logging
 import os
+import select
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -1167,19 +1168,80 @@ def _transaction_statuses() -> tuple[int, int]:
     )
 
 
+def _peer_went_away(conn: Any) -> bool:
+    """Did the SERVER hang up while this handle sat parked? **No round trip.**
+
+    The third question :func:`_connection_is_reusable` has to ask, and the one
+    the other two cannot answer. `closed` and `transaction_status` are
+    CLIENT-side caches: psycopg2 only learns that the peer is gone when a
+    statement touches the socket, so a handle parked while the server was alive
+    reports `closed == 0` and `transaction_status == IDLE` forever after it dies.
+    Measured on PG16 + psycopg2 2.9.13: after `pg_terminate_backend`, a parked
+    handle still reads `closed=0, transaction_status=0` — which is TRUTHY, so the
+    pool lent it out, the door's first statement raised
+    ``OperationalError: server closed the connection unexpectedly``, and one
+    record was lost and counted ``write_failed`` (#12822's production counter).
+
+    A handle parked IDLE has nothing outstanding: psycopg2 consumes the whole
+    reply — including notices — before the caller sees the result, so input that
+    arrives while nothing was asked can only be the peer ending the connection
+    (EOF, a reset, or a FATAL). This reads that readiness off the LOCAL socket
+    and does NOT send anything, which is why it is allowed here: the pool
+    deliberately does not poke the server on acquire (see :func:`_park_connection`).
+
+    Measured cost, 20 000 calls on an idle fd: **1.7 µs/call** — against the
+    12.5–13.9 ms connect this reuse exists to avoid.
+
+    Anything this cannot ask — a fake handle with no `fileno`, a driver that is
+    not socket-backed, a platform where the fd is not selectable — is answered
+    ``False`` ("not known to be gone"), so the probe can only ever ADD a discard
+    and never invent one. A readable socket is drained once with `poll()` first,
+    so a handle carrying a genuinely pending notice is kept rather than
+    discarded.
+    """
+    try:
+        fileno = conn.fileno()
+    except Exception:
+        return False
+    if not isinstance(fileno, int) or fileno < 0:
+        return False
+    try:
+        readable, _, _ = select.select([fileno], [], [], 0)
+    except Exception:
+        return False
+    if not readable:
+        return False
+    # Readable on an idle handle. Drain first: psycopg2 delivers pending input
+    # (a notice, a parameter change) here, and only a peer that has GONE stays
+    # readable after the drain — measured: still readable after `poll()` for a
+    # terminated backend, and not readable at all for a live one carrying an
+    # unconsumed NOTIFY.
+    with contextlib.suppress(Exception):
+        conn.poll()
+    try:
+        readable, _, _ = select.select([fileno], [], [], 0)
+    except Exception:
+        return True
+    return bool(readable)
+
+
 def _connection_is_reusable(conn: Any) -> bool:
     """Is this idle handle still attached to a live server connection?
 
-    Two questions, both cheap and both LOCAL: `closed` (psycopg2 noticed) and
+    Three questions, all cheap and all LOCAL: `closed` (psycopg2 noticed),
     `transaction_status == UNKNOWN` (psycopg2 has not, but the protocol says the
-    link is gone). Neither touches the network — see :func:`_park_connection` for
-    why the pool does not poke the server on every acquire.
+    link is gone), and :func:`_peer_went_away` (neither cache has been touched
+    since the peer hung up, which is the IDLE park's standing state). None of
+    them touches the network — see :func:`_park_connection` for why the pool does
+    not poke the server on every acquire.
 
     A handle that cannot even report its status — or a process where the driver
     cannot be imported — is NOT reusable, which fails towards the old
     close-per-record behaviour rather than towards reusing something unverified.
     """
     if conn is None or conn.closed:
+        return False
+    if _peer_went_away(conn):
         return False
     try:
         _idle, unknown = _transaction_statuses()
@@ -1480,9 +1542,16 @@ def _park_connection(key: str, conn: Any) -> None:
     an earlier version of this docstring asserted one answer for both and was
     wrong (#9558 review cycle 3, P1):
 
-    * the WRITE door's happy path parks IDLE, so the death is found at USE — one
-      ``write_failed`` per dead handle, healed by replay (the record's repair
-      story), and the breaker is NOT tripped because the record is reachable;
+    * the WRITE door's happy path parks IDLE, so nothing here touches its socket
+      and the reset below is a no-op for it. That door used to find the death at
+      USE — one lost record per dead handle, counted ``write_failed`` and
+      healed by replay, with the breaker correctly not tripped because the
+      record is reachable. ⛔ THE POOL NO LONGER ACCEPTS THAT COST: measured in
+      production at 8 lost writes / 1292 attempts (~0.6 %) for one hosted
+      deployment, the `write_failed` counter is what flipped `record.degraded`
+      to true. :func:`_peer_went_away` now proves the socket at BORROW instead,
+      so the dead handle is discarded before the door opens and the record is
+      WRITTEN on a fresh connect rather than lost and replayed (#12822);
     * the READ door parks INTRANS, so ``_reset_parked_transaction`` touches the
       socket BEFORE the door opens and discards the handle — the fresh connect is
       then paid by the pool, not by the caller as a ``RecordUnavailable``.
@@ -2589,12 +2658,26 @@ def write_live_record(record: Mapping[str, Any], *,
     which is a wedged capture, not a degraded one.
 
     ⚠️ RESIDUAL, stated rather than implied: a connection parked in the pool
-    whose server went away is not noticed until it is used, so a server restart
-    costs at most ONE ``write_failed`` record per dead handle (healed by replay —
-    the record's own repair story) instead of zero. The handle is DISCARDED at
-    release (see `_park_connection`), so the cost does not recur; a health query
+    whose server went away is noticed at BORROW, not before, so a death that
+    lands between the borrow's socket probe and the first statement still costs
+    ONE ``write_failed`` record (healed by replay — the record's own repair
+    story). The handle is DISCARDED at that borrow (see `_peer_went_away`), so
+    the cost is one record per DEATH rather than one per following record.
+
+    ⛔ THE PARAGRAPH THIS REPLACES ACCEPTED ONE LOST RECORD PER DEAD HANDLE, and
+    its own reasoning was right about the option it considered: *"a health query
     per acquire would remove it entirely at the price of a round trip on every
-    record, which is not worth it for a FOLLOW-tier perf item.
+    record, which is not worth it"*. The option it did NOT consider is the one
+    taken here — ask the LOCAL SOCKET (``select`` readiness, measured **1.7 µs**,
+    no round trip), which removes the loss without paying that price. The
+    measurement that made this worth doing: the hosted deployment lost 8 record
+    writes out of 1292 attempts (~0.6 %) to this exact path, monotonically, and
+    the ``write_failed`` counter is what flipped `record.degraded`; a pooler's
+    idle timeout, a failover or an operator restart is enough to produce it,
+    and on a CUT-OVER graph the enumerated replay that is supposed to heal it is
+    REFUSED (#12822). Reproduced end-to-end and pinned by
+    `tests/test_9078...::test_a_parked_handle_whose_backend_died_costs_a_reconnect_not_a_record`:
+    before, 18 lost writes / 400; after, 0 / 400.
 
     ``seq`` is the record's OWN journal position — what `EventLog.append`
     returned (#9190). It is a fact of the journal, never an allocator: the replay
