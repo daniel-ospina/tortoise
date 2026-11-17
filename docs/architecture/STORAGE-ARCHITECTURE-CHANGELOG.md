@@ -2277,26 +2277,30 @@ derivation lost exactly one symbol key and one walk with it (28 keys / 42 rows �
 a re-derivation from the tree, not a retyped total. The gap at 32 is left as a gap rather than
 renumbering the tail, exactly as the gap at 36 was.
 
-## §14.3 V2's delivery state left the row — the design and the 4.4 MB stayed (`#11691`, 2026-11-17)
+## §14.3 V2's stale delivery state left the row — the design and the 4.4 MB stayed (`#11691`, 2026-11-17)
 
-**§14.3 — V2.** The row read *"V1 is decided (2026-11-07) **and IMPLEMENTED — landed 2026-11-10
-(`#11642` / PR `#11660`) … so the 4.4 MB this row charges to FalkorDB RAM is Postgres's now"*, plus a
-reader's note about a *"not yet implemented"* clause having gone stale. That is the delivery state and
-the change history of another row's work, which is this file's business, not the design document's
-(`#8542`); `tests/test_extractor_v4_citation_rot.py` reds it by name.
+**§14.3 — V2.** The row's `what turns on it` cell read *"**~4.4 MB** — and **free once the move
+lands**: V1 is decided (2026-11-07), not yet implemented."* As a design statement it was wrong in two
+ways at once. Its delivery state had gone false: `#11642`'s migration
+(`supabase/migrations/20261109000001_record_embedding_vector.sql`, the
+`GENERATED … STORED` `embedding_vec` column plus three HNSW indexes) landed 2026-11-10 as PR
+`#11660` — and a delivery state, like a change history, is this file's business and not the design
+document's (`#8542`); `tests/test_extractor_v4_citation_rot.py` reds a stale *"not yet implemented"*
+clause by name.
 
-What the design document now states is the fact the row turns on: the vector index and its rows live
-in **Postgres** (§12.1c; measurements in `docs/architecture/SEARCH-ARCHITECTURE.md` §3), so the
-**~4.4 MB** this row charges against FalkorDB RAM is Postgres's, and the question still open in the
-row is the `Source`-summary one — not whether the move exists. Nothing was deleted: the landed date,
-the migration's issue and PR, and the measurements' home are all recorded here.
+So the pre-change text is quoted above exactly as it stood (in `origin/main`'s row), and what the
+design document now states is the FACT the row turns on: the vector index and its rows live in
+**Postgres** (§12.1c; measurements in `docs/architecture/SEARCH-ARCHITECTURE.md` §3), so the
+**~4.4 MB** this row charges against FalkorDB RAM is charged to Postgres instead, and the question
+still open in the row is the `Source`-summary one — not whether the move exists. Nothing was deleted:
+the landed date, the migration's issue and PR, and the measurements' home are all recorded here.
 
 ## §9.1's `:Point` passthrough bullet — the deny-set correction states its mechanism, and its two line cites became symbols (`#11691`, 2026-11-17)
 
 **§9.1, the `:Point` passthrough residual.** Two shapes had accumulated in one bullet, both caught by
 `tests/test_extractor_v4_citation_rot.py`:
 
-* the deny-set correction was written as a `CORRECTED (2026-11-17, …)` stamp narrating what *"an
+- the deny-set correction was written as a `CORRECTED (2026-11-17, …)` stamp narrating what *"an
   earlier revision of this bullet said"* — the change history belongs here. The bullet now states the
   mechanism it settled on: a deny entry acts on the **fold**, never on the graph, because `_POINT_DENY`
   is a skip set consumed by `_persist_extra_props`, which emits `SET n += $extra` and derives no
@@ -2304,7 +2308,7 @@ the migration's issue and PR, and the measurements' home are all recorded here.
   the property from every legacy `:Point` — is recorded here, and the entry still names why a fold-only
   deny is the wrong instrument: the destruction this tree documents is a whole-graph restore wipe,
   independent of which deny carries the entry;
-* the bullet carried two `projection/entities.py:NNNN-NNNN` ranges, which rot on every unrelated code
+- the bullet carried two `projection/entities.py:NNNN-NNNN` ranges, which rot on every unrelated code
   move. They are now symbol-keyed — `projection/entities.py::_persist_extra_props` for the skip set,
   and `record_restore.py::_ask_the_wipe_guard` for the wipe it names (the guard that refuses that
   `MATCH (n) DETACH DELETE n` pre-wipe on a production name), which is the form §13/§13.8 use.

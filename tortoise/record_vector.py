@@ -205,6 +205,22 @@ ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 #: statements spend at most two thirds and the remaining third is the reserve the
 #: graph fallback is answered from — which is what makes the named
 #: ``scan_fallback`` land INSIDE the read's budget instead of after it.
+#:
+#: ⛔ THIS DIVIDES, and the acceptance as written on #11691 says
+#: ``min(<record door bound>, the read's own budget)`` — so the implemented bound is
+#: STRICTER than the written one, deliberately, and the difference is stated here
+#: rather than left for a reader to discover from the arithmetic (#11691 review,
+#: P3). The consequence to know before diagnosing a fallback: a record leg that
+#: would answer in 200–500 ms *inside* a 500 ms read is cancelled at ~166 ms, its
+#: rows are discarded, and the trace records the SAME ``scan_fallback`` a genuinely
+#: wedged store produces — so ``leg_trace.reason`` alone does NOT distinguish "too
+#: slow for its share" from "the store did not answer". The whole-budget
+#: alternative is not available (it is the defect this change fixes: the graph
+#: fallback then misses its own deadline), so what a reader needs is the bound the
+#: leg was given: it is ``min(RECORD_STATEMENT_TIMEOUT_MS, read budget //
+#: RECORD_LEG_STATEMENTS_PER_READ)``, computable from the read's configured budget,
+#: and it is NOT recorded in the trace today — that gap is named here rather than
+#: implied to be observable.
 RECORD_LEG_STATEMENTS_PER_READ = 3
 
 

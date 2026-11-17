@@ -49,7 +49,6 @@ implied to be a field:
   They are arithmetic on committed fields, not fields of their own — and the shape they
   split is the MEASURED one (an `id`-only primary key), so both halves are a **FLOOR**.
 
-
 ```text
 date       2026-11-17T03:19:15Z
 server     PostgreSQL 16.16 (Debian 16.16-1.pgdg12+1), pgvector 0.8.7
@@ -227,6 +226,15 @@ loaded box it takes ~35 minutes; `--scale-rows` lowers the scale phase,
 NOT kept in the artifact (they are bulk), so `--recompute` carries the paired
 deltas through unchanged and re-derives everything downstream of them — which is
 exactly the half a rate change moves.
+
+⛔ **`--dsn` is for an EMPTY database, and the harness enforces it.** The stand-in
+tables are `DROP`ped and recreated, so a non-empty target is **refused before any
+DDL** (`_refuse_destructive_target`) — pointing this at the record's own database
+would delete `public.point`/`source`/`event` and leave eight-column stand-ins in
+their place, which is unrecoverable. "Current production volume" is reproduced by
+`--scale-rows`, never by aiming the harness at production. `--allow-non-empty-dsn`
+is the deliberate override for a target you know is disposable, and it still
+prints every table it is about to empty.
 
 ⚠️ One trap found the hard way and now pinned in the harness's comment: a **bare
 `LIKE` copies neither default nor generation expressions**, so the first version's

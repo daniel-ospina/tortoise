@@ -73,7 +73,10 @@ Run (it starts its own throwaway ``pgvector/pgvector:pg16`` container):
         --json-out docs/evidence/11691-vector-leg-budget/measurement.json
 
     # …or against a Postgres you already have (it must carry the `vector`
-    # extension and be EMPTY: this drops and recreates the stand-in tables):
+    # extension and be EMPTY: this drops and recreates the stand-in tables).
+    # ⛔ A NON-EMPTY target is REFUSED before any DDL — pointing this at the
+    # record's own DSN would destroy `public.point`/`source`/`event` and replace
+    # them with stand-ins; `--allow-non-empty-dsn` is the deliberate override.
     uv run --with psycopg2-binary python tools/record_vector_write_cost_11691.py \\
         --dsn postgresql://postgres:pw@127.0.0.1:5432/postgres
 """
@@ -191,7 +194,79 @@ def _migration_statements(kind: str) -> list[str]:
     return [function, column.group(0), index.group(0)]
 
 
-def build_schema(cur: Any) -> None:
+#: Every table `build_schema` DROPs. Named ONCE, so the destructive preflight
+#: below cannot drift from the DDL it is guarding: a table added to the loop and
+#: not to this tuple would be dropped without being checked.
+STAND_IN_TABLES = ("point", "source", "event", "point_gen_only", "point_plain")
+
+
+def _refuse_destructive_target(cur: Any, *, allow_non_empty: bool = False) -> None:
+    """Refuse a `--dsn` whose stand-in tables already hold rows (#11691 review, P2).
+
+    `build_schema` DROPs and recreates `public.{point,source,event}` (plus its two
+    controls) on WHATEVER database the connection names. The default path cannot
+    hurt anything — it starts a throwaway container — but `--dsn` is offered as
+    "a Postgres you already have", and the obvious way to reproduce "current
+    production volume" is the DSN of the record itself. That run destroys the
+    record's three tables and replaces them with four-column stand-ins of the
+    same name: unrecoverable data loss, protected only by prose in a docstring.
+
+    The check is the DATA, not the name: an empty database has nothing to lose,
+    so it needs no ceremony, while no database name can make a populated table
+    safe to drop. This is the same class as `record_restore._ask_the_wipe_guard`
+    (which refuses a bulk `MATCH (n) DETACH DELETE n` on a non-test graph) — a
+    destructive operation that must fail PRE-wipe and name what it refused.
+
+    `--allow-non-empty-dsn` is the deliberate escape for a target the operator
+    knows is disposable (a bench replica). It is a flag rather than a name rule
+    so the override is visible in the invocation that used it, and it still
+    prints every table it is about to empty.
+    """
+    cur.execute("SELECT current_database()")
+    row = cur.fetchone()
+    database = row[0] if row and row[0] else "?"
+    occupied: list[tuple[str, int]] = []
+    for table in STAND_IN_TABLES:
+        # `to_regclass` resolves the name without throwing on a database that has
+        # never held the record; a plain SELECT would raise `UndefinedTable` and
+        # turn "empty target" into a crash.
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL", (f"public.{table}",))
+        exists = cur.fetchone()
+        if not (exists and exists[0]):
+            continue
+        # EXISTS, not count(*): a refusal must not scan a production table to
+        # decide whether to touch it.
+        cur.execute(f"SELECT EXISTS (SELECT 1 FROM public.{table})")
+        present = cur.fetchone()
+        if present and present[0]:
+            cur.execute(f"SELECT count(*) FROM public.{table}")
+            counted = cur.fetchone()
+            occupied.append((table, int(counted[0]) if counted else -1))
+    if not occupied:
+        return
+    detail = ", ".join(f"public.{t} ({n:,} rows)" for t, n in occupied)
+    if allow_non_empty:
+        print(f"⚠️ `--allow-non-empty-dsn`: emptying {detail} in {database!r} — "
+              "the data in those tables is about to be unrecoverable",
+              file=sys.stderr)
+        return
+    raise SystemExit(
+        f"REFUSING to drop and recreate the stand-in tables in database "
+        f"{database!r}: {detail} already hold data. This harness is a "
+        f"MEASUREMENT, and the tables it creates are stand-ins, not the "
+        f"record — pointing it at the record's own database destroys it.\n"
+        f"\n"
+        f"Use the default (a throwaway pgvector container, nothing of yours is "
+        f"touched): drop `--dsn` and re-run. If the target really is disposable, "
+        f"pass `--allow-non-empty-dsn` and know that the tables above are "
+        f"emptied and recreated as eight-column stand-ins.")
+
+
+def build_schema(cur: Any, *, allow_non_empty: bool = False) -> None:
+    # ⛔ BEFORE the first DDL, and before even `CREATE EXTENSION`: the refusal
+    # must land pre-wipe, so it cannot come after anything that changes the
+    # target. See `_refuse_destructive_target`.
+    _refuse_destructive_target(cur, allow_non_empty=allow_non_empty)
     cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
     # The columns a point/source/event WRITE touches. Types and nullability
     # mirror the record's migrations; the surrounding schema (RLS, triggers,
@@ -684,6 +759,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dsn", default=None,
                         help="an EMPTY Postgres with the vector extension; "
                              "default: start a throwaway pgvector/pgvector:pg16")
+    parser.add_argument("--allow-non-empty-dsn", action="store_true",
+                        help="permit a `--dsn` whose stand-in tables already "
+                             "hold rows (they are DROPPED and recreated). "
+                             "Refused by default — see "
+                             "`_refuse_destructive_target`")
     parser.add_argument("--json-out", default=None,
                         help="write the full record here")
     parser.add_argument("--container", default="tortoise-11691-write-cost")
@@ -725,7 +805,8 @@ def main(argv: list[str] | None = None) -> int:
                     raise
                 time.sleep(1.0)
         conn.autocommit = False
-        build_schema(conn.cursor())
+        build_schema(conn.cursor(),
+                     allow_non_empty=args.allow_non_empty_dsn)
         conn.commit()
 
         org = "org_11691"

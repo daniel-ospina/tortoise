@@ -862,3 +862,121 @@ def test_the_index_split_re_derives_from_the_shapes_that_were_measured():
     assert round(split[full] / 1e6, 1) == 69.0, split
     assert round(split["point_pkey"] / 1e6, 1) == 1.9, split
     assert sum(split.values()) == pv_index_bytes, split
+
+
+# ── the measurement harness must not empty the database it measures ────────
+#
+# `tools/record_vector_write_cost_11691.py` builds its three stand-in shapes with
+# `DROP TABLE IF EXISTS public.{point,source,event} CASCADE`, and its `--dsn`
+# option is documented as "a Postgres you already have" — so the obvious way to
+# reproduce "current production volume" is the record's own DSN, which would
+# destroy the record's three tables and leave stand-ins of the same name. The
+# guard is DATA-driven rather than name-driven (an empty database has nothing to
+# lose; no name makes a populated table safe to drop), and it must run BEFORE the
+# first DDL — a check that runs after the DROP it guards protects nothing.
+
+def _harness_module():
+    """Load the standalone harness by path — it is a script, not an importable module."""
+    import importlib.util
+    import pathlib
+
+    path = (pathlib.Path(__file__).resolve().parent.parent
+            / "tools/record_vector_write_cost_11691.py")
+    spec = importlib.util.spec_from_file_location("_write_cost_11691", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeDatabase:
+    """A cursor that answers the guard's preflight queries about `tables`.
+
+    Only the four statements the preflight may issue are answered; anything else
+    is recorded and returns `None`, which is exactly what a `DROP TABLE` needs to
+    be visible as "the guard did NOT stop the DDL".
+    """
+
+    def __init__(self, tables: dict[str, int], database: str = "tortoise_record"):
+        self.tables = tables
+        self.database = database
+        self.statements: list[str] = []
+        self._row = None
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        text = " ".join(sql.split()).upper()
+        self._row = None
+        if text.startswith("SELECT CURRENT_DATABASE()"):
+            self._row = (self.database,)
+        elif text.startswith("SELECT TO_REGCLASS("):
+            name = str(params[0]).split(".", 1)[-1]
+            self._row = (name in self.tables,)
+        elif text.startswith("SELECT EXISTS (SELECT 1 FROM PUBLIC."):
+            name = text.split("PUBLIC.", 1)[1].split()[0].rstrip(")").lower()
+            self._row = (self.tables.get(name, 0) > 0,)
+        elif text.startswith("SELECT COUNT(*) FROM PUBLIC."):
+            name = text.split("PUBLIC.", 1)[1].split()[0].rstrip(")").lower()
+            self._row = (self.tables[name],)
+
+    def fetchone(self):
+        return self._row
+
+    @property
+    def ddl(self) -> list[str]:
+        return [s for s in self.statements
+                if s.lstrip().upper().startswith(("DROP", "CREATE", "ALTER"))]
+
+
+def test_the_harness_refuses_to_drop_stand_ins_over_a_populated_database():
+    """The preflight stops `build_schema` BEFORE its first DROP, naming the data.
+
+    Non-vacuity: this is the reviewer's exact scenario — `--dsn` pointing at the
+    record (33,671 live `public.point` rows). The pre-fix `build_schema` runs
+    `DROP TABLE IF EXISTS public.point CASCADE` against it and this arm reds on
+    the missing refusal. The second assertion is the half that survives a
+    "guard added in the wrong place" fix: a check that runs after the DROP still
+    raises, so only the no-DDL assertion proves it protects anything.
+    """
+    harness = _harness_module()
+    cur = _FakeDatabase({"point": 33_671, "source": 1_204, "event": 55_010})
+
+    with pytest.raises(SystemExit) as refused:
+        harness.build_schema(cur)
+
+    message = str(refused.value)
+    assert "REFUSING" in message, message
+    assert "tortoise_record" in message, (
+        f"the refusal does not name the database it refused: {message}")
+    assert "public.point" in message and "33,671" in message, (
+        f"the refusal does not name the populated table and its row count, so an "
+        f"operator cannot see WHAT was about to be destroyed: {message}")
+    assert not cur.ddl, (
+        "the guard ran AFTER DDL — these statements executed before the refusal, "
+        f"so the tables were already dropped: {cur.ddl}")
+
+
+def test_the_harness_accepts_an_empty_target_and_a_deliberate_override():
+    """An empty database needs no ceremony; a non-empty one needs the explicit flag.
+
+    Both halves matter: a guard that also refuses the empty throwaway container
+    would break the documented happy path, and a guard with no override refuses a
+    bench replica the operator has chosen to sacrifice. The override is asserted
+    to still reach the DDL, so it is a real escape rather than a silent no-op.
+    """
+    harness = _harness_module()
+
+    empty = _FakeDatabase({})
+    harness._refuse_destructive_target(empty)  # must not raise
+
+    occupied = _FakeDatabase({"point": 5})
+    with pytest.raises(SystemExit):
+        harness._refuse_destructive_target(occupied)
+
+    harness._refuse_destructive_target(occupied, allow_non_empty=True)
+
+    # …and the escape must be REAL, not a silent no-op: with it, `build_schema`
+    # reaches its DDL (which is the destruction the operator just authorised).
+    overridden = _FakeDatabase({"point": 5})
+    harness.build_schema(overridden, allow_non_empty=True)  # must not raise
+    assert overridden.ddl, (
+        "--allow-non-empty-dsn did not reach the DDL, so it is not an override")
