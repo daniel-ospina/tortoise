@@ -1,0 +1,2787 @@
+{
+ "arms": {
+  "blocking": {
+   "fts_only": {
+    "candidate_set": "pooled union over a capture's derived queries (max_queries=15); the per-query window is `k` candidates per mention",
+    "candidates_mean_per_mention": {
+     "10": 10,
+     "15": 15,
+     "3": 3,
+     "5": 5
+    },
+    "in_window": {
+     "10": 446,
+     "15": 446,
+     "3": 438,
+     "5": 445
+    },
+    "pair_completeness": {
+     "10": 1.0,
+     "15": 1.0,
+     "3": 0.9821,
+     "5": 0.9978
+    },
+    "pooled_candidates_per_capture": 42.4,
+    "pooled_candidates_per_mention": 2.83
+   },
+   "index_stats": {
+    "blocks": 8055,
+    "key_memberships": 10722,
+    "max_block_size": 100,
+    "members": 1000,
+    "oversized_skipped": {},
+    "query_candidate_cap": 200
+   },
+   "multikey": {
+    "candidates_max": 159,
+    "candidates_mean_per_mention": 34.67,
+    "in_block": 446,
+    "k_independent": true,
+    "pair_completeness": 1.0,
+    "reduction_ratio": 0.0285
+   },
+   "pairs": 446,
+   "population": 1000
+  },
+  "duplicate_rate": {
+   "pairs": 446,
+   "prior_off": {
+    "attached": 0,
+    "definition": "no prior: every mention mints (not measured)",
+    "minted": 446,
+    "rate": 1.0
+   },
+   "prior_on_norm_only": {
+    "attached": 0,
+    "minted": 446,
+    "rate": 1.0
+   },
+   "prior_on_shipped_folded": {
+    "attached": 229,
+    "minted": 217,
+    "rate": 0.4865
+   },
+   "window_k": 3
+  },
+  "entity_rerank": {
+   "15": {
+    "cases": [
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 5,
+      "gold_id": "obj-11901000637",
+      "moved": true,
+      "query": "test_test_lane_tool",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000940",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tests/test_test_lane_tool.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4422,
+        "id": "obj-11901000142",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the test suite"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4204,
+        "id": "obj-11901000310",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the full test suite"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4159,
+        "id": "obj-11901000147",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the test file"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4002,
+        "id": "obj-11901000637",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "test_test_lane_tool"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3665,
+        "id": "obj-11901000948",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tests/test_runner_tool_contract.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3135,
+        "id": "obj-11901000903",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tools/test_lane.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3064,
+        "id": "obj-11901000440",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the new test file"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3012,
+        "id": "obj-11901000990",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tools/fleet/fleet_health.test.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2977,
+        "id": "obj-11901000978",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tests/test_mcp_bridge.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2177,
+        "id": "obj-11901000909",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tests/test_7949_capstone_measure.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1829,
+        "id": "obj-11901000922",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "scripts/harness-apply-timer.test.sh"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1582,
+        "id": "obj-11901000995",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "extensions/auto-sync.test.ts"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.156,
+        "id": "obj-11901000944",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "home/cmux/orchestrator/lane-merge.sh"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000966",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tests/test_context_enrich_8488.py"
+       }
+      ]
+     },
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 6,
+      "gold_id": "obj-11901000062",
+      "moved": true,
+      "query": "the review",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000543",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the reviewed"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5902,
+        "id": "obj-11901000012",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the reviewer"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4368,
+        "id": "obj-11901000596",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review file"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4367,
+        "id": "obj-11901000389",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review comments"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4334,
+        "id": "obj-11901000487",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review record"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4187,
+        "id": "obj-11901000062",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "the review"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3975,
+        "id": "obj-11901000211",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review comment"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3913,
+        "id": "obj-11901000249",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the reviewed head"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3305,
+        "id": "obj-11901000288",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review in full"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2656,
+        "id": "obj-11901000406",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the full review"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2647,
+        "id": "obj-11901000416",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review comments and checking"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2232,
+        "id": "obj-11901000595",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review discipline and gathering"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.22,
+        "id": "obj-11901000072",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review findings"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1775,
+        "id": "obj-11901000488",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review skill in full"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000275",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review findings and the"
+       }
+      ]
+     },
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 4,
+      "gold_id": "obj-11901000081",
+      "moved": true,
+      "query": "the failing required chec",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000224",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing required che"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6046,
+        "id": "obj-11901000243",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing required check"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5983,
+        "id": "obj-11901000269",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing required c"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5955,
+        "id": "obj-11901000081",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "the failing required chec"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5864,
+        "id": "obj-11901000117",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing required ch"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5761,
+        "id": "obj-11901000172",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing required checks"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5346,
+        "id": "obj-11901000233",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing required"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4,
+        "id": "obj-11901000404",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing require"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3074,
+        "id": "obj-11901000571",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing requir"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2662,
+        "id": "obj-11901000434",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing req"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2622,
+        "id": "obj-11901000356",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing re"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2602,
+        "id": "obj-11901000016",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing check"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1843,
+        "id": "obj-11901000258",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing requ"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1811,
+        "id": "obj-11901000203",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the failing"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000189",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the required"
+       }
+      ]
+     },
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 5,
+      "gold_id": "obj-11901000083",
+      "moved": true,
+      "query": "the state of the worktree",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000129",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree state"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6456,
+        "id": "obj-11901000051",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6356,
+        "id": "obj-11901000289",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the state of this worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6165,
+        "id": "obj-11901000030",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree being reaped"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6157,
+        "id": "obj-11901000083",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "the state of the worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5918,
+        "id": "obj-11901000127",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the git worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.589,
+        "id": "obj-11901000098",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree and reading the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5105,
+        "id": "obj-11901000498",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the state of the tree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4633,
+        "id": "obj-11901000074",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the current state of the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4495,
+        "id": "obj-11901000455",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the actual state of the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4485,
+        "id": "obj-11901000095",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the current state"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3886,
+        "id": "obj-11901000430",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the current state and the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2853,
+        "id": "obj-11901000497",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the state files and the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2744,
+        "id": "obj-11901000593",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the repo state and the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000201",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the state"
+       }
+      ]
+     }
+    ],
+    "exact": {
+     "gained": 4,
+     "informative_rows": 0,
+     "lost": 0,
+     "mentions": 300,
+     "moved_up": 4,
+     "past_k_cases_moved_up": 4,
+     "past_k_cases_recorded": 4,
+     "recall_3_after": 300,
+     "recall_3_before": 296,
+     "recall_pct_after": 100.0,
+     "recall_pct_before": 98.7,
+     "rows_carried": 4500,
+     "signal_coverage": 0.0,
+     "signals_informative": false
+    },
+    "variant": {
+     "gained": 7,
+     "in_window_3_after": 445,
+     "in_window_3_before": 438,
+     "lost": 0,
+     "pairs": 446
+    }
+   },
+   "applied": true,
+   "arm": "entity_rerank",
+   "graph_terms_on_this_population": "INERT BY CONSTRUCTION: the eval graph holds one :Object per name and no claims, so every row answers degree 0 / confidence null \u2014 read `signals_informative` rather than assuming the graph moved anything",
+   "identity_dimension": "exact normalised-name equality (entity_resolver's fold) sorts ahead of the score for entity rows only",
+   "ranker": "GraphRanker(entity_type='object')",
+   "weights": {
+    "graph_boost": 0.35,
+    "recency": 0.15,
+    "similarity": 0.5
+   }
+  },
+  "exact": {
+   "3": {
+    "attached": 296,
+    "in_window": 296,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 4,
+    "rank_sum": 333,
+    "rows_zero": 0
+   },
+   "5": {
+    "attached": 299,
+    "in_window": 299,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 1,
+    "rank_sum": 347,
+    "rows_zero": 0
+   },
+   "10": {
+    "attached": 300,
+    "in_window": 300,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 0,
+    "rank_sum": 353,
+    "rows_zero": 0
+   },
+   "15": {
+    "attached": 300,
+    "in_window": 300,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 0,
+    "rank_sum": 353,
+    "rows_zero": 0
+   }
+  },
+  "exact_by_class": {
+   "definite": {
+    "10": {
+     "in_window": 180,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 180,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 177,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 179,
+     "n": 180,
+     "rows_zero": 0
+    }
+   },
+   "ident": {
+    "10": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 89,
+     "n": 90,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    }
+   },
+   "path": {
+    "10": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    }
+   }
+  },
+  "exact_misses": [
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_test_lane_tool",
+    "returned": 3,
+    "siblings_2tok": 5,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "tests/test_test_lane_tool.py",
+     "the test suite",
+     "the full test suite",
+     "the test file",
+     "test_test_lane_tool"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the review",
+    "returned": 3,
+    "siblings_2tok": 23,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the reviewed",
+     "the reviewer",
+     "the review file",
+     "the review comments",
+     "the review record"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the failing required chec",
+    "returned": 3,
+    "siblings_2tok": 19,
+    "signal_tokens": 3,
+    "tokens": 4,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the failing required che",
+     "the failing required check",
+     "the failing required c",
+     "the failing required chec",
+     "the failing required ch"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the state of the worktree",
+    "returned": 3,
+    "siblings_2tok": 19,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the worktree state",
+     "the worktree",
+     "the state of this worktree",
+     "the worktree being reaped",
+     "the state of the worktree"
+    ]
+   }
+  ],
+  "exact_misses_recorded": 4,
+  "exact_misses_total": 4,
+  "gate": {
+   "shipped": {
+    "gated": 99,
+    "gated_and_missed": 0,
+    "names": 300,
+    "noise_rows_freed": 0,
+    "suppressed_correct_by_k": {
+     "15": 99,
+     "3": 99
+    },
+    "suppressed_correct_k_sum": 198
+   },
+   "zep_full_name": {
+    "gated": 36,
+    "gated_and_missed": 0,
+    "names": 300,
+    "noise_rows_freed": 0,
+    "suppressed_correct_by_k": {
+     "15": 36,
+     "3": 36
+    },
+    "suppressed_correct_k_sum": 72
+   }
+  },
+  "gate_by_class": {
+   "definite": {
+    "shipped": {
+     "gated": 63,
+     "names": 180,
+     "suppressed_correct_k_sum": 126
+    },
+    "zep_full_name": {
+     "gated": 0,
+     "names": 180,
+     "suppressed_correct_k_sum": 0
+    }
+   },
+   "ident": {
+    "shipped": {
+     "gated": 36,
+     "names": 90,
+     "suppressed_correct_k_sum": 72
+    },
+    "zep_full_name": {
+     "gated": 36,
+     "names": 90,
+     "suppressed_correct_k_sum": 72
+    }
+   },
+   "path": {
+    "shipped": {
+     "gated": 0,
+     "names": 30,
+     "suppressed_correct_k_sum": 0
+    },
+    "zep_full_name": {
+     "gated": 0,
+     "names": 30,
+     "suppressed_correct_k_sum": 0
+    }
+   }
+  },
+  "gate_gated_names": [
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the diff",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "diff"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tool",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tool"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the model",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "model"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#2258",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "2258"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#2981",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "2981"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the rung in the",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "rung"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the head",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "head"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the check",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "check"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the end",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "end"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10114",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10114"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10010",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10010"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#825",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "825"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#7949",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "7949"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10137",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10137"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10452",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10452"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#9876",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "9876"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10463",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10463"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10000",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10000"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10543",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10543"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10601",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10601"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#709",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "709"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10519",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10519"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the file",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "file"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the repo",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "repo"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#8447",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "8447"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fix",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fix"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10305",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10305"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the code",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "code"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10399",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10399"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the gate",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "gate"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10537",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10537"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the body",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "body"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the brief",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "brief"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#4282",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "4282"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10548",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10548"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the guard",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "guard"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#1484",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "1484"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the test",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "test"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the pin",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "pin"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the issue",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "issue"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10602",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10602"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the new",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "new"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10610",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10610"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the merge",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "merge"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3175",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3175"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tree",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tree"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the suite",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "suite"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10717",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10717"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the rail",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "rail"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the owner",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "owner"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10597",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10597"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#1662",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "1662"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the lane",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "lane"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#9567",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "9567"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the real",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "real"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10017",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10017"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10275",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10275"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the row",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "row"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10541",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10541"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10575",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10575"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fold",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fold"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the exact",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "exact"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10509",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10509"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tests",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tests"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10214",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10214"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10641",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10641"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the claim",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "claim"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the diff of",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "diff"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the delta",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "delta"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the doc",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "doc"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the line",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "line"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fixes",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fixes"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the graph",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "graph"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the three",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "three"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the probe",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "probe"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the log",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "log"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the arm",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "arm"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the count",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "count"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the box",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "box"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the peer",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "peer"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the job",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "job"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the pass",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "pass"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the chain",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "chain"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the old",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "old"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the queue",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "queue"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the batch",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "batch"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the run",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "run"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the seam",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "seam"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the loop",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "loop"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the write",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "write"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the files",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "files"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the list",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "list"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the prose",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "prose"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fleet",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fleet"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the four",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "four"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the diff with",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "diff"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the mac",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "mac"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the skill",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "skill"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the base",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "base"
+    ],
+    "wide_rows": 15
+   }
+  ],
+  "gate_variant": {
+   "shipped": {
+    "gated_pairs": 162,
+    "in_window_before": 157,
+    "pairs": 446,
+    "would_attach_before": 94,
+    "would_attach_before_any_k": 99
+   },
+   "zep_full_name": {
+    "gated_pairs": 96,
+    "in_window_before": 91,
+    "pairs": 446,
+    "would_attach_before": 91,
+    "would_attach_before_any_k": 96
+   }
+  },
+  "pooled": {
+   "3": {
+    "captures": 20,
+    "set_max": 45,
+    "set_min": 37,
+    "set_sum": 848
+   },
+   "5": {
+    "captures": 20,
+    "set_max": 74,
+    "set_min": 58,
+    "set_sum": 1369
+   },
+   "10": {
+    "captures": 20,
+    "set_max": 141,
+    "set_min": 111,
+    "set_sum": 2559
+   },
+   "15": {
+    "captures": 20,
+    "set_max": 205,
+    "set_min": 162,
+    "set_sum": 3658
+   }
+  },
+  "pooled_coverage": {
+   "names_in_sample": 300,
+   "names_measured": 300,
+   "names_reached": 300,
+   "skipped_singleton": 0,
+   "truncated": false
+  },
+  "pooled_gate": {
+   "shipped": {
+    "15": {
+     "gated": 99,
+     "lost": 91,
+     "rescued_by_union": 8,
+     "unreachable_regardless": 0
+    },
+    "3": {
+     "gated": 99,
+     "lost": 97,
+     "rescued_by_union": 2,
+     "unreachable_regardless": 0
+    }
+   },
+   "zep_full_name": {
+    "15": {
+     "gated": 36,
+     "lost": 36,
+     "rescued_by_union": 0,
+     "unreachable_regardless": 0
+    },
+    "3": {
+     "gated": 36,
+     "lost": 36,
+     "rescued_by_union": 0,
+     "unreachable_regardless": 0
+    }
+   }
+  },
+  "variant": {
+   "3": {
+    "attached": 229,
+    "attached_folded": 408,
+    "attached_norm_only": 0,
+    "in_multikey_block": 446,
+    "in_window": 438,
+    "in_window_not_attached": 209,
+    "pairs": 446
+   },
+   "5": {
+    "attached": 235,
+    "attached_folded": 415,
+    "attached_norm_only": 0,
+    "in_multikey_block": 446,
+    "in_window": 445,
+    "in_window_not_attached": 210,
+    "pairs": 446
+   },
+   "10": {
+    "attached": 236,
+    "attached_folded": 416,
+    "attached_norm_only": 0,
+    "in_multikey_block": 446,
+    "in_window": 446,
+    "in_window_not_attached": 210,
+    "pairs": 446
+   },
+   "15": {
+    "attached": 236,
+    "attached_folded": 416,
+    "attached_norm_only": 0,
+    "in_multikey_block": 446,
+    "in_window": 446,
+    "in_window_not_attached": 210,
+    "pairs": 446
+   }
+  },
+  "variant_by_class": {
+   "article-drop": {
+    "10": {
+     "attached": 180,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "15": {
+     "attached": 180,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "3": {
+     "attached": 173,
+     "attached_folded": 173,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 173,
+     "pairs": 180
+    },
+    "5": {
+     "attached": 179,
+     "attached_folded": 179,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 179,
+     "pairs": 180
+    }
+   },
+   "basename-only": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    }
+   },
+   "hash-dropped": {
+    "10": {
+     "attached": 36,
+     "attached_folded": 36,
+     "attached_norm_only": 0,
+     "in_multikey_block": 36,
+     "in_window": 36,
+     "pairs": 36
+    },
+    "15": {
+     "attached": 36,
+     "attached_folded": 36,
+     "attached_norm_only": 0,
+     "in_multikey_block": 36,
+     "in_window": 36,
+     "pairs": 36
+    },
+    "3": {
+     "attached": 36,
+     "attached_folded": 36,
+     "attached_norm_only": 0,
+     "in_multikey_block": 36,
+     "in_window": 36,
+     "pairs": 36
+    },
+    "5": {
+     "attached": 36,
+     "attached_folded": 36,
+     "attached_norm_only": 0,
+     "in_multikey_block": 36,
+     "in_window": 36,
+     "pairs": 36
+    }
+   },
+   "hyphen-to-space": {
+    "10": {
+     "attached": 20,
+     "attached_folded": 20,
+     "attached_norm_only": 0,
+     "in_multikey_block": 20,
+     "in_window": 20,
+     "pairs": 20
+    },
+    "15": {
+     "attached": 20,
+     "attached_folded": 20,
+     "attached_norm_only": 0,
+     "in_multikey_block": 20,
+     "in_window": 20,
+     "pairs": 20
+    },
+    "3": {
+     "attached": 20,
+     "attached_folded": 20,
+     "attached_norm_only": 0,
+     "in_multikey_block": 20,
+     "in_window": 20,
+     "pairs": 20
+    },
+    "5": {
+     "attached": 20,
+     "attached_folded": 20,
+     "attached_norm_only": 0,
+     "in_multikey_block": 20,
+     "in_window": 20,
+     "pairs": 20
+    }
+   },
+   "space-to-hyphen": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 179,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 179,
+     "pairs": 180
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    }
+   }
+  }
+ },
+ "code_head": "8b9355b285746e1b5d04aa9a2cf3bcb6d229482b",
+ "config": {
+  "fused_rerank_gate_armed": false
+ },
+ "corpus": {
+  "dir": "/tmp/sess12184",
+  "elapsed_s": 438.4,
+  "files": 9,
+  "graph": "recall12184s9_1794881456",
+  "harvested_distinct": {
+   "definite": 39364,
+   "ident": 5069,
+   "path": 2016
+  },
+  "input": {
+   "files": 9,
+   "lines": 3399,
+   "parse_errors": 3,
+   "records_without_text": 0
+  },
+  "population": 1000,
+  "population_digest": "15c3c60681ecb7f1",
+  "sample": 300,
+  "sample_by_class": {
+   "definite": 180,
+   "ident": 90,
+   "path": 30
+  }
+ },
+ "issue": 11901,
+ "ks": [
+  3,
+  5,
+  10,
+  15
+ ],
+ "measured_at": "2026-11-17T02:18:15Z",
+ "measured_for": 12295,
+ "pooled_budget_note": "a pooled group is `max_queries` (15) names, which is the production BUDGET CAP, not the typical capture \u2014 a capture with 5 entities issues 5 object queries",
+ "retrieval": {
+  "has_embedder": true,
+  "legs_seen": {
+   "fts": true,
+   "structural": true,
+   "vector": true
+  },
+  "note": "hybrid",
+  "uniform_windows": true,
+  "window_modes": {
+   "hybrid": 5230,
+   "keyword_only": 0
+  }
+ }
+}

@@ -1508,6 +1508,17 @@ install defeats the purpose of hosting locally.
 - `FalkorProjection.from_uri` accepts `docker://`, `redis://`, and `rediss://`.
   The `redis://`/`rediss://` schemes exist for the **hosted API** (Fly), which
   resolves `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` at runtime (entrypoint.sh).
+  ⚠️ **A shell INSIDE the machine sees `TORTOISE_DB_URI` SET AND EMPTY**
+  (#13320 note 2): `fly.toml`'s `[env]` block ships `TORTOISE_DB_URI = ""`, and
+  `entrypoint.sh` only *replaces* that value for the process it execs — it tests
+  `-n` and `export`s `FALKORDB_CLOUD_URI` into it, so the APP is correct while
+  `fly ssh console` (which reads `[env]`, not the entrypoint) hands an operator
+  the empty string. An operator script that then does
+  `os.environ.setdefault("TORTOISE_DB_URI", uri)` keeps the empty value (the key
+  is present, so `setdefault` is a no-op) and dies with
+  `RuntimeError: TORTOISE_DB_URI is empty in production`. ASSIGN it instead —
+  `os.environ["TORTOISE_DB_URI"] = os.environ["FALKORDB_CLOUD_URI"]` — which is
+  what the #13320 reproduction does.
 - Restart the MCP server after changing the URI (resolved once at startup).
 
 **Self-hosted authenticated MCP (`serve --http`, #702):** local stdio is
