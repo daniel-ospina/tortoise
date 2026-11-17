@@ -1102,7 +1102,7 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
     * the CLOSE fold resolves its target through `live_name_holder_ids`, which
       applies the CURRENCY predicate — and `outdated` is in it
       (`live.py` `TERMINAL_EXCLUDED_STATUSES` + the flag conjunct), so such a row has
-      NO live holder and the close fold is NEVER dispatched. Nothing can move it, so
+      NO live holder and the close fold is NEVER dispatched. Nothing can close it, so
       any state this read answers about it re-fires once per poll, without bound;
     * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6159-6162`), which
       bypasses the live-holder requirement for a single registered incarnation — so it
