@@ -1494,6 +1494,7 @@ def test_sc4_deprecation_markers_present():
     from tortoise.sdk import TortoiseSDK  # noqa: I001
     from tortoise.tool_registry import RETIRED_USE_INSTEAD
     import inspect
+    import re
 
     # every still-live legacy surface carries its marker + a LIVE replacement
     for method_name in ("ingest_corpus", "_index_sessions"):
@@ -1503,31 +1504,23 @@ def test_sc4_deprecation_markers_present():
             (f"{method_name} marker must name the LIVE replacement "
              "(index_directory is itself retired)")
         # ⛔ The negative arm is scoped to the DEPRECATED PARAGRAPH(S) — not the whole
-        # docstring, and not a single physical line (round-2 and round-3 review of
-        # #13085). Banning the NAME outright reds on honest history:
-        # `tortoise/sdk.py`'s own `_index_process_unit` says
-        # "``index_file``/``index_directory`` (both DELETED by #4282 …)", and
-        # `index_sources_from_directory` says it "Absorbs `index_directory`". Reading
-        # only the FIRST line carrying DEPRECATED is too narrow the other way: both
-        # directives WRAP (`sdk.py:41302-41303`, `:55250-55251`), so an offer that
-        # continues onto the next line slipped past. Every DEPRECATED paragraph is
-        # therefore read, and the retired name must not appear in any of them.
+        # docstring, and not a single physical line (rounds 1-4 of #13085's review).
+        # Banning the NAME outright reds on honest history: `tortoise/sdk.py`'s own
+        # `_index_process_unit` says "``index_file``/``index_directory`` (both DELETED
+        # by #4282 …)", and `index_sources_from_directory` says it "Absorbs
+        # `index_directory`". Reading only the line carrying DEPRECATED is too narrow
+        # both ways — the directives WRAP (`sdk.py:41302-41303`, `:55250-55251`), so an
+        # offer can sit BELOW the token, and the mirror shape puts it ABOVE it. The
+        # paragraph is therefore SPLIT FIRST and tested whole, so the arm has no
+        # direction and no line count to depend on.
         # What must not survive is the DIRECTIVE that OFFERS the retired name; a
-        # docstring elsewhere may still record what it absorbed. Residual: a
-        # parenthetical history written INSIDE the directive paragraph (e.g.
-        # "use X (renamed from index_directory)") is honest prose this arm reds on —
-        # keep such history in its own paragraph.
-        offending: list[str] = []
-        in_paragraph = False
-        for line in doc.splitlines():
-            if "DEPRECATED" in line:
-                in_paragraph = True
-            elif in_paragraph and not line.strip():
-                in_paragraph = False
-            if in_paragraph and "index_directory" in line:
-                offending.append(line.strip())
+        # paragraph may record what was absorbed. Residual: the arm keys on the word
+        # DEPRECATED, so a paragraph that merely MENTIONS it while recording history
+        # also reds — keep such history in a paragraph that avoids the word.
+        offending = [p.strip() for p in re.split(r"\n\s*\n", doc)
+                     if "DEPRECATED" in p and "index_directory" in p]
         assert not offending, (
-            f"{method_name}'s DEPRECATED text offers the retired index_directory: "
+            f"{method_name}'s DEPRECATED paragraph offers the retired index_directory: "
             f"{offending!r}")
 
     # the retired PUBLIC name is gone, and its frozen private path is still served
