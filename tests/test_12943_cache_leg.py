@@ -1219,26 +1219,48 @@ def test_the_0_row_capable_arms_STILL_count_a_fold_that_LANDED(
         sdk.close()
 
 
-def test_a_declared_gateway_lane_records_its_target(monkeypatch, tmp_path):
+_GATEWAYS = ("why_snapshot", "webhook_delivery", "onboarding")
+
+
+def _gateway_run(door: str, proj, cypher: str, params: dict):
+    """Call one of the three declared live gateways by name."""
+    if door == "why_snapshot":
+        from tortoise import why_snapshot
+
+        return why_snapshot._run(proj, cypher, params)
+    if door == "webhook_delivery":
+        from tortoise import webhook_delivery
+
+        return webhook_delivery._run(proj, cypher, params)
+    from tortoise.onboarding import state as onboarding_state
+
+    return onboarding_state._run(proj, cypher, params)
+
+
+@pytest.mark.parametrize("door", _GATEWAYS)
+def test_a_declared_gateway_lane_records_its_target(monkeypatch, tmp_path, door):
     """`why_snapshot` / `webhook_delivery` / onboarding write WITHOUT folding.
 
-    They issue their own statements through the projection's handle under a
-    declared lane, so a process whose live traffic is those lanes registered no
-    target at all — the same "{} means healthy" illusion, one lane over
-    (#12943 review cycle 3, finding 4).
+    All THREE are pinned, not just the one that was convenient: deleting the
+    `note_live_write_target` call from any of them must red this suite (measured —
+    the single-door version left two of the three unpinned, review cycle 4, P2).
+    Each issues its own statement through the projection's handle under a declared
+    lane, so a process whose live traffic is those lanes would otherwise register
+    no target at all — the same "{} means healthy" illusion, one lane over.
     """
     _drop_uri(monkeypatch)
-    from tortoise import why_snapshot
     from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
 
     sdk = _embedded_sdk(tmp_path)
     try:
         proj = sdk._get_proj()
         reset_cache_write_targets()
-        why_snapshot._run(proj, "CREATE (:WhyProbe {id: $id})", {"id": "w-1"})
-        assert sum(cache_write_targets().values()) == 1, cache_write_targets()
+        _gateway_run(door, proj, "CREATE (:GatewayProbe {id: $id})", {"id": "w-1"})
+        assert sum(cache_write_targets().values()) == 1, (
+            f"{door}'s live write was not recorded: {cache_write_targets()!r}")
         # A READ through the same gateway is not a cache write.
-        why_snapshot._run(proj, "MATCH (n:WhyProbe) RETURN count(n)")
-        assert sum(cache_write_targets().values()) == 1, cache_write_targets()
+        _gateway_run(door, proj, "MATCH (n:GatewayProbe) RETURN count(n)", None)
+        assert sum(cache_write_targets().values()) == 1, (
+            f"{door}'s read was counted as a write: {cache_write_targets()!r}")
     finally:
         sdk.close()
