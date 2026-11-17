@@ -317,7 +317,7 @@ if both forms answer the same wrong thing, the diff is empty and says so honestl
   authorises it; landing it deletes the Cypher form in the same PR, which is a caller-visible change
   owned by `#13083`'s placement table.
 - **No shape §3 keeps is proposed for a move.** `traversal` (3), `ep` (32), `fulltext`
-  (2) are `stays`, each citing its section. `adjacency` (288) is `measure`, not `move`.
+  (2) are `stays`, each citing its section. `adjacency` (289) is `measure`, not `move`.
 - The text index is **not** re-decided: `#13099` measured the gate and §6.2's STATUS note records that
   the decision stands; adopting from that measurement is a reopen on `#4051`, not a lane's move.
 - `cache_projection.py` and `cache_tier` are untouched — `#13083` owns them.
