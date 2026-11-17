@@ -43396,7 +43396,7 @@ class TortoiseSDK:
             # — an unbounded probe would let a wedged store stall the read it
             # annotates.
             try:
-                graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or 500))
+                graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS))
             except Exception as e:  # noqa: BLE001, RUF100
                 # The store IS configured (the projection object was obtained
                 # just above) but did not answer: off by OUTAGE — `degraded`,
@@ -43416,7 +43416,7 @@ class TortoiseSDK:
         # #7952: the store is reachable, so the known-hot set can be READ.
         if read_status_out is not None and _residency_enabled():
             _residency = _read_declaration(
-                graph, timeout_ms=int(_elevated_timeout_ms or 500))
+                graph, timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS))
         # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
@@ -43725,7 +43725,7 @@ class TortoiseSDK:
             _bm25_trace_start = len(status_trace) if status_trace is not None else None
             _bm25_hits = run_bm25_query(
                 graph, query, entity_type=entity_type, limit=str_limit,
-                timeout_ms=int(_elevated_timeout_ms or 500),
+                timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS),
                 excluded_statuses=() if include_terminal else None,
                 leg_trace=status_trace,
                 keep_numeric=keep_numeric,
@@ -44000,7 +44000,7 @@ class TortoiseSDK:
                     graph, text_hit_ids, max_hops=structural_hops,
                     limit=str_limit,
                     excluded_statuses=() if include_terminal else None,
-                    timeout_ms=int(_elevated_timeout_ms or 500),
+                    timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS),
                 )
                 if expansion:
                     merged = list(dict(raw_results.get("structural", [])).items())

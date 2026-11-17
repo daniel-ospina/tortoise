@@ -56,6 +56,17 @@ record schema with its RLS policies, triggers and foreign keys. That makes every
 absolute figure here a LOWER bound on the real write — and costs all three shapes
 identically, so the DELTAS this file reports are the features' own cost.
 
+⛔ THE INDEX SET IS PART OF THAT GAP, and it is the part the byte figures are most
+easily misread over (#11691 review, finding 2): the stand-in's ``point`` carries
+``id text PRIMARY KEY`` — ONE column — where production's ``public.point`` has a
+THREE-column primary key (``PRIMARY KEY (org_id, graph_id, node_key)``,
+``supabase/migrations/20261012000003_record_epistemic.sql:118``) plus
+``idx_point_scope`` (same file, ``:148``) and ``idx_point_graph_tier``
+(``supabase/migrations/20261029000001_record_point_cache_tier.sql:103``). So the
+artifact's ``scale.indexes`` holds exactly TWO keys, and every figure labelled
+"the primary key's" here is the ``id``-only key's cost: treat it as a FLOOR on a
+composite key's growth, never as production's per-write key cost.
+
 Run (it starts its own throwaway ``pgvector/pgvector:pg16`` container):
 
     uv run --with psycopg2-binary python tools/record_vector_write_cost_11691.py \\
@@ -233,10 +244,14 @@ def _corpus(n: int, seed: int = 11691) -> list[str]:
     as the JSON text a ``jsonb`` column stores (which is what the record holds,
     and why the payload column is ~3.6 kB rather than pgvector's 1,536 B).
 
-    ⚠️ THAT NUMBER IS MEASURED OFF THIS FUNCTION, not eyeballed: `_corpus(50,
-    seed=11691)` averages 3,607.6 characters a row (min 3,585, max 3,631), i.e.
-    3,608 B — and a corpus with a DIFFERENT DIM or precision has a different one,
-    so re-measure rather than re-quote it.
+    ⚠️ THAT NUMBER IS MEASURED OFF THIS FUNCTION, not eyeballed: the corpus the
+    write phase CONSUMES — `_corpus(WARMUP + TIMED, seed=11691)`, 1,200 rows —
+    averages 3,607.3 characters a row (min 3,572, max 3,642), i.e. 3,608 B, and
+    the artifact records exactly that sample as `corpus.text_bytes_per_row_mean`.
+    (The first 50 rows alone average 3,607.6 — the same figure at the quoted
+    rounding, but the FIELD must describe the sample that was measured, which is
+    the 1,200-row one.) A corpus with a DIFFERENT DIM or precision has a
+    different size, so re-measure rather than re-quote it.
     """
     rng = random.Random(seed)
     centroids = [[rng.gauss(0.0, 1.0) for _ in range(DIM)] for _ in range(50)]
@@ -444,6 +459,24 @@ def _loadavg() -> tuple[float, float, float] | None:
         return None
 
 
+def _control_index_bytes(shape: dict) -> int:
+    """The CONTROL shape's index bytes — 0, because it has no index at all.
+
+    Fail-closed in both directions (#11691 review, finding 1): asking the shape
+    under test for `HNSW_INDEX` raises if the key is gone (a relabelled index is
+    not a free index), while the control's emptiness is ASSERTED here instead of
+    being spelled `.get(key, 0)` — the spelling that made a dropped key and a
+    genuinely absent index indistinguishable.
+    """
+    if shape["indexes"]:
+        raise SystemExit(
+            "the generated-column control carries an index "
+            f"({sorted(shape['indexes'])}) — it is built `LIKE … INCLUDING "
+            "GENERATED` with none, so the HNSW-vs-control subtraction below is "
+            "no longer measuring the index under test")
+    return shape["index_bytes"]
+
+
 def _derive(report: dict) -> dict:
     """The DERIVED half: deltas, production scale, and the money.
 
@@ -538,15 +571,26 @@ def _derive(report: dict) -> dict:
         # `point` carries `point_pkey` and that difference silently charged the
         # pkey's ~75 kB/1k growth to the index under test).
         "hnsw_bytes_per_1000_writes": round(
-            (full["indexes"].get(HNSW_INDEX, 0)
-             - gen_only["indexes"].get(HNSW_INDEX, 0))
+            (full["indexes"][HNSW_INDEX] - _control_index_bytes(gen_only))
             / (full["timed_writes"] + WARMUP) * 1000.0, 1),
         # …and the growth the CONTROL SHAPE carries but the index does not: the
         # primary key's own bytes, reported separately so the split is auditable
         # instead of invisible.
+        #
+        # ⛔ INDEXED, NOT `.get(…, 0)` (#11691 review, finding 1). A default of 0
+        # is fail-open in exactly the direction this split exists to catch: a
+        # renamed or dropped HNSW index reads 0.0 on the shape UNDER TEST, which
+        # moves the whole index cost into the field NAMED "primary key" while the
+        # only pinned invariant — their sum — stays identical. A missing key must
+        # raise here, not relabel itself.
+        #
+        # ⚠ THE CONTROL IS THE ONE SHAPE WHOSE ABSENCE IS THE TRUTH: `point_gen_only`
+        # is built `LIKE public.point INCLUDING GENERATED` with no index, so it must
+        # carry an EMPTY map (README §1.5) — asserted, so "no index" and "the map
+        # lost a key" stay distinguishable.
         "primary_key_bytes_per_1000_writes": round(
-            (full["index_bytes"] - full["indexes"].get(HNSW_INDEX, 0)
-             - gen_only["index_bytes"] + gen_only["indexes"].get(HNSW_INDEX, 0))
+            (full["index_bytes"] - full["indexes"][HNSW_INDEX]
+             - gen_only["index_bytes"] + _control_index_bytes(gen_only))
             / (full["timed_writes"] + WARMUP) * 1000.0, 1),
         # The generated COLUMN's payload (vector + heap) per 1,000 writes.
         "payload_bytes_per_1000_writes": round(
@@ -624,7 +668,12 @@ def _derive(report: dict) -> dict:
         "production_volume": production,
         # the corpus' own bytes/row — the number the evidence doc quotes to
         # explain the row size, emitted so it is a FIELD and not prose (F3).
-        "corpus": _corpus_shape(),
+        # `WARMUP + TIMED` is the corpus the write phase CONSUMES, so the field
+        # describes the rows it measures rather than a 50-row prefix of them
+        # (#11691 review, finding 5: 3,607.3 vs 3,607.6 B/row — immaterial, but
+        # a field that describes a different sample than the one measured is the
+        # provenance defect F3 is about).
+        "corpus": _corpus_shape(WARMUP + TIMED, seed=11691),
     })
 
     return report

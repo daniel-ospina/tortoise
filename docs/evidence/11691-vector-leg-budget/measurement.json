@@ -227,12 +227,12 @@
   }
  },
  "corpus": {
-  "rows": 50,
+  "rows": 1200,
   "seed": 11691,
   "dim": 384,
-  "text_bytes_per_row_mean": 3607.6,
-  "text_bytes_per_row_min": 3585,
-  "text_bytes_per_row_max": 3631,
+  "text_bytes_per_row_mean": 3607.3,
+  "text_bytes_per_row_min": 3572,
+  "text_bytes_per_row_max": 3642,
   "derivation": "len() of each row `_corpus(n, seed)` emits, i.e. the `jsonb` text the record stores; mean/min/max over those rows"
  }
 }

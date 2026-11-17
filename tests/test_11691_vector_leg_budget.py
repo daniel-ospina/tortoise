@@ -265,6 +265,42 @@ def test_the_door_ceiling_can_be_tightened_and_never_widened(monkeypatch):
         conn.close()
 
 
+def test_a_malformed_budget_reaches_the_leak_guard_and_closes_the_handle(
+        monkeypatch):
+    """The FALSIFIER for the leak guard (#11691 review, finding 4).
+
+    Every case above passes a valid int or `None`, so re-hoisting the coercion
+    ABOVE the guarded `try` — the exact defect the review named — reds none of
+    them. The failure it protects against is not "a wrong bound": it is an
+    `int()` that RAISES while the door is holding a POOLED connection, which
+    escaped the handler that closes it and abandoned one borrowed socket per
+    call.
+
+    Measured before the fix: `open_record(..., statement_timeout_ms="abc")`
+    raised `ValueError` out of the door with the handle still open.
+    """
+    import tortoise.record_writer as rw
+
+    state: dict = {"statements": [], "closed": 0}
+
+    class _Tracking(_FakeConn):
+        def close(self):
+            state["closed"] += 1
+
+    monkeypatch.setattr(rw, "_default_connect",
+                        lambda dsn, _s=state: _Tracking(_s), raising=True)
+
+    with pytest.raises(record_serve.RecordUnavailable):
+        record_serve.open_record("postgresql://localhost/record",
+                                 statement_timeout_ms="abc")
+    assert state["closed"] == 1, (
+        "the door abandoned a POOLED connection: a malformed budget escaped "
+        "before the guarded `try`, so the handler that closes the handle never "
+        "ran")
+    assert state["statements"] == [], (
+        f"a statement ran on an unbounded handle: {state['statements']}")
+
+
 # ── the contract that must NOT move ────────────────────────────────────────
 
 def test_the_searcher_keeps_its_four_argument_shape(armed):
@@ -364,8 +400,6 @@ def _names_the_budget(node: ast.expr) -> bool:
 
 def test_the_dense_pass_default_is_the_one_budget_not_a_literal():
     """`_entity_key_dense_pass`'s `timeout_ms` default NAMES the constant.
-
-    The constant is `500` today, so a reverted `timeout_ms: int = 500` behaves
     identically — which is exactly why nothing would go red while the default
     stopped tracking the budget the moment somebody moved it. Measured:
     reverting the default to the literal left every other arm in this file
@@ -424,6 +458,45 @@ def test_the_expansion_pass_binds_the_constant_not_a_literal():
         f"the call at sdk.py:{calls[0].lineno} does not name "
         f"`VECTOR_LEG_BUDGET_MS` ({ast.unparse(bound)}) — a literal here leaves "
         "this leg on the old budget when the constant moves")
+
+
+def test_no_leg_in_the_fused_read_carries_its_own_budget_literal():
+    """REPO-WIDE: every `int(_elevated_timeout_ms or …)` names the constant.
+
+    `search_engine.py` states the rule this protects: "the fused read JOINS its
+    workers, so a leg on a different budget is a leg the cap cannot bound." The
+    per-site pins above cannot see the rest of them — measured at this head, the
+    two site-specific pins left FOUR copies of the same expression in the same
+    method (the bm25 leg, the structural leg, the readiness probe and the
+    residency read), so moving the constant would have silently split the read's
+    budget (#11691 review, finding 3).
+
+    A scan, not a count: the number of legs is expected to grow, so this asserts
+    about EVERY match rather than pinning how many there are.
+    """
+    source = pathlib.Path(sdk_module_file()).read_text()
+    tree = ast.parse(source)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        # the shape `int(_elevated_timeout_ms or <X>)` — compare the AST, so a
+        # renamed local or a reformatted line cannot slip past a text search.
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "int" and len(node.args) == 1):
+            continue
+        inner = node.args[0]
+        if not (isinstance(inner, ast.BoolOp)
+                and isinstance(inner.op, ast.Or)
+                and len(inner.values) == 2
+                and isinstance(inner.values[0], ast.Name)
+                and inner.values[0].id == "_elevated_timeout_ms"):
+            continue
+        if not _names_the_budget(inner.values[1]):
+            offenders.append(
+                f"sdk.py:{node.lineno} binds {ast.unparse(node)} — the budget's "
+                f"fallback is a literal, so this leg keeps its own number")
+    assert not offenders, (
+        "legs of the fused read carry their own budget literal:\n  "
+        + "\n  ".join(offenders))
 
 
 def sdk_module_file() -> str:
@@ -500,3 +573,56 @@ def test_the_committed_measurement_prices_itself_from_pricing_json():
             continue
         assert added["seconds_per_month_at_tier_volume"][tier] == round(
             added["ms_per_write_p50"] * ops / 1000.0, 1), tier
+
+
+def test_the_index_split_re_derives_from_the_shapes_that_were_measured():
+    """The HNSW/pkey split is arithmetic on the artifact — and neither is 0.
+
+    A SUM is not an invariant (#11691 review, finding 1): the money pin above
+    adds the two fields, so SWAPPING them, or a `.get(index, 0)` that reads 0.0
+    and dumps the whole index cost into the field named "primary key", leaves it
+    green. Measured on the committed artifact before this pin: with the HNSW
+    name changed to a typo the split became 0.0 / 2,129,920.0 and every existing
+    arm still passed.
+
+    So this re-derives each half from the measured shapes, and pins that both
+    halves are non-zero — the direction the fail-open default moved them.
+    """
+    import json
+    import pathlib
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    art = json.loads((repo / "docs/evidence/11691-vector-leg-budget/"
+                             "measurement.json").read_text())
+    deltas = art["deltas"]
+    hnsw = deltas["hnsw_bytes_per_1000_writes"]
+    pkey = deltas["primary_key_bytes_per_1000_writes"]
+
+    assert hnsw > 0, (
+        "the HNSW figure is 0 — the index-byte read found no HNSW index, and "
+        f"its cost has been relabelled into the primary key: {deltas}")
+    assert pkey > 0, (
+        "the primary-key figure is 0 — no key growth was attributed, so the "
+        f"split is not measuring what it names: {deltas}")
+
+    # The split's own denominator is NOT `scale.index_bytes`: that is the
+    # ABSOLUTE size at 20,000 rows, while these two fields are the GROWTH per
+    # 1,000 writes measured on the interleaved delta. Measured attempt at that
+    # equation: 2,129,920/1k × 20 = 42,598,400 vs `index_bytes` 42,074,112 — a
+    # 1.25% gap, i.e. the two numbers are different quantities and an equality
+    # pin here would be a fabricated invariant. What IS checkable from the
+    # committed artifact is the SHAPE of the split (see the assertions above)
+    # and that it names the index set that was actually measured.
+    full = next(s for s in art["scale"]["indexes"] if "hnsw" in s)
+    assert set(art["scale"]["indexes"]) == {full, "point_pkey"}, (
+        f"the measured shape's index set changed: {sorted(art['scale']['indexes'])}")
+    assert hnsw > pkey, (
+        f"the HNSW index ({hnsw}/1k) is not larger than the key ({pkey}/1k) — "
+        "on a 384-d vector index that inversion means the halves are swapped")
+
+    # …and the corpus figure the doc quotes is a FIELD, of the sample measured.
+    corpus = art["corpus"]
+    assert corpus["rows"] == 1200, (
+        f"the corpus field describes {corpus['rows']} rows, not the 1,200 the "
+        "write phase consumes")
+    assert 3_500 < corpus["text_bytes_per_row_mean"] < 3_700, corpus

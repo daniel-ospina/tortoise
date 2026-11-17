@@ -33,7 +33,7 @@ server     PostgreSQL 16.16 (Debian 16.16-1.pgdg12+1), pgvector 0.8.7
 image      pgvector/pgvector:pg16 (throwaway container, one run)
 corpus     50 centroids + gaussian noise, 384-d, STORED AS THE RECORD STORES IT
            (`jsonb` — 3,608 B of text/row on average, `corpus.text_bytes_per_row_mean`
-           = 3,607.6 over `_corpus(50, seed=11691)`, not pgvector's 1,536 B)
+           = 3,607.3 over the 1,200 rows the write phase consumes, not pgvector's 1,536 B)
 shapes     point_plain      the record's columns, no generated column, no index
            point_gen_only   + `embedding_vec` GENERATED … STORED   (no index)
            point            + `embedding_vec` and the HNSW index   (= production)
@@ -93,6 +93,17 @@ Measured as size deltas over exactly the writes the timings above describe:
 |---|---|---|
 | the HNSW index (`idx_point_embedding_vec_hnsw`) | **2,054,827** | 2,055 B |
 | the primary key's own index (`point_pkey`) | **75,093** | 75 B |
+
+⛔ **`point_pkey` HERE IS THE STAND-IN'S KEY, ONE COLUMN WIDE** (#11691 review,
+findings 1–2). The harness builds its own `point` (`tools/record_vector_write_cost_11691.py`,
+`build_schema`): `id text PRIMARY KEY`, no `idx_point_scope`, no
+`idx_point_graph_tier`. Production's `public.point` has a THREE-column key
+(`PRIMARY KEY (org_id, graph_id, node_key)`,
+`supabase/migrations/20261012000003_record_epistemic.sql:118`) plus those two
+btrees (`:148`, `supabase/migrations/20261029000001_record_point_cache_tier.sql:103`).
+So **75 B/write is a FLOOR on a composite key's growth, not production's
+per-write key cost**, and "the indexes, all" below means all of the *measured
+shape's* two indexes, not of `public.point`.
 | the generated column's payload (vector + heap tuple) | **1,945,600** | 1,946 B |
 | **total** | **4,075,520** | 4,076 B |
 
@@ -126,7 +137,7 @@ bytes below.
 | quantity at 33,671 rows | value |
 |---|---|
 | the vector payload + index (total relation) | **233.4 MB** |
-| the indexes, all (`idx_point_embedding_vec_hnsw` + `point_pkey`) | **70.8 MB** |
+| the indexes, all — of the MEASURED SHAPE (`idx_point_embedding_vec_hnsw` + its `id`-only `point_pkey`) | **70.8 MB** |
 | of which the HNSW index's own bytes | **69.0 MB** |
 | of which `point_pkey` | **1.9 MB** |
 | monthly, at `postgres_storage.cost_basis_usd_per_gb_month` (**$0.125/GB-month**) | **$0.029/month** |
