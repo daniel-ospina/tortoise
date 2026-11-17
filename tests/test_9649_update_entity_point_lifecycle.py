@@ -195,12 +195,25 @@ def test_the_written_word_is_the_word_the_guard_approved(env):
     Mutant that reddens: drop the `str.__str__` normalisation in the Point arm
     and the stored status becomes `''` while the journal still says
     `superseded` — a graph/record divergence, not a refusal.
+
+    ⛔ #12592 merge: the call NAMES A SUCCESSOR, and that is not decoration.
+    This case's vehicle used to be a bare ``status='superseded'`` on a live
+    Point, which ONTOLOGY §4.3 now refuses at this door — *"`superseded` means
+    replaced: it names the successor"* — for every label, Points included
+    (`_assert_supersession_names_a_successor`). The pin's SUBJECT is the
+    normalisation, not the successorless shape, so it keeps its subject and
+    supplies the half §4.3 requires: the assertion, the mutant it names
+    (drop `str.__str__` -> the driver stores `''`) and the journal checks are
+    unchanged. §5 gives a Point's successor as the `CORRECTS` edge, but the
+    guard also reads a carried `supersededBy` property, which is the half a
+    single `update_entity` call can supply.
     """
     sdk, events = env
     pid = _live(sdk)
     assert _row(sdk, pid)["status"] == "live"
 
-    sdk.update_knowledge(pid, status=_LyingLen("superseded"))
+    sdk.update_knowledge(pid, status=_LyingLen("superseded"),
+                      supersededBy="successor-name")
 
     after = _row(sdk, pid)
     assert after["status"] == "superseded", (
@@ -714,13 +727,24 @@ def test_an_undeclared_transition_from_live_is_refused(env, target):
     ``archived`` is *"reserved — no v1 write path"* and ``outdated`` is written
     only by ``invalidate_point`` / ``supersede_point``; neither is a declared
     transition from ``live``, so the generic door must not mint them.
-    ``retracted`` / ``superseded`` are declared and stay legal.
+    ``retracted`` / ``superseded`` are declared and stay legal — ⛔ and since
+    #12592 a declared ``superseded`` must ALSO name its successor, because
+    ONTOLOGY §4.3 defines the word as *"replaced: it names the successor"*. The
+    two halves are pinned here: the bare word is refused, the pair is accepted.
     """
     sdk, _ = env
     pid = _live(sdk)
     declared = _ALLOWED_TRANSITIONS["live"]
 
     if target in declared:
+        if target == "superseded":
+            # #12592: declared is not sufficient — the word needs its partner.
+            with pytest.raises(ValueError, match="no successor"):
+                sdk.update_knowledge(pid, status=target)
+            assert _row(sdk, pid)["status"] == "live"
+            sdk.update_knowledge(pid, status=target, supersededBy="the successor")
+            assert _row(sdk, pid)["status"] == target
+            return
         sdk.update_knowledge(pid, status=target)
         assert _row(sdk, pid)["status"] == target
         return
@@ -787,7 +811,10 @@ def test_the_generic_door_still_serves_the_other_labels(env):
     assert sdk.get_entity(obj)["status"] == "archived"
 
     subj = sdk.create_subject("team-x")["id"]
-    sdk.update_knowledge(subj, status="superseded")
+    # ⛔ #12592: the bare word is refused on every label now (§4.3), so the
+    # non-Point control names its successor. The point of THIS test is unchanged:
+    # the door serves the other labels rather than raising `No point`.
+    sdk.update_knowledge(subj, status="superseded", supersededBy="team-y")
     assert sdk.get_entity(subj)["status"] == "superseded"
 
 
@@ -1287,40 +1314,39 @@ def test_a_write_that_matches_no_row_journals_nothing(env, monkeypatch):
 # ══════════════════════════════════════════════════════════════════════
 
 def test_a_declared_terminalizing_transition_carries_none_of_the_verbs_effects(env):
-    """#9649 review F1 / #12403: the door PERMITS a declared terminal target,
-    and performs none of the effects the verb that owns it performs.
+    """#9649 review F1 / #12403: the door PERMITS a declared terminal target, and
+    performs none of the effects the verb that owns it performs.
 
-    ``_ALLOWED_TRANSITIONS['live']`` is ``{retracted, superseded}``, so the
-    transition arm accepts both — but this arm writes ``status`` and journals
-    ``EntityMutated/restatus`` and NOTHING else. Measured here, at this head:
-
-    * no ``PointSuperseded`` / ``PointRetracted`` record — those are the
-      ``:GraphEvent`` store's claim-transition set (``#432`` Task 3), while
-      ``EntityMutated`` is JSONL-only (``#548``), so a change-feed subscriber
-      never learns the claim died;
-    * no ``CORRECTS`` edge for ``superseded`` — ONTOLOGY §5 defines that state
-      AS *"structural replacement via CORRECTS edge"*, so the claim leaves
-      belief (``_terminal_excluded``) and nothing replaces it;
-    * no window close and no ``updatedAt`` stamp, unlike ``retract_point`` /
-      ``supersede_point``.
-
-    ⛔ THIS PINS A DISCLOSED RESIDUAL, NOT A CONTRACT WE WANT. If #12403 lands
-    (refuse the terminalizing targets and name the verb, or emit the record),
-    the assertions below INVERT — ``pytest.raises(ValueError)`` for the first
-    shape, or a ``PointSuperseded`` record for the second. Update the pin with
-    the fix; do not delete it, and do not read its presence as approval of the
-    behaviour.
+    ⛔ ``#12592`` CLOSED THE FIRST HALF OF THIS RESIDUAL FOR ``superseded`` and
+    this pin INVERTS with it, exactly as its own docstring instructed: the bare
+    ``status='superseded'`` is now REFUSED, because ONTOLOGY §4.3 defines the word
+    as *"replaced: it names the successor"*, and the refusal names
+    ``supersede_point`` — the verb that carries the effects. What REMAINS of
+    #12403 is the second half, pinned below on the shape that is still accepted:
+    a ``superseded`` write that DOES name a successor through this door still
+    writes no ``CORRECTS`` edge, no ``PointSuperseded`` record, and closes no
+    window. ``retracted`` (the other declared target) is untouched by #12592 and
+    remains a full #12403 residual — it keeps the old assertions at the end.
     """
     sdk, events = env
     pid = _live(sdk, "claim that will be retired through the generic door")
     before = _row(sdk, pid)
     assert before["validTo"] is None, before
 
-    sdk.update_knowledge(pid, status="superseded")
+    # 1. the bare word is REFUSED now, and names the verb that does the work.
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(pid, status="superseded")
+    # The named verb is the one that EXISTS at this head: `supersede` was
+    # absorbed by `supersede_knowledge` (#4282 row 23), so a message that still
+    # said `supersede(` would prescribe an unperformable repair (AX rule 2).
+    assert "supersede_knowledge(" in str(exc.value), str(exc.value)
+    assert _row(sdk, pid) == before, "the refused write moved the row"
 
+    # 2. the residual that REMAINS: a successor-naming write is accepted and
+    #    still mints no edge and no claim-transition record.
+    sdk.update_knowledge(pid, status="superseded", supersededBy="the named successor")
     after = _row(sdk, pid)
     assert after["status"] == "superseded", after
-    # 1. no claim-transition record of any kind.
     journal = [
         json.loads(line) for line in
         (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1331,21 +1357,14 @@ def test_a_declared_terminalizing_transition_carries_none_of_the_verbs_effects(e
         f"this residual is CLOSED (#12403) — invert this pin: {sorted(kinds)}")
     assert "EntityMutated" in kinds, (
         f"the restatus journal is what the door does write: {sorted(kinds)}")
-    # 2. no successor edge, and the claim really does leave belief.
-    # ⛔ INCOMING, not outgoing (review round 12): the SDK spells the edge
-    # `MERGE (a)-[:CORRECTS]->(b)` with `a` = the CORRECTING point, so a
-    # superseded node has ZERO OUTGOING edges whether or not a successor
-    # exists — an outgoing count is unfalsifiable in the direction that
-    # matters, and a future fix minting `(new)-[:CORRECTS]->(old)` would
-    # leave it green. ONTOLOGY §5 defines the state by the edge INTO it.
     assert sdk._get_proj().g.query(
         "MATCH (:Point {id:$id})<-[r:CORRECTS]-() RETURN count(r)",
         params={"id": pid}).result_set[0][0] == 0, (
-        "#12403: a successor-less `superseded` is the shape ONTOLOGY §5 forbids")
+        "#12403: a successor-named `superseded` through this door mints no "
+        "CORRECTS edge — the verb does, and that is the residual")
     assert sdk.query("claim that will be retired") in ([], None), (
         "the dead claim must leave belief — that is WHY a missing successor "
         "matters (#2498)")
-    # 3. the window the verbs close stays exactly as it was.
     assert after["validTo"] == before["validTo"], after
 
     # ...and the VERB, on the same shape, does all three (the contrast the
@@ -1553,17 +1572,22 @@ def test_a_plain_status_key_still_gets_the_documented_answer(env):
     """Non-vacuity control: the ordinary spelling must behave, not be refused.
 
     Without this, every pin above would pass on a guard that refused every write.
+    ⛔ The control is ``retracted`` — a DECLARED transition from ``live`` that
+    needs no partner. ``superseded`` stopped being usable as this control in
+    #12592: ONTOLOGY §4.3 makes the bare word a refusal, and the declared-but-
+    partnerless shape is pinned in
+    ``test_an_undeclared_transition_from_live_is_refused``.
     """
     sdk, _ = env
     pid = _live(sdk, "a live claim")
 
-    sdk.update_knowledge(pid, status="superseded")
-    assert _row(sdk, pid)["status"] == "superseded", (
+    sdk.update_knowledge(pid, status="retracted")
+    assert _row(sdk, pid)["status"] == "retracted", (
         "a DECLARED transition must still land — the arm is not simply closed")
 
     # ...and the plain spelling is then refused on the SAME guarantee the exotic
     # keys were refused on, so the family is one rule and not two.
-    with pytest.raises(ValueError, match="superseded"):
+    with pytest.raises(ValueError, match="retracted"):
         sdk.update_knowledge(pid, status="live")
 
 
@@ -1583,7 +1607,11 @@ def test_a_rendered_status_key_is_dropped_before_the_sibling_arm(env):
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
 
-    sdk.update_knowledge(pid, **{_KStr("q"): "superseded"})
+    # ⛔ `retracted`, not `superseded` (#12592): the word now needs its partner,
+    # and adding one would put a SECOND field in this call — the very thing this
+    # pin's "one intent journals ONE record" assertion measures. The DROP is what
+    # is under test, and any status exercises it.
+    sdk.update_knowledge(pid, **{_KStr("q"): "retracted"})
 
     recs = _mutations(events, pid)
     assert len(recs) == 1, (
