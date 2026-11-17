@@ -26,7 +26,6 @@ than report agreement.
 
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 from decimal import Decimal
@@ -65,50 +64,31 @@ def test_the_census_reconciles_arithmetically():
     totals = census.rg_totals(("tortoise",))
     ast_door_calls = len(result["sites"]) + result["non_cypher_door_calls"]
     assert totals["lines_door_calls"] - totals["door_occurrences_without_a_call"] == ast_door_calls
-    # ⛔ The THIRD reconciliation row the REPORT PRINTS — `− 0`, the residual — and
-    # the printed components beside it. This is NOT the assertion above restated.
-    # `check()` reads only the `<!-- cypher-inventory:KEY = N -->` marker comments,
-    # so every number in the doc's PRINTED arithmetic block is unpinned by it: an
-    # edit of `− 0` → `− 1`, or `1,557` → `1,556`, or `1301` → `1201`, leaves
-    # `--check` green (the drift class the review named for the markers). The doc
-    # states the `− 0` is a RESIDUAL, not a measurement, so what is worth pinning is
-    # that the printed residual is the one these two measurements derive — a
-    # NON-zero there is the signal that the regex count and the AST walk stopped
-    # agreeing (`#13098` review P3).
-    residual = (totals["lines_door_calls"]
-                - totals["door_occurrences_without_a_call"] - ast_door_calls)
-    printed = _printed_reconciliation()
-    assert printed["residual"] == residual, (
-        f"the report prints the third row as −{printed['residual']}, but the two "
-        f"measurements derive {residual}")
-    assert printed["ast_door_calls"] == ast_door_calls
-    assert (printed["classified"], printed["non_cypher"]) == (
-        len(result["sites"]), result["non_cypher_door_calls"])
-
-
-def _printed_reconciliation() -> dict[str, int]:
-    """Parse the doc's PRINTED reconciliation block — prose, not the pinned markers.
-
-    Deliberately a separate reader from `census.check()`: that one cannot see this
-    block, which is why the numbers a reader quotes were able to drift while
-    `--check` stayed green.
-    """
-    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
-        encoding="utf-8")
-    block = doc_text.split("### The reconciliation, measured (not inferred)", 1)[1]
-    block = block.split("```", 2)[1]
-
-    def num(pattern: str, group: int = 1) -> int:
-        found = re.search(pattern, block, re.MULTILINE)
-        assert found, f"the reconciliation block no longer prints {pattern!r}"
-        return int(found.group(group).replace(",", ""))
-
-    return {
-        "residual": num(r"^\s*−\s*([\d,]+)\s+occurrences sharing a line with a CALL"),
-        "ast_door_calls": num(r"^=\s*([\d,]+)\s+AST door calls"),
-        "classified": num(r"^=\s*([\d,]+)\s+classified Cypher statements"),
-        "non_cypher": num(r"^=\s*[\d,]+\s+classified Cypher statements\s*\+\s*([\d,]+)"),
-    }
+    # ⛔ This second assertion was an IDENTITY and could never fail: both buckets
+    # come from the SAME regex, so `regex − non-call` equals the regex's own
+    # partition total by construction, and subtracting the AST count from it is
+    # the assertion above rearranged. Its comment claimed a line regex and an AST
+    # walk were "measured independently", which the arithmetic denies
+    # (`#13098` review P2). What is asserted now is a PER-LINE cross-check of the
+    # line regex against the AST's own door nodes — strictly stronger than the
+    # sum, because a balanced pair of opposite errors (one line where the regex
+    # sees two occurrences and the AST holds one node, another off in the other
+    # direction) leaves the totals closing perfectly and is caught only here.
+    # Non-vacuity MEASURED, and stated for exactly what it shows: putting a
+    # docstring `.query(` on a line that already carries a real door call takes
+    # this counter 0 -> 1. That mutant ALSO reddens the assertion above (the
+    # occurrence leaves `door_occurrences_without_a_call`, so `regex − non-call`
+    # grows by one) — so what it proves is that this counter can be non-zero, NOT
+    # that it is the only arm that sees a divergence. What only this counter sees
+    # is the BALANCED case: two lines that are wrong in opposite directions leave
+    # every total above closing perfectly, and no assertion on those totals can
+    # ever notice (`#13098` review P3 caught this comment claiming more than the
+    # mutant showed).
+    assert totals["lines_where_regex_and_ast_disagree"] == 0, (
+        "the door regex and the AST disagree on how many door calls ONE LINE carries — the "
+        "totals can still close over that, which is exactly why this arm exists: "
+        f"{totals}"
+    )
 
 
 def test_the_census_pin_can_report_drift(tmp_path):

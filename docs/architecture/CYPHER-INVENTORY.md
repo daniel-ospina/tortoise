@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1301** | **97** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **8,791** | **799** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/` |
+| every tracked surface (`--all-surface`) | **8,793** | **799** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement, NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it read 8,791 here, which is no tree this tool can print) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -87,29 +87,53 @@ shape total, so a total cannot be inflated by them.
 
 ### The reconciliation, measured (not inferred)
 
-The `rg`-style predicates, computed in-process so they are reproducible without a shell:
+The predicates, stated exactly as `rg_totals` runs them — a shell `rg` reproduces NEITHER number, for
+two reasons given below the block, so the block does not pretend it does:
 
 ```text
-rg -o '\.(ro_)?(query|execute)\s*\(' tortoise/   → 1,609 occurrences across 105 files
-rg -o '\b(MATCH|MERGE)\s*\(' tortoise/           → 2,326 occurrences across 140 files
+population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
+            (the 295 files the tool reports as `py_files`), scanned as WHOLE TEXT
+
+door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
+verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
+
+1,609 occurrences of the door predicate across 105 files
+2,326 occurrences of the verb predicate across 140 files   (upper-bound shape, see below)
 
 1,609  regex door-pattern occurrences
   −52  occurrences on a line carrying NO door call (comments and docstrings)
-  − 0  occurrences sharing a line with a CALL
+= 1,557  occurrences on a line carrying a door CALL          [measured]
+  − 0   of those, the AST did not record (residual)
 = 1,557  AST door calls
 = 1301  classified Cypher statements + 256 non-Cypher door calls
 ```
 
-The first two rows are measured by the tool (`--json` → `rg_totals`), and so is the **−52**. ⛔ The
-**third** row (`− 0`) is a **residual**, not a measurement — `rg_totals` has no such key; it is what
-balances the subtraction, printed so a reader can see the arithmetic close. The `= 1,557` beside it
-IS measured: it is the AST door-call count (`sites` + `non_cypher_door_calls`, both pinned). An
-earlier revision of this paragraph said *every* line here was `rg_totals`-computed, which overstated
-it — and its next sentence then called the `0` "a measurement, not a convenience", which reversed
-the row it names (both `#13098` review P3). The `0` is still worth keeping visible even though it is
-derived: it is the residual the first version of this tool silently absorbed, and the review caught
-it closing over a 52-statement undercount — so a NON-zero here is the signal that the two
-measurements (regex occurrences, AST calls) have stopped agreeing. The
+⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (295 files; the tool
+prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
+cannot do. Measured on this tree:
+
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 295 files>` → **1,609** across **105** files: exactly the
+tool's number. A bare `rg … tortoise/` gives 1,615 / 106, the 6 extra occurrences living in
+`tortoise/test_*.py` — `--glob '!tortoise/test_*.py'` only excludes the top level, so it does not
+reproduce the exclusion either.
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 295 files>` → **2,313** across **139** files, while the tool
+reports 2,326 / 140. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
+concatenation leaves `MATCH` and its `(` on two lines, one occurrence to the tool and none to `rg`.
+(A bare case-sensitive `rg` gives 2,047, and `-i` without the exclusion 2,385 — which is why the
+number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
+
+The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−52** and
+the **= 1,557 on a door-call line** are both counts, not differences. ⛔ The **residual** row is
+the only derived one — it is the gap between the regex's own line-based count and the AST's node
+count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
+two measurements have stopped agreeing. It is also the value the first version of this tool silently
+absorbed: the review caught that version closing over a 52-statement undercount. The row is now
+falsifiable rather than decorative — `rg_totals` carries `lines_where_regex_and_ast_disagree`, a
+PER-LINE cross-check the totals structurally cannot express (a balanced pair of opposite errors
+leaves every total above closing perfectly), pinned at 0 by the census suite. An earlier revision of
+this paragraph called the residual "a measurement, not a convenience", which reversed the row it
+names (`#13098` review P3). The
 `MATCH|MERGE` figure is **not** a statement count and is printed only because a reader will run it:
 one statement can contain two node patterns, and a statement built with `UNWIND` contains none, so it
 is an upper-bound shape, never a census.
@@ -378,6 +402,14 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_unresolved = 104 -->
 <!-- cypher-inventory:shape_plain_read = 573 -->
 <!-- cypher-inventory:shape_plain_write = 281 -->
+<!-- cypher-inventory:shape_adjacency_read = 189 -->
+<!-- cypher-inventory:shape_adjacency_write = 100 -->
+<!-- cypher-inventory:shape_ep_read = 21 -->
+<!-- cypher-inventory:shape_ep_write = 11 -->
+<!-- cypher-inventory:shape_ddl_ddl = 17 -->
+<!-- cypher-inventory:shape_traversal_read = 3 -->
+<!-- cypher-inventory:shape_fulltext_read = 2 -->
+<!-- cypher-inventory:shape_unresolved_unresolved = 104 -->
 <!-- cypher-inventory:non_cypher_door_calls = 256 -->
 <!-- cypher-inventory:ast_door_calls = 1557 -->
 <!-- cypher-inventory:partial = 313 -->
