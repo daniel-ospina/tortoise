@@ -1175,7 +1175,7 @@ class EmbeddingModel:
         unaffected, and the bounded path can only run where a background load is
         the declared behaviour.
         """
-        if cls._instance is not None and cls._instance._model is not None:
+        if cls.loaded():
             return True
         now = time.monotonic()
         # A load that FAILED must not re-charge the budget on every write:
@@ -1194,10 +1194,29 @@ class EmbeddingModel:
             return True
         # Idempotent: a no-op while the lifespan pre-warm is already running,
         # and the thing that starts one when a write is first past the post.
-        cls.start_warm_up()
+        #
+        # ⛔ #13224 F2: the cooldown above is TIME-BOXED and `start_warm_up` is
+        # ONE-SHOT — `_warm_up_started` is cleared only by `_reset()` — so once
+        # the first attempt has ended there may be NO load in flight and none
+        # will ever be started from here. Waiting then cannot make the model
+        # ready: the loop below sleeps out the whole budget and declines anyway,
+        # on EVERY row, for the life of the process (measured: 0.25 s / 0.01 s =
+        # 25 wakeups per row; a 12k-row ingest ≈ 50 min of pure sleep), while the
+        # pre-fix `get()` negative cache declined in zero time. That is exactly
+        # the state a keyword-only install (no `sentence-transformers`) and a
+        # broken load live in, and `tests/conftest.py` pins the warm-up off for
+        # the whole suite so no test could see it.
+        #
+        # `start_warm_up` returns the LIVE thread, or `None` when nothing is in
+        # flight — so `None` here is the mechanical answer "this write cannot be
+        # satisfied by waiting", and declining immediately is what keeps the
+        # bounded wait doing its real job: overlapping a load that is genuinely
+        # running (the coalescing precondition the serving pattern names).
+        if cls.start_warm_up() is None:
+            return False
         deadline = now + max(0.0, budget)
         while True:
-            if cls._instance is not None and cls._instance._model is not None:
+            if cls.loaded():
                 return True
             now = time.monotonic()
             if cls._last_failed_at is not None and \
@@ -1210,8 +1229,19 @@ class EmbeddingModel:
 
     @classmethod
     def loaded(cls) -> bool:
-        """True iff the model is already warm — never blocks, never loads."""
-        return cls._instance is not None and cls._instance._model is not None
+        """True iff the model is already warm — never blocks, never loads.
+
+        ⛔ Read the instance into a LOCAL: `get()` nulls `cls._instance` under
+        `cls._lock` when a load fails, so `cls._instance is not None and
+        cls._instance._model` is two reads of a mutable class attribute with no
+        lock between them, and a concurrent failing `get()` flips the second
+        into `AttributeError: 'NoneType' object has no attribute '_model'`
+        (#13224 F2/observation). Every writer wraps the seam in `except
+        Exception`, so that surfaces as a silently dropped vector rather than an
+        error — the failure mode this file spends thousands of lines removing.
+        """
+        instance = cls._instance
+        return instance is not None and instance._model is not None
 
     # ── #4055: the one-time setup's clock, read by the wait-bound seams ────
 
@@ -1653,6 +1683,23 @@ WRITE_EMBED_BUDGET_S = 0.25
 _WRITE_READY_POLL_S = 0.01
 
 
+def _in_replay_fold() -> bool:
+    """True while this write is a JOURNAL REPLAY fold, not a request (#13224 F3).
+
+    Imported lazily: `tortoise.embeddings` is on the hot path of every writer and
+    must not drag the projection package in at import time (the projection itself
+    imports this module lazily, from inside the fold). A projection that cannot
+    answer is treated as "not a replay" — the bounded wait, i.e. the pre-F3
+    behaviour — because a broken reader must never turn a WRITE into a no-op by
+    making it block on a cold load instead.
+    """
+    try:
+        from .projection import replay_window_open
+        return bool(replay_window_open())
+    except Exception:  # noqa: BLE001, RUF100 — a write must not die on the probe
+        return False
+
+
 def encode_for_row(
     content: str, expected_dim: int | None,
 ) -> list[float] | None:
@@ -1681,10 +1728,25 @@ def encode_for_row(
     trusted — the measurement `#5008` asks for, without a new stats channel in
     the projection.
 
-    ⚠️ **Live/replay parity** holds by construction: the verdict is a pure
-    function of the TEXT, and live and replay encode the same text, so gating
-    both sides (they both call this seam) cannot make one carry a vector the
-    other does not — the `#5004` divergence class.
+    ⚠️ **Live/replay parity** holds for the GATE, which is a pure function of
+    the TEXT: live and replay encode the same text, so gating both sides (they
+    both call this seam) cannot make one carry a vector the other does not — the
+    `#5004` divergence class.
+
+    ⛔ The #13224 BOUND is deliberately **not** applied to a journal REPLAY
+    (`tortoise rebuild` / `rebuild_all`). The bounded wait is a *request* budget
+    — ``#4055``: process INITIALISATION must not be charged to a request's wait
+    budget — read in BOTH directions: a rebuild is not a request, and its fold is
+    cold by construction (one process, one fold of the journal, first row before
+    any load has landed). Charging 0.25 s to it would write the FIRST MINUTE of
+    a recovery's own rows without vectors, where the pre-#13224 blocking fold
+    produced them, and nothing on the rebuild path runs
+    ``graph-scripts/backfill_embeddings.py``. So the fold keeps the synchronous
+    ``encode_for_store`` and pays the one-time load instead: bounded by the load
+    window rather than by the whole rebuild, and a recovered graph stays as
+    retrievable as the one it replaced. The seam finds a replay window through
+    ``projection.replay_window_open()`` — the ONE reader a producer-side door is
+    meant to consult — so no caller has to remember to pass a flag.
 
     ⚠️ **Deliberately NOT routed through here**, so the boundary is written
     down rather than inferred: `encode_batch_for_store` (the session TURN
@@ -1701,6 +1763,14 @@ def encode_for_row(
                 verdict["reason"], verdict["rule_id"],
             )
             return None
+    # ⛔ #13224 F3: a REPLAY fold is not a request. It is cold by construction and
+    # must reproduce the vectors the pre-#13224 fold produced, so it keeps the
+    # synchronous encode instead of the request's wait budget (see the docstring).
+    # `replay_window_open()` is the projection's own, stack-inherited answer to
+    # "did this record come FROM the journal?", so a nested write lane cannot
+    # escape it and no caller has to pass a flag through the fold.
+    if _in_replay_fold():
+        return encode_for_store(content, expected_dim)
     # ⛔ #13224: BOUND the wait for a cold embedder. `get()` (reached through
     # `encode_for_store`) blocks up to `_LOAD_TIMEOUT_S` for the load and, during
     # a warm window, on `_lock` for the load another thread is running — so a
