@@ -4028,6 +4028,70 @@ operator who read the line above as "CI defends this" would never run it.
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 | TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `migrations_head` row: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` — **not by that `/health` read**, but it **WAS measured, 2026-11-05T23:07:38Z**, by the fail-closed drift gate (see §"Arming the Postgres record" below: both migrations RECORDED APPLIED). Re-read `/health` before reusing any *endpoint* value here; the LEDGER question is the gate's to answer, and `/health` cannot answer it at all. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so **the arming is not the remaining work.** ⛔ **The remaining work is ORDERED, and it is not "migration + backup":** the 2026-11-03 decision puts a **verified backup FIRST** (*"No migration runs on an unbacked store"*), and **that first step is the live blocker** — a missing `TORTOISE_RECORD_BACKUP_DSN` (see the credential table in §"Arming the Postgres record"). This row is not a licence to run the apply. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
+| TORTOISE_RECORD_SERVE | — (a **mode flag**, not a credential: no secret to provision) | — | — (unset everywhere, so CI stays `off`) |
+
+### Arming the READ path — `TORTOISE_RECORD_SERVE` (epic #7879, #12941)
+
+> ⛔ **`TORTOISE_RECORD_DSN` IS A HARD PRECONDITION, AND IT IS A DIFFERENT FLAG.**
+> `TORTOISE_RECORD_SERVE` selects **which store answers a read**; `TORTOISE_RECORD_DSN` is the
+> record's own connection string (see [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)).
+> Arming the read mode with **no resolvable DSN does not degrade to the cache**: `open_record` raises
+> a **structural** `RecordServeError` and `serve_point` re-raises structural errors, so the read
+> **fails instead of falling back — but the shape of the failure is per door**, and an operator sent
+> hunting one of them will miss the other two: the hosted `GET /v1/points/{id}` answers **500**, the
+> MCP door returns an **error payload** (`_safe`, which returns an `_SafeError` rather than raising),
+> and the **SDK raises** to its own caller. ⛔ **None of the three falls back to the cache.**
+> Check the DSN resolves *first* (`GET /health` → `"record":{"armed":true,…}`).
+
+The three modes (`tortoise/record_serve.py` — `serve_mode()`, ONE parser and ONE registry):
+
+| value | what answers | when to use it |
+|---|---|---|
+| *unset* / `off` (**DEFAULT**) | the cache, exactly as before #12941 | the shipped default. A typo reads OFF too — an unrecognised value is OFF by design |
+| **`prefer`** | **the record first**, then the cache with a NAMED, COUNTED fallback | ✅ **RECOMMENDED.** Every armed read reads its own writes, and the dogfood keeps working when the record is slow, down, unasked or has no tenant to ask |
+| `record` | the record only — a miss is an absence, an outage RAISES | strict / verification lanes. **No cache branch**: any record failure is a 500 or a refusal on every read |
+
+⚠️ **`prefer` is RECORD-FIRST, not "cache when warm".** `_from_record()` runs before any cache
+consult — that is deliberate (`record_serve`'s `MODES` block, #10602's lane design). The
+"cache when warm, fall back to the record" phrasing in #12941's summary is **not** what was built;
+see the `OVERRIDES:` line recorded on #12941.
+
+**What changes on an armed read — two things, and both are consequences of record-first:**
+
+1. **Latency: a Postgres round trip per read.** The leg is bounded on all three doors by
+   `monitoring.record_read_timeout_s()` (**9.0 s**, pinned *below*
+   `mcp_auth._TRANSPORT_WAIT_BOUND_S` = 10 s so the lane's legible refusal — not a transport timeout
+   — is what a saturated caller sees). A bound miss under `prefer` answers from the cache with
+   `fallbackReason: "record-read-bound-miss"`.
+2. **The wire shape.** A found read names the store that answered (`servedFrom`, and
+   `fallbackReason` when there was a fallback), and an answer **no reachable store could SEE**
+   carries `residency: "not-hot"` instead of an empty dict (#7952 — a cache miss must never be
+   reported as an absence). ⚠️ **`not-hot` is deliberately TRUTHY**, so a write-verification written
+   as `if result:` reports a node this store could not see as a *successful write*: test
+   `result.get("id")`, or refuse the `residency` marker. The same rule is stated in the
+   `tortoise_get_point` / `tortoise_get_operator` registry descriptions, which is what a client
+   codes against.
+
+**Unsetting restores today's behaviour byte-for-byte** — `serve_mode()` reads unset, blank, `0`,
+`false`, `no` and `off` as OFF, and the `off` shape is pinned by the `off`-mode tests in
+`tests/test_12941_read_your_writes.py`.
+
+```bash
+fly secrets set TORTOISE_RECORD_SERVE=prefer -a tortoise-y4mjjq   # applies on the next deploy
+fly secrets unset TORTOISE_RECORD_SERVE -a tortoise-y4mjjq        # back to the shipped default
+```
+
+**Reading the fallback counter.** `record_serve.fallback_counts()` returns the process's counts by
+reason — `record-unavailable`, `record-miss`, `record-tenant-unresolved`,
+`record-read-lane-refused`, `record-read-bound-miss`. ⚠️ It is **process-local**: it is not published
+on `/health` today, so it is readable in-process (and from tests) but **not** from the pod. Do not
+read its absence as "no fallbacks happened".
+
+**Verification.** `tests/test_12941_read_your_writes.py` pins the seam and every door DB-free (a fake
+record, a fake cache) — read-your-writes, `not-hot`-is-never-empty, the byte-identical default, and
+the bound. `tests/test_record_serve.py` owns the seam's own unit contract.
+
+⛔ **Arming is an OWNER action.** Nothing in the code arms it, and no deploy sets it.
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 
