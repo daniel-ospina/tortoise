@@ -214,7 +214,7 @@ The eval pipeline loses questions when the shared FalkorDB container stalls unde
 **Acceptance:** `--workers` help text reflects contended-host guidance; preflight warns (or optionally gates, per owner decision) when host load avg > 20; macOS-safe via `os.getloadavg()`.
 **Files:**
 
-- Modify: `tools/longmem_eval/run.py` (help text `:2472-2477`)
+- Modify: `tools/longmem_eval/run.py` (help text `:2497-2502`)
 - Modify: `tools/longmem_eval/preflight.py` (load check)
 - Test: `tests/`
 

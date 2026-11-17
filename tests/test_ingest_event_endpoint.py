@@ -814,12 +814,14 @@ def test_direct_route_event_outdated_flag_rejected_phase1(sdk, spelling):
     assert _count(sdk, "MATCH (n:Event {name:'Launch'}) RETURN count(n)") == 0
 
 
-def test_direct_route_live_event_not_over_rejected(sdk):
-    """#7925 review P1 (Event arm's OTHER edge): only TERMINAL declared values
-    reject. A bundle-local Event declaring `status: 'live'` is not born
-    terminal, so the direct Event<->Object edge is legal and must be written
-    operator-less. Without this pin the Event arm could over-reject every
-    declared status."""
+def test_direct_route_live_event_status_is_refused(sdk):
+    """#13100 reopens #7925's non-terminal allowance on an `:Event`.
+
+    #7925 pinned that a bundle-local Event declaring `status: 'live'` was
+    accepted (only terminal words rejected). The approved model has no Event
+    lifecycle at all — a thing that has not happened yet is a PLAN — so the
+    declaration is refused at Phase 1, and nothing commits.
+    """
     bundle = {
         "entities": [
             {"ref": "evt", "type": "event", "name": "Launch",
@@ -828,9 +830,22 @@ def test_direct_route_live_event_not_over_rejected(sdk):
         ],
         "connections": [{"from": "evt", "to": "o", "operator": "IMPL"}],
     }
-    assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
-    assert res["created"]["connections"] == 1
+    violations = sdk._validate_bundle(bundle)
+    assert violations, "a non-terminal Event status passed Phase 1"
+    assert any("for an :Event" in v["message"] for v in violations)
+    # ZERO mutation — the point of a Phase-1 refusal.
+    assert _count(sdk, "MATCH (n:Event {name:'Launch'}) RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (:Event)-[r:IMPL]->(:Object) RETURN count(r)") == 0
+    assert _operator_count(sdk) == 0
+
+    # …and a status-less Event still reaches the direct route operator-less.
+    ok = {"entities": [
+        {"ref": "evt", "type": "event", "name": "Launch",
+         "eventKind": "sessionCaptured"},
+        {"ref": "o", "type": "object", "name": "Delta"}],
+        "connections": [{"from": "evt", "to": "o", "operator": "IMPL"}]}
+    assert sdk._validate_bundle(ok) == []
+    assert sdk.ingest(ok)["created"]["connections"] == 1
     assert _count(sdk, "MATCH (:Event)-[r:IMPL]->(:Object) RETURN count(r)") == 1
     assert _operator_count(sdk) == 0
 

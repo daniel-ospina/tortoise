@@ -1995,8 +1995,9 @@ _ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
 #: without changing what it means.
 _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 
-#: The labels whose ``status`` the COMPARISON decides. ``Event`` carries
-#: ``eventStatus`` under a different name and its lifecycle has no such fold, so the
+#: The labels whose ``status`` the COMPARISON decides. ``Event`` has no lifecycle
+#: at all — ``eventStatus`` is an INGEST marker (``pending`` / ``indexed``, #13100),
+#: not a state word, and the projection folds no Event status — so the
 #: status leg stays bounded to the families that model the field. ONE home (#8859
 #: follow-up review round 2, P3): the status comparison in `_compare_entities` reads
 #: this, and `entity_parity_bounds["status_compared"]` emits it — the set used to be
@@ -2843,9 +2844,10 @@ def _compare_entities(journal_entities, graph_entities,
         # SEEDS it ON CREATE and `_SUBJECT_HANDLED` keeps a re-mention from
         # clobbering it), so a superseded team/role/person is exactly the
         # "buried behind a live status" shape this leg exists to catch.
-        # `Event` carries `eventStatus` under a different name and its
-        # lifecycle has no such fold, so the STATUS leg stays bounded to the
-        # families that model the field. Presence is compared for every kind.
+        # `Event` has no lifecycle at all (`eventStatus` is an INGEST marker,
+        # #13100) and the projection folds no Event status, so the STATUS leg
+        # stays bounded to the families that model the field. Presence is
+        # compared for every kind.
         # (The Object-only `ambiguous_status` bound is unaffected: a Subject
         # name-only ref is REFUSED as never-guess, so it never becomes
         # ambiguous.)
@@ -2877,8 +2879,8 @@ def _compare_entities(journal_entities, graph_entities,
                         })
         # #7936: the BELIEF leg — every reference-fold label, `Event` included
         # (the belief fold matches it on its `id` property exactly like the
-        # other three, so `eventStatus`'s separate lifecycle is irrelevant
-        # here). Presence-conditional from the JOURNAL side, like the Point
+        # other three, and an Event has no lifecycle for this leg to model,
+        # #13100). Presence-conditional from the JOURNAL side, like the Point
         # leg: only a key the journal's own fold carries can state an
         # expectation, and a journal-side `None` is "absent" rather than a
         # value (`_canonical_point_fields`'s rule — the writer cannot persist a
