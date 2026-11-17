@@ -24,6 +24,7 @@ mirroring the SQL semantics the real functions execute
 """
 from __future__ import annotations
 
+import itertools
 import json
 import uuid
 from datetime import UTC, datetime
@@ -2072,12 +2073,15 @@ class FakeControlPlane:
     def _certifiable(rows, total, cursor: str) -> bool:
         """Derive `complete` the way the real walk does — never assert it.
 
-        ``SupabaseControlPlane.query_all`` certifies only when the walk could
-        ADVANCE from every page it saw (a page where NO row carries a cursor
-        value leaves ``advanceable`` empty, so it breaks with ``exhausted``
-        False) AND a stated total, if any, was met. The uncapped double reaches
-        the end in one page, so "the page can advance" IS "the walk could
-        finish".
+        ``SupabaseControlPlane.query_all`` certifies only when ALL THREE of its
+        gates pass: (1) the walk could ADVANCE from every page it saw (a page
+        where NO row carries a cursor value leaves ``advanceable`` empty, so it
+        breaks with ``exhausted`` False); (2) every page is STRICTLY ASCENDING on
+        the cursor (`if any(a >= b for a, b in itertools.pairwise(advanceable)):
+        break` — a server that ignored `order` would otherwise step OVER rows and
+        still certify); and (3) a stated total, if any, was met. The uncapped
+        double reaches the end in one page, so "the page advances AND is
+        ascending" IS "the walk could finish".
 
         ⛔ A MIXED PAGE IS NOT REFUSED — only a wholly uncursored one is. The
         real check is ``advanceable = [c for c in cursors if c]; if not
@@ -2118,9 +2122,18 @@ class FakeControlPlane:
         # cursor values (a page may carry a row whose cursor could not be read,
         # and that row is kept in `rows` but cannot satisfy a total). Counting
         # rows here would certify a walk production refuses.
+        # GATE 2 — STRICTLY ASCENDING. Mirrored because omitting it is the LOOSE
+        # direction: a duplicated or descending page certifies here while the
+        # store refuses the walk, and `_org_graph_names` deprovisions whatever the
+        # double certified. `tools/…`-independent: it is two lines of the real rule.
+        advanceable = [c for c in cursors if c]
+        if any(a >= b for a, b in itertools.pairwise(advanceable)):
+            return False
         if total is None:
             return True
-        return len({c for c in cursors if c}) >= total
+        # GATE 3 — the stated total counts DISTINCT CURSOR VALUES, not rows (the
+        # real certificate is `len(seen) >= total`, and `seen` is a set).
+        return len(set(advanceable)) >= total
 
     def _query_impl(self, table: str, *, select: list[str] | None = None,
                     filters: list[tuple[str, str, object]] | None = None,

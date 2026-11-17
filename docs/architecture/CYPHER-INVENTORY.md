@@ -98,7 +98,7 @@ door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
 1,622 occurrences of the door predicate across 108 files
-2,342 occurrences of the verb predicate across 142 files   (upper-bound shape, see below)
+2,343 occurrences of the verb predicate across 143 files   (upper-bound shape, see below)
 
 1,622  regex door-pattern occurrences
   −53  occurrences on a line carrying NO door call (comments and docstrings)
@@ -118,8 +118,8 @@ tool's number. A bare `rg … tortoise/` gives 1,628 / 109, the 6 extra occurren
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,622 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,329** across **141** files, while the tool
-reports 2,342 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **142** files, while the tool
+reports 2,343 / 143. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — a wrapped English sentence in ten (e.g. `oauth.py:1600`'s “limits match” / “(#329): preserve
@@ -129,9 +129,9 @@ over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone 
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
 which is why the tool's verb total is an upper bound.
-(A BARE case-sensitive `rg … tortoise/` gives 2,063 — that population includes `tortoise/test_*.py`
-and one `.ts` hook, so it is NOT the 2,060 the same predicate finds over the 297-file set above; `-i`
-without the exclusion gives 2,401. Both figures are stated with their population because that is why
+(A BARE case-sensitive `rg … tortoise/` gives 2,064 — that population includes `tortoise/test_*.py`
+and one `.ts` hook, so it is NOT the 2,061 the same predicate finds over the 297-file set above; `-i`
+without the exclusion gives 2,402. Both figures are stated with their population because that is why
 the number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
@@ -415,7 +415,7 @@ statement site: `ast_door_calls` **1571→1569** and `non_cypher_door_calls` **2
 `sites`/`plain`/`candidates` are unchanged (1311 / 859 / 578 — the 578 is the `plain` READ half,
 which is also the migration-candidate count). `files_scanned` stays 297 and `files_with_sites` 99:
 both conversions land in a file that already carries sites. The `rg` reconciliation in §1 is
-re-measured on this tree (1,622 / 2,329 / 1,628 bare / 2,060 / 2,401), Appendix A is regenerated
+re-measured on this tree (1,622 / 2,330 / 1,628 bare / 2,061 / 2,064 bare-case-sensitive / 2,402), Appendix A is regenerated
 with `--markdown`, and `--check` reports **`25 pinned counts match`**.
 ⛔ **The re-derivation is not a formality at this head, and this is the case that proves it:** the
 branch's own pre-merge tree measured **1567 / 256**, and `origin/main`'s measured **1571 / 260** —
