@@ -676,11 +676,18 @@ def test_status_at_the_COMPLETION_BOUNDARY_still_reports_done(monkeypatch, capsy
 
     At `next_seq - 1 == len(journal.records)` the record holds exactly this
     journal and the honest answer is `0` / `true`. A guard written `>=` instead
-    of `>` would report `unknown` for a correctly completed record — a false
-    refusal on the one input where the tool is supposed to say "done". Both
-    sides of the boundary are pinned, so neither direction can go green.
+    of `>` reports `unknown` for a correctly completed record — a false refusal
+    on the one input where the tool is supposed to say "done".
+
+    ⛔ Both sides are pinned AT THE EXACT VALUE — this test at `len`, the next at
+    `len + 1` — and both derive `len` from the fixture rather than hardcoding 39: a
+    test sitting only a few positions away lets a guard LOOSENED to `> len + k`
+    stay green while it reports `fully_consumed: true` for a record that holds
+    positions this journal does not have (measured: `> len + 5` survived until
+    the `len + 1` case below existed).
     """
-    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=39, present=39,
+    n = len(read_journal(FIXTURE))
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=n, present=n,
                                                 first_gap=None, min_seq=1))
     rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE)])
     assert rc == EXIT_OK
@@ -694,6 +701,32 @@ def test_status_at_the_COMPLETION_BOUNDARY_still_reports_done(monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload["events_remaining"] == 0
     assert payload["fully_consumed"] is True
+
+
+def test_status_ONE_position_past_the_boundary_is_a_mismatch(monkeypatch, capsys):
+    """⛔ The under-fire side, pinned at `len + 1` — not a few positions away.
+
+    A record holding one position more than this journal has is already a
+    DIFFERENT journal, and `plan` refuses it. Measured before this test: a guard
+    loosened to `> len + 5` left the suite green and reported
+    `events remaining: 0` / `fully_consumed: true` for records holding up to 44
+    positions over this 39-record journal.
+    """
+    n = len(read_journal(FIXTURE))
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=n + 1, present=n + 1,
+                                                first_gap=None, min_seq=1))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "not the same journal" in out
+    assert "events remaining: 0" not in out
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["events_remaining"] is None
+    assert payload["fully_consumed"] is None
 
 
 def test_the_mismatch_sentence_names_the_HIGH_water_mark_not_the_resume_point(
