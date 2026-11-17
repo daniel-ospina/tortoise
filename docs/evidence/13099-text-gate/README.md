@@ -79,7 +79,7 @@ index**. Those are different claims and are kept different on purpose.
 | **Search (rung 1)** | `mcp__seo-intelligence__perplexity_search` — **server not registered on this box** (`mcp_load` → *Unknown MCP server*). Same failure `#12298` recorded. |
 | **Search (rung 2)** | `web_search` refused — `PERPLEXITY_API_KEY not set`. `~/keys.env` exists (0600) and carries **no** Perplexity key. **External research was therefore unavailable**, so every operational fact below is **measured from the deployed artifact itself** (extension control files, package metadata, `pg_settings`, relation sizes) rather than quoted from a vendor page. Where a fact is inherited from a prior record, it says so. |
 | **Graph (internal)** | `#12298`'s record and `SEARCH-ARCHITECTURE.md` read in full. The graph brief `~/.pi/agent/state/TORTOISE-GRAPH-BRIEF.md` does not exist on this box. |
-| **`AGENT_INFRA_PATH`** | **unset** — so `scripts/parallel_work_check.sh` (a `commit-workflow` gate) could not run. Recorded, not worked around. |
+| **`AGENT_INFRA_PATH`** | **unset in this session** — so `scripts/parallel_work_check.sh` (a `commit-workflow` gate) was **not run**. ⛔ Not "could not run": the checker is reachable at the vendored path (`/home/cmux/agent-infra/scripts/parallel_work_check.sh`, and it reads no `AGENT_INFRA_PATH` at all), so this is a record of what the run did, not a claim about what was possible. Recorded, not worked around. |
 
 **Backends actually deployed** (both in Docker, both measured):
 
@@ -258,7 +258,7 @@ Measured from the deployed artifacts (no vendor page was consulted; see §2):
 
 | candidate | extension / dependency | index build (2 000 docs) | index size | background worker / config | licence |
 |---|---|---|---|---|---|
-| **in-graph `db.idx.fulltext`** (baseline) | none — FalkorDB built-in | 0.001 s (created on an already-seeded graph; seeding alone is 1.174 s, 1.226 s on the repeat run) | not separately exposed; the whole graph incl. index is **7.73 MB** `used_memory` (7.74 MB on the repeat run) — content **and** `vector(384)` embeddings | none, but the text lives in **RAM at the graph's cost** — the ~$73/GB-month that motivates the migration | FalkorDB |
+| **in-graph `db.idx.fulltext`** (baseline) | none — FalkorDB built-in | 0.001 s (created on an already-seeded graph; seeding alone is 1.174 s, 1.226 s on the repeat run) | not separately exposed; the whole graph incl. index is **7.73 MB** `used_memory` (7.74 MB on the repeat run) — content **and** `vector(384)` embeddings | none, but the text lives in **RAM at the graph's cost** — the ~$73/GB-month (⛔ **inherited**, `docs/architecture/STORAGE-ARCHITECTURE.md` §16.1 ≈ `$0.10/GB-hour`; it is in NEITHER artifact) that motivates the migration | FalkorDB |
 | **`ts_rank` / `ts_rank_cd`** | **built-in** (`tsvector`, GIN) | **0.011 s** (repeat 0.012 s) | **64 KB** GIN (+ 72 KB for the `simple` variant) | **none** — no extension, no preload, no worker | PostgreSQL |
 | **`pg_search` BM25** | `pg_search` **0.26.6**, `requires = 'vector'`, **not relocatable** | **0.026 s** (repeat 0.025 s) | **3.13 MB** — **48× the GIN index** | **`shared_preload_libraries` change required** (`pg_search,pg_cron,pg_stat_statements` in this image) plus a `paradedb.min_rows_per_worker = 300000` parallel-build threshold | **AGPL-3.0-or-later** |
 | **hybrid (RRF)** | needs both legs in one store | — | — | none of its own — RRF is application-side | — |
@@ -367,7 +367,7 @@ they are read from the image (§6's caveats say where) — so the pin is a prese
 is guarded by nothing. Stated rather than implied to be covered.
 
 ⚠️ **The two committed artifacts predate record keys this harness now writes**, and a rerun will
-differ structurally from them, not only in timings. Four keys need reading with that in mind:
+differ structurally from them, not only in timings. Five keys need reading with that in mind:
 
 - `corpus.queries_sha256` and `results[*].arm_errors` are **absent** — they only appear on the next
   measurement run, which is why the query digest is also stated in prose above, and why the
@@ -381,6 +381,12 @@ differ structurally from them, not only in timings. Four keys need reading with 
   reading taken by the original run — it is a separate measurement over the committed query set
   (all 296 query texts, 0 raising and 0 returning an empty token list), which is why the value is
   trustworthy while its position is not the one a rerun produces.
+- **The FalkorDB server version (`v4.20.6`, §2) is recorded in NO artifact** — `graph_seed` carries
+  `fulltext_index_build_s`, `graph_memory_usage`, `points` and `seed_s` only, while the Postgres seed
+  records its own `server_version`. The comparability argument in §3 rests on WHICH graph build ran
+  the measurement, so this is the one deployment fact in the record that no committed file can
+  corroborate; it is asserted from the lane, not pinned. `seed_graph` already shells `redis-cli INFO`
+  for memory, so the next run can record `redis_version` beside it and a pin can follow.
 
 The `verdict` blocks themselves ARE regenerated from each file's own `results`, so the decision rule
 and the published conclusion cannot diverge.

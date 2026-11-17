@@ -236,7 +236,18 @@ def test_the_corpus_is_built_without_touching_a_graph(monkeypatch):
     The property is asserted, not assumed: `falkordb` is replaced by a module
     whose every attribute access raises, so any attempt to reach a graph while
     building the corpus or the query classes fails this test.
+
+    ⛔ AND THE MODULE BODY IS RE-EXECUTED UNDER THE SHIM. An attribute-only shim
+    installed AFTER the import cannot see a binding created at import time:
+    `from falkordb import FalkorDB` at module scope resolves before this test
+    runs, and the later call then reaches the real class without ever touching
+    the shim — measured, and a plausible edit, since the harness's own imports
+    are function-local. Reloading the corpus module re-executes its body against
+    the shim, so a module-scope falkordb import reds this test instead of opening
+    a connection. (Narrowing the docstring was the alternative; closing the hole
+    is the point of the pin.)
     """
+    import importlib
     import sys
     import types
 
@@ -246,6 +257,8 @@ def test_the_corpus_is_built_without_touching_a_graph(monkeypatch):
                 f"the corpus build imported falkordb.{name} — it must need no graph")
 
     monkeypatch.setitem(sys.modules, "falkordb", _NoGraph("falkordb"))
+    import benchmarks.synthetic_corpus as corpus_mod
+    importlib.reload(corpus_mod)  # the module BODY now runs against the shim
     oracle, points, live = build_corpus()
     classes = build_query_classes(oracle, points, load_committed_queries())
     oov_evidence(points, classes)  # the README's degeneracy claim must need no graph
