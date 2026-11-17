@@ -366,13 +366,33 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         f"canonical-mcp-tools.md says the door wave lands the surface on {door_wave.group(2)} "
         f"advertised tools; the manifest derives {live}"
     )
-    assert int(equations[0][1]) - int(door_wave.group(1)) == live, (
-        f"canonical-mcp-tools.md's own terms stop composing: {equations[0][1]} − "
-        f"{door_wave.group(1)} = {int(equations[0][1]) - int(door_wave.group(1))}, not {live}"
+    # ⛔ BY CONTENT, NOT BY POSITION (#13052 review at 0881a403, P3): the parenthetical is a
+    # RUNNING record that has already been appended to twice, so `equations[0]` / `equations[-1]`
+    # silently retarget the moment a movement is appended — measured, an append ahead of a wrong
+    # retired total stayed green, and a legitimate append red with a message blaming the retired
+    # total. Each side is therefore found by the words that introduce it, so an append ADDS
+    # coverage instead of moving the binding off the equation it was written for.
+    advertised_eq = re.search(
+        r"\((\d+(?:\s*[−+-]\s*\d+)+)\s*=\s*(\d+),\s*then the door wave's", arithmetic)
+    assert advertised_eq, (
+        "canonical-mcp-tools.md's parenthetical no longer states the advertised side as an "
+        "equation immediately followed by `then the door wave's` — the binding below is "
+        "written against that form, so a reworded sentence must update it in the same change"
     )
-    assert int(equations[-1][1]) == retired, (
-        f"canonical-mcp-tools.md's retired-forward arithmetic ends on {equations[-1][1]}; the "
-        f"manifest carries {retired}"
+    retired_eq = re.search(r"and\s+(\d+(?:\s*\+\s*\d+)+)\s*=\s*(\d+)", arithmetic)
+    assert retired_eq, (
+        "canonical-mcp-tools.md's parenthetical no longer states the retired side as "
+        "`and <terms> = <total>`; that clause is what binds the retired-forward arithmetic to "
+        "the manifest, so its absence is a failure and not a vacuous pass"
+    )
+    assert int(advertised_eq.group(2)) - int(door_wave.group(1)) == live, (
+        f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
+        f"{door_wave.group(1)} = {int(advertised_eq.group(2)) - int(door_wave.group(1))}, "
+        f"not {live}"
+    )
+    assert int(retired_eq.group(2)) == retired, (
+        f"canonical-mcp-tools.md's retired-forward arithmetic (`{retired_eq.group(1)}`) states "
+        f"{retired_eq.group(2)}; the manifest carries {retired}"
     )
 
     # 2. The live surface's MOVEMENTS — they COMPOSE, so the rule is the chain.
