@@ -54820,107 +54820,107 @@ class TortoiseSDK:
                 from .entity_resolver import wire_holds_role
                 wire_holds_role(self, _role_holder, _subject_id)
         elif t == "object":
-            # ⛔ #12869: this was the row's MINTING door and it carried NO status
-            # check at all — not a vocabulary one (correctly: §4.3 leaves the
-            # word set OPEN per kind, #10371) and not even a TYPE one. So
-            # `create_object('Held', status=['live'])` stored the list verbatim
-            # on a live row, and EVERY later lifecycle write on that row raised
+            # ⛔ #12869: this arm was the row's MINTING door and carried NO status
+            # check at all — not a vocabulary one (correctly: §4.3 leaves the word
+            # set OPEN per kind, #10371) and not even a TYPE one. So
+            # `create_object('Held', status=['live'])` stored the list verbatim on
+            # a live row, and EVERY later lifecycle write on that row raised
             # `TypeError: unhashable type: 'list'` out of the guard instead of
-            # refusing — the row became unaddressable by the one guard that
-            # exists to protect its lifecycle. Guarding only `update_entity`
-            # would have left the defect one call away, exactly as the `#1423`
-            # Subject twin records for its own door (`create_entity`'s subject
-            # arm validates too, and says why).
-            # §4.3 declares the property's type as `string`, so a NON-STRING is
-            # the one value undeclared for every kind: ⛔ NOT "open vocabulary" —
-            # S0 refuses an undeclared word, so a `str` is graded upstream. `None`
-            # is legal here (an absent status reads live, `#9974` R1).
-            # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (`lifecycle_props_by_
-            # rendering`), the same one the update door's guard uses: a `str`
-            # SUBCLASS key that overrides `__hash__` is missed by
-            # `"status" in props` while the write still files it under `status`
-            # (`live.lifecycle_props_by_rendering`'s docstring records the
-            # measured #11825 round-4/8 case). FIRST-WINS, so an ordinary plain
-            # `str` key makes this identical to `props["status"]`.
+            # refusing — the row became unaddressable by the one guard that exists
+            # to protect its lifecycle. Guarding only `update_entity` would have
+            # left the defect one call away, exactly as the `#1423` Subject twin
+            # records for its own door.
+            #
+            # §4.3 declares the property's type as `string`, so a NON-STRING is the
+            # one value undeclared for EVERY kind. ⛔ This is NOT an "open
+            # vocabulary" claim: `#11824` S0 closed the word set, so an undeclared
+            # WORD (`status="banana"`) is itself REFUSED by name at this door —
+            # what stays open is which words each kind may hold, and the type is
+            # `string` for all of them. `None` stays legal (an absent status reads
+            # live, `#9974` R1).
+            #
+            # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT
+            # (`lifecycle_props_by_rendering`), the same one the update door's
+            # guard uses: a `str` SUBCLASS key that overrides `__hash__` is missed
+            # by `"status" in props` while the write still files it under `status`
+            # (`live.lifecycle_props_by_rendering`'s docstring records the measured
+            # #11825 round-4/8 case). FIRST-WINS, so an ordinary plain `str` key
+            # makes this identical to `props["status"]`.
             # ⛔ `type` IS A PARAMETER HERE (`type: str`), so `type(x)` would call
             # the string; `_refusal_type_name(x)` is shadow-free AND hostile-safe.
-            # ⛔ AND THIS GUARD IS A LANDING TEST, NOT A PRESENCE TEST (#12869).
-            # A create whose name is already held by a single LIVE row MERGES
-            # onto it, and `_upsert_object`'s ON MATCH lane never rewrites
-            # `status` (it is projection-owned) — so a declared status is
-            # DROPPED there and that row is never poisoned. Refusing it would
-            # reverse the recorded `#7925` round-4 decision that this refusal
-            # fires ONLY where the value would LAND.
-            # ⚠️ AT THIS DOOR THAT SCOPE IS NOW UNOBSERVABLE, and the comment is
-            # not allowed to imply otherwise: `#11824` S0's TYPE check, run
-            # INLINE by `create_entity` (its `_read_caller_status` call), not by
-            # `_validate_bundle` — `create_object` never enters the bundle door,
-            # which returns an ingest VIOLATION rather than raising — refuses EVERY
-            # declared non-`str`
-            # declared non-`str` before this writer arm runs — mint, MERGE and
-            # ADOPT alike — so this arm's `lands` thunk never gets to answer
-            # for one. MEASURED at this head: `create_object(name, kind,
-            # status=['retracted'])` on a held name, on a fresh name and on an
-            # id-less ADOPT holder all return `a status must be a plain
-            # string`, never this helper's `refused a non-string status`.
-            # ⛔ SO THE TESTS THAT PIN IT ARE THE INVERTED ONES. `#11824` S0
-            # renamed and INVERTED both arms this paragraph used to cite, which
-            # is why the old names
-            # (`…_CREATE_guard_is_a_LANDING_test_not_a_presence_test`,
-            # `…_NON_PERSISTABLE_status_is_still_DROPPED_not_refused`) exist
-            # nowhere: they are now
-            # `TestNonScalarStatus12869.test_a_MERGE_or_ADOPT_holder_cannot_take_a_non_string_status`
-            # (which asserts the refusal ON the merge and adopt shapes — the
-            # landing exemption is gone, not re-scoped) and
-            # `…test_a_NON_PERSISTABLE_status_is_REFUSED_not_dropped`. A future
-            # reader who restores a "refuse only what lands" claim here must
-            # move those arms back with it or the two disagree silently.
-            # ⛔ THE BUNDLE-LEVEL NAMES THIS COMMENT USED TO CITE
-            # (`…_object_item_status_is_accepted_when_a_holder_owns_the_name`,
-            # `…_second_same_name_item_declaring_array_is_dropped`) exist
-            # NOWHERE at this head for the same reason: the `:Object` arm now
-            # refuses every non-`str` at its own door
-            # (`test_object_item_declaring_a_non_string_status_is_refused_in_phase_1`),
-            # so the bundle refuses before this writer arm is reached.
-            # ⛔ WHAT `lands` STILL DECIDES, and where: the THIRD caller,
-            # `EventAPI.add_object` (`api.py`, the journal lane), has no shared
-            # type door above it — there the landing question is the live one
-            # and it keeps that refusal off a merge (`#7925` r4). It also stops
-            # this helper's two-key AMBIGUITY refusal, which at this door S0's
-            # inline check answers first (measured: the `{status: None,
-            # KHash('status'): …}` spelling returns `refused a CONFLICTING
-            # status write` from `create_entity`'s own ambiguity arm, not from
-            # here).
+            # ⚠️ AND THE HELPER'S OWN AMBIGUITY RAISE IS UNREACHABLE FROM ALL THREE
+            # CALLERS at this head — each door's inline arm answers first.
             #
-            # ⛔ SO THE TEST IS "WILL THIS CALL CREATE THE NODE?", AND
-            # `resolve_or_mint`'s `created` FLAG IS NOT THAT QUESTION. It means
-            # "an id was minted", which is ALSO true for the ADOPT path — one
-            # LIVE id-less legacy holder that gets a stamped id (#3590 review
-            # F2). An adopt lands on an EXISTING node, so the status is dropped
-            # there too, and `_adopt_idless_holder` has already WRITTEN the stamp
-            # by the time this flag is readable: refusing on it would be a
-            # refusal that COSTS A WRITE, the atomicity rule `#9287`/`#10192`
-            # states and that this function's own `#12047` review F5 note
-            # re-states twenty lines up ("a refusal here leaves NOTHING
-            # behind"). The flag also cannot separate an `explicit_id` re-create
-            # from a first mint. So the node's own EXISTENCE is asked instead —
-            # the one question that is true exactly when the status would land.
-            # ⚠️ A non-persistable shape (dict/set/bytes) is DROPPED by the
-            # writer and never stored (#7369), so it cannot be a value this
-            # refuses — the same `#7925` round-4 decision, which is why the test
-            # is the transport gate (`_value_ok`) and not "not a string".
+            # ⛔ WHERE THIS GUARD SITS, MEASURED — do not restate the ladder from
+            # memory. `#11824` S0's TYPE check runs INLINE in `create_entity` (its
+            # `_read_caller_status` call), NOT in `_validate_bundle` (which returns
+            # ingest VIOLATIONS rather than raising, so it is not the raiser). By
+            # the time this writer arm runs, S0 has already refused every declared
+            # non-`str` on ALL THREE shapes — a fresh mint, a MERGE onto a held
+            # name, and an id-less ADOPT. Measured at this head:
+            # `create_object(name, kind, status=['retracted'])` returns
+            # `a status must be a plain string` on each of the three, never this
+            # helper's `refused a non-string status`.
+            # ⛔ SO THE LANDING QUESTION IS UNOBSERVABLE AT THIS DOOR, and this
+            # comment may not imply otherwise: the `lands` thunk below never gets
+            # to answer for a non-`str`. The recorded `#7925` round-4 decision it
+            # encodes ("refuse only where the value would LAND") is real, and it
+            # is answered by the ONE caller with no shared type door above it —
+            # `EventAPI.add_object` (`tortoise/api.py:2927`, the journal lane),
+            # where a declared status on a merge is dropped rather than refused.
+            # The same helper also refuses a two-key AMBIGUITY write; here S0's
+            # inline check answers first (measured: the `{status: None,
+            # KHash('status'): …}` spelling returns `refused a CONFLICTING status
+            # write` from `create_entity`'s own ambiguity arm, not from here).
+            #
+            # ⛔ THE TESTS THAT PIN THIS DOOR ARE THE INVERTED ONES. S0 renamed and
+            # INVERTED both arms an earlier draft of this comment cited, so those
+            # old names exist nowhere:
+            # `…_CREATE_guard_is_a_LANDING_test_not_a_presence_test` and
+            # `…_NON_PERSISTABLE_status_is_still_DROPPED_not_refused` are now
+            # `TestNonScalarStatus12869.test_a_MERGE_or_ADOPT_holder_cannot_take_a_non_string_status`
+            # (it asserts the refusal ON the merge and adopt shapes — the landing
+            # exemption is gone, not re-scoped) and
+            # `…test_a_NON_PERSISTABLE_status_is_REFUSED_not_dropped`. A future
+            # reader who restores a "refuse only what lands" claim HERE must move
+            # those arms back with it, or the two disagree silently.
+            # ⛔ AND NO BUNDLE-LEVEL NAME PINS THIS ARM. The pair an earlier draft
+            # cited (`…_object_item_status_is_accepted_when_a_holder_owns_the_name`,
+            # `…_second_same_name_item_declaring_array_is_dropped`) also exists
+            # nowhere: the `:Object` arm now refuses every non-`str` at its own
+            # door
+            # (`test_object_item_declaring_a_non_string_status_is_refused_in_phase_1`),
+            # so the bundle refuses before this arm is reached.
+            #
+            # ⛔ WHY THE THUNK ASKS NODE EXISTENCE, NOT `created`:
+            # `resolve_or_mint`'s flag means "an id was minted", which is ALSO
+            # true on the ADOPT path (one LIVE id-less legacy holder gets a
+            # stamped id, #3590 review F2). An adopt lands on an EXISTING node, so
+            # the status is dropped there too, and `_adopt_idless_holder` has
+            # already WRITTEN the stamp by the time the flag is readable —
+            # refusing on it would be a refusal that COSTS A WRITE, the atomicity
+            # rule `#9287`/`#10192` states and this function's `#12047` review F5
+            # note re-states above ("a refusal here leaves NOTHING behind"). The
+            # flag also cannot separate an `explicit_id` re-create from a first
+            # mint. So the node's own EXISTENCE is asked instead — the one
+            # question true exactly when the status would land. At THIS door S0
+            # answers first (measurement above); the thunk is what the journal
+            # lane relies on.
+            # ⚠️ A non-persistable shape (dict/set/bytes) is DROPPED by the writer
+            # and never stored (#7369), so it cannot be a value this refuses —
+            # the same `#7925` round-4 decision, which is why the test is the
+            # transport gate (`_value_ok`) and not "not a string".
             # ⛔ THIS DOOR DOES NOT PASS `journals` (#12869 review, P2). It used
-            # to, on the claim that it made a `bytes`/`frozenset` status
-            # "refused instead of being handed to the JSON encoder" — which was
-            # false on the RESOLVE branch (`_obj_created` False skips this call
-            # entirely, so the value still reached the encoder and
-            # `_journal_write_failures` incremented) and, on the mint branch,
-            # narrowed `status` alone on a mechanism that is not
-            # `status`-specific: `_journal_entity_event` SWALLOWS the encoder
-            # failure and logs "LIVE-ONLY and will not survive a rebuild"
-            # (#4240), exactly as it does for `tags=frozenset(...)`. So the
-            # refusal lives at the ONE door that raises (`EventAPI.add_object`)
-            # and #4240 keeps this lane, uniformly for every unencodable prop.
+            # to, on the claim that it made a `bytes`/`frozenset` status "refused
+            # instead of being handed to the JSON encoder" — false on the RESOLVE
+            # branch (`_obj_created` False skips this call entirely, so the value
+            # still reached the encoder and `_journal_write_failures`
+            # incremented) and, on the mint branch, `status`-specific for no
+            # reason: `_journal_entity_event` SWALLOWS the encoder failure and
+            # logs "LIVE-ONLY and will not survive a rebuild" (#4240), exactly as
+            # it does for `tags=frozenset(...)`. So the refusal lives at the ONE
+            # door that raises (`EventAPI.add_object`) and #4240 keeps this lane,
+            # uniformly for every unencodable prop.
             from .entity_identity import entity_create_lock, resolve_or_mint
             with entity_create_lock("Object", name):
                 _obj_target, _obj_created = resolve_or_mint(
