@@ -6550,10 +6550,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # insertions moved `hosted_api.py` by +102 at BOTH ends, and the three offsets above
         # still hold EXACTLY at the new START, so the START is confirmed by structure rather
         # than assumed from one bumped number:
-        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15049`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15079` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15089` (inside it), and `:15126` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:15127`.
+        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15180`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15209` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
+        # the blank line immediately before `return OrgInfoResponse(` at `:15258`. RE-DERIVED at
+        # this merge: `origin/main`'s `#13116` added 131 lines to `hosted_api.py` above the
+        # block, so every number in this comment moved with the row below it.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("15180", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
@@ -6682,7 +6684,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15299-15376`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:15180-15257`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
@@ -6710,7 +6712,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     _i7_end_ok = _org_info[15257 - 1].strip() == "" and bool(
         _org_info[15257].lstrip().startswith("return OrgInfoResponse("))
     assert _i7_end_ok, (
-        "04-plan.md I7's range end (`:15245`) is no longer the blank line before "
+        "04-plan.md I7's range end (`:15257`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
 
