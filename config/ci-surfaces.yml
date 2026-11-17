@@ -1027,6 +1027,23 @@ surfaces:
   # through to `core`. A one-surface registration drops this file on either
   # half's own diff — the #1349/#3332 silent-drop class the manifest exists for.
   - test_10602_wait_bound_breach_visible.py
+  # #13034 (second half): `api`, because the file imports `tortoise.hosted_api`
+  # (monkeypatches `_data_sdk_offloaded` / `_read_offload` and drives
+  # `hosted_api.list_points` — `test_the_hosted_list_route_drops_it` asserts the
+  # public list route drops an `isClosed` Point) and `tortoise.mcp_auth`
+  # (`_current_org_id` / `_current_org_limits` / `_transport_mode`, which drive the
+  # whole MCP-tag arm). Neither module is in `SHARED_MODULES` and neither matches a
+  # `SOURCE_PATTERNS` entry, so the `core` row's `tortoise/sdk.py` reasoning does
+  # NOT cover them: on a `hosted_api.py` or `mcp_auth.py` diff, `select()` returned
+  # `['api', …]` and this file was NOT chosen — verified with the row absent, and
+  # with it present `select()` returns the file for both. Same rule as the rows
+  # above: a one-surface registration drops this file on the other half's own diff.
+  # ⚠️ SCOPE, stated so the severity is not overstated: `--surface-audit` reports
+  # the same core-only shape for ~545 further files against these two modules. That
+  # audit is REPORT-ONLY, not a gate, so this is a pre-existing broad residual and
+  # not a novel regression; this row fixes the one file this PR touches, and a
+  # repo-wide sweep is a separate change rather than ride-along scope here.
+  - test_13034_currency_rule_reads_position.py
   # #10749: the health tail must fit INSIDE the transport wait bound. Dual-registered
   # for the same reason as #10602 directly above and #3834 before it: the publish sites
   # live on BOTH halves — `setup_timeout_clamped` / `setup_timeout_clamped_s` on the
@@ -7447,16 +7464,15 @@ surfaces:
   - test_12586_update_point_promote_flag.py
   # #13034: "is this still served as current?" — the two-axis terminal predicate
   # (`isClosed` + the `terminal` pipeline slot, alongside the lifecycle word) and
-  # the five readers that must ask it. `core` is the sufficient surface and it is
-  # the one its own diff resolves to: every subject of the file falls through the
-  # `SOURCE_PATTERNS` — `tortoise/live.py`, `tortoise/pipeline.py` and
-  # `tortoise/derived_invalidation.py` match no entry (verified by resolving each
-  # through `ci_selection.SOURCE_PATTERNS`), and `tortoise/sdk.py`, which the file
-  # also imports, is in `SHARED_MODULES` and forces the FULL matrix on its own.
-  # ⛔ THE ROW IS THE WHOLE FIX: the file exists in main and was never classified,
-  # so `ci_selection.py --integrity` failed closed on EVERY PR until it was added
-  # (the #1349/#3332 silent-drop class, in its blocking form — an unclassified
-  # file is also a file `select()` never runs).
+  # the five readers that must ask it. `core` here is the surface the file's OWN
+  # diff resolves to (`tortoise/live.py`, `tortoise/pipeline.py` and
+  # `tortoise/derived_invalidation.py` match no `SOURCE_PATTERNS` entry); the `api`
+  # row is the second half, added below with its own reasoning — ⛔ `core` alone is
+  # NOT sufficient, which the first cut of this comment wrongly claimed.
+  # ⛔ THE ROW IS THE WHOLE FIX for the blocking failure: the file exists in main
+  # and was never classified, so `ci_selection.py --integrity` failed closed on
+  # EVERY PR until it was added (the #1349/#3332 silent-drop class, in its blocking
+  # form — an unclassified file is also a file `select()` never runs).
   - test_13034_currency_rule_reads_position.py
   - test_uri_env_mutations_declared.py
   # #8066: the served-skill relay ratchet. Its SUBJECT is every
