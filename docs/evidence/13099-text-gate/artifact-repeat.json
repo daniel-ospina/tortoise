@@ -85,7 +85,7 @@
    "['affect', 'design', 'does', 'this', 'why'] -> oov ['affect', 'design', 'does', 'this', 'why']",
    "['change', 'is', 'of', 'outcome', 'role', 'the', 'what'] -> oov ['change', 'of', 'outcome', 'role', 'the', 'what']"
   ],
-  "reading": "The question class adds only out-of-vocabulary scaffolding, and no candidate prices an unmatched query term, so its per-arm numbers duplicate the keyword class. It is reported for completeness and must NOT be read as independent evidence either way."
+  "reading": "The question class adds only out-of-vocabulary scaffolding, and no candidate prices an unmatched query term, so the four POSTGRES LEXICAL arms return the keyword class's numbers exactly. It is reported for completeness and must NOT be read as independent evidence either way. \u26d4 Not every arm duplicates it: the two RRF hybrids move by the amount the question's own wording shifts the vector leg, and the raw diagnostic returns zero rows for question text (README \u00a74/\u00a75.3)."
  },
  "worked_examples": [
   {
@@ -15585,14 +15585,17 @@
    "pg_ts_rank_cd",
    "pg_ts_rank_simple",
    "pg_bm25",
-   "hybrid_baseline",
    "hybrid_bm25"
   ],
   "diagnostic_arms_not_candidates": [
    "in_graph_fulltext_raw"
   ],
+  "control_arms_not_candidates": [
+   "hybrid_baseline"
+  ],
   "disqualified_arms": [],
   "baseline_disqualified": false,
-  "decision": "a Postgres option does not lose to the in-graph leg on any query class at any published metric (ndcg@10, ndcg@100, recall@100): pg_ts_rank, pg_ts_rank_cd, pg_ts_rank_simple, pg_bm25, hybrid_baseline, hybrid_bm25"
- }
+  "decision": "a Postgres option does not lose to the in-graph leg on any query class at any published metric (ndcg@10, ndcg@100, recall@100): pg_ts_rank, pg_ts_rank_cd, pg_ts_rank_simple, pg_bm25, hybrid_bm25"
+ },
+ "tokenizer_fallbacks": []
 }

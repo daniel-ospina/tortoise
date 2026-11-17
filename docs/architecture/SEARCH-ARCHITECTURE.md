@@ -309,8 +309,10 @@ opposite of the ordering in §5.
 > significantly on any query class.** So **the reason this section gives for keeping the index does not
 > reproduce against the leg we actually run.** ⚠️ **The 8–23 figure itself is untouched:** it compares
 > Postgres FTS to BM25 on three foreign datasets, while this compares **our leg** to Postgres **on our
-> corpus** — a different claim, and the one a decision here can rest on. The one place the in-graph leg
-> genuinely trails is exact-name lookup (**+4.87 nDCG@10**, CI excluding 0, n=96), and the mechanism is
+> corpus** — a different claim, and the one a decision here can rest on. The place the in-graph leg
+> genuinely trails **at the head** is exact-name lookup (**+4.87 nDCG@10**, CI excluding 0, n=96); at
+> depth it trails on the keyword class too (**+9.23 nDCG@100**, above), so "it only loses on names"
+> would be the wrong reading. The mechanism is
 > recorded with a worked example: a document matching 2 of a query's 7 terms scores 9.0 while the
 > document matching all 7 scores 4.14 and ranks 99th — the `#8488`/`#12350` defect class, fixable in
 > place rather than a reason the store is wrong. ⛔ **This note decides nothing and reverses nothing — the

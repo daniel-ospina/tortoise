@@ -220,9 +220,10 @@ split identically on both sides (`cap-dominated` alone matches **0** documents; 
 the target first).
 
 **This is the #8488 / #12350 defect class wearing a different hat**, and it matters for the verdict:
-the one place the in-graph leg genuinely trails is a **ranking-property deficit fixable in place**,
-not a reason the store is wrong. `#12298` reached the same structural conclusion for `_`-carrying
-identifiers: a 25-point gap that was the query builder, not the scorer.
+the place the in-graph leg genuinely trails **at the head** is a **ranking-property deficit fixable in
+place**, not a reason the store is wrong — and it trails at depth on the keyword class too (Δ nDCG@100
++9.23, §5.1), so this is not the only place it trails. `#12298` reached the same structural conclusion
+for `_`-carrying identifiers: a 25-point gap that was the query builder, not the scorer.
 
 ### 5.5 What the numbers say, read honestly
 

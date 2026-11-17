@@ -582,3 +582,31 @@ def test_an_arm_built_from_a_disqualified_arm_is_disqualified_too():
           "error": "psycopg.OperationalError"}])
     assert "hybrid_baseline" in v2["disqualified_arms"]
 
+
+
+def test_the_fusion_control_is_not_offered_as_a_postgres_option():
+    """`hybrid_baseline` is the CONTROL, not an adoption candidate.
+
+    It is RRF(in-graph leg, pgvector) — it contains no Postgres lexical leg at
+    all, so listing it among the "Postgres options that do not lose" counts the
+    baseline as evidence for replacing the baseline, and makes the emitted
+    decision line name a candidate nobody could adopt. It must stay REPORTED
+    (the arm does not lose; that is what a control is for) and be excluded from
+    the candidates NAMED — named separately, not dropped silently.
+    """
+    v = verdict(_results({
+        "hybrid_baseline": {"short_keyword": (3.0, -0.5, 7.0),
+                            "entity_name": (3.0, -0.5, 7.0)},
+        "hybrid_bm25": {"short_keyword": (3.0, -0.5, 7.0),
+                        "entity_name": (3.0, -0.5, 7.0)},
+    }))
+    assert "hybrid_baseline" in v["qualifying_arms"]       # reported, not hidden
+    assert "hybrid_baseline" not in v["qualifying_candidates"]
+    assert v["control_arms_not_candidates"] == ["hybrid_baseline"]
+    assert "hybrid_bm25" in v["qualifying_candidates"]
+    assert "hybrid_baseline" not in v["decision"]
+
+    # …and the committed record agrees with the code
+    art = _artifact()
+    assert art["verdict"]["control_arms_not_candidates"] == ["hybrid_baseline"]
+    assert "hybrid_baseline" not in art["verdict"]["qualifying_candidates"]

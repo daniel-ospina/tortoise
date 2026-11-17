@@ -150,6 +150,12 @@ QUERY_CLASSES = ("short_keyword", "natural_language_question", "entity_name")
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 
+# Query texts the product tokenizer could not price this run, and WHY. Emptied at
+# the start of `run()` and published as the artifact's `tokenizer_fallbacks`; a
+# non-empty list means those queries were built with the regex fallback instead of
+# the shared product tokenizer, which the record must say rather than hide.
+TOKENIZER_FALLBACKS: list[dict[str, Any]] = []
+
 
 # ── corpus + queries (reused, never rebuilt) ────────────────────────────────
 
@@ -241,7 +247,6 @@ def oov_evidence(points: list[dict], classes: dict[str, list[dict]]) -> dict:
     pool: set[str] = set()
     for p in points:
         pool.update(t for t in _TOKEN_RE.findall(str(p["content"]).lower()) if t)
-    pool.update(t.replace("-", "") for t in pool)
 
     def tokens(text: str) -> set[str]:
         return {t for t in _TOKEN_RE.findall(text.lower()) if t}
@@ -264,9 +269,13 @@ def oov_evidence(points: list[dict], classes: dict[str, list[dict]]) -> dict:
         "examples": examples,
         "reading": (
             "The question class adds only out-of-vocabulary scaffolding, and no "
-            "candidate prices an unmatched query term, so its per-arm numbers "
-            "duplicate the keyword class. It is reported for completeness and "
-            "must NOT be read as independent evidence either way."),
+            "candidate prices an unmatched query term, so the four POSTGRES "
+            "LEXICAL arms return the keyword class's numbers exactly. It is "
+            "reported for completeness and must NOT be read as independent "
+            "evidence either way. ⛔ Not every arm duplicates it: the two RRF "
+            "hybrids move by the amount the question's own wording shifts the "
+            "vector leg, and the raw diagnostic returns zero rows for question "
+            "text (README §4/§5.3)."),
     }
 
 
@@ -398,11 +407,18 @@ def or_tokens(text: str) -> list[str]:
     """
     from tortoise.sparse import tokenize_sparse_query
 
+    reason = None
     try:
         toks = tokenize_sparse_query(text, keep_numeric=False)
-    except Exception:
+    except Exception as exc:  # recorded, never silent — a fallback that quietly
+        # swapped the tokenizer would make the run's own claim ("the comparison
+        # is about the scorer, both stacks import ONE tokenizer") false with
+        # nothing in the artifact saying so.
         toks = []
+        reason = f"{type(exc).__name__}: {exc}"
     if not toks:
+        TOKENIZER_FALLBACKS.append(
+            {"text": text, "reason": reason or "tokenizer returned no tokens"})
         toks = [t for t in _TOKEN_RE.findall(text.lower()) if t]
     # dedupe, preserve order
     seen: set[str] = set()
@@ -551,6 +567,7 @@ ARM_DEPENDS_ON: dict[str, tuple[str, ...]] = {
 
 def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         reuse: bool = False, full: bool = False) -> dict:
+    TOKENIZER_FALLBACKS.clear()   # this run's fallbacks only — never a previous run's
     oracle, points, live_by_topic = build_corpus()
     committed = load_committed_queries()
     classes = build_query_classes(oracle, points, committed)
@@ -746,6 +763,7 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         "worked_examples": worked,
         "results": results,
         "errors": errors,
+        "tokenizer_fallbacks": list(TOKENIZER_FALLBACKS),
         "verdict": verdict(results, errors),
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -898,7 +916,16 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
     # `in_graph_fulltext_raw` exists to decompose builder-vs-scorer, and it is
     # expected to lose (it drops the OR-union the product builds).
     not_candidates = {"in_graph_fulltext_raw"}
-    candidates = [a for a in qualifying if a not in not_candidates]
+    # CONTROL arms are not ALTERNATIVES either. `hybrid_baseline` is the RRF fusion
+    # of the IN-GRAPH leg with pgvector — the control `hybrid_bm25` is measured
+    # against. Listing it among the qualifying candidates would count the baseline
+    # as evidence for replacing the baseline, and make the decision line name a
+    # "Postgres option" that contains no Postgres lexical leg at all. It stays in
+    # `qualifying_arms` (the arm does not lose; that is the point of a control) and
+    # is named separately rather than dropped, so the exclusion is auditable.
+    control_arms = {"hybrid_baseline"}
+    candidates = [a for a in qualifying
+                  if a not in not_candidates and a not in control_arms]
 
     if baseline_disqualified:
         decision = (
@@ -929,6 +956,7 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
         "qualifying_arms": qualifying,
         "qualifying_candidates": candidates,
         "diagnostic_arms_not_candidates": sorted(not_candidates),
+        "control_arms_not_candidates": sorted(control_arms),
         "disqualified_arms": sorted(disqualified),
         "baseline_disqualified": baseline_disqualified,
         "decision": (
@@ -967,6 +995,11 @@ def main(argv: list[str] | None = None) -> int:
     art = run(args.fg_host, args.fg_port, args.pg_dsn, Path(args.out),
               reuse=args.reuse, full=args.full)
     print(json.dumps(art["verdict"], indent=1))
+    if art.get("tokenizer_fallbacks"):
+        print(f"!! {len(art['tokenizer_fallbacks'])} query text(s) used the REGEX "
+              "fallback because the product tokenizer returned nothing (see "
+              "`tokenizer_fallbacks` in the artifact); those queries are not "
+              "priced by the shared tokenizer the record claims")
     if art["errors"]:
         # NOT a success: a run with a failed arm cannot support a decision, and
         # exiting 0 here is what let a disqualified candidate read as a verdict.
