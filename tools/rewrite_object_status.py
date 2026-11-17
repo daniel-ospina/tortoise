@@ -148,7 +148,6 @@ re-read is the second guard: `--execute` exits non-zero unless the population is
 EXIT CODES
 ==========
     0   the run completed — a preview, or an execute whose population is now 0
-    1   the run did not reach its post-condition: rows remain, a row failed,
     1   the run did not reach its post-condition: rows remain, a row failed, a
         record did not land, a row's `id` is bound by more than one node, or the
         read was truncated / a row is UNADDRESSABLE (no usable `id`). A PREVIEW
