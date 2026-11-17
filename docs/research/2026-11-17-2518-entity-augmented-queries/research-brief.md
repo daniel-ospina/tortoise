@@ -172,17 +172,16 @@ Convergence across the sources, with the numbers each one carries:
 
 **Harness:** `tools/candidate_recall_11901.py` (unchanged; the same tool that produced the `#11901`
 and `#12295` artifacts), `--population 1000 --sample 300 --captures 20`, corpus
-`/home/cmux/.tortoise/session-events` (**the artifacts record `corpus.files: 14`** — this box's `HOME`
-is `/home/cmux`, so
+`/home/cmux/.tortoise/session-events` (**the artifacts record `corpus.files: 14`**, and on this box
+the directory globs exactly **14** `*.jsonl` (2026-11-04 … 2026-11-17) — its newest member was created
+at `00:02:44Z`, **before** the first run at `01:53:53Z`, so the file SET the runs read is the set the
+directory holds now; what moved between runs is the corpus's CONTENT, which the artifacts record
+(`corpus.input.lines` `10 746 → 10 761`) and §3's table states. This box's `HOME` is `/home/cmux`, so
 that path IS the harness's `--sessions-dir` default; §8 passes it explicitly so the corpus is part of
-the recipe rather than an accident of `HOME`). ⚠️ **The recorded 14 is the artifact's input, not a
-description of the directory today**: on the box this brief was reviewed on the same path globs **22**
-`*.jsonl` (2026-10-27 … 2026-11-17), and the directory's own last entry change — the birth of
-`2026-11-17.jsonl` at `00:07:44Z` — **predates every run** (`01:53:53Z` … `02:15:03Z`), so the two
-counts do not describe one directory observed at two times. What the 14 came from is **not
-established**, and this brief does not claim it is: the corpus is live and cell-specific, so a reader
+the recipe rather than an accident of `HOME`. The corpus is live and cell-specific, so a reader
 re-running §8 reads a **different** corpus, and every number below is its own artifact's recorded
-input rather than a statement about the directory now. ⚠️ The artifacts' own `issue` / `measured_for` fields
+input rather than a statement about the capture corpus in general.
+⚠️ The artifacts' own `issue` / `measured_for` fields
 read `11901` / `12295`: those are the harness's hardcoded provenance
 (`tools/candidate_recall_11901.py:2042-2045`), naming the runs it was written for, not this one.
 ⚠️ **Reading files outside the repo** — this is
@@ -425,9 +424,9 @@ not an expansion one.
 
 ## 7. What this document does NOT claim
 
-- **Not a production census.** The population is a stratified 300-name sample of a live capture
-  corpus (`corpus.files: 14` **as the artifacts record it** — the same path globs 22 on the reviewing
-  box, §3), and `/home/cmux/.tortoise/session-events` is not the population a hosted graph
+- **Not a production census.** The population is a stratified 300-name sample of **this box's** capture
+  corpus (the artifacts record `corpus.files: 14`, which is what the directory holds — 2026-11-04 …
+  2026-11-17), and `/home/cmux/.tortoise/session-events` is not the population a hosted graph
   holds. Every number here measures the mechanism on a real name distribution, never production.
 - **Not a hybrid-vs-lexical comparison as an effect size, and NOT a paired ablation.** The five runs
 do **not** share a population: `corpus.population_digest` differs in every run (§3's table). The
