@@ -23472,8 +23472,10 @@ class TortoiseSDK:
         # #12914 round-4 P1 measured, reported here instead of papered over. The
         # write below goes through ``update_knowledge`` -> ``_update_entity``, and
         # THAT door runs label-surface guards this one does not: the
-        # ``refuse_terminal_event_state`` probe (an ``:Event`` row cannot take a
-        # terminal ``status``) and the ``:Source`` closed-surface refusal (D30).
+        # ``refuse_event_lifecycle_state`` probe (an ``:Event`` row cannot take
+        # ANY ``status``, #13100 §8 — this branch widened it from the terminal
+        # subset, so the divergence below is wider than this comment first said)
+        # and the ``:Source`` closed-surface refusal (D30).
         # Measured on the round-4 head: for the HYBRID shapes ``:Object:Event``,
         # ``:Subject:Event``, ``:Object:Source`` and ``:Subject:Source`` the
         # preview answers ``would supersede`` and the write REFUSES. Before this

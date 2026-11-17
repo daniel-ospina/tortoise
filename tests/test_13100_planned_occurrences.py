@@ -107,6 +107,26 @@ def _docstring_nodes(tree) -> set[int]:
     return ids
 
 
+def _write_line(lines: list[str], node, value: str) -> int:
+    """The line the WRITE is on, read from the node's own RAW source span.
+
+    ⛔ ``node.lineno`` is where the string OPENED, not where the write is. An
+    implicitly concatenated query (the shape ``hosted_api.py`` uses) is folded by
+    ``ast`` into ONE ``Constant`` carrying the first fragment's line and NO
+    newlines in ``node.value``, so ``node.lineno + value[:i].count("\\n")``
+    answers the opening line and silently drifts from the site it names (#13100
+    review round 2, P2: measured ``(22505, 'pending')`` for a write on
+    ``:22509``). The raw source is the only place that offset survives.
+    """
+    end = getattr(node, "end_lineno", None) or node.lineno
+    for lineno in range(node.lineno, end + 1):
+        text = lines[lineno - 1] if lineno <= len(lines) else ""
+        for match in _EVENT_STATUS_LITERAL.finditer(text):
+            if match.group(1) == value:
+                return lineno
+    return node.lineno
+
+
 def _event_status_writes(source: str) -> list[tuple[int, str]]:
     """``(lineno, value)`` for every LITERAL ``eventStatus`` write in ``source``.
 
@@ -121,6 +141,7 @@ def _event_status_writes(source: str) -> list[tuple[int, str]]:
     import ast
 
     tree = ast.parse(source)
+    lines = source.splitlines()
     docstrings = _docstring_nodes(tree)
     found: set[tuple[int, str]] = set()
     for node in ast.walk(tree):
@@ -139,9 +160,7 @@ def _event_status_writes(source: str) -> list[tuple[int, str]]:
         elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
                 and id(node) not in docstrings):
             for match in _EVENT_STATUS_LITERAL.finditer(node.value):
-                # the query may span lines; report the line the WRITE is on
-                found.add((node.lineno + node.value.count("\n", 0,
-                                                         match.start()),
+                found.add((_write_line(lines, node, match.group(1)),
                            match.group(1)))
     return sorted(found)
 
