@@ -40,21 +40,26 @@ Lifecycle decision table (THE rule):
      ``commit_ops.OBJECT_TERMINAL_STATUSES``) — the fold refuses such a row in BOTH
      directions, so no fold ever reaches it;
   3. a row whose ``isClosed`` marker is a FALSY NON-BOOLEAN (``0`` / ``0.0`` /
-     ``""``) — the doors store it verbatim, and the fold's live-holder probe is
-     type-sensitive, so such a row is not live either, and no fold THIS reader
-     can trigger runs for it: ``None`` gates the transition arm off. Not being
-     trigger-reachable is not being unreachable — a ``github.issue.reopened``
-     fold reached by NAME does rewrite the marker to a real boolean
-     (``projection/entities.py:6157-6164`` → ``pipeline.py:434``); what makes the
-     truthy half self-heal is that this reader ANSWERS ``"closed"`` for it, so
-     the fold is triggered at all (#13326).
-  ⚠️ Stated trade, symmetric: these rows record no transition at all, so neither
-  ``-closed`` nor ``-reopened``. Bounded and inspectable; an unbounded mint loop is
-  neither (#13143, #13288 F1). This is NOT the pre-#13143 bug returning — that was
-  a real close reading as "first ingest". For families 1 and 2 no fold ever
-  reaches the row; for family 3 a fold CAN reach it by name, but none is
-  triggered — because this reader records no transition for it to fold. So nothing
-  in this path writes back a repair.
+     ``""``) **on a position that records no end and whose legacy ``status`` word
+     does not say ``closed``** — the doors store it verbatim and the fold's
+     live-holder probe is type-sensitive (``0 = false`` is FALSE), so the row is
+     not LIVE and no CLOSING fold is ever dispatched for it. What is withheld is
+     the ``"open"`` answer only: that is the one that mints a ``-closed`` per poll
+     of a closed issue, because the close fold refuses a row with no live holder
+     (#13326). ⛔ Not being trigger-reachable is not being unreachable — a
+     ``github.issue.reopened`` fold reached by NAME does rewrite the marker to a
+     real boolean (``projection/entities.py:6157-6164`` → ``pipeline.py:434``);
+     what makes the truthy half self-heal is that this reader ANSWERS ``"closed"``
+     for it, so the fold is triggered at all. So an ENDED position, and a legacy
+     ``status`` word that says ``closed``, both KEEP their ``"closed"`` answer.
+  ⚠️ Stated trade, symmetric: the rows these answers are actually taken for record
+  no transition at all, so neither ``-closed`` nor ``-reopened``. Bounded and
+  inspectable; an unbounded mint loop is neither (#13143, #13288 F1). This is NOT
+  the pre-#13143 bug returning — that was a real close reading as "first ingest".
+  For families 1 and 2 no fold ever reaches the row; for family 3 (where the
+  withheld answer is ``"open"``) a fold CAN reach it by name, but none is triggered
+  — because this reader records no transition for it to fold. So nothing in this
+  path writes back a repair.
   ⚠️ The WIDER terms — ``status='outdated'`` and the legacy ``outdated=true`` flag —
   are NOT latched: ``_fold_object_stage``'s set has no ``outdated`` member, the
   CLOSE fold cannot reach such a row (no live holder) while the REOPEN fold can
@@ -1559,7 +1564,7 @@ class GitHubIndexer:
         # incarnation (`projection/entities.py:6158-6164`: `object_id = _held[0]`,
         # reached BEFORE `resolve_fold_name`), `_held` comes from
         # `all_name_holder_ids` (any status — an Integer-`0` row IS held,
-        # `entity_identity.py:447-470`), and `_live_holders` uses the same
+        # `entity_identity.py:466,990`), and `_live_holders` uses the same
         # `coalesce(n.isClosed, false) = false` predicate that calls Integer `0`
         # not-live (`live.py:209-213`). So a falsy-marked row sits in exactly the
         # predicate state a truthy-marked one does, and a `github.issue.reopened`
@@ -1580,6 +1585,20 @@ class GitHubIndexer:
         # ANY fold outcome (it gates the transition arm off, `if prev_state is not
         # None:`), so it is the only answer that cannot loop — that is the choice,
         # and it is the one not to reverse.
+        # ⛔ SO IT WITHHOLDS THE `"open"` ANSWER ONLY, never a `"closed"` one. A
+        # position-less LEGACY row whose `status` word says `closed`
+        # (`status='completed'`, `_STATUS_TO_STATE` — a pre-S0 write: today's doors
+        # refuse the word, `lifecycle_vocabulary.py:313`) keeps that answer, and must:
+        # it is not an assertion this arm may improve on but the reading the REOPEN
+        # fold reaches and REPAIRS — `_reopen_targets_closed` is True for an
+        # Integer-`0` row exactly as for a truthy one, and with no `cur_id`
+        # `apply_stage_fold` skips the identity guards and
+        # `stage_move_refusal(None, …, is_closed=bool(0)=False, reopen=True)`
+        # admits the move, writing `isClosed=False` and a live slot
+        # (`pipeline.py:397-435`). Answering `None` there would be the silent false
+        # negative the wide-term arm above exists to avoid, in the direction that
+        # loses data — pinned by
+        # `test_a_FALSY_isClosed_on_a_LEGACY_status_row_still_records_its_reopen`.
         # ⛔ AND IT IS ANSWERED AFTER THE POSITION READ, deliberately: a falsy marker
         # on an ENDED position still reads `"closed"` above, which is the reading
         # the fold reaches and REPAIRS. Answering `None` there would cost that row
@@ -1590,13 +1609,17 @@ class GitHubIndexer:
         # arm is `False`, so narrowing costs that fix nothing.
         # Cost, stated: one lost transition on a row no in-contract writer produces,
         # against an unbounded journal mint, which is not a defensible alternative.
-        if is_closed is not None and not isinstance(is_closed, bool) and not is_closed:
-            return None                      # 0 / 0.0 / "" — no live holder, unplaceable
+        # The polarity the remaining axes give, computed ONCE so the falsy marker is
+        # answered FROM it rather than in place of it.
         if stage_id is not None or slot is not None:
-            return "open"
-        if status is None:
-            return None
-        return _STATUS_TO_STATE.get(str(status))
+            fall_through = "open"
+        elif status is None:
+            fall_through = None
+        else:
+            fall_through = _STATUS_TO_STATE.get(str(status))
+        if is_closed is not None and not isinstance(is_closed, bool) and not is_closed:
+            return None if fall_through == "open" else fall_through
+        return fall_through
 
     def _upsert_statement(self, sdk, proj, repo: str, issue: dict) -> dict:
         """Two-phase statement write (P2-1): probe WITHOUT props → create

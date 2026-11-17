@@ -738,6 +738,79 @@ def test_a_FALSY_isClosed_on_a_TERMINAL_BY_ID_row_still_records_its_reopen(sdk):
         "landed on it — the falsy arm was placed above the position read")
 
 
+def test_a_FALSY_isClosed_on_a_LEGACY_status_row_still_records_its_reopen(sdk):
+    """#13326 review (round 3) F1 (P2): the arm must withhold `"open"` ONLY.
+
+    A POSITION-LESS legacy row (`status='completed'`, no `pipelineStageId` /
+    `pipelineSlot` — the shape a pre-S0 binary left) that also carries the verbatim
+    integer marker reaches neither the position test nor the wider-term arm:
+    `'completed'` is in neither `commit_ops.OBJECT_TERMINAL_STATUSES`
+    (`commit_ops.py:88-89`) nor `live.TERMINAL_EXCLUDED_STATUSES`
+    (`live.py:97-115`). Before this PR it fell through to `_STATUS_TO_STATE` and
+    read `"closed"` — and CONVERGED, because that reading IS the one the reopen
+    fold reaches and repairs: a GitHub reopen mints `-reopened`,
+    `_reopen_targets_closed` is True for an Integer-`0` row exactly as for a
+    truthy one (one registered incarnation, no live holder), an absent `cur_id`
+    skips `apply_stage_fold`'s identity guards, and
+    `stage_move_refusal(None, …, is_closed=bool(0)=False, reopen=True)` admits the
+    move and writes `isClosed=False` plus a live slot (`pipeline.py:397-435`).
+
+    An arm answering `None` for EVERY falsy marker drops that reopen for ever —
+    no mint ⇒ no fold ⇒ no repair, every poll — which is exactly the silent false
+    negative `_row_is_frozen`'s arm documents for `status='completed'` +
+    `outdated` + `isClosed=false`. So the arm withholds only the `"open"` answer,
+    and this pin is the observation that separates the two arms: it is RED under
+    the unconditional-`None` arm (0 mints) and GREEN here (1 mint + a repaired
+    marker).
+    """
+    oid = "github-issue-acme/repo1-1"
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    # The MARKER through the PUBLIC DOOR (the verbatim integer this PR is about);
+    # the legacy `status` word by a RAW write, because today's door REFUSES it —
+    # "a position word written as a status" (`lifecycle_vocabulary.py:313`) — so
+    # this shape exists only on a row a pre-S0 binary wrote. Raw graph writes are
+    # the legitimate simulation of legacy data (`live.py:100-108`, #2901). No
+    # pipeline props: that is what makes the row position-less.
+    sdk.update_knowledge(oid, isClosed=0)
+    proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) "
+                 "SET o.status='completed' "
+                 "REMOVE o.pipelineStageId, o.pipelineSlot")
+    stored = proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.status, o.isClosed, "
+        "typeof(o.isClosed), o.pipelineStageId, o.pipelineSlot").result_set[0]
+    assert stored[1] == 0 and stored[2] == "Integer", (
+        f"the door did not store the uncoerced integer this pin is about: {stored!r}")
+    assert stored[0] == "completed", (
+        f"the legacy word this pin is about was not stored: {stored!r}")
+    assert stored[3] is None and stored[4] is None, (
+        f"the precondition is not the POSITION-LESS legacy shape: {stored!r}")
+    # GitHub CLOSED over a row read "closed": nothing to record, no loop.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
+        "a transition was minted over a legacy row read `closed`")
+    # ⛔ THE DISCRIMINATOR: the reopen this reading makes reachable must be
+    # RECORDED (one mint) and must repair the marker — the unconditional-`None`
+    # arm gates the transition off and mints 0.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", closed_at=None, updated_at="2026-07-23T08:00:00Z")]
+    assert _run(_indexer(t), sdk)["events_minted"] == 1, (
+        "the falsy arm swallowed the `closed` answer a legacy status word gives a "
+        "position-less row, so the reopen the fold WOULD apply was dropped for ever")
+    repaired = proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.isClosed, typeof(o.isClosed), "
+        "o.pipelineSlot").result_set[0]
+    assert repaired[1] == "Boolean" and repaired[0] is False, (
+        f"the fold did not repair the marker to a real boolean: {repaired!r}")
+    assert repaired[2] == "active", (
+        f"the reopen must leave a live position: {repaired!r}")
+    assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
+        "the repaired row must be settled — nothing further to record")
+
+
 def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
     """#13222 review round 2, finding 1 (P1): reading a SUBSET of the fold's decision.
 
