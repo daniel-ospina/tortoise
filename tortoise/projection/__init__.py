@@ -13193,40 +13193,41 @@ class FalkorProjection(
             # A surviving name is no longer evidence of anything: the record
             # carries no address the fold can use.
             folded, _ = self._fold_object_superseded(ev)
-            if folded == 0 and journal_object_surviving is not None:
-                _cids, _ = journal_object_surviving
-                _oid, _oname = ev.get("id"), ev.get("name")
-                _survives = isinstance(_oid, str) and _oid in _cids
-                _deleted = (isinstance(_oid, str)
-                            and journal_object_deleted is not None
-                            and _oid in journal_object_deleted)
-                if not _survives and not _deleted:
-                    # #3590 D2 as amended on #10204: the exemption is granted on
-                    # ADDRESSES — the record carries at least one, and the
-                    # journal established NONE it carries. `None` (the
-                    # one-record LIVE path, which has no journal to consult)
-                    # stays fail-closed: it reads OBJECT_ADDRESS_ESTABLISHED.
-                    _sup_shape = classify_terminalizer_miss(
-                        "ObjectSuperseded", target_deleted=False,
-                        object_address=supersede_object_address(
-                            ev, journal_object_established))
-                    record_non_folded(
-                        _sup_shape,
-                        event_id=ev.get("event_id"),
-                        event_type="ObjectSuperseded", id=_oid,
-                        candidates=((_oname,) if isinstance(_oname, str)
-                                    and _oname else (_oid,)),
-                        # #10204 / #10183: the exempt record's receipt says the
-                        # journal never established the target's address and
-                        # that this replay applies no supersede, so a caller does
-                        # not go hunting a journal repair. It makes NO loss
-                        # verdict and NO "there is no repair" verdict — the
-                        # DEGRADED GUARANTEE on this shape is the class where
-                        # the supersede IS lost and the repair (journal the
-                        # missing creation) does exist.
-                        detail=_object_supersede_miss_detail(
-                            _sup_shape, prefix="graph fold: "),
-                    )
+            if folded == 0:
+                if journal_object_surviving is not None:
+                    _cids, _ = journal_object_surviving
+                    _oid, _oname = ev.get("id"), ev.get("name")
+                    _survives = isinstance(_oid, str) and _oid in _cids
+                    _deleted = (isinstance(_oid, str)
+                                and journal_object_deleted is not None
+                                and _oid in journal_object_deleted)
+                    if not _survives and not _deleted:
+                        # #3590 D2 as amended on #10204: the exemption is granted on
+                        # ADDRESSES — the record carries at least one, and the
+                        # journal established NONE it carries. `None` (the
+                        # one-record LIVE path, which has no journal to consult)
+                        # stays fail-closed: it reads OBJECT_ADDRESS_ESTABLISHED.
+                        _sup_shape = classify_terminalizer_miss(
+                            "ObjectSuperseded", target_deleted=False,
+                            object_address=supersede_object_address(
+                                ev, journal_object_established))
+                        record_non_folded(
+                            _sup_shape,
+                            event_id=ev.get("event_id"),
+                            event_type="ObjectSuperseded", id=_oid,
+                            candidates=((_oname,) if isinstance(_oname, str)
+                                        and _oname else (_oid,)),
+                            # #10204 / #10183: the exempt record's receipt says the
+                            # journal never established the target's address and
+                            # that this replay applies no supersede, so a caller does
+                            # not go hunting a journal repair. It makes NO loss
+                            # verdict and NO "there is no repair" verdict — the
+                            # DEGRADED GUARANTEE on this shape is the class where
+                            # the supersede IS lost and the repair (journal the
+                            # missing creation) does exist.
+                            detail=_object_supersede_miss_detail(
+                                _sup_shape, prefix="graph fold: "),
+                        )
                 _skip()
             return
         elif t == "ObjectRegistered":

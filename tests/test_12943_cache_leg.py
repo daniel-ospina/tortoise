@@ -1025,3 +1025,32 @@ def test_a_malformed_uri_does_not_turn_binding_a_tenant_into_a_failure(
             "binding a tenant must not add a cache-leg failure of any kind")
     finally:
         sdk.close()
+
+
+def test_a_supersede_that_folds_NOTHING_is_not_a_landed_write(monkeypatch,
+                                                             tmp_path):
+    """The other half of the landed guard: `_skip` must not sit behind the
+    journal diagnostic (#12943 review of the landed-count delta).
+
+    `ObjectSuperseded` is the arm whose `folded == 0` case is TOLERATED — the
+    live one-record path (`journal_object_surviving is None`) has no journal to
+    consult and is fail-closed by shape. But a supersede that folded no Object
+    wrote NOTHING, and a hook that counts it would report a landed write for
+    exactly the idempotent re-fold a healthy deployment repeats. Nested inside
+    the journal gate, `_skip()` never ran on that path.
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    reset_cache_write_targets()
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        # The LIVE path: no `journal_object_surviving`, and no such Object.
+        proj.apply({"event_id": "ev-sup-none", "type": "ObjectSuperseded",
+                    "id": "obj-never-existed", "name": "never-existed"})
+        assert cache_write_targets() == {}, (
+            "a supersede that folded nothing is not a landed write — got "
+            f"{cache_write_targets()!r}")
+    finally:
+        sdk.close()
