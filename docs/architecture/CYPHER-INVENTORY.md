@@ -455,7 +455,7 @@ has already merged without regenerating them (the rule assigns the refresh to th
 the code; none of those commits did it), while
 `tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` is RED at
 `origin/main` today — the generated table is the only artifact in this document that no pin reaches.
-(Two earlier revisions of this paragraph are RETIRED rather than reconciled, because each named a
+(Three earlier revisions of this paragraph are RETIRED rather than reconciled, because each named a
 unit, a metric or a base it did not measure: "31 of 1,313 rows" — `1,313` is the table's LINE count,
 it is **1,311 rows over 1,313 lines**, of which **1,310** are distinct, the duplicate being the two
 unresolved door calls on `tortoise/session_source_migration.py:235` — with `31` attributed to no
