@@ -679,6 +679,218 @@ def _parse_iso(value) -> datetime | None:
         return None
 
 
+# ── Per-label signal dispatch (#12184) ────────────────────────────────
+#
+# `GraphRanker._fetch_signals` used to be a TWO-branch dispatch:
+#
+#     if entity_type == "event": return self._fetch_event_signals(ids)
+#     return self._fetch_point_signals(ids)      # ← everything else
+#
+# so `rerank(..., entity_type="object")` — and "subject", "source",
+# "document" — silently fetched POINT signals for entity ids. No error, no
+# warning: the caller got a list that looked ranked and was scored against
+# the wrong rows. The defect is not that the numbers were loud, it is that
+# they were plausible — a point's signal is its OWN persisted belief and its
+# OPERATOR edges, and an entity has neither, so the read answers
+# `confidence: None`, `degree: 0` for every entity row and the "graph"
+# contribution collapses to a constant. A constant graph term is not a
+# neutral default: it is a graph claim ("the graph does not distinguish
+# these") made by a read that never looked at the right edges.
+#
+# The dispatch below is therefore EXPLICIT for every label in
+# `security.VALID_ENTITY_TYPES`, and REFUSES any label it has no signal set
+# for — never a fallback.
+#
+# The entity signal set, decided here and recorded in
+# `docs/architecture/SEARCH-ARCHITECTURE.md` §6.4:
+#
+#   * ``confidence`` — the MEAN persisted belief of the claims that point AT
+#     the entity (inbound ``about*`` edges, plus ``extractedFrom`` for a
+#     Source). An entity has no belief of its own; what the graph knows about
+#     it is what its claims say. ``None`` when none of them carries a belief
+#     (#11702's ABSENT state — never a fabricated 0.5), and that term then
+#     does not participate.
+#   * ``degree`` — the INBOUND claim count: how much the graph actually
+#     refers to this entity. This is the structural signal the point read
+#     cannot produce: a Point's degree is its operator connectivity, an
+#     entity's is its USE.
+#   * ``identity`` — computed in ``rerank`` from the row against the query,
+#     not here: exact normalised-name equality is the identity ladder's own
+#     verdict (``entity_resolver.normalize_entity_name``), and for an
+#     entity row the name IS the row's whole surface (a Point carries
+#     ``content`` instead). See ``_identity_match``.
+#   * ``created`` — the row's timestamp, for the existing recency term.
+#
+# ``operator`` routes to the POINT fetch on purpose and is not a fallback: an
+# operator IS a ``:Point`` (``validate_entity_type`` maps it to ``:Point``,
+# ontology §4.3), so point signals are the CORRECT signals for it.
+
+
+class UnsupportedEntitySignals(ValueError):
+    """No graph signal set exists for this ``entity_type`` — refuse, never guess.
+
+    Raised by :meth:`GraphRanker._fetch_signals` / :meth:`StateRanker.rerank`
+    for a label the module has no signal fetch for. Before #12184 such a
+    label silently received POINT signals; a caller that asked for a ranking
+    it could not have got back a plausible one instead. A ``ValueError``
+    subclass so existing `except ValueError` callers keep their behaviour.
+    """
+
+
+#: entity_type → (graph label, identity property, extra INBOUND edge predicates
+#: beyond ``ABOUT_EDGE_TYPES``). ``document`` is a ``:Source`` (D10, ONTOLOGY
+#: §4.4) and a Source resolves by ``url``, not ``id`` (#149) — the same
+#: three-way id field ``search_engine``'s legs use. ``source``/``document`` add
+#: ``extractedFrom`` because that is the edge a claim carries to the document it
+#: was read from (§3.3): the claims ABOUT a source are the claims extracted
+#: FROM it.
+ENTITY_SIGNAL_SPECS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "object": ("Object", "id", ()),
+    "subject": ("Subject", "id", ()),
+    "source": ("Source", "url", ("extractedFrom",)),
+    "document": ("Source", "url", ("extractedFrom",)),
+}
+
+
+#: entity_type → the fetch that answers for it. Every member of
+#: ``VALID_ENTITY_TYPES`` is present; a label outside this map is REFUSED.
+#: ``operator`` → point is a routing declaration, not a fallback (§4.3).
+SIGNAL_FAMILY_BY_ENTITY_TYPE: dict[str, str] = {
+    "point": "point",
+    "operator": "point",
+    "event": "event",
+    **{et: "entity" for et in ENTITY_SIGNAL_SPECS},
+}
+
+
+def signal_family_for(entity_type: str) -> str:
+    """The signal FAMILY a label is ranked with — or a loud refusal.
+
+    ONE home for the question "which signals does this row type get?" so
+    ``GraphRanker`` and ``StateRanker`` cannot drift apart again (#12184
+    audit point 4: both dispatched internally and both silently fell back to
+    point signals).
+    """
+    family = SIGNAL_FAMILY_BY_ENTITY_TYPE.get(entity_type)
+    if family is None:
+        raise UnsupportedEntitySignals(
+            f"no graph signal set for entity_type {entity_type!r}: refusing to "
+            f"rank it rather than scoring it with another row type's signals. "
+            f"Known labels: {sorted(SIGNAL_FAMILY_BY_ENTITY_TYPE)}")
+    return family
+
+
+def _entity_row_name(result: dict) -> str:
+    """The entity surface a result row carries.
+
+    ``name`` is the entity's natural key (``:Object``/``:Subject``); the
+    search rows that reach a ranker carry it as ``content`` (the read's
+    unified key) or as ``name`` on a to-dict'ed entity. A Point carries
+    ``content`` and no identity property at all — which is why the identity
+    term below is only computed for entity-shaped rows.
+    """
+    for key in ("name", "content"):
+        val = result.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return ""
+
+
+def _identity_match(result: dict, query: str | None) -> bool:
+    """Is this row the entity the query names — under the identity ladder's fold?
+
+    ``entity_resolver.normalize_entity_name`` is the ONE stored-name fold
+    (#12047: NFKC → casefold → drop a leading article → non-word runs to
+    space), i.e. the fold an exact identity match uses. Using it here means
+    the ranker's "these are the same name" agrees with the matcher's, instead
+    of introducing a second fold that would drift.
+
+    Deliberately BOOLEAN, not a fuzzy score: this term says "the query IS
+    this entity's name", which is a categorical identity verdict, not a
+    similarity to be tuned. Fuzzy name similarity is the match ladder's
+    question, and #11901 records a second similarity constant as a REFUSED
+    row.
+    """
+    if not query or not query.strip():
+        return False
+    name = _entity_row_name(result)
+    if not name:
+        return False
+    try:
+        from .entity_resolver import normalize_entity_name
+        return normalize_entity_name(name) == normalize_entity_name(query)
+    except Exception:  # pragma: no cover — defensive: a fold failure is not an identity
+        logger.warning("identity fold failed for %r", query, exc_info=True)
+        return False
+
+
+def fetch_entity_signals(projection, ids: list[str], *, entity_type: str,
+                         point_signals) -> dict[str, dict]:
+    """Batch-fetch the ENTITY signal set for ``ids`` (#12184).
+
+    Shared by ``GraphRanker`` and ``StateRanker`` so the two rankers can never
+    disagree on what an Object/Subject/Source is measured by. ``point_signals``
+    is the caller's own ``_fetch_point_signals`` (the two classes keep their
+    own point reads — ``StateRanker``'s also counts degree centrality), and it
+    is called ONCE for the union of the entities' inbound claims.
+
+    The output keeps the point signal shape (plus ``is_entity``) so every
+    consumer in ``rerank`` keeps reading one dict shape for every family.
+    """
+    if not ids:
+        return {}
+    label, id_prop, extra_preds = ENTITY_SIGNAL_SPECS[entity_type]
+    preds = "|".join(tuple(extra_preds) + tuple(ABOUT_EDGE_TYPES))
+    rows = projection.g.query(
+        "MATCH (n:" + label + ") WHERE n." + id_prop + " IN $ids "
+        # The traversal position may hold ANY epistemic label (#7927): the
+        # claims about an Object/Subject can be Points, and a Source's claims
+        # are extractedFrom Points. ``p.id IS NOT NULL`` is #8538's rule — a
+        # belief with no id cannot be re-anchored into the id-keyed point read
+        # below, so counting it toward degree would report a measured entity
+        # with a phantom degree.
+        "OPTIONAL MATCH (p)-[a:" + preds + "]->(n) "
+        f"  WHERE {epistemic_disjunction('p')} AND p.id IS NOT NULL "
+        "WITH n, count(a) AS claim_degree, collect(DISTINCT p.id) AS pids "
+        "RETURN n." + id_prop + ", claim_degree, pids, n.createdAt",
+        params={"ids": ids},
+    ).result_set
+    all_pids = sorted({pid for row in rows for pid in (row[2] or ()) if pid})
+    point_sigs = point_signals(all_pids) if all_pids else {}
+    out: dict[str, dict] = {}
+    for row in rows:
+        eid, claim_degree, pids = row[0], int(row[1]), row[2] or ()
+        confs = [point_sigs[p]["confidence"] for p in pids
+                 if p in point_sigs and point_sigs[p].get("confidence") is not None]
+        measured = [p for p in pids
+                    if p in point_sigs and point_sigs[p].get("confidence") is not None]
+        out[eid] = {
+            "confidence": (round(sum(confs) / len(confs), 6)
+                           if confs else None),
+            # #11702's three states, one level up: a mean over declared priors
+            # is a PRIOR; at least one EP-measured claim makes it a
+            # MEASUREMENT; no claim belief at all is ABSENT.
+            "ep_state": (EP_STATE_ABSENT if not confs
+                         else EP_STATE_MEASURED
+                         if any(point_sigs[p].get("has_ep") for p in measured)
+                         else EP_STATE_BASELINE),
+            "has_ep": len(confs) > 0,
+            "has_prior": any(point_sigs[p].get("has_prior") for p in pids
+                             if p in point_sigs),
+            "degree": claim_degree,
+            "created": row[3] if len(row) > 3 else None,
+            "variance": 0.0,
+            "contested": False,
+            "status": "",
+            "draft": False,
+            #: Which family produced this dict. ``rerank`` reads it to label
+            #: the breakdown; ``graph_boost`` reads it to pick the entity
+            #: formula instead of silently reusing the point one.
+            "is_entity": True,
+        }
+    return out
+
+
 class GraphRanker:
     """Re-rank search results using graph topology signals.
 
@@ -721,6 +933,15 @@ class GraphRanker:
         # `belief_read_for` reports as "no claim".
         self.signals_read: bool | None = None
         self.signals_answered: frozenset = frozenset()
+        # #12184: whether the ENTITY read found any graph structure to order
+        # on. `signals_read` says the read ANSWERED; this says the answer
+        # DISTINGUISHED the rows. They are different facts, and conflating them
+        # is what made a constant graph term read as a graph verdict. `None`
+        # for point/event families (not applicable), `False` when every entity
+        # row answered `degree: 0` and `confidence: null` — the order is then
+        # the legs' relevance alone, and the caller can say so instead of
+        # presenting it as graph-informed.
+        self.signals_informative: bool | None = None
         # #2952: recency decay is INTENTIONAL product behaviour (γ·e^(-λ·age),
         # 30-day half-life), so the fix is not to delete it but to make the
         # reference time it measures against EXPLICIT and injectable. A caller
@@ -755,6 +976,7 @@ class GraphRanker:
         regression)."""
         self.signals_read = False
         self.signals_answered = frozenset()
+        self.signals_informative = None
         if not results:
             return results
 
@@ -771,6 +993,22 @@ class GraphRanker:
         signals = signals or {}
         self.signals_answered = frozenset(
             pid for pid, sig in signals.items() if sig.get("has_prior"))
+        if entity_type in ENTITY_SIGNAL_SPECS and signals:
+            # #12184: an entity read that answered all-`(0, None)` measured
+            # NOTHING that could order the rows. Say so rather than letting a
+            # constant graph term pass as a graph judgement (the shape the
+            # issue exists about, one level up): the breakdown still reports
+            # `graph_boost`, and `signals_informative` is the field that
+            # distinguishes "the graph ranked these" from "the graph had
+            # nothing and relevance did the work".
+            self.signals_informative = any(
+                (sig.get("degree") or 0) > 0 or sig.get("confidence") is not None
+                for sig in signals.values())
+            if not self.signals_informative:
+                logger.warning(
+                    "entity signal read answered with no structure for %d %r "
+                    "row(s) — the order is relevance-only (signals_informative"
+                    "=False)", len(signals), entity_type)
         contested_boosts: dict[str, float] = {}
         if query and self.projection is not None and _w4_flag_on():
             contested_boosts = resolve_contested_relevance(
@@ -785,8 +1023,30 @@ class GraphRanker:
             similarities.append(sim)
 
         norm_sims = _min_max_normalize(similarities)
+        # #12184: for an ENTITY row the query NAMES an identity, so exact
+        # normalised-name equality (the identity ladder's own fold) is an
+        # explicit ORDER DIMENSION — the same shape #2598 used for a draft
+        # (``(is_draft, ..., -final_score)``): a categorical fact sorts ahead
+        # of every score, because no number can be more true than "this row IS
+        # the entity the query names".
+        #
+        # ⛔ NOT a term folded into ``final``, and the reason is measured: the
+        # similarity entering it is MIN-MAX normalised, so the top lexical row
+        # is always 1.0 and any "floor at 1.0" for an exact name can only TIE
+        # with it (the first version of this change did exactly that and left
+        # the fixture in the wrong order). A dimension cannot be absorbed that
+        # way. It is also not a fourth weighted term: there is no constant to
+        # tune for a boolean, and adding one would silently rebalance the three
+        # weights the constructor validates to sum to 1.0.
+        #
+        # ⛔ NOT computed for points/events: a claim has no identity property
+        # (its surface is ``content``), so the same comparison there would rank
+        # a claim by the length of its text.
+        identity_hits: list[bool] = []
+        if signal_family_for(entity_type) == "entity":
+            identity_hits = [_identity_match(r, query) for r in results]
         annotated: list[dict] = []
-        for r, norm_sim in zip(results, norm_sims):  # noqa: B905
+        for idx, (r, norm_sim) in enumerate(zip(results, norm_sims)):  # noqa: B905
             sig = signals.get(r.get("id"), {})
             graph_boost = self.graph_boost(r, sig)
             cb = contested_boosts.get(r.get("id"), 0.0)
@@ -797,6 +1057,7 @@ class GraphRanker:
                 # when a maxed structural boost meets the W4-b increment.
                 graph_boost = round(min(1.0, graph_boost + cb), 4)
             recency = self.recency_boost(r, sig)
+            identity_hit = identity_hits[idx] if identity_hits else False
             final = (
                 self.similarity_weight * norm_sim
                 + self.graph_boost_weight * graph_boost
@@ -809,6 +1070,12 @@ class GraphRanker:
                 "recency_boost": round(recency, 4),
                 "final_score": round(final, 4),
             }
+            if identity_hits:
+                # #12184: report the verdict, so an order built on identity is
+                # visible instead of looking like a relevance the leg produced.
+                copy["graph_ranking"]["identity_match"] = identity_hit
+            if entity_type in ENTITY_SIGNAL_SPECS:
+                copy["graph_ranking"]["signal_family"] = "entity"
             if sig:
                 # #11702 — the ranker REPORTS the belief it ordered on, and
                 # names its state. `confidence: null` + `ep_state: "absent"`
@@ -831,7 +1098,16 @@ class GraphRanker:
                 copy["graph_ranking"]["contested"] = sig.get("contested", False)
             annotated.append(copy)
 
-        annotated.sort(key=lambda r: r["graph_ranking"]["final_score"], reverse=True)
+        if identity_hits:
+            # Explicit dimension, then the score — the #2598 shape. `sorted` is
+            # stable, so equal (identity, score) rows keep the leg's order.
+            annotated.sort(
+                key=lambda r: (r["graph_ranking"]["identity_match"],
+                               r["graph_ranking"]["final_score"]),
+                reverse=True)
+        else:
+            annotated.sort(
+                key=lambda r: r["graph_ranking"]["final_score"], reverse=True)
         return annotated
 
     # ── Signal computation ────────────────────────────────────────────────
@@ -876,6 +1152,23 @@ class GraphRanker:
             confidence = signals.get("confidence")
             degree = signals.get("degree", 0)
             about_objects = signals.get("about_objects", 0)
+            if signals.get("is_entity"):
+                # #12184: ENTITY rows. `degree` is the INBOUND CLAIM count
+                # ("how much the graph refers to this entity"), never the point
+                # read's operator connectivity, and `confidence` is the MEAN
+                # belief of those claims, never the row's own (an entity has
+                # none). The numeric shape matches the point arm deliberately —
+                # the two families are on the same [0,1] scale so a caller can
+                # mix them — but every input differs, which is the whole point
+                # of the dispatch: the pre-#12184 read fed point inputs here.
+                #
+                # The ABSENT arm keeps its WEIGHT, not the whole boost (the
+                # #11702 rule): a never-measured entity must not outrank a
+                # measured-symmetric one.
+                connectivity = 1.0 - 1.0 / (1.0 + (degree or 0))
+                if confidence is None:
+                    return round(0.5 * connectivity, 4)
+                return round(0.5 * confidence + 0.5 * connectivity, 4)
             if about_objects > 0 or signals.get("is_event"):
                 # Events/Sessions: 0.6·aboutObject count (Objects referenced).
                 inst_norm = 1.0 - 1.0 / (1.0 + about_objects)
@@ -927,13 +1220,28 @@ class GraphRanker:
         """
         if not ids:
             return {}
+        # #12184: the label → family resolution is the SHARED one
+        # (`signal_family_for`), and it REFUSES a label it has no signals for
+        # BEFORE the try below — a refusal is not a failed read, so it must not
+        # be swallowed into `None` (which the caller reads as "the read did not
+        # answer" and ranks with the neutral defaults: exactly the silent
+        # fallback this dispatch replaces).
+        family = signal_family_for(entity_type)
         try:
-            if entity_type == "event":
+            if family == "event":
                 return self._fetch_event_signals(ids)
+            if family == "entity":
+                return self._fetch_entity_signals(ids, entity_type)
             return self._fetch_point_signals(ids)
         except Exception as e:  # pragma: no cover — defensive
             logger.warning("GraphRanker signal fetch failed: %s", e)
             return None
+
+    def _fetch_entity_signals(self, ids: list[str], entity_type: str) -> dict[str, dict]:
+        """Entity-shaped signals (Object/Subject/Source) — see the module note."""
+        return fetch_entity_signals(
+            self.projection, ids, entity_type=entity_type,
+            point_signals=self._fetch_point_signals)
 
     def _fetch_point_signals(self, ids: list[str]) -> dict[str, dict]:
         # Post-#2206/#2286 parity: a point's confidence is the belief MEAN
@@ -1337,11 +1645,29 @@ class StateRanker:
         self.signals_answered: frozenset = frozenset()
         if self.projection is not None:
             for et, ids in ids_by_entity.items():
+                # #12184: the SAME label → family resolution GraphRanker uses
+                # (`signal_family_for`), and the same refusal for a label with
+                # no signal set. Before this, only `object` was routed and
+                # every other label — `subject` included — silently got POINT
+                # signals, which is the defect this issue is about, one class
+                # over (audit point 4 on #12184).
+                family = signal_family_for(et)
+                if family == "event":
+                    # StateRanker's pool is Points + entities (recall_state);
+                    # it has NO event signal set, and inventing one here would
+                    # be a second, unpinned definition. Refuse loudly instead
+                    # of scoring an Event with point signals.
+                    raise UnsupportedEntitySignals(
+                        "StateRanker has no event signal set: it ranks Points "
+                        "and entity rows (recall_state's pool). Refusing to "
+                        "score an Event with another row type's signals.")
                 try:
-                    if et == "object":
-                        signals.update(self._fetch_object_signals(ids))
+                    if family == "entity":
+                        signals.update(self._fetch_entity_signals(ids, et))
                     else:
                         signals.update(self._fetch_point_signals(ids))
+                except UnsupportedEntitySignals:
+                    raise
                 except Exception as e:  # pragma: no cover — defensive
                     logger.warning("StateRanker signal fetch failed (%s): %s", et, e)
             self.signals_read = bool(signals)
@@ -1776,76 +2102,29 @@ class StateRanker:
         return out
 
     def _fetch_object_signals(self, ids: list[str]) -> dict[str, dict]:
-        """Batch-fetch state signals for Objects: confidence = MEAN EP
-        posterior of the Points about them (via about* edges); degree =
-        incident about* edge count. An Object with no about-Point carrying a
-        belief reports ``confidence: None`` + ``ep_state: "absent"`` (#11702) —
-        the old neutral 0.5 was the same fabrication one level up."""
-        if not ids:
+        """Batch-fetch ENTITY signals for Objects (#12184).
+
+        Confidence = the MEAN EP posterior of the claims about them (inbound
+        ``about*`` edges); degree = the inbound claim count. An Object with no
+        about-claim carrying a belief reports ``confidence: None`` +
+        ``ep_state: "absent"`` (#11702) — the old neutral 0.5 was the same
+        fabrication one level up.
+
+        ⛔ The BODY now lives in the shared :func:`fetch_entity_signals`, used by
+        ``GraphRanker`` too. Keeping two copies is how the two rankers would
+        disagree about what an entity is measured by, and #12184 is precisely
+        the class where one ranker had the capability and the other silently
+        substituted a different row type's signals.
+        """
+        return self._fetch_entity_signals(ids, "object")
+
+    def _fetch_entity_signals(self, ids: list[str], entity_type: str) -> dict[str, dict]:
+        """Entity-shaped signals for any label in :data:`ENTITY_SIGNAL_SPECS`."""
+        if self.projection is None:  # pragma: no cover — embedded path never asks
             return {}
-        about_types = "|".join(ABOUT_EDGE_TYPES)
-        rows = self.projection.g.query(
-            "MATCH (o:Object) WHERE o.id IN $ids "
-            # #7927: ``p`` is a TRAVERSAL position — the belief an Object is
-            # measured by may be any epistemic label, not only a Point.
-            "OPTIONAL MATCH (p)-[a:" + about_types + "]->(o) "
-            f"  WHERE {epistemic_disjunction('p')} "
-            # ``pids`` feeds ``_fetch_point_signals`` — an ID-ANCHORED Point
-            # read — so a belief with no ``id`` (a keyless legacy :Event) would
-            # be a ``None`` in that list: the edge counted toward ``degree``
-            # while its posterior vanished, i.e. a measured Object reported as
-            # unmeasured with a phantom degree (measured: degree 1, has_ep
-            # False). Held to what the pre-widening predicate admitted rather
-            # than coalescing, because the value would be re-anchored as an
-            # ``id`` it is not (#8538; #7927 review).
-            "  AND p.id IS NOT NULL "
-            "WITH o, count(a) AS about_degree, collect(DISTINCT p.id) AS pids "
-            "RETURN o.id, about_degree, pids",
-            params={"ids": ids},
-        ).result_set
-        # Batch-fetch posterior params for all about-Points (single query).
-        all_pids = sorted({pid for row in rows for pid in row[2] if pid})
-        point_sigs = self._fetch_point_signals(all_pids) if all_pids else {}
-        out = {}
-        for row in rows:
-            oid, about_degree, pids = row[0], int(row[1]), row[2]
-            # #11702: an absent belief carries NO number. Filter the Nones out
-            # rather than letting them poison the mean — an Object whose
-            # about-Points are all unmeasured has no belief of its own, and the
-            # old `NEUTRAL_CONFIDENCE` here was the neutral-mean fabrication one
-            # level up.
-            confs = [point_sigs[p]["confidence"] for p in pids
-                     if p in point_sigs and point_sigs[p].get("confidence") is not None]
-            measured = [p for p in pids
-                        if p in point_sigs and point_sigs[p].get("confidence") is not None]
-            out[oid] = {
-                "confidence": (round(sum(confs) / len(confs), 6)
-                               if confs else None),
-                # #11702: the Object's belief is a MEASUREMENT only when at
-                # least one about-node was EP-MEASURED; a mean over declared
-                # priors is a prior, and no about-belief at all is absent.
-                "ep_state": (EP_STATE_ABSENT if not confs
-                             else EP_STATE_MEASURED
-                             if any(point_sigs[p].get("has_ep") for p in measured)
-                             else EP_STATE_BASELINE),
-                "has_ep": len(confs) > 0,
-                # #10137: the Object's belief is the MEAN of its about-Points,
-                # so it is a measurement only when at least one of them carried
-                # one — otherwise there is no value at all (#11702).
-                "has_prior": any(
-                    point_sigs[p].get("has_prior") for p in pids
-                    if p in point_sigs),
-                "degree": about_degree,
-                "variance": 0.0,
-                "contested": False,
-                # #2598: the Object status family has NO ``draft`` member
-                # (``commit_ops.OBJECT_TERMINAL_STATUSES``), so an Object can
-                # never be a staged row — declared explicitly rather than left
-                # absent so the rerank gate reads one shape for both families.
-                "status": "",
-                "draft": False,
-            }
-        return out
+        return fetch_entity_signals(
+            self.projection, ids, entity_type=entity_type,
+            point_signals=self._fetch_point_signals)
 
     def _embedded_signals(self, results: list[dict]) -> dict[str, dict]:
         """Read state signals embedded in result dicts (projection=None).
