@@ -212,6 +212,7 @@ REFUSE_FANOUT = "id-fanout-or-foreign-label"
 REFUSE_AMBIGUOUS_TARGET = "ambiguous-target-flag"
 REFUSE_PENDING_UNWRITABLE = "durability-marker-unwritable"
 REFUSE_PENDING_UNREADABLE = "durability-marker-unreadable"
+REFUSE_BUSY = "another-run-in-progress"
 
 #: Knowledge labels a ``:Object`` must NOT also carry. ``update_knowledge``
 #: dispatches on the label, so a dual-labelled row takes the other family's arm
@@ -376,6 +377,97 @@ def _set_pending(journal: str | None, ids: list) -> bool:
     except OSError:
         return False
     return True
+
+
+def _acquire_run_lock(journal: str | None):
+    """An EXCLUSIVE, non-blocking lock for the whole run; :class:`Refused` if busy.
+
+    ⛔ The marker protocol is a read-modify-write shared by every process pointed
+    at this journal: a per-row MERGE reads the file and writes it back, and the
+    end-of-run discharge writes an EXACT set. Without serialization they are
+    last-writer-wins, so the discharge silently DELETES an id a concurrent run
+    just merged — the peer's live-only row loses its only durable trace and the
+    next preview prints the `0 rows ⇒ dead weight` sentence with exit 0. That is
+    the exact false PASS this marker exists to prevent (measured: a peer merge
+    fired inside the discharge's journal read, and the peer id was gone).
+
+    A one-shot migration does not need concurrent runs, so the whole run takes
+    the lock and a second run is REFUSED BY NAME rather than interleaved. The
+    lock file lives beside the marker, is never deleted (unlinking a file under
+    a held flock reintroduces the race), and a filesystem without `fcntl` simply
+    does not lock — recorded here rather than silently assumed.
+    """
+    path = _pending_path(journal)
+    if path is None:
+        return None
+    lock_path = path.with_name(path.name + ".lock")
+    try:
+        # A long-lived handle is the POINT (the flock lives as long as the run),
+        # so the context-manager rule does not apply here.
+        handle = open(lock_path, "a+", encoding="utf-8")  # noqa: SIM115
+    except OSError as exc:
+        raise Refused(REFUSE_BUSY, (
+            f"the run lock {lock_path} could not be created ({exc}), so a "
+            "concurrent run could erase this run's durability marker. Nothing "
+            "was written.")) from exc
+    try:
+        import fcntl
+    except ImportError:                     # pragma: no cover - non-POSIX
+        return handle
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        raise Refused(REFUSE_BUSY, (
+            f"another run holds {lock_path} ({exc}). Two runs on one journal can "
+            "erase each other's durability markers, so this one refuses rather "
+            "than interleave. Wait for it, then re-run. Nothing was written."
+        )) from exc
+    return handle
+
+
+def _release_run_lock(handle) -> None:
+    if handle is None:
+        return
+    with contextlib.suppress(OSError, AttributeError, ValueError):
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with contextlib.suppress(OSError, AttributeError):
+        handle.close()
+
+
+def _population_ids(rep) -> set[str]:
+    return {str(r.get("id")) for r in rep.rows if r.get("id") is not None}
+
+
+def _kept_pending(pending, population, log) -> list[str]:
+    """The ids that must STAY marked: this run's, plus any not proven durable.
+
+    ⛔ Applied on the PREVIEW arm too. A marker left by a killed run can name
+    only ids whose own record already landed; they are discharged by the execute
+    arm, but a preview that showed them verbatim withheld the measurement and
+    prescribed `rebuild_all` — a destructive journal replay — on a healthy graph.
+    Read-only: no write is involved on the preview path.
+
+    The WHOLE journal is read (these ids were named by runs that may be long
+    finished), and only when there is something to judge: the steady state (no
+    marker, nothing rewritten) parses nothing.
+    """
+    ids = sorted({str(i) for i in pending or () if i is not None})
+    if not ids:
+        return []
+    try:
+        records = log.read_all()
+    except (AttributeError, OSError, TypeError, ValueError):
+        records = None                       # fail closed: keep every id
+    kept = []
+    for pid in ids:
+        # ⛔ An id still carrying a legacy word LIVE is NOT dischargeable,
+        # whatever an older record says about an earlier life of the row.
+        if pid not in population and _row_recorded(records, pid):
+            continue
+        kept.append(pid)
+    return kept
 
 
 def _clear_pending(journal: str | None) -> None:
@@ -808,12 +900,19 @@ def rewrite(sdk, rep: Report) -> Report:
         # added to the report's set only once that write SUCCEEDS, so the report
         # never accuses a row that was refused of being live-only.
         if not _write_pending(rep.journal, set(_marker_ids) | {str(rid)}):
+            # ⛔ Two different verdicts: an UNREADABLE marker (a read failure) is
+            # not an unwritable one, and the module names them separately for a
+            # reason — collapsing them mislabelled the cause.
+            _token = (REFUSE_PENDING_UNREADABLE
+                      if _read_pending(rep.journal) is None
+                      else REFUSE_PENDING_UNWRITABLE)
             rep.failures.append({
                 "id": rid,
-                "error": (f"{REFUSE_PENDING_UNWRITABLE}: the durability marker "
-                          f"{_pending_path(rep.journal)} could not be written, "
-                          "so this row is NOT being written — a failed or killed "
-                          "run would leave it LIVE-ONLY with no trace."),
+                "error": (f"{_token}: the durability marker "
+                          f"{_pending_path(rep.journal)} could not be "
+                          f"{'read' if _token == REFUSE_PENDING_UNREADABLE else 'written'}"
+                          ", so this row is NOT being written — a failed or "
+                          "killed run would leave it LIVE-ONLY with no trace."),
             })
             continue
         _marker_ids.add(str(rid))
@@ -937,23 +1036,9 @@ def rewrite(sdk, rep: Report) -> Report:
                       f"{_pending_path(rep.journal)} became unreadable during "
                       "the run, so its ids could not be discharged."),
         })
-    # The WHOLE journal, not a window: these ids were named by runs that may be
-    # long finished. `None` (unreadable) keeps every id — fail closed.
-    try:
-        _all_records = log.read_all()
-    except (AttributeError, OSError, TypeError, ValueError):
-        _all_records = None
-    _population = {str(r.get("id")) for r in rep.rows if r.get("id") is not None}
-    _kept = []
-    for _pid in sorted(set(_on_disk) | _marker_ids):
-        if _pid in _discharged:
-            continue
-        # An id still carrying a legacy word LIVE is NOT dischargeable, whatever
-        # an old record from an earlier life might say about it.
-        if _pid not in _population and _row_recorded(_all_records, _pid):
-            continue
-        _kept.append(_pid)
-    _still = _kept
+    _still = [pid for pid in _kept_pending(
+        sorted(set(_on_disk) | _marker_ids), _population_ids(rep), log)
+        if pid not in _discharged]
     _write_failed = None
     if (rep.failures or rep.truncated or rep.unaddressable or rep.fanout
             or _still
@@ -1194,6 +1279,13 @@ def run(sdk, *, execute: bool = False, sample: int = 20,
             f"the durability marker {_pending_path(rep.journal)} exists but "
             "could not be read, so it is unknown whether a previous run left "
             "rows LIVE-ONLY. Nothing was written."))
+    if rep.pending and log is not None:
+        # ⛔ The PREVIEW gets the same discharge test the write arm applies, or a
+        # marker left by a killed run (naming only ids whose records landed)
+        # withholds the measurement and prescribes `rebuild_all` — a destructive
+        # journal replay — on a healthy graph. Read-only.
+        rep.pending = _kept_pending(
+            rep.pending, _population_ids(rep), log)
     if not execute:
         return rep
     # ⛔ THE REFUSALS ARE MADE HERE, not only in `main`. `main` answers them with
@@ -1273,6 +1365,16 @@ def main(argv: list[str] | None = None) -> int:
             f"the next rebuild would revert it. {repair} Nothing was written.\n")
         return 2
 
+    # ⛔ ONE run at a time on this journal (see `_acquire_run_lock`). Held across
+    # both arms, so the preview cannot be interleaved with another run's writes.
+    try:
+        _lock = _acquire_run_lock(journal)
+    except Refused as refused:
+        sys.stderr.write(
+            f"rewrite_object_status: REFUSED {refused.reason}: "
+            f"{refused.message}\n")
+        return 2
+
     sdk = TortoiseSDK(db_path=args.db_path, graph_name=args.graph_name,
                       event_log_path=journal)
     try:
@@ -1301,6 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     finally:
         sdk.close()
+        _release_run_lock(_lock)
 
     if args.json:
         print(json.dumps(rep.to_dict(), indent=2, default=str))

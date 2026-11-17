@@ -488,26 +488,120 @@ def test_a_row_written_before_a_KILL_is_discharged_by_the_next_run(env, monkeypa
     assert "dead weight" in tool.render(tool.run(sdk, execute=False))
 
 
-def test_a_TORN_marker_write_cannot_read_as_no_marker(env):
-    """The marker's own update must be atomic, or it manufactures a false PASS.
+def test_a_TORN_marker_write_keeps_the_previous_marker_intact(env, monkeypatch):
+    """The marker's own update must be all-or-nothing, or it manufactures a PASS.
 
     `write_text` truncates first, so a kill in that window leaves an EMPTY file
-    — which `_read_pending` reads as "no marker", and the next preview prints the
-    sentence authorising the `assembly` drop. The write goes through a
-    same-directory tmp file + `os.replace`, and the tmp is cleaned up.
+    — which `_read_pending` reads as "no marker", and the next preview then
+    prints the sentence authorising the `assembly` drop. The write goes through a
+    same-directory tmp + `os.replace`, so a torn write leaves the PREVIOUS
+    complete set in place and reports failure.
+
+    ⛔ Discriminating on purpose: the earlier version of this test asserted only
+    the SUCCESS path, so it passed unchanged against `write_text` — the code it
+    was supposed to catch (review finding, 2026-11-17).
     """
     sdk, events = env
-    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    journal = str(events / "events.jsonl")
+    keep = sdk.create_object("keep", objectKind="test:widget")["id"]
+    nxt = sdk.create_object("next", objectKind="test:widget")["id"]
+    assert tool._write_pending(journal, [keep]) is True
+    marker = tool._pending_path(journal)
+
+    real_write_text = Path.write_text
+
+    def torn(self, data, *a, **kw):          # die mid-write, on the tmp only
+        if self.name.endswith(".tmp"):
+            real_write_text(self, str(data)[:1], *a, **kw)
+            raise OSError(28, "No space left on device")
+        return real_write_text(self, data, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", torn)
+    try:
+        wrote = tool._write_pending(journal, [nxt])
+    finally:
+        monkeypatch.setattr(Path, "write_text", real_write_text)
+
+    assert wrote is False, "a torn marker write reported success"
+    assert tool._read_pending(journal) == [keep], (
+        "a torn write lost the previous marker — the next preview would read "
+        "'no marker' and certify an unmeasured graph")
+    assert marker.read_text(encoding="utf-8") == f"{keep}\n"
+    assert [p.name for p in marker.parent.iterdir() if p.name.endswith(".tmp")] == [], \
+        "a torn write left its tmp file behind"
+
+
+def test_a_PREVIEW_discharges_a_durable_only_marker(env, monkeypatch):
+    """A marker naming only rows whose records LANDED must not block the reading.
+
+    After a killed run the marker can name exclusively durable rows; the execute
+    arm discharges them, but a preview that showed them verbatim withheld the
+    measurement and prescribed `rebuild_all` — a destructive journal replay — on
+    a healthy graph. The preview applies the same read-only test.
+    """
+    sdk, events = env
+    oid = sdk.create_object("durable", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 
-    assert tool._write_pending(str(events / "events.jsonl"), [oid]) is True
-    marker = tool._pending_path(str(events / "events.jsonl"))
-    assert tool._read_pending(str(events / "events.jsonl")) == [oid]
+    real_write = tool._write_pending
+    calls = {"n": 0}
 
-    leftovers = [p.name for p in marker.parent.iterdir() if p.name.endswith(".tmp")]
-    assert leftovers == [], f"a tmp file was left behind: {leftovers}"
-    # No torn state is representable: whatever a reader sees is a complete set.
-    assert marker.read_text(encoding="utf-8") == f"{oid}\n"
+    def die_after_the_first_row(journal, ids):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt
+        return real_write(journal, ids)
+
+    monkeypatch.setattr(tool, "_write_pending", die_after_the_first_row)
+    extra = sdk.create_object("also", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, extra, "outdated")
+    with pytest.raises(KeyboardInterrupt):
+        tool.run(sdk, execute=True)
+    monkeypatch.setattr(tool, "_write_pending", real_write)
+
+    journal = str(events / "events.jsonl")
+    assert tool._read_pending(journal) == [oid], "precondition: the durable row is marked"
+    assert _status(sdk, oid) == tool.REWRITE_TO
+
+    preview = tool.run(sdk, execute=False)
+
+    assert preview.pending == [], (
+        f"a marker naming only durable rows withheld the reading: {preview.pending!r}")
+    assert preview.total == 1, "precondition: one row is still legacy"
+    # And the message it prints must be the actionable one, not `rebuild_all`.
+    text = tool.render(preview)
+    assert "LIVE-ONLY" not in text, text
+    assert "rebuild_all" not in text, text
+
+
+def test_a_SECOND_concurrent_run_is_refused_by_name(env, monkeypatch):
+    """Two runs on one journal must not interleave their read-modify-writes.
+
+    The marker is a shared read-modify-write: a per-row MERGE reads and rewrites
+    it, and the end-of-run discharge writes an exact set. Last-writer-wins lets
+    the discharge DELETE an id a peer just merged, so the peer's live-only row
+    loses its only durable trace and the next preview certifies the graph
+    (measured: a peer merge fired inside the discharge's journal read and the id
+    was gone). The run therefore takes an exclusive lock and refuses a second
+    run BY NAME.
+    """
+    sdk, events = env
+    _seed(sdk)
+    journal = str(events / "events.jsonl")
+
+    held = tool._acquire_run_lock(journal)
+    try:
+        with pytest.raises(tool.Refused) as raised:
+            tool._acquire_run_lock(journal)
+        assert raised.value.reason == tool.REFUSE_BUSY, raised.value.reason
+        assert "another run" in raised.value.message.lower()
+    finally:
+        tool._release_run_lock(held)
+
+    # Released: the next run gets it, and the lock file is not a leftover marker.
+    again = tool._acquire_run_lock(journal)
+    tool._release_run_lock(again)
+    assert tool._read_pending(journal) == [], "the lock file must not read as a marker"
 
 
 def test_a_discharged_id_is_REMOVED_from_the_marker(env):
