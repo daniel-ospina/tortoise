@@ -459,6 +459,20 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
     ⚠️ The trade, stated: a genuinely closing issue whose row carries a broken
     position records no `-closed`. That is bounded and inspectable; an unbounded
     mint loop on the journal is neither.
+
+    ⛔ AND THE ORDER IS THE FIX (#13288 F1/F3, the marker-carrying subset below).
+    A guard with the right answer in the wrong place only holds for the rows that
+    reach it: `is_position_ended` short-circuits on `bool(is_closed)`
+    (`live.py:154`) and never consults the slot, so while this guard sat BELOW the
+    polarity arms a row carrying a truthy `isClosed` *and* a broken position
+    answered `"closed"` — and against an OPEN issue that mints `-reopened`,
+    `-reopened-2`, … on every poll, for ever (`[1,1,1]` measured at head
+    `52dd2a6`). Such a row is one supported write sequence away: close the issue
+    normally (the fold writes `isClosed=true` + `done`), then
+    `update_knowledge(id, pipelineStageId='nope')`. The two marker-free shapes
+    above cannot observe that: they answer `None` through the trailing
+    `status is None` arm, so they stay green under the arm-order mutation. The
+    loop below is the pin for the ORDER.
     """
     oid = "github-issue-acme/repo1-1"
     shapes = {
@@ -482,6 +496,57 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
         assert mints == [0, 0, 0], (
             f"{why}: the fold refuses this row, so the read must not call it open "
             f"— every poll minted another close ({mints})")
+
+    # ⛔ THE MARKER-CARRYING SUBSET — the arm-order pin (#13288 F1, F3). Every poll
+    # here is an OPEN issue, which is the direction a `"closed"` answer loops in,
+    # and the row is built by the reachable sequence rather than by hand.
+    for why, (prop, value) in shapes.items():
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        proj.g.query("MATCH (e:Event) DETACH DELETE e")
+        t = MockGitHubTransport(issues=[gh_issue(1)])
+        _run(_indexer(t), sdk)
+        # 1. a REAL close, through the fold: `isClosed=true` + the terminal stage.
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="closed", closed_at="2026-07-20T08:00:00Z",
+            updated_at="2026-07-20T08:00:00Z")]
+        assert _run(_indexer(t), sdk)["events_minted"] == 1
+        # 2. the break, through the same PUBLIC door the shape is reachable by.
+        sdk.update_knowledge(oid, **{prop: value})
+        closed_marker, stage = proj.g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.isClosed, o.pipelineStageId",
+            params={"id": oid}).result_set[0]
+        assert closed_marker and stage, (
+            "the fixture cannot show the marker-carrying shape: it needs a truthy "
+            f"isClosed AND a stage id (got {closed_marker!r}, {stage!r})")
+        # 3. GitHub says OPEN again — the state the issue is in for its whole life
+        # and the one in which `"closed"` mints a reopen on EVERY poll.
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="open", updated_at="2026-07-22T08:00:00Z")]
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+        assert mints == [0, 0, 0], (
+            f"{why}, with a truthy `isClosed`: the fold cannot place this row, so "
+            f"the read must not call it CLOSED — every poll minted another reopen "
+            f"({mints}); the unresolvable guard was shadowed by the position arm")
+
+    # …and the CONTROL, on the same reachable sequence: an `isClosed=true` row the
+    # fold CAN place must still be READ as closed, so a guard that answered `None`
+    # for everything cannot pass the loop above.
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (o:Object) DETACH DELETE o")
+    proj.g.query("MATCH (e:Event) DETACH DELETE e")
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    assert _run(_indexer(t), sdk)["events_minted"] == 1
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", updated_at="2026-07-22T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+    assert mints == [1, 0, 0], (
+        "a placeable `isClosed=true` row must still be READ as closed and record "
+        f"its reopen exactly once ({mints}) — `None` for EVERYTHING is not the fix")
 
 
 def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):

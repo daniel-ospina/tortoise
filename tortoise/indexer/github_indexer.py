@@ -42,6 +42,13 @@ Lifecycle decision table (THE rule):
   unbounded mint loop is neither (#13143, #13288 F1). This is NOT the pre-#13143
   bug returning — that was a real close reading as "first ingest"; both refusals
   above are shapes for which no fold writes anything.
+  ⛔ BOTH are answered BEFORE the polarity (closed/open) arms, on purpose: the
+  answer therefore does not depend on ``isClosed``. It must not, because
+  ``is_position_ended`` short-circuits on the marker alone and never looks at the
+  slot, so a marker-carrying row with an unplaceable position would otherwise
+  answer ``"closed"`` and mint ``-reopened``, ``-reopened-2``, … on every poll of
+  an OPEN issue (measured at ``[1,1,1]`` — #13288 F1). A lookup the fold refuses to
+  perform is not a negative result; it is a third answer.
 
   **Stated residual (#13288 review, note).** The declaration this reader resolves
   against is ``core:workitem`` only, because that is the only pipeline the BUILT-IN
@@ -50,7 +57,10 @@ Lifecycle decision table (THE rule):
   (``projection/entities.py:5950-5958``, ``pipeline_key = target_kind``), so such a
   row's ``pipelineStageKey`` names a pipeline this reader cannot resolve and it
   answers ``None`` — its close/reopen history stops, re-introducing the #13143
-  symptom (``events_minted: 0`` on a close) for that population. It is BOUNDED (no
+  symptom (``events_minted: 0`` on a close) for that population. That answer is
+  unconditional in every other prop (it is taken before the polarity arms, see the
+  refusal bullet above), so it does not flip to ``"closed"`` on a row that also
+  carries ``isClosed`` — the shape that would loop. It is BOUNDED (no
   mint loop) and one config away from being live, so it is stated here rather than
   guessed at. Resolving the declaration the way the fold does — through the pack
   index — is the honest close, and it is deliberately NOT done in the loop fix: it
@@ -1187,7 +1197,13 @@ class GitHubIndexer:
         # 2) THE POSITION AXIS -> `"closed"` only when it records an end. This is
         # the axis the fold WRITES, so its answer is reconcilable: the
         # `reopen=True` arm writes `isClosed=False` and an active stage, which is
-        # why an `isClosed=1` row self-heals instead of looping.
+        # why an `isClosed=1` row self-heals instead of looping — ⛔ ONLY for a row
+        # the fold can PLACE. The unresolvable guard below is therefore evaluated
+        # BEFORE this arm (#13288 F1): `is_position_ended` short-circuits on
+        # `bool(is_closed)` (`live.py:154`) and never consults the slot, so a
+        # marker-carrying row with a position the fold refuses would answer
+        # `"closed"` and mint `-reopened`, `-reopened-2`, … on every poll of an
+        # OPEN issue, for ever.
         # The slot is resolved the way `apply_stage_fold` resolves the CURRENT
         # stage: from the DECLARATION, by `pipelineStageId`, not from the stored
         # `pipelineSlot` alone. A row whose slot prop was never written (or was
@@ -1219,6 +1235,10 @@ class GitHubIndexer:
         # (pinned by `test_a_row_whose_position_the_fold_cannot_place_is_never_`
         # `read_as_closed_either`). Only while the position was still LIVE did the
         # position reach this arm at all, which is why that direction's pin passed.
+        # A lookup that cannot be PERFORMED is not a negative result (the reconciler
+        # shape: observe → diff → act), so the answer for it is a third value —
+        # `None`, "cannot place this row" — and never a polarity inferred from the
+        # props that survived the refusal.
         # `None` is the loop-free answer and the repo's own precedent for this
         # shape: `planned_occurrence.plan_position` treats the same two refusals
         # as unresolvable and explicitly refuses to call such a row open/upcoming
