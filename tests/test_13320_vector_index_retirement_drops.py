@@ -599,6 +599,14 @@ class _PostDropReadFailsOnce(_EngineLikeGraph):
         low = cypher.lower()
         if low.startswith("drop") and "embedding" in low:
             self._drop_seen = True
+        if low.startswith("drop") and "vector index" in low:
+            # ⛔ AMBIGUOUS, not the engine's `no such index` (#13330 review 5):
+            # a definitive refusal proves nothing was written, so the sweep
+            # legitimately reuses the pre-drop rows and this lane never re-reads
+            # — the confirmation read this fixture exists to fail would not
+            # happen. A transport failure may have applied the DDL, so it does.
+            self.calls.append(cypher)
+            raise RuntimeError("connection reset by peer")
         if "db.indexes()" in low and self._drop_seen and not self._failed:
             self._failed = True
             self.calls.append(cypher)
@@ -1030,3 +1038,49 @@ def test_an_ANSWERED_None_catalogue_is_not_read_as_no_index(monkeypatch, caplog)
     assert "NO row list" in joined, f"the line must name the shape it saw: {joined!r}"
     assert "cannot say whether arming took effect" in joined, (
         f"the unreadable arm must not claim an outcome it cannot measure: {joined!r}")
+
+
+def test_a_DEFINITIVE_refusal_does_not_cost_an_extra_catalogue_read(
+        monkeypatch, caplog):
+    """An engine's `no such index` proves nothing was written (#13330 review 5, P2).
+
+    Counting a definitive refusal as a possible write made the permanent SURVIVOR
+    store — the state that warns on every setup of the hosted per-request path —
+    pay an extra catalogue read for DROPs the engine had already told it could not
+    have written. An AMBIGUOUS failure (a transport error after the server may
+    have executed the DDL) must still force the confirmation read; this pin holds
+    both directions.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="none")
+    proj = _bare(graph, graph="test_13320_refusal_cost")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    reads = [c for c in graph.calls if "db.indexes()" in c.lower()]
+    assert len(reads) == 2, (
+        "the survivor store paid an extra catalogue read for DROPs the engine "
+        f"definitively refused: {len(reads)} reads, calls={graph.calls!r}")
+
+    # …and the AMBIGUOUS failure still re-reads (the lane the rule exists for).
+    caplog.clear()
+    ambiguous = _EngineLikeGraph(drop_accepts="none")
+
+    class _Transport:
+        def __init__(self, inner):
+            self._inner = inner
+            self.calls = inner.calls
+
+        def query(self, cypher, params=None, timeout=None):
+            if cypher.lower().startswith("drop") and "vector index" in cypher.lower():
+                self.calls.append(cypher)
+                raise RuntimeError("connection reset by peer")
+            return self._inner.query(cypher, params=params, timeout=timeout)
+
+    t = _Transport(ambiguous)
+    _bare(t, graph="test_13320_refusal_cost_ambiguous")._ensure_indexes()
+    reads2 = [c for c in t.calls if "db.indexes()" in c.lower()]
+    assert len(reads2) == 3, (
+        "an AMBIGUOUS drop failure must still force the confirmation read: "
+        f"{len(reads2)} reads, calls={t.calls!r}")

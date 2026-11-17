@@ -21814,16 +21814,26 @@ class FalkorProjection(
         # that read to the inventory instead of letting it probe again. After a
         # DROP the rows describe a catalogue that no longer exists, so that one
         # case re-reads.
-        # ⛔ AN ATTEMPT IS A WRITE UNTIL THE CATALOGUE SAYS OTHERWISE (#13330
-        # review P2). `_dropped_with` is set only by a statement that RETURNED,
-        # but a DROP that RAISES may already have applied the DDL — a transport
-        # failure after the server executed it. Reading that as "nothing wrote"
-        # handed the inventory the PRE-drop rows, so a real removal could be
-        # reported as `every candidate DROP was refused` from a stale read, and
-        # reused rows the #5434 rule above says are stale. One extra catalogue
-        # read on the FAILURE path only; a store with nothing to drop still
-        # takes exactly one.
-        _attempted = _dropped_with is not None or bool(_drop_refusals)
+        # ⛔ AN AMBIGUOUS ATTEMPT IS A WRITE UNTIL THE CATALOGUE SAYS OTHERWISE
+        # (#13330 review P2) — but a DEFINITIVE REFUSAL IS NOT AN ATTEMPT
+        # (#13330 review 5, P2). `_dropped_with` is set only by a statement that
+        # RETURNED, and a DROP that RAISES may already have applied the DDL (a
+        # transport failure after the server executed it), so that case must
+        # re-read. The engine's own `no such index` answer is NOT that case: it
+        # proves nothing was written, and counting it as a write made the
+        # permanent SURVIVOR store — the state whose WARNING the latch only
+        # silences once per process while the SWEEP still runs per setup, on a
+        # method the hosted path reaches per request — pay a THIRD catalogue read
+        # on top of its three refused DDL round trips. One extra read remains, on
+        # the genuinely ambiguous path only.
+        #
+        # ⚠️ STILL OPEN, measured and NOT fixed here (the peer commit's stated
+        # residual): the three DDL round trips themselves repeat on EVERY setup
+        # of a survivor store. Reducing them needs a per-store negative cache and
+        # is a follow-up, not a read.
+        _ambiguous_write = any(
+            "no such index" not in str(err).lower() for _s, err in _drop_refusals)
+        _attempted = _dropped_with is not None or _ambiguous_write
         if catalogue_rows is None and not _attempted:
             catalogue_rows = _rows
         _wrote_index = _attempted
