@@ -199,18 +199,30 @@ def test_the_DEDICATED_point_doors_grade_a_renderer_named_status_key(env):
 
     ``create_point`` tested ``"status" in props`` / popped ``"status"`` and
     ``update_point`` tested ``'status' in props``, while the transport applies
-    ``str(key)``. Measured on this branch BEFORE the fix:
+    ``str(key)``. Measured on this branch BEFORE the fix, per engine:
 
-        create_point({<content 'zzz', __str__ 'status'>: 'in_progress'})
-          -> ACCEPTED, stored status='in_progress'   (and 'garbage')
-        update_point(the same shape) -> ACCEPTED, stored 'garbage'
+        update_point({<content 'zzz', __str__ 'status'>: 'garbage'})
+          -> ACCEPTED, stored 'garbage'                 (BOTH engines)
+        create_point(the same shape)
+          -> embedded engine: the caller's key won last-wins, stored the
+             ungraded word (measured: returned `status: in_progress`)
+          -> graph lane: `ResponseError: Duplicate property key 'status' in
+             inline property map` — the caller's key arrives beside the CREATE
+             map's own `status: $st` field, so the driver refused the statement
 
-    — an ungraded word no read leg excludes, i.e. one that reads as CURRENT,
-    which is the fail-open #10371 / #11824 exists to close; the identical bags
-    were already refused by ``create_object`` (the two-key case) and
-    ``update_knowledge`` (the single-key case). This test therefore pins the
-    family DISAGREEING before the fix and agreeing after it, on both doors and
-    on the two-key bag.
+    ⛔ THE ENGINE SPLIT IS PART OF THE CLAIM (#13143 review round 2, P3): the
+    create half's failure MODE is engine-dependent, so this docstring must not
+    say "stored" for it as if it were universal — a measurement that does not
+    reproduce in the lane this test actually runs in is not evidence. What is
+    universal, and what the fix closes, is that **neither door GRADED the word**:
+    an ungraded word no read leg excludes reads as CURRENT, which is the
+    fail-open #10371 / #11824 exists to close — and the identical bags were
+    already refused by ``create_object`` (the two-key case) and
+    ``update_knowledge`` (the single-key case). This test pins the family
+    DISAGREEING before the fix and agreeing after it, on both doors and on the
+    two-key bag; §1's discriminator is therefore the GRADED refusal
+    (``ValueError … was refused``), which the pre-fix graph lane does not raise
+    either — it raises the driver's duplicate-key error instead.
 
     It also pins the DELIVERY: a rendered key is re-filed under the literal
     spelling, so a bag that IS accepted lands exactly one ``status`` column —

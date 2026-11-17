@@ -5808,17 +5808,30 @@ door cannot answer, whatever the two values say.
 def _rehome_rendered_status_key(props: dict, *, door: str, label: str) -> bool:
     """Refuse an ambiguous status write, and file a renderer-named one under ``status``.
 
-    #13143 review (F1, P1) — measured on this tree: the two DEDICATED Point
-    doors tested the LITERAL NAME (``"status" in props`` /
-    ``props.pop("status", "live")``) while the transport applies ``str(key)``.
-    A ``str`` subclass whose content and ``__str__`` differ therefore slipped
-    past the test and was written as ``status`` by ``SET n += $props``:
+    #13143 review (F1, P1) — the two DEDICATED Point doors tested the LITERAL
+    NAME (``"status" in props`` / ``props.pop("status", "live")``) while the
+    transport applies ``str(key)``. A ``str`` subclass whose content and
+    ``__str__`` differ therefore slipped past those tests:
 
-        ``create_point({<K content 'zzz', __str__ 'status'>: 'in_progress'})``
+        ``update_point({<K content 'zzz', __str__ 'status'>: 'in_progress'})``
         STORED ``status='in_progress'`` (and ``'garbage'``)
-        ``update_point(same shape)`` → same, where ``update_knowledge`` REFUSED
-        both — an ungraded word no read leg excludes, i.e. one that reads as
-        CURRENT, which is exactly the fail-open #10371 / #11824 exists to close.
+        ``create_point(the same shape)`` — the caller's key reached the inline
+        CREATE map beside the map's own ``status: $st`` field, so WHICH failure
+        it produced depended on the engine: on the graph lane the duplicate
+        key was rejected by the driver
+        (``ResponseError: Duplicate property key 'status'``, i.e. a raw error a
+        caller cannot act on) and on the embedded engine the caller's key won
+        last-wins and stored the ungraded word.
+
+    Both are defects, and the one that matters is the shared one: **neither door
+    GRADED the word**. ``update_knowledge`` refused both bags on the same day, so
+    the family disagreed, and an ungraded word no read leg excludes reads as
+    CURRENT — exactly the fail-open #10371 / #11824 exists to close.
+
+    (The engine split is recorded because the first draft of this docstring
+    claimed the create half "STORED" the word, which is only true embedded; a
+    review finding corrected it, and a measurement that does not reproduce in
+    the lane its own test runs in is not evidence — #13143 review round 2.)
 
     The entity doors had already been moved onto the renderer union
     (:func:`keys_rendering_as`, :func:`_status_write_is_ambiguous`); this is the
