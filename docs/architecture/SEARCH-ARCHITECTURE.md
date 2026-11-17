@@ -307,13 +307,13 @@ leg (`tortoise/bm25.py`,
 `#8488`) found **neither rarity nor length** priced into the scoring, measured on the **embedded
 (falkordblite) lane** — not on the hosted `db.idx.fulltext` leg, which is unmeasured here. What the move
 decisively changes is the **order** the fusion consumes, not the score scale: `rrf_fusion` is RANK-based
-(`RRF(d) = Σ w_i / (k + rank_i)`, `search_engine.py:3046` — and it DISCARDS the leg's own score outright,
-`for rank, (pid, _score) in enumerate(ranked)`, `:3116-3118`), so the `{"vector": 1.5}` + implicit 1.0
+(`RRF(d) = Σ w_i / (k + rank_i)`, `search_engine.rrf_fusion` — and it DISCARDS the leg's own score outright,
+`for rank, (pid, _score) in enumerate(ranked)`), so the `{"vector": 1.5}` + implicit 1.0
 weights are multipliers on a rank and a rescale leaves them untouched, and on the multi-leg arm a caller's
-`threshold` is compared against the **fused** score (`sdk.py:38445`), never against the leg's own.
+`threshold` is compared against the **fused** score (`sdk.tortoise_fts_query`, its RRF arm's `fused = {… if score >= threshold}` under "Apply threshold filter to RRF scores"), never against the leg's own.
 ⚠️ The magnitude does enter ONE arm, and it is stated because a later lane would otherwise be surprised
 by it: when a single leg answers or the read is a full scan, a caller's `threshold` IS compared against
-that **leg's raw score** (`sdk.py:38401`; bounded `0.0–1.0` at `:37470`, shipped default `0.0` = filter
+that **leg's raw score** (`sdk.tortoise_fts_query`, its single-leg/full-scan arm; `threshold` bounded `0.0–1.0` by that method's own validation, shipped default `0.0` = filter
 off) — there a rescale changes which rows clear the floor. Either way a different scorer **re-ranks** the
 lexical leg, and that re-ordering — not a lost scale — is what M3's score distributions must measure.
 Independently of all of it, `to_tsvector` cannot reproduce the product's tokenizer behaviour
