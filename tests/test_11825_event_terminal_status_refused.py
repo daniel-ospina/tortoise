@@ -66,7 +66,19 @@ from tortoise.sdk import POINT_STATUS_VALUES, TortoiseSDK
 #: to the question these tests ask, and neither may be weakened: the assertion is
 #: the STATE (nothing stored, nothing journalled), so the pattern accepts either
 #: and the ordering is main's to decide.
-_EITHER_REFUSAL = r"(not writable on an :Event|not an exact `str`)"
+#:
+#: ⛔ A THIRD answer joined at the #13065 merge: `_sanitize_props` refuses a call
+#: in which two keys render as the SAME name and ask for DIFFERENT words
+#: ("more than one key in this call renders as `status` and they ask for
+#: different words"). That is also a correct answer to these questions — and it
+#: fires BEFORE the `:Event` arm for exactly the two-key inputs the masking arms
+#: below construct (`status` + an alias). It does not weaken the claim those arms
+#: pin: masking needed the guard to read only the LAST declaration, and a pair of
+#: DIFFERENT words is now refused regardless of which one is last. Repeated here
+#: rather than re-spelled per arm, so the day a door reorders again the pattern is
+#: the one place that changes.
+_EITHER_REFUSAL = (r"(not writable on an :Event|not an exact `str`"
+                   r"|CONFLICTING status write)")
 
 #: The terminal half, as a sorted tuple so a parametrized id list is stable.
 _TERMINAL = tuple(sorted(TERMINAL_EXCLUDED_STATUSES))
@@ -676,7 +688,7 @@ class TestTheEventApiDoor:
                 return isinstance(other, _AliasOutdated) and str.__eq__(self, other)
 
         eid = _event(sdk, name="Masked")
-        with pytest.raises(ValueError, match="not writable on an :Event"):
+        with pytest.raises(ValueError, match=_EITHER_REFUSAL):
             sdk.update_knowledge(eid, **{"status": "superseded",
                                       _AliasHarmless("status"): "live"})
         assert "status" not in _props(sdk, eid)
