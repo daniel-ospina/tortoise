@@ -2430,7 +2430,10 @@ BASE-scoped, not tree-scoped.** Four of the phrases they quote — *"STANDS, unc
 TODAY"*, *"IN FORCE TODAY"* and *"the record must hold a label's vectors before anything else about that label's
 storage is decided"* — appear nowhere in `#13350`'s base (`git grep -F <phrase> d392ac79aa^ -- docs/architecture/STORAGE-ARCHITECTURE.md`
 → 0 hits each — that commit is the merge of this PR, so its first parent is the base); an intermediate revision of
-this PR wrote them. ⚠️ Run the same grep against the merged `origin/main` and the last of the four now hits, because
+this PR wrote them. The §14.3 heading's *"in force today"* is the same phrase as the six sites' uppercase *"IN FORCE
+TODAY"* in the other casing, absent from the base for the same reason (it entered the file at `d392ac79aa` itself:
+`git log -S "in force today"` → that commit), so the two casings are counted once — which is why this reads **four**.
+⚠️ Run the same grep against the merged `origin/main` and the last of the four now hits, because
 the merge itself put it there — which is why the ref is named here instead of the branch name. What the net change
 corrects is the result, and one of the corrections below is **content, not wording**:
 
@@ -2469,6 +2472,21 @@ corrects is the result, and one of the corrections below is **content, not wordi
   and the **authorisation to RETIRE** a graph copy is scoped, and that comment gives it for `:Object`/`:Subject`
   and no other label. A label-scoped authorisation never narrowed the sequencing rule, and the general rule never
   widened the prohibition.
+- **The ruling's release separation is restored at every site.** The sequencing has two halves — the order *and* the
+  release boundary — and the merged `origin/main` stated only the *precondition*: `git grep -c "in a later release"
+  origin/main -- docs/architecture/STORAGE-ARCHITECTURE.md` → **0 hits** (and `"record first"` → 0), against **2** in
+  `#13350`'s base (`… d392ac79aa^ -- …` → 2, at `:1584` and `:1594`, each carrying the order *and* the separation).
+  A precondition — *"only once the record holds AND indexes that label"* — is satisfiable **within one release**, so
+  on its own it never states the separation. `#11395` comment `6956793300` states both in one line — *"Sequencing:
+  record first, graph removal second, in that order and **not in one release**"* — and without the second half a lane
+  could satisfy every remaining site by doing both removals in one release, which is the deletion the sequencing
+  exists to prevent. The ten sites (`:216`, `:980`, `:1118`, `:1126`, `:1147`, `:1330`, `:1541`, `:1584`, `:1592`,
+  `:1594`) now read *"in a later release and never in the same one"* (`git grep -c` → **10**), and
+  `SEARCH-ARCHITECTURE.md:51` carries the same sentence. **What is RESTORED is the base's wording** (*"in a later
+  release"*, at `:1584`/`:1594` in `d392ac79aa^` and absent from `d392ac79aa`'s result); **what is ADDED** is
+  *"and never in the same one"* — the ruling's own clause, which the base did not spell out — and the `#13220`
+  step-1/step-2 anchoring around it. The mirror-image record for the sibling document states the same restoration in
+  `SEARCH-ARCHITECTURE-CHANGELOG.md`'s `#13350` entry.
 - **§14.3's heading** now says the KEEP half's *prohibition* binds today rather than that the ruling is "in force
   today", so the heading agrees with the six sites, the V3 row and this entry instead of contradicting them from
   the line above the table.
