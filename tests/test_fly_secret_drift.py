@@ -139,6 +139,15 @@ def _declared_gh_names(manifest: Path) -> set[str]:
     return names
 
 
+#: A comment starts at `#` ONLY at line start or after whitespace — the gate's own
+#: `_COMMENT_RE` (`(?:^|\s)#`), reproduced here on purpose. A plainer
+#: `split("#", 1)` truncates the PAYLOAD of a `fly-only:#13209` declaration to
+#: `fly-only:`, so an offender message would print a token no manifest line
+#: contains — two readers of one grammar disagreeing in the one string an
+#: operator is meant to act on (#13370 review, P3).
+_MANIFEST_COMMENT_RE = re.compile(r"(?:^|\s)#")
+
+
 def _manifest_sources(manifest: Path) -> dict[str, str]:
     """`{Fly variable: source token}` for every declaration in the manifest.
 
@@ -147,8 +156,9 @@ def _manifest_sources(manifest: Path) -> dict[str, str]:
     the two differ — keying on the payload would silently skip that row.
     """
     sources: dict[str, str] = {}
-    for line in manifest.read_text().splitlines():
-        parts = line.split("#", 1)[0].split()
+    for raw in manifest.read_text().splitlines():
+        marker = _MANIFEST_COMMENT_RE.search(raw)
+        parts = (raw[: marker.start()] if marker else raw).split()
         if len(parts) == 2:
             sources[parts[0]] = parts[1]
     return sources
@@ -2176,6 +2186,30 @@ def test_probe_block_and_manifest_gh_secret_names_are_in_lockstep():
 _FLY_ONLY_LINE = "FLY_ONLY_KEY  fly-only:#661\n"
 _FLY_ONLY_MANIFEST = _MANIFEST + _FLY_ONLY_LINE
 _FLY_ONLY_SECRETS = [*_ALL_DECLARED, "FLY_ONLY_KEY"]
+
+
+def test_the_test_side_manifest_reader_keeps_a_fly_only_payload(tmp_path):
+    """`_manifest_sources` must agree with the GATE about where a comment starts.
+
+    A plainer `split("#", 1)` truncates `fly-only:#13209` to `fly-only:`. The
+    CLASSIFICATION survived that (`startswith("fly-only:")` still holds, so the
+    guard passed), and only the string an operator reads diverged — an offender
+    message naming a token no manifest line contains. Two readers of one grammar
+    disagreeing in the one place a human acts on it is worth a pin, because the
+    failure is invisible until someone is already debugging (#13370 review, P3).
+    """
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text(
+        "# a full-line comment\n"
+        "REGISTRY_STREAM_KEY    fly-only:#661\n"
+        "TORTOISE_RECORD_SERVE  fly-only:#13209   # trailing note\n"
+        "SENTRY_DSN             gh-secret:SENTRY_DSN   # error tracking\n"
+    )
+    assert _manifest_sources(manifest) == {
+        "REGISTRY_STREAM_KEY": "fly-only:#661",
+        "TORTOISE_RECORD_SERVE": "fly-only:#13209",
+        "SENTRY_DSN": "gh-secret:SENTRY_DSN",
+    }
 
 
 def _fly_only_manifest(name: str, line: str, base: str = _MANIFEST) -> Path:
