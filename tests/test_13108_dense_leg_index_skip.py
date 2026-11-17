@@ -240,7 +240,7 @@ class _InventoryStub:
         self._graph_name = "g13108"
         self._catalogue_rows = catalogue_rows
         self._vector_indexed_labels = "UNSET"
-        self._vector_indexed_served_labels = "UNSET"
+        self._vector_index_served_labels = "UNSET"
         self._vector_indexed_labels_for_reads = "UNSET"
 
     def _stable_endpoint(self):
@@ -278,7 +278,14 @@ def test_a_reshaped_catalogue_is_UNMEASURED_for_behaviour_only():
     assert stub._vector_indexed_labels == set(), (
         "the REPORTED pair must keep #11087's pinned semantic — an answered "
         f"catalogue is 'measured and empty', got {stub._vector_indexed_labels!r}")
-    assert stub._vector_indexed_served_labels is not None
+    # ⛔ The attribute is `_vector_index_served_labels` (NOT `…indexed…`):
+    # asserting the misspelt name was satisfied by this stub's own sentinel and
+    # could never fail (`#13121` round 7 F3). Assert the VALUE, so the row
+    # discriminates.
+    assert stub._vector_index_served_labels == {"Object", "Subject", "Event",
+                                                "Source", "Point"}, (
+        "the served half must be measured beside the indexed one, got "
+        f"{stub._vector_index_served_labels!r}")
     assert stub._vector_indexed_labels_for_reads is None, (
         "the BEHAVIOURAL half must be NOT MEASURED when nothing in the "
         "catalogue parsed — acting on 'nothing is indexed' here would demote "

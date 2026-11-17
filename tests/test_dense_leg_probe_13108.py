@@ -93,14 +93,21 @@ def test_over_budget_includes_the_budget_itself():
 
 
 def test_summarise_publishes_None_for_every_absent_latency():
-    """An arm that ran nothing is `None` in every latency cell, never `0`."""
+    """An arm that ran nothing is `None` in EVERY cell, never `0`.
+
+    The counters count READINGS, so an arm with no readings has no count: `0 over
+    budget` on an arm that took no samples is a measured-looking zero — the rule
+    `percentile` states, broken by `windows-8000-under-load-timeout.json`
+    (`n: 0` beside `over_budget: 0`, `degraded: 0`, `zero_rows: 0`; `#13121`
+    round 7 F5).
+    """
     arm = probe.summarise([])
     assert arm["n"] == 0
     assert arm["latency_ms"] == {"p50": None, "p95": None, "p99": None,
                                 "max": None, "mean": None}
-    assert arm["count"]["rows_mean"] is None
-    assert arm["over_budget"] == 0
-    assert arm["degraded"] == 0
+    assert arm["count"] == {"zero_rows": None, "rows_mean": None}
+    assert arm["over_budget"] is None
+    assert arm["degraded"] is None
 
 
 def test_summarise_counts_the_mechanism_the_trace_actually_took():

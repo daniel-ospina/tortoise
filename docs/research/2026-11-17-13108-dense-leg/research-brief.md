@@ -146,12 +146,15 @@ Published, 384-dim `all-MiniLM-L6-v2`, cosine, k=10, 100k vectors, 500 queries:
 | HNSW `ef_search=100` | 99.4 % | 0.84 ms | 1.41 ms |
 
 ⇒ at 100k an index is ~22× faster at 99.4 % recall; **below ~10k an exact scan is normally the
-right answer** (~0.2 ms at 1k, ~1.9 ms at 10k in the same extrapolation).
+right answer** (**0.186 ms at 1k**, ~1.86 ms at 10k — the linear extrapolation of the measured
+18.58 ms at 100k; earlier revisions of this paragraph rounded it to "~0.2 ms", which is what made
+the ratios below self-inconsistent — `#13121` round 7 F2).
 
 **This is where the external pass becomes evidence rather than background.** Our own
-measurement (§3.4) is **≈13.3 ms to scan 1,000 `:Object` vectors** — about **66×** the
-literature's ~0.2 ms at the same size (≈167× once the two refused round trips are added back,
-which is what the pre-fix read paid). So the cost we are paying is **not the algorithm's**: it is
+measurement (§3.4) is **≈13.26 ms to scan 1,000 `:Object` vectors** — **≈71×** the literature's
+0.186 ms at the same size (**≈180×** once the two refused round trips are added back,
+13.26 + 20.17 = 33.43 ms, which is what the pre-fix read paid). So the cost we are paying is
+**not the algorithm's**: it is
 FalkorDB evaluating `vec.euclideanDistance` as a Cypher function per row and sorting the label. That reframes V3's option set — "get an index" and "make the scan not be a
 per-row interpreter call" both address this, and the second one does not touch the recorded
 decision at all.
@@ -211,9 +214,9 @@ sequentially; a capture fleet does not.
 
 | population | box | windows | `window_modes` | `keyword_only` share |
 |---|---|---|---|---|
-| **1,000 names**, eval end-to-end, **before** the fix | rest (load ~3) | 4,396 | `{hybrid: 4396, keyword_only: 0}` | **0 %** |
-| **1,000 names**, eval end-to-end, **after** the fix | rest (decaying from 54) | 4,396 | `{hybrid: 4396, keyword_only: 0}` | **0 %** |
-| **1,000 names**, eval end-to-end | **load 109–131** | 4,396 | `{hybrid: 4396, keyword_only: 0}` | **0 %** |
+| **1,000 names**, eval end-to-end, **before** the fix | rest (operator's reading, ~3) | 4,396 | `{hybrid: 4396, keyword_only: 0}` | **0 %** |
+| **1,000 names**, eval end-to-end, **after** the fix | rest (operator's reading, decaying from 54) | 4,396 | `{hybrid: 4396, keyword_only: 0}` | **0 %** |
+| **1,000 names**, eval end-to-end | **load 109–131** (operator's reading; only `131` is in the artifact's own filename) | 4,396 | `{hybrid: 4396, keyword_only: 0}` | **0 %** |
 | **8,000 names**, probe windows c=1 | rest (load 7.7) | 60 | `{hybrid: 60}` | 0 % |
 | **8,000 names**, probe windows c=1 | load 114–134 | 120 | `{hybrid: 120}` | 0 % |
 | **8,000 names**, probe windows c=1 | **load 122–132** | 60 | `{hybrid: 58, keyword_only: 2}` | **3.3 %** — reason **`timeout`** |
@@ -223,6 +226,12 @@ revision listed `1,000 names, probe windows c=8/16/32` with `{hybrid: 96}` and w
 638/1249/2607 ms. No committed artifact backs it — no 1,000-name artifact has a populated `windows`
 key, no artifact records concurrency 8/16/32 windows, and `grep -c '1249'` / `'2607'` over the ten
 artifacts returns 0 — so the row is removed rather than left as a number without a source.
+
+⛔ **The eval artifacts carry NO load/box field** (`grep -c load eval-*.json` → 0 0 0), so the "box"
+column above is the OPERATOR'S READING of the machine at the time, not a figure the artifact
+records — and the one load value that is machine-recorded anywhere is the `131` in
+`eval-1000-load131-before.json`'s filename (`#13121` round 7 F4). The window arms below are the
+opposite: their `load.loadavg` is written by the probe.
 
 **The two eval runs are BETWEEN-RUN, not paired, and that is declared rather than glossed.**
 Their population digests differ — `0defe6b3adae26ee` vs `343c1c49f4568d8d` — because the capture
@@ -360,12 +369,11 @@ load ~130 the dense leg still timed out (§3.3).
   live label.
 
 ⚠️ **And a third option this measurement opens, which is neither index nor budget:** the scan is
-**≈66×** a tuned exact scan of the same size (13.26 ms vs the §2.2 literature's 0.18–0.19 ms
-**per 1,000 rows**; that figure is derived from 18.58 ms at 100k, so it must not be read as a
-per-10k rate). ⛔ The pre-fix read paid **≈167×** once the two refused round trips are added back
-(13.26 + 20.17 = 33.43 ms) — a separate, larger ratio, and not the "≈70×" an earlier revision of
-this paragraph claimed. If the requirement is "the dense leg fits in 500 ms at 8,000 rows", a scan
-that costs 0.2–2 ms instead of 13 ms achieves it without touching V3 at all. That is a bigger change than this lane should make, and it is filed
+**≈71×** a tuned exact scan of the same size (13.26 ms vs 0.186 ms, the §2.2 linear
+extrapolation of the measured 18.58 ms at 100k — **per 1,000 rows**, not per 10k). ⛔ The pre-fix
+read paid **≈180×** once the two refused round trips are added back (13.26 + 20.17 = 33.43 ms). If
+the requirement is "the dense leg fits in 500 ms at 8,000 rows", a scan that costs 0.2–2 ms instead
+of 13 ms achieves it without touching V3 at all. That is a bigger change than this lane should make, and it is filed
 as such rather than assumed.
 
 ---
@@ -385,7 +393,7 @@ as such rather than assumed.
 1. **V3's index question — for the owner.** §6 is the evidence; this lane does not create one.
 2. **The 45 % magnitude is not reproduced here** (§3.3). Reproducing it needs a census-sized
    label and a store shared with fleet traffic; both are named, neither is guessed at.
-3. **The scan's ≈66× gap to a tuned exact scan** (§2.2, §6) — an alternative remedy with no
+3. **The scan's ≈71× gap to a tuned exact scan** (§2.2, §6) — an alternative remedy with no
    decision attached, unmeasured beyond the comparison above.
 4. **The default product caller still sees no degradation** — `leg_trace=None` everywhere
    (`#2952` is opt-in). Surfacing `degraded_read` on the product's own read is unaffected by this

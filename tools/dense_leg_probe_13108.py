@@ -181,13 +181,21 @@ def summarise(samples: list[dict]) -> dict:
         "reason": {str(k): v for k, v in sorted(
             reason.items(), key=lambda kv: str(kv[0]))},
         "count": {
-            "zero_rows": sum(1 for s in samples if not s.get("rows")),
+            # #13121 round 7 (F5): the three counters below follow the SAME
+            # None-not-0 rule as every latency cell — `0 over budget` on an arm
+            # that took no samples is a measured-looking zero, and
+            # `windows-8000-under-load-timeout.json` carries exactly that shape
+            # (`n: 0`, `over_budget: 0`, `degraded: 0`, `zero_rows: 0`).
+            "zero_rows": (sum(1 for s in samples if not s.get("rows"))
+                          if samples else None),
             "rows_mean": (round(statistics.fmean(
                 [s.get("rows", 0) for s in samples]), 2) if samples else None),
         },
-        "over_budget": sum(1 for s in samples
-                           if s["elapsed_ms"] >= s["timeout_ms"]),
-        "degraded": sum(1 for s in samples if s.get("degraded")),
+        "over_budget": (sum(1 for s in samples
+                            if s["elapsed_ms"] >= s["timeout_ms"])
+                        if samples else None),
+        "degraded": (sum(1 for s in samples if s.get("degraded"))
+                     if samples else None),
     }
 
 
