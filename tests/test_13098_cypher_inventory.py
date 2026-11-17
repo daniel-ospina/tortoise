@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -275,6 +276,56 @@ def test_the_diff_reports_order_for_an_ordered_statement():
     )
     assert result["equal"] is False
     assert any(d["kind"] == "order" for d in result["differences"])
+
+
+def test_the_order_pass_uses_the_value_pass_equality_for_numbers():
+    """A numeric column must not report `order` on two forms that agree.
+
+    ⛔ The order pass compared `_canon` (a json serialisation) while the value
+    pass compared `_norm`, and those disagree on `1` vs `1.0`: `public.point`
+    carries `confidence` as `double precision`, so the record answers
+    `float`/`Decimal` where FalkorDB answers the `int` the property was written
+    with. Measured before the fix: identical rows in identical order reported
+    `['order']` (`#13098` review P2) — so an ordered EP-shaped candidate could
+    never return an empty diff. Both directions are pinned here: the numeric
+    difference is NOT an order difference, and a real reorder still is.
+    """
+    candidate = harness.CANDIDATES["point-listing"]
+    cols = ["id", "content", "created_at"]
+    # same rows, same order; the record's numbers arrive as Decimal/float
+    result = harness.diff(
+        candidate, [("a", "x", 1), ("b", "y", 2)], cols,
+        [("a", "x", Decimal("1")), ("b", "y", Decimal("2.0"))], cols,
+        ["a", "b"],
+    )
+    assert result["equal"] is True, result["differences"]
+    # …and the same values REORDERED is still the null-placement class
+    reversed_rows = harness.diff(
+        candidate, [("a", "x", 1), ("b", "y", 2)], cols,
+        [("b", "y", Decimal("2.0")), ("a", "x", Decimal("1"))], cols,
+        ["a", "b"],
+    )
+    assert reversed_rows["equal"] is False
+    assert [d["kind"] for d in reversed_rows["differences"]] == ["order"]
+
+
+def test_a_projection_that_drifts_on_both_sides_still_reddens_against_the_declaration():
+    """`Candidate.columns` is a CONTRACT, not a comment (`#13098` review P3).
+
+    The cross-engine checks alone cannot see this: both stores dropping the same
+    column agrees with itself, so only the declared list can catch it.
+    """
+    candidate = harness.CANDIDATES["point-by-id"]  # declares id/content/point_kind
+    result = harness.diff(
+        candidate, [("a", "x")], ["id", "content"],
+        [("a", "x")], ["id", "content"],
+        ["a"],
+    )
+    assert result["equal"] is False
+    shape = [d for d in result["differences"] if d["kind"] == "shape"]
+    assert shape, result["differences"]
+    assert shape[0]["detail"] == "declared column list"
+    assert shape[0]["declared"] == ["id", "content", "point_kind"]
 
 
 def test_an_unordered_statement_is_compared_as_a_multiset():

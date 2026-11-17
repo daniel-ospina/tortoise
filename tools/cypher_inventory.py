@@ -657,7 +657,22 @@ def check(doc: Path, result: dict) -> int:
         "files_scanned": result["files_scanned"],
         "unresolved": sum(1 for s in sites if s.shape == "unresolved"),
         "candidates": sum(1 for s in sites if s.verdict.startswith("candidate")),
+        # ⛔ §0 also PUBLISHES these four, and they were outside `actual`, so the doc
+        # could have printed any value for them while `--check` stayed green — the
+        # same vacuity the `files_scanned` key above closed, left open for its
+        # neighbours (`#13098` review P3). `ast_door_calls` is the reconciliation's
+        # headline (census + non-Cypher, §0's "= 1,557"), so it is pinned as the
+        # SUM rather than as a second independent count that could disagree.
+        "non_cypher_door_calls": result["non_cypher_door_calls"],
+        "ast_door_calls": len(sites) + result["non_cypher_door_calls"],
+        "partial": result["partial"],
     }
+    plain_roles = shape_matrix(sites).get("plain", {})
+    # §0 publishes the split — "854 (573 read, 281 write)" — and a role swap is the
+    # one direction this census's verdict flips (a write published as a migration
+    # candidate), so both halves are pinned, not just their sum.
+    actual["shape_plain_read"] = plain_roles.get("read", 0)
+    actual["shape_plain_write"] = plain_roles.get("write", 0)
     for shape, roles in shape_matrix(sites).items():
         actual[f"shape_{shape}"] = sum(roles.values())
     drift = {

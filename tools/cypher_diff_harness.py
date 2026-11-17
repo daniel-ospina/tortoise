@@ -46,9 +46,12 @@ field diff:
   FIRST by default, which is a real porting defect this harness catches (the
   `null-order` mutation below is exactly it) — so collapsing nullness into
   "falsy" would erase the class the harness exists to see.
-* **ROW SHAPE is compared as the declared column list**, so an extra or missing
-  column is a difference even when every value matches (a projection drift is not
-  a value difference and must not be absorbed by a zip).
+* **ROW SHAPE is compared THREE ways: each engine's columns against the
+  candidate's DECLARED `columns` tuple, then the two lists' counts, then their
+  names case-insensitively**, so an extra or missing column is a difference even
+  when every value matches (a projection drift is not a value difference and must
+  not be absorbed by a zip) — and a projection that drifts on BOTH sides in the
+  same way still reddens against the declaration (`#13098` review P3).
 
 Value normalization, stated so it is not mistaken for tolerance: `Decimal` (the
 record's numeric type) and `float` compare by numeric value AND by type family;
@@ -582,12 +585,35 @@ def _canon(row: Sequence[Any]) -> str:
     return json.dumps([_norm(v) for v in row], sort_keys=True, default=str)
 
 
+def _norm_row(row: Sequence[Any]) -> tuple:
+    """A row normalised for ORDER comparison — the SAME equality as the value pass.
+
+    ⛔ NOT `_canon`. `_canon` serialises, so `1` and `1.0` become different json
+    strings while `_norm` already treats them as one number — which made an
+    ordered numeric candidate report `order` on two forms the value pass had just
+    certified identical (`#13098` review P2). The two stores really do disagree
+    on Python type here: `public.point.confidence` is `double precision`, so the
+    record answers `float`/`Decimal` while FalkorDB answers the `int` the property
+    was written with. A tuple compares element-wise with `==`, so numerics compare
+    numerically and nested lists/dicts compare by value.
+    """
+    return tuple(_norm(v) for v in row)
+
+
 def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
          sql_rows: list[tuple], sql_cols: list[str], seeded_ids: list[str]) -> dict:
     """Rows · order · null handling · row shape. Empty `differences` == equal."""
     differences: list[dict] = []
 
-    # 1. ROW SHAPE — the declared column list, not whatever the engine labelled.
+    # 1. ROW SHAPE — the candidate's DECLARED column list against each engine, then
+    # the two engines against each other. The declaration arm is what makes the
+    # `columns` field a contract rather than a comment: a projection that drifts on
+    # BOTH sides in the same way passes every cross-engine check (`#13098` review P3).
+    declared = list(candidate.columns)
+    if list(cypher_cols) != declared or list(sql_cols) != declared:
+        differences.append({"kind": "shape", "detail": "declared column list",
+                            "declared": declared,
+                            "cypher": list(cypher_cols), "sql": list(sql_cols)})
     if len(cypher_cols) != len(sql_cols):
         differences.append({"kind": "shape", "detail": "column count",
                             "cypher": cypher_cols, "sql": sql_cols})
@@ -639,7 +665,7 @@ def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
     # 4. ORDER — only when the statement declares it, and only on a row set that
     # already matches (an order claim over different rows is a value finding).
     if (candidate.ordered and not value_diffs and len(cypher_rows) == len(sql_rows)
-            and [_canon(r) for r in cypher_rows] != [_canon(r) for r in sql_rows]):
+            and [_norm_row(r) for r in cypher_rows] != [_norm_row(r) for r in sql_rows]):
         differences.append({"kind": "order", "detail": "row sequence differs "
                             "although the row set matches — the NULL-placement "
                             "class (a graph DESC puts NULLs FIRST; a hand-port "

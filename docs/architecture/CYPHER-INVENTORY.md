@@ -101,11 +101,15 @@ rg -o '\b(MATCH|MERGE)\s*\(' tortoise/           → 2,326 occurrences across 14
 ```
 
 The first two rows are measured by the tool (`--json` → `rg_totals`), and so is the **−52**. ⛔ The
-**third** row is a **residual**, not a measurement — `rg_totals` has no such key; it is the value that
-balances the subtraction, printed so a reader can see the arithmetic close. An earlier revision said
-*every* line here was `rg_totals`-computed, which overstated it (`#13098` review P3). The **0** is a
-measurement, not a convenience — it is the residual the first version of this tool
-silently absorbed, and the `#13098` review caught it closing over a 52-statement undercount. The
+**third** row (`− 0`) is a **residual**, not a measurement — `rg_totals` has no such key; it is what
+balances the subtraction, printed so a reader can see the arithmetic close. The `= 1,557` beside it
+IS measured: it is the AST door-call count (`sites` + `non_cypher_door_calls`, both pinned). An
+earlier revision of this paragraph said *every* line here was `rg_totals`-computed, which overstated
+it — and its next sentence then called the `0` "a measurement, not a convenience", which reversed
+the row it names (both `#13098` review P3). The `0` is still worth keeping visible even though it is
+derived: it is the residual the first version of this tool silently absorbed, and the review caught
+it closing over a 52-statement undercount — so a NON-zero here is the signal that the two
+measurements (regex occurrences, AST calls) have stopped agreeing. The
 `MATCH|MERGE` figure is **not** a statement count and is printed only because a reader will run it:
 one statement can contain two node patterns, and a statement built with `UNWIND` contains none, so it
 is an upper-bound shape, never a census.
@@ -372,6 +376,11 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_plain = 854 -->
 <!-- cypher-inventory:shape_traversal = 3 -->
 <!-- cypher-inventory:shape_unresolved = 104 -->
+<!-- cypher-inventory:shape_plain_read = 573 -->
+<!-- cypher-inventory:shape_plain_write = 281 -->
+<!-- cypher-inventory:non_cypher_door_calls = 256 -->
+<!-- cypher-inventory:ast_door_calls = 1557 -->
+<!-- cypher-inventory:partial = 313 -->
 
 ---
 
