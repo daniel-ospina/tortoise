@@ -689,6 +689,14 @@ def detectable_effect(n: int, discordance: float, *,
         return float("nan")
     if not 0.0 <= discordance <= 1.0:
         raise ValueError("discordance must be a probability")
+    # ⛔ A ZERO discordance is NOT an infinitely powerful study. The plug-in form
+    # would return 0 (⟹ "any difference is detectable"), which is the opposite of
+    # the truth: with no discordant pair observed the run carries no information
+    # about the difference at all. Measured on the object control, where the two
+    # switch states are one code path and every item agrees — the naive reading
+    # was MDE = 0.0000 printed beside a null. Undefined, and said so.
+    if discordance == 0.0:
+        return float("nan")
     za = _norm_ppf(1 - alpha / 2)
     zb = _norm_ppf(power)
     delta = max(1e-9, math.sqrt(discordance) * (za + zb) / math.sqrt(n))
@@ -708,6 +716,10 @@ def independent_effect(n: int, p_bar: float, *,
     published comparison. Reported beside the paired figure so the sample-size
     argument is arithmetic rather than assertion."""
     if n <= 0:
+        return float("nan")
+    if p_bar <= 0.0 or p_bar >= 1.0:
+        # same defect as above: a floor/ceiling rate has zero variance, and a
+        # zero MDE reads as "any effect detectable" when it means "no power".
         return float("nan")
     za = _norm_ppf(1 - alpha / 2)
     zb = _norm_ppf(power)
@@ -784,6 +796,11 @@ def analyze(off_hits: list[int], on_hits: list[int], *, ks: tuple[int, ...],
         "correlation": outcome_correlation(off_hits, on_hits),
         "mde_paired": detectable_effect(n, disc),
         "mde_independent": independent_effect(n, p_bar),
+        "mde_note": ("" if disc else
+                     "NOT ESTIMABLE: no discordant pair was observed, so this n "
+                     "carries no information about the difference — an MDE of 0 "
+                     "here would read as 'infinitely powered', which is the "
+                     "opposite of what an all-agree run means"),
     })
     return out
 

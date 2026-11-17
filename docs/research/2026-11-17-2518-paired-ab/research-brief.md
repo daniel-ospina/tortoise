@@ -51,7 +51,10 @@ same items, same box, back to back (`paired-object-60-control.json`, n = 60):
 So between those two published runs there was **no code difference to measure** on that instrument: the
 expansion's two switch states are one code path there. Whatever produced 75.0 → 76.3 and 88.0 → 85.0 was
 corpus drift, machine load and sampling noise. The tool flags the arm `structurally_blind: true` and
-**refuses** to publish its null as a result (exit 3, artifact still written).
+**refuses** to publish its null as a result (exit 3, artifact still written). Its minimum detectable
+effect is reported as **not estimable** (`nan`, with a `mde_note`) rather than `0` — an all-agree run
+carries no information about the difference, and an MDE of 0 beside a null reads as "infinitely powered",
+which is the opposite of what it means.
 
 ---
 

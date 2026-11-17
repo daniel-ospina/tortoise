@@ -98,6 +98,26 @@ def test_paired_design_needs_far_fewer_items_than_two_independent_arms():
     assert independent / paired > 1.5
 
 
+def test_a_zero_discordance_run_reports_no_estimable_mde():
+    """The defect this pins: two IDENTICAL arms produced ``MDE = 0.0000``.
+
+    Printed beside a null it reads as "infinitely powered", which is the opposite
+    of the truth — with no discordant pair the run carries no information about
+    the difference. Measured on the object control, where both switch states are
+    one code path and every item agrees. Undefined, and said so.
+    """
+    assert math.isnan(P.detectable_effect(300, 0.0))
+    assert math.isnan(P.independent_effect(300, 0.0))
+    assert math.isnan(P.independent_effect(300, 1.0))
+    # a floor/ceiling rate has zero variance and therefore no estimable MDE
+    row = P.analyze([0] * 60, [0] * 60, ks=P.KS, bootstrap=100, seed=1)
+    assert math.isnan(row["mde_paired"])
+    assert "NOT ESTIMABLE" in row["mde_note"]
+    # …while a real all-discordant-one-way run still gets a number
+    row2 = P.analyze([0] * 60, [1] * 60, ks=P.KS, bootstrap=100, seed=1)
+    assert not math.isnan(row2["mde_paired"])
+
+
 def test_bootstrap_ci_brackets_the_delta_and_is_seeded():
     off = [0] * 18 + [1] * 2
     on = [0] * 8 + [1] * 12

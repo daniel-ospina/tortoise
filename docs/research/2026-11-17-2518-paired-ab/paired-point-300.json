@@ -1830,6 +1830,7 @@
           "discordant_miss_to_hit": 13,
           "mcnemar_exact_p": 0.000244140625,
           "mde_independent": 0.03330409864782953,
+          "mde_note": "",
           "mde_paired": 0.03353871783643781,
           "n": 300,
           "off_hits": 0,
@@ -1870,6 +1871,7 @@
           "discordant_miss_to_hit": 17,
           "mcnemar_exact_p": 1.52587890625e-05,
           "mde_independent": 0.03795471158179386,
+          "mde_note": "",
           "mde_paired": 0.03835299115795398,
           "n": 300,
           "off_hits": 0,
@@ -1910,6 +1912,7 @@
           "discordant_miss_to_hit": 5,
           "mcnemar_exact_p": 0.0625,
           "mde_independent": 0.020794593858483593,
+          "mde_note": "",
           "mde_paired": 0.020799829826524573,
           "n": 300,
           "off_hits": 0,
@@ -1950,6 +1953,7 @@
           "discordant_miss_to_hit": 6,
           "mcnemar_exact_p": 0.03125,
           "mde_independent": 0.022760185911771955,
+          "mde_note": "",
           "mde_paired": 0.022785071976512552,
           "n": 300,
           "off_hits": 0,
@@ -2005,26 +2009,26 @@
   },
   "environment": {
     "db_uri_scheme": "docker",
-    "elapsed_s": 124.3,
+    "elapsed_s": 125.0,
     "embedder": false,
     "graph": "(run-scoped)",
     "graph_nodes": 3252,
-    "load_delta_1m": -0.84,
+    "load_delta_1m": -0.54,
     "load_end": {
       "cpus": 16,
-      "load_15m": 9.59130859375,
-      "load_1m": 9.6796875,
-      "load_5m": 9.9462890625
+      "load_15m": 11.37255859375,
+      "load_1m": 12.5537109375,
+      "load_5m": 11.548828125
     },
     "load_start": {
       "cpus": 16,
-      "load_15m": 9.6005859375,
-      "load_1m": 10.51953125,
-      "load_5m": 10.06103515625
+      "load_15m": 11.3212890625,
+      "load_1m": 13.0888671875,
+      "load_5m": 11.41943359375
     },
     "same_load_note": "both arms ran back to back in ONE process on ONE box, so the loads below bracket the whole comparison rather than one arm \u2014 and the delta is reported so a reader can see whether the box moved under it"
   },
-  "git_head": "44a1b823646321be3c3753b010530265a35fbf81",
+  "git_head": "9b537d875a3ee27e6abdb7ccac07b28ef71a78cd",
   "items": {
     "dropped": {},
     "id_digest": "4d6899d3d0b62543777628ef16a2fa2ef5e9aea845823b073a2158c2119da686",
@@ -2034,7 +2038,7 @@
     "sampled": 300,
     "with_item": 300
   },
-  "measured_at": "2026-11-17T17:19:29.402093+00:00",
+  "measured_at": "2026-11-17T17:49:39.197370+00:00",
   "population": {
     "names_sha256": "06373b442bc9318223d65220d30054c4138dd62c661181c29e8d9b8cf5d6d4eb",
     "population": 1000,
