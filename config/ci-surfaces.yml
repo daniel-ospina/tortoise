@@ -6370,11 +6370,16 @@ surfaces:
   # subjects are `tools/` paths (`cypher_inventory.py`, `cypher_diff_harness.py`)
   # that match no SOURCE_PATTERNS entry, and the doc they pin is a `docs/` file.
   # Registered at all because an unlisted file is a `manifest-integrity` red
-  # (#1262) AND is selected by no shard (#1349/#2938) — so the 22 pins here
+  # (#1262) AND is selected by no shard (#1349/#2938) — so the pins here
   # (census arithmetic, shape precedence, the diff's row/order/null/shape rules,
   # the refusal arms) would be green-by-absence, which for a "harness that can
-  # fail" is the one thing it cannot afford. Hermetic: the census is `subprocess`
-  # + `ast` over the git index, and the harness cases drive `diff()` /
+  # fail" is the one thing it cannot afford. No count is quoted on purpose, for
+  # the reason this file's own `durations:` rows state: a figure beside a weight
+  # re-stales against the run it came from, and the count is `tools/ci_selection.py
+  # --integrity`'s business — this comment said "22" while the suite was already 48
+  # items, and had re-staled before that (`#13098` review P3).
+  # Hermetic: the census is `subprocess` + `ast` over the git index, and the
+  # harness cases drive `diff()` /
   # `_mutated()` / `bootstrap_record()` in process with the store and `subprocess`
   # seams patched — no DB, no graph, no docker, no network, no model call. The
   # DB-backed legs are their own job (`.github/workflows/cypher-diff.yml`).

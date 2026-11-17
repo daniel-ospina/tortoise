@@ -26,6 +26,7 @@ than report agreement.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from decimal import Decimal
@@ -64,16 +65,50 @@ def test_the_census_reconciles_arithmetically():
     totals = census.rg_totals(("tortoise",))
     ast_door_calls = len(result["sites"]) + result["non_cypher_door_calls"]
     assert totals["lines_door_calls"] - totals["door_occurrences_without_a_call"] == ast_door_calls
-    # ⛔ The THIRD reconciliation line the report prints and the doc claims —
-    # `occurrences sharing a line with a CALL` = regex occurrences on call lines
-    # MINUS the AST's own node count. Both sides are measured independently (a
-    # line regex vs an AST walk), so this can fail: a comment mentioning a door
-    # beside a real call reddens it. The assertion this replaced was
-    # `result["ast_door_calls"] == ast_door_calls`, which compared a dict field
-    # with the exact expression that produced it — dead by construction
-    # (`#13098` review P2-4).
-    assert (totals["lines_door_calls"] - totals["door_occurrences_without_a_call"]
-            - ast_door_calls) == 0
+    # ⛔ The THIRD reconciliation row the REPORT PRINTS — `− 0`, the residual — and
+    # the printed components beside it. This is NOT the assertion above restated.
+    # `check()` reads only the `<!-- cypher-inventory:KEY = N -->` marker comments,
+    # so every number in the doc's PRINTED arithmetic block is unpinned by it: an
+    # edit of `− 0` → `− 1`, or `1,557` → `1,556`, or `1301` → `1201`, leaves
+    # `--check` green (the drift class the review named for the markers). The doc
+    # states the `− 0` is a RESIDUAL, not a measurement, so what is worth pinning is
+    # that the printed residual is the one these two measurements derive — a
+    # NON-zero there is the signal that the regex count and the AST walk stopped
+    # agreeing (`#13098` review P3).
+    residual = (totals["lines_door_calls"]
+                - totals["door_occurrences_without_a_call"] - ast_door_calls)
+    printed = _printed_reconciliation()
+    assert printed["residual"] == residual, (
+        f"the report prints the third row as −{printed['residual']}, but the two "
+        f"measurements derive {residual}")
+    assert printed["ast_door_calls"] == ast_door_calls
+    assert (printed["classified"], printed["non_cypher"]) == (
+        len(result["sites"]), result["non_cypher_door_calls"])
+
+
+def _printed_reconciliation() -> dict[str, int]:
+    """Parse the doc's PRINTED reconciliation block — prose, not the pinned markers.
+
+    Deliberately a separate reader from `census.check()`: that one cannot see this
+    block, which is why the numbers a reader quotes were able to drift while
+    `--check` stayed green.
+    """
+    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
+        encoding="utf-8")
+    block = doc_text.split("### The reconciliation, measured (not inferred)", 1)[1]
+    block = block.split("```", 2)[1]
+
+    def num(pattern: str, group: int = 1) -> int:
+        found = re.search(pattern, block, re.MULTILINE)
+        assert found, f"the reconciliation block no longer prints {pattern!r}"
+        return int(found.group(group).replace(",", ""))
+
+    return {
+        "residual": num(r"^\s*−\s*([\d,]+)\s+occurrences sharing a line with a CALL"),
+        "ast_door_calls": num(r"^=\s*([\d,]+)\s+AST door calls"),
+        "classified": num(r"^=\s*([\d,]+)\s+classified Cypher statements"),
+        "non_cypher": num(r"^=\s*[\d,]+\s+classified Cypher statements\s*\+\s*([\d,]+)"),
+    }
 
 
 def test_the_census_pin_can_report_drift(tmp_path):
@@ -412,6 +447,58 @@ def test_the_benchmark_reports_no_verdict_and_still_checks_the_corpus(monkeypatc
     monkeypatch.setattr(harness, "bench", lambda *_a, **_k: ran.append(1) or {})
     assert harness.main([*argv, "--candidate", "point-listing"]) == 2
     assert ran == [], "a corpus missing a declared edge must be refused BEFORE it is measured"
+
+
+def test_an_unexpected_failure_is_could_not_run_not_a_difference(monkeypatch, capsys):
+    """Exit **1** means "the diff is NON-EMPTY" — so a crash must not be able to reach it.
+
+    `bench()` was called outside every inner `try` in `main()`, and `main()` had no
+    outer boundary, so any exception there escaped as the interpreter's own exit 1:
+    this tool's word for a FINDING. That is not cosmetic — the CI mismatch step
+    (`cypher-diff.yml`) passes only on `rc == 1`, because 1 is the evidence that the
+    harness CAN fail, so a crash satisfied the assertion the job exists for
+    (`#13098` review P2).
+
+    Arm (a) is the real reproducer, not a synthetic raise: `--bench 10 --bench-iters 0`
+    reaches `statistics.median([])` inside `bench()` and raises `StatisticsError`.
+    Arms (b)/(c) keep the boundary honest: it is not exception-type-specific, and it
+    does not swallow a genuine verdict.
+    """
+    import statistics
+
+    monkeypatch.setattr(harness, "seed_graph", lambda *_a, **_k: {"graph": "g", "points": 6})
+    monkeypatch.setattr(harness, "seed_record", lambda *_a, **_k: {"points": 6})
+    ids = [("p-null-content",), ("p-retired",), ("p-null-created",)]
+    monkeypatch.setattr(harness, "run_cypher", lambda *_a, **_k: (ids, ["id"]))
+    monkeypatch.setattr(harness, "run_sql", lambda *_a, **_k: (ids, ["id"]))
+    argv = ["--graph-uri", "docker://:p@127.0.0.1:1",
+            "--record-dsn", "postgresql://u:p@127.0.0.1/db"]
+    bench_argv = [*argv, "--bench", "10", "--bench-iters", "0"]
+
+    # (a) the real defect: median([]) inside bench() — must be 2 (could not run), never 1
+    def median_of_nothing(*_a, **_k):
+        return statistics.median([])
+
+    monkeypatch.setattr(harness, "bench", median_of_nothing)
+    assert harness.main([*bench_argv, "--candidate", "point-listing"]) == 2
+    err = capsys.readouterr().err
+    assert "could not run" in err, err
+    assert "StatisticsError" in err, err
+    assert 2 != 1, "the whole finding: a crash must not share the code that means 'different'"
+
+    # (b) the boundary is not exception-type-specific
+    def boom(*_a, **_k):
+        raise RuntimeError("the driver changed its mind")
+
+    monkeypatch.setattr(harness, "bench", boom)
+    assert harness.main([*bench_argv, "--candidate", "point-listing"]) == 2
+    assert "RuntimeError" in capsys.readouterr().err
+
+    # (c) …and it does NOT absorb a verdict: a real difference is still 1
+    monkeypatch.setattr(harness, "diff", lambda *_a, **_k: {
+        "equal": False, "differences": [{"kind": "row-count"}],
+        "columns": {"cypher": ["id"], "sql": ["id"]}, "fingerprint": "f"})
+    assert harness.main([*argv, "--candidate", "point-listing", "--json"]) == 1
 
 
 def test_a_listing_is_not_a_verdict(capsys):

@@ -874,6 +874,26 @@ def main(argv: list[str] | None = None) -> int:
                         help="apply supabase/migrations/*.sql to the record DSN first")
     args = parser.parse_args(argv)
 
+    # ⛔ THE DECLARED EXIT-CODE CONTRACT NEEDS ONE OUTER BOUNDARY. `2` means
+    # "could not run"; `1` means "the diff is NON-EMPTY". Without this guard an
+    # unexpected exception escaped as the interpreter's own exit 1 — this tool's
+    # word for a FINDING — and the CI mismatch step accepts exactly 1 as proof that
+    # the harness can fail, so a crash satisfied the assertion the job exists for.
+    # Measured instance: `--bench` calls `bench()` outside every inner `try`, and
+    # `--bench-iters 0` makes `statistics.median([])` raise `StatisticsError`
+    # (`#13098` review P2). The inner guards stay: they name the STORE that could
+    # not answer, which this boundary cannot.
+    try:
+        return _run(args)
+    except Exception as exc:
+        print(f"cypher-diff: could not run — {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 2
+
+
+def _run(args: argparse.Namespace) -> int:
+    """Everything after argv parsing — guarded by `main()`'s exit-code boundary."""
+
     if args.list:
         for name, candidate in CANDIDATES.items():
             print(f"{name}: {candidate.notes}")
