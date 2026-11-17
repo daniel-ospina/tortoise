@@ -35,6 +35,7 @@ query, so the test pins the SEAM and the DOOR, not a live deployment.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import ClassVar
 
 import pytest
@@ -666,6 +667,224 @@ def test_hosted_off_mode_does_not_mark_a_RETRACTED_point_not_hot(monkeypatch):
 
 
 # ── 4. the three modes, named once ────────────────────────────────────────
+
+
+# ── the POST-MERGE findings on #12947 ──────────────────────────────────────
+#
+# A fresh-context review of PR #12947 (comment IC_kwDOToroq88AAAABnSEWl_) returned
+# seven findings. Two of them are the P1s pinned here — the ones that leave the
+# dogfood's own verify-after-write broken at the door an agent actually uses:
+#
+#   1. the MCP door's RECORD leg had no elapsed bound, so a slow record produced
+#      the transport's `-32009` ("the work may still complete") instead of the
+#      cache answer with a NAMED reason the `prefer` contract promises;
+#   2. `tortoise_get_entity` — which `tool_registry.py` names as the LIVE
+#      canonical tool, `tortoise_get_point` being its RETIRED alias — returned a
+#      bare `{}` on a cold cache with no `not-hot`, and it is the only by-id door
+#      for the issue's OWN measured population (8 Objects, 39 Events).
+#
+# ⚠️ Finding 3 (the `if props:` texts) and finding 6 (the PR body's test counts)
+# were already closed by the rounds that shipped; finding 7's "retired-description
+# line-count rule" does not exist at the lines it cites (that region is
+# `tortoise_get_operator`'s docstring). Those three are verified in the PR body,
+# not re-fixed here.
+
+
+@pytest.fixture
+def mcp_door():
+    """The MCP auth context WITHOUT pinning `_get_org_sdk`.
+
+    `mcp_harness` always patches the SDK to the `get_point` stub; the ENTITY
+    door needs `get_entity`, so it supplies its own stub through
+    `_get_org_sdk`. Without `http` transport `_safe` short-circuits and the
+    door's seam is never reached, which would make these tests vacuous.
+    """
+    from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
+                                   _transport_mode)
+
+    _transport_mode.set("http")
+    _current_org_id.set("org_t")
+    _current_org_limits.set(None)
+    try:
+        yield
+    finally:
+        _transport_mode.set(None)
+        _current_org_id.set(None)
+        _current_org_limits.set(None)
+
+
+class _EntitySDK:
+    """A cache that holds nothing — the entity door's cold-cache answer.
+
+    `get_entity` is the ONLY method the bare entity door reaches, so stubbing it
+    here keeps the DOOR (which is what the finding is about) under test rather
+    than the SDK's per-label resolution (#9721).
+    """
+
+    def __init__(self, answer=None):
+        self.answer = {} if answer is None else answer
+        self.calls: list[str] = []
+
+    def get_entity(self, id):
+        self.calls.append(id)
+        return dict(self.answer)
+
+
+def _slow_opener(delay):
+    """A record whose OPEN takes `delay` seconds — a record that is merely SLOW.
+
+    Slowness, not an error, is the condition the missing bound hid: an error
+    already fell back (`record-unavailable`), while a slow read ran past the
+    transport's wait bound and the caller got `-32009`.
+    """
+    calls = []
+
+    def _open(_dsn=None):
+        calls.append(_dsn)
+        time.sleep(delay)
+        return _FakeConn(rows=[_row()])
+
+    _open.calls = calls
+    return _open
+
+
+def test_MCP_a_slow_record_answers_from_the_cache_inside_the_bound(
+        monkeypatch, mcp_harness):
+    """#12947 finding 1 (P1): the record leg has a lane bound like the others.
+
+    `hosted_api` submits the SAME `serve_point` under
+    `record_read_timeout_s()` (`monitoring.py` states the `9.0 < 10.0`
+    invariant against `mcp_auth._TRANSPORT_WAIT_BOUND_S`), but the MCP door
+    called it synchronously with no bound at all — so under a record slowdown
+    the agent got the transport's `-32009` "the work may still complete"
+    instead of the cache answer `prefer` promises, and
+    `FALLBACK_RECORD_BOUND_MISS` was unreachable from this door.
+
+    The record here ANSWERS, just too slowly. The assertion is the named reason
+    plus the counter — a bound that fired would not answer `servedFrom: record`
+    with a row, which is the mutation this discriminates.
+    """
+    from tortoise import monitoring
+    from tortoise.mcp_server import tortoise_get_point
+
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(rs, "open_record", _slow_opener(0.5))
+    monkeypatch.setattr(monitoring, "record_read_timeout_s", lambda: 0.05)
+    mcp_harness(None)  # the cache is COLD
+
+    started = time.monotonic()
+    out = tortoise_get_point("p-1")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.4, (
+        f"the MCP door waited {elapsed:.2f}s on a record bounded at 0.05s — "
+        "the leg is still unbounded")
+    assert out.get("residency") == RESIDENCY_NOT_HOT, (
+        "a record that could not answer inside the bound must leave the read "
+        f"not-hot, never an absence claim — got {out!r}")
+    assert out.get("servedFrom") == "cache"
+    assert out.get("fallbackReason") == rs.FALLBACK_RECORD_BOUND_MISS, (
+        "a ran-but-too-slow record is neither 'unavailable' nor 'never asked' "
+        f"— got {out.get('fallbackReason')!r}")
+    assert out.get("id") is None, "a bound miss must not serve the slow row"
+    assert rs.fallback_counts().get(rs.FALLBACK_RECORD_BOUND_MISS) == 1, (
+        "the fallback must be COUNTED, not only named")
+
+
+def test_SDK_record_mode_refuses_on_a_bound_miss(monkeypatch):
+    """`record` mode has no cache branch, so a bound miss must RAISE.
+
+    The lenient shape must not leak into the strict mode: answering `not-hot`
+    (or an absence) in `record` mode would turn "the record did not answer in
+    time" into a finding about the graph, which is the §17.2 inversion.
+    """
+    from tortoise import monitoring
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    monkeypatch.setattr(rs, "open_record", _slow_opener(0.5))
+    monkeypatch.setattr(monitoring, "record_read_timeout_s", lambda: 0.05)
+    stub = _sdk_class()(None)
+
+    with pytest.raises(rs.RecordUnavailable):
+        stub.get_point("p-1", served_out={})
+
+
+def test_MCP_the_ENTITY_door_says_not_hot_instead_of_an_empty_answer(
+        monkeypatch, mcp_door):
+    """#12947 finding 2 (P1): the LIVE canonical tool must not answer `{}`.
+
+    `tool_registry.py` names `tortoise_get_entity` as the live canonical tool
+    and `tortoise_get_point` as its RETIRED alias, and the entity door is the
+    only by-id door for Objects and Events — the issue's own measured
+    population (8 objects, 39 events). It returned a bare `{}` on a cold cache
+    with no `not-hot`, so an agent writing an Object and verifying with
+    `tortoise_get_entity(written_id)` read the write back as ABSENT with no
+    error and no signal — #12941's defect, at the most-used door.
+
+    NOTE the scope: only the VERDICT is emitted. The record-SERVED half needs
+    per-label parity (#9721) and is deliberately absent, so this asserts
+    `not-hot` and never asserts a served node.
+    """
+    from tortoise import mcp_server
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    stub = _EntitySDK()
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
+
+    out = mcp_server.tortoise_get_entity("o-1")
+
+    assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
+        "the canonical entity door reported 'it does not exist' for a node "
+        f"nobody who could see it was asked about — got {out!r}")
+    assert stub.calls == ["o-1"], "the door must still be the one that answered"
+
+
+def test_MCP_the_entity_TYPE_dispatcher_says_not_hot_too(monkeypatch, mcp_door):
+    """`tortoise_get(id, type="entity"|"event")` is the same door, so same rule."""
+    from tortoise import mcp_server
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _EntitySDK())
+
+    for kind in ("entity", "event"):
+        out = mcp_server.tortoise_get("o-1", type=kind)
+        assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
+            f"type={kind!r} bypassed the verdict — got {out!r}")
+
+
+def test_MCP_the_ENTITY_door_is_byte_identical_when_unarmed(monkeypatch,
+                                                           mcp_door):
+    """The default must not move: unarmed, the entity door still answers `{}`.
+
+    `off` consults no record, so an empty answer establishes nothing and the
+    pre-#12941 shape (`{}`) is the honest one — the same rule the point doors
+    follow for an `off` deployment whose `TORTOISE_RESIDENCY` marker is unarmed.
+    """
+    from tortoise import mcp_server
+
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
+    monkeypatch.delenv("TORTOISE_RESIDENCY", raising=False)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _EntitySDK())
+
+    out = mcp_server.tortoise_get_entity("o-1")
+
+    assert out == {}, f"off mode changed shape at the entity door — got {out!r}"
+    assert not out
+
+
+def test_MCP_the_ENTITY_door_leaves_a_FOUND_node_alone(monkeypatch, mcp_door):
+    """The verdict rides only an EMPTY answer — a found node keeps its shape."""
+    from tortoise import mcp_server
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk",
+                        lambda: _EntitySDK({"id": "o-1", "name": "n"}))
+
+    out = mcp_server.tortoise_get_entity("o-1")
+
+    assert out == {"id": "o-1", "name": "n"}, (
+        f"a found node must not gain a marker — got {out!r}")
 
 
 def test_the_three_modes_and_the_absent_verdict():
