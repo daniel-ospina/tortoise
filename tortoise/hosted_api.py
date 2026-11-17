@@ -253,6 +253,7 @@ from tortoise.sdk import (
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _journal_write_failure_warning,  # #4240 F1: the shared "a journal append failed" receipt warning
+    _refuse_inconsistent_goal_ending,  # #13065: the status/goalState AGREEMENT refusal, ONE home
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
@@ -261,8 +262,6 @@ from tortoise.sdk import (
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk._capture_session)
     validate_goal_state,  # #13110: the ONE goal-achievement guard (REST refuses before the write)
-    # #13065: the status/goalState AGREEMENT refusal, ONE home for the same reason
-    _refuse_inconsistent_goal_ending,
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
