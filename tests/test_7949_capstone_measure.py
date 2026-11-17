@@ -6259,11 +6259,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart at `main`. The
         # `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
         # and is RED here, measured: main's tortoise-capture.ts carries +23 lines above
-        # both `def`s that neither of that row's two sides moved — `#12695`'s +16, then
-        # `#13039`/`#13048` (`7520c6dafdca`, +7 net at `:53`) above both `def`s. That shift
-        # is `main`'s, not this branch's: `tortoise-capture.ts` is untouched by this diff
-        # (`git diff --stat origin/main...HEAD -- tortoise/pi-hooks/` is EMPTY), so the pair
-        # is re-derived from the tree, never carried.
+        # both `def`s that neither of that row's two sides moved.
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("1030", "export function postCapture("),
             ("1022", "export function postInstallProbe("),
@@ -6293,13 +6289,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # insertion moves by +39 — this row's two, and the `19558`/`19583`/`19451`/`18991`
         # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
         # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
-        # pointer to a row that no longer exists). ⛔ RE-DERIVED AGAIN at the `#13000` rebase
-        # (this branch's own #12992 block sits above both and costs `+141`, and `main`'s `#13043`
-        # then moved the whole file again by `+102` — `+243` in total from `main`'s `c4f6170cc3`):
-        # measured at THIS head, not copied: `@app.post("/v1/sessions")` is `:19128` and
-        # `@app.post("/v1/sessions/install-probe")` is `:21683` (they were `:18885`/`:21440` at
-        # `c4f6170cc3` and `:18854`/`:21409` at `#12947`'s head), each the file's ONLY
-        # occurrence of its needle.
+        # pointer to a row that no longer exists). Measured at THIS head, not copied: `@app.post("/v1/sessions")` is
+        # `:18987` and `@app.post("/v1/sessions/install-probe")` is `:21542` — the pair the row
+        # below pins, each the file's ONLY occurrence of its needle. (Prose here had `:18854`/`:21409`, `#12947`'s head.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("19128", ("exact", '@app.post("/v1/sessions")')),
             ("21683", '@app.post("/v1/sessions/install-probe")'),
@@ -6543,17 +6535,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # not read this range, so the pin caught it instead — again as
         # "the only failure was a stale TABLE ROW" on every parametrization, which is why
         # that message says what it says. ⛔ Those `:14575`/`:14604`/`:14614`/`:14652` figures are
-        # the `#12947` HEAD's, and the range has since moved TWICE — by a uniform +31 (main's
-        # `#12993`/`#12926`/`#12989` via the re-cut) and then by this branch's own #12992
-        # insertion, which sits above the whole span and costs `+141`, and `main`'s `#13043` then
-        # moved the file by a further `+102` (`+243` total — the same offset the capture-route
-        # rows above take at this head) — so
-        # they are kept as history and NOT as this head's. Measured at THIS head, which is
-        # what the row below pins:
+        # the `#12947` HEAD's, and the range has since moved AGAIN by a uniform +31 (main's
+        # `#12993`/`#12926`/`#12989` via the re-cut), so they are kept as history and NOT as this
+        # head's. Measured at THIS head, offset for offset (+29 `nodes_used`, +39 `max_nodes`,
+        # +78 `return`), which is what the row below pins — and ⛔ RE-DERIVED AGAIN at the
+        # forward merge of `main` `aa8413ca38` into `#12592`: `#12592`'s OWN `sdk.py`-adjacent
+        # insertions moved `hosted_api.py` by +102 at BOTH ends, and the three offsets above
+        # still hold EXACTLY at the new START, so the START is confirmed by structure rather
+        # than assumed from one bumped number:
         # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:14849`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14878` (inside the span),
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14737` (inside the span),
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:14888` (inside it), and `:14926` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:14927`.
+        # the blank line immediately before `return OrgInfoResponse(` at `:14786`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14849", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
@@ -6687,8 +6680,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:14888` (both needles are the file's only occurrences —
-    # `:14878` and `:14888` — so a later end cannot change the sum). Ends below `:14888` fail
+    # true for any end at or beyond `:14747` (both needles are the file's only occurrences —
+    # `:14737` and `:14747` — so a later end cannot change the sum). Ends below `:14747` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
     # end in `:14849`-`:14887` gives a non-empty window that lacks the second needle, and an
     # end below `:14849` gives an EMPTY window. The end is therefore pinned by the
@@ -6703,14 +6696,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
         assert sum(_needle in _l for _l in _span) == 1, (
-            f"04-plan.md I7 says `:14849-14926` publishes `nodes_used` / `max_nodes`, but "
+            f"04-plan.md I7 says `:14708-14785` publishes `nodes_used` / `max_nodes`, but "
             f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
             "range has moved, so re-derive it (start AND end) rather than bumping one end")
     # …and the END by structure, because membership inside a window cannot see it move.
     _i7_end_ok = _org_info[14926 - 1].strip() == "" and bool(
         _org_info[14926].lstrip().startswith("return OrgInfoResponse("))
     assert _i7_end_ok, (
-        "04-plan.md I7's range end (`:14926`) is no longer the blank line before "
+        "04-plan.md I7's range end (`:14785`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
 
