@@ -151,18 +151,22 @@ def storage_limits(tier: str) -> dict:
     ⛔ **DELIBERATELY NOT part of :func:`tier_limits`.** That dict is handed
     around as "the org's limits" and reaches ``quota.enforce_org_limit``; the
     allowance gate arms on *presence* — ``allowance_gate.enforce_allowances``
-    does ``if dim.limit_key not in limits: continue``
-    (``allowance_gate.py``:823). Both storage dimensions are currently
-    **BLOCKED** there (``postgres_storage`` has no per-org byte meter — a
-    per-org split would be an ALLOCATION, not a measurement; ``graph_storage``'s
-    own contract forbids capping on the ledger figure because the HNSW index is
-    under-reported 8.5x-21.7x). Putting either key into the dict every caller
-    treats as "the limits" is therefore one ``{**tier_limits(t), ...}`` away
-    from arming a blocked dimension and answering HTTP 500 on every gated
-    write. ``quota.py`` states the intended state: *"INERT BY DEFAULT: no
-    production resolver emits an ``ALLOWANCE_KEYS`` value"*. This accessor keeps
-    that true while letting the artifact carry the values a future resolver
-    will emit.
+    skips any dimension whose ``limit_key`` is absent from the limits dict. Both storage dimensions are currently
+    **BLOCKED** there, so putting either key into the dict every caller treats
+    as "the limits" is one ``{**tier_limits(t), ...}`` away from arming a
+    blocked dimension and answering HTTP 500 on every gated write. ``quota.py``
+    states the intended state: *"INERT BY DEFAULT: no production resolver emits
+    an ``ALLOWANCE_KEYS`` value"*. This accessor keeps that true while letting
+    the artifact carry the values a future resolver will emit.
+
+    ⛔ **WHY a dimension is blocked is stated in ONE place, and it is not here.**
+    ``allowance_gate.DIMENSIONS[*].blocked_reason`` carries the reason AND its
+    ``release`` conditions; restating it in this docstring is how the same
+    sentence came to be quoted in two files long after #12762 falsified it (the
+    per-org Postgres attribution it called missing had landed). Read
+    ``RELEASE_CONDITIONS``' description for what each condition needs, and
+    ``tests/test_9559_blocked_release_conditions.py`` for the evidence that is
+    re-checked on every PR.
 
     Returns ``{<allowance_key>: value | None}`` for every STORAGE dimension —
     ``None`` meaning UNCONFIGURED (the gate's own reading of it), never 0-by-0.
