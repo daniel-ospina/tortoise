@@ -1749,37 +1749,61 @@ def _strip_sql_comments(sql: str) -> str:
 def _find_closing_tag(code: str, start: int, tag: str) -> int:
     """Index of the `tag` that CLOSES a dollar-quoted body beginning at `start`.
 
-    ⛔ STRING LITERALS ARE SKIPPED, because a `$$` inside one does not close the
-    body — PostgreSQL's own scanner does exactly this. A plain `str.find` does
-    not, and the consequence was MEASURED on this tree: a correctly guarded body
-    carrying `PERFORM 'a $$ literal';` before the guard had its window truncated
-    at the literal (19 characters instead of 231), so ``_GATE_GUARD_RX`` found
-    nothing and the gate reported **"the zeroing UPDATE is no longer GUARDED"**
-    over a body that IS guarded. Fail-closed, so never a false PASS — but the
-    message is the entire product of a failure, and it named a defect the file
-    does not have.
+    ⛔ A PLAIN FIND, WITH NO ESCAPE PROCESSING — because PostgreSQL does none
+    inside a dollar-quoted body: *"no characters inside a dollar-quoted string
+    are ever escaped … Backslashes are not special, and neither are dollar signs,
+    **unless they are part of a sequence matching the opening tag**"*
+    (postgresql.org → 4.1.2.4 "Dollar-Quoted String Constants"). With the SAME
+    tag, a `$$` inside a `'…'` literal is such a sequence, so it ENDS the body —
+    and the file does not load at all.
+
+    ⛔ AND THE EXECUTING HALF OF THIS REPO AGREES, which is the half that decides
+    what production runs: `supabase/tests/pglite/validate.mjs:83-89` is the
+    splitter that applies every migration through real PostgreSQL, and after
+    reading an opening tag it jumps straight to
+    `sql.indexOf(tag, i + tag.length)` — no literal skipping. A source gate that
+    modelled a lexer here would disagree with the thing that EXECUTES the file,
+    and the source gate would be the wrong one.
+
+    (#13315 review F2/F3 — an earlier cut of this PR SKIPPED `'…'` literals here,
+    on the inverted premise that PostgreSQL's scanner does. Measured on that
+    cut's own fixture: the window widened from 20 to 94 characters over a file
+    whose closing `$$` is followed by ` literal';`, i.e. a RED became a GREEN on
+    a migration PostgreSQL rejects. Its literal scan also mis-modelled `E'…'`
+    backslash escapes, which could swallow a REAL terminator and red a valid
+    file. The confusing message that motivated all of it is answered in
+    `_function_body`, which names the shape instead of modelling a lexer
+    PostgreSQL does not have.)
 
     Returns -1 when the tag never closes; the caller REDs with a message naming
     the file rather than reading to end-of-file.
     """
-    i, n = start, len(code)
-    while i < n:
-        if code.startswith(tag, i):
-            return i
-        if code[i] == "'":
-            j = i + 1
-            while j < n:
-                if code[j] == "'":
-                    if code.startswith("''", j):
-                        j += 2
-                        continue
-                    j += 1
-                    break
-                j += 1
-            i = j
-            continue
-        i += 1
-    return -1
+    return code.find(tag, start)
+
+
+#: What may legally FOLLOW a function's dollar-quoted body — the `CREATE
+#: FUNCTION` tail (postgresql.org → CREATE FUNCTION, the `{ LANGUAGE … |
+#: TRANSFORM … | IMMUTABLE | … }` block) or the statement's own `;`. ⛔ This is a
+#: GRAMMAR test, not a lexer, and that distinction is the whole point: it is exact
+#: (a valid file MUST continue with one of these, or the file does not parse), so
+#: it can never red a loadable migration the way a hand-rolled quote scanner can.
+_FUNCTION_FOOTER = re.compile(
+    r"\s*(?:;|\Z"
+    r"|LANGUAGE\b|TRANSFORM\b|WINDOW\b|IMMUTABLE\b|STABLE\b|VOLATILE\b"
+    r"|NOT\s+LEAKPROOF\b|LEAKPROOF\b|CALLED\b|RETURNS\b|STRICT\b|EXTERNAL\b"
+    r"|SECURITY\b|PARALLEL\b|COST\b|ROWS\b|SUPPORT\b|SET\b|AS\b)",
+    re.IGNORECASE)
+
+
+class _BodyDoesNotLoad(AssertionError):
+    """A dollar-quoted body that ENDS somewhere the CREATE FUNCTION grammar
+    cannot accept, i.e. a migration PostgreSQL would refuse to load.
+
+    Raised instead of returning a truncated window, because the failure message
+    is the entire product of a gate failure: asserting `_GATE_GUARD_RX` over a
+    window that closed early reports *"the zeroing UPDATE is no longer GUARDED"*
+    over a file whose guard is intact and whose real defect is elsewhere.
+    """
 
 
 def _replayable_migration(path: Path) -> bool:
@@ -1836,9 +1860,18 @@ def _function_body(sql: str, decl_rx: re.Pattern[str]) -> str | None:
     body and reported a fail-closed arm that the executed function had lost — the
     same false PASS this window exists to close, one position further in.
 
+    ⛔ AND IT REFUSES A FILE POSTGRESQL CANNOT LOAD rather than reporting a body
+    it truncated. Because no character inside a dollar-quoted body is escaped,
+    a `$$` inside a `'…'` literal terminates the body, and what follows is the
+    REST OF THAT LITERAL — `literal';` — which no `CREATE FUNCTION` footer can
+    start with. So the check is the grammar (`_FUNCTION_FOOTER`) and the message
+    names the shape and the remedy (a distinct tag) instead of the guard
+    assertion blaming a defect the file does not have (#13315 review F2).
+
     Returns ``None`` when the declaration or its delimiters cannot be found, so
     the caller REDs with a message naming the file instead of silently scanning
-    the wrong text.
+    the wrong text. Raises `_BodyDoesNotLoad` when the closing tag is followed by
+    something the grammar forbids.
     """
     code = _strip_sql_comments(sql)
     decls = list(decl_rx.finditer(code))
@@ -1848,9 +1881,21 @@ def _function_body(sql: str, decl_rx: re.Pattern[str]) -> str | None:
     opener = _DOLLAR_TAG.search(code, decl.end())
     if opener is None:
         return None
-    closer = _find_closing_tag(code, opener.end(), opener.group(0))
+    tag = opener.group(0)
+    closer = _find_closing_tag(code, opener.end(), tag)
     if closer < 0:
         return None
+    tail = code[closer + len(tag):]
+    if _FUNCTION_FOOTER.match(tail) is None:
+        raise _BodyDoesNotLoad(
+            f"the dollar-quoted body ends at a `{tag}` followed by "
+            f"{tail.lstrip()[:40]!r} — not a legal CREATE FUNCTION footer "
+            "(`LANGUAGE` / `IMMUTABLE` / `SECURITY` / … / `;`). PostgreSQL "
+            "cannot load this file: nothing inside a dollar-quoted body is "
+            f"escaped, so a `{tag}` inside a string literal ENDS the body "
+            "(postgresql.org 4.1.2.4; `supabase/tests/pglite/validate.mjs:83-89` "
+            "does the same flat find). Give the body a DISTINCT tag "
+            "(`$function$ … $function$`) if it must mention the delimiter")
     return code[opener.end():closer]
 
 
@@ -2036,8 +2081,11 @@ def test_the_body_scan_honours_a_named_dollar_tag():
     """A `$function$`-tagged body (what `pg_dump` emits) is still bounded.
 
     PostgreSQL's dollar-quote rule is `$tag$ … $tag$`, the tag being part of the
-    delimiter — so a body carrying a literal `$$` inside a string must not end the
-    scan early, and the extractor must not assume the tag is `$$`.
+    delimiter — so an inner `$$` is CONTENT that never matches a `$function$`
+    tag, and the extractor must not assume the tag is `$$`. That is also the
+    REMEDY for a body that has to mention `$$`: a distinct tag makes the
+    occurrence harmless where the same tag would terminate the body (see the
+    literal row below, `#13315` review F2).
     """
     decl_rx = re.compile(r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.tagged\b")
     sql = (
@@ -2057,42 +2105,89 @@ def test_the_body_scan_honours_a_named_dollar_tag():
     assert "after" not in code, f"the scan ran past the closing tag: {code!r}"
 
 
-def test_a_doubled_dollar_inside_a_STRING_LITERAL_does_not_close_the_body():
-    """A `$$` inside a `'…'` literal does not end a `$$`-tagged body.
+def test_a_doubled_dollar_inside_a_STRING_LITERAL_DOES_close_the_body():
+    """`$$` inside a `'…'` literal ENDS a `$$` body — so the file does not LOAD.
 
-    REVIEW FINDING (P3, fail-closed but a FALSE DIAGNOSIS): PostgreSQL's scanner
-    skips string literals when it looks for the closing dollar tag; `str.find`
-    does not. MEASURED on this tree — a correctly GUARDED body carrying
-    `PERFORM 'a $$ literal';` before its guard had its window truncated at the
-    literal (19 chars instead of 231), so the guard assertion fired and reported
-    "the zeroing UPDATE is no longer GUARDED" over a body that is guarded.
+    ⛔ THE PREMISE THIS ROW REPLACES WAS INVERTED, and pinning it would have
+    taught the next reader a rule PostgreSQL does not have (#13315 review F2).
+    PostgreSQL: *"no characters inside a dollar-quoted string are ever escaped …
+    neither are dollar signs, unless they are part of a sequence matching the
+    opening tag"* (4.1.2.4). A `$$` inside a string literal IS such a sequence,
+    so it closes the body, and the remainder — ` literal'; IF …` — is parsed as
+    SQL: `syntax error at or near "literal'"`. This is not "a correctly guarded
+    body"; it is a migration the server refuses. The repo's executing half says
+    the same thing, structurally: `supabase/tests/pglite/validate.mjs:83-89`
+    jumps to the next `indexOf(tag)` with no literal skipping.
 
-    The named-tag test above cannot catch this: with `$function$` the inner `$$`
-    never equals the tag, so the naive search happens to be right. The failure
-    needs the SAME tag inside a literal.
+    ⛔ WHAT THE GATE OWES ON THIS SHAPE is a message that names it. The truncated
+    window would otherwise satisfy nothing and the guard assertion would report
+    "the zeroing UPDATE is no longer GUARDED" over a body whose guard is intact —
+    a wrong diagnosis is the whole product of a RED. `_function_body` therefore
+    checks what FOLLOWS the closing tag against the `CREATE FUNCTION` grammar
+    (exact, no lexer) and raises `_BodyDoesNotLoad` naming the shape.
+
+    ⛔ AND THE REMEDY IS PROVEN HERE, not asserted in prose: the same body under
+    a DISTINCT tag keeps its guard window, because `$$` never matches
+    `$function$`.
     """
     decl_rx = re.compile(r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.literal\b")
-    sql = (
-        "CREATE OR REPLACE FUNCTION public.literal()\n"
-        "RETURNS void AS $$\n"
+    body = (
         "BEGIN\n"
         "  PERFORM 'a $$ literal';\n"
         "  IF 1 = 1 THEN RAISE WARNING 'kept'; END IF;\n"
         "  RETURN;\n"
-        "END;\n"
-        "$$ LANGUAGE plpgsql;\n"
-    )
-    code = _function_body(sql, decl_rx)
-    assert code is not None
-    assert "RAISE WARNING 'kept'" in code, (
-        f"the body window closed at the `$$` inside a string literal: {code!r}")
-    # ⛔ NON-VACUITY, asserted rather than assumed: the search this replaces MUST
-    # truncate before the warning on THIS text, or the row has lost its subject.
+        "END;\n")
+    head = "CREATE OR REPLACE FUNCTION public.literal()\nRETURNS void AS "
+    sql = head + "$$\n" + body + "$$ LANGUAGE plpgsql;\n"
+
+    with pytest.raises(_BodyDoesNotLoad) as exc:
+        _function_body(sql, decl_rx)
+    message = str(exc.value)
+    assert "string literal" in message and "$function$" in message, (
+        f"the RED does not name the shape or the remedy: {message!r}")
+    # ⛔ THE WINDOW REALLY DOES CLOSE THERE — the message is derived, not parroted:
+    # PostgreSQL's terminator is the literal's `$$`, and the text after it is the
+    # rest of the literal.
     naive_open = sql.index("AS $$") + len("AS $$")
     naive_close = sql.find("$$", naive_open)
-    assert naive_close < sql.index("RAISE WARNING"), (
-        "this row no longer discriminates: `str.find` does not truncate at the "
-        "literal any more, so a plain find would pass it — re-measure the shape")
+    assert sql[naive_close + 2:].lstrip().startswith("literal'"), (
+        "this row no longer discriminates: the first `$$` after the opener is not "
+        "the one inside the literal — re-measure the shape")
+
+    # The REMEDY: a distinct tag makes the same inner `$$` ordinary content.
+    tagged = head + "$function$\n" + body + "$function$ LANGUAGE plpgsql;\n"
+    code = _function_body(tagged, decl_rx)
+    assert code is not None and "RAISE WARNING 'kept'" in code, (
+        f"a distinct tag did not preserve the body window: {code!r}")
+
+    # ⛔ NON-VACUITY, against the implementation this replaced: a quote-skipping
+    # lexer widened the window over THIS text and so reported the file as fine.
+    def _literal_skipping_find(code_text: str, start: int, tag: str) -> int:
+        i, n = start, len(code_text)
+        while i < n:
+            if code_text.startswith(tag, i):
+                return i
+            if code_text[i] == "'":
+                j = i + 1
+                while j < n:
+                    if code_text[j] == "'":
+                        if code_text.startswith("''", j):
+                            j += 2
+                            continue
+                        j += 1
+                        break
+                    j += 1
+                i = j
+                continue
+            i += 1
+        return -1
+
+    wider = _literal_skipping_find(sql, naive_open, "$$")
+    assert wider > naive_close, (
+        "the reverted lexer does not widen this window, so the row proves nothing")
+    assert "RAISE WARNING 'kept'" in sql[naive_open:wider], (
+        "the widened window no longer contains the guard, so this row would pass "
+        "under the pre-fix implementation too — re-measure the fixture")
 
 
 # --------------------------------------------------------------------------- #
