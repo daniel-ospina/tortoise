@@ -1685,6 +1685,21 @@ def test_goto_spends_its_one_retry_on_a_transient_navigation_error() -> None:
     )
 
 
+def test_goto_still_retries_a_status_mismatch() -> None:
+    """The pre-existing retry — "one retry on a mismatch" — survives untouched.
+
+    This pins the OTHER half of the helper: rewriting `_goto` for #13096 moved
+    the status check inside a loop, so without this a refactor could silently
+    drop the retry that #3962 added and no test would notice. Green on both the
+    pre-fix and the fixed helper — it is a regression guard for this change's
+    rewrite, not a non-vacuity proof, and it is labelled as such rather than
+    claimed as one.
+    """
+    page = _NavPage([503, 200])  # a transient 5xx, then the real page
+    assert _goto(page, "http://127.0.0.1:8847/privacy") == "<html>served</html>"
+    assert page.goto_calls == 2, f"a status mismatch must still be retried once — got {page.goto_calls}"
+
+
 def test_goto_reraises_a_persistent_navigation_error() -> None:
     """A failure the retry does not clear is re-raised with its real reason.
 
