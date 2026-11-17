@@ -8990,7 +8990,7 @@ def _refuse_unencodable_object_status(props, *, door: str, target: object) -> No
     except (TypeError, ValueError):
         raise ValueError(
             f"{door} refused a non-string status for {_refusal_repr(target)}: "
-            f"{_refusal_repr(word)} is {word.__class__.__name__}, which has no "
+            f"{_refusal_repr(word)} is {_refusal_type_name(word)}, which has no "
             f"JSON form, and this door records every write. The NODE would "
             f"drop the value (#7369) but the record cannot carry it, so the "
             f"write would fail inside the event log after this door had "
@@ -9179,12 +9179,12 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     # `_refuse_unencodable_object_status`, called by the door before the lock and
     # the id resolution, because a refusal that ran after `_registration_id`
     # would have taken the lock for a write that cannot happen (`#11948`).
-    # ⛔ `type(word)` would be fine here, but `type` is a PARAMETER name at one
-    # of the three callers (`create_entity(type, …)`), so the shadow-free
-    # spelling is used uniformly rather than per-caller.
+    # ⛔ The class NAME goes through `_refusal_type_name`: `type(word)` is
+    # shadowed at one caller (`create_entity(type, …)`) and a raising
+    # metaclass `__name__` replaced the promise (MEASURED: `name-boom`).
     raise ValueError(
         f"{door} refused a non-string status for {_refusal_repr(target)}: "
-        f"{_refusal_repr(word)} is {word.__class__.__name__}, not a `str`. ONTOLOGY §4.3 declares "
+        f"{_refusal_repr(word)} is {_refusal_type_name(word)}, not a `str`. ONTOLOGY §4.3 declares "
         f"`status` as a STRING, and the Object family's word set is "
         f"deliberately OPEN — a pack kind validates against its own declared "
         f"words (#10371), so arbitrary STRINGS stay accepted and are not "
@@ -52996,8 +52996,8 @@ class TortoiseSDK:
             # (`live.lifecycle_props_by_rendering`'s docstring records the
             # measured #11825 round-4/8 case). FIRST-WINS, so an ordinary plain
             # `str` key makes this identical to `props["status"]`.
-            # ⛔ `type` IS A PARAMETER HERE (`type: str`), so `type(x)` would
-            # call the string. `__class__.__name__` is the shadow-free spelling.
+            # ⛔ `type` IS A PARAMETER HERE (`type: str`), so `type(x)` would call
+            # the string; `_refusal_type_name(x)` is shadow-free AND hostile-safe.
             # ⛔ AND THIS GUARD IS A LANDING TEST, NOT A PRESENCE TEST (#12869).
             # A create whose name is already held by a single LIVE row MERGES
             # onto it, and `_upsert_object`'s ON MATCH lane never rewrites

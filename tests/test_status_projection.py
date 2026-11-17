@@ -3257,6 +3257,38 @@ class TestNonScalarStatus12869:
             assert sdk._get_proj().g.query(
                 "MATCH (n:Object {name:'boom-ent'}) RETURN count(n)"
             ).result_set[0][0] == 0
+
+            # (g) the CLASS NAME, not just the value (#12910 review round 8, P2).
+            #     Both refusals above name the operand's type as well as its
+            #     repr, and `type(word).__name__` is caller-controlled too: a
+            #     METACLASS may define `__name__` as a raising property, so the
+            #     f-string escaped as that exception before `_refusal_type_name`
+            #     was used. ⛔ AN `int` SUBCLASS is the shape that reaches it —
+            #     `_json.dumps` can serialise it (so the encoder probe passes)
+            #     and `_value_ok` is False (so the TYPE arm is entered), while a
+            #     plain object is DEGRADED to null by the #7369 gate instead and
+            #     never reaches the message at all (MEASURED). A raising
+            #     `__class__` property is NOT this axis: `isinstance` consults it
+            #     and raises inside the guard's first line, before any message is
+            #     built (MEASURED) — so this arm pins the `__name__` axis, which
+            #     is the one a refusal can fix.
+            class _RaisingNameMeta(type):
+                @property
+                def __name__(cls):
+                    raise RuntimeError("name-boom")
+
+            class _BoomInt(int, metaclass=_RaisingNameMeta):
+                pass
+
+            with pytest.raises(ValueError) as ei:
+                sdk.create_object("rr-name", "core:strategy",
+                                  status=_BoomInt(123))
+            assert "unreadable (its metaclass raises)" in str(ei.value), (
+                "the refusal did not use `_refusal_type_name` on its class "
+                "name: " + str(ei.value))
+            assert "name-boom" not in str(ei.value)
+            assert _carrier_row(sdk, "Object", "rr-name") is None, (
+                "a refused non-string create left a node behind")
         finally:
             sdk.close()
 
