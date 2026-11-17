@@ -1588,13 +1588,28 @@ def _reading(dim: AllowanceDimension, org_id: str,
         # which is what keeps a missing gauge a refusal). It RETURNS rather than
         # falling through on purpose: a row that does not exist has no AGE, so the
         # staleness bound below must not be applied to it.
-        if dim.unmeasured_is_unarmed:
+        if dim.unmeasured_is_unarmed and not observed_only:
             # ⛔ LOUD, BUT NOT AN INCIDENT: this is the state of EVERY new tenant
             # and of EVERY tenant at each billing-window boundary, so the signal
             # is a throttled log + a counter rather than a page (see
             # ``_OPERATOR_FAULT_REASONS``). It is still stated, because "the cap
             # is not binding for this org" is exactly the fact an operator needs
             # to see when deciding whether #9559 has been wired.
+            #
+            # ⛔ ``and not observed_only`` (#13102 review round 8, F2): on the
+            # UNLIMITED path (``allowance is None``, or the artifact's ``0``
+            # unset sentinel with ``zero_means_unarmed``) NOTHING is armed, so
+            # the two causal claims this signal makes are both false — nothing
+            # is under-enforced, and no reading will ever make a cap bind. The
+            # counter is the instrument #9559 reads to tell "the meter never
+            # reports for a PAID tenant" from "free-tier traffic exists", so
+            # counting an unarmed dimension here destroyed that distinction.
+            # Every neighbouring branch already handles the unlimited case
+            # explicitly (a fault logs "dimension unlimited, no refusal" and
+            # does not touch the counter; so does a non-reading); ``absent`` was
+            # the one that did not. The ARMED-tenant regression this signal
+            # exists for is untouched: a configured allowance takes
+            # ``observed_only=False`` and still counts + logs.
             _served_unmeasured(dim, org_id, "absent")
         return MeterReading(used=0.0, measured_at=None, estimated=False,
                             note="no usage metered in this window")

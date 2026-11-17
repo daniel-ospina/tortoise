@@ -432,6 +432,48 @@ def test_a_tenant_with_NO_ledger_ROW_is_served_not_refused(monkeypatch, signals)
     assert not [f for f in signals if "ALLOWANCE_CAP" in f[0]], signals
 
 
+def test_an_UNARMED_dimension_counts_NOTHING_as_under_enforcement(
+        monkeypatch, signals, caplog):
+    """#13102 review round 8 (F2): on the UNLIMITED path, `absent` is not a cost.
+
+    ``enforce_allowances`` calls ``_reading(..., observed_only=True)`` exactly
+    when the dimension is unarmed BY CONFIGURATION (``allowance is None``, or the
+    artifact's ``0`` unset sentinel with ``zero_means_unarmed`` — free/anon, and
+    any limits dict that spreads ``pricing.storage_limits()``). ``_reading``'s
+    ``ABSENT`` + ``absent_is_zero`` branch signalled anyway, so a deliberately
+    uncapped tenant produced, per org per hour, "the cap does NOT bind for this
+    org **until a usable reading exists** (under-enforcement)" — two false causal
+    claims, since nothing is armed and no reading can ever make a cap bind.
+
+    The counter is the instrument #9559 reads to tell *"the meter never reports
+    for a PAID tenant"* from *"free-tier traffic exists"*, so counting an unarmed
+    dimension there destroyed the very distinction the signal exists to make.
+    Every neighbouring branch already handled the unlimited case explicitly (a
+    fault and a non-reading both log "dimension unlimited, no refusal" and leave
+    the counter alone); ``absent`` was the one that did not.
+
+    RED on the pre-fix tree: the counter reads ``{('graph_storage', 'absent'): 2}``
+    and ``UNMEASURED_UNARMED_WARNING`` is in the log.
+    """
+    _ledger_reading(monkeypatch, unmeasured_reason="absent")
+    with caplog.at_level("WARNING"):
+        for limits in (
+                _limits(tier="free", max_graph_storage_mb=0),   # the unset sentinel
+                _limits(tier="free", max_graph_storage_mb=None),  # documented unlimited
+                # the "second arming seam" this PR guards against: a limits dict
+                # that spreads the artifact's figures, so an UNPAID tier arrives
+                # with the amount present-and-zero rather than absent.
+                {**_limits(tier="anon"),
+                 **pricing.storage_limits("anon")}):
+            enforce_allowances(limits)
+    assert unarmed_served_counts() == {}, (
+        "an unarmed dimension must not be counted as under-enforcement — that "
+        f"counter is how #9559 tells a broken meter from free-tier traffic: "
+        f"{unarmed_served_counts()}")
+    assert UNMEASURED_UNARMED_WARNING not in caplog.text, caplog.text
+    assert signals == [], signals
+
+
 @pytest.mark.parametrize("reason", ["unreported", "read_error", "period_error"])
 def test_a_FAULT_on_the_gauge_is_served_AND_FILES_AN_INCIDENT(
         monkeypatch, signals, caplog, reason):
