@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 24731
+    uv run python tools/hosted_api_cite_census.py --pivot 24762
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -141,7 +141,11 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site —
 #: and that pin is what reds when a forward merge grows the module, which is the
 #: remedy this constant relies on rather than a hand sweep.
-DEFAULT_PIVOT = 24731
+#: #12947 moved it 24692 -> 24731, and this PR's forward merge of main moved it
+#: 24731 -> 24762 (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)'
+#: tortoise/hosted_api.py`), re-deriving the notes, the scorecard and this constant
+#: TOGETHER — the constant is the third of the three, and the pin reds when it lags.
+DEFAULT_PIVOT = 24762
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"

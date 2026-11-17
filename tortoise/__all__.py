@@ -7,25 +7,32 @@ approval record in `docs/product/canonical-mcp-tools.md`, PR 4120). It is
 derivable from code.
 
 WHAT IS NOT IN HERE, AND WHY THAT IS THE POINT
-    **118** public methods are live on `TortoiseSDK` today and 40 are approved, but the two
-    sets only overlap in 22 of the class's methods — 23 approved ROWS resolve, and the row-1
+    **94** public methods are live on `TortoiseSDK` today and 40 are approved, but the two
+    sets only overlap in 28 of the class's methods — 29 approved ROWS resolve, and the row-1
     `Tortoise(...)` is not one of them: it names the `TortoiseSDK` class rather than a method
-    on it. So **96 of the live methods are off the approved surface**, and those are what
-    Phase 2 of #4282 REMOVES. Phase 2 IMPLEMENTS the remaining **17** methods — the count the
+    on it. So **66 of the live methods are off the approved surface**, and those are what
+    Phase 2 of #4282 REMOVES. Phase 2 IMPLEMENTS the remaining **11** methods — the count the
     gate prints for approved methods it cannot resolve on the live class. Both numbers
-    reconcile with the live count and nothing else: 96 off-surface + 22 overlapping methods =
-    118 live, and 22 + 17 = 39 method rows out of the 40 (`Tortoise(...)` is the 40th). These
+    reconcile with the live count and nothing else: 66 off-surface + 28 overlapping methods =
+    94 live, and 28 + 11 = 39 method rows out of the 40 (`Tortoise(...)` is the 40th). These
     numbers are MEASURED at this merge (`uv run python tools/sdk_surface_declaration.py
-    show`), because three landed waves moved them: **#12901 wave 1** retired five off-surface
-    methods that no production code called (live 125 -> 120, off-surface 112 -> 107, overlap
-    and implement set unchanged); #4282 **Phase 2** (#11609 lane B / #12915) retired four
-    public names into approved containers and delivered three approved ones (live -> 119, the
-    overlap 13 -> 16, the off-surface set -> 103, the implement set 26 -> 23); and **this
-    lane** (#11609's source/mine containers) replaced seven live off-surface doors with six
-    approved containers (live 119 -> 118, overlap 16 -> 22, off-surface 103 -> 96, implement
-    set 23 -> 17). The waves are disjoint by construction: wave 1's membership rule excluded
-    any name bound by a `tool_registry` entry (live or retired), and the names the later waves
-    re-key were live MCP doors, so no wave consumed another's candidates. Those 96 off-surface
+    show`), because five landed waves moved them: **#12901 wave 1** retired five off-surface
+    methods that no production code called (live 125 -> 120); #11609's **READ/QUERY** family
+    (#12951) landed six containers while re-privatising the fourteen read methods they cover
+    (live 120 -> 112, the overlap 13 -> 19); #4282 **Phase 2** (#11609 lane B / #12915)
+    retired four public names into approved containers and delivered three approved ones
+    (live 112 -> 111, the overlap 19 -> 22); #11609's source/mine containers replaced seven
+    live off-surface doors with six approved containers (live 111 -> 110, the overlap
+    22 -> 28); and **#12901 wave 2** privatised the sixteen members of the canonical
+    control-plane partition (`N1`-`N6`) that are off this list and bound by no MCP tool
+    (live 110 -> 94, off-surface 82 -> 66, overlap and implement set unchanged — a departure
+    with no replacement NAMED on the surface yet, so every one of them is a REMOVAL in
+    `tortoise/sdk_retired.py`, not a rename). The waves are disjoint by construction: wave 1's
+    membership rule excluded
+    any name bound by a `tool_registry` entry (live or retired), the names the later waves
+    re-key were live MCP doors, and wave 2's rule is the control-plane PARTITION minus the
+    approved rows minus the one MCP-bound member (`org_create`) — so no wave consumed
+    another's candidates. Those 66 off-surface
     methods are deliberately
     NOT declared in this module: a declaration that also lists everything that exists cannot
     hold a line, because the gate then answers "the surface is what the surface is" and
@@ -51,10 +58,10 @@ THE GATE
     dropped from here) and against the live class in both directions (a public method that
     is not on the approved surface; an approved method that does not exist on the SDK).
     Both gap directions FAIL by design while the migration is open: the honest reading of
-    this declaration today is "40 approved, 118 live, 22 of the approved methods implemented
-    and 96 live-but-unapproved" — never "green". (118 − 40 = 78 is only the DELTA to the
+    this declaration today is "40 approved, 94 live, 28 of the approved methods implemented
+    and 66 live-but-unapproved" — never "green". (94 − 40 = 54 is only the DELTA to the
     target count, which is a different measurement from the set that has to be removed; the
-    removals are the 96.)
+    removals are the 66.)
 
     Adding or removing a name here is a **surface change** and needs Daniel's approval FIRST
     (`AGENTS.md` → "MCP/SDK Surface Approval"). The gate makes such a change VISIBLE; it

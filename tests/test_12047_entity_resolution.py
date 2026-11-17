@@ -122,7 +122,7 @@ class TestEntityQueueIsNoLongerAStub:
         _create_raw(sdk, "Subject", "sub-2", "the fresh-context reviewer role",
                     "subjectKind", "role")
 
-        rows = sdk.list_dedup_candidates(candidate_type="entity")
+        rows = sdk.review_link_candidates("dedup", candidate_type="entity")
         assert rows, "the entity queue returned nothing for a known near-duplicate pair"
         row = rows[0]
         assert row["candidate_type"] == "entity"
@@ -137,7 +137,7 @@ class TestEntityQueueIsNoLongerAStub:
         _create_raw(sdk, "Object", "obj-1", "a16z Speedrun", "objectKind", "organization")
         _create_raw(sdk, "Object", "obj-2", "a16z Speedrun 2026 application",
                     "objectKind", "organization")
-        row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+        row = sdk.review_link_candidates("dedup", candidate_type="entity")[0]
         for key in ("id", "candidate_id", "existing_id", "target_id", "name",
                     "existing_name", "label", "method", "similarity",
                     "candidate_type", "status"):
@@ -168,12 +168,12 @@ class TestEntityQueueIsNoLongerAStub:
 
         monkeypatch.setattr(er, "entity_candidates", _boom)
         with pytest.raises(EntityScanUnavailable):
-            sdk.list_dedup_candidates(candidate_type="entity")
+            sdk.review_link_candidates("dedup", candidate_type="entity")
 
     def test_unknown_candidate_type_still_refuses(self, sdk_factory):
         sdk = sdk_factory()
         with pytest.raises(ValueError):
-            sdk.list_dedup_candidates(candidate_type="nonsense")
+            sdk.review_link_candidates("dedup", candidate_type="nonsense")
 
 
 # ── the deterministic rung: a near-duplicate resolves onto the existing entity
@@ -364,7 +364,7 @@ class TestApproveMergeOnEntities:
                     "subjectKind", "role")
         _create_raw(sdk, "Subject", "sub-new", "the fresh-context reviewer role",
                     "subjectKind", "role")
-        return sdk.list_dedup_candidates(candidate_type="entity")[0]
+        return sdk.review_link_candidates("dedup", candidate_type="entity")[0]
 
     def test_merge_records_the_alias_and_deletes_nothing(self, sdk_factory):
         sdk = sdk_factory()
@@ -391,7 +391,7 @@ class TestApproveMergeOnEntities:
             params={"id": row["candidate_id"]}).result_set[0]
         assert merged == [row["existing_id"], "merge"]
         assert [r["candidate_id"] for r in
-                sdk.list_dedup_candidates(candidate_type="entity")
+                sdk.review_link_candidates("dedup", candidate_type="entity")
                 ] == []
 
         # …and a LATER write of the variant resolves instead of minting a twin.
@@ -414,7 +414,7 @@ class TestApproveMergeOnEntities:
             "MATCH (s:Subject {id:$id}) RETURN coalesce(s.aliases, [])",
             params={"id": row["existing_id"]}).result_set[0][0] == []
         assert [r["candidate_id"] for r in
-                sdk.list_dedup_candidates(candidate_type="entity")] == []
+                sdk.review_link_candidates("dedup", candidate_type="entity")] == []
 
     def test_a_repeat_of_the_same_verdict_is_idempotent(self, sdk_factory):
         sdk = sdk_factory()
@@ -432,7 +432,7 @@ class TestApproveMergeOnEntities:
         # sub-3's two rivals are equidistant — the resolver must refuse.
         with pytest.raises(ValueError, match="refusing"):
             entity_pair_for(g, "sub-3")
-        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+        row = next(r for r in sdk.review_link_candidates("dedup", candidate_type="entity")
                    if r["candidate_id"] == "sub-3")
         assert row["ambiguous"] is True and row["tied_with"]
 
@@ -484,7 +484,7 @@ class TestMergeIsDurable:
         try:
             sdk.create_subject("fresh-context code reviewer", "role")
             sdk.create_subject("the fresh-context reviewer role", "role")
-            row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+            row = sdk.review_link_candidates("dedup", candidate_type="entity")[0]
             sdk.approve_merge(row["candidate_id"], action="merge")
             g = sdk._get_proj().g
             q = ("MATCH (s:Subject) RETURN s.id, s.aliases, s.resolved_from, "
@@ -517,7 +517,7 @@ class TestMergeIsDurable:
         try:
             sdk.create_subject("plate one", "other")
             sdk.create_subject("plate wun", "other")
-            row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+            row = sdk.review_link_candidates("dedup", candidate_type="entity")[0]
             sdk.approve_merge(row["candidate_id"], action="reject")
             g = sdk._get_proj().g
             q = ("MATCH (s:Subject) RETURN s.id, s.dedup_reviewed, "
@@ -552,7 +552,7 @@ class TestReviewFixes:
         _create_raw(sdk, "Subject", "sub-2", "alpha beta gammas", "subjectKind", "other")
         _create_raw(sdk, "Subject", "sub-3", "alpha beta gammaa", "subjectKind", "other")
         g = sdk._get_proj().g
-        rows = {r["candidate_id"]: r for r in sdk.list_dedup_candidates(candidate_type="entity")}
+        rows = {r["candidate_id"]: r for r in sdk.review_link_candidates("dedup", candidate_type="entity")}
         for cid, row in rows.items():
             if row.get("ambiguous"):
                 continue
@@ -567,12 +567,12 @@ class TestReviewFixes:
         sdk = sdk_factory()
         _create_raw(sdk, "Subject", "sub-a", "alpha gamma", "subjectKind", "other")
         _create_raw(sdk, "Subject", "sub-b", "alpha gammas", "subjectKind", "other")
-        row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+        row = sdk.review_link_candidates("dedup", candidate_type="entity")[0]
         sdk.approve_merge(row["candidate_id"], action="merge")
         survivor = row["existing_id"]
         # A fresh exact twin of the MERGED-AWAY name appears.
         _create_raw(sdk, "Subject", "sub-d", row["name"], "subjectKind", "other")
-        rows = sdk.list_dedup_candidates(candidate_type="entity")
+        rows = sdk.review_link_candidates("dedup", candidate_type="entity")
         for r in rows:
             assert r["existing_id"] != row["candidate_id"], (
                 "the merge target is a retired carrier (resolved_from set)")
@@ -619,7 +619,7 @@ class TestReviewFixes:
         sdk = sdk_factory()
         _create_raw(sdk, "Subject", "sub-a", "alpha gamma", "subjectKind", "other")
         _create_raw(sdk, "Subject", "sub-b", "alpha gammas", "subjectKind", "other")
-        row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+        row = sdk.review_link_candidates("dedup", candidate_type="entity")[0]
         sdk.approve_merge(row["candidate_id"], action="merge")
         got = resolve_entity_name(sdk._get_proj().g, "Subject", row["name"])
         assert got["resolution"] in ("exact", "alias"), got
@@ -631,7 +631,7 @@ class TestReviewFixes:
         sdk = sdk_factory()
         _create_raw(sdk, "Subject", "sub-1", "alpha gamma", "subjectKind", "role")
         _create_raw(sdk, "Subject", "sub-2", "alpha gammas", "subjectKind", "naturalPerson")
-        row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+        row = sdk.review_link_candidates("dedup", candidate_type="entity")[0]
         assert row["kind_mismatch"] is True
         verdict = sdk.approve_merge(row["candidate_id"], action="merge")
         assert verdict["kind_mismatch"] is True
@@ -757,7 +757,7 @@ class TestSecondReviewRoundBounded:
         _create_raw(sdk, "Subject", "sub-c", "aaa one", "subjectKind", "other",
                     ts="2026-01-03", dedup_reviewed="reject",
                     dedup_target_id="sub-a")
-        rows = sdk.list_dedup_candidates(candidate_type="entity")
+        rows = sdk.review_link_candidates("dedup", candidate_type="entity")
         got = {(r["candidate_id"], r["existing_id"]) for r in rows}
         assert ("sub-c", "sub-b") in got, (
             f"the real sub-b/sub-c duplicate is missing from the queue: {got}")
@@ -841,7 +841,7 @@ class TestSecondReviewRoundBounded:
         _create_raw(sdk, "Subject", "sub-b", "Bob Smith", "subjectKind",
                     "naturalPerson", ts="2026-01-02")
         sdk.approve_merge("sub-b", action="merge")
-        sdk.update_knowledge("sub-a", status="superseded")
+        sdk.update_knowledge("sub-a", status="superseded", supersededBy="Bob Smith")
         g = sdk._get_proj().g
         assert resolve_entity_id(
             g, "Subject", "Bob Smith",
@@ -870,7 +870,7 @@ class TestSecondReviewRoundBounded:
                     ts="2026-01-03", dedup_reviewed="reject",
                     dedup_target_id="sub-a")
         pairs = {(r["candidate_id"], r["existing_id"]) for r in
-                 sdk.list_dedup_candidates(candidate_type="entity")}
+                 sdk.review_link_candidates("dedup", candidate_type="entity")}
         assert ("sub-c", "sub-b") in pairs, pairs
         verdict = sdk.approve_merge("sub-c", action="reject")
         assert not verdict.get("already_reviewed"), (
@@ -878,7 +878,7 @@ class TestSecondReviewRoundBounded:
         assert verdict.get("target_id") == "sub-b", (
             f"the reject did not name the pair it decided: {verdict}")
         after = {(r["candidate_id"], r["existing_id"]) for r in
-                 sdk.list_dedup_candidates(candidate_type="entity")}
+                 sdk.review_link_candidates("dedup", candidate_type="entity")}
         assert ("sub-c", "sub-b") not in after, (
             f"the pair just rejected is still offered: {after}")
         assert ("sub-c", "sub-a") not in after, (
@@ -901,7 +901,7 @@ class TestSecondReviewRoundBounded:
                     "naturalPerson", ts="2026-01-01")
         _create_raw(sdk, "Subject", "sub-b", "Acme Owner", "subjectKind",
                     "naturalPerson", ts="2026-01-02")
-        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+        row = next(r for r in sdk.review_link_candidates("dedup", candidate_type="entity")
                    if r["candidate_id"] == "sub-b")
         assert row["existing_id"] == "sub-a", row
         sdk.approve_merge("sub-b", action="merge")
@@ -933,7 +933,7 @@ class TestSecondReviewRoundBounded:
                     "naturalPerson", ts="2026-01-01")
         _create_raw(sdk, "Subject", "sub-b", "Bob Smith", "subjectKind",
                     "naturalPerson", ts="2026-01-02")
-        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+        row = next(r for r in sdk.review_link_candidates("dedup", candidate_type="entity")
                    if r["candidate_id"] == "sub-b")
         assert row["existing_id"] == "sub-a", row
         sdk.approve_merge("sub-b", action="merge")
@@ -959,7 +959,7 @@ class TestSecondReviewRoundBounded:
                     "organization", ts="2026-01-01")
         _create_raw(sdk, "Object", "obj-b", "Acme Owner", "objectKind",
                     "organization", ts="2026-01-02")
-        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+        row = next(r for r in sdk.review_link_candidates("dedup", candidate_type="entity")
                    if r["candidate_id"] == "obj-b")
         assert row["existing_id"] == "obj-a", row
         sdk.approve_merge("obj-b", action="merge")
@@ -982,7 +982,7 @@ class TestSecondReviewRoundBounded:
                     ts="2026-01-01")
         _create_raw(sdk, "Object", "obj-c", "Big Boss Inc.", "objectKind", "organization",
                     ts="2026-01-02", canonical_name="Big Boss Inc")
-        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+        row = next(r for r in sdk.review_link_candidates("dedup", candidate_type="entity")
                    if r["candidate_id"] == "obj-c")
         assert row["existing_id"] == "obj-a"
         sdk.approve_merge("obj-c", action="merge")
@@ -1198,7 +1198,7 @@ class TestSecondReviewRound:
         _create_raw(sdk, "Subject", "sub-a", "quarterly revenue", "subjectKind", "other")
         _create_raw(sdk, "Subject", "sub-b", "quasar rebound", "subjectKind", "other")
 
-        rows = sdk.list_dedup_candidates(candidate_type="entity")
+        rows = sdk.review_link_candidates("dedup", candidate_type="entity")
         semantic = [r for r in rows if r["method"] == "semantic"]
         assert semantic, (
             "the semantic rung produced no row with a working encoder and "
@@ -1257,7 +1257,7 @@ class TestSecondReviewRound:
         _create_raw(sdk, "Object", "obj-x", "Acme Corporation", "objectKind", "document")
         _create_raw(sdk, "Object", "obj-y", "Acme Corporaton", "objectKind", "document")
         g = sdk._get_proj().g
-        page = sdk.list_dedup_candidates(candidate_type="entity", limit=1)
+        page = sdk.review_link_candidates("dedup", candidate_type="entity", limit=1)
         assert page and page[0]["candidate_id"] == "obj-y"
         assert entity_pair_for(g, "obj-y") is not None, (
             "the merge recompute lost a pair that the queue's own row named")
@@ -1509,7 +1509,7 @@ class TestThirdReviewRound:
         sdk = sdk_factory()
         _create_raw(sdk, "Object", "obj-x", "Acme Corporation", "objectKind", "document")
         _create_raw(sdk, "Object", "obj-y", "Acme Corporaton", "objectKind", "document")
-        row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+        row = sdk.review_link_candidates("dedup", candidate_type="entity")[0]
         del seen[:]
         assert entity_pair_for(sdk._get_proj().g, row["candidate_id"])
         assert seen and seen[0] is None, f"the recompute was bounded: {seen}"
@@ -1529,7 +1529,7 @@ class TestThirdReviewRound:
         _create_raw(sdk, "Object", "obj-a", "The Owner", "objectKind", "document")
         _create_raw(sdk, "Object", "obj-b", "the owner", "objectKind", "document")
         a, b = "obj-a", "obj-b"
-        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+        row = next(r for r in sdk.review_link_candidates("dedup", candidate_type="entity")
                    if r["candidate_id"] == b)
         assert row["method"] == "exact", row
         out = sdk.approve_merge(row["candidate_id"], "merge")
@@ -1619,7 +1619,7 @@ class TestThirdReviewRound:
 
         # 1) the queue sees the pair, because it folds `canonical_name or name`
         #    at READ time — the legacy row is found by the graph, not by the rung.
-        rows = sdk.list_dedup_candidates(candidate_type="entity")
+        rows = sdk.review_link_candidates("dedup", candidate_type="entity")
         pair = [r for r in rows
                 if {r["candidate_id"], r["existing_id"]} == {obj, "obj-twin"}]
         assert pair, f"the legacy row is invisible to the queue: {rows!r}"
@@ -1632,7 +1632,7 @@ class TestThirdReviewRound:
         # path honours them — so the legacy spelling resolves even after the
         # retired carrier is superseded (a terminal node is excluded from the
         # live-holder union, so the alias is the only remaining evidence).
-        sdk.update_knowledge(out["candidate_id"], status="superseded")
+        sdk.update_knowledge(out["candidate_id"], status="superseded", supersededBy="the merging survivor")
         assert sdk.create_object("the owner", "document")["id"] == surv
 
     def test_the_alias_arm_survives_the_carriers_retirement(self, sdk_factory):
@@ -1647,7 +1647,7 @@ class TestThirdReviewRound:
             pytest.skip("resolved at create time — no merge to test")
         out = sdk.approve_merge(b["id"], "merge")
         assert out["survived_id"] == a
-        sdk.update_knowledge(b["id"], status="superseded")
+        sdk.update_knowledge(b["id"], status="superseded", supersededBy="the merging survivor")
         assert sdk.create_object("Acme Corporaton", "document")["id"] == a
         assert _count(sdk, "Object") == 2, "the merge must not delete either node"
 
@@ -1847,8 +1847,8 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
         candidate = sdk.create_object("Acme Corporaton", "document")["id"]
         assert candidate != survivor, "fixture drift: no merge to set up"
         sdk.approve_merge(candidate, action="merge")
-        sdk.update_knowledge(survivor, status="superseded")
-        sdk.update_knowledge(candidate, status="superseded")
+        sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
+        sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
         return survivor, candidate
 
     def test_a_retired_survivor_of_a_merge_keeps_the_bounded_exemption(self, tmp_path):
@@ -1916,8 +1916,8 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
         survivor = sdk.create_object("Acme Corp", "document")["id"]
         candidate = sdk.create_object("Acme Corporaton", "document")["id"]
         sdk.approve_merge(candidate, action="merge")
-        sdk.update_knowledge(survivor, status="superseded")
-        sdk.update_knowledge(candidate, status="superseded")
+        sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
+        sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
         before = _count(sdk, "Object")
 
         with pytest.raises(ValueError) as exc:
@@ -1960,7 +1960,7 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
         api = EventAPI(_Log(), initiated_by="extractor", agent_id="test",
                        projection=proj)
         holder = sdk.create_object("Acme Corp", "document")["id"]
-        sdk.update_knowledge(holder, status="superseded")
+        sdk.update_knowledge(holder, status="superseded", supersededBy="Acme Corp (retired)")
         before = _count(sdk, "Object")
 
         with pytest.raises(ValueError) as exc:
@@ -2068,7 +2068,7 @@ class TestThe12120ReadersOutsideTheEntityModule:
             sdk.approve_merge(candidate, action="merge")
             # ONLY the survivor is retired — the carrier stays live (the merge is
             # non-destructive). This is the shape that used to fail.
-            sdk.update_knowledge(survivor, status="superseded")
+            sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
             carrier = sdk._get_proj().g.query(
                 "MATCH (o:Object {id:$id}) RETURN o.status, o.resolved_from",
                 params={"id": candidate}).result_set
@@ -2214,7 +2214,7 @@ class TestThe12120FourthRoundReaders:
         sdk.approve_merge(candidate, action="merge")
         # The retired CARRIER only: the survivor stays live, which is the state a
         # re-review of the pair leaves behind (the merge is non-destructive).
-        sdk.update_knowledge(candidate, status="superseded")
+        sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
         clear_non_folded_entries()
 
         role = sdk.create_subject("the admin role", "role",
@@ -2245,8 +2245,8 @@ class TestThe12120FourthRoundReaders:
         candidate = sdk.create_object("Acme Corporaton", "document")["id"]
         assert candidate != survivor, "fixture drift: nothing to merge"
         sdk.approve_merge(candidate, action="merge")
-        sdk.update_knowledge(survivor, status="superseded")
-        sdk.update_knowledge(candidate, status="superseded")
+        sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
+        sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
 
         (exists, _terminal, _op, _unevaluable, live, _merges,
          _target) = sdk._entity_name_holders("Object", "Acme Corporaton")
@@ -2425,7 +2425,7 @@ class TestThe12120AboutEdgeStubIsFoldAware:
         sdk = sdk_factory()
         try:
             buried = sdk.create_subject("The Owner")["id"]
-            assert sdk.update_knowledge(buried, status="superseded") is not False
+            assert sdk.update_knowledge(buried, status="superseded", supersededBy="The Owner II") is not False
             sdk.create_event("ev-12055-4", "github.issue.open",
                              aboutSubject="the owner")
             g = sdk._get_proj().g
@@ -2867,7 +2867,7 @@ class TestThe12120ReviewRound6:
         try:
             g = sdk._get_proj().g
             dead = sdk.create_object("Acme Corp", "document")["id"]
-            sdk.update_knowledge(dead, status="superseded")
+            sdk.update_knowledge(dead, status="superseded", supersededBy="Acme Corp II")
             live = sdk.create_object("ACME CORP", "document")["id"]
             assert live != dead
             g.query("MATCH (o:Object {id:$id}) SET o.canonical_name='acme corp'",
@@ -3037,7 +3037,7 @@ class TestThe12120ReviewRound8:
                                method="fuzzy", similarity=0.9)
             # Retire the SURVIVOR only — the carrier stays live, so
             # `recall_state` still shows "The Widget".
-            sdk.update_knowledge(survivor, status="superseded")
+            sdk.update_knowledge(survivor, status="superseded", supersededBy="The Widget")
             target = sdk.create_object("Old Co", "document")["id"]
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Co", "supersedes_by": "The Widget",
@@ -3616,7 +3616,10 @@ class TestThe12120Finding4TheUnpinnedMigratedReaders:
             author = sdk.create_subject("Acme Corp", "naturalPerson")["id"]
             pid = sdk.create_point("statement", "the spec is approved",
                                    authoredBy="the acme corp")["id"]
-            chain = sdk.provenance(pid)
+            # The chain is not an EP surface: the posterior gate is opted out, exactly as
+            # `_check_confidence_provenance` (mcp_server) does the same for the live door.
+            chain = sdk.check_confidence(pid, include_provenance=True,
+                require_calibration=False)['provenance']
             assert chain.get("subject"), (
                 "the fold-equivalent author resolved to no Subject: "
                 f"{chain.get('subject')!r}")

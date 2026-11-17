@@ -297,6 +297,6 @@ def test_document_id_that_canonicalises_onto_a_web_source(sdk_factory):
     assert rows[0][0] == 1, f"one identity must be one node: {rows}"
     # current behaviour (see docstring): the source is PROMOTED to a document
     assert rows[0][2] == ["web"] and rows[0][3] == ["report"], rows
-    assert [r.get("url") for r in sdk.list_sources()] == [], (
+    assert [r.get("url") for r in sdk.list_knowledge("source")] == [], (
         "a promoted node is metered as a document and leaves list_sources()"
     )

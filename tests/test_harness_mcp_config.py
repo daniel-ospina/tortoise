@@ -1210,9 +1210,9 @@ class TestDocsPageAndSkillConfig:
         #     rather than of callers in general — so both branches are driven,
         #     and the default branch is the one the row describes;
         #   * the ABSENCE of a per-tool SELECTOR parameter: no tool takes a
-        #     graph-selecting parameter of its own (the three that do are
-        #     read-only, or the admin recording flag — named explicitly below, so
-        #     a new one fails). Per-call selection itself is a DISPATCH-level
+        #     graph-selecting parameter of its own (the one that does is the
+        #     admin recording flag — named explicitly below, so a new one fails).
+        #     Per-call selection itself is a DISPATCH-level
         #     argument (`mcp_server._take_graph_argument` strips it,
         #     `mcp_server._resolve_graph_argument` resolves and scopes), which is
         #     why no handler signature carries one.
@@ -1284,20 +1284,32 @@ class TestDocsPageAndSkillConfig:
         graph_aware = {name: _graph_params(t) for name, t in active.items()}
         graph_aware = {n: p for n, p in graph_aware.items() if p}
         # The exceptions are named, with their risk, so each one is a DECISION
-        # rather than a hole: two READ tools render another graph's contents, and
-        # one ADMIN tool toggles that graph's recording flag. None of them moves
-        # where a connector's writes land. The set is exact — a fourth entry
+        # rather than a hole: one ADMIN tool toggles that graph's recording flag.
+        # It moves no connector's writes, and the set is exact — a second entry
         # fails, so a new selector is argued here rather than slipped in.
+        # (`tortoise_entity_profile` / `tortoise_traverse` were the two READ
+        # exceptions until #11609 Phase 2 retired them — see below.)
+        # ⛔ #11609 Phase 2 (PR #12951) RETIRED the two read exceptions this set
+        # used to carry: `tortoise_entity_profile` and `tortoise_traverse` were
+        # retired FORWARD into `tortoise_explore_connections`, so neither can be
+        # pointed at a graph any more — they are no longer live tools. The set
+        # stays EXACT (a new selector still fails here, argued rather than
+        # slipped in), and the departure is ASSERTED below instead of assumed,
+        # so a resurrection, or a silent disappearance of the retirement, is
+        # caught rather than shrinking this pin.
         assert {n: active[n].risk for n in graph_aware} == {
-            "tortoise_entity_profile": "read",
-            "tortoise_traverse": "read",
             "tortoise_graph_set_recording": "admin",
         }, (
-            "exactly these three tools take a graph SELECTOR parameter and none "
-            "is a write — a WRITE tool gaining one would move a connector's "
+            "exactly this one tool takes a graph SELECTOR parameter and it is "
+            "not a write — a WRITE tool gaining one would move a connector's "
             "writes (#9340), so it must be argued here, not slipped in (the "
             "per-call `graph` argument is a dispatch seam and adds no "
             f"parameter): { {n: (active[n].risk, sorted(p)) for n, p in graph_aware.items()} }")
+        assert {"tortoise_entity_profile", "tortoise_traverse"} <= retired, (
+            "the two read tools that used to take a graph selector are RETIRED "
+            "(#11609 Phase 2), not silently gone: the retirement ledger is what "
+            "makes their absence from the selector set a recorded decision "
+            "instead of a hole in it")
         mcp_src = self.MCP_SERVER.read_text(encoding="utf-8")
         # Matched as a PATTERN, not a byte string: a re-wrapped or re-quoted line
         # is a no-op, and a second guard that reds on a no-op teaches the next

@@ -89,6 +89,16 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (a)`
     # shard at lines 41/50/249/258, which is how it was found.
     "test_10015_organisation_account.py": {"registry": "prod-coupled"},
+    # #12943: the MCP-door test provisions the `:Team` node the MCP lane's quota
+    # resolution reads. It MUST be the `registry` namespace: the tool refuses
+    # `Team '<id>' not found in registry` before any SDK is built, and the graph
+    # that check reads is the one `hosted_api._make_sdk(namespace="registry")`
+    # resolves — so a `test_*` rename would seed a graph the resolver never reads
+    # and the test would pass over nothing without reaching the store it measures.
+    # The `prod-coupled` class exactly, same shape as
+    # test_cross_tenant_read_isolation.py's registry control-plane seeding. The
+    # seeded id is run-unique, so nothing collides.
+    "test_12943_cache_leg.py": {"registry": "prod-coupled"},
     # The seed helper does `_make_sdk(namespace="registry")._get_registry()
     # .query(CREATE :Team ...)` — i.e. it seeds a Team through the CANONICAL
     # namespace PROD code resolves, the same `prod-coupled` class as the

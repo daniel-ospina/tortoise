@@ -497,8 +497,76 @@ PRODUCTION = REPO / "tortoise"
 
 
 def _attribute_names(tree: ast.AST) -> list[tuple[int, str]]:
-    return [(node.lineno, node.attr) for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute) and node.attr in RETIRED_SDK_METHODS]
+    """Every CALL of a retired SDK name: ``<receiver>.<retired>(…)``.
+
+    ⛔ CALL, not every attribute read (#12951 CI red). This collected every
+    ``ast.Attribute`` whose NAME was retired, which is receiver-blind: the
+    moment a wave retires a name that is also an ordinary field name, the gate
+    floods with data-model reads that reach no SDK at all. Measured when #11609
+    Phase 2 retired ``status`` and ``provenance`` — 86 offenders, 86 of them
+    plain reads on a row / record / exception object (``_held.status``,
+    ``r.provenance``, ``outcome.status`` …) and ZERO SDK call sites, so the red
+    said nothing about the defect this gate exists to catch while blocking
+    every merge until someone narrowed or deleted it.
+
+    The defect it exists to catch IS a call: ``goal_judgement`` kept
+    ``sdk.update_entity(…)`` and took every goal judgement down with it. A call
+    site is an ``ast.Call`` whose ``func`` IS the retired attribute, so this
+    keeps detection exact in the direction that matters —
+    ``test_the_census_still_catches_an_sdk_call_site`` below proves both
+    directions on synthetic trees rather than leaving the narrowing as an
+    unverified claim.
+    """
+    return [(node.func.lineno, node.func.attr) for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in RETIRED_SDK_METHODS]
+
+
+def test_the_census_still_catches_an_sdk_call_site():
+    """The narrowing above is name-blind, so prove it is not KIND-blind.
+
+    A call of a retired name is still caught; an ordinary attribute READ of the
+    same name is not. Without this pin the narrowing is an assertion about
+    behaviour that no test measures — the exact shape of change that turns a
+    gate into decoration.
+    """
+    retired = sorted(RETIRED_SDK_METHODS)
+    assert retired, "no retired names declared — the pin is vacuous"
+    name = retired[0]
+    caught = ast.parse(f"def f(sdk):\n    return sdk.{name}(1)\n")
+    missed = ast.parse(f"def f(row):\n    return row.{name}\n")
+    assert _attribute_names(caught) == [(2, name)], (
+        "a CALL of a retired name must still be caught — this is the "
+        "`goal_judgement`/`sdk.update_entity` defect the gate exists for")
+    assert _attribute_names(missed) == [], (
+        "a plain attribute READ of a name that happens to be retired must NOT "
+        "be flagged — it reaches no SDK")
+
+    # ── RECORDED RESIDUAL (#12951 review Q4) ───────────────────────────────
+    # The census is CALL-SHAPE scoped, so an ALIASED call — ``fn = sdk.<retired>;
+    # fn(1)`` — carries no ``ast.Attribute`` at the call site and is NOT flagged.
+    # That is SAFE rather than merely measured, and the reason is a different pin:
+    # ``TortoiseSDK.__getattr__`` (sdk.py) raises ``AttributeError(retirement_hint
+    # (name))`` on the ATTRIBUTE ACCESS itself, so the alias is never formed — the
+    # first statement below dies before a callee exists. Both shapes are asserted
+    # here so the residual is recorded where the narrowing is, instead of being
+    # claimed away above. (The raise itself is pinned for EVERY retired name by
+    # `test_a_retired_sdk_name_RAISES_naming_its_replacement`; the single-name
+    # check here ties that pin to the alias claim.)
+    from tortoise.sdk import TortoiseSDK
+    aliased = ast.parse(f"def f(sdk):\n    fn = sdk.{name}\n    return fn(1)\n")
+    assert _attribute_names(aliased) == [], (
+        "the census is call-shape scoped: an aliased call is not visible to it — "
+        "if this ever starts matching, update the recorded residual above")
+    alias_builtin = ast.parse(
+        f"def f(sdk):\n    return getattr(sdk, {name!r})(1)\n")
+    assert _attribute_names(alias_builtin) == [], (
+        "a getattr() dynamic call is not visible to the census either")
+
+    bare = object.__new__(TortoiseSDK)
+    with pytest.raises(AttributeError):
+        getattr(bare, name)
 
 
 def test_no_production_module_reaches_a_retired_sdk_name():
@@ -584,7 +652,12 @@ def test_the_sdk_containers_point_arm_journals_the_status(tmp_path):
         pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
         before = len(_entity_mutations(events, pid))
 
-        sdk.update_knowledge(pid, status="superseded")
+        # ⛔ THE WORD NEEDS ITS PARTNER (#12592): a bare `status="superseded"`
+        # is refused at this door now, and this case pins the JOURNAL record a
+        # container status write leaves — not the successor rule (that is pinned
+        # in `tests/test_12592_supersede_door.py`). Naming a successor keeps the
+        # intent and takes the same `restatus` path.
+        sdk.update_knowledge(pid, status="superseded", supersededBy="a claim v2")
 
         written = _entity_mutations(events, pid)[before:]
         assert len(written) == 1, (
@@ -654,8 +727,9 @@ def test_the_mcp_containers_props_arm_journals_the_status(tmp_path, monkeypatch)
         pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
         before = len(_entity_mutations(events, pid))
 
+        # Same shape as the SDK case above: the pair, not the bare word (#12592).
         got = mcp_server.tortoise_update_knowledge(
-            pid, props={"status": "superseded"})
+            pid, props={"status": "superseded", "supersededBy": "a claim v2"})
 
         assert not (isinstance(got, dict) and got.get("error")), (
             "the advertised door refused a status write the door it absorbs "

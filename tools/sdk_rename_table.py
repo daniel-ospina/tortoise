@@ -92,6 +92,13 @@ sys.path.insert(0, str(ROOT))
 # second opinion about what the public surface IS, and the two would eventually differ.
 from tools.bridge_table import _sdk_targets  # noqa: E402
 
+# The single owner of "where did a RETIRED name go". A retired name is not a ROW in this
+# table (it maps the live surface), but when a quote we must trust MENTIONS one — beta's
+# W8 row routes `get_source_reliability`'s reads "via `list_sources`", which itself retires
+# into `list_knowledge` — the replacement it reaches has to come from somewhere. Importing
+# the ledger is the same rule as the line above: a second copy would be a second answer.
+from tortoise.sdk_retired import RETIRED_SDK_METHODS  # noqa: E402
+
 SDK_SRC = ROOT / "tortoise" / "sdk.py"
 BETA_DOC = ROOT / "docs" / "product" / "beta-sdk-surface.md"
 CANON_DOC = ROOT / "docs" / "product" / "canonical-sdk-methods.md"
@@ -408,9 +415,7 @@ CITES: dict[str, tuple[str, str]] = {
                  "`issue_insight`, `annotate_ask_hits` | 5 | → `search_knowledge`. |"),
     "r2": (BETA, "| `query`, `paginated_query`, `query_points_by_tag` | 3 | "
                  "→ `list_knowledge`. |"),
-    "r1_canon": (CANON, "| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, "
-                        "`suggest_entry_points`, `search_sessions`, `issue_insight`, "
-                        "`topic_summarize`, `annotate_ask_hits` |"),
+    "r1_canon": (CANON, "| R1 | `search_knowledge` | #1 |"),
     "r3": (BETA, "| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, "
                  "`calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence` "
                  "for the confidence view; **`recall_subgraph` is dropped, not folded** "
@@ -446,12 +451,7 @@ CITES: dict[str, tuple[str, str]] = {
     "r6_test_guard": (BETA, "| `test_guard` | **Kept and relocated.** It guards the "
                             "production-wipe incident, so the code must survive — but it "
                             "is *test infrastructure* and moves out of the product SDK. |"),
-    "r6_canon": (CANON, "| R6 | `graph_overview` | #6 | `status`, `taxonomy`, "
-                        "`list_pointkinds`, `list_sources`, `list_tags`, "
-                        "`list_namespaces`, `list_topics`, "
-                        "`list_graphs`, `stale_points`, `summarize_structure`, "
-                        "`check_structure`, `audit`, `validate_domain`, "
-                        "`dream_health_check`, `dream_health_state`, `test_guard` |"),
+    "r6_canon": (CANON, "| R6 | `graph_overview` | #6 |"),
     "r6_list_sources": (BETA, "| `list_sources` | **Not discarded.** Present at "
                               "`tortoise/sdk.py` with an MCP tool and a CLI command "
                               "(`tortoise/__main__.py`), and it is covered by "
@@ -677,7 +677,10 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # R3 — three members leave the group default.
     "get_historical_knowledge": ("get_historical_knowledge", "r3_restore"),
     "recall_subgraph": (DISCARDED, "r3_drop_subgraph"),
-    "provenance": ("check_confidence", "r3_context"),
+    # ⛔ `provenance` left the PUBLIC surface in #11609 Phase 2 (it retired into
+    # `check_confidence(claim_id, include_provenance=True)`). A retired name has no row
+    # in THIS table, which maps the live surface only — see `tortoise/sdk_retired.py`
+    # for its destination and `docs/product/canonical-sdk-methods.md` for the batch.
     "belief_timeline": ("check_confidence", "r3_context"),
     "session_context": ("check_confidence", "r3_context"),
     "volunteer_context": ("check_confidence", "r3_context"),
@@ -696,16 +699,15 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # beta's "Renamed, relocated, or re-homed": the code must survive but it is *test
     # infrastructure* and moves OUT of the product SDK — kept, but not a target.
     "test_guard": (RELOCATED, "r6_test_guard"),
-    "taxonomy": ("graph_overview", "r6_aliases"),
-    "list_pointkinds": ("graph_overview", "r6_aliases"),
-    "list_tags": ("graph_overview", "r6_aliases"),
-    "list_namespaces": ("graph_overview", "r6_aliases"),
+    # ⛔ #11609 Phase 2 retired EIGHT of R6's aliases off the public surface (`taxonomy`,
+    # `list_pointkinds`, `list_tags`, `list_namespaces`, `status`, `list_topics`,
+    # `list_sources`, `validate_domain`) — they answer through `graph_overview(section=…)`
+    # and `list_knowledge(kind='source')` today. Retired names are NOT rows here: this
+    # table maps the live surface, and their destinations are recorded in
+    # `tortoise/sdk_retired.py`.
     "list_graphs": ("graph_overview", "r6_aliases"),
-    "status": ("graph_overview", "r6_aliases"),
     "stale_points": ("graph_overview", "r6_aliases"),
     "check_structure": ("graph_overview", "r6_aliases"),
-    "list_topics": ("graph_overview", "r6_aliases"),
-    "list_sources": ("list_knowledge", "r6_list_sources"),
     # W1
     "create_entity": (UNCHANGED, "unchanged4"),
     # #4282 Phase 2 — the six SOURCES / MINE / SESSION targets landed (#11609), so
@@ -752,7 +754,11 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # W5 — the journal reconciliation. Each member's destination is its OWN, taken from
     # the canonical menu's absorption row; see the `w5_*` citations above.
     "diary_write": ("create_entity", "w5_diary_write"),
-    "diary_read": ("list_knowledge", "w5_diary_read"),
+    # BOTH former keys leave this map with the wave that retired them: `diary_read`
+    # into `list_knowledge(kind='diary')` (#11609 Phase 2 read half, this PR) and
+    # `checkpoint` into `mine_knowledge_from_session` (#11609 Phase 2
+    # SOURCES/MINE/SESSION lane, #12948). A retired name carries its hint in
+    # `tortoise/sdk_retired.py` instead of a row here, like every retired name above.
     # W11
     "update": ("update_knowledge", "w11_canon"),
     "retract_point": ("update_knowledge", "w11_retract"),
@@ -786,19 +792,28 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "close": (UNCHANGED, "unchanged4"),
     # N1 — the five the beta doc files as console plumbing.
     "org_create": (UNBACKED, ""),
-    "org_get": ("get_organisation_account", "n1_account"),
+    # ⛔ #12901 wave 2: TEN rows LEFT the public surface here — `org_get`,
+    # `graph_delete`, `trash_graphs`, `graph_key_ids`, `graph_active_key_count`,
+    # `membership_create`, `apikey_create`, `apikey_revoke`, `apikey_verify` and
+    # `sweep_invite_ghost_memberships`. They leave this map with the `def` they keyed,
+    # for the reason `_validate` enforces (a row for a name with no `def` is a STALE map
+    # key) and because the rename table maps names that still EXIST. Their RECORDED
+    # DESTINATIONS moved to `tortoise/sdk_retired.py::WAVE2_DELETION_DESTINATIONS`, which
+    # is where a departed name's disposition lives; the `CITES` regions that authorised
+    # each row stay, because they are the anchor to the beta ledger's own text.
     # N1's target is PUBLIC since #10015 (2026-11-14): `get_organisation_account` gained
     # its `def`, so the partition must COVER it and the disposition is UNCHANGED because
     # the method IS its own destination — the same move N2's three rows made in phase 2.3.
-    # `org_get` above stays the DEPRECATED predecessor that maps onto it (`retain`, per the
-    # rename table's own reading of row 28), which is why both names are live at once.
+    # ⛔ #12901 wave 2: `org_get`, the deprecated predecessor that mapped onto it, is no
+    # longer a public `def` — its body survives as `_org_get` and its recorded destination
+    # is in `sdk_retired.WAVE2_DELETION_DESTINATIONS`. So the "both names are live at once"
+    # state this comment used to describe is over: exactly one name is live here.
     "get_organisation_account": (UNCHANGED, "n1_account"),
     # 2026-10-25 owner ruling (#4282): `org_list` is GONE, not folded. It ran
     # `MATCH (t:Team)` with no tenant filter — every customer's account — and had
     # zero callers. A scoped account list is NEW behaviour, so it has no row here.
     # See the OVERRIDES line on #4282 before adding one back.
     # N2
-    "graph_delete": ("delete_memory_graph", "n2_rename"),
     # #4282 phase 2.3 landed these three targets and retired the four names they
     # absorbed (`graph_list`, `graph_restore`, `graph_set_name`,
     # `graph_set_recording` — see `tortoise/sdk_retired.py`). The rows are now
@@ -806,23 +821,19 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "list_memory_graphs": (UNCHANGED, "n2_list"),
     "restore_memory_graph": (UNCHANGED, "n2_restore"),
     "update_memory_graph": (UNCHANGED, "n2_update"),
-    "graph_key_ids": ("list_keys", "n2_keys"),
-    "graph_active_key_count": ("list_keys", "n2_keys"),
     # 2026-10-25 owner ruling (#4282): `graph_count` left the PUBLIC surface and is
     # now the internal `_graph_count`. It is the plan-quota counter (it skips
     # deleted graphs so a deletion frees a slot) and only our server calls it; a
     # customer counts by listing. No target row, so no disposition row here.
-    "trash_graphs": (DISCARDED, "maintenance"),
-    # N3
-    "membership_create": ("add_member", "n3_members"),
-    # ⛔ #12901 wave 1: `membership_get` LEFT the public surface (recorded in
-    # `REMOVED_SDK_METHODS`); the map only carries names that still exist.
-    # N4
-    "apikey_create": ("create_key", "n4_keys"),
-    "apikey_revoke": ("revoke_key", "n4_keys"),
-    "apikey_verify": (DISCARDED, "n1_console"),
-    # N5 — the two that are maintenance, not invite UX.
-    "sweep_invite_ghost_memberships": (DISCARDED, "maintenance"),
+    # N3/N4/N5/N6 are now EMPTY of rows.
+    # ⛔ #12901 wave 1 removed `membership_get`; wave 2 removed the rest of N3–N6
+    # (`membership_create`, `apikey_create`, `apikey_revoke`, `apikey_verify`,
+    # `invitation_list`/`_get_by_id`/`_revoke`, `sweep_invite_ghost_memberships`, the
+    # three `signup_token_*`). The four group labels stay in the canonical doc with an
+    # explicit `—` member cell: an empty group is a FINDING the rendered table reports
+    # (`unfilled`), not a table to delete — the partition is the record of what the
+    # control plane WAS, and deleting it would erase the trace wave 2 has to be
+    # re-derivable from.
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -835,7 +846,10 @@ TENSIONS: list[tuple[str, str, str]] = [
     # (method, the destination the OTHER doc implies, citation showing it)
     ("get_owned_entities", "`explore_connections`", "t_r5"),
     ("get_historical_knowledge", "`check_confidence`", "t_r3"),
-    ("list_sources", "`graph_overview`", "t_r6"),
+    # #11609 Phase 2 removed the `list_sources` tension: the method retired into
+    # `list_knowledge(kind='source')`, so there is no Part A row to carry a destination and
+    # nothing to disagree about. The MCP-side record lives in `bridge-table.md` Part B,
+    # where `tortoise_list_sources` is one of the retired names.
     ("test_guard", "`graph_overview`", "t_r6"),
     # The beta row 258 splits W8: reads go to `list_sources`; the canonical W8 row keeps
     # `get_source_reliability` on `manage_source_trust`. Part A carries beta's read.
@@ -847,16 +861,9 @@ TENSIONS: list[tuple[str, str, str]] = [
 TENSION_CITES: dict[str, tuple[str, str]] = {
     "t_r3": (CANON, "| R3 | `recall_beliefs` | #3 |"),
     "t_r5": (CANON, "| R5 | `explore_connections` | #5 |"),
-    "t_r6": (CANON, "| R6 | `graph_overview` | #6 | `status`, `taxonomy`, "
-                    "`list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, "
-                    "`list_topics`, `list_graphs`, `stale_points`, "
-                    "`summarize_structure`, `check_structure`, `audit`, "
-                    "`validate_domain`, `dream_health_check`, `dream_health_state`, "
-                    "`test_guard` |"),
+    "t_r6": (CANON, "| R6 | `graph_overview` | #6 |"),
     "t_n2": (CANON, "| N2 | `graph` | `list_memory_graphs`, "
-                    "`graph_delete`, `restore_memory_graph`, `trash_graphs`, "
-                    "`update_memory_graph`, `graph_key_ids`, "
-                    "`graph_active_key_count` |"),
+                    "`restore_memory_graph`, `update_memory_graph` |"),
     "t_w8": (CANON, "| W8 | `manage_source_trust` | #14 |"),
     "t_w15": (CANON, "| W15 | `adjust_relationship` | #21 |"),
 }
@@ -1344,24 +1351,17 @@ BRIDGE_DETERMINATION: dict[str, str] = {
                         "its retraction rationale is \u201cnot a separate verb\u201d. The "
                         "bridge follows the canonical collapse table's "
                         "`invalidate_point` → `supersede`.",
+    # ⛔ #11609 Phase 2 removed the `list_namespaces`, `list_sources` and `list_topics`
+    # determinations: those three names left the PUBLIC surface, so they no longer have a
+    # Part A row and cannot diverge from the bridge. Their destination is recorded in
+    # `tortoise/sdk_retired.py`; a determination here would claim a disagreement the
+    # rename table no longer holds an opinion about.
     "list_graphs": "**Part A is right; the bridge conflates two methods.** beta's "
                    "narrow-aliases row names `list_graphs` among the aliases absorbed by "
                    "`graph_overview` and deleted, while `graph_list` is the one sent to "
                    "`list_memory_graphs`. The canonical doc's \u201cdoes not merge\u201d "
                    "list keeps `list_graphs` \u2260 `graph_list` (raw DB names vs "
                    "control-plane rows).",
-    "list_namespaces": "**Part A is right; the bridge is wrong.** beta's narrow-aliases row "
-                       "names `list_namespaces` among the aliases absorbed by "
-                       "`graph_overview`, and canonical R6 lists it there too.",
-    "list_sources": "**Part A is right (beta governs).** beta's `list_sources` row is "
-                    "explicit that it is **not discarded** and folds into **row 4 "
-                    "`list_knowledge(kind='source')`**, and beta's `get_source_reliability` "
-                    "row routes its reads via `list_sources`. The bridge sends it to "
-                    "`graph_overview` \u2014 canonical R6's home for it \u2014 but beta "
-                    "governs the surface, so Part A carries beta's destination.",
-    "list_topics": "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names "
-                   "`list_topics` among the aliases absorbed by `graph_overview`, and "
-                   "canonical R6 lists it there too.",
     "org_create": "**Genuinely contested — no owner ruling.** No approved doc places "
                   "organisation-account creation. `create_memory_graph` (beta row 29) "
                   "provisions a memory GRAPH, not an account, and beta's tenancy block "
@@ -1470,6 +1470,11 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
     """
     errs: list[str] = []
     target_of = {r["name"]: _destination(r) for r in rows}
+    # A retired name still REACHES its recorded replacement, so a quote that names one is
+    # evidence for that replacement (the ledger is imported, never re-spelled). Check 7's
+    # own wording covers this arm — "nor a method that reaches it" — and a RETIRED name is
+    # exactly that: it no longer has a row, but its destination is a fact on record.
+    target_of.update(RETIRED_SDK_METHODS)
     real = set(targets)
 
     # 7. A row's Target must be what its quote names. The Basis legend says `stated`

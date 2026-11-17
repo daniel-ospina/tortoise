@@ -4,8 +4,8 @@ so a terminal row was resurrected by a prop edit.
 Measured on ``main`` at ``6916a6cd89`` (2026-11-13), embedded engine, throwaway
 nodes, deleted after:
 
-    update_entity(<archived Object>,  status='live') -> ACCEPTED  RESURRECTED
-    update_entity(<archived Subject>, status='live') -> ACCEPTED  RESURRECTED
+    update_knowledge(<archived Object>,  status='live') -> ACCEPTED  RESURRECTED
+    update_knowledge(<archived Subject>, status='live') -> ACCEPTED  RESURRECTED
 
 That is the #9649 defect class on two more labels. #12325 closed
 ``update_entity``'s ``:Point`` arm, and ``_assert_lifecycle_guard`` is
@@ -54,7 +54,7 @@ What this suite pins:
 * the verdict is over EVERY row the write binds (#7822's fan-out rule, applied to
   the non-Point arms): a live sibling must not authorise a write that also lands
   on the terminal one;
-* the refusal's repair is PERFORMABLE — it does not name ``supersede()``, which is
+* the refusal's repair is PERFORMABLE — it does not name ``supersede_knowledge()``, which is
   ``:Point``-only and raises ``No point <id>`` for these labels (the AX-rule-2
   defect #10183 records; the missing SDK door is #12592);
 * nothing leaks onto the Point arm, which owns its own vocabulary and table.
@@ -154,24 +154,30 @@ def test_the_refusal_names_the_family_section_of_the_model(sdk):
 
 
 def test_the_named_repair_is_performable(sdk):
-    """⛔ The message must NOT offer `supersede()`.
+    """⛔ The message must NOT offer `supersede_knowledge()` as the way back.
 
-    `TortoiseSDK.supersede` routes to `supersede_point`/`invalidate_point`, both
-    `:Point`-only, and raises `No point <id>` for an Object. Naming it would be an
-    unperformable prescription — the AX-rule-2 defect #10183 exists to stop. The
-    real route today is the record path, and the missing SDK verb is #12592.
+    `TortoiseSDK.supersede` now DISPATCHES for an Object/Subject (#12592) — the
+    missing verb this test used to name — but a supersession is written from the
+    LIVE side: that door runs the family lifecycle guard and refuses a TERMINAL
+    source (#2498, terminalization is one-way). So it is still not the repair for
+    a dead row, and naming it here would be an unperformable prescription — the
+    AX-rule-2 defect #10183 exists to stop. The route that exists is minting the
+    replacement, and that is what the message names.
     """
     node = _object(sdk, "archived")
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(node, status="live")
     message = str(exc.value)
-    assert "supersede()" not in message, \
-        "that door raises No point <id> for an Object — do not prescribe it"
     assert "apply_supersessions" in message
+    assert "supersede_knowledge()" not in message, \
+        "that door refuses a terminal source — do not prescribe it"
     # And the prescription that IS named really exists:
     from tortoise.commit_ops import apply_supersessions  # noqa: F401
-    with pytest.raises(ValueError, match="No point"):
-        sdk.supersede_knowledge(node, "some-successor")  # Point-only, as the message says
+    # ⛔ #12592: the door EXISTS for this label now, and still refuses the dead
+    # row — the refusal is the one-way rule, never `No point` (which is what this
+    # assertion pinned before the family path existed).
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.supersede_knowledge(node, "some-successor")
 
 
 # ── NOT a vocabulary: a pack/connector word is accepted ──
@@ -248,7 +254,7 @@ def test_an_undeclared_word_is_still_the_other_issue(sdk):
     a closed set and owes §4.3 an answer.
 
     The one real Object writer of a legacy word is
-    ``tests/test_11926_derived_invalidation.py`` (``update_entity(<Object>,
+    ``tests/test_11926_derived_invalidation.py`` (``update_knowledge(<Object>,
     status='outdated')``, read back at its ``status`` assertion);
     ``tortoise/derived_invalidation.py`` only MENTIONS the word in a comment and
     never calls this door with it.
@@ -475,7 +481,7 @@ def test_a_carrier_less_supersession_is_not_un_superseded(sdk):
     transition table by one more shape.
 
     ⛔ And the refusal must NOT prescribe the clear here (review cycle 1, P1):
-    `update_entity(status='live', supersededBy=None, supersededAt=None)` is
+    `update_knowledge(status='live', supersededBy=None, supersededAt=None)` is
     REFUSED on this row — there is nothing carried to clear — so offering it
     would be an unperformable prescription, the AX-rule-2 defect #10183.
     """

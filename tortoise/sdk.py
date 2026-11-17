@@ -148,6 +148,20 @@ from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verd
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
+# #10893: the read-stage timeline, so a breached wait budget can NAME the stage it
+# died in. `mark` is a NO-OP when no timeline is bound (every CLI, unit test and
+# in-process SDK user), so the hot read path pays one ContextVar read per
+# boundary — see `tortoise/read_stages.py`.
+from .read_stages import (
+    STAGE_EMBED_ENCODE,
+    STAGE_EMBED_GET,
+    STAGE_EP_ANNOTATION,
+    STAGE_FUSION,
+    STAGE_ORDERING,
+    STAGE_RESPONSE,
+    STAGE_RETRIEVAL,
+)
+from .read_stages import mark as _mark_read_stage
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -256,6 +270,25 @@ from .session_source_display import (
 from .security import redact_secrets
 import threading
 from datetime import UTC
+
+# #12943: module-scope, not a local import inside ``__init__``. THE IMPORT IS THE
+# ONLY LINE OF THAT HOOK THAT CAN RAISE: ``note_local_cache`` itself is wrapped
+# (its module's contract is "a fault in observability must never deny a caller a
+# graph it can use", the #5148 rule), but a local `from .cache_leg import …`
+# re-executes `cache_leg`'s module body on first use — and by then
+# ``__init__`` has already run ``_mark_embedded_opened``, so a failure here would
+# leave the opened-set claiming a store this dead construction never opened and
+# silence the cross-process busy probe for the next one (epic #900 §5.3).
+# Imported under a guard for the same reason: observability must not be able to
+# break the constructor, so a broken seam degrades to no hook.
+# Placed AFTER the last import on purpose: a module-level ``try`` is a non-import
+# statement, so inserting it mid-region splits sdk.py's imports into two isort
+# sections and ruff flags the whole tail (I001) — the block belongs at the
+# region's end, not beside ``monitoring``.
+try:
+    from .cache_leg import note_local_cache as _note_local_cache
+except Exception:  # observability never denies a usable graph
+    _note_local_cache = None
 
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
@@ -5225,6 +5258,13 @@ def _deleted_point_payload(id: str) -> dict:
 _JOURNAL_ENVELOPE_KEYS = (
     "type", "id", "point", "payload",
     "event_id", "ts", "recorded_ts", "initiated_by", "projection_version",
+    # ``seq`` is a journal POSITION, not a tenant property (#12894). It is the
+    # name `record_projection._carried_position` reads to decide a record's
+    # ordinal, and `record_projection.ENVELOPE_KEYS` already declares it an
+    # `_emit_event`-owned envelope name — it is reserved here too so no caller
+    # prop can put one on a line. See `_RESERVED_ENVELOPE_PROPS` for the
+    # collision this closes.
+    "seq",
 )
 
 #: Every `_emit_event` ENVELOPE name a caller prop must not be able to set —
@@ -5258,9 +5298,34 @@ _JOURNAL_ENVELOPE_KEYS = (
 #
 # The set is spelled out rather than derived so an auditor sees it whole; it
 # must stay equal to `_JOURNAL_ENVELOPE_KEYS` minus ``id``.
+#
+# ⛔ ``seq`` IS LOAD-BEARING HERE, not tidiness (#12894). `#9190` makes the
+# record CARRY its ordinal, so `record_projection._carried_position` READS a
+# record's `seq` and REFUSES the write when it disagrees with the enumeration.
+# A caller prop named ``seq`` rode `event.update(extra)` onto the journal line
+# top level (neither this set nor `_JOURNAL_ENVELOPE_KEYS` named it), so
+# ``update_point(pid, seq=42)`` produced a line whose ``seq`` disagreed with
+# every enumeration the journal could ever make — refusing that record's live
+# write (fail-soft: counted on `record_write_failures`, the row never lands) AND
+# every replay of it, since replay reads the same key. Unhealable by the one
+# repair the seam advertises. Stripped at intake like the other envelope names,
+# so a caller ``seq`` cannot forge a position.
+#
+# ⛔ AND THAT STRIP IS A CALLER-VISIBLE PROPS CHANGE, stated rather than
+# glossed (#12894 review cycle 10, P2). Before this reservation
+# ``create_point(kind, content, seq=42)`` PERSISTED ``properties(n).seq = 42``
+# and journalled it; now the value is dropped at intake with the usual
+# "ignoring client-supplied 'seq'" warning. No documented tenant prop, and no
+# caller or test in the tree, relies on it — but a caller that did would see the
+# property stop being written, so this is not byte-identical for that prop
+# class. The SDK's posture for envelope names is strip-and-ignore, and that
+# is kept here; `tortoise/api.py`'s `EventAPI._emit` REFUSES the same name
+# loudly (`_ENVELOPE_KEYS`) because on a POSITION a silent drop is the worse
+# posture for a caller that believes it set an ordinal. Two postures, each
+# documented at its own door.
 _RESERVED_ENVELOPE_PROPS = (
     "type", "point", "payload", "event_id", "ts", "recorded_ts",
-    "initiated_by", "projection_version",
+    "initiated_by", "projection_version", "seq",
 )
 
 #: The SERVER-MANAGED embedding journal fields — the names a caller may never
@@ -5544,9 +5609,17 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
 # a bare carrier.
 #
 # ⛔ The MIRROR shape (``status='superseded'`` with NO carrier) is deliberately
-# OUT of this guard: it makes a rebuild REVIVE a node rather than bury a live
-# one, it is a shape in use (``update_entity(subject, status='superseded')``),
-# and it is already named as #9974's window. Refusing it would be an over-block.
+# OUT of *this* guard: it makes a rebuild REVIVE a node rather than bury a live
+# one, and refusing it here would conflate two questions. ⚠️ It is no longer
+# ACCEPTED anywhere, though: #12592 added the DUAL rule at the same door
+# (``_assert_supersession_names_a_successor``, ONTOLOGY §4.3 — the word MEANS
+# replaced, so it names the successor), and that rule refuses the mirror shape on
+# every label. So this paragraph is a statement about THIS guard's scope, not
+# about what the door accepts: the #9974 window it names is now closed by the
+# dual, and the two messages are deliberately distinguishable (one speaks of the
+# CARRIER, the other of the missing successor) —
+# ``tests/test_status_projection.py::TestLifecycleCarrierCoherence::
+# test_the_mirror_shape_is_not_refused_by_the_carrier_guard`` pins the difference.
 #
 # ⛔ THE GUARDED SURFACE IS THE RECORD'S CARRIER *COLUMNS*, NOT A HAND-WRITTEN
 # PAIR OF PROP NAMES (review P1 — measured on the pre-fix head: the camel-only
@@ -5820,13 +5893,33 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
     if not carriers:
         return
     status = props.get("status", stored_status)
-    if status == _SUPERSEDED_STATUS:
+    # Base content, for the reason the supersession guard states (#12592
+    # cycle-7): `lifecycle_props_by_rendering` hands back the caller's object, and
+    # a `str` subclass can answer `==` however it likes while the wire renders the
+    # word. Both guards must read the same word the driver writes (#12907).
+    # ⛔ `issubclass(type(status), str)`, NOT `isinstance(status, str)` (#12914
+    # review P2, the same class #12882/#12907 pin at `:48509`): `isinstance`
+    # consults `__class__`, so an object that DECLARES ``__class__ = str``
+    # passes the test and `str.__str__` then REFUSES it — measured,
+    # ``update_knowledge(<live Object>, status=<__class__=str impostor>,
+    # supersededBy='y')`` escaped as ``TypeError: descriptor '__str__'
+    # requires a 'str' object`` where this door's contract is the `ValueError`
+    # below. A value that is not genuinely `str` has no base CONTENT to
+    # compare, so it is not the word and the carrier refusal stands.
+    status_word = (str.__str__(status)
+                   if issubclass(type(status), str) else None)
+    if status_word == _SUPERSEDED_STATUS:
         return
-    named = ", ".join(f"{key!r} (record column {column!r})"
+    # Both caller-supplied operands in this message go through `_refusal_repr`:
+    # a `str` subclass is admitted as a keyword KEY by CPython's own check and as
+    # a `status` value by the record, and its `__repr__` may answer with another
+    # `str` subclass whose `__format__` raises (measured: `RuntimeError:
+    # fmt-boom`), which would replace this door's `ValueError` (#12914 review P3).
+    named = ", ".join(f"{_refusal_repr(key)} (record column {column!r})"
                      for key, column in carriers)
     raise ValueError(
         f"{named} on a :{label} is a lifecycle CARRIER and cannot be "
-        f"written with status={status!r} (through {surface}). The record "
+        f"written with status={_refusal_repr(status)} (through {surface}). The record "
         f"derives an Object's/Subject's status from the carriers ALONE "
         f"(public.object_current_status: superseded_by IS NOT NULL OR "
         f"superseded_at IS NOT NULL -> 'superseded'), so a carrier written "
@@ -6496,6 +6589,100 @@ def _stored_goal_ending_view(proj, id_val: str, *,
     if len(endings) > 1:
         view["conflict"] = True
     return view
+
+#: The property that NAMES the successor — the other half of ONTOLOGY §4.3's
+#: sentence (*"`superseded` means replaced: it names the successor"*) and of
+#: §4.2's Subject row (*"successor NAME (stored verbatim)"*). ⛔ A POINT'S
+#: SUCCESSOR IS THE `CORRECTS` EDGE, not this property: ``supersede_point``
+#: writes ``status``/``outdated``/the temporal stamps and MERGEs the edge, and
+#: writes NO ``supersededBy`` (measured at this head). This property is still
+#: WRITABLE on a Point through ``update_knowledge`` (the door refuses no label
+#: here), which is why the guard reads BOTH channels for a Point — but nothing
+#: in the SDK's own supersession path puts the name there.
+_SUCCESSOR_PROP = "supersededBy"
+
+#: …and the RECORD column it folds into (``record_projection.snake``), because the
+#: guarded surface is the record's COLUMNS: ``superseded_by`` and ``supersededBy``
+#: are one column, so a clear through either spelling splits the same pair
+#: (#12592 cycle-4; #12782 for the shadow-property class).
+_SUCCESSOR_COLUMN = "superseded_by"
+
+#: The dead sets the supersession DOORS consult, per label — the family's OWN
+#: recorded read vocabulary (`commit_ops`), never a literal here: the same
+#: declaration #10371's transition guard takes its dead set from, so the two
+#: questions (*"may this row leave a dead state?"* / *"may it ENTER one?"*) cannot
+#: be answered from two different vocabularies. `live.is_terminal_status` answers
+#: for a Point (the status set PLUS the legacy `outdated` flag), which is why the
+#: Point arm asks that predicate rather than reading this map.
+_SUPERSESSION_DEAD_SETS: dict[str, frozenset[str]] = {
+    "Object": _OBJECT_TERMINAL_STATUSES,
+    "Subject": _SUBJECT_TERMINAL_STATUSES,
+}
+
+
+def _is_terminal_point_status(status) -> bool:
+    """`live.is_terminal_status` without the legacy flag — the STATUS half only.
+
+    The guard reads one column, so it asks the recorded predicate about that
+    column rather than re-deriving a vocabulary (#10371's rule). The flag half is
+    not consulted because the guard's question is worded from `status`.
+    """
+    from tortoise.live import is_terminal_status
+    return is_terminal_status(status)
+
+
+def _successor_named_by(props: dict) -> bool:
+    """Does this call NAME a successor, in the channel every reader resolves?
+
+    #12592. The dual of :func:`_refuse_bare_lifecycle_carrier`: that one refuses a
+    "CARRIER without the STATUS", this one the STATUS without a carrier.
+
+    ⛔ BOTH renderings must name `supersededBy`, and it must be the CAMEL
+    spelling — the narrow direction, because this predicate is an ALLOWANCE (it
+    lets a `status='superseded'` write through), and an allowance must be true of
+    the write that actually happens. The live write applies `SET n += $props`
+    literally, so `superseded_by` stores a SHADOW property that every camel-keyed
+    reader of the successor ignores (`audit` 4b/4c,
+    `assembly._probe_visible_successors`, the renderer — #12782), while the record
+    column DOES take it: admitting it here would leave a row the record calls
+    `superseded` with the pointer the model reads for "which row replaced this?"
+    written nowhere. A key whose two renderings disagree has the same misread from
+    the other side (`_carrier_prop_named_by` requires them to agree).
+
+    A blank value names nobody: the property exists, so #10192's record fold still
+    derives `'superseded'`, but the successor a reader resolves is the empty
+    string. `None` is the documented CLEAR and is not a name either, and a
+    NON-STRING is not a name at all — a successor resolves through
+    `_as_str`-style readers, so `0`/`False`/`[]` would be admitted here and
+    resolve to nothing (measured before this clause existed: all three returned
+    `True`). The production callers all pass a string; the requirement is what
+    the readers actually consume, not a type preference.
+    """
+    for key, value in props.items():
+        if _carrier_prop_named_by(key, (_SUCCESSOR_PROP,)) is None:
+            continue
+        # ⛔ THE VALUE IS READ AT ITS BASE CONTENT, never through the caller's
+        # overrides (#12592 cycle-6 P1). `value.strip()` is a METHOD LOOKUP, so a
+        # `str` subclass can answer it while its content is empty — measured:
+        # ``class BlankLies(str): strip = lambda *a, **k: 'v2'`` makes
+        # ``_successor_named_by({'supersededBy': BlankLies('')})`` return True,
+        # and the write stores the base content ``''``: the exact state this guard
+        # refuses (the record then reads `IS NOT NULL` and folds the word, so the
+        # record agrees with the row instead of exposing it). `live.py` states the
+        # rule for the whole seam — "the VALUE keeps its base content
+        # (``str.__str__``)" — and this is the ALLOWANCE side, so it reads the same
+        # way.
+        # ⛔ SO THE TYPE MUST BE EXACT (#12592 cycle-7 P2): reading the base
+        # content is not enough, because the LIVE WIRE is rendered by METHOD
+        # LOOKUPS on the caller's object (`falkordb.helpers.quote_string` calls
+        # `len(v)` and `v.replace`). Measured: ``class Len0(str): __len__ =
+        # lambda s: 0`` and ``class Rep0(str): replace = lambda s, *a, **k: ''``
+        # both render ``'""'`` for content ``'v2'`` while the journal keeps
+        # ``'v2'`` and this predicate answered True — a graph naming nobody with
+        # the record disagreeing. With an exact ``str`` no override can exist, so
+        # the guard, the journal and the wire agree by construction.
+        return type(value) is str and bool(value.strip())
+    return False
 
 
 # ── #9964: the kind decides the layer ──────────────────────────────────────
@@ -7721,7 +7908,7 @@ def _entity_key_dense_query(
 # #1709: process-local serialization for the registry recovery mint (FalkorDB
 # has no transactions; parity with the Supabase lane's FOR UPDATE row lock —
 # concurrent same-token recoveries must not overshoot the non-bootstrap key
-# cap). See TortoiseSDK.signup_token_recover.
+# cap). See TortoiseSDK._signup_token_recover.
 _SIGNUP_TOKEN_RECOVER_LOCK = threading.Lock()
 
 
@@ -12683,6 +12870,27 @@ def _live_operator_mechanism_pairs(proj, ids):
     return priced_out
 
 
+def _refusal_type_name(value) -> str:
+    """`type(value).__name__` for a caller-controlled operand in a REFUSAL message.
+
+    The NAME can raise too: a metaclass may define ``__name__`` as a property,
+    so a refusal that interpolates the class name directly escapes as the
+    caller's own exception class instead of the promised ``ValueError``
+    (measured: ``RuntimeError: name-boom`` from this door's impostor refusal,
+    #12914 review P3). Defensive for the same reason as ``_refusal_repr``
+    below, and shared so the two cannot drift.
+    """
+    try:
+        name = type(value).__name__
+    except Exception:  # noqa: BLE001, RUF100 — a hostile metaclass is the point
+        return "unreadable (its metaclass raises)"
+    # The READ surviving is not enough: the property may ANSWER with something
+    # that is not a `str`, and an f-string then renders it with the caller's own
+    # `__format__` (measured: `RuntimeError: fmt-boom`). Exact-`str` also keeps
+    # the value safe to hash and sort in a refusal that groups names.
+    return name if type(name) is str else "unreadable (its name is not a str)"
+
+
 def _refusal_repr(value) -> str:
     """`repr` for a caller-controlled operand in a REFUSAL message.
 
@@ -12696,9 +12904,16 @@ def _refusal_repr(value) -> str:
     `!r` — the exact gap the #12907 Point arm carried.
     """
     try:
-        return repr(value)
+        text = repr(value)
     except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
-        return f"<{type(value).__name__}>"
+        return f"<{_refusal_type_name(value)}>"
+    # The CALL surviving is not enough, exactly as `_refusal_type_name` states for
+    # the class name: CPython accepts a `__repr__` that ANSWERS with a `str`
+    # SUBCLASS, and the f-string then renders it with that subclass's own
+    # `__format__` — measured, `RuntimeError: fmt-boom` out of this PR's own
+    # refusals at `supersede`'s two operand arms (#12914 review P3). Bound the
+    # ANSWER into base content before it enters a message.
+    return text if type(text) is str else str.__str__(text)
 
 
 class TortoiseSDK:
@@ -12818,6 +13033,23 @@ class TortoiseSDK:
         if self._db_uri is None and self._db_path:
             self._probe_embedded_busy(self._db_path)
             _mark_embedded_opened(self._db_path)
+        # #12943: the cache leg's own legibility. THIS is the one constructor
+        # every write door passes (SDK direct, the hosted REST lane's
+        # `_data_sdk`/`_make_sdk`, the MCP lane's `mcp_auth._get_org_sdk`), so
+        # the check lives here rather than at three call sites that can drift.
+        # ⛔ Called UNCONDITIONALLY, outside the `_db_uri is None` branch above.
+        # Nested inside it, `cache_uri` is always `None` by construction, so the
+        # predicate's `if cache_uri: return None` arm would be unreachable from
+        # every deployed process and the branch would be the real gate — which
+        # is the drift the predicate exists to prevent (review cycle 2). The
+        # branch above is a cheap short-circuit for the embedded-only probes;
+        # the DECISION is the predicate's, and on a healthy shared deployment it
+        # costs one attribute read and one comparison (its first arm).
+        # Deliberately NOT a raise: #7722's embedded fallback and a declared
+        # single-tenant self-host are both coherent and must keep building.
+        if _note_local_cache is not None:
+            _note_local_cache(cache_uri=self._db_uri,
+                              cache_path=self._db_path)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
@@ -19225,7 +19457,7 @@ class TortoiseSDK:
         Supersessions ride the payload's ``supersessions`` channel (#2164):
         ``commit_ops.apply_supersessions`` applies each record AFTER the
         entities/points it references exist (ordering contract) — ``pt_`` refs
-        → the canonical ``supersede()`` (CORRECTS + outdated + edge transfer);
+        → the canonical ``supersede_point`` (CORRECTS + outdated + edge transfer);
         entity refs → an ``ObjectSuperseded`` event (id-style, journaled with
         full provenance) + the ``_fold_object_superseded`` status fold. Fold
         misses/skips/failures are surfaced through the shared meta
@@ -20148,7 +20380,7 @@ class TortoiseSDK:
                         payload, _capture_reverse_id_map.get(pid, pid))
                     or _folded_content_by_id.get(pid, "")))
         # #2164: supersessions — client-derived records (the deterministic
-        # channel for the Object status fold; §6b parity). pt_ → supersede()
+        # channel for the Object status fold; §6b parity). pt_ → supersede_point
         # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
         # entities exist (ordering contract). Warnings ride meta under the
         # helper's BOUNDED #5654 contract: the first
@@ -23450,7 +23682,7 @@ class TortoiseSDK:
                 missing_ok=True) is None:
             return {"invalidated": False, "id": id, "corrected_by": corrected_by_id}
         # #2498: guard the CORRECTOR leg too — `supersede_point` guards BOTH
-        # endpoints and `supersede(..., transfer_edges=False)` routes here, so
+        # endpoints and `supersede_knowledge(..., transfer_edges=False)` routes here, so
         # an unguarded corrector let `(operator|terminal)-[:CORRECTS]->(point)`
         # through on one leg and not the other. A missing corrector still
         # raises (structural failure — would orphan an outdated point).
@@ -23544,21 +23776,27 @@ class TortoiseSDK:
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
 
     # ── Supersede / Invalidate consolidation (epic #888 W2) ───────────
-    # supersede() is the unified node-lifecycle entry; transfer_edges picks the
-    # full transfer (supersede_point) or the invalidate behavior
-    # (invalidate_point). Legacy methods remain the implementations.
+    # `supersede_knowledge` is the unified node-lifecycle entry (#12592 retired
+    # the bare `supersede` name); `transfer_edges` picks the full transfer
+    # (supersede_point) or the invalidate behavior (invalidate_point) on the
+    # Point arm, and the OLD node's label picks the family arm otherwise.
+    # Legacy methods remain the implementations.
 
     def supersede_knowledge(self, old_id: str, new_id: str,
-                            transfer_edges: bool = True, *,
+                            transfer_edges: bool | None = None, *,
                             valid_from: str | None = None,
                             valid_to_precision: str | None = None) -> dict:
-        """Replace a node with a successor — dispatching on the LINK POLICY (#4282 row 23).
+        """Replace a node with a successor — dispatching on the LINK POLICY (#4282 row 23)
+        and then on the OLD node's LABEL (#12592).
 
         ``beta-sdk-surface.md`` row 23 states the discriminator as part of the verb:
         *"Carries an explicit link policy — whether the old node's links follow the
         successor"*. That is ``transfer_edges``:
 
-          transfer_edges=True  (default) → FULL SUPERSEED. CORRECTS edge + outdated
+          transfer_edges=None (default, NOT SUPPLIED) → the arm is chosen by the OLD
+                              node's label: a full supersede for a :Point, the
+                              family supersede for an :Object/:Subject.
+          transfer_edges=True → FULL SUPERSEED (:Point only). CORRECTS edge + outdated
                               flag + ALL edges transferred from old to new.
                               Absorbs ``supersede_point`` — and with it the
                               bi-temporal window kwargs below, which the old
@@ -23569,7 +23807,7 @@ class TortoiseSDK:
                               ``valid_from`` is the same "returned success having
                               recorded part of it" class this surface refuses
                               everywhere else, so the kwargs are carried here.
-          transfer_edges=False → INVALIDATE ONLY. Outdated flag + a CORRECTS edge,
+          transfer_edges=False → INVALIDATE ONLY (:Point only). Outdated flag + a CORRECTS edge,
                               NO edge transfer. Absorbs the ``supersede(...,
                               transfer_edges=False)`` arm; ``invalidate_point``
                               itself STAYS public, because its
@@ -23578,11 +23816,135 @@ class TortoiseSDK:
                               home on ``update_knowledge`` and retiring it would
                               delete that capability rather than rename it.
 
-        Returns {invalidated, id, corrected_by} (+ edges_transferred when
-        transfer_edges=True). Raises ValueError on missing/self/terminal input
-        (both legs route through the ONE shared lifecycle guard, #2498).
+        ``Point`` (today's behaviour, unchanged): the two arms above.
+
+        ``Object`` / ``Subject`` (#12592) → :meth:`_supersede_entity`: the
+        coherent pair ``status='superseded'`` + ``supersededBy=<successor name>``
+        + ``supersededAt`` in ONE journaled write, behind this door's own
+        lifecycle guard. Before this, the unified door READ as generic and was
+        Point-only by implementation: a caller reading the signature could not
+        tell, and an Object/Subject caller got ``No point <id>`` — while the
+        only way to mark one replaced was ``update_knowledge(status='superseded')``,
+        which stored the word with NO successor (the incoherence ONTOLOGY §4.3
+        defines away, now refused at that door).
+
+        ⛔ NO NEW PUBLIC METHOD (#12592 decision 1). The MCP/SDK surface may not
+        grow without the owner's approval, so the family paths are private and
+        this ONE existing method dispatches. Adding ``supersede_object`` /
+        ``supersede_subject`` would be a surface change and is refused here.
+
+        ⛔ ``transfer_edges=False`` stays POINT-ONLY, and that is the model, not a
+        gap: the invalidate half is ``outdated`` + ``CORRECTS`` — a Point's own
+        machinery (§4.7: an Object's transaction-time expiry is ``expiredAt``,
+        which is a different fact and has no CORRECTS partner). A retirement of
+        an Object/Subject with no successor is ``archived``, which the refusal
+        below prescribes rather than silently reinterpreting the call.
+
+        The window kwargs are SUPERSEED facts and belong to the Point arm that
+        can record them (``supersede_point``). The invalidate arm and the
+        Object/Subject arm carry neither, so passing one there is REFUSED rather
+        than dropped — the caller would otherwise get a write that recorded none
+        of what they asked.
+
+        Returns ``{invalidated, id, corrected_by}`` (+ ``edges_transferred`` when
+        the supersede arm ran) for a Point, and
+        ``{superseded, id, label, superseded_by, superseded_at}`` for an Object
+        or a Subject. Raises ``ValueError`` on missing/self/terminal/cross-family
+        input (both Point legs route through the ONE shared lifecycle guard, #2498).
         """
-        if not transfer_edges:
+        # ⛔ NORMALISE THE OPERANDS BEFORE ANYTHING READS THEM (#12914 review P1,
+        # re-review finding 3). Every read below — `_supersession_label`, the
+        # lifecycle/terminal guards, the per-family probes, the write — must see
+        # the SAME bytes, and the bytes the driver sends are `quote_string`'s
+        # rendering of the caller's object (`v.replace(...)` + a format), NOT its
+        # base content. Measured while the rebind sat INSIDE `_supersede_entity`
+        # (below this point): an `old_id` whose base content is an `:Object` and
+        # whose `replace()` renders a `:Point` RESOLVED AS A POINT, passed the
+        # Point guards, appended a `PointSuperseded` record and wrote NOTHING —
+        # a record/graph divergence reported as `{'invalidated': True}`. Rebinding
+        # here, at the entry the label and both arms derive from, makes the guard,
+        # the probes and the wire one value. Behaviour for a plain `str` and for a
+        # genuinely non-`str` id is unchanged (`str.__str__` is identity on the
+        # former and the rebind is skipped for the latter).
+        if issubclass(type(old_id), str):
+            old_id = str.__str__(old_id)
+        if issubclass(type(new_id), str):
+            new_id = str.__str__(new_id)
+        label = self._supersession_label(old_id)
+        # ⛔ AN IMPOSTOR ID IS REFUSED AT THE DOOR (#12914 review P2). A value
+        # that declares ``__class__ = str`` without being one passes
+        # `isinstance` and then `supersede_point`'s own query raises
+        # ``TypeError: argument of type '…' is not iterable`` (measured) — the
+        # Point doors cannot answer their documented ``No point <id>`` for it,
+        # because they query it too. Every GENUINE non-`str` id (`123`, `None`,
+        # `[]`, `object()`) keeps that documented fall-through untouched; only
+        # the forged-`__class__` class is caught here, where this door's stated
+        # contract is a ``ValueError``.
+        if label is None and isinstance(old_id, str) \
+                and not issubclass(type(old_id), str):
+            raise ValueError(
+                f"supersede_knowledge: {_refusal_repr(old_id)} is not a node id — it declares "
+                f"`__class__ = str` but its class is {_refusal_type_name(old_id)}, "
+                f"so no :Point, :Object or :Subject row can carry it and the "
+                f"graph cannot encode it (#12907). Pass the id string itself."
+            )
+        if label in ("Object", "Subject"):
+            # ⛔ THE FAMILY ARM CANNOT TRANSFER EDGES, SO IT REFUSES THE KEYWORD —
+            # ANY SUPPLIED VALUE (#12914 review P3, re-review findings 4 + 2).
+            # `transfer_edges` defaulted to `True`, so an EXPLICIT `True` here was
+            # silently DROPPED — no edges transferred and no `edges_transferred`
+            # in the return — while `False` on the same labels was refused. That
+            # is exactly the "a keyword the chosen arm cannot RECORD is refused,
+            # never dropped" rule this file states for the Point arm (#10053).
+            # The test is `is not None`, not `is True`: pinning the two singletons
+            # left `1`, `0`, `'yes'`, `1.0` still silently dropped (measured), so
+            # the singleton shape only narrowed the defect. `None` is the
+            # not-supplied default and is the ONLY value that takes this arm.
+            # The two refusals live in ONE helper (#12914 round-3 finding 2), so the
+            # dry-run preview calls the SAME check instead of restating it — a
+            # preview that restates a refusal is a second source of truth, and the
+            # divergence this round fixed was exactly that class.
+            self._refuse_family_transfer_edges(label, old_id, transfer_edges)
+            # The family write records status + carrier + stamp; it has no slot
+            # for a bi-temporal window, so a window kwarg is refused here rather
+            # than dropped — the same rule main states for the invalidate arm,
+            # applied to this arm for the same reason.
+            refused = sorted(
+                name for name, value in (
+                    ("valid_from", valid_from),
+                    ("valid_to_precision", valid_to_precision),
+                ) if value is not None
+            )
+            if refused:
+                raise ValueError(
+                    f"supersede_knowledge: a :{label} supersession records "
+                    f"status='superseded' + supersededBy + supersededAt, and it "
+                    f"cannot record {', '.join(refused)} — those are Point "
+                    f"window facts (§4.7). Drop the window from this call, or "
+                    f"carry the window on the :{label} with "
+                    f"`update_knowledge({_refusal_repr(old_id)}, validTo=…)`."
+                )
+            return self._supersede_entity(label, old_id, new_id)
+        # ⛔ THE SUCCESSOR OPERAND IS BOUNDED ON THE POINT ARM TOO (#12914 review
+        # P2): the refusal above bounds ``old_id``, but this arm hands ``new_id``
+        # straight to ``_assert_lifecycle_guard`` and its query, which cannot
+        # encode a forged-``__class__`` value either — measured,
+        # ``supersede_knowledge(<live Point>, <impostor>)`` escaped as ``TypeError:
+        # argument of type '…' is not iterable`` where every GENUINE non-``str``
+        # successor (``123``, ``None``, ``[]``) answers the Point doors' own
+        # documented ``No point <id>`` (measured). ``_supersede_entity`` needs no
+        # equivalent here: its ``_rows`` already answers "names no node" for the
+        # same value, which is why the Object/Subject arm is untouched.
+        if isinstance(new_id, str) and not issubclass(type(new_id), str):
+            raise ValueError(f"No point {_refusal_repr(new_id)}")
+        if transfer_edges is not None and not transfer_edges:
+            # `is not None and not …`, not `is False` (#12914 re-review finding 4):
+            # the `None` default means NOT SUPPLIED and must keep taking the
+            # SUPERSEED arm, while every other falsy value a caller can pass —
+            # `0`, `''`, `[]` — must keep selecting INVALIDATE exactly as
+            # `not transfer_edges` did before the default changed. Keying on
+            # `is False` alone silently redirected those to the MORE destructive
+            # arm (measured: `transfer_edges=0` transferred real edges).
             # The window kwargs are SUPERSEED facts (the predecessor's end is the
             # successor's start; the precision marker closes its window). The
             # invalidate arm writes its own window end and can carry neither, so
@@ -23606,6 +23968,333 @@ class TortoiseSDK:
             return self.invalidate_point(old_id, new_id)
         return self.supersede_point(old_id, new_id, valid_from=valid_from,
                                     valid_to_precision=valid_to_precision)
+
+    def _supersession_label(self, node_id: str) -> str | None:
+        """The lifecycle label ``node_id`` carries, Point winning a tie (#3311).
+
+        ONE statement over the three labels, each arm on its own index, so the
+        dispatch costs one round trip and a `:Point:Object` cannot resolve to two
+        answers: a node carrying BOTH is the hybrid #3311's ``retype`` and
+        migrated graphs produce, and every other door in this class resolves it by
+        POINT PRECEDENCE (the Point arm validates the status and drops the key
+        before the non-Point arms read it). ``None`` when no node of any of the
+        three labels carries the id — the caller then falls through to the Point
+        doors, which answer ``No point <id>`` exactly as before this change.
+        """
+        # ⛔ A value that is not genuinely `str` carries no label and names no
+        # node (#12914 review P2): `isinstance` consults `__class__`, so an
+        # object declaring ``__class__ = str`` reached the driver's `str` branch
+        # and the QUERY raised ``TypeError: argument of type '…' is not
+        # iterable`` instead of the caller's documented refusal. Answering
+        # ``None`` here is the same answer every genuinely non-`str` id already
+        # gets (the driver degrades it to null and nothing matches).
+        if not issubclass(type(node_id), str):
+            return None
+        rows = self._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN 1 AS rank, count(n) AS hits "
+            "UNION "
+            "MATCH (n:Object {id:$id}) RETURN 2 AS rank, count(n) AS hits "
+            "UNION "
+            "MATCH (n:Subject {id:$id}) RETURN 3 AS rank, count(n) AS hits",
+            params={"id": node_id},
+        ).result_set
+        best = min((tuple(r) for r in rows if r and r[1]),
+                   key=lambda r: r[0], default=None)
+        if best is None:
+            return None
+        return {1: "Point", 2: "Object", 3: "Subject"}[best[0]]
+
+    def _refuse_family_transfer_edges(self, label: str, old_id: str,
+                                      transfer_edges: bool | None) -> None:
+        """Refuse ANY supplied ``transfer_edges`` on the family arm (#12914).
+
+        Extracted from ``supersede_knowledge`` (round-3 finding 2) so the MCP
+        dry-run preview runs the SAME check: the preview must refuse what the
+        write refuses, and two copies of a refusal are two statements that drift.
+        ``None`` is the not-supplied default and is the ONLY value that passes —
+        the arm has no slot for the keyword, so every supplied value is refused
+        rather than silently dropped (#10053).
+        """
+        if transfer_edges is False:
+            # The INVALIDATE half keeps its own prescription: a :{label} that
+            # was retired with no successor is `archived`, and that is the
+            # repair a caller who wanted this arm actually needs.
+            raise ValueError(
+                f"supersede_knowledge: transfer_edges=False is the INVALIDATE half, "
+                f"and it is Point-only — `outdated` + a `CORRECTS` edge are "
+                f"a Point's machinery (ONTOLOGY §4.7), and "
+                f"{_refusal_repr(old_id)} is a :{label}. A :{label} that "
+                f"was retired with NO successor is 'archived' under §4.3 — "
+                f"`update_knowledge({_refusal_repr(old_id)}, status='archived')` "
+                f"— or, if it WAS replaced, name the successor with "
+                f"`supersede_knowledge({_refusal_repr(old_id)}, <successor id>)`."
+            )
+        if transfer_edges is not None:
+            raise ValueError(
+                f"supersede_knowledge: transfer_edges={transfer_edges!r} cannot be "
+                f"honoured on a :{label} — that keyword is Point-only: "
+                f"`outdated` + a `CORRECTS` edge + edge transfer are a Point's "
+                f"machinery (ONTOLOGY §4.7), while this arm records "
+                f"status='superseded' + supersededBy + supersededAt with NO edge "
+                f"transfer. Drop the keyword to take this arm, or call it for a "
+                f"Point; a :{label} retired with no successor is "
+                f"`update_knowledge(id, status='archived')`."
+            )
+
+    def _supersede_entity(self, label: str, old_id: str, new_id: str,
+                          *, dry_run: bool = False) -> dict:
+        """The per-family supersession for ``:Object`` / ``:Subject`` (#12592).
+
+        Writes the coherent pair through the ONE entity write path, so the
+        journal, the guard and the replay fold cannot drift from
+        ``update_knowledge``'s:
+
+            status='superseded' + supersededBy=<successor NAME> + supersededAt
+
+        ⛔ THE CARRIER IS THE SUCCESSOR'S **NAME**, not its id, and that is what
+        the readers require: §4.2/§4.3 define ``supersededBy`` as *"successor
+        NAME (stored verbatim)"*, and every name-keyed reader of it — `audit`
+        4b/4c, `assembly._probe_visible_successors`, the renderer, the
+        `ObjectSuperseded` fold's visible-successor probe — resolves a NAME. The
+        record lane already does this deliberately
+        (``commit_ops._apply_subject_supersession`` stores the successor's
+        SPELLING, not the id); storing an id here would write a pointer no read
+        surface can resolve, i.e. the same defect as storing none. The ARGUMENT is
+        an id (the door must resolve a real node to guard it); the STORED value is
+        its name.
+
+        Guards, in the order the caller can act on them:
+
+        * the successor must be a node of the SAME family — a Subject cannot
+          supersede an Object. Cross-family would store one label's name in
+          another's carrier, which no successor probe would ever match;
+        * ``old_id != new_id`` (a self-replacement names itself as its own
+          successor);
+        * the OLD row must not already be terminal — ⛔ NOT because terminalization
+          is one-way (§5/#2498 is the POINT rule; DEAD -> DEAD stays legal for
+          these families, which the door states as a per-family delta), but as
+          THIS door's own fail-closed choice: a second supersede of a dead row
+          would silently REWRITE a recorded successor, and a recorded successor is
+          evidence. Nothing here needs it — a row already superseded has its
+          replacement, and a row retired with no successor is `archived`/`retracted`;
+        * the SUCCESSOR must not be terminal, and must carry a name — a terminal
+          successor buries the old row with nothing current to show, and a nameless
+          successor cannot be named at all (the carrier is the name).
+
+        Returns ``{superseded, id, label, superseded_by, superseded_at}``. The
+        write is checked: a graph write that matched nothing raises rather than
+        reporting a supersession that did not land.
+        """
+        proj = self._get_proj()
+        # Base content (#12592 cycle-8 P2): `==` is a METHOD LOOKUP on the
+        # caller's object, so a `str` subclass with `__eq__ -> False` slipped this
+        # gate and the write stored the row as its OWN successor — the successor
+        # then resolved to the row it replaced.
+        #
+        # ⛔ The base-content read is gated on `issubclass(type(x), str)`, NOT
+        # `isinstance(x, str)` (#12914 review P2): `isinstance` consults
+        # `__class__`, so an object that DECLARES ``__class__ = str`` passed the
+        # test and `str.__str__` REFUSED it — measured, ``supersede_knowledge(<live
+        # Object>, <impostor>)`` escaped as ``TypeError: descriptor '__str__'
+        # requires a 'str' object`` at this line instead of the documented
+        # ``supersede: no :Object <id>`` ValueError below. A value with no `str`
+        # base content is left as it is and falls through to that refusal (`_rows`
+        # answers "names no node" for it, see there).
+        _old_word = (str.__str__(old_id)
+                     if issubclass(type(old_id), str) else old_id)
+        _new_word = (str.__str__(new_id)
+                     if issubclass(type(new_id), str) else new_id)
+        # ⛔ The operands were already rebound to base content at the ENTRY of
+        # `supersede_knowledge` (#12914 review P1, re-review finding 3), so these
+        # are the same bytes the probes and the write send. Kept as the local
+        # spelling the comparison and the sibling probe read, so a future edit
+        # cannot reintroduce a caller-object read here without failing those.
+        old_id = _old_word
+        new_id = _new_word
+        if (issubclass(type(old_id), str) and issubclass(type(new_id), str)
+                and _old_word == _new_word):
+            # ⛔ THE COMPARISON ITSELF IS A CALLER READ (#12914 review P2, cycle 7):
+            # `==` on a operand that is not genuinely `str` dispatches to the
+            # CALLER's `__eq__` — measured, an impostor defining `__eq__` made
+            # `supersede_knowledge(<live Object>, <impostor>)` raise `RuntimeError: eq-boom`
+            # where the same call with a plain impostor answers
+            # `supersede: no :Object <id>`. The self-successor refusal needs both
+            # words in base content anyway, so it runs only when BOTH operands
+            # are; a value that is not genuinely `str` names no node and falls
+            # through to `_rows`' documented "names no node" answer below.
+            raise ValueError(
+                f"supersede_knowledge: old_id and new_id must differ ({_refusal_repr(old_id)}) — a "
+                f"row cannot be its own successor")
+
+        def _rows(node_id: str) -> dict:
+            # ⛔ A value that is not genuinely `str` names NO NODE (#12914 review
+            # P2): the graph cannot encode it, and the driver's parameter check
+            # is `isinstance`-shaped — so an object declaring ``__class__ = str``
+            # raised ``TypeError`` INSIDE the query instead of reaching the
+            # refusals below. Every genuinely non-`str` value the driver CAN
+            # encode already degrades to null and matches nothing, so "no rows"
+            # is the answer those values get today; this answers it without the
+            # unencodable round trip, and lets the impostor land on the same
+            # documented ``no :<label> <id>`` / cross-family ValueError.
+            if not issubclass(type(node_id), str):
+                return {"rows": 0, "statuses": [], "names": []}
+            rows = proj.g.query(
+                f"MATCH (n:{label} {{id:$id}}) "
+                "RETURN count(n) AS rows, collect(n.status) AS statuses, "
+                "collect(n.name) AS names",
+                params={"id": node_id},
+            ).result_set
+            if not rows or not rows[0][0]:
+                return {"rows": 0, "statuses": [], "names": []}
+            return {"rows": rows[0][0],
+                    "statuses": list(rows[0][1] or ()),
+                    "names": list(rows[0][2] or ())}
+
+        dead = _SUPERSESSION_DEAD_SETS[label]
+        old = _rows(old_id)
+        if not old["rows"]:
+            raise ValueError(f"No :{label} {_refusal_repr(old_id)}")
+        # ⛔ A HYBRID ID IS REFUSED, NOT FANNED OUT (#12914 review P2).
+        # `_supersession_label` resolves ONE label (Point wins a tie), but the write
+        # below goes through `update_knowledge`, whose non-Point arm applies
+        # ``SET n += $props`` to EVERY label the id binds — measured on the reviewed
+        # head with an id bound by both :Object and :Subject:
+        # ``supersede_knowledge(id, <Object>)`` returned
+        # ``{'label': 'Object', 'superseded_by': 'shared-object-v2'}`` and BOTH rows
+        # ended ``['superseded', 'shared-object-v2']``, i.e. the Object's successor
+        # name written into the Subject's per-label carrier — the cross-family shape
+        # this door refuses one line above, one step quieter. `supersededBy` is read
+        # by a PER-LABEL successor probe, so one stored name cannot be right for two
+        # families.
+        # ⚠️ NO CALLER-SIDE REPAIR IS PRESCRIBED, because none exists (AX rule 2):
+        # the SDK has no label-drop door, and the explicit
+        # `update_knowledge(<id>, status='superseded', supersededBy=…)` pair fans out
+        # over the same ``SET``. So the message names the diagnosis and says plainly
+        # that this is a GRAPH repair (a stranded label from a migration), not a
+        # mistake the caller can re-send around — the refusal is the whole answer.
+        _sibling = "Subject" if label == "Object" else "Object"
+        _sib = proj.g.query(
+            f"MATCH (n:{_sibling} {{id:$id}}) RETURN count(n) AS hits",
+            params={"id": _old_word},
+        ).result_set
+        if _sib and _sib[0] and _sib[0][0]:
+            raise ValueError(
+                f"supersede_knowledge: {_refusal_repr(old_id)} binds BOTH a :{label} "
+                f"and a :{_sibling} row, and this door writes the successor to "
+                f"every label the id carries (`SET n += $props`) — so one name "
+                f"would land in two per-label carriers, and `supersededBy` is "
+                f"resolved per label. Measured on the reviewed head: the "
+                f":{label}'s successor name was stored on the :{_sibling} row "
+                f"too. ⛔ No SDK write can repair this — there is no label-drop "
+                f"door, and the explicit `update_knowledge(..., "
+                f"supersededBy=<name>)` pair fans out over the same SET. This is "
+                f"a GRAPH repair (a stranded label from a migration, #3311), not "
+                f"a call to re-send: remove the stray :{_sibling} label, then "
+                f"re-send this call."
+            )
+        # The verdict is over EVERY bound row (#7822's fan-out rule): a dead
+        # sibling is not made live by the write, so terminalizing the id again
+        # would re-terminalize a dead row.
+        dead_old = sorted({str(s) for s in old["statuses"] if str(s) in dead})
+        if dead_old:
+            raise ValueError(
+                f"supersede_knowledge: :{label} {_refusal_repr(old_id)} is already terminal "
+                f"({dead_old[0]}) — {label} supersession cannot re-terminalize a "
+                f"dead row (#2498: terminalization is one-way). Mint the "
+                f"replacement and let it stand as current; the dead row keeps its "
+                f"recorded successor and instant."
+            )
+        new = _rows(new_id)
+        if not new["rows"]:
+            raise ValueError(
+                f"supersede_knowledge: no :{label} {_refusal_repr(new_id)} — the successor must be a "
+                f"same-family node (a :{label} cannot name a node of another "
+                f"label as its successor: `supersededBy` is read by a "
+                f"per-label successor probe, so a cross-family name would never "
+                f"resolve).")
+        dead_new = sorted({str(s) for s in new["statuses"] if str(s) in dead})
+        if dead_new:
+            raise ValueError(
+                f"supersede_knowledge: the successor {_refusal_repr(new_id)} is itself terminal "
+                f"({dead_new[0]}) — {_refusal_repr(old_id)} would be replaced by a dead row, "
+                f"leaving nothing current to show. Name a :{label} that is "
+                f"current, or mint one first."
+            )
+        names = [str(n).strip() for n in new["names"]
+                 if n is not None and str(n).strip()]
+        if not names:
+            raise ValueError(
+                f"supersede_knowledge: the successor {_refusal_repr(new_id)} carries no name — "
+                f"`supersededBy` stores the successor's NAME (§4.2/§4.3: "
+                f"*successor name, stored verbatim*) and every read surface "
+                f"resolves it by name, so an id alone cannot be stored here. "
+                f"Give the node a name (`update_knowledge({_refusal_repr(new_id)}, "
+                f"name=<name>)`), then re-send this call."
+            )
+        # ⛔ THE SUCCESSOR SIDE HAS THE SAME FAN-OUT RULE AS THE SOURCE SIDE
+        # (#12914 review P3). The source is adjudicated PER ROW above (`dead_old`
+        # over `statuses`, `rows` over `names`); the successor was not —
+        # ``names[0]`` took whatever `collect(n.name)` returned first, so an id
+        # bound by two same-label rows with DIFFERENT names stored an
+        # engine-order choice the caller never made. Measured on the reviewed
+        # head: two :Object rows sharing one id, names `Alpha` and `Beta`, and
+        # the write stored `Alpha` with no refusal. A successor whose identity
+        # is ambiguous cannot be named, and guessing is the class this door
+        # refuses everywhere else (`_all_carrier_keys`, `_status_write_is_
+        # ambiguous`).
+        _distinct = sorted(set(names))
+        if len(_distinct) > 1:
+            raise ValueError(
+                f"supersede_knowledge: the successor id {_refusal_repr(new_id)} "
+                f"names MORE THAN ONE ROW ({len(_distinct)} distinct names: "
+                f"{', '.join(repr(n) for n in _distinct)}), and `supersededBy` "
+                f"stores ONE name (§4.2/§4.3) — which of them the record would "
+                f"hold is engine-defined order, not your call. Give the id a "
+                f"single row, or supersede with a successor whose identity is "
+                f"unambiguous, then re-send."
+            )
+        successor_name = names[0]
+        from .projection import _now_iso
+        instant = _now_iso()
+        # ⛔ ``dry_run`` IS THE MCP PREVIEW'S DOOR, NOT A PUBLIC MODE (#12914
+        # round-3 finding 2). It runs EVERY guard above and skips only the write.
+        # The ``supersededAt`` it reports is the instant the write WOULD stamp —
+        # the real write mints its own, so a caller must not reserve it.
+        #
+        # ⛔ ITS GUARDS ARE THIS FUNCTION'S, NOT THE WRITE DOOR'S — the residual
+        # #12914 round-4 P1 measured, reported here instead of papered over. The
+        # write below goes through ``update_knowledge`` -> ``_update_entity``, and
+        # THAT door runs label-surface guards this one does not: the
+        # ``refuse_terminal_event_state`` probe (an ``:Event`` row cannot take a
+        # terminal ``status``) and the ``:Source`` closed-surface refusal (D30).
+        # Measured on the round-4 head: for the HYBRID shapes ``:Object:Event``,
+        # ``:Subject:Event``, ``:Object:Source`` and ``:Subject:Source`` the
+        # preview answers ``would supersede`` and the write REFUSES. Before this
+        # PR both arms refused, so the divergence is this change's. It is
+        # FAIL-CLOSED — the refusal happens before any row is touched, and the
+        # common (single-label) path is unaffected — which is why it is filed
+        # rather than fixed here: closing it means threading a dry-run through
+        # ``_update_entity``'s write phase, a change to the core update door that
+        # does not belong in a re-cut of this PR. The preview's ``rows`` below is
+        # keyed the same way for the same reason: report what this door knows.
+        if dry_run:
+            return {"superseded": True, "id": old_id, "label": label,
+                    "superseded_by": successor_name, "superseded_at": instant,
+                    "rows": old["rows"]}
+        applied = self.update_knowledge(
+            old_id, status=_SUPERSEDED_STATUS,
+            supersededBy=successor_name, supersededAt=instant)
+        if not applied:
+            # The write path reports `{}` when it matched nothing. A supersession
+            # that did not land must never be reported as one — the phantom-claim
+            # class `supersede_point`'s own count probe guards.
+            raise ValueError(
+                f"supersede_knowledge: the write on :{label} {_refusal_repr(old_id)} matched no row — "
+                f"nothing was superseded (a concurrent delete, or the row moved). "
+                f"Re-read the row and re-send."
+            )
+        return {"superseded": True, "id": old_id, "label": label,
+                "superseded_by": successor_name, "superseded_at": instant}
 
     @_declares_live_write_lane("supersede_point")
     def supersede_point(self, old_id: str, new_id: str,
@@ -23706,6 +24395,23 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
+        # ⛔ BOUND BEFORE THE GUARDS, NOT AFTER (#12914 re-review finding 3).
+        # The driver renders a parameter through `quote_string` -> `v.replace(...)`
+        # + a format, so the bytes it sends are NOT the operand's base content
+        # when the operand is a `str` subclass. Rebinding here — above the source
+        # guard, the successor comparison and the target guard — is what makes
+        # "guard, probes and wire are the same bytes" true; sitting below the
+        # source guard it left the split open, and measured: an `old_id` whose
+        # base content is an already-`superseded` Point but whose `replace()`
+        # renders a LIVE Point passed the terminal guard and appended a SECOND
+        # `PointSuperseded` for a dead claim — the #2498 harm that guard exists
+        # to prevent. (`str.__str__` on a plain `str` is identity, so nothing
+        # about an ordinary call changes.)
+        if issubclass(type(old_id), str):
+            old_id = str.__str__(old_id)
+        if issubclass(type(new_id), str):
+            new_id = str.__str__(new_id)
+
         # #432/#2498: the SHARED transition guard — old point must exist, be
         # a statement (not an operator), and not already be terminal. The
         # pre-#2498 body hardcoded a 3-status subset, so an `outdated` /
@@ -23719,6 +24425,21 @@ class TortoiseSDK:
         # statement, not be terminal, and differ from the old point. A missing /
         # self / terminal successor would terminalize the old point with no valid
         # replacement (phantom PointSuperseded).
+        #
+        # ⛔ THE COMPARISON IS A CALLER READ TOO (#12914 review P2, cycle 9): `==`
+        # on an operand that is not genuinely `str` dispatches to the caller —
+        # ``str.__eq__`` answers ``NotImplemented`` for a GENUINE ``str``
+        # SUBCLASS that overrides ``__eq__``, so the subclass's answer is the one
+        # that lands. Measured: a str subclass whose ``__eq__`` returns False
+        # walked ``supersede_knowledge(<live Point>, SubLyingEq(<the same id>))``
+        # past this gate, and the write stored the row as its OWN successor —
+        # row ``['superseded', True, None]`` with a ``CORRECTS`` edge
+        # ``<id> -> <id>`` — the exact state this gate exists to refuse. The
+        # rebind at the TOP of this method (re-review finding 3) already reduced
+        # every genuinely-`str` operand to its base content, so this comparison
+        # runs on base content for that pair without ever calling the caller's
+        # `__eq__`; a non-``str`` pair keeps exactly the comparison it had, so no
+        # non-``str`` id changes behaviour here.
         if old_id == new_id:
             raise ValueError("supersede_point: old_id and new_id must differ")
         # #2498: the SAME shared guard for the successor — a terminal (or
@@ -26107,7 +26828,7 @@ class TortoiseSDK:
                 "deferred_live_prior": deferred,
                 "boundary_blocked": boundary_blocked}
 
-    def list_dedup_candidates(self, candidate_type: str = "content",
+    def _list_dedup_candidates(self, candidate_type: str = "content",
                               limit: int = 50) -> list[dict]:
         """Review queue for dedup candidates (plan §6.1, DE2E-3/DE2E-2).
 
@@ -28072,15 +28793,20 @@ class TortoiseSDK:
         # ── the CALLER-FACING read (#12941) — opt-in, so an unarmed caller and
         # every mid-write caller above keep the pre-#12941 shape exactly.
         from .record_serve import (
+            FALLBACK_RECORD_BOUND_MISS,
             FALLBACK_RECORD_TENANT_UNRESOLVED,
             MODE_OFF,
+            MODE_PREFER,
             MODE_RECORD,
             READ_POINT_BY_ID,
+            CacheAnswerRequired,
+            RecordReadBoundMiss,
             RecordServeError,
+            RecordUnavailable,
             answered_by_cache,
             point_residency,
             serve_mode,
-            serve_point,
+            serve_point_bounded,
         )
         from .residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
 
@@ -28123,9 +28849,59 @@ class TortoiseSDK:
                 props=_cache_answer(),
                 reason=FALLBACK_RECORD_TENANT_UNRESOLVED)
         else:
-            answer = serve_point(
-                tenant=tenant, point_id=id, cache_answer=_cache_answer,
-                mode=mode)
+            # ⛔ ONE BOUND FOR ALL THREE DOORS (#12947 finding 1, P1). The hosted
+            # route already submits this same call to
+            # `_read_offload(..., timeout=record_read_timeout_s())`; the SDK and
+            # the MCP door called it on the caller's thread and nothing bounded
+            # it, so a slow record produced the transport's `-32009` ("the work
+            # may still complete") instead of this seam's NAMED fallback, and
+            # `FALLBACK_RECORD_BOUND_MISS` was unreachable from those doors.
+            # `record_read_timeout_s()` is resolved HERE rather than imported at
+            # module scope so the bound a lane refuses on is the one a test can
+            # shrink to prove the refusal (`monitoring.py` pins it below the
+            # transport's wait bound).
+            from .monitoring import record_read_timeout_s
+
+            bound_s = record_read_timeout_s()
+
+            def _cache_answered(reason: str):
+                """The caller's OWN cache read — the deferred shape's fallback.
+
+                It runs HERE, on the caller's thread, so the bounded worker
+                touches the RECORD and never a graph handle: the same split
+                `hosted_api.get_point` makes, and the reason `cache_answer=None`
+                is passed below for `prefer`.
+                """
+                return answered_by_cache(
+                    read=READ_POINT_BY_ID, coordinate=coordinate,
+                    props=_cache_answer(), reason=reason)
+
+            try:
+                answer = serve_point_bounded(
+                    bound_s=bound_s,
+                    tenant=tenant, point_id=id,
+                    # ⛔ `prefer` takes the DEFERRED shape: the seam still
+                    # decides and NAMES the fallback, but the cache read then
+                    # happens on this lane instead of inside the worker.
+                    # `record` never calls the callback and must pass one at all
+                    # (`serve_point` refuses `None` outside `prefer`).
+                    cache_answer=(None if mode == MODE_PREFER else _cache_answer),
+                    mode=mode)
+            except CacheAnswerRequired as needed:
+                # `prefer` only: the record missed or could not be asked, so the
+                # reason is the SEAM's and the answer is the cache's.
+                answer = _cache_answered(needed.reason)
+            except RecordReadBoundMiss as bound_miss:
+                if mode == MODE_RECORD:
+                    # No cache branch exists, so "too slow" must RAISE: turning a
+                    # capacity condition into an absence is the §17.2 inversion
+                    # this whole module exists to prevent. Chained from the seam's
+                    # own miss so the cause survives the translation.
+                    raise RecordUnavailable(
+                        f"the record did not answer {coordinate} inside "
+                        f"{bound_s:.1f}s — in 'record' mode there is no cache "
+                        f"branch, so an absence is NOT established") from bound_miss
+                answer = _cache_answered(FALLBACK_RECORD_BOUND_MISS)
         served_out.update(answer.as_wire())
         # ⛔ THE SEAM DECIDES HERE, NOT THE DECLARATION. In an armed mode the
         # record was (or could have been) asked, so `answer.not_hot` already
@@ -28140,6 +28916,476 @@ class TortoiseSDK:
             served_out[RESIDENCY_FIELD] = RESIDENCY_NOT_HOT
             return {**(answer.props or {}), RESIDENCY_FIELD: RESIDENCY_NOT_HOT}
         return dict(answer.props) if answer.props else {}
+
+    # ── #4282 Phase 2 read/query containers (#11609) ──────────────
+    #
+    # The approved surface has ONE read verb per question, not a zoo of narrow
+    # ones (`docs/product/beta-sdk-surface.md` rows 3-10, owner-approved). Each
+    # container below is that verb: it dispatches on the discriminator
+    # `docs/product/bridge-table.md` Part A records for it, and every arm answers
+    # with what the narrow method it replaces returned. The container is a DOOR,
+    # never a second implementation — AIP-136 is the ruling: a custom method is
+    # for what the standard methods cannot express, and consolidating them must
+    # not change what the operation MEANS.
+
+    #: The `section=` values :meth:`graph_overview` dispatches on — THE home for the
+    #: container's approved set. Read by the dispatch and by the tests; the MCP door's
+    #: own list (`mcp_server._OVERVIEW_SECTIONS`) is this set PLUS its declared
+    #: transport-only sections, and the relationship is pinned in
+    #: `tests/test_11609_read_containers.py` in BOTH directions (#12951 review: the
+    #: comment here used to claim this tuple was read by "the MCP container's own list",
+    #: which was false — that list is an independent literal).
+    #:
+    #: ⛔ Do not add a section here to make the two sets match: the difference is exactly
+    #: `mcp_server._OVERVIEW_TRANSPORT_ONLY_SECTIONS` (`graphs`, `health`), and neither
+    #: belongs in this set — `graphs` is another container's source (bridge-table Part A
+    #: sends it to `tenancy:list_memory_graphs`) and `health` is a monitoring probe with
+    #: no SDK read behind it.
+    GRAPH_OVERVIEW_SECTIONS = (
+        "taxonomy", "structure", "structure_check", "pointkinds", "tags",
+        "sources", "namespaces", "topics", "status", "stale",
+        "validate_domain", "audit", "dream_health",
+    )
+    #: Sections whose argument is REQUIRED, so the combined (`section=None`) read
+    #: leaves them out rather than reporting them as refusals.
+    GRAPH_OVERVIEW_NEEDS_ARGUMENT = ("topics", "validate_domain")
+
+    def graph_overview(self, section: str | None = None, *,
+                       entity_id: str | None = None,
+                       days: int = 30,
+                       limit: int = 50,
+                       domain: str | None = None,
+                       point_kinds: list[str] | None = None) -> Any:
+        """What is in this memory graph and how it is shaped — ONE call (row 6).
+
+        The approved orientation container. ``section`` selects the view and
+        every value dispatches to the read it replaces, so the narrow door and
+        this one cannot disagree:
+
+          taxonomy | structure | structure_check | pointkinds | tags | sources |
+          namespaces | status | stale | validate_domain (`domain` required) |
+          audit (`point_kinds` optional) | dream_health | topics (`entity_id`)
+
+        Omit ``section`` → a combined dict of one entry per section that does not
+        require an argument, keyed by the section name. ⚠️ This is NOT the set the MCP
+        container folds: the transport's no-`section` summary is an OLDER envelope
+        (`mcp_server._OVERVIEW_DEFAULT_SUMMARY_KEYS`, kept byte-identical to what
+        `tortoise_overview` returned before the consolidation), so it keeps ``audit``
+        and ``dream_health`` OUT and carries its two transport-only sections
+        (``graphs``, ``health``) IN. Both folds are presentation; this one is the
+        container's. (#12951 review: the sentence here claimed the two were "the same
+        set", which they are not.)
+
+        ``structure_check`` keeps its own door live on purpose (#10914): that read
+        is the one member with a WRAP envelope (``list[dict]``) and the failure
+        repair that envelope carries cannot ride a ``-> Any`` container.
+        """
+        if section is None:
+            combined: dict[str, Any] = {}
+            for sec in self.GRAPH_OVERVIEW_SECTIONS:
+                if sec in self.GRAPH_OVERVIEW_NEEDS_ARGUMENT:
+                    continue
+                combined[sec] = self.graph_overview(
+                    sec, days=days, limit=limit, point_kinds=point_kinds)
+            return combined
+        if section == "taxonomy":
+            return self._taxonomy()
+        if section == "structure":
+            return self.summarize_structure()
+        if section == "structure_check":
+            return self.check_structure()
+        if section == "pointkinds":
+            return self._list_pointkinds()
+        if section == "tags":
+            return self._list_tags()
+        if section == "sources":
+            return self._list_sources()
+        if section == "namespaces":
+            return self._list_namespaces()
+        if section == "status":
+            return self._status()
+        if section == "stale":
+            return self.stale_points(days=days, limit=limit)
+        if section == "dream_health":
+            return self.dream_health_check()
+        if section == "validate_domain":
+            if not domain:
+                raise ValueError(
+                    "graph_overview(section='validate_domain') requires domain= "
+                    "— name the domain whose validators to run")
+            return self._validate_domain(domain)
+        if section == "audit":
+            return self.audit(point_kinds=point_kinds)
+        if section == "topics":
+            if not entity_id:
+                raise ValueError(
+                    "graph_overview(section='topics') requires entity_id= "
+                    "— name the entity whose topics to read")
+            return self._list_topics(entity_id)
+        raise ValueError(
+            f"graph_overview: unknown section {section!r}. Valid sections: "
+            f"{', '.join(self.GRAPH_OVERVIEW_SECTIONS)}")
+
+    #: The `mode=` values :meth:`search_knowledge` dispatches on.
+    SEARCH_KNOWLEDGE_MODES = (
+        "hybrid", "full_text", "tag", "sessions", "entry_points",
+        "issue_insight",
+    )
+
+    def search_knowledge(self, query: str | None = None, mode: str = "hybrid", *,
+                         kind: str | None = None,
+                         tag: str | None = None,
+                         entity_type: str = "point",
+                         limit: int | None = None,
+                         offset: int = 0,
+                         include_retracted: bool = False,
+                         min_confidence: float = 0.0,
+                         order_by: str = "relevance",
+                         threshold: float = 0.0,
+                         relationship_filter: str | None = None,
+                         traversal_path: str | None = None,
+                         agent: str | None = None,
+                         topics: list[str] | None = None,
+                         after: Any = None,
+                         before: Any = None,
+                         title: str | None = None,
+                         body: str | None = None,
+                         repo: str | None = None,
+                         **filters) -> Any:
+        """Find things by text — full-text and hybrid (row 3, `mode=`).
+
+        ONE search door. ``mode`` selects which question is being asked, and each
+        value answers with the rows its own read always returned:
+
+          hybrid (default) — meaning-ranked retrieval: RRF fusion of the FTS,
+              vector and structural legs, EP-annotated. Omitting ``query`` and
+              naming ``kind`` enumerates that kind instead (the full-scan mode).
+          full_text — exact matching with NO relevance ranking: pointKind and
+              property filters over a TOTAL order, so ``offset=`` walks the whole
+              population and the envelope carries ``total``/``hasMore``. The
+              engine has no standalone lexical leg (the RRF legs are fused, not
+              selectable), so "full text" here is the exact read, never a
+              vector-free hybrid — stated rather than implied.
+          tag — the Points reachable through one Tag. Sliced from a full scan, so
+              a walked tag page is approximate, not the complete set (#5346).
+              Retracted Points are excluded unless ``include_retracted=True`` —
+              the same tombstone contract as every other mode, applied here
+              because the accessor has no exclusion of its own.
+          sessions — indexed agent sessions, filtered by ``agent``/``topics`` and
+              bounded by ``after``/``before``.
+          entry_points — entity resolution: a natural-language query to matching
+              entities.
+          issue_insight — the "there is more in the graph" read for a would-be
+              issue (``title``, ``body``, ``repo``); call it BEFORE filing.
+
+        ``mode='full_text'`` is a DELEGATION to :meth:`list_knowledge` — the two
+        approved documents disagree about which container owns the exact claim
+        list (`docs/product/bridge-table.md` §D4 records it, and resolving it is
+        the owner's), so the read is implemented ONCE and both approved names
+        reach it.
+        """
+        mode = (mode or "hybrid").strip().lower()
+        if mode not in self.SEARCH_KNOWLEDGE_MODES:
+            raise ValueError(
+                f"search_knowledge: unknown mode {mode!r}. Valid modes: "
+                f"{', '.join(self.SEARCH_KNOWLEDGE_MODES)}")
+        if mode == "hybrid":
+            return self.tortoise_fts_query(
+                query=query, kind=kind, entity_type=entity_type,
+                min_confidence=min_confidence, order_by=order_by,
+                limit=10 if limit is None else limit, threshold=threshold,
+                relationship_filter=relationship_filter,
+                traversal_path=traversal_path,
+                include_terminal=include_retracted)
+        if mode == "full_text":
+            return self.list_knowledge(
+                "claim", point_kind=kind, limit=20 if limit is None else limit,
+                offset=offset, include_retracted=include_retracted, **filters)
+        if mode == "tag":
+            if not tag:
+                raise ValueError(
+                    "search_knowledge(mode='tag') requires tag= — name the Tag "
+                    "whose Points to read")
+            # #7983: `_record_reads=False` on the accessor, then record the page
+            # this call actually SERVES — this arm IS the paginated caller
+            # `query_points_by_tag`'s docstring warns about. Recording inside the
+            # accessor would count the WHOLE tag population for a call that
+            # receives one page of it, biased `f` HIGH (“the direction that must
+            # not happen”); recording nothing would leave the served rows
+            # unrecorded. The MCP tag arm performs the same two steps
+            # (`mcp_server.tortoise_query`), and the two must measure one thing.
+            rows = self.query_points_by_tag(tag, _record_reads=False)
+            # `query_points_by_tag` has no terminal-status exclusion of its own
+            # (it returns `properties(p)` for the whole tag population), so the
+            # `include_retracted=` this container DECLARES has to be applied
+            # here — the pre-existing door for the same question
+            # (`mcp_server.tortoise_query_points_by_tag`) filters
+            # `status != "retracted"` for exactly this reason (Epic #888).
+            # Unapplied, a caller who omitted the flag (every caller — the
+            # default is False) was served tombstones, and two live doors
+            # answering "the Points reachable through one Tag" would disagree
+            # about tombstones with no signal. Filtered BEFORE the slice, so
+            # `total`/`hasMore` describe the population the caller asked for.
+            if not include_retracted:
+                rows = [r for r in rows if r.get("status") != "retracted"]
+            page = rows[offset:offset + (limit or 100)]
+            _ledger_record("Point", page)  # #7983: the served page, not the tag
+            return {"results": page, "total": len(rows),
+                    "hasMore": offset + (limit or 100) < len(rows)}
+        if mode == "sessions":
+            if not query:
+                raise ValueError(
+                    "search_knowledge(mode='sessions') requires query= — the "
+                    "session search is text-driven")
+            return self._search_sessions(
+                query, agent=agent, topics=topics, after=after, before=before,
+                limit=10 if limit is None else limit, offset=offset)
+        if mode == "entry_points":
+            if not query:
+                raise ValueError(
+                    "search_knowledge(mode='entry_points') requires query= — "
+                    "entity resolution is text-driven")
+            return self._suggest_entry_points(
+                query, limit=5 if limit is None else limit, kind_filter=kind)
+        # mode == "issue_insight"
+        subject = title or query
+        if not subject:
+            raise ValueError(
+                "search_knowledge(mode='issue_insight') requires title= (or "
+                "query=) — the insight is matched against a would-be issue")
+        return self.issue_insight(
+            subject, body=body, repo=repo, limit=2 if limit is None else limit)
+
+    #: The `kind=` values :meth:`list_knowledge` dispatches on.
+    LIST_KNOWLEDGE_KINDS = (
+        "claim", "source", "source_reliability", "batch", "namespace",
+        "topic", "diary",
+    )
+
+    def list_knowledge(self, kind: str = "claim", *,
+                       point_kind: str | None = None,
+                       id: str | None = None,
+                       url: str | None = None,
+                       entity_id: str | None = None,
+                       agent: str | None = None,
+                       wing: str | None = None,
+                       limit: int = 20,
+                       offset: int = 0,
+                       include_retracted: bool = False,
+                       **filters) -> Any:
+        """One list method; ``kind=`` selects the collection (row 4).
+
+        Browse and filter WITHOUT a text search. ``kind`` is a closed set and
+        every value answers with the rows its own read returned:
+
+          claim (default) — Points by pointKind/property filters, paged over a
+              TOTAL order: ``{results, total, hasMore}``, so ``offset=`` walks it
+              to completion.
+          source — every PROVENANCE Source with its point count (the
+              ``documentKind IS NULL`` partition, D10).
+          source_reliability — one Source's derived reliability (``url=``
+              required). It is its own arm because the read RECOMPUTES and caches
+              the derivation, which is why the MCP door for it is not a read.
+          batch — with ``id=``: one bundle's stamped artifacts; without: the most
+              recent batch ids with their counts.
+          namespace — installed pack namespaces with kind counts.
+          topic — one entity's topic profile (``entity_id=`` required).
+          diary — an agent's recent diary entries, newest first.
+
+        Paging is a CONTRACT, not decoration (AIP-158, and this surface's own
+        row 4): a list that hits its cap must say so and hand back a way to
+        continue. ``claim`` publishes ``total``/``hasMore``; the tag read pages
+        through :meth:`search_knowledge` (``mode="tag"``), because ``tag`` is not
+        one of :data:`LIST_KNOWLEDGE_KINDS`. The
+        collections that are inherently whole-vocabulary (``source``,
+        ``namespace``, ``batch``) are bounded by ``limit`` and are documented as
+        capped where they are capped, never silently short.
+        """
+        kind = (kind or "claim").strip().lower()
+        if kind not in self.LIST_KNOWLEDGE_KINDS:
+            raise ValueError(
+                f"list_knowledge: unknown kind {kind!r}. Valid kinds: "
+                f"{', '.join(self.LIST_KNOWLEDGE_KINDS)}")
+        if kind == "claim":
+            return self.paginated_query(
+                kind=point_kind, skip=offset, limit=limit,
+                include_retracted=include_retracted, **filters)
+        if kind == "source":
+            return self._list_sources()
+        if kind == "source_reliability":
+            if not url:
+                raise ValueError(
+                    "list_knowledge(kind='source_reliability') requires url= "
+                    "— the reliability is derived for one Source")
+            return self.get_source_reliability(url)
+        if kind == "batch":
+            if id:
+                return self.list_batch(id)
+            return self.list_batches(limit=limit)
+        if kind == "namespace":
+            return self._list_namespaces()
+        if kind == "topic":
+            if not entity_id:
+                raise ValueError(
+                    "list_knowledge(kind='topic') requires entity_id= — the "
+                    "topic profile is per entity")
+            return self._list_topics(entity_id)
+        # kind == "diary"
+        if not agent:
+            raise ValueError(
+                "list_knowledge(kind='diary') requires agent= — the diary is "
+                "read per author")
+        return self._diary_read(agent, last_n=limit, wing=wing)
+
+    def check_confidence(self, claim_id: str | None = None, *,
+                         topic: str | None = None,
+                         session: bool = False,
+                         calibrate: bool = False,
+                         include_provenance: bool = False,
+                         limit: int = 50,
+                         require_calibration: bool | None = None) -> Any:
+        """How confident the graph is — the confidence view ONLY (row 5).
+
+        The container answers with the confidence VIEW; it never recomputes the
+        posterior (that is :meth:`compute_confidence`'s job, and the reason
+        `compute_confidence` stays its own entry). ⚠️ It is NOT write-free: the
+        ``claim_id`` arm reaches :meth:`get_confidence`, whose lazy-consistency
+        path dreams a DIRTY root (``self.dream(dirty_only=True, …)``) — a write
+        that PRE-DATES this container and is unchanged by it, which is also why
+        the MCP door for this row is tiered ``maintenance`` rather than ``read``.
+        Dispatch is by argument, as `docs/product/bridge-table.md` Part A
+        records for this target:
+
+          claim_id= — one claim's EP posterior ``{mean, variance, alpha, beta}``;
+              ``include_provenance=True`` adds the chain behind it.
+          topic= — the dated belief chain for a topic, oldest window first.
+          session=True — what happened last session, including its confidence
+              changes.
+          calibrate=True — the graph-wide calibration audit, per point.
+          (no selector) — the graph-wide calibration audit, which is the answer
+              to "how confident is this graph" rather than "how confident is
+              this claim".
+
+        ``require_calibration`` is forwarded verbatim to the EP read; ``None``
+        keeps the shared posture (default fail-closed, #344).
+        """
+        if claim_id:
+            view = self.get_confidence(
+                claim_id, require_calibration=require_calibration)
+            if not include_provenance:
+                return view
+            return {
+                "confidence": view,
+                "provenance": self._provenance(claim_id),
+            }
+        if topic:
+            return self.belief_timeline(topic, limit=limit)
+        if session:
+            return self.session_context()
+        # calibrate=True, and the no-selector default: the graph-wide view.
+        return self.calibrate_summary()
+
+    def explore_connections(self, node_id: str | None = None, *,
+                            query: str | None = None,
+                            hops: int = 2,
+                            include_content: bool = False,
+                            point_kind: str | None = None,
+                            confidence_min: float | None = None) -> Any:
+        """Walk outward from a node through its links (row 8).
+
+        Dispatch is by argument, as the bridge table records for this target:
+
+          node_id= — the entity-centric BFS from that node: its neighbours
+              categorised by layer.
+          node_id= + include_content=True — the EXPAND payload for one Point:
+              every neighbour's full text, not just its state entry (the
+              list/expand split, #1353).
+          query= — resolve a natural-language query to the nodes it names, then
+              walk from the best one. This is the capability `traverse` used to
+              provide and that had NO door at all after #4282 deleted the name
+              without landing its target: the walk is reachable from the SDK
+              again here.
+
+        ``hops`` bounds the BFS; the walk is the navigation module's, not a second
+        traversal implementation.
+        """
+        if not node_id and not query:
+            raise ValueError(
+                "explore_connections requires node_id= (walk from this node) or "
+                "query= (resolve a name, then walk from it)")
+        if not node_id:
+            hits = self._suggest_entry_points(query, limit=1)
+            if not hits:
+                return {"error": f"explore_connections: query {query!r} matched "
+                                 "no node to walk from", "results": []}
+            node_id = hits[0]["id"] if isinstance(hits[0], dict) else hits[0]
+            if node_id and isinstance(node_id, dict):  # pragma: no cover - shape guard
+                node_id = node_id.get("id")
+        if include_content:
+            return self._expand_relationships(node_id)
+        from .navigation import entityProfile
+        proj = self._get_proj()
+        return entityProfile(
+            proj.db,
+            getattr(proj, "graph_name", "tortoise"),
+            node_id, hops=hops, pointKind=point_kind,
+            confidenceMin=confidence_min)
+
+    #: The `kind=` values :meth:`review_link_candidates` dispatches on.
+    REVIEW_LINK_CANDIDATE_KINDS = ("connections", "dedup", "cross_lens")
+
+    def review_link_candidates(self, kind: str = "connections", *,
+                               mode: str = "both",
+                               scope: str | None = None,
+                               candidate_type: str = "content",
+                               limit: int | None = None,
+                               threshold: float | None = None) -> Any:
+        """Connections found but not made — READ-ONLY (row 10).
+
+        The review queue for links the graph has not asserted. Dispatch is by
+        argument, as the bridge table records for this target:
+
+          connections (default) — related-but-missing suggestions and illogical or
+              stale links (``mode`` selects add / prune / both; ``scope`` narrows
+              the pool to the retrieval-nearest points).
+          dedup — the deduplication review queue (``candidate_type`` selects the
+              content or entity queue).
+          cross_lens — unverified cross-source candidate pairs over the vector
+              index.
+
+        Nothing here writes. Accepting a candidate is
+        :meth:`link_entities` with its endpoints — never a side effect of reading
+        the queue (the candidates-never-write contract, #438).
+
+        ``limit`` bounds EVERY arm, not just ``dedup`` (#12951 review): the
+        parameter is advertised on the public door, so an arm that dropped it
+        answered with the callee's own bound while the caller believed it had
+        asked for N — the silently-dropped-argument failure this surface exists
+        to kill. ``None`` (the default) preserves each callee's bound exactly, so
+        a caller that does not pass it gets byte-identical behaviour to before
+        the fix: ``connections`` maps it onto ``add_limit``/``prune_limit``,
+        ``cross_lens`` onto ``max_candidates`` (and ``top_k``, capped at the ANN
+        pool), ``dedup`` onto its own ``limit``.
+        """
+        kind = (kind or "connections").strip().lower()
+        if kind not in self.REVIEW_LINK_CANDIDATE_KINDS:
+            raise ValueError(
+                f"review_link_candidates: unknown kind {kind!r}. Valid kinds: "
+                f"{', '.join(self.REVIEW_LINK_CANDIDATE_KINDS)}")
+        if kind == "connections":
+            extra = {} if limit is None else {
+                "add_limit": limit, "prune_limit": limit}
+            return self.review_connections(mode=mode, scope=scope, **extra)
+        if kind == "dedup":
+            extra = {} if limit is None else {"limit": limit}
+            return self._list_dedup_candidates(
+                candidate_type=candidate_type, **extra)
+        extra = {} if limit is None else {
+            "max_candidates": limit, "top_k": min(limit, CROSS_LENS_ANN_TOP_K)}
+        return self.get_cross_lens_candidates(
+            threshold=DEFAULT_THRESHOLD if threshold is None else threshold,
+            **extra)
+
     # ── Chain Integrity ───────────────────────────────────────────
 
     def check_structure(self) -> list[dict]:
@@ -28160,7 +29406,7 @@ class TortoiseSDK:
             "product-strategy", proj)
         return to_legacy_shape(violations)
 
-    def validate_domain(self, domain: str) -> dict:
+    def _validate_domain(self, domain: str) -> dict:
         """Run a domain's graph-surface validators (issue #405) — advisory,
         read-only, on-demand. Returns
         ``{domain, ok, violations, drift}`` where violations are enriched,
@@ -28273,12 +29519,12 @@ class TortoiseSDK:
 
     # ── Taxonomy ─────────────────────────────────────────────────
 
-    def taxonomy(self) -> dict[str, int]:
+    def _taxonomy(self) -> dict[str, int]:
         """Count entities by node label. Returns {Point: N, Event: N, ...}."""
         from .taxonomy import taxonomy as _taxonomy
         return _taxonomy(self._get_proj())
 
-    def list_pointkinds(self) -> list[dict]:
+    def _list_pointkinds(self) -> list[dict]:
         """All pointKinds present in the graph with counts. Returns [{kind, count, pack}].
 
         #2205: same non-operator predicate as summarize_structure (absence-or-
@@ -28303,7 +29549,7 @@ class TortoiseSDK:
             result.append({"kind": kind, "count": count, "pack": pack})
         return result
 
-    def list_sources(self) -> list[dict]:
+    def _list_sources(self) -> list[dict]:
         """All PROVENANCE Sources with point counts.
 
         Returns [{url, sourceKind, points}]. D10 (ONTOLOGY v3.15 §4.4): a
@@ -28328,7 +29574,7 @@ class TortoiseSDK:
             for row in rows
         ]
 
-    def list_tags(self) -> list[dict]:
+    def _list_tags(self) -> list[dict]:
         """All Tag names with count of tagged Points. Returns [{name, count}].
 
         Orphaned :Tag nodes (no TAGGED edges) are garbage-collected when
@@ -28365,7 +29611,7 @@ class TortoiseSDK:
             _ledger_record("Point", points)  # #7983: a product read of these keys
         return points
 
-    def list_namespaces(self) -> list[dict]:
+    def _list_namespaces(self) -> list[dict]:
         """Installed pack namespaces with kind counts. Returns [{namespace, name, kind_count}]."""
         registry = _get_kind_expander()
         packs = registry.list_packs()
@@ -28378,7 +29624,7 @@ class TortoiseSDK:
             for p in packs
         ]
 
-    def list_topics(self, entity_id: str) -> dict:
+    def _list_topics(self, entity_id: str) -> dict:
         """entityProfile lite for an entity. Returns {id, pointKind, context, neighbors, neighborCounts}."""
         from .taxonomy import list_topics as _list_topics
         return _list_topics(self._get_proj(), entity_id)
@@ -34581,7 +35827,7 @@ class TortoiseSDK:
             return None
         return raw_entry(rows[0][0], source_id=(rows[0][0] or {}).get("url"))
 
-    def provenance(self, point_id: str) -> dict:
+    def _provenance(self, point_id: str) -> dict:
         """Provenance chain — "Who decided this?" Point → Subject → delegation."""
         point = self.get_point(point_id)
         if not point:
@@ -38358,9 +39604,20 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         # #689: retracted points must not feed Beta priors into EP.
+        #
+        # #13034: the hand-written `status <> 'retracted'` test below this
+        # comment was a SUBSET of the terminal vocabulary, so a claim ended by
+        # `superseded`/`deprecated`/`archived` (or by the legacy `outdated`
+        # flag, or by `isClosed`/a terminal pipeline stage) kept its stored
+        # prior in the SDK's persistent evidence set. Measured consequence: the
+        # hydrated ghost is passed to EP as an evidence ROOT, so a run
+        # (`compute_confidence()` with no anchors) assembled the operator wired
+        # to it and WROTE a fresh posterior onto a live downstream claim that
+        # nothing had touched — a dead claim voting by proxy. The shared
+        # predicate is the one rule every other read surface applies.
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
-            "AND (n.status IS NULL OR n.status <> 'retracted') "
+            f"AND {_terminal_excluded('n.status')} "
             "RETURN n.id, n.ep_alpha, n.ep_beta"
         ).result_set
         for pid, alpha, beta in rows:
@@ -40791,7 +42048,7 @@ class TortoiseSDK:
             props["wing"] = wing
         return self.create_point("diary", entry, **props)
 
-    def diary_read(self, agent_name: str, last_n: int = 10,
+    def _diary_read(self, agent_name: str, last_n: int = 10,
                    wing: str | None = None) -> list[dict]:
         """Read recent diary entries for an agent, newest first."""
         proj = self._get_proj()
@@ -40811,7 +42068,7 @@ class TortoiseSDK:
             ).result_set
         return [r[0] for r in rows]
 
-    def status(self) -> dict:
+    def _status(self) -> dict:
         """Graph health + entity counts + FalkorDB connectivity.
 
         Returns {connected, counts: {Point, Event, ...}, total_entities}.
@@ -40823,7 +42080,7 @@ class TortoiseSDK:
             connected = True
         except Exception:
             pass
-        counts = self.taxonomy()
+        counts = self._taxonomy()
         total = sum(counts.values())
         result = {"connected": connected, "counts": counts, "total_entities": total}
         if self._namespace:
@@ -41429,7 +42686,7 @@ class TortoiseSDK:
 
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────
 
-    def suggest_entry_points(self, query: str, *, limit: int = 5,
+    def _suggest_entry_points(self, query: str, *, limit: int = 5,
                              kind_filter: str | None = None,
                              graph_ranker=None) -> list[dict]:
         """Entity resolution — NL query → matching entities from the graph.
@@ -42984,6 +44241,16 @@ class TortoiseSDK:
         if strategies.get("vector") and query and query.strip():
             from .embeddings import EmbeddingModel
             from .exceptions import EmbedderUnavailableError
+            # #10893: stage marks for the wait-bound breach. `mark` is a NO-OP
+            # when no timeline is bound (every CLI/test/SDK-user process), so
+            # this costs one ContextVar read per boundary — see
+            # `tortoise/read_stages.py` for why the instrument must not be able
+            # to look like the latency it measures.
+            # ⛔ `embed_get` and `embed_encode` are SEPARATE stages on purpose: a
+            # COLD LOAD (~57 s measured) is setup the #4055 exemption already
+            # excuses, while an ENCODE is work this request owns. Collapsing
+            # them is how the two got argued as one thing on #10893.
+            _mark_read_stage(STAGE_EMBED_GET)
             model = None
             try:
                 model = EmbeddingModel.get()
@@ -42997,6 +44264,7 @@ class TortoiseSDK:
                 # ``no_embedder`` term names — carry the recorded cause.
                 _vec_reason = EmbeddingModel.absent_reason()
             else:
+                _mark_read_stage(STAGE_EMBED_ENCODE)
                 try:
                     query_vec = model.encode([_dense_query])[0].tolist()
                 except Exception:  # noqa: BLE001, RUF100
@@ -43136,6 +44404,12 @@ class TortoiseSDK:
             tuple(expanded_kinds)
             if leg_trace is not None and query_vec is not None
             and expanded_kinds else None)
+        # #10893: ONE stage for all three retrieval legs plus the expansion
+        # passes below that re-ask the store. The legs run in PARALLEL under a
+        # per-leg deadline, so a per-leg sum would exceed the stage that
+        # contains it; per-leg detail already has its own channel (`leg_trace`,
+        # a different question).
+        _mark_read_stage(STAGE_RETRIEVAL)
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -43631,6 +44905,7 @@ class TortoiseSDK:
                 # order by itself.
                 from tortoise.search_engine import clamp_lexical_fusion_weight
                 fusion_weights = clamp_lexical_fusion_weight(fusion_weights)
+            _mark_read_stage(STAGE_FUSION)
             fused = rrf_fusion(
                 ranked_lists,
                 strategy_names=list(raw_results.keys()),
@@ -44441,6 +45716,10 @@ class TortoiseSDK:
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)
+        # #10893: the decoration read is the FIRST of the two graph round trips
+        # on this path (step 7's batch content fetch is the second), and the one
+        # a breach never used to be able to name.
+        _mark_read_stage(STAGE_EP_ANNOTATION)
         ep_breakdowns = annotate_ep_batch(graph, result_ids) if entity_type == "point" else {}
 
         # 7. Fetch entity content in BATCH (not N+1)
@@ -44956,6 +46235,12 @@ class TortoiseSDK:
                 r.subject_unavailable = SUBJECT_BINDING_UNAVAILABLE
 
         # 9. Order results
+        # #10893 review F1: the ordering pass is a READ of its own on the graph
+        # branch (`GraphRanker.rerank` -> its own `_fetch_signals`, plus W4
+        # enrichment), so it gets its own stage. Without it those round trips
+        # were charged to `ep_annotation` AFTER that stage had returned — a
+        # confident lie, which is the one thing this instrument must not do.
+        _mark_read_stage(STAGE_ORDERING)
         if order_by == "graph":
             # #25: graph-informed rerank — weighted fusion of similarity +
             # persisted EP confidence + operator connectivity + recency decay.
@@ -44988,6 +46273,11 @@ class TortoiseSDK:
             # and makes no claim. A duck-typed `graph_ranker` whose read we
             # cannot observe makes no claim either (None ⇒ key absent).
             _consulted, _answered = _belief_read(ranker, ranked)
+            # #10893 review F1: this branch RETURNS here, so without a mark of
+            # its own it would never reach the terminal stage and a breach in
+            # response assembly would be published as `ordering` — blaming the
+            # rerank for time the answer took to be written out.
+            _mark_read_stage(STAGE_RESPONSE)
             return _with_read_status(_belief_label(
                 ranked, consulted=_consulted, answered=_answered))
         belief_consulted = False
@@ -45062,6 +46352,10 @@ class TortoiseSDK:
         from .ranking import annotate_belief_order as _belief_label
         # `answered` is only meaningful on the confidence path, which is the
         # only one that reads (`read` stays None on the relevance path).
+        # #10893: TERMINAL stage. A breach that lands here says "the read is
+        # DONE and the answer is late" — the one attribution that points at
+        # response assembly or a blocked loop rather than at any retrieval step.
+        _mark_read_stage(STAGE_RESPONSE)
         return _with_read_status(_belief_label(
             out, consulted=belief_consulted,
             answered=answered if order_by == "confidence" else None))
@@ -45526,7 +46820,7 @@ class TortoiseSDK:
         merged.extend((pid, s) for pid, s in vector_hits if pid not in seen)
         return merged
 
-    def expand_relationships(self, point_id: str) -> list[dict]:
+    def _expand_relationships(self, point_id: str) -> list[dict]:
         """Full relationship payload for a single Point, incl. related_content (#1353 D14).
 
         The expand side of the list/expand split: search list view carries bounded
@@ -46767,6 +48061,28 @@ class TortoiseSDK:
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
     # ── Control Plane: Org CRUD ───────────────────────────────────
+    #
+    # ⛔ #12901 wave 2 (2026-11-16): every method that was a PUBLIC SDK door in the
+    # control-plane sections below (`Org CRUD`, `Membership CRUD`, `APIKey CRUD`,
+    # `Agent signup tokens`, `Invitation CRUD`) is now PRIVATE — the `_` prefix on
+    # `_graph_delete`/`_trash_graphs`/`_graph_key_ids`/`_graph_active_key_count`/
+    # `_org_get`/`_membership_create`/`_apikey_*`/`_signup_token_*`/`_invitation_*`/
+    # `_sweep_invite_ghost_memberships` is the marker. The
+    # canonical inventory's control-plane partition (N1–N6 in
+    # `docs/product/canonical-sdk-methods.md`) is console/hosted plumbing, not
+    # customer product surface, and the owner-approved beta surface allocates those
+    # capabilities to the tenancy block (`get_organisation_account`, `create_key`,
+    # `list_keys`, `revoke_key`, `add_member`, `delete_memory_graph`, …) — not to
+    # per-table CRUD. The BODIES all survive, privately, because `tortoise/hosted_api.py`,
+    # `tortoise/__main__.py` and `tortoise/mcp_auth.py` are their only callers: closing
+    # the door loses no capability, which is the `capture_session` -> `_capture_session`
+    # precedent recorded in `tortoise/sdk_retired.py`.
+    #
+    # Each departure is recorded in `sdk_retired.py::REMOVED_SDK_METHODS` (with its
+    # recorded destination in `WAVE2_DELETION_DESTINATIONS`) and pinned by
+    # `tests/test_sdk_retirement.py` + `tests/test_12901_wave2_control_plane.py`.
+    # Do NOT re-publicise one of these names without the owner's approval (AGENTS.md →
+    # "MCP/SDK Surface Approval").
 
     def org_create(self, name: str, *, idempotency_key: str | None = None,
                     mint_key: bool = True, owner_user_id: str | None = None) -> dict:
@@ -46961,7 +48277,7 @@ class TortoiseSDK:
             # membership upsert (role=owner, status=active, user_id=session
             # user) and membership_create (BELONGS_TO edge).
             if owner_user_id:
-                self.membership_create(tid, owner_user_id, "owner")
+                self._membership_create(tid, owner_user_id, "owner")
         except Exception:
             try:  # noqa: SIM105
                 reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t",
@@ -47117,7 +48433,7 @@ class TortoiseSDK:
             params={"tid": org_id},
         ).result_set[0][0]
 
-    def graph_delete(self, org_id: str, graph_id: str) -> bool:
+    def _graph_delete(self, org_id: str, graph_id: str) -> bool:
         """Soft-delete a Graph node (status='deleted' tombstone — the v1
         lifecycle, C2 #2111). Returns True when a non-default node was
         tombstoned; False when unknown OR the default (callers map to
@@ -47173,7 +48489,7 @@ class TortoiseSDK:
         ).result_set
         return bool(res and int(res[0][0]) > 0)
 
-    def trash_graphs(self, org_id: str) -> list[dict]:
+    def _trash_graphs(self, org_id: str) -> list[dict]:
         """#2304: tombstoned custom nodes of an org (the trash list) — the
         owner restore surface. ``deleted_at`` absent = legacy tombstone
         (predates the prop; purge treats it as past-grace). Purged nodes
@@ -47287,7 +48603,7 @@ class TortoiseSDK:
             )
         return True
 
-    def graph_key_ids(self, org_id: str, graph_id: str) -> list[str]:
+    def _graph_key_ids(self, org_id: str, graph_id: str) -> list[str]:
         """APIKey node ids bound to a graph — the delete-cascade source
         (every key dies with the graph, E2E-8). Revoked or not — the
         cascade must revoke rows that are somehow still active AND clean
@@ -47299,7 +48615,7 @@ class TortoiseSDK:
         ).result_set
         return [r[0] for r in rows]
 
-    def graph_active_key_count(self, org_id: str, graph_id: str) -> int:
+    def _graph_active_key_count(self, org_id: str, graph_id: str) -> int:
         """ACTIVE (non-revoked) APIKey nodes bound to a graph — the
         key_count source for GET /v1/graphs (parity with the Supabase
         count_graph_keys seam; C2 P2: graph_key_ids is the cascade source
@@ -47322,7 +48638,7 @@ class TortoiseSDK:
         ).result_set
         return int(rows[0][0]) if rows else 0
 
-    def org_get(self, org_id: str) -> dict | None:
+    def _org_get(self, org_id: str) -> dict | None:
         """Get an org by ID. Returns None if not found."""
         reg = self._get_registry()
         rows = reg.query(
@@ -47463,7 +48779,7 @@ class TortoiseSDK:
             # present the disagreement diagnosis below still runs in full, in
             # every mode (a registry-written org is a real state even on a
             # Supabase deployment).
-            if self._get_registry(create=False) is not None and self.org_get(org_id) is not None:
+            if self._get_registry(create=False) is not None and self._org_get(org_id) is not None:
                 raise ControlPlaneError(
                     f"get_organisation_account cannot answer for {org_id!r}: the "
                     "account exists in this SDK's control plane but not in the one "
@@ -47490,7 +48806,7 @@ class TortoiseSDK:
         }
     # ── Control Plane: Membership CRUD ─────────────────────────────
 
-    def membership_create(self, org_id: str, user_id: str, role: str) -> dict:
+    def _membership_create(self, org_id: str, user_id: str, role: str) -> dict:
         """Add a user to an org with a given role.
 
         Validates role, org existence, and max_users constraint.
@@ -47504,7 +48820,7 @@ class TortoiseSDK:
                 f"Invalid role {role!r}. Must be 'owner', 'admin', or 'member'."
             )
 
-        org = self.org_get(org_id)
+        org = self._org_get(org_id)
         if org is None:
             raise ControlPlaneError(f"Team {org_id!r} not found")
 
@@ -47586,7 +48902,7 @@ class TortoiseSDK:
                 out.append(props)
         return out
 
-    def apikey_create(self, org_id: str, created_by: str,
+    def _apikey_create(self, org_id: str, created_by: str,
                       *, graph_id: str | None = None,
                       scopes: list | None = None,
                       created_by_key_id: str | None = None,
@@ -47640,7 +48956,7 @@ class TortoiseSDK:
                     _ESCALATION_SCOPES & set(scopes))) + ".",
             )
 
-        org = self.org_get(org_id)
+        org = self._org_get(org_id)
         if org is None:
             raise ControlPlaneError(f"Team {org_id!r} not found")
 
@@ -47689,7 +49005,7 @@ class TortoiseSDK:
                      resource_type="apikey", resource_id=kid)
         return {"id": kid, "key_prefix": key_prefix, "api_key": api_key,
                 "org_id": org_id, "created_at": now}
-    def apikey_revoke(self, key_id: str) -> dict:
+    def _apikey_revoke(self, key_id: str) -> dict:
         """Revoke an API key (soft delete — sets revoked_at). Idempotent."""
         from datetime import datetime, timezone
         reg = self._get_registry()
@@ -47710,7 +49026,7 @@ class TortoiseSDK:
                      resource_type="apikey", resource_id=key_id)
         return {"revoked": True, "key_id": key_id, "revoked_at": now}
 
-    def apikey_verify(self, key_plaintext: str) -> dict | None:
+    def _apikey_verify(self, key_plaintext: str) -> dict | None:
         """Verify an API key against stored hashes.
 
         Returns {org_id, key_id} if valid, None if not found or revoked.
@@ -47794,7 +49110,7 @@ class TortoiseSDK:
     # process-local lock (parity with the Supabase lane's FOR UPDATE row
     # lock — the non-bootstrap key cap cannot overshoot under concurrency).
 
-    def signup_token_lookup(self, token_plaintext: str) -> dict | None:
+    def _signup_token_lookup(self, token_plaintext: str) -> dict | None:
         """Resolve a signup token → its node props; None when unknown/revoked.
 
         Registry parity for resolve_signup_token (Supabase lane). The caller
@@ -47825,7 +49141,7 @@ class TortoiseSDK:
             ]
         return matches[0] if matches else None
 
-    def signup_token_recover(self, token_plaintext: str) -> dict:
+    def _signup_token_recover(self, token_plaintext: str) -> dict:
         """Keyless recovery: mint a NEW key on the token's org.
 
         Registry parity for recover_team_key (Supabase lane). Cap + revoke-
@@ -47839,11 +49155,11 @@ class TortoiseSDK:
         from datetime import datetime, timezone as _tz  # noqa: I001
         from .exceptions import ControlPlaneError
 
-        node = self.signup_token_lookup(token_plaintext)
+        node = self._signup_token_lookup(token_plaintext)
         if node is None:
             raise ControlPlaneError("signup token not found or revoked")
         org_id = node.get("org_id") or ""
-        org = self.org_get(org_id)
+        org = self._org_get(org_id)
         if org is None or org.get("deleted_at"):
             raise ControlPlaneError("signup token team deleted")
 
@@ -47856,7 +49172,7 @@ class TortoiseSDK:
         reg = self._get_registry()
         with _SIGNUP_TOKEN_RECOVER_LOCK:
             # re-verify under the lock (parity with the FOR UPDATE re-check)
-            node = self.signup_token_lookup(token_plaintext)
+            node = self._signup_token_lookup(token_plaintext)
             if node is None:
                 raise ControlPlaneError("signup token not found or revoked")
             if node.get("org_id") != org_id:
@@ -47926,7 +49242,7 @@ class TortoiseSDK:
                 "org_name": org.get("name"), "tier": org.get("tier") or "free",
                 "graph_name": org.get("graph_name") or f"org_{org_id}"}
 
-    def signup_token_revoke(self, token_plaintext: str, org_id: str) -> dict:
+    def _signup_token_revoke(self, token_plaintext: str, org_id: str) -> dict:
         """Revoke a signup token (set revoked_at) — registry parity (#1715).
 
         Org-scoped: the SignupToken node's org_id must match ``org_id`` or
@@ -47992,7 +49308,7 @@ class TortoiseSDK:
         return int(tier_limits("free").get("max_api_keys", 2))
 
     # ── Control Plane: Invitation CRUD ─────────────────────────────
-    def invitation_list(self, org_id: str) -> list[dict]:
+    def _invitation_list(self, org_id: str) -> list[dict]:
         """List invitations for an org (no token hashes)."""
         reg = self._get_registry()
         rows = reg.query(
@@ -48009,7 +49325,7 @@ class TortoiseSDK:
                 "expires_at": r[5], "accepted_at": r[6], "status": r[7],
             })
         return invs
-    def invitation_get_by_id(self, invitation_id: str) -> dict | None:
+    def _invitation_get_by_id(self, invitation_id: str) -> dict | None:
         """Get an invitation by its ULID."""
         reg = self._get_registry()
         rows = reg.query(
@@ -48018,9 +49334,9 @@ class TortoiseSDK:
         ).result_set
         return rows[0][0] if rows else None
 
-    def invitation_revoke(self, invitation_id: str) -> dict:
+    def _invitation_revoke(self, invitation_id: str) -> dict:
         """Revoke an invitation (soft delete). Idempotent."""
-        inv = self.invitation_get_by_id(invitation_id)
+        inv = self._invitation_get_by_id(invitation_id)
         if inv is None:
             return {"revoked": False, "reason": "not found"}
         if inv.get("status") == "revoked":
@@ -48034,7 +49350,7 @@ class TortoiseSDK:
         self._audit(inv["org_id"], None, "invitation_revoke",
                      resource_type="invitation", resource_id=invitation_id)
         return {"revoked": True, "invitation_id": invitation_id}
-    def sweep_invite_ghost_memberships(self, *, dry_run: bool = False) -> dict:
+    def _sweep_invite_ghost_memberships(self, *, dry_run: bool = False) -> dict:
         """#1908: one-time backfill sweep for pre-#1880 invite-{iid} ghosts.
 
         Deletes Membership rows whose user_id matches 'invite-*' when the
@@ -49263,6 +50579,556 @@ class TortoiseSDK:
         return resolve_or_mint(self._get_proj().g, label, name,
                                explicit_id=explicit_id)[0]
 
+    def _assert_supersession_names_a_successor(self, id_val: str, props: dict,
+                                               point_ids) -> None:
+        """ONTOLOGY §4.3's invariant at the WRITE door (#12592).
+
+        §4.3 states, for every entity that carries the word:
+
+            ``superseded`` means replaced: it names the successor; a retirement
+            with no successor is ``archived``; ``deprecated`` is an independent
+            terminal state and needs no successor. A journal rebuild is unchanged
+            and still restores a supersession recorded without a successor.
+
+        Measured before this guard (``main`` at 58f904ccf7, embedded engine,
+        throwaway nodes) — the first three rows are the defect, the fourth shows
+        the pair IS expressible through this door once the successor is named::
+
+            update_knowledge(<Point>,   status='superseded')  -> ACCEPTED  supersededBy=None
+            update_knowledge(<Object>,  status='superseded')  -> ACCEPTED  supersededBy=None
+            update_knowledge(<Subject>, status='superseded')  -> ACCEPTED  supersededBy=None
+            update_knowledge(<either>,  status='superseded', supersededBy='v2') -> ACCEPTED
+
+        A row that says `superseded` while naming nothing is a state the model
+        does not have: the word's MEANING is "replaced by", so with no partner it
+        asserts a replacement that does not exist. That is why this is not a
+        vocabulary question (`#10371` refused to make the Object vocabulary
+        closed) and not the #10192 coherence question (that one guards the
+        carrier's own record column): it is the model's own sentence, enforced at
+        the door that can store the word.
+
+        ⛔ THE ASYMMETRY WITH REPLAY IS DELIBERATE, NOT AN OVERSIGHT. §4.3's own
+        last clause says a journal rebuild still restores a supersession recorded
+        WITHOUT a successor — a legacy/pre-fix journal, or a raw producer, can
+        carry that shape, and a replay fold that refuses it would refuse to
+        rebuild history. So the fold's `SET n += $state` arm is untouched, and
+        the refusal lives HERE, at the live write door, where a caller can still
+        supply the missing half. Do not "fix" this by teaching the fold the same
+        refusal: that would reverse §4.3's recorded clause and drop rows from
+        every rebuild of an existing journal.
+
+        ⛔ NOT #12403. That issue records the wider residual that this door still
+        accepts a DECLARED terminalizing POINT target and writes no
+        `CORRECTS` successor record. This guard closes only the half §4.3 names —
+        the word without a pointer — and says so in the repair, which names
+        :meth:`supersede_knowledge` (the door that also mints the edge) rather than
+        prescribing the bare pair for a Point.
+
+        ⛔ SCOPE: THE **UPDATE** DOOR, AND THE CREATE DOOR IS A DISCLOSED RESIDUAL.
+        `create_object("X", kind, status='superseded')` / `create_subject(...)`
+        can still mint a born-superseded row naming nothing. That is not an
+        oversight and not silently left: #12592's decided scope is
+        "`update_knowledge(...)` writing `status='superseded'` with no successor",
+        and the born-superseded shape has a second, legitimate role — a
+        record-sourced rebuild re-creates a row that a journal recorded as
+        superseded (`tortoise/cache_projection.py`'s head comment documents
+        `create_object(name, status='superseded')` among the shapes the cache
+        must tolerate), so closing it here would need the SAME replay
+        carve-out the update door gets from §4.3's last clause, plus a
+        decision on how an ON-MATCH re-create may restate a carried row. Recorded
+        on #12592 rather than guessed at here.
+
+        The verdict is over EVERY row the write binds (#7822's fan-out rule, not
+        Point-specific): a write that leaves ANY bound row naming nothing is the
+        claim this guard exists to refuse.
+        """
+        # ⛔ A CALL THAT WRITES `status` TWICE IS NOT THIS GUARD'S TO ANSWER
+        # (#12882 merge, measured). `_status_write_is_ambiguous` refuses it with
+        # its own pinned message — and that message is the one the caller is
+        # promised. Reading the first-wins value here instead pre-empted it: with
+        # `{<content 'superseded', __str__ 'status'>: 'superseded', 'status':
+        # 'live'}` this guard saw the word `superseded` and raised the
+        # successorless refusal, so `test_a_hostile_repr_cannot_replace_the_
+        # refusal` never reached the sibling door. Fail closed where the sibling
+        # does, and let it speak. (Same lesson as the off-word and non-`str`
+        # deferrals below.)
+        if _status_write_is_ambiguous(props):
+            return
+        # ⛔ MORE THAN ONE KEY NAMING THE CARRIER IS NOT A CALL THIS GUARD CAN
+        # ANSWER (#12592 review P1, and the class #12786 measured on `status`).
+        # `_successor_named_by` decides per KEY, and the live write applies EVERY
+        # prop entry to ONE property name — so `{<KHash('supersededBy')>: 'v2',
+        # 'supersededBy': None}` is two dict entries that both land on
+        # `supersededBy`, with an engine-defined winner: admitted here as naming
+        # a successor, it can store `None` and leave the row claiming the word
+        # with nobody named. Fail closed, exactly as the sibling status guard
+        # does on the same asymmetry, and say which keys were involved.
+        _carrier_keys = sorted(
+            str(k) for k in keys_rendering_as(props, {_SUCCESSOR_PROP}))
+        # ⛔ THE CARRIER IS THE RECORD'S COLUMN, NOT A SPELLING (#12592 cycle-4
+        # P1, and the same class #12782 measured). `_split_properties` files
+        # ``snake(key)`` into the record column, so ``superseded_by`` and
+        # ``supersededBy`` are ONE column while ``keys_rendering_as`` sees only
+        # the camel key: measured, ``keys_rendering_as({'superseded_by': None},
+        # {'supersededBy'})`` is EMPTY. So a spelling-keyed check missed the clear
+        # AND the conflict, and
+        # ``update_knowledge(<superseded Object, supersededBy='acme-v2'>,
+        # status='superseded', superseded_by=None)`` was ADMITTED: the graph kept
+        # the camel name every reader resolves while the record's `superseded_by`
+        # column went NULL, so the record derived the word from a column the
+        # caller had just cleared.
+        from tortoise.record_projection import snake  # local: avoids import weight
+        # ⛔ BOTH RENDERINGS, because the RECORD reads the JOURNAL one (#12592
+        # cycle-5 P1). This file already knows the asymmetry: the live writer
+        # files by ``str(key)``, the journal (and therefore
+        # ``_split_properties`` -> ``snake(prop)``, which decides the column) by
+        # ``str.__str__(key)``. A ``str`` subclass whose CONTENT is
+        # ``superseded_by`` and whose ``__str__`` is something else is therefore a
+        # carrier to the record and invisible to a ``str(k)``-only test — the same
+        # class ``_carrier_prop_named_by`` documents (its own docstring carries the
+        # measured shape), and
+        # the sibling carrier guard already reads the content rendering
+        # (``column = snake(key)``). Measured: ``snake(str(K))`` gave the
+        # ``__str__`` word while ``snake(str.__str__(K))`` gave the column, so a
+        # same-call clear through such a key was ADMITTED and nulled the record
+        # column while the graph kept its camel name. This is the REFUSAL side, so
+        # it widens to the union; `_successor_named_by` stays narrow on purpose.
+        # ⛔ NO `str.__str__` ON A NON-`str` (#12882 merge): the descriptor refuses
+        # an object that only CLAIMS `__class__ = str`, and a non-`str` key cannot
+        # file a property name anyway (`keys_rendering_as` returns None for one), so
+        # the journal rendering is simply absent for it. The exotic-key refusal
+        # below is what answers that key.
+        _name_keys = [k for k in props
+                      if _SUCCESSOR_COLUMN in (snake(str(k)),
+                                               snake(str.__str__(k))
+                                               if issubclass(type(k), str) else "")]
+        _name_values = [props[k] for k in _name_keys]
+        # ⛔ COUNTED BY KEY OBJECT, not by rendered name (#12592 cycle-4): a
+        # `str` subclass with a colliding `__hash__` renders as the SAME name as
+        # the plain key, so a set of rendered strings collapses the two and the
+        # conflict goes unseen — which is exactly the shape this refusal exists
+        # for (the earlier list form counted them; a set does not).
+        _all_carrier_keys = [k for k in props
+                             if str(k) in set(_carrier_keys) or k in _name_keys]
+        if len(_all_carrier_keys) > 1:
+            raise ValueError(
+                f"update_knowledge refused a CONFLICTING successor write on "
+                f"{_refusal_repr(id_val)}: this call writes the `{_SUCCESSOR_COLUMN}` column "
+                f"through more than one key "
+                f"({', '.join(sorted({str(k) for k in _all_carrier_keys}))}), and "
+                f"they land on ONE property, so which value survives is not "
+                f"knowable here. A key whose spellings disagree is filed under "
+                f"one name by the live write and another by the journal, and a "
+                f"`None` beside a value can store the CLEAR while the guard "
+                f"reads the name. Pass `{_SUCCESSOR_PROP}` ONCE, as a plain str, "
+                f"with the word you mean."
+            )
+        _rendered_status = lifecycle_props_by_rendering(props, {"status"})
+        _status_supplied = "status" in _rendered_status
+        status_value = _rendered_status.get("status")
+        # ⛔ THE WORD IS COMPARED AT ITS BASE CONTENT, never through the caller's
+        # `__eq__`/`__ne__` (#12592 cycle-7 P1). `lifecycle_props_by_rendering`
+        # hands back the CALLER'S OBJECT, and `!=` is a method lookup on it:
+        # measured, ``class Liar(str): __eq__ = lambda s, o: False; __ne__ =
+        # lambda s, o: True`` makes ``Liar('superseded') != 'superseded'`` TRUE
+        # while the wire renders ``"superseded"`` — so the guard returned here as
+        # "moves the row OFF the word" and the write stored exactly the row §4.3
+        # forbids. `tortoise/live.py` states the seam's rule ("the VALUE keeps its
+        # base content"), and the same normalisation is what #12907 pins for the
+        # Point arm, so this is that rule applied to the comparison, once.
+        #
+        # ⛔ `issubclass(type(v), str)`, NOT `isinstance(v, str)` (#12882 merge).
+        # `isinstance` consults `__class__`, so an object that declares
+        # ``__class__ = str`` answers True while `str.__str__` REFUSES it with
+        # ``TypeError: descriptor '__str__' requires a 'str' object`` — measured
+        # as `test_a_str_subclass_cannot_forge_a_dead_word_or_crash_the_guard`
+        # escaping as a TypeError where the contract is a ValueError. The same
+        # idiom the status-entailment arm of this door already uses.
+        status_word = (str.__str__(status_value)
+                       if issubclass(type(status_value), str) else None)
+        if _status_supplied and status_word is None:
+            # ⛔ A NON-`str` TARGET NEVER ASKS FOR THE WORD, so this guard has no
+            # question to answer about it — and answering one anyway took a
+            # SIBLING'S refusal away (#12882 merge, measured: five pins in
+            # `test_status_projection.py` expected the transition guard's
+            # `is TERMINAL for a :Object` and got this guard's successorless
+            # message instead, on `status=None`/`_LyingEq()`/`_BoomRepr()`/
+            # `_Impostor()`). Those values reach a DEAD row, where #12882's
+            # terminal refusal is the governing rule; a non-`str` on a LIVE row
+            # is that issue's own disclosed vocabulary residual (#10371), not
+            # this invariant. So defer: this is the SAME lesson the exotic-key
+            # bound below records — a write this guard does not adjudicate must
+            # not pre-empt the guard that does.
+            return
+        if status_word is not None and status_word != _SUPERSEDED_STATUS:
+            # The call moves the row OFF the word (#12825's coherent lift CLEARS
+            # the carriers; a retirement to `archived`/`deprecated` needs none).
+            # §4.3's sentence is about the word, not about a clear.
+            return
+        # ⛔ NO KEY OF A WORD-KEEPING WRITE MAY BE A CALLER-CONTROLLED RENDERER
+        # (#12592 cycle-8 P1). ⚠️ PLACED HERE ON PURPOSE, after the early return
+        # above: a write that moves the row OFF the word answers its own question
+        # elsewhere (the transition guard, the carrier guard), and those refusals
+        # are pinned — a blanket bound before this line took their message away
+        # (measured: 15 pins in `test_10371`/`test_9649` expected
+        # `'superseded' -> 'live'` and got this one instead). A read-then-write guard cannot answer a question about a
+        # value whose rendering CHANGES between the read and the write: measured
+        # with a `str` subclass key whose `__str__` answers `supersededBy` on the
+        # writer's later call and something harmless on this guard's calls, the
+        # guard read `carrier_cleared` False and `_name_keys` empty, so the write
+        # landed `status='superseded'` having REMOVED the graph's `supersededBy`
+        # — the row §4.3 defines away — while every read here looked innocent.
+        # Binding the renderings once is NOT a fix (the writer renders again,
+        # later), and normalising `props` for the whole door is a change to every
+        # prop path rather than to this invariant. So the input is bounded where
+        # this guard can bound it: a superseded write takes plain `str` keys. No
+        # real caller loses anything — `**props` is the only way to supply a
+        # subclass key and JSON/MCP cannot construct one — and it is the same
+        # exactness cycle 7 required of the VALUE, for the same reason: with an
+        # exact `str` there is no override, so guard, journal and wire agree by
+        # construction. (The ROOT cause — this door accepting caller-rendered keys
+        # at all — is recorded on #12592 rather than fixed inside one guard.)
+        # The STATUS key is exempt, on purpose: a rendered echo of the stored word
+        # (`status` reached through an adorned key) is #3305's declared-preserved
+        # read-modify-write, and where two keys render as `status` with different
+        # words `_status_write_is_ambiguous` already refuses the write with its own
+        # message (pinned in `test_10371`). This guard polices the keys that are
+        # NOT its sibling's business.
+        _exotic_keys = [
+            k for k in props
+            if type(k) is not str
+            and "status" not in (snake(str(k)),
+                                  snake(str.__str__(k))
+                                  if issubclass(type(k), str) else "")]
+        if _exotic_keys:
+            raise ValueError(
+                f"update_knowledge refused status='superseded' on {_refusal_repr(id_val)}: "
+                f"{len(_exotic_keys)} property key(s) are not plain `str` "
+                f"({', '.join(sorted({_refusal_type_name(k) for k in _exotic_keys}))}). "
+                f"A key whose RENDERING can differ between this check and the "
+                f"write cannot be checked at all — the write renders it again, "
+                f"later, and could store `{_SUCCESSOR_PROP}` after this guard saw "
+                f"a harmless name (measured). `'superseded'` MEANS replaced "
+                f"(ONTOLOGY §4.3), so the write either names the successor or it "
+                f"does not happen. Re-send with plain `str` keys — the only shape "
+                f"the wire, the journal and this guard all read the same way."
+            )
+        # ⛔ THE ALLOWANCE COMES AFTER THE KEY BOUND, not before (#12914 review
+        # P1, cycle-9): the bound answers "can any read here be trusted", which
+        # is PRIOR to "does this call name a successor". With the allowance first,
+        # a stateful ``str`` subclass key whose content is ``supersededBy`` and
+        # whose ``__str__`` answers the camel name on this guard's calls and a
+        # harmless name on the WRITER's later call returned True here — so this
+        # `return` skipped the bound and the write landed the word with
+        # `supersededBy` NULL plus an orphan property (measured: K>=7 str() calls
+        # on the reviewed head). The bound refuses that key before the allowance
+        # can be granted, and it is still BELOW the two returns above, so a write
+        # that moves the row OFF the word keeps its own guard's message.
+        # A named successor in the CALL is sufficient — the write applies it to
+        # every bound row (``SET n += $props``), so no row is left nameless.
+        if _successor_named_by(props):
+            return
+        # ⛔ A SUPPLIED CARRIER THAT NAMES NOTHING IS A **CLEAR**, and a clear in
+        # the same breath as the word splits the pair (#12592 review P0 —
+        # measured on the reviewed head: a coherent Object superseded with
+        # 'acme-v2', then `update_knowledge(o, status='superseded',
+        # supersededBy=None)` was ACCEPTED and stored `[['superseded', None]]`;
+        # with no `status` key at all it was never refused either, because this
+        # guard was only entered on a status write). The stored-value allowance
+        # below reads the PRE-write row, so it must never license a call that
+        # removes the very value it is reading.
+        carrier_cleared = bool(_name_keys)
+        proj = self._get_proj()
+        # `bound` is every label this id actually binds; `nameless` is the
+        # subset that fails. The PRESCRIPTION is chosen from `bound`, not from
+        # `nameless`: a `:Point:Object` hybrid whose Object arm is nameless is
+        # still an id on which `archived` is refused (the Point arm owns that
+        # rule), so the repair offered must be one this door can perform.
+        bound: list[str] = []
+        nameless: list[str] = []
+        dead_seen: str | None = None
+        word_after = (_SUPERSEDED_STATUS if status_word == _SUPERSEDED_STATUS
+                      else None)      # None -> the row's own stored status stands
+        # ⛔ §5 NAMES A POINT'S SUCCESSOR WITH THE EDGE, not (only) with a
+        # property: `supersede_point` writes `status='superseded'` + `outdated` +
+        # `(new)-[:CORRECTS]->(old)` and NO `supersededBy` (measured on this head).
+        # So a Point that was superseded the way the model says to has a
+        # successor and an EMPTY property — and judging it by the property alone
+        # would refuse an idempotent echo of a correctly-superseded claim, i.e.
+        # reverse the declared-preserved read-modify-write capability (#3305).
+        for label in ("Object", "Subject"):
+            rows = proj.g.query(
+                f"MATCH (n:{label} {{id:$id}}) "
+                "RETURN n.id AS id, n.status AS st, n.supersededBy AS succ",
+                params={"id": id_val},
+            ).result_set
+            if not rows:
+                continue             # no row of this label is bound
+            bound.append(label)
+            dead_words = _SUPERSESSION_DEAD_SETS[label]
+            failed = False
+            for _id, stored_status, stored_succ in rows:
+                # ⛔ ADJUDICATE ONLY WHAT THE CALL **WRITES** — and that is the
+                # WORD, never the stored one (#12914 review P2, completed P2/F1).
+                # `word_after` is non-`None` only when the call itself writes
+                # `status='superseded'` (every other status returns above), so it
+                # IS the call's own word and the WHOLE of this question. A
+                # stored-word fallback was tried twice and was wrong both ways:
+                #
+                #   * UNCONDITIONAL — `update_knowledge(<legacy successorless
+                #     :Object>, expiredAt=…)` and the same with `validTo=…` raised
+                #     "refused status='superseded' … with no successor", naming a
+                #     field the caller never sent, on exactly the population
+                #     `tests/test_11826`'s audit exists to repair.
+                #   * KEYED ON `carrier_cleared` — the SAME refusal reappeared for
+                #     a bare clear the moment a temporal prop rode along (measured,
+                #     #12914 review F1): `update_knowledge(<legacy row>,
+                #     supersededBy=None)` was ACCEPTED, and that identical clear
+                #     with `validTo='…'` was REFUSED — while `main` accepts it. The
+                #     verdict flipped on an UNRELATED field.
+                #
+                # #12882 F2 settles it: "with no status named there is no
+                # transition to ask about". A temporal prop names no status either,
+                # so it cannot make one exist. `carrier_cleared` therefore keeps
+                # exactly ONE job: disqualifying the stored successor as a name
+                # (`names_after`, below) — a call that clears the carrier names
+                # nobody, whatever the pre-write row held. That is what keeps
+                # `status='superseded', supersededBy=None` refused.
+                effective = word_after
+                if effective == _SUPERSEDED_STATUS:
+                    # The carrier IS the property for this family, so a call that
+                    # clears it leaves the row naming nobody whatever the stored
+                    # value said.
+                    names_after = (not carrier_cleared
+                                   and isinstance(stored_succ, str)
+                                   and bool(stored_succ.strip()))
+                    if not names_after:
+                        failed = True
+                # `superseded IS terminal, but it is not the DEAD-SOURCE case
+                # this flag words: a row already saying the word keeps the
+                # carrier/clear message below, which is the true cause.
+                if (dead_seen is None and stored_status != _SUPERSEDED_STATUS
+                        and stored_status in dead_words):
+                    dead_seen = str(stored_status)
+            if failed:
+                nameless.append(label)
+        if point_ids:
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.id AS id, ID(n) AS nid, n.status AS st, "
+                "n.supersededBy AS succ",
+                params={"ids": list(point_ids)},
+            ).result_set
+            if rows:
+                bound.append("Point")
+            # ⛔ THE VERDICT IS PER NODE, not per id (#12592 review P1): ids are
+            # not unique in this graph (`create_point(id=…)` is public, and
+            # #7822's fan-out note is the same fact), so an id-keyed edge set let
+            # one twin's CORRECTS edge authorise a nameless sibling. Measured on
+            # the reviewed head: two `:Point {id:'pf'}` nodes, an edge into one
+            # only -> `update_knowledge('pf', status='superseded')` ACCEPTED and both
+            # rows left naming nobody.
+            # ⛔ THE NAME IS JUDGED AFTER THE WRITE, not as it is stored (#12592
+            # cycle-3 P1): a Point carrying `supersededBy` as a PLAIN PROPERTY
+            # (mintable through this very door — the docstring's own table says
+            # `update_knowledge(<either>, status='superseded', supersededBy='v2')`
+            # is ACCEPTED) loses that name to a same-call clear, and the Point arm
+            # was reading the stored value while the Object/Subject arm was not.
+            # Measured shape: `update_knowledge(<Point superseded, supersededBy='v2'>,
+            # status='superseded', supersededBy=None)` was admitted and left the
+            # row saying the word with no property and no edge.
+            unresolved = [r[1] for r in rows
+                          if (word_after or r[2]) == _SUPERSEDED_STATUS
+                          and (carrier_cleared
+                               or not (isinstance(r[3], str)
+                                       and r[3].strip()))]
+            if unresolved:
+                # The successor edge — `INCOMING`, because the SDK spells it
+                # `MERGE (new)-[:CORRECTS]->(old)` (a superseded node has no
+                # outgoing CORRECTS whatever its state, so an OUTGOING read is
+                # unfalsifiable: the same direction note
+                # `tests/test_9649_update_entity_point_lifecycle.py` pins).
+                # ⛔ `WITH n` IS LOAD-BEARING, not style: on the canonical
+                # 6.0.1 instance a `WHERE n.id IN $ids` followed by a
+                # re-binding `MATCH (n)…` has its predicate DROPPED, so the
+                # query would answer about OTHER points' edges (#6976, and the
+                # rail `tests/test_relationships_bounded.py` caught this exact
+                # line when it was first written without the barrier). The probe
+                # binds the node's INTERNAL id, for the same reason the verdict
+                # is per node.
+                edged = {r[0] for r in proj.g.query(
+                    "MATCH (n:Point) WHERE ID(n) IN $nids WITH n "
+                    "MATCH (n)<-[:CORRECTS]-(:Point) "
+                    "RETURN DISTINCT ID(n) AS nid",
+                    params={"nids": unresolved},
+                ).result_set}
+                if any(nid not in edged for nid in unresolved):
+                    nameless.append("Point")
+            for _id, _nid, stored_status, _succ in rows:
+                if (dead_seen is None and stored_status != _SUPERSEDED_STATUS
+                        and _is_terminal_point_status(stored_status)):
+                    dead_seen = str(stored_status)
+        if not nameless:
+            # Every bound row ALREADY names a successor: the pair is coherent
+            # before this write, so re-stating the status is idempotent (the
+            # same allowance the entailed-status arms make). Measured on the
+            # pre-guard tree: `status='superseded'` re-written on a carried row
+            # is accepted today and must stay accepted — a read-modify-write PUT
+            # that echoes the status back would otherwise start failing. NOTE it
+            # is reached only when the call does not itself clear the carrier:
+            # that gate is `carrier_cleared` above, applied per row.
+            return
+        labels = "/".join(f":{name}" for name in nameless)
+        # ⛔ POINT WINS THE WORDING, not the first nameless row (#12592 review
+        # P2). `nameless` is built Object→Subject→Point, so a `:Point:Object`
+        # hybrid whose Object arm is nameless while its Point arm is satisfied
+        # would otherwise be told to `archived` — a word §5 declares RESERVED on
+        # Points and that this door REFUSES on the Point arm — while the
+        # recovery actually available to it (`retract_point`, or the CORRECTS
+        # edge `supersede_knowledge()` writes through the Point path) is not offered. The
+        # prescription must be performable on every label it is spoken from.
+        first = "Point" if "Point" in bound else nameless[0]
+        # The extra "not the route here" sentence is for a MIXED id, where the
+        # leading verb cannot serve every arm — i.e. a non-Point label is among
+        # the ones that failed. A nameless Point with a satisfied Object arm is
+        # NOT that case: `supersede_knowledge()` on the Point path writes the very edge
+        # that satisfies it (#12592 review P2).
+        mixed = len(bound) > 1 and any(name != "Point" for name in nameless)
+        section = "§5" if first == "Point" else (
+            "§4.2" if first == "Subject" else "§4.3")
+        # AX rule 2 (#10183): the repair must be PERFORMABLE from where the
+        # caller stands. `supersede_knowledge(<id>, <successor id>)` is the one door that
+        # writes the whole pair atomically on a LIVE source (#12592); the
+        # explicit pair is what a caller who knows only the successor's NAME can
+        # send; and the successorless retirement is named with the word the model
+        # gives it — `archived` for an Object/Subject (§4.3/§4.2), and for a
+        # Point `retract_point`, because §5 declares `archived` RESERVED on
+        # Points ("no v1 write path") and naming it there would advertise a
+        # write the model does not offer.
+        if first == "Point":
+            model_clause = (
+                "That is not a supersession at all: a Point retired with no "
+                "successor is 'retracted' (`retract_point`), and 'deprecated' is "
+                "an independent terminal state that needs none (`archived` is "
+                "RESERVED on Points — ONTOLOGY §5: no v1 write path). ")
+            retirement_word = f"`retract_point({_refusal_repr(id_val)})`"
+            retirement = f"or, if nothing replaced it, {retirement_word}."
+            # ⛔ THE CARRIER CLAUSE IS LABEL-CONDITIONAL, because the carrier IS.
+            # `supersede_point` writes `status`, `outdated`, the temporal stamps
+            # and MERGEs `(new)-[:CORRECTS]->(old)` — it writes NO
+            # `supersededBy` and no `supersededAt` (measured, sdk.py's
+            # supersede_point SET), and on a Point the EDGE is the successor
+            # (§5). A message that promised `supersededBy` here would be the one
+            # thing AX rule 2 must not do: prescribe a repair whose result the
+            # caller cannot verify against the promise.
+            carrier_clause = (
+                "writes status, `outdated` and the CORRECTS edge in ONE "
+                "guarded call on a Point — and on a Point that edge IS the "
+                "successor (§5), which is what makes `query()` and every "
+                "retrieval leg stop treating it as current")
+        else:
+            model_clause = (
+                "That is not a supersession at all: a retirement with no "
+                "successor is 'archived', and 'deprecated' is an independent "
+                "terminal state that needs none. ")
+            retirement_word = f"`update_knowledge({_refusal_repr(id_val)}, status='archived')`"
+            retirement = f"or, if nothing replaced it, {retirement_word}."
+            carrier_clause = (
+                "writes status, `supersededBy` (the successor's NAME, §4.2) "
+                "and `supersededAt` in ONE atomic write")
+        # A hybrid id gets an extra sentence, because the leading verb is NOT
+        # performable on it: `supersede_knowledge()` dispatches to the Point path, and a
+        # Point that is already terminal refuses a second supersession — so the
+        # explicit pair (which satisfies every arm at once) is what the caller
+        # must reach for.
+        mixed_clause = (
+            f" ⛔ This id binds {' and '.join(f':{n}' for n in bound)} at once, "
+            f"so `supersede_knowledge()` is NOT the route here (it dispatches to the Point "
+            f"path, one-way): the `update_knowledge(...)` pair above is the ONE "
+            f"write that satisfies every arm, and it needs only the successor's "
+            f"NAME. "
+        ) if mixed else ""
+        # ⛔ THE LEADING VERB DEPENDS ON WHAT IS REACHABLE (#12592 review P2):
+        # on a row that is ALREADY terminal, `supersede_knowledge()` refuses it ("already
+        # terminal" — a supersession is written from the LIVE side, #2498), so
+        # leading with it prescribes a repair that fails. Measured on the
+        # reviewed head: `update_knowledge(<archived Object>, status='superseded')`
+        # led with `supersede_knowledge(...)` and that raised. The explicit pair is
+        # performable in both situations, so it is what a dead row is told.
+        pair = (f"`update_knowledge({_refusal_repr(id_val)}, status='superseded', "
+                f"supersededBy=<successor name>)`")
+        verb = (f"`supersede_knowledge({_refusal_repr(id_val)}, <successor id>)` {carrier_clause}")
+        if carrier_cleared:
+            # ⛔ BASE CONTENT, not `isinstance` (#12914 review P2, cycle 5):
+            # `isinstance` consults `__class__`, so a value declaring
+            # ``__class__ = str`` passed this test and `.strip()` then hit the
+            # OBJECT's attribute — measured, `update_knowledge(<live Object>,
+            # status='superseded', supersededBy=<impostor>)` raised
+            # `AttributeError: 'Impostor' object has no attribute 'strip'`
+            # where this very message's contract (reached by `None`, `''` and
+            # `123`) is a `ValueError`. Same root as the three sites this PR
+            # already bounds (`:5808`, `:22906`, `:48611`).
+            _shadow_only = any(issubclass(type(v), str)
+                               and str.__str__(v).strip()
+                               for v in _name_values)
+            # WHICH spelling the caller used decides WHICH repair is honest
+            # (#12914 review P3, cycle 7): `supersededBy=<a str subclass>` is
+            # refused by `_successor_named_by`'s exact-`str` rule, and naming the
+            # CAMEL spelling "one NO READER RESOLVES" is false — that spelling is
+            # the one every reader keys on (measured: `supersededBy=Name('v2')`
+            # got the shadow-column diagnosis while `supersededBy='v2'` is the
+            # admitted form). The shadow branch is for a value supplied under the
+            # SNAKE spelling only.
+            _camel_supplied = any(issubclass(type(k), str)
+                                  and str.__str__(k) == _SUCCESSOR_PROP
+                                  for k in _name_keys)
+            if _shadow_only and not _camel_supplied:
+                # A value IS supplied — under a spelling no reader resolves
+                # (`superseded_by`, #12782). Not a clear, and not a name either.
+                repair = (
+                    f"⛔ This call supplies the successor under a spelling NO "
+                    f"READER RESOLVES "
+                    f"({', '.join(sorted({str(k) for k in _name_keys}))}): "
+                    f"`supersededBy` is the property every reader keys on, and "
+                    f"the snake form writes a SHADOW column the graph does not "
+                    f"hold (#12782). Pass the CAMEL spelling — {pair}, or "
+                    f"{verb}; otherwise move the row OFF the word in the same "
+                    f"call ({retirement_word} is the successorless retirement); ")
+            else:
+                repair = (
+                    f"⛔ This call CLEARS `{_SUCCESSOR_PROP}` (a `None` — or a "
+                    f"blank/non-string — value), so the write ITSELF would split "
+                    f"the pair. Name the successor — {pair}, or {verb}; if the "
+                    f"stored replacement was WRONG, replace the NAME rather than "
+                    f"remove it. To stop claiming a replacement at all, move the "
+                    f"row OFF the word in the same call: "
+                    f"`update_knowledge({_refusal_repr(id_val)}, status='live', "
+                    f"supersededBy=None, supersededAt=None)` is #12825's "
+                    f"coherent un-supersede, and {retirement_word} is the "
+                    f"successorless retirement; ")
+        elif dead_seen is not None:
+            repair = (
+                f"Name the successor — {pair} is the write that works here, "
+                f"because this row is already {dead_seen!r} and `supersede_knowledge()` "
+                f"writes a supersession from the LIVE side (one-way, #2498), so "
+                f"it refuses a dead source. On a live row {verb} does the same "
+                f"in one call; ")
+        else:
+            repair = (
+                f"Name the successor — {verb}; {pair} is the same pair "
+                f"spelled out; {retirement} ")
+        raise ValueError(
+            f"update_knowledge refused status='superseded' on {labels} "
+            f"{_refusal_repr(id_val)} with no successor: 'superseded' MEANS replaced "
+            f"(ONTOLOGY {section}) — it names the successor, so a row that "
+            f"says 'superseded' and names nothing asserts a replacement that "
+            f"does not exist. {model_clause}"
+            f"{repair}{mixed_clause} (A JOURNAL REBUILD is unchanged: ONTOLOGY "
+            f"{section} keeps restoring a supersession recorded without a "
+            f"successor — this refusal is the live write door only, where you "
+            f"can still supply the missing half.)"
+        )
+
     @_declares_apply_first_write_lane("_update_entity")
     def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
         # #2296 review: `_reserved_supplied` is the set of reserved names the
@@ -50093,6 +51959,37 @@ class TortoiseSDK:
                         f"(`validFrom`, `validTo`, their precision markers, "
                         f"`expiredAt`, `when`), and the revision lands."
                     ) from None
+            # ── #12592: the WORD needs its partner, at the WRITE door ──────────
+            # ONTOLOGY §4.3: *"`superseded` means replaced: it names the
+            # successor"*. Measured on `main` @ 58f904ccf7: every label accepted
+            # a bare `status='superseded'` and stored `supersededBy=None`.
+            # Placement is load-bearing twice over: AFTER the terminality guard
+            # (so a dead row's refusal keeps naming the dead state first) and
+            # AHEAD of every write below (the Point status arm's `SET` + its
+            # `restatus` journal, and the non-Point label loop) — a refusal that
+            # cost a write is the atomicity defect #9287/#10192 state.
+            # The Point ids are passed because this door addresses a Point by
+            # `id`, `eventId` or `url`; the non-Point arms bind `{id: $id}`.
+            self._assert_supersession_names_a_successor(
+                id_val, props, _lifecycle_ids)
+            # ⛔ THE CARRIER-ONLY CLEAR IS DELIBERATELY OUT OF SCOPE, and this
+            # is a DECISION, not an omission: PR #12882's review F2 re-pinned it,
+            # and THIS branch pins the same behaviour from its own side in
+            # `tests/test_12592_supersede_door.py::
+            # test_a_bare_carrier_clear_stays_ACCEPTED_and_leaves_the_row_dead`
+            # (#12882's own arm of the pin lands with that PR). The ruling reads
+            # "the bare carrier CLEAR is still ACCEPTED on a superseded row and
+            # leaves the row TERMINAL: with no status named there is no transition
+            # to ask about"). A cycle-2 review proposed refusing it here as the
+            # same defect; that would reverse a recorded decision taken by the
+            # lane that owns the un-supersede contract, so it is NOT adopted —
+            # it is reported as a residual instead (#12592 comment): after a bare
+            # clear the row DOES sit in the incoherent state §4.3 says the model
+            # does not have, and closing that needs a decision about the record's
+            # expression route (`cache_projection`'s NOT MONOTONE bullet), not a
+            # guard in this door. What IS refused here is the same-call SPLIT —
+            # `status='superseded'` together with a carrier clear — because no
+            # decision covers it and the write itself splits the pair.
         # ⛔ A REFUSAL MUST NOT COST A WRITE (#12222, review cycle 10 P1). The
         # rename-ambiguity guard lives BELOW, inside its lock and ahead of the
         # label write loop — but the Point STATUS arm below writes
@@ -50380,9 +52277,13 @@ class TortoiseSDK:
         # (`_ALLOWED_TRANSITIONS`): a dead claim is answered only by minting a
         # successor. An Object's dead words are bookkeeping. `main` moves them —
         # `tests/test_11826_object_supersession_instrument.py` takes a
-        # `superseded` Object to `archived` inside its test body (the supersede at
-        # `:245`, the archived write at `:290`, the assertion it justifies from
-        # `:291`) — and that module reds if this refuses it. Note what that
+        # `superseded` Object to `archived` inside its test body
+        # (`test_a_successorless_supersede_still_gets_a_performable_repair`; its
+        # docstring and a comment on the write explain WHY it is written raw —
+        # the audit exists to find that legacy shape, which no door can mint any
+        # more, #12592) — and that module reds if this refuses it. Named by TEST
+        # rather than by line: the fixture sweep in #12592 moved those numbers,
+        # and a comment that points at a stale line is worse than no pointer. Note what that
         # assertion actually says: archiving SILENCES the
         # `superseded_object_active_edges` finding without clearing the deficit
         # (`tortoise/audit.py` says so in its own docstring), so it is not
@@ -50486,12 +52387,16 @@ class TortoiseSDK:
         # traceback — #12869's wording predates this narrowing and should be
         # re-measured there before it is restated.
         #
-        # The remedy is deliberately NOT `supersede()`: that door routes to
-        # `supersede_point`/`invalidate_point`, which are `:Point`-only and raise
-        # `No point <id>` for an Object or a Subject, so naming it here would be
-        # an unperformable prescription (the AX-rule-2 defect #10183 records).
-        # What exists today is the record path (`commit_ops.apply_supersessions`
-        # / the `ObjectSuperseded` fold); the SDK gap is #12592.
+        # ⛔ THE REMEDY IS `supersede_knowledge` (#12914 review P3): #12592 gave
+        # the Object/Subject families their OWN supersede path, so this paragraph
+        # no longer describes the tree. The Point doors
+        # (`supersede_point`/`invalidate_point`) are still `:Point`-only, and
+        # naming THEM here would be an unperformable prescription (the AX-rule-2
+        # defect #10183 records) — `supersede_knowledge` is the door that resolves
+        # the family and writes the pair. `supersede_point` stays one-way on
+        # purpose: its successor must be current, so it cannot be used to undo a
+        # supersession (the LIVE-source reason the sibling hint at the other end
+        # of this file states).
         _nonpoint_status = lifecycle_props_by_rendering(props, {"status"})
         if _nonpoint_status:
 
@@ -50792,8 +52697,11 @@ class TortoiseSDK:
                     f"create door for that label and record the replacement "
                     f"through the supersession path "
                     f"(`commit_ops.apply_supersessions` / the "
-                    f"`ObjectSuperseded` fold); this door has no SDK "
-                    f"supersede verb for an Object or a Subject yet (#12592). "
+                    f"`ObjectSuperseded` fold). A supersession is written from "
+                    f"the LIVE side and is one-way, so it is not a route back "
+                    f"for a dead row either (#12592 gave the Object/Subject "
+                    f"families their own supersede path, and it refuses a "
+                    f"terminal source for this same reason). "
                     f"Content and metadata revisions are still accepted on the "
                     f"dead row (this refusal is the `status` field only)."
                     f"{_np_unsupersede_hint}"
@@ -52269,7 +54177,7 @@ class TortoiseSDK:
         from .session_indexer import compute_session_embedding
         return compute_session_embedding(name, summary, keywords, topics)
 
-    def search_sessions(self, query: str, *, agent: str | None = None,
+    def _search_sessions(self, query: str, *, agent: str | None = None,
                         topics: list[str] | None = None,
                         after: "datetime | str | None" = None,  # noqa: F821, UP037
                         before: "datetime | str | None" = None,  # noqa: F821, UP037
