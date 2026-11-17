@@ -158,7 +158,7 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: covered the three PROSE notes and the test's `_PIVOT`, so a stale DEFAULT_PIVOT
 #: left `--check` at exit 0 while every defaulted call (`census()`,
 #: `pivot_is_the_lifetime_site()`) answered about a comment line — measured at
-#: `e743e35748`, where the pin read 25005 and this constant still read 24903. It is
+#: `e743e35748^` (`2512c4f906`), where the pin read 25005 and this constant still read 24903. It is
 #: now a `_NOTES` row of its own (`census DEFAULT_PIVOT`) so BOTH verbs write it, and
 #: `tests/test_demo_session_read_exclusion_8290.py` is the pin that reds as well.
 DEFAULT_PIVOT = 25005
@@ -200,7 +200,7 @@ _NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     # NEITHER VERB READ (#13000 review P1). The rows above cover the three PROSE
     # notes and the test's pin; `DEFAULT_PIVOT` was left to that pin alone, so a
     # re-derivation wrote the notes and the pin and left the fallback behind —
-    # `_PIVOT` 25005 beside `DEFAULT_PIVOT` 24903 at `e743e35748`, and `--check`
+    # `_PIVOT` 25005 beside `DEFAULT_PIVOT` 24903 at `e743e35748^`, and `--check`
     # reported "every stated figure is the measured one" over the split because
     # it never looked here. Reading it makes all four visible to both verbs.
     ("census DEFAULT_PIVOT", _CENSUS,

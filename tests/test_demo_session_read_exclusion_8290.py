@@ -1060,7 +1060,7 @@ def test_the_census_check_verb_sees_the_tools_own_default_pivot(
 
     Why this exists (#13000 review P1): `_NOTES` covered the three prose notes and
     this file's pin, and left the census tool's OWN fallback unread. Measure the
-    consequence rather than assume it: at `e743e35748` the pin read `25005` while
+    consequence rather than assume it: at `e743e35748^` the pin read `25005` while
     `DEFAULT_PIVOT` still read `24903`, and `--check` printed "every stated figure
     is the measured one" over that split. The fallback is what every DEFAULTED call
     (`census()`, `pivot_is_the_lifetime_site()`) answers from, so a stale value
