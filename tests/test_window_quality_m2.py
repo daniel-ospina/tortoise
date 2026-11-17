@@ -2558,10 +2558,19 @@ def test_the_claim_ledger_matcher_is_pinned_on_synthetic_input():
     assert "claim inverted" in violations(own_cue), (
         "the row's own `nor` must not dismiss the row's own inversion (#13126 "
         "round 13, P1)")
-    # …while a cue from OUTSIDE the row still spares correct English
-    outside_cue = [("It is not the accepted bound: passes neither `a` nor `b`.",
-                    "passes neither", "passes neither", ("passes both",))]
-    assert violations(outside_cue) == "" or "vacuous row" in violations(outside_cue)
+    # …while a cue from OUTSIDE the row still spares correct English, and the SAME
+    # sentence without it is an inversion — so the sparing is the cue and nothing
+    # else (#13126 round 12, N1/F3).
+    sparing = ("It is not the case that the loss is smaller than the eviction; the "
+               "finding stands.")
+    assert violations([(sparing, "the finding stands", None,
+                        ("smaller than the eviction",))]) == "", (
+        "a negated hit is the record stating the distinction — it must be spared")
+    assert "claim inverted" in violations(
+        [(sparing.replace("not the case that ", ""), "the finding stands", None,
+          ("smaller than the eviction",))]), (
+        "the same sentence WITHOUT the cue must red — the spare is the cue, not a "
+        "blanket pass")
 
     # ── a cue may not reach across a CLAUSE break ─────────────────────────────
     assert "claim inverted" in violations(
