@@ -3999,10 +3999,12 @@ surfaces:
   # `fast_pool()`, and an unweighted fast file is the #3400/#4348 trap. DB-free by
   # construction: the schema tests parse real migration files copied into
   # `tmp_path`, and the pool tests drive `_default_connect` through a fake
-  # `psycopg2.connect`, so the THIRTEEN arms that need the driver use
-  # `importorskip` and skips visibly without the `[postgres]` extra (`15 passed,
-  # 13 skipped`, 28 collected; WITH the driver, `28 passed, 0 skipped`). The
-  # measured cost is in `docs/evidence/9558-record-write-cost/`.
+  # `psycopg2.connect`, so the arms that need the driver skip visibly without the
+  # `[postgres]` extra: 14 of its 32 tests — 12 through `_fake_driver`'s
+  # `importorskip`, 1 at `test_a_broken_handle_is_discarded_not_reused`, 1 at the
+  # returned-handle fence pin — measured `18 passed, 14 skipped`; WITH the driver,
+  # `32 passed, 0 skipped`. The measured cost is in
+  # `docs/evidence/9558-record-write-cost/`.
   - test_9558_record_write_cost.py
   # #9318: the record's POSITION-KEY collision — a journal position held by a
   # record this write does not CONTINUE (a different `event_type`, or a different

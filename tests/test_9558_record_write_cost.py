@@ -826,7 +826,8 @@ def test_an_idle_handle_whose_peer_hung_up_is_discarded_at_borrow(monkeypatch):
 
 
 def test_an_idle_handle_whose_socket_is_quiet_is_reused_with_no_round_trip():
-    """The normal case pays 1.7 µs and NOTHING else — no statement, no round trip.
+    """The normal case pays single-digit microseconds and NOTHING else — no
+    statement, no round trip.
 
     A borrow that verified every handle with a health query would reintroduce the
     per-record round trip #9558 removed (12.5–13.9 ms of connect + auth per
@@ -845,6 +846,9 @@ def test_an_idle_handle_whose_socket_is_quiet_is_reused_with_no_round_trip():
     assert live.commands == [], (
         "a borrow of a QUIET handle issued a statement — that is a server round "
         "trip on every write borrow, the cost #9558 removed")
+    live.close()    # popped out of the pool by the borrow, so the autouse
+    # release fixture never sees it: without this the two socketpair fds leak
+    # per run (hygiene, cycle-7 note).
 
 
 def test_the_readiness_probe_has_no_fd_ceiling(monkeypatch):
