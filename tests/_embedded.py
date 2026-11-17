@@ -634,6 +634,16 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # test_markers declaration) — the pin reding on the addition is the pin
     # working as designed.
     "test_9451_pre_existing_stub_ingest_instant",
+    # #13224 (review F1): the cold-embedder write bound. The `sdk` fixture
+    # builds `TortoiseSDK(tmp_path/…)` and reads the Subject row back off that
+    # store, so the load-bearing reason is the REDIRECT: a URI-set lane would
+    # point the create and its read-back at a server graph, and the assertion
+    # that proves the row was stored WITHOUT a vector would certify a graph the
+    # file does not target. Mirrors the ``carve_out`` row in
+    # ``config/ci-surfaces.yml``; a stem in only one of the two is the silent
+    # hole ``test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems``
+    # catches.
+    "test_13224_cold_embedder_write_bound",
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",

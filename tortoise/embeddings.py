@@ -1175,7 +1175,7 @@ class EmbeddingModel:
         unaffected, and the bounded path can only run where a background load is
         the declared behaviour.
         """
-        if cls._instance is not None and cls._instance._model is not None:
+        if cls.loaded():
             return True
         now = time.monotonic()
         # A load that FAILED must not re-charge the budget on every write:
@@ -1192,13 +1192,32 @@ class EmbeddingModel:
             # contract (#13224: the bound must never change dev/test behaviour,
             # and `tests/conftest.py` pins this flag off for the whole suite).
             return True
-        # Idempotent: a no-op while the lifespan pre-warm is already running,
-        # and the thing that starts one when a write is first past the post.
-        cls.start_warm_up()
+        # ⛔ #13224 F2: OVERLAP a load that is genuinely in flight, and DECLINE at
+        # once when there is none to overlap. `start_warm_up()` is ONE-SHOT: it
+        # returns the existing thread only while that thread is alive, and after
+        # it has run once (`_warm_up_started`, cleared only by the `_reset()` test
+        # hook) it returns `None` forever. Waiting on `None` cannot be satisfied
+        # by waiting — so a `None` (or a dead thread) with the model still cold
+        # means "this write gets no vector", and spending the budget first only
+        # adds 0.25 s of `time.sleep` to EVERY row of a process whose load failed
+        # once and whose negative cache has aged out (`_FAIL_COOLDOWN_S` = 60 s;
+        # the plain `uv sync` keyword-only install reaches exactly this state, as
+        # does any OOM/offline load). That is the pre-fix behaviour's cost put
+        # back on the write path, which is the regression F2 named.
+        load = cls.start_warm_up()
+        if cls.loaded():
+            return True
+        if load is None or not load.is_alive():
+            return False
         deadline = now + max(0.0, budget)
         while True:
-            if cls._instance is not None and cls._instance._model is not None:
+            if cls.loaded():
                 return True
+            if not load.is_alive():
+                # The load ENDED without producing a model (a failed load some
+                # path already declined to stamp, or a warm-up that bailed):
+                # there is nothing left to wait FOR.
+                return False
             now = time.monotonic()
             if cls._last_failed_at is not None and \
                     (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
@@ -1211,7 +1230,12 @@ class EmbeddingModel:
     @classmethod
     def loaded(cls) -> bool:
         """True iff the model is already warm — never blocks, never loads."""
-        return cls._instance is not None and cls._instance._model is not None
+        # ONE read of the mutable class attribute: `get()` nulls `_instance`
+        # under `cls._lock` on a transient failure, so two reads can observe
+        # `None` on the second and raise `AttributeError` inside a write path
+        # (whose `except Exception` would swallow it into a silent no-vector).
+        inst = cls._instance
+        return inst is not None and inst._model is not None
 
     # ── #4055: the one-time setup's clock, read by the wait-bound seams ────
 
@@ -1652,6 +1676,56 @@ WRITE_EMBED_BUDGET_S = 0.25
 #: becomes ready mid-budget is used, coarse enough not to spin (<= 25 wakeups).
 _WRITE_READY_POLL_S = 0.01
 
+# ── #13224 F3: a REPLAY is not a REQUEST ───────────────────────────────────
+#
+# `encode_for_row` is not only a request seam. `tortoise rebuild` →
+# `proj.rebuild_all(...)` folds the journal in ONE process that is cold by
+# construction, and the fold RE-ENCODES from the event text — it never restores a
+# journaled vector (unlike `_upsert_point`, which does). So the request-shaped
+# budget above, applied to a fold, silently drops the vectors the pre-#13224 fold
+# produced for every row written inside the load window — on the recovery tool's
+# own first minute, while `derived = replay(journal)` is what the journal exists
+# for.
+#
+# The reciprocal of #4055 settles it: process INITIALISATION must not be charged
+# to a REQUEST's wait budget, and by the same reasoning a request's wait budget
+# must not be charged to a process whose whole job IS the initialisation. A
+# replay has no request to protect — it is offline, bulk, and nothing is waiting
+# on its wall clock — so it keeps the synchronous pre-#13224 fold. The lane is
+# declared by the replay engines' own single seam (`projection._replay_write_scope`,
+# which `rebuild`, `rebuild_all`, restore and the consistency recovery all open)
+# rather than inferred here.
+_REPLAY_WRITE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "tortoise_embedding_replay_write", default=False,
+)
+
+
+@contextlib.contextmanager
+def replay_write_scope():
+    """Declare a JOURNAL REPLAY window: embed as the pre-#13224 fold did.
+
+    Opened by ``projection._replay_write_scope()``, so every replay engine
+    (``rebuild``, ``rebuild_all``, the restore/backup folds and the consistency
+    recovery) reaches it without a new call site to remember — a context
+    variable, so it is visible to the fold's own thread and to nothing else in
+    the process (a concurrent live write keeps its request budget).
+
+    Inside the window :func:`encode_for_row` does NOT apply
+    :data:`WRITE_EMBED_BUDGET_S`: the fold waits for the load, exactly as it did
+    before #13224, so a rebuild never returns a less-retrievable graph than the
+    one it replaced.
+    """
+    token = _REPLAY_WRITE.set(True)
+    try:
+        yield
+    finally:
+        _REPLAY_WRITE.reset(token)
+
+
+def in_replay_write_scope() -> bool:
+    """True inside :func:`replay_write_scope` — a replay, not a request."""
+    return _REPLAY_WRITE.get()
+
 
 def encode_for_row(
     content: str, expected_dim: int | None,
@@ -1681,10 +1755,19 @@ def encode_for_row(
     trusted — the measurement `#5008` asks for, without a new stats channel in
     the projection.
 
-    ⚠️ **Live/replay parity** holds by construction: the verdict is a pure
-    function of the TEXT, and live and replay encode the same text, so gating
-    both sides (they both call this seam) cannot make one carry a vector the
-    other does not — the `#5004` divergence class.
+    ⚠️ **Live/replay parity** holds by construction: the GATE's verdict is a
+    pure function of the TEXT, and live and replay encode the same text, so
+    gating both sides (they both call this seam) cannot make one carry a vector
+    the other does not — the `#5004` divergence class.
+
+    ⛔ That parity statement covers the GATE only, and #13224 F3 is the half it
+    cannot cover: the cold-embedder BOUND below is a function of PROCESS STATE,
+    not of the text. So the bound is EXEMPTED on the replay lane
+    (:func:`replay_write_scope`, opened by the replay engines): a fold keeps the
+    pre-#13224 synchronous behaviour and still produces the vector the pre-fix
+    fold produced. Without that exemption a rebuild's first minute would return
+    rows without vectors it used to carry — the journal's `derived = replay`
+    contract (``api.py``) broken by a request's latency budget.
 
     ⚠️ **Deliberately NOT routed through here**, so the boundary is written
     down rather than inferred: `encode_batch_for_store` (the session TURN
@@ -1701,6 +1784,13 @@ def encode_for_row(
                 verdict["reason"], verdict["rule_id"],
             )
             return None
+    # ⛔ #13224 F3: a REPLAY is not a REQUEST. The fold has no caller waiting on
+    # its wall clock and is cold by construction, so it keeps the pre-#13224
+    # synchronous encode (`get()` waits for the load) rather than trading the
+    # recovery tool's vectors for a latency bound it does not need. See
+    # `replay_write_scope` above and `projection._replay_write_scope`.
+    if in_replay_write_scope():
+        return encode_for_store(content, expected_dim)
     # ⛔ #13224: BOUND the wait for a cold embedder. `get()` (reached through
     # `encode_for_store`) blocks up to `_LOAD_TIMEOUT_S` for the load and, during
     # a warm window, on `_lock` for the load another thread is running — so a
@@ -1709,12 +1799,19 @@ def encode_for_row(
     # MEASURED dominant cost on this path: 13.5 s warm-cache model load vs 25-43
     # ms per encode, on a create whose own fold is 8-10 ms.
     if not EmbeddingModel.await_write_ready(WRITE_EMBED_BUDGET_S):
+        # #4861: a REQUIRED process must not be handed a keyword-only row it
+        # cannot tell apart from a hybrid one — the same exit `get()` would have
+        # taken, minus the 90 s block. `_unavailable` RAISES when the flag is
+        # armed and returns `None` otherwise, so reaching the next line means the
+        # row IS written without a vector.
+        unavailable = EmbeddingModel._unavailable(
+            context="cold embedder, write wait expired (#13224)")
         # Visible, not silent: counted on the existing "ran no model work"
         # metering term (#4488) and logged once per process — a bulk write must
         # not storm the log with one line per row.
         _note_embed_skip(1)
         _note_cold_write(WRITE_EMBED_BUDGET_S)
-        return None
+        return unavailable
     return encode_for_store(content, expected_dim)
 
 

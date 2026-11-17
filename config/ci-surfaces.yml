@@ -8724,6 +8724,22 @@ surfaces:
   # class is not a docs-only diff.
   - test_published_artifact_canary.py
   - test_embedded_choke_point.py
+  # #13224 (review F1): the cold-embedder write bound — a create must not block
+  # on the model load. REGISTERED, not diff-carrying: the file is a `carve_out:`
+  # member, so `select()` strips it from `test_files` and the URI-unset carve-out
+  # leg runs it. The `core` row is what makes `--integrity` pass and what selects
+  # it on a `tortoise/embeddings.py`-only diff (`embeddings.py` matches no
+  # SOURCE_PATTERN, so such a diff falls to `core`); without it the file is in no
+  # surface at all — `manifest-integrity` REDS (a required context) AND the 16
+  # tests run on no leg, including the post-merge full push run.
+  # CARVE-OUT: the docstring's declared lane is the embedded one and the file is
+  # URI-less by design (its `sdk` fixture builds `TortoiseSDK(db_path=…)` and it
+  # imports `tests.test_hosted_api.client`), so a URI-set lane would redirect the
+  # construction and certify the server instead. Registered in the three-way
+  # mirror — `carve_out:` + `tests/_embedded.TEST_NO_REDIRECT_STEMS` + the
+  # `test_markers.py` declaration — for the #8488/#5140 reason: a `core`-only row
+  # "would make the manifest green and run NOTHING on a docker leg".
+  - test_13224_cold_embedder_write_bound.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -11441,6 +11457,14 @@ carve_out:
 # DECLARED in ``tests/test_markers.py::test_no_redirect_stems_registry_exact``
 # (the pin is ``test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems``).
 - test_why_snapshot_8099.py
+# #13224 (review F1): the cold-embedder write bound. The `sdk` fixture builds
+# `TortoiseSDK(tmp_path / …)` and the end-to-end case drives the hosted client
+# against that embedded store, so the file's declared lane is the URI-unset one
+# — a URI-set lane would redirect the construction to the server and the write
+# path it pins would be certified on a graph it does not target. Mirror of the
+# `core` surface row above; the two registries are one set in two homes
+# (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+- test_13224_cold_embedder_write_bound.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
 # when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
 # present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`
