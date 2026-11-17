@@ -6037,7 +6037,8 @@ def _cors_headers_for_scope(scope) -> list[tuple[bytes, bytes]]:
     ]
 
 
-async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
+async def _send_wait_bound_refusal(send, scope, route_path: str,
+                                  stages: dict | None = None) -> None:
     """Answer a breached request with the transport's OWN 504 refusal.
 
     No new format: the REST arm is the §6.1 shape the rest of this app already
@@ -6048,6 +6049,14 @@ async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
     builders and only transported here as raw ASGI messages.
     """
     retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
+    # #10893: the stage rides `data`, ADDITIVELY and only when a timeline was
+    # bound. The refusal's IDENTITY is `code` + the exact `message` (see
+    # `tests/_verdict.py::is_transport_wait_bound_refusal`), so neither arm's
+    # envelope moves — a caller that knows nothing about stages is byte-identical,
+    # and one that reads `data.stage` learns what actually consumed the budget.
+    # The REST arm gets the same three fields under its own `detail` payload, and
+    # keeps the shipped `detail` STRING when no timeline is bound.
+    stage_fields = dict(stages) if stages else {}
     if _is_jsonrpc_surface(route_path):
         # Function-local: mcp_auth reaches back into this module (late, from a
         # function body), so a module-level edge here would be a needless
@@ -6056,7 +6065,13 @@ async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
 
         resp = _jsonrpc_error(
             ERR_TIMEOUT, _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
-            data={"retry_after": retry_after}, status=504,
+            data={"retry_after": retry_after, **stage_fields}, status=504,
+            headers={"Retry-After": str(retry_after)})
+    elif stage_fields:
+        resp = JSONResponse(
+            status_code=504,
+            content={"detail": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+                     **stage_fields},
             headers={"Retry-After": str(retry_after)})
     else:
         resp = JSONResponse(
@@ -6078,7 +6093,8 @@ async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
 
 
 def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
-                            latency_ms: int, *, tool_name: str | None = None) -> None:
+                            latency_ms: int, *, tool_name: str | None = None,
+                            stages: dict | None = None) -> None:
     """Fire-and-forget breach telemetry — OFF the request path.
 
     ``_track_analytics_event`` does a BLOCKING ``httpx`` POST (5 s timeout), so
@@ -6095,6 +6111,22 @@ def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
     props = {"path": route_path, "method": method, "latency_ms": latency_ms}
     if tool_name is not None:
         props["tool_name"] = tool_name
+    if stages:
+        # #10893: the stage attribution, on the SAME row as the latency it
+        # explains. Both keys are registered in `_ALLOWED_ANALYTICS_PROPS` —
+        # an unregistered prop is STRIPPED here in silence (#3821), which for
+        # this instrument would rebuild the exact blindness it removes.
+        # ⛔ `read_stage` is validated against the closed vocabulary before it
+        # is published: the analytics lake is a top-level-key filter with no
+        # per-event scoping (see the allowlist's own note), so a free-form
+        # string must never reach it.
+        from tortoise.read_stages import STAGE_SET as _STAGE_SET
+        started = stages.get("stage")
+        if started in _STAGE_SET:
+            props["read_stage"] = started
+        spent = stages.get("stages_ms")
+        if spent:
+            props["read_stages_ms"] = spent
 
     def _write() -> None:
         try:
@@ -6301,6 +6333,26 @@ class WaitBoundMiddleware:
             scope["state"] = state
         state["_wait_bound_t0"] = t0
 
+        # #10893: the READ-STAGE timeline for THIS request. Created here, on the
+        # request's own thread, and bound AROUND the handler task's creation so
+        # the task — and every context-copying hand-off below it, including
+        # `_read_offload`'s `monitoring.confine_context`, which is where
+        # `tortoise_fts_query` actually runs — carries a reference to it. The
+        # read path calls `read_stages.mark(...)` at each boundary; the refusal
+        # path below reads it back. `started_at=t0` makes `stages_ms` directly
+        # comparable to the `latency_ms` on the same breach record.
+        #
+        # ⛔ CONSTRUCTED FOR `data` TRAFFIC ONLY, and that is not an
+        # optimisation: the exempt routes returned above are the ones that must
+        # not pay for this bound at all, and a control poll (`/health`, the
+        # instrument's own probe) provokes no read stages, so a timeline there
+        # could only ever publish `pre_handler` — a misleading "nothing ran"
+        # for a request that never had anything to run.
+        request_stages = None
+        if traffic_class == "data":
+            from tortoise.read_stages import begin as _begin_read_stages
+            request_stages = _begin_read_stages(t0)
+
         # #4055 (P2): bind an opaque owner token for THIS request, then create
         # the handler task INSIDE the binding so the task copies it. Any
         # one-time embedder load the handler triggers (possibly through a
@@ -6308,8 +6360,12 @@ class WaitBoundMiddleware:
         # the load's owner; the wait-bound seam admits the cold-setup exemption
         # only for a load THIS request owns — never a concurrent request's.
         from tortoise.embeddings import request_load_owner
+        from tortoise.read_stages import request_stages as _bind_read_stages
         owner = object()
-        with request_load_owner(owner):
+        with contextlib.ExitStack() as _bindings:
+            _bindings.enter_context(request_load_owner(owner))
+            if request_stages is not None:
+                _bindings.enter_context(_bind_read_stages(request_stages))
             task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
         try:
             # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
@@ -6455,9 +6511,21 @@ class WaitBoundMiddleware:
         # `counted_now` would keep the SEAM's event and drop THIS one, inverting
         # the #3834 F-2 rule that the detector which ANSWERED the caller owns the
         # truthful event. Tracked on #10602.
+        # #10893: WHICH STAGE the budget went to. Two views, for two audiences:
+        # `stages_view` (telemetry + log) is published whenever a timeline was
+        # bound — `pre_handler` is the ANSWER for an operator, because it says the
+        # time did not go to retrieval at all. `wire_stages` (the refusal BODY) is
+        # published only once the read actually started, because a caller cannot
+        # act on "no stage was slow". ``None`` (no timeline, i.e. control traffic)
+        # adds nothing to either.
+        stages_view = (request_stages.snapshot()
+                       if request_stages is not None else None)
+        wire_stages = (request_stages.wire_snapshot()
+                       if request_stages is not None else None)
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
-                                int((time.monotonic() - t0) * 1000))
+                                int((time.monotonic() - t0) * 1000),
+                                stages=stages_view)
         # A refused request is demand that reached the plane — it belongs in the
         # denominator of the share it is also the numerator of, or the ratio
         # divides by a population that excludes its own failures.
@@ -6469,9 +6537,15 @@ class WaitBoundMiddleware:
                     _monitoring.record_wait_bound_attempt(surface)
             except Exception:  # measurement must never be a new failure mode
                 _logger.debug("wait-bound attempt count failed", exc_info=True)
+        # #10893: the stage is on the LOG line too, not only in the analytics
+        # prop. The operatives who re-measured this issue a dozen times were
+        # reading a terminal, and a breach that names its stage is the difference
+        # between "the plane is wedged" and "the encode is wedged".
+        from tortoise.read_stages import log_suffix as _stage_log_suffix
         _logger.warning(
-            "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
-            _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
+            "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly%s",
+            _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path,
+            _stage_log_suffix(stages_view))
         # The task has already outlived the refusal decision, so register it
         # BEFORE the send: the send happens 10 s in, where a client that has
         # already gone makes uvicorn raise (ConnectionResetError /
@@ -6479,7 +6553,8 @@ class WaitBoundMiddleware:
         # handler would never be drained. The send is then best-effort.
         _track_wait_bound_request(task)
         try:
-            await _send_wait_bound_refusal(send, scope, route_path)
+            await _send_wait_bound_refusal(send, scope, route_path,
+                                           stages=wire_stages)
         except Exception:
             _logger.debug(
                 "wait-bound refusal send failed (client disconnected?)",
@@ -40370,6 +40445,16 @@ _ALLOWED_ANALYTICS_PROPS = {
     "questions", "step", "error_type",
     # #889: MCP tool-call telemetry (friction evidence for epic #888)
     "tool_name", "status", "latency_ms", "error_kind",
+    # #10893: WHICH stage consumed a breached wait budget, and how long the
+    # stages that finished took. On the `transport_wait_bound_exceeded` row
+    # beside the `latency_ms` it explains — without them every re-measurement of
+    # that issue had to infer the stage from outside the process, and three of
+    # them inferred a different one. `read_stage` is validated against
+    # `read_stages.STAGES` at the emit site before it is published, so the
+    # free-form-string hazard this flat list has (no per-event scoping) does not
+    # apply to it; `read_stages_ms` is a nested ``{stage: float}`` mapping, which
+    # the PII filter passes because it tests top-level keys only.
+    "read_stage", "read_stages_ms",
     # #3675: the result-bearing half of the SAME row. Without it the
     # ``mcp_tool_call`` series cannot tell a ``tortoise_search`` that returned
     # 8 points from one that returned nothing — both are ``status: "ok"`` —

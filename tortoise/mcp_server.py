@@ -477,7 +477,8 @@ def _hold_mcp_dispatch_after_request(task) -> None:
 
 
 def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
-                                         name: str) -> None:
+                                         name: str,
+                                         stages: dict | None = None) -> None:
     """Schedule the shared breach writer OFF the event loop (#3834 G1).
 
     The writer is ``hosted_api._emit_wait_bound_breach`` — the SAME single emit
@@ -536,7 +537,8 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
         try:
             from tortoise import hosted_api as _ha
             _ha._emit_wait_bound_breach(
-                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name)
+                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name,
+                stages=stages)
         except Exception:  # telemetry must never turn a refusal into an error
             _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
 
@@ -1420,7 +1422,8 @@ def _write_retry_safety(name: str, arguments=None) -> bool:
 
 
 def _wait_bound_refusal_result(name: str | None = None,
-                               arguments=None, *, dispatched: bool = True) -> ToolResult:
+                               arguments=None, *, dispatched: bool = True,
+                               stages: dict | None = None) -> ToolResult:
     """The ONE refusal result both wait-bound paths return.
 
     The message and the advertised delay come from the single module both
@@ -1512,6 +1515,16 @@ def _wait_bound_refusal_result(name: str | None = None,
     default, because there the dispatch really was started and abandoned.
     """
     data: dict = {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}
+    if stages:
+        # #10893: ADDITIVE, and only when a timeline was bound — the envelope
+        # (`code` + the exact neutral `message`) is the refusal's IDENTITY for
+        # `tests/_verdict.py::is_transport_wait_bound_refusal` and does not move.
+        # ⛔ It rides BOTH arms deliberately, including the `committed: "none"`
+        # write arm: "which stage was it in" is a fact about the WAIT, not a
+        # claim about the write, so it cannot contradict `committed`.
+        data["stage"] = stages.get("stage")
+        if stages.get("stages_ms"):
+            data["stages_ms"] = stages["stages_ms"]
     # The human channel. Not in the write set, so the shape it always had stands.
     # NOT a claim that nothing was mutated: non-write-set tools can write (see the
     # docstring's `_cas_write_onboarding_state` case).
@@ -1798,6 +1811,19 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     # its route path for. Escape it for the log line (the analytics sink
     # sanitizes its own copy).
     safe_name = _mcp_auth._sanitize_for_log(name)
+    # #10893: WHICH read stage the budget went to — read from the timeline the
+    # REST middleware bound around this request (this dispatch task inherits it),
+    # so the MCP refusal and the REST refusal of the SAME request cannot describe
+    # the same stall two different ways. Two views, on purpose: `stages_view`
+    # (telemetry + log, ALWAYS when a timeline is bound) and `wire_stages`
+    # (the refusal body, only once the read actually started — see
+    # `read_stages.ReadStages.wire_snapshot`). ``None`` when nothing is bound
+    # (stdio MCP, an in-process SDK call): both calls below then add nothing,
+    # keeping those refusals byte-identical to the pre-#10893 shape.
+    from tortoise.read_stages import stage_view as _read_stage_view
+    from tortoise.read_stages import stage_wire_view as _read_stage_wire_view
+    stages_view = _read_stage_view()
+    wire_stages = _read_stage_wire_view()
     # #3834 F-2 / #9762: RE-READ the flag here, not only at entry. The entry
     # short-circuit only sees a refusal that already happened; a transport that
     # does not start its response before dispatching (fastmcp's
@@ -1818,11 +1844,13 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # a ``hosted_api`` import, and neither must the breach path, where that
         # import froze the loop and delivered the refusal seconds late.
         _emit_mcp_wait_bound_breach_off_loop(
-            _current_org_id.get() or "", latency_ms, name)
+            _current_org_id.get() or "", latency_ms, name, stages=stages_view)
+        from tortoise.read_stages import log_suffix as _stage_log_suffix
         _log.warning(
             "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
-            "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
-    return _wait_bound_refusal_result(name, arguments)
+            "refusing legibly%s", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name,
+            _stage_log_suffix(stages_view))
+    return _wait_bound_refusal_result(name, arguments, stages=wire_stages)
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
