@@ -4281,6 +4281,22 @@ surfaces:
   # handler); this arm is load-bearing for the module-only diff, the `api` arm
   # for the handler-only one.
   - test_record_serve.py
+  # #7879 (epic #7879, hole 1) — the RUNNER for the record fold: the only
+  # production entry point that executes `record_projection.replay()`. `core` is
+  # the arm that carries it: `tools/record_runner.py` matches no SOURCE_PATTERN
+  # and `tools/` is a flat NON_PYTHON_PREFIXES entry, so the tool is paired with a
+  # `CORE_ALSO` row in `tools/ci_selection.py` (the `curate_graph.py` precedent) —
+  # without that row a runner-only diff selects NO surface and these pins never
+  # run on the file that defines the gates they hold.
+  # DB-free by construction: `open_record`/`read_checkpoint` are replaced, so it
+  # needs no graph, no URI and no carve-out registration. Its live proof (a real
+  # journal folded into a real `pgvector` Postgres, a SIGKILL mid-run resumed with
+  # no duplicate positions) is the PR body's, and its DB-level half belongs to the
+  # `test-record-postgres` lane. Pinned by
+  # `tests/test_ci_selection.py::test_record_runner_tool_change_selects_core_not_tier1`
+  # — the `CORE_ALSO` row in `tools/ci_selection.py` is what makes a runner-only
+  # diff select this arm at all.
+  - test_record_runner.py
   # The LIVE half: parity on a real Postgres and S9 with the cache copy
   # destroyed. It needs BOTH stores (`TORTOISE_DB_URI` + `TEST_RECORD_DB_URI`)
   # and no CI job provides both, so it SKIPS VISIBLY (per-test `pytest.skip`,
@@ -13980,6 +13996,7 @@ durations:
   test_rebuild_team_meta_marker_5353.py: 1.4  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.5
   test_reconciliation.py: 0.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.5
   test_record_projection.py: 2.6  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 3.2
+  test_record_runner.py: 2.0  # #7879: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the flat 2.0s default — an unregistered new test file reds `integrity_problems` on the DURATIONS map too. DB-free. ⛔ No local timing and no CASE COUNT are quoted on purpose — the same rule the rows below state: a figure beside a weight re-stales against the run it came from, and the count was already wrong (47 quoted, 48 measured) on the day it landed. Refresh from the first post-merge run that includes it (`tools/ci_timing.py --refresh-durations`).
   test_record_reconcile_trigger.py: 2.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.5
   test_record_schema_placement.py: 0.2
   test_12901_wave2_control_plane.py: 2.0  # new in #12901 (PR wave 2) — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ('a default is not a reading'): the `core` registration above is what puts the file in `fast_pool()`. ⚠️ MEASURED LOCALLY as context, NOT as the weight: whole-file through `tools/test_lane.py run` measured **50 passed in 8.57 s** on a private lane container at head `b4ca3f2849`, so the flat 2.0 UNDERSTATES it until a sweep re-bases it. `--integrity` is the authority and the refresher replaces this row from junit.
