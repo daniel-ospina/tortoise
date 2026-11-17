@@ -6546,7 +6546,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:14896`,
         # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14925` (inside the span),
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:14935` (inside it), and `:14973` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:14786`.
+        # the blank line immediately before `return OrgInfoResponse(` at `:14974` — ⛔ not `:14786`, which at this head is a docstring in a DIFFERENT endpoint (`GET /v1/topics/{topic}/summary`); the `+188` moved the PAIR and only the first half was re-derived (`:14973` is the blank line, so the `return` is the NEXT line — `_i7_end_ok` pins that pair by content).
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14896", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
