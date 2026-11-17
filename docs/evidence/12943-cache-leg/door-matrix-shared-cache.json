@@ -4,9 +4,9 @@
   "rows": [
     {
       "door": "sdk",
-      "org": "a129435c1e3de316",
-      "graph_id": "g_12943a5c1e3de316",
-      "cache_graph_canonical": "org_a129435c1e3de316_g_12943a5c1e3de316",
+      "org": "a12943eaf4807daa",
+      "graph_id": "g_12943aeaf4807daa",
+      "cache_graph_canonical": "org_a12943eaf4807daa_g_12943aeaf4807daa",
       "record": {
         "object": 1,
         "subject": 0,
@@ -26,13 +26,13 @@
         "__absent__": 1
       },
       "outcome": {
-        "cache_target": "org_a129435c1e3de316_g_12943a5c1e3de316"
+        "cache_target": "org_a12943eaf4807daa_g_12943aeaf4807daa"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_a129435c1e3de316_g_12943a5c1e3de316": 1
+        "server://127.0.0.1:16403|org_a12943eaf4807daa_g_12943aeaf4807daa": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -43,9 +43,10 @@
       ],
       "reached_canonical": true,
       "reached_org_default": false,
+      "reached_actual": true,
       "reconcile": {
-        "canonical_graph": "org_a129435c1e3de316_g_12943a5c1e3de316",
-        "actual_graph": "org_a129435c1e3de316_g_12943a5c1e3de316",
+        "canonical_graph": "org_a12943eaf4807daa_g_12943aeaf4807daa",
+        "actual_graph": "org_a12943eaf4807daa_g_12943aeaf4807daa",
         "canonical": {
           "cache_side": "cache",
           "checked": 1,
@@ -63,7 +64,7 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "29435c1e3de316_g_12943a5c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "2943eaf4807daa_g_12943aeaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         },
         "actual": {
           "cache_side": "cache",
@@ -82,15 +83,15 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "29435c1e3de316_g_12943a5c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "2943eaf4807daa_g_12943aeaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         }
       }
     },
     {
       "door": "data_sdk",
-      "org": "b129435c1e3de316",
-      "graph_id": "g_12943b5c1e3de316",
-      "cache_graph_canonical": "org_b129435c1e3de316_g_12943b5c1e3de316",
+      "org": "b12943eaf4807daa",
+      "graph_id": "g_12943beaf4807daa",
+      "cache_graph_canonical": "org_b12943eaf4807daa_g_12943beaf4807daa",
       "record": {
         "object": 1,
         "subject": 0,
@@ -110,13 +111,13 @@
         "__absent__": 1
       },
       "outcome": {
-        "cache_target": "org_b129435c1e3de316_g_12943b5c1e3de316"
+        "cache_target": "org_b12943eaf4807daa_g_12943beaf4807daa"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_b129435c1e3de316_g_12943b5c1e3de316": 1
+        "server://127.0.0.1:16403|org_b12943eaf4807daa_g_12943beaf4807daa": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -126,9 +127,10 @@
       ],
       "reached_canonical": true,
       "reached_org_default": false,
+      "reached_actual": true,
       "reconcile": {
-        "canonical_graph": "org_b129435c1e3de316_g_12943b5c1e3de316",
-        "actual_graph": "org_b129435c1e3de316_g_12943b5c1e3de316",
+        "canonical_graph": "org_b12943eaf4807daa_g_12943beaf4807daa",
+        "actual_graph": "org_b12943eaf4807daa_g_12943beaf4807daa",
         "canonical": {
           "cache_side": "cache",
           "checked": 1,
@@ -146,7 +148,7 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "29435c1e3de316_g_12943b5c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "2943eaf4807daa_g_12943beaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         },
         "actual": {
           "cache_side": "cache",
@@ -165,15 +167,15 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "29435c1e3de316_g_12943b5c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "2943eaf4807daa_g_12943beaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         }
       }
     },
     {
       "door": "data_sdk_orgwide",
-      "org": "c129435c1e3de316",
-      "graph_id": "g_12943c5c1e3de316",
-      "cache_graph_canonical": "org_c129435c1e3de316_g_12943c5c1e3de316",
+      "org": "c12943eaf4807daa",
+      "graph_id": "g_12943ceaf4807daa",
+      "cache_graph_canonical": "org_c12943eaf4807daa_g_12943ceaf4807daa",
       "record": {
         "object": 1,
         "subject": 0,
@@ -193,13 +195,13 @@
         "Source": 0
       },
       "outcome": {
-        "cache_target": "org_c129435c1e3de316"
+        "cache_target": "org_c12943eaf4807daa"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_c129435c1e3de316": 1
+        "server://127.0.0.1:16403|org_c12943eaf4807daa": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -209,9 +211,10 @@
       ],
       "reached_canonical": false,
       "reached_org_default": true,
+      "reached_actual": true,
       "reconcile": {
-        "canonical_graph": "org_c129435c1e3de316_g_12943c5c1e3de316",
-        "actual_graph": "org_c129435c1e3de316",
+        "canonical_graph": "org_c12943eaf4807daa_g_12943ceaf4807daa",
+        "actual_graph": "org_c12943eaf4807daa",
         "canonical": {
           "cache_side": "cache",
           "checked": 1,
@@ -219,7 +222,7 @@
           "declaration_source": null,
           "divergent": 1,
           "divergent_keys": [
-            "Object:1a1eb9c37ae-c36e4a22ad11"
+            "Object:1a1ebb4f316-07b7e8a4b0ba"
           ],
           "extra_in_cache": 0,
           "field_mismatches": 0,
@@ -250,15 +253,15 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "or search on org_c129435c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "or search on org_c12943eaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         }
       }
     },
     {
       "door": "rest",
-      "org": "d129435c1e3de316",
-      "graph_id": "g_12943d5c1e3de316",
-      "cache_graph_canonical": "org_d129435c1e3de316_g_12943d5c1e3de316",
+      "org": "d12943eaf4807daa",
+      "graph_id": "g_12943deaf4807daa",
+      "cache_graph_canonical": "org_d12943eaf4807daa_g_12943deaf4807daa",
       "record": {
         "object": 1,
         "subject": 0,
@@ -279,13 +282,13 @@
       },
       "outcome": {
         "status": 200,
-        "body": "{\"canonical_name\":\"door rest 5c1e3de316\",\"createdAt\":\"2026-11-17T22:24:08.676413+00:00\",\"embedding\":[-0.033926740288734436,-0.03186924383044243,0.06509606540203094,0.008158838376402855,-0.060390688478"
+        "body": "{\"canonical_name\":\"door rest eaf4807daa\",\"createdAt\":\"2026-11-17T22:51:09.472193+00:00\",\"embedding\":[-0.0350976325571537,-0.02276204340159893,0.037389300763607025,0.00658611673861742,-0.04583287239074"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_d129435c1e3de316_g_12943d5c1e3de316": 1
+        "server://127.0.0.1:16403|org_d12943eaf4807daa_g_12943deaf4807daa": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -296,9 +299,10 @@
       ],
       "reached_canonical": true,
       "reached_org_default": false,
+      "reached_actual": true,
       "reconcile": {
-        "canonical_graph": "org_d129435c1e3de316_g_12943d5c1e3de316",
-        "actual_graph": "org_d129435c1e3de316_g_12943d5c1e3de316",
+        "canonical_graph": "org_d12943eaf4807daa_g_12943deaf4807daa",
+        "actual_graph": "org_d12943eaf4807daa_g_12943deaf4807daa",
         "canonical": {
           "cache_side": "cache",
           "checked": 1,
@@ -318,7 +322,7 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "29435c1e3de316_g_12943d5c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "2943eaf4807daa_g_12943deaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         },
         "actual": {
           "cache_side": "cache",
@@ -339,15 +343,15 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "29435c1e3de316_g_12943d5c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "2943eaf4807daa_g_12943deaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         }
       }
     },
     {
       "door": "mcp",
-      "org": "e129435c1e3de316",
-      "graph_id": "g_12943e5c1e3de316",
-      "cache_graph_canonical": "org_e129435c1e3de316_g_12943e5c1e3de316",
+      "org": "e12943eaf4807daa",
+      "graph_id": "g_12943eeaf4807daa",
+      "cache_graph_canonical": "org_e12943eaf4807daa_g_12943eeaf4807daa",
       "record": {
         "object": 1,
         "subject": 0,
@@ -367,13 +371,13 @@
         "__absent__": 1
       },
       "outcome": {
-        "tool_returned": "{'node': {'canonical_name': 'door mcp 5c1e3de316', 'createdAt': '2026-11-17T22:24:10.409540+00:00', 'embedding': [-0.04667801409959793, -0.05986839905381203, 0."
+        "tool_returned": "{'node': {'canonical_name': 'door mcp eaf4807daa', 'createdAt': '2026-11-17T22:51:11.406129+00:00', 'embedding': [-0.05422130227088928, -0.05018220096826553, 0."
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_e129435c1e3de316_g_12943e5c1e3de316": 1
+        "server://127.0.0.1:16403|org_e12943eaf4807daa_g_12943eeaf4807daa": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -383,9 +387,10 @@
       ],
       "reached_canonical": true,
       "reached_org_default": false,
+      "reached_actual": true,
       "reconcile": {
-        "canonical_graph": "org_e129435c1e3de316_g_12943e5c1e3de316",
-        "actual_graph": "org_e129435c1e3de316_g_12943e5c1e3de316",
+        "canonical_graph": "org_e12943eaf4807daa_g_12943eeaf4807daa",
+        "actual_graph": "org_e12943eaf4807daa_g_12943eeaf4807daa",
         "canonical": {
           "cache_side": "cache",
           "checked": 1,
@@ -405,7 +410,7 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "29435c1e3de316_g_12943e5c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "2943eaf4807daa_g_12943eeaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         },
         "actual": {
           "cache_side": "cache",
@@ -426,15 +431,15 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "29435c1e3de316_g_12943e5c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "2943eaf4807daa_g_12943eeaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         }
       }
     },
     {
       "door": "script_orglevel",
-      "org": "f129435c1e3de316",
-      "graph_id": "g_12943f5c1e3de316",
-      "cache_graph_canonical": "org_f129435c1e3de316_g_12943f5c1e3de316",
+      "org": "f12943eaf4807daa",
+      "graph_id": "g_12943feaf4807daa",
+      "cache_graph_canonical": "org_f12943eaf4807daa_g_12943feaf4807daa",
       "record": {
         "object": 1,
         "subject": 0,
@@ -454,13 +459,13 @@
         "Source": 0
       },
       "outcome": {
-        "cache_target": "org_f129435c1e3de316"
+        "cache_target": "org_f12943eaf4807daa"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_f129435c1e3de316": 1
+        "server://127.0.0.1:16403|org_f12943eaf4807daa": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -470,9 +475,10 @@
       ],
       "reached_canonical": false,
       "reached_org_default": true,
+      "reached_actual": true,
       "reconcile": {
-        "canonical_graph": "org_f129435c1e3de316_g_12943f5c1e3de316",
-        "actual_graph": "org_f129435c1e3de316",
+        "canonical_graph": "org_f12943eaf4807daa_g_12943feaf4807daa",
+        "actual_graph": "org_f12943eaf4807daa",
         "canonical": {
           "cache_side": "cache",
           "checked": 1,
@@ -480,7 +486,7 @@
           "declaration_source": null,
           "divergent": 1,
           "divergent_keys": [
-            "Object:1a1eb9c4f42-d4c0fb59273d"
+            "Object:1a1ebb50a8d-1e1cdb950283"
           ],
           "extra_in_cache": 0,
           "field_mismatches": 0,
@@ -513,15 +519,15 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "or search on org_f129435c1e3de316 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "or search on org_f12943eaf4807daa is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         }
       }
     },
     {
       "door": "misroute",
-      "org": "h129435c1e3de316",
-      "graph_id": "g_12943h5c1e3de316",
-      "cache_graph_canonical": "org_h129435c1e3de316_g_12943h5c1e3de316",
+      "org": "h12943eaf4807daa",
+      "graph_id": "g_12943heaf4807daa",
+      "cache_graph_canonical": "org_h12943eaf4807daa_g_12943heaf4807daa",
       "record": {
         "object": 1,
         "subject": 0,
@@ -537,8 +543,8 @@
         "__absent__": 1
       },
       "outcome": {
-        "cache_target": "org_h129435c1e3de316_g_12943other0cf655da",
-        "tenant_graph_id": "g_12943h5c1e3de316"
+        "cache_target": "org_h12943eaf4807daa_g_12943otherb7a495a1",
+        "tenant_graph_id": "g_12943heaf4807daa"
       },
       "error": null,
       "cache_leg_failures": {
@@ -548,7 +554,7 @@
         "tenant_graph_mismatch": 1
       },
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_h129435c1e3de316_g_12943other0cf655da": 1
+        "server://127.0.0.1:16403|org_h12943eaf4807daa_g_12943otherb7a495a1": 1
       },
       "metrics_keys_moved": [
         "cache_leg_failures",
@@ -559,9 +565,10 @@
       ],
       "reached_canonical": false,
       "reached_org_default": false,
+      "reached_actual": true,
       "reconcile": {
-        "canonical_graph": "org_h129435c1e3de316_g_12943h5c1e3de316",
-        "actual_graph": "org_h129435c1e3de316_g_12943other0cf655da",
+        "canonical_graph": "org_h12943eaf4807daa_g_12943heaf4807daa",
+        "actual_graph": "org_h12943eaf4807daa_g_12943otherb7a495a1",
         "canonical": {
           "cache_side": "cache",
           "checked": 1,
@@ -569,7 +576,7 @@
           "declaration_source": null,
           "divergent": 1,
           "divergent_keys": [
-            "Object:1a1eb9c5527-2f73f50dea2e"
+            "Object:1a1ebb5103c-a516e2f1f276"
           ],
           "extra_in_cache": 0,
           "field_mismatches": 0,
@@ -602,7 +609,7 @@
           "truth_side": "record",
           "verdict": "clean",
           "exit": 0,
-          "stderr_tail": "435c1e3de316_g_12943other0cf655da is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+          "stderr_tail": "43eaf4807daa_g_12943otherb7a495a1 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
         }
       }
     }

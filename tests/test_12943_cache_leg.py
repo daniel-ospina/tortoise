@@ -1025,3 +1025,112 @@ def test_a_malformed_uri_does_not_turn_binding_a_tenant_into_a_failure(
             "binding a tenant must not add a cache-leg failure of any kind")
     finally:
         sdk.close()
+
+
+def test_apply_still_RETURNS_the_fold_result(monkeypatch, tmp_path):
+    """`apply`'s return value is consumed — a wrapper that drops it loses records.
+
+    `create_source`'s `_return_apply_result` path feeds
+    `apply_result.result_set[0][0]` into the #5024 (T6) `SourceVersioned`
+    decision. The registry wrapper's first draft returned `None` instead, and the
+    record stopped carrying source version transitions **permanently** — the
+    journal is append-only. Measured then: `test_source_rematerialisation_5024`
+    12 failed, `test_source_version_window_3644` 5 failed. This is the cheap pin
+    that makes the same silent loss impossible to re-introduce.
+    """
+    _drop_uri(monkeypatch)
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        out = proj.apply({"event_id": "ev-src", "type": "SourceCreated",
+                          "url": "https://example.test/a", "sourceId": "src-1"})
+        assert out is not None, (
+            "apply() must return the fold's own result — `create_source` reads "
+            "it to decide whether a SourceVersioned record is owed")
+    finally:
+        sdk.close()
+
+
+def test_apply_keeps_the_signature_the_replay_engines_introspect(
+        monkeypatch, tmp_path):
+    """The journal-context keywords are a CONTRACT, not cosmetics.
+
+    `consistency.recover_from_log` and `backup.restore` read
+    `inspect.signature(proj.apply).parameters` to decide whether this engine can
+    be handed the journal's own context. A `**kwargs` wrapper erases all four
+    names, so both engines silently stop threading it — measured on that draft:
+    `test_rebuild_parity_fail_loud_3585` 8 failed (the whole journal-context
+    class: forward references, absent-target supersedes, restore refusals).
+    """
+    import inspect
+
+    _drop_uri(monkeypatch)
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        params = inspect.signature(sdk._get_proj().apply).parameters
+        for name in ("journal_object_surviving", "journal_object_deleted",
+                     "journal_first_materialized", "journal_seq",
+                     "journal_existence", "journal_object_established",
+                     "about_links_deferred"):
+            assert name in params, (
+                f"apply() lost the {name!r} parameter the replay engines "
+                "introspect — they will stop threading the journal context")
+        assert not any(p.kind is inspect.Parameter.VAR_KEYWORD
+                       for p in params.values()), (
+            "apply() must name its keywords explicitly; **kwargs erases them")
+    finally:
+        sdk.close()
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "PointsMerged"},                            # no merge_ids
+    {"type": "ObjectSuperseded", "id": "no-such-object"},  # matched nothing
+    {"type": "PointPromoted", "point": {"id": "\x00bad"}},  # unwritable id
+])
+def test_the_OTHER_writing_nothing_exits_are_not_counted(
+        monkeypatch, tmp_path, event):
+    """`_skip()` must cover every exit that issues no write — measured, not assumed.
+
+    Review cycle 3 measured the draft counting all three of these (registry
+    `{'embedded:…|tortoise': 1}`) while the fold logged that the record was
+    dropped, and counted `ObjectSuperseded` on the LIVE path because its `_skip()`
+    was nested inside the journal-context gate — the one path this instrument
+    exists to serve.
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        reset_cache_write_targets()
+        sdk._get_proj().apply(dict(event, event_id=f"ev-{event['type']}"))
+        assert cache_write_targets() == {}, (
+            f"{event['type']} wrote nothing but was counted as a landed cache "
+            f"write — got {cache_write_targets()!r}")
+    finally:
+        sdk.close()
+
+
+def test_a_declared_gateway_lane_records_its_target(monkeypatch, tmp_path):
+    """`why_snapshot` / `webhook_delivery` / onboarding write WITHOUT folding.
+
+    They issue their own statements through the projection's handle under a
+    declared lane, so a process whose live traffic is those lanes registered no
+    target at all — the same "{} means healthy" illusion, one lane over
+    (#12943 review cycle 3, finding 4).
+    """
+    _drop_uri(monkeypatch)
+    from tortoise import why_snapshot
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        reset_cache_write_targets()
+        why_snapshot._run(proj, "CREATE (:WhyProbe {id: $id})", {"id": "w-1"})
+        assert sum(cache_write_targets().values()) == 1, cache_write_targets()
+        # A READ through the same gateway is not a cache write.
+        why_snapshot._run(proj, "MATCH (n:WhyProbe) RETURN count(n)")
+        assert sum(cache_write_targets().values()) == 1, cache_write_targets()
+    finally:
+        sdk.close()

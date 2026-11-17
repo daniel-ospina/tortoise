@@ -1555,20 +1555,12 @@ class _EdgeHandlers:
         # it only when a row was actually created, so it is the landed-write
         # point rather than an attempt. Replay is excluded below, before the
         # recorder gate (a projection with no recorder still WROTE the cache).
-        try:
-            # Lazy imports: `tortoise.projection` imports THIS module, and this
-            # mixin's `self` IS the projection (`_stable_endpoint` is its own).
-            from tortoise.cache_leg import note_cache_write_target
-            from tortoise.projection import replay_window_open
+        # Lazy import: `tortoise.projection` imports THIS module, and this
+        # mixin's `self` IS the projection. The helper is total and excludes a
+        # replay itself.
+        from tortoise.projection import note_live_write_target
 
-            if not replay_window_open():
-                endpoint = getattr(self, "_cache_target_endpoint", None)
-                if endpoint is None:
-                    endpoint = self._stable_endpoint() or ()
-                    self._cache_target_endpoint = endpoint
-                note_cache_write_target(endpoint, getattr(self, "graph_name", None))
-        except Exception:  # noqa: BLE001, RUF100 — never break a live write
-            pass
+        note_live_write_target(self)
         recorder = getattr(self, "_structural_edge_recorder", None)
         if recorder is None:
             return

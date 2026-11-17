@@ -223,12 +223,29 @@ def cache_store_fingerprint(endpoint: object) -> str:
 def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     """Count one LIVE write against the store+graph it actually folded into.
 
-    Called from ``FalkorProjection.apply`` — the ONE fold every live door passes
-    (SDK, REST, MCP, capture, the onboarding metadata lane) after ``create_point``
-    went through the outbox — so the count cannot drift from the writes. Replay
-    is excluded by the caller: a rebuild WRITES the target on purpose and
-    counting it would let a repair make the picture look healthier than the live
-    traffic it repaired.
+    Called from the two live lanes that CHOOSE a graph, and only there:
+
+    * ``FalkorProjection.apply`` — the fold every door passes (SDK, REST, MCP,
+      capture, the onboarding metadata lane), counted once per fold that LANDED
+      (a skipped/malformed fold is not a write);
+    * ``_record_structural_edges`` — ``create_edge`` and the about-lane mint
+      their edges with a raw ``MERGE`` under ``_structural_edge_write_scope`` and
+      never pass ``apply``, so without that hook a process whose writes are edges
+      registers NO target (the same "{} means healthy" illusion, one lane over).
+
+    ⛔ THE RESIDUAL IS NAMED RATHER THAN IMPLIED: a raw statement issued at
+    ``proj.g`` inside a live scope — the capture provenance stamps
+    (``_CAPTURE_PROVENANCE_LANE``) are the standing example — reaches the graph
+    without passing either lane and is NOT counted. That is accepted because such
+    a writer does not CHOOSE its graph (it stamps nodes by id in the graph the
+    SDK is already bound to), so it cannot hide the split this registry exists to
+    expose; a lane that could choose would have to go through a fold or a mint.
+    Closing it belongs at the write handle (``_GuardedGraph``), where a
+    per-statement census already exists (§17.1), not here.
+
+    Replay is excluded by both callers: a rebuild WRITES the target on purpose,
+    and counting it would let a repair make the picture look healthier than the
+    live traffic it repaired.
 
     WHAT THIS ANSWERS THAT ``cache_leg_failures`` CANNOT. ``cache_leg_failures``
     counts a CONFIGURATION split (record armed + this process's cache is the

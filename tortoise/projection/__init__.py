@@ -4592,6 +4592,58 @@ def _handle_only_write_scope(reason: str):
         _RAW_QUERY_CLOSED_DEPTH.reset(token)
 
 
+def note_live_write_target(proj) -> None:
+    """Record ONE live cache write against the store+graph it reached (#12943).
+
+    The registry (`cache_leg.cache_write_targets`) exists because the record's
+    TENANT and the cache's GRAPH are two independent answers: when they differ,
+    the write lands in a graph the record's reconciler never reads, nothing
+    fails, and every counter reads healthy. A per-process answer to "where did
+    THIS process's live writes go" is what turns that into a measurement.
+
+    Called from every gateway that writes the cache WITHOUT folding a record,
+    and from the fold itself, so the bound is stated rather than implied:
+
+    * the fold (`FalkorProjection.apply`) — once per fold that LANDED;
+    * the structural-edge mint (`edges._record_structural_edges`) — once per
+      mint that created a row;
+    * the three declared live gateways that issue their own statements —
+      `onboarding.state._run`, `webhook_delivery._run`, `why_snapshot._run`;
+    * and ``replay_window_open()`` excludes every one of them, because a rebuild
+      writes the same target on purpose and counting it would let a repair make
+      the live picture look healthier than the traffic it repaired. (The fold and
+      the mint check the window at their own seam, before this helper.)
+
+    ⛔ RESIDUAL, stated: a raw statement issued at ``proj.g`` inside a live scope
+    from anywhere ELSE — the capture provenance stamps (`_CAPTURE_PROVENANCE_LANE`)
+    are the standing example — is not recorded. That is accepted because such a
+    writer does not CHOOSE its graph (it stamps nodes by id in the graph the SDK is
+    already bound to), so it cannot hide this class; closing it belongs at the
+    write handle, where §17.1's per-statement census already lives.
+
+    ⛔ TOTAL (#5148's rule): observability must never break a write that already
+    landed, so every step — endpoint resolution included — is inside the guard.
+    Returns nothing; a caller has no decision to make from it.
+    """
+    try:
+        from tortoise.cache_leg import note_cache_write_target
+
+        if replay_window_open():
+            return
+        resolver = getattr(proj, "_stable_endpoint", None)
+        if resolver is None:
+            return          # a raw handle, not a projection: nothing to name
+        endpoint = getattr(proj, "_cache_target_endpoint", None)
+        if endpoint is None:
+            endpoint = resolver() or ()
+            # Memoised: the endpoint cannot change for a live projection (the
+            # client is built once) and this runs on write paths.
+            proj._cache_target_endpoint = endpoint
+        note_cache_write_target(endpoint, getattr(proj, "graph_name", None))
+    except Exception:  # noqa: BLE001, RUF100 — never deny a write that landed
+        return
+
+
 def _replay_write_scope():
     """The replay engines' scope: the record came FROM the journal.
 
@@ -12630,7 +12682,12 @@ class FalkorProjection(
         return ev
 
     @tolerates_altered_numbers
-    def apply(self, event: dict, **kwargs) -> None:
+    def apply(self, event: dict, *, journal_object_surviving=None,
+              journal_object_deleted=None, journal_first_materialized=None,
+              journal_seq: int | None = None,
+              journal_existence=None,
+              journal_object_established=None,
+              about_links_deferred: bool = False):
         """Fold one record into the cache, recording WHERE it landed (#12943).
 
         A THIN WRAPPER, and the wrap is the point: the registry counts a fold
@@ -12653,22 +12710,35 @@ class FalkorProjection(
         the registry exists to instrument. `_stable_endpoint` is NOT
         exception-free by design (`_falkordb_version_cache_key` deliberately
         leaves `OverflowError` uncaught on a non-finite port).
+
+        ⛔ THE SIGNATURE AND THE RETURN VALUE ARE PART OF THE CONTRACT, and this
+        is where that is pinned: the keyword names are INTROSPECTED by the two
+        replay engines (`consistency.recover_from_log` and `backup.restore` read
+        `inspect.signature(proj.apply).parameters` to decide whether this engine
+        can be handed the journal's own context), and the fold's RESULT is
+        consumed by `create_source`'s `_return_apply_result` path (the #5024 T6
+        `SourceVersioned` decision). A wrapper that swallowed either silently
+        stops journalling source version transitions and un-threads the replay
+        engines — measured on this wrapper's first draft: 12 failures in
+        `test_source_rematerialisation_5024` and 8 in
+        `test_rebuild_parity_fail_loud_3585`. Forward both explicitly; do not
+        "simplify" this back to `**kwargs`, and never drop the return.
         """
         wrote = [True]      # a fold's NORMAL path writes; `_skip()` says otherwise
-        self._apply_event(event, _wrote=wrote, **kwargs)
-        if wrote[0] and not replay_window_open():
-            try:
-                from tortoise.cache_leg import note_cache_write_target
-                endpoint = getattr(self, "_cache_target_endpoint", None)
-                if endpoint is None:
-                    endpoint = self._stable_endpoint() or ()
-                    # Memoised: the endpoint cannot change for a live
-                    # projection (the client is built once), and this fold is
-                    # on the write path.
-                    self._cache_target_endpoint = endpoint
-                note_cache_write_target(endpoint, self.graph_name)
-            except Exception:  # noqa: BLE001, RUF100 — never break a live fold
-                pass
+        result = self._apply_event(
+            event,
+            journal_object_surviving=journal_object_surviving,
+            journal_object_deleted=journal_object_deleted,
+            journal_first_materialized=journal_first_materialized,
+            journal_seq=journal_seq,
+            journal_existence=journal_existence,
+            journal_object_established=journal_object_established,
+            about_links_deferred=about_links_deferred,
+            _wrote=wrote,
+        )
+        if wrote[0]:
+            note_live_write_target(self)
+        return result
 
     def _apply_event(self, event: dict, *, journal_object_surviving=None,
                      journal_object_deleted=None,
@@ -12682,9 +12752,11 @@ class FalkorProjection(
             """This call folded NOTHING — say so, then return.
 
             #12943: the write-target registry counts writes LANDED on a graph,
-            and the fold has eight exits that write nothing (a malformed
-            envelope, an unwritable id, a re-stamp that folded no Point, and
-            the three recognized-not-folded arms at the tail). Counting them
+            and this fold has many exits that write nothing (a malformed
+            envelope, an unwritable or absent id on the point/operator/promote
+            arms, an empty `merge_ids`, a re-stamp that folded no Point, a
+            supersede that matched no Object, and the three
+            recognized-not-folded arms at the tail). Counting them
             would answer "how many folds were STARTED"; the one direction that
             matters is the opposite — a record-written / cache-not-written split
             must never read as a write that landed (#12943 review cycle 2,
@@ -12988,6 +13060,10 @@ class FalkorProjection(
                                    where="FalkorProjection.apply",
                                    absent_is_ordinary=False,
                                    drops_record=True)
+                # #12943: this branch folds NOTHING (the record is dropped),
+                # so it must not count as a landed cache write — the sibling
+                # `PointAdded` unwritable-id branch does the same.
+                _skip()
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
             # (#2256 review P1): promotion emitters journal FLAT get_point
@@ -13011,6 +13087,9 @@ class FalkorProjection(
                         "MATCH (n:Point {id:$id}) SET n.status = 'live'",
                         params={"id": oid},
                     )
+                else:
+                    # #12943: no snapshot and no id — no statement is issued.
+                    _skip()
         elif t in _POINT_RESTAMP_EVENT_TYPES:
             # #3305: the Point-lifecycle terminalizer fold, for the ONE-RECORD
             # contract (a live caller, or any whole-journal engine that has not
@@ -13041,6 +13120,10 @@ class FalkorProjection(
             return
         elif t == "PointsMerged":
             # #331 (review r2): `or []` also covers "merge_ids": null.
+            # #12943: an empty set issues NO statement, so it is not a landed
+            # write.
+            if not ev.get("merge_ids"):
+                _skip()
             for mid in ev.get("merge_ids") or []:
                 # #331 (review r4): str-only ids.
                 if isinstance(mid, str):
@@ -13193,6 +13276,12 @@ class FalkorProjection(
             # A surviving name is no longer evidence of anything: the record
             # carries no address the fold can use.
             folded, _ = self._fold_object_superseded(ev)
+            if folded == 0:
+                # #12943: a supersede that matched NOTHING wrote nothing on
+                # EVERY path, the live one-record one included — the journal
+                # context only decides whether a non-folded record is also
+                # raised, never whether the fold wrote.
+                _skip()
             if folded == 0 and journal_object_surviving is not None:
                 _cids, _ = journal_object_surviving
                 _oid, _oname = ev.get("id"), ev.get("name")
