@@ -145,6 +145,27 @@ def _vocabulary_in(text: str) -> bool:
     return all(f"'{word}'" in text for word in sorted(GOAL_STATE_VALUES))
 
 
+def test_the_vocabulary_check_is_not_substring_blind():
+    """`_vocabulary_in` is the only thing standing between the suite and a
+    refusal that lists six of seven members, so its own discriminating power is
+    pinned on the exact mutant that survived the bare-substring form: the
+    message renders the set with `met` REMOVED, and `"met" in "'unmet'"` — the
+    old test — is True (#13116 review Secondary 1, measured)."""
+    omitted_met = (
+        "Invalid goalState 'green'. A goal's achievement state is a closed "
+        "vocabulary: ['abandoned', 'active', 'blocked', 'guideline', "
+        "'superseded', 'unmet']. (Lifecycle is the separate `status` field.)"
+    )
+    assert _vocabulary_in(omitted_met) is False, omitted_met
+
+    # …and the real sentence, which names every member, passes.
+    from tortoise.sdk import validate_goal_state
+
+    with pytest.raises(ValueError) as raised:
+        validate_goal_state("green")
+    assert _vocabulary_in(str(raised.value)), str(raised.value)
+
+
 # ── Door 1 — REST `POST /v1/objects` ────────────────────────────────────────
 
 def test_rest_create_persists_and_returns_goal_state(tmp_path):
@@ -373,6 +394,28 @@ def test_mcp_create_still_accepts_the_props_bag_form(tmp_path):
             "MCP-PROPS-GOAL", "goal", props={"goalState": "guideline"})
         assert not out.get("error"), out
         assert _stored(ha, out["id"]) == "guideline"
+
+
+def test_mcp_create_still_accepts_a_positional_props_bag(tmp_path):
+    """`props` was the THIRD POSITIONAL argument before this change, so a new
+    field declared in front of it re-binds this call to `goalState` — failing
+    CLOSED (an error, not a wrong write) but breaking every external Python
+    caller that passes the bag positionally. No in-repo caller does, so only
+    this test can redden if the parameter order drifts back (#13116 review
+    Secondary 2; measured on the pre-fix signature:
+    `tortoise_create_object("n", "goal", {"a": 1})`
+    -> `Invalid goalState {'a': 1}`, props never passed).
+
+    A TEST, not a comment, because the signature is the whole defect: the
+    `props=`-keyword pin above stays green under the re-ordered signature.
+    """
+    from tortoise import mcp_server
+
+    with _graph(str(tmp_path / "mcp-props-positional.db")) as ha, _mcp_ctx():
+        out = mcp_server.tortoise_create_object(
+            "MCP-PROPS-POSITIONAL", "goal", {"goalState": "superseded"})
+        assert isinstance(out, dict) and not out.get("error"), out
+        assert _stored(ha, out["id"]) == "superseded"
 
 
 def test_mcp_refuses_an_unknown_word_with_the_closed_set(tmp_path):

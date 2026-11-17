@@ -9300,6 +9300,18 @@ surfaces:
   # born-live default for goal-kind Points (a target-only draft goal is
   # EP-inert while `converged=True` is still reported).
   - test_7856_goal_state.py
+  # #13110: TRIPLE-REGISTERED with `api` (the REST doors) and `core` (the MCP
+  # declarations). The `sdk` arm is what the #13116 round-1 review named (and
+  # what the `#7856` row directly above is), because the ONE closed-vocabulary
+  # guard `validate_goal_state` lives in `tortoise/sdk.py` and `_sanitize_props`
+  # — the backstop every write path reaches — calls it; the file also pins that
+  # the REST 422 body is that same sentence rather than a second copy of the
+  # set. `sdk.py` is a SHARED_MODULE today, so a `sdk.py`-only diff already
+  # selects the FULL matrix; this row is what keeps the pin selected if that
+  # stays true only by accident, and it is what `ci_selection --integrity`
+  # reads for a `tests/`-only change. Multi-registration is deliberate —
+  # `duplicate_entries()` rejects only a repeat on the SAME surface.
+  - test_13110_goalstate_doors.py
   # #7852 W1: the Layer-2 `semantics` write path — `create_operator` resolves the
   # direction from the relation's declared meaning and records the basis it used
   # as `direction_basis` (absent/`None` is NOT a declaration — review ISSUE 3).
