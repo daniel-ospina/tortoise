@@ -398,8 +398,9 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
     # which shapes it cannot see, and the ones below are the ones found so far:
     #   * FALSE GREEN, the same limit the substring had: a DIFFERENT
     #     `"|".join` that mentions `ABOUT_EDGE_TYPES` satisfies it. The quote
-    #     regex above independently refuses the constant's VALUE going missing,
-    #     so a revert has to keep the value and fake the consumption.
+    #     regex above independently refuses the MODULE-LEVEL definition losing
+    #     its `aboutObject`, so that revert has to keep the value and fake the
+    #     consumption — which is false for a shadowed name, see the last bullet.
     #   * FALSE RED on an alias: `_t = tuple(ABOUT_EDGE_TYPES); "|".join(_t)` is
     #     correct and would be refused — the name must appear in the call's own
     #     arguments. Resolving local aliases was considered and declined: it is
@@ -411,8 +412,11 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
     #   * FALSE RED on a hoisted separator: `_sep = "|"` then `_sep.join(...)` is
     #     correct and refused, because the receiver must be the literal `"|"`.
     #   * FALSE GREEN on a shadowed name: the match is name-only, so a same-scope
-    #     `ABOUT_EDGE_TYPES = ("aboutSubject",)` would satisfy it — the sibling
-    #     regex above is what refuses that one, since it pins the value.
+    #     `ABOUT_EDGE_TYPES = ("aboutSubject",)` would satisfy it, even though the
+    #     binding consumed at the join then no longer carries `aboutObject`.
+    #     NO arm refuses this one: the regex above is a whole-file `re.search`,
+    #     so it is satisfied by the module-level definition at :1579 even when
+    #     that is not the binding the join site reads.
     joins_the_constant = any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
