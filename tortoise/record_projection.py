@@ -3085,8 +3085,16 @@ def _split_properties(
 
     Three destinations, and no fourth:
       * a property with a column is written to that column — UNLESS the
-        column is the record's own bookkeeping (`_BOOKKEEPING_COLUMNS`),
-        which a payload may never write;
+        column is the record's own bookkeeping (`_BOOKKEEPING_COLUMNS`) or a
+        declared `DERIVED_COLUMNS` name for this table, neither of which a
+        payload may ever write. ⛔ THE SECOND EXCEPTION IS THE ONE TO READ
+        FIRST (#13220): once `object`/`subject` gained an `embedding` COLUMN,
+        a carried `embedding` is met by the `DERIVED_COLUMNS` arm BELOW and
+        `continue`s — it is DROPPED, never resolved to the column, because the
+        record's own derivation is that column's only writer (see
+        `mutations_for`'s `derived` paragraph, which bypasses the split for
+        exactly that reason). The carve-out is stated in the migration's
+        `⛔ AND THE ORDERING IS THE OTHER WAY ROUND` block too;
       * a property the schema refuses as a props key is **dropped** (it is
         DERIVED/VOLATILE — recomputed from the structure, never authority);
       * everything else lands in the declared `props` tail.

@@ -111,9 +111,11 @@ SELECT tests.assert(
 -- The guard makes the ABSENCE DISCLOSED rather than silent (a NOTICE, the same
 -- shape as the drill's own `⊘ … SKIPPED` line), and keeps the assertions live on
 -- any pgvector-capable runner. Their real coverage today is the probe-backed
--- evidence, not this file: `tests/test_13220_record_label_embeddings.py` reads
--- the applied schema through `record_projection.table_columns()`/
--- `column_types()`, and the migration was applied for real (all 20
+-- evidence, not this file: `tests/test_13220_record_label_embeddings.py` pins
+-- the DECLARED schema through `record_projection.table_columns()`/
+-- `column_types()` — which PARSE `supabase/migrations/` rather than reading a
+-- database (that is their own docstring's contract) — and the applied side is
+-- carried by the separate fact that the migration was applied for real (all 20
 -- `RECORD_MIGRATIONS`, `applied=20 rc=0`) against a `pgvector/pgvector:pg16`
 -- container as recorded on #13265 — see also `test-record-postgres`
 -- (`tests/test_11642_vector_move_live.py`), the job that owns pgvector coverage.
