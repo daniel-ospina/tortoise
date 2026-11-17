@@ -260,6 +260,7 @@ from tortoise.sdk import (
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk._capture_session)
+    canonical_org_graph_name,  # #13205: the ONE idempotent `org_{bare id}` composition
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
@@ -647,8 +648,15 @@ def _graph_name_for_namespace(namespace: str | None, *,
     Branch order and truthiness mirror ``_get_proj`` EXACTLY: ``registry``
     first; ``graph_name is not None`` (not truthiness); the ``test_`` /
     ``tortoise_test`` family; the hyphenated ``test-`` family; then
-    ``org_{namespace}``; a falsy namespace falls back to the URI's own graph,
-    else ``tortoise``.
+    ``canonical_org_graph_name(namespace)``; a falsy namespace falls back to the
+    URI's own graph, else ``tortoise``.
+
+    ⛔ The org arm DELEGATES to the SDK's
+    :func:`tortoise.sdk.canonical_org_graph_name` (#13205) rather than restating
+    `f"org_{namespace}"`. That is not style: the two used to be independent
+    concatenations, so an idempotency fix applied to one would have split the
+    admission key from the graph the request opened — the #3365 class this
+    mirror exists to prevent.
     """
     if namespace == "registry":
         return "registry_tortoise"
@@ -659,7 +667,11 @@ def _graph_name_for_namespace(namespace: str | None, *,
             return f"{namespace}_tortoise"
         if namespace.startswith("test-"):
             return f"{namespace.replace('-', '_')}_tortoise"
-        return f"org_{namespace}"
+        # #13205: the SAME idempotent composition the SDK uses — never a bare
+        # `f"org_{namespace}"`, which minted a second prefix when the input
+        # already carried one (the `team_team_…` graph on the production
+        # instance). This mirror must not restate the rule; it calls it.
+        return canonical_org_graph_name(namespace)
     return uri_graph or "tortoise"
 
 
@@ -34045,6 +34057,94 @@ def _drop_org_graph_strict(org_id: str, graph_name: str | None = None) -> None:
     _drop_org_graph_impl(org_id, graph_name)
 
 
+def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
+    """EVERY data-plane graph name this org owns — the deprovision list (#13205).
+
+    Why this exists. An org's data plane is not one graph. The default graph is
+    ``organizations.graph_name`` (``org_{org_id}``, or the pre-#3543
+    ``team_{org_id}``, or the registry lane's ``org_{name}``), and every custom
+    graph ``_provision_graph`` / ``insert_graph`` mints is a SEPARATE physical
+    graph named ``org_{org_id}_{gid}``. The purge used to drop exactly ONE name
+    (the stored default), so a hard-deleted org left its custom graphs — and
+    every legacy-spelled graph — on the instance forever. That is the same
+    class of leak #13205 measured: on ``instance-yxwgk64it``, 148 empty graphs
+    held 216 MB (26 % of a 1 GB instance) because a tenant graph costs ~1.46 MB
+    of resident RAM (measured by DELETE, not by create) and nothing ever
+    reclaimed it.
+
+    ⛔ THE SAFETY CLAUSE IS THE FILTER, not the enumeration. A candidate name is
+    kept ONLY if it provably belongs to THIS org: it equals the stored
+    ``graph_name``, or it is ``org_{org_id}``/``team_{org_id}``, or it is
+    prefixed ``org_{org_id}_``/``team_{org_id}_``. A malformed or foreign
+    ``graphs`` row therefore cannot make a purge delete another tenant's graph —
+    the enumerator supplies candidates, this function decides, and the two are
+    not the same trust level.
+
+    Enumeration is BEST-EFFORT and that is deliberate: the three derived names
+    above need no read at all, so an unreadable control plane (or a schema a
+    migration behind, or the registry lane with no ``graphs`` table) still
+    drops the default instead of failing the whole purge on a listing error.
+    """
+    prefixes = (f"org_{org_id}_", f"team_{org_id}_")
+    own_defaults = {f"org_{org_id}", f"team_{org_id}"}
+    if graph_name:
+        own_defaults.add(str(graph_name))
+    candidates: list[str] = [str(graph_name)] if graph_name else []
+    candidates.append(canonical_org_graph_name(org_id))
+    candidates.append(f"team_{org_id}")  # pre-#3543 spelling; no migration rewrote it
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "graphs", select=["namespace"],
+                filters=[("org_id", "eq", org_id)],
+            )
+            candidates += [r.get("namespace") for r in rows]
+        else:
+            nodes = _make_sdk(namespace="registry")._get_registry().query(
+                "MATCH (g:Graph {org_id:$tid}) RETURN g.namespace",
+                params={"tid": org_id},
+            ).result_set
+            candidates += [r[0] for r in nodes]
+    except Exception as e:
+        _logger.warning(
+            "graph enumeration failed for %s — dropping the derived names only "
+            "(the purge must not be blocked by a listing error): %s", org_id, e)
+    out: list[str] = []
+    for name in candidates:
+        if not name or not isinstance(name, str):
+            continue
+        if name not in own_defaults and not name.startswith(prefixes):
+            continue  # not provably this org's — never drop it
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def _drop_org_graphs_strict(org_id: str, graph_name: str | None = None) -> list[str]:
+    """STRICT drop of every graph this org owns — the deprovision seam (#13205).
+
+    Same retry-anchor contract as :func:`_drop_org_graph_strict`, widened from
+    the org's default graph to the WHOLE org: every name
+    :func:`_org_graph_names` proves is this org's (default + legacy spelling +
+    every custom ``org_{org_id}_{gid}``). Dropping only the default was the
+    defect — the row went, the custom graphs stayed, and a hard delete is the
+    last moment anything knows they existed.
+
+    An ABSENT graph is success (the impl treats that family as success), so the
+    list is safe to re-run; a REAL failure (auth, dead connection) propagates so
+    the caller keeps the org row as the retry anchor (#926) rather than
+    committing an erasure that orphaned a live graph.
+    """
+    names = _org_graph_names(org_id, graph_name)
+    for name in names:
+        _drop_org_graph_strict(org_id, name)
+    return names
+
+
 def _drop_org_graph_impl(org_id: str, graph_name: str | None = None) -> None:
     target = graph_name or f"org_{org_id}"
     sdk = _make_sdk(namespace=org_id)
@@ -34111,10 +34211,17 @@ def _drop_org_acl_users(org_id: str) -> None:
 
 
 def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None:
-    """Cascade-delete a registry org + drop its graph (mirrors sdk.org_delete)."""
+    """Cascade-delete a registry org + drop its graphs (mirrors sdk.org_delete).
+
+    #13205: EVERY graph, not just the default. The enumeration runs BEFORE the
+    nodes go — the registry ``Graph`` nodes are where the custom graphs'
+    namespaces live, so a drop list built after the ``DETACH DELETE`` would be
+    the default graph alone and the custom ones would leak.
+    """
     # C4 (#2113): drop the custom graphs' ACL users BEFORE the nodes go
     # (the enumeration reads the nodes).
     _drop_org_acl_users(org_id)
+    graph_names = _org_graph_names(org_id, graph_name)
     reg = sdk._get_registry()
     reg.query(
         "MATCH (m:Membership {org_id:$tid}) DETACH DELETE m",
@@ -34132,7 +34239,8 @@ def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None
         "MATCH (t:Team {id:$id}) DETACH DELETE t",
         params={"id": org_id},
     )
-    _drop_org_graph(org_id, graph_name)
+    for name in graph_names:
+        _drop_org_graph(org_id, name)
 
 
 def _stored_grace_elapsed(row_deleted_at, row_grace_hours,
@@ -34318,8 +34426,12 @@ def _purge_deleted_orgs_locked() -> None:
                     else:
                         # C4 (#2113): drop the custom graphs' ACL users first
                         # (the enumeration reads the rows).
+                        # #13205: and drop EVERY graph the org owns — the
+                        # default name alone left every custom
+                        # `org_{org_id}_{gid}` graph on the instance after the
+                        # row was gone, permanently.
                         _drop_org_acl_users(org_id)
-                        _drop_org_graph_strict(org_id, row.get("graph_name"))
+                        _drop_org_graphs_strict(org_id, row.get("graph_name"))
                     purge_org_control_plane(cp, org_id)
                     _audit_logger.append(
                         org_id, None, "team_delete_purged",
