@@ -281,7 +281,9 @@ opposite of the ordering in §5.
 > reproduces **inside the current index**. ⚠️ **What is still NOT measured**, so "resolved" is not read
 > as more than it is: the qualifier that asked *how far our leg sits from the 8–23-point BM25 baseline*
 > is a **ranking-distance (nDCG)** question, and M3 measured recall and score distributions, never
-> nDCG. That distance is now measured — see the STATUS note below (`#13099`). The leg's
+> nDCG. That ranking distance is now measured — **against the Postgres candidates, on our own corpus**
+> (see the STATUS note below, `#13099`); the 8–23-point figure itself still compares foreign datasets and
+> is untouched by that measurement. The leg's
 > actual defect is a **tokenizer contract**, not a scorer or a ranking baseline, and it is filed as
 > `#12350`. Numbers, method and the artifacts: `docs/research/2026-11-13-12298-m3-fts-leg/`; the
 > changelog entry records what changed and what did not. ⛔ **This note does not decide `C3` (SPLADE)**

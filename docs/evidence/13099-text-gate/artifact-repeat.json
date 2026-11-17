@@ -14699,7 +14699,12 @@
  },
  "errors": [],
  "verdict": {
-  "rule": "a candidate qualifies unless it is significantly WORSE (paired 90% CI upper < 0) on any query class",
+  "rule": "a candidate qualifies unless it is significantly WORSE (paired 90% CI upper < 0) on any query class on ANY of the published metrics (ndcg@10, ndcg@100, recall@100), or was disqualified by a recorded error",
+  "metrics_checked": [
+   "ndcg@10",
+   "ndcg@100",
+   "recall@100"
+  ],
   "headline_ndcg@10": {
    "in_graph_fulltext_raw": {
     "short_keyword": {
@@ -14905,6 +14910,668 @@
     }
    }
   },
+  "headline": {
+   "in_graph_fulltext_raw": {
+    "short_keyword": {
+     "ndcg@10": {
+      "delta_pts": -42.64,
+      "ci": [
+       -50.09,
+       -35.2
+      ],
+      "status": "worse",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": -46.06,
+      "ci": [
+       -51.1,
+       -40.82
+      ],
+      "status": "worse",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": -43.72,
+      "ci": [
+       -48.34,
+       -39.05
+      ],
+      "status": "worse",
+      "n": 100
+     }
+    },
+    "natural_language_question": {
+     "ndcg@10": {
+      "delta_pts": -81.71,
+      "ci": [
+       -86.55,
+       -76.43
+      ],
+      "status": "worse",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": -72.41,
+      "ci": [
+       -76.39,
+       -68.27
+      ],
+      "status": "worse",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": -67.85,
+      "ci": [
+       -72.43,
+       -63.09
+      ],
+      "status": "worse",
+      "n": 100
+     }
+    },
+    "entity_name": {
+     "ndcg@10": {
+      "delta_pts": -9.06,
+      "ci": [
+       -13.54,
+       -4.82
+      ],
+      "status": "worse",
+      "n": 96
+     },
+     "ndcg@100": {
+      "delta_pts": -36.67,
+      "ci": [
+       -40.22,
+       -33.26
+      ],
+      "status": "worse",
+      "n": 96
+     },
+     "recall@100": {
+      "delta_pts": -31.95,
+      "ci": [
+       -36.23,
+       -27.58
+      ],
+      "status": "worse",
+      "n": 96
+     }
+    }
+   },
+   "pg_ts_rank": {
+    "short_keyword": {
+     "ndcg@10": {
+      "delta_pts": 2.32,
+      "ci": [
+       -0.93,
+       5.46
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 9.23,
+      "ci": [
+       6.68,
+       11.85
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 13.58,
+      "ci": [
+       10.46,
+       16.78
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "natural_language_question": {
+     "ndcg@10": {
+      "delta_pts": 2.32,
+      "ci": [
+       -0.93,
+       5.46
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 9.23,
+      "ci": [
+       6.68,
+       11.85
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 13.58,
+      "ci": [
+       10.46,
+       16.78
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "entity_name": {
+     "ndcg@10": {
+      "delta_pts": 4.87,
+      "ci": [
+       2.44,
+       7.44
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "ndcg@100": {
+      "delta_pts": 15.06,
+      "ci": [
+       12.9,
+       17.26
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "recall@100": {
+      "delta_pts": 29.13,
+      "ci": [
+       25.61,
+       32.66
+      ],
+      "status": "better",
+      "n": 96
+     }
+    }
+   },
+   "pg_ts_rank_cd": {
+    "short_keyword": {
+     "ndcg@10": {
+      "delta_pts": 2.32,
+      "ci": [
+       -0.93,
+       5.46
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 9.23,
+      "ci": [
+       6.68,
+       11.85
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 13.58,
+      "ci": [
+       10.46,
+       16.78
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "natural_language_question": {
+     "ndcg@10": {
+      "delta_pts": 2.32,
+      "ci": [
+       -0.93,
+       5.46
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 9.23,
+      "ci": [
+       6.68,
+       11.85
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 13.58,
+      "ci": [
+       10.46,
+       16.78
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "entity_name": {
+     "ndcg@10": {
+      "delta_pts": 4.87,
+      "ci": [
+       2.44,
+       7.44
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "ndcg@100": {
+      "delta_pts": 15.06,
+      "ci": [
+       12.9,
+       17.26
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "recall@100": {
+      "delta_pts": 29.13,
+      "ci": [
+       25.61,
+       32.66
+      ],
+      "status": "better",
+      "n": 96
+     }
+    }
+   },
+   "pg_ts_rank_simple": {
+    "short_keyword": {
+     "ndcg@10": {
+      "delta_pts": 3.45,
+      "ci": [
+       0.1,
+       7.01
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 10.47,
+      "ci": [
+       7.92,
+       13.12
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 14.65,
+      "ci": [
+       11.58,
+       17.82
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "natural_language_question": {
+     "ndcg@10": {
+      "delta_pts": 3.45,
+      "ci": [
+       0.1,
+       7.01
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 10.47,
+      "ci": [
+       7.92,
+       13.12
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 14.65,
+      "ci": [
+       11.58,
+       17.82
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "entity_name": {
+     "ndcg@10": {
+      "delta_pts": 4.87,
+      "ci": [
+       2.44,
+       7.44
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "ndcg@100": {
+      "delta_pts": 15.66,
+      "ci": [
+       13.52,
+       17.82
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "recall@100": {
+      "delta_pts": 29.2,
+      "ci": [
+       25.67,
+       32.74
+      ],
+      "status": "better",
+      "n": 96
+     }
+    }
+   },
+   "pg_bm25": {
+    "short_keyword": {
+     "ndcg@10": {
+      "delta_pts": 1.87,
+      "ci": [
+       -1.9,
+       5.98
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 10.12,
+      "ci": [
+       7.1,
+       13.16
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 15.15,
+      "ci": [
+       11.4,
+       18.88
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "natural_language_question": {
+     "ndcg@10": {
+      "delta_pts": 1.87,
+      "ci": [
+       -1.9,
+       5.98
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 10.12,
+      "ci": [
+       7.1,
+       13.16
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 15.15,
+      "ci": [
+       11.4,
+       18.88
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "entity_name": {
+     "ndcg@10": {
+      "delta_pts": 4.87,
+      "ci": [
+       2.44,
+       7.44
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "ndcg@100": {
+      "delta_pts": 15.8,
+      "ci": [
+       13.62,
+       17.96
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "recall@100": {
+      "delta_pts": 29.36,
+      "ci": [
+       25.83,
+       32.92
+      ],
+      "status": "better",
+      "n": 96
+     }
+    }
+   },
+   "hybrid_baseline": {
+    "short_keyword": {
+     "ndcg@10": {
+      "delta_pts": 3.6,
+      "ci": [
+       -0.18,
+       7.47
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 9.36,
+      "ci": [
+       6.94,
+       11.99
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 12.67,
+      "ci": [
+       9.64,
+       15.88
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "natural_language_question": {
+     "ndcg@10": {
+      "delta_pts": 3.32,
+      "ci": [
+       -0.56,
+       7.19
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 9.69,
+      "ci": [
+       7.16,
+       12.33
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 13.01,
+      "ci": [
+       9.87,
+       16.21
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "entity_name": {
+     "ndcg@10": {
+      "delta_pts": 4.55,
+      "ci": [
+       2.32,
+       6.93
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "ndcg@100": {
+      "delta_pts": 12.55,
+      "ci": [
+       11.21,
+       13.93
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "recall@100": {
+      "delta_pts": 23.45,
+      "ci": [
+       21.18,
+       25.73
+      ],
+      "status": "better",
+      "n": 96
+     }
+    }
+   },
+   "hybrid_bm25": {
+    "short_keyword": {
+     "ndcg@10": {
+      "delta_pts": 2.99,
+      "ci": [
+       -1.09,
+       7.47
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 11.78,
+      "ci": [
+       8.37,
+       15.38
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 15.99,
+      "ci": [
+       11.76,
+       20.43
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "natural_language_question": {
+     "ndcg@10": {
+      "delta_pts": 2.64,
+      "ci": [
+       -1.43,
+       7.06
+      ],
+      "status": "within_noise",
+      "n": 100
+     },
+     "ndcg@100": {
+      "delta_pts": 12.11,
+      "ci": [
+       8.63,
+       15.74
+      ],
+      "status": "better",
+      "n": 100
+     },
+     "recall@100": {
+      "delta_pts": 16.44,
+      "ci": [
+       12.03,
+       20.81
+      ],
+      "status": "better",
+      "n": 100
+     }
+    },
+    "entity_name": {
+     "ndcg@10": {
+      "delta_pts": 4.87,
+      "ci": [
+       2.44,
+       7.44
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "ndcg@100": {
+      "delta_pts": 15.71,
+      "ci": [
+       13.57,
+       17.84
+      ],
+      "status": "better",
+      "n": 96
+     },
+     "recall@100": {
+      "delta_pts": 29.36,
+      "ci": [
+       25.83,
+       32.92
+      ],
+      "status": "better",
+      "n": 96
+     }
+    }
+   }
+  },
+  "worst_status": {
+   "in_graph_fulltext_raw": {
+    "short_keyword": "worse",
+    "natural_language_question": "worse",
+    "entity_name": "worse"
+   },
+   "pg_ts_rank": {
+    "short_keyword": "within_noise",
+    "natural_language_question": "within_noise",
+    "entity_name": "better"
+   },
+   "pg_ts_rank_cd": {
+    "short_keyword": "within_noise",
+    "natural_language_question": "within_noise",
+    "entity_name": "better"
+   },
+   "pg_ts_rank_simple": {
+    "short_keyword": "better",
+    "natural_language_question": "better",
+    "entity_name": "better"
+   },
+   "pg_bm25": {
+    "short_keyword": "within_noise",
+    "natural_language_question": "within_noise",
+    "entity_name": "better"
+   },
+   "hybrid_baseline": {
+    "short_keyword": "within_noise",
+    "natural_language_question": "within_noise",
+    "entity_name": "better"
+   },
+   "hybrid_bm25": {
+    "short_keyword": "within_noise",
+    "natural_language_question": "within_noise",
+    "entity_name": "better"
+   }
+  },
   "qualifying_arms": [
    "pg_ts_rank",
    "pg_ts_rank_cd",
@@ -14924,6 +15591,7 @@
   "diagnostic_arms_not_candidates": [
    "in_graph_fulltext_raw"
   ],
-  "decision": "a Postgres option does not lose to the in-graph leg on any query class at nDCG@10: pg_ts_rank, pg_ts_rank_cd, pg_ts_rank_simple, pg_bm25, hybrid_baseline, hybrid_bm25"
+  "disqualified_arms": [],
+  "decision": "a Postgres option does not lose to the in-graph leg on any query class at any published metric (ndcg@10, ndcg@100, recall@100): pg_ts_rank, pg_ts_rank_cd, pg_ts_rank_simple, pg_bm25, hybrid_baseline, hybrid_bm25"
  }
 }

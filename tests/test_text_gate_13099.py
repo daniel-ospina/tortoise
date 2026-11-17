@@ -260,6 +260,7 @@ def test_the_corpus_is_built_without_touching_a_graph(monkeypatch):
 
 DOC_DIR = Path("docs") / "evidence" / "13099-text-gate"
 ARTIFACT = DOC_DIR / "artifact.json"
+ARTIFACT_REPEAT = DOC_DIR / "artifact-repeat.json"
 README = DOC_DIR / "README.md"
 
 # The README's §5 tables print 4 decimal places, the artifact stores 6.
@@ -390,3 +391,54 @@ def test_an_arm_that_raised_is_disqualified_not_scored_as_a_loss():
     clean = verdict(_results({"pg_bad": {
         "short_keyword": (-9.0, -14.0, -4.0), "entity_name": (0.0, -2.0, 2.0)}}))
     assert clean["headline_ndcg@10"]["pg_bad"]["short_keyword"]["status"] == "worse"
+
+
+def test_the_rule_checks_every_published_metric_not_just_the_head():
+    """A depth-only loss is a real reason not to adopt, so it must disqualify.
+
+    The record's claim is "no Postgres option loses significantly on any query
+    class", and §5/§6 publish nDCG@10, nDCG@100 and recall@100 for every arm and
+    class. A rule that read nDCG@10 alone would call an arm `qualifying` that
+    lost significantly AT DEPTH — an unstated narrowing of the claim, which is
+    the class of defect this record has already had to correct once.
+    """
+    results = _results({"pg_deep": {
+        "short_keyword": (2.0, -1.0, 5.0),   # head: inside the noise band
+        "entity_name": (2.0, -1.0, 5.0),
+    }})
+    deltas = results["short_keyword"]["arms"]["pg_deep"]["delta_vs_baseline"]
+    deltas["ndcg@100"] = {"mean": -9.0, "lower": -14.0, "upper": -4.0, "n": 100}
+
+    v = verdict(results)
+
+    assert v["headline_ndcg@10"]["pg_deep"]["short_keyword"]["status"] == "within_noise"
+    assert v["headline"]["pg_deep"]["short_keyword"]["ndcg@100"]["status"] == "worse"
+    assert v["worst_status"]["pg_deep"]["short_keyword"] == "worse"
+    assert "pg_deep" not in v["qualifying_candidates"], (
+        "a significant loss at depth must disqualify — the record publishes "
+        "depth as a metric, so it cannot then decide on the head alone")
+    assert v["metrics_checked"] == ["ndcg@10", "ndcg@100", "recall@100"]
+
+
+def test_both_committed_verdicts_are_what_this_code_produces():
+    """Each artifact's verdict must reproduce from its OWN `results`.
+
+    Pinned because the alternative happened: the decision rule was edited and
+    the published verdict left stating the OLD rule, so the record asserted a
+    conclusion its own numbers no longer supported. The repeat run is checked
+    against ITS results too — copying one verdict onto the other would be
+    fabricated agreement.
+    """
+    import json
+
+    for path in (ARTIFACT, ARTIFACT_REPEAT):
+        art = json.loads(path.read_text())
+        assert art["verdict"] == verdict(art["results"], art.get("errors")), (
+            f"{path.name}'s verdict is stale relative to `verdict()` — regenerate "
+            "it from that file's own `results`")
+        assert art["verdict"]["metrics_checked"] == [
+            "ndcg@10", "ndcg@100", "recall@100"]
+
+    first = json.loads(ARTIFACT.read_text())["verdict"]
+    repeat = json.loads(ARTIFACT_REPEAT.read_text())["verdict"]
+    assert first["qualifying_candidates"] == repeat["qualifying_candidates"]

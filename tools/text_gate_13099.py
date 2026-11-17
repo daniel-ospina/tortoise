@@ -744,6 +744,29 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
     return artifact
 
 
+# The metrics the decision rule is evaluated on. §5/§6 publish all three per arm
+# per class, so the rule reads all three — see `verdict()`'s docstring for why a
+# head-only rule is the wrong rule here.
+METRICS_CHECKED = ("ndcg@10", "ndcg@100", "recall@100")
+
+
+def _metric_status(d: dict) -> str:
+    """`worse` only on a significant LOSS — the direction rule, in one place."""
+    if d["upper"] < 0.0:
+        return "worse"
+    if d["lower"] > 0.0:
+        return "better"
+    return "within_noise"
+
+
+def _worst_status(statuses: list[str]) -> str:
+    """The arm's status is its WORST metric's status, so a loss anywhere bites."""
+    for level in ("worse", "disqualified", "within_noise", "better"):
+        if level in statuses:
+            return level
+    return "within_noise"
+
+
 def verdict(results: dict, errors: list[dict] | None = None) -> dict:
     """One line, with the number.
 
@@ -763,6 +786,17 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
 
     Treating ``better`` as "not within noise, therefore keep the index" would
     reverse the decision the issue exists to test.
+
+    ⛔ IT KEYS ON EVERY PUBLISHED METRIC, NOT ON nDCG@10 ALONE. The claim this
+    record makes is "no Postgres option loses significantly on any query class",
+    and §5/§6 publish three metrics per arm per class. A rule that read only the
+    head would call an arm `qualifying` while it lost significantly AT DEPTH — a
+    real reason not to adopt it, and exactly the kind of unstated narrowing the
+    evidence record must not contain. The arm's status is its WORST metric's
+    status, so a loss anywhere disqualifies. (Verified on the committed run:
+    strengthening the rule changes no verdict — every candidate's depth intervals
+    exclude 0 in the POSITIVE direction, and the only arm that loses on all three
+    metrics is `in_graph_fulltext_raw`, a non-candidate diagnostic.)
     """
     # Arms that raised ANYWHERE in the run. Read from the caller's error list AND
     # from the per-class `arm_errors` block, so a hand-built `results` dict (the
@@ -771,38 +805,53 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
     for blk in results.values():
         disqualified.update(a for a, n in (blk.get("arm_errors") or {}).items() if n)
 
+    def _metric_row(d: dict, status: str) -> dict[str, Any]:
+        return {
+            "delta_pts": round(d["mean"], 2),
+            "ci": [round(d["lower"], 2), round(d["upper"], 2)],
+            "status": status,
+            "n": d["n"],
+        }
+
     headline: dict[str, Any] = {}
+    # The same per-arm/per-class view, per METRIC — what the decision reads.
+    by_metric: dict[str, Any] = {}
+    worst: dict[str, dict[str, str]] = {}
     for cls, blk in results.items():
         for arm, row in blk["arms"].items():
             if arm == "in_graph_fulltext":
                 continue
-            d = row.get("delta_vs_baseline", {}).get("ndcg@10")
+            deltas = row.get("delta_vs_baseline") or {}
+            d = deltas.get("ndcg@10")
             if arm in disqualified:
-                status = "disqualified"
                 headline.setdefault(arm, {})[cls] = {
-                    "delta_pts": None, "ci": None, "status": status,
+                    "delta_pts": None, "ci": None, "status": "disqualified",
                     "n": (d or {}).get("n")}
+                by_metric.setdefault(arm, {}).setdefault(cls, {})["all"] = {
+                    "delta_pts": None, "ci": None, "status": "disqualified",
+                    "n": (d or {}).get("n")}
+                worst.setdefault(arm, {})[cls] = "disqualified"
                 continue
             if not d:
                 continue
-            if d["upper"] < 0.0:
-                status = "worse"
-            elif d["lower"] > 0.0:
-                status = "better"
-            else:
-                status = "within_noise"
-            headline.setdefault(arm, {})[cls] = {
-                "delta_pts": round(d["mean"], 2),
-                "ci": [round(d["lower"], 2), round(d["upper"], 2)],
-                "status": status,
-                "n": d["n"],
-            }
+            headline.setdefault(arm, {})[cls] = _metric_row(d, _metric_status(d))
+            per_metric: dict[str, Any] = {}
+            for metric in METRICS_CHECKED:
+                dm = deltas.get(metric)
+                if not dm:
+                    continue
+                per_metric[metric] = _metric_row(dm, _metric_status(dm))
+            if not per_metric:
+                continue
+            by_metric.setdefault(arm, {})[cls] = per_metric
+            worst.setdefault(arm, {})[cls] = _worst_status(
+                [v["status"] for v in per_metric.values()])
 
     def qualifies(clsmap: dict) -> bool:
-        return bool(clsmap) and all(v["status"] not in ("worse", "disqualified")
-                                    for v in clsmap.values())
+        return bool(clsmap) and all(s not in ("worse", "disqualified")
+                                    for s in clsmap.values())
 
-    qualifying = [arm for arm, clsmap in headline.items() if qualifies(clsmap)]
+    qualifying = [arm for arm, clsmap in worst.items() if qualifies(clsmap)]
 
     # The DISQUALIFIED-BY-DESIGN arms are not candidates: they are diagnostics.
     # `in_graph_fulltext_raw` exists to decompose builder-vs-scorer, and it is
@@ -812,16 +861,21 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
 
     return {
         "rule": ("a candidate qualifies unless it is significantly WORSE "
-                 "(paired 90% CI upper < 0) on any query class, or was "
+                 "(paired 90% CI upper < 0) on any query class on ANY of the "
+                 "published metrics (" + ", ".join(METRICS_CHECKED) + "), or was "
                  "disqualified by a recorded error"),
+        "metrics_checked": list(METRICS_CHECKED),
         "headline_ndcg@10": headline,
+        "headline": by_metric,
+        "worst_status": worst,
         "qualifying_arms": qualifying,
         "qualifying_candidates": candidates,
         "diagnostic_arms_not_candidates": sorted(not_candidates),
         "disqualified_arms": sorted(disqualified),
         "decision": (
             ("a Postgres option does not lose to the in-graph leg on any query "
-             "class at nDCG@10: " + ", ".join(candidates)
+             "class at any published metric (" + ", ".join(METRICS_CHECKED) + "): "
+             + ", ".join(candidates)
              if candidates else
              "every Postgres option loses significantly on at least one query "
              "class; the text index stays")
