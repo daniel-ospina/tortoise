@@ -890,10 +890,19 @@ def test_a_point_addressed_by_its_event_id_is_guarded_too(env):
 
     for props in ({"validTo": "2031-01-01T00:00:00Z"},
                   {"validFrom": "2019-01-01T00:00:00Z"},
-                  {"when": "2031-01-01T00:00:00Z"},
-                  {"status": "live"}):
+                  {"when": "2031-01-01T00:00:00Z"}):
         with pytest.raises(ValueError, match="terminal"):
             sdk.update_knowledge("evt-review-9649", **props)
+    # ⛔ The `status` half of this probe is answered EARLIER now, and that is a
+    # deliberate narrowing rather than a lost pin: since #13100 an `:Event`
+    # carries no lifecycle at all, so the door refuses ANY `status` on this
+    # hybrid at its Event arm, before the address resolution runs. Both refusals
+    # leave the dead claim alone — which is what this test exists for — and the
+    # resolution half is still pinned by the three temporal props above (plus
+    # the `url` arm's own test below). The status-arm claims that used to ride
+    # this hybrid live on the `:Source` arm, the door's other secondary key.
+    with pytest.raises(ValueError, match=":Event"):
+        sdk.update_knowledge("evt-review-9649", status="live")
     assert _row(sdk, old) == before, (
         "the eventId-addressed write must leave the dead claim alone")
 
@@ -980,20 +989,40 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
     never addressed (AX rule 2) and blocking a healthy write.
     """
     sdk, _ = env
-    sdk.create_point("statement", "carries provenance", dedup=False,
-                     status="retracted", eventId="ev-9649-prov")["id"]
+    provenance = sdk.create_point(
+        "statement", "carries provenance", dedup=False,
+        status="retracted", eventId="ev-9649-prov")["id"]
     sdk._get_proj().g.query(
         "CREATE (e:Event {eventId:'ev-9649-prov', name:'session'})")
 
-    # ⛔ A NON-TERMINAL status is what makes this test still possible at all:
-    # since #11825 a TERMINAL status on an `:Event` is refused by that guard
-    # first (measured: `status='archived'` here raises "not writable on an
-    # :Event" before the address resolution is consulted), so `archived` would
-    # pin #11825's rule instead of this one. `live` rides the prop lane #2788
-    # leaves open, and the address read still has to NOT find the retracted
-    # provenance Point — which is the whole claim under test.
-    sdk.update_knowledge("ev-9649-prov", status="live")
-    assert sdk.get_entity("ev-9649-prov")["status"] == "live"
+    # ⛔ The probe is a TEMPORAL field, never `status`, since #13100: a `status`
+    # write on an `:Event` is refused by that rule before this arm is consulted
+    # (the earlier cut of this test said as much for `archived`, which #11825's
+    # guard caught first, and #13100 now catches every word). `validTo` is a
+    # `_TEMPORAL_RESTAMP_PROPS` member, so it still reaches the address
+    # resolution — which is the whole claim under test.
+    #
+    # The two reads below are what keep the assertion non-vacuous: the PRE-FIX
+    # arm (`n:Point {eventId:$id}`, unqualified) DOES match the provenance Point,
+    # and the qualified arm does not match anything — so an unqualified
+    # resolution would have handed the guard a dead claim the caller never
+    # addressed. The refusal of that claim is measured right beside it.
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point {eventId:$id}) RETURN count(n)",
+        params={"id": "ev-9649-prov"}).result_set[0][0] == 1
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Event {eventId:$id}) WHERE n:Point RETURN count(n)",
+        params={"id": "ev-9649-prov"}).result_set[0][0] == 0
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_knowledge(provenance, validTo="2031-01-01T00:00:00Z")
+
+    sdk.update_knowledge("ev-9649-prov", validTo="2031-01-01T00:00:00Z")
+    assert sdk._get_proj().g.query(
+        "MATCH (e:Event {eventId:'ev-9649-prov'}) RETURN e.validTo",
+    ).result_set == [["2031-01-01T00:00:00Z"]], (
+        "the Event the caller addressed must take the write")
+    assert sdk.get_entity(provenance)["status"] == "retracted", (
+        "the provenance Point must be untouched")
 
 
 def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
@@ -1007,39 +1036,47 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
     against `label='Event'` — a record no fold can apply (a live write that makes
     `rebuild_all` refuse). Measured at `a35a3973b7`.
 
+    ⛔ The fixture is a `:Point:Source` addressed by its `url`, not a
+    `:Point:Event` addressed by its `eventId`: since #13100 an `:Event` carries no
+    lifecycle at all, so the door refuses ANY `status` on that hybrid before this
+    arm is reached (`test_a_point_addressed_by_its_event_id_is_guarded_too` pins
+    that refusals). `url` is the door's OTHER secondary key, resolved by the same
+    `_lifecycle_ids` read, so every claim here is unchanged: the status arm keys
+    on the RESOLVED address, validates the word, asks the DECLARED transition,
+    drops the key from `props`, and journals against the POINT.
+
     ⛔ TWO NODES since #11825 (#9649 merge review): an `:Event` never carries a
     TERMINAL status (that guard refuses one first, with its own message), and
     every DECLARED transition out of a non-terminal Point status is terminal —
     so the transition refusal reachable on a hybrid is an UNDECLARED
     non-terminal one (`live -> draft`), while the journal half is the prop-lane
-    promotion `draft -> live`. Splitting them keeps both halves of this test's
-    claim pinned instead of pinning #11825's rule by accident.
+    promotion `draft -> live`.
     """
     sdk, events = env
     pid = _live(sdk)
     sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
-        params={"id": pid, "eid": "evt-hybrid-9649"})
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$u",
+        params={"id": pid, "u": "src://hybrid-9649"})
 
     with pytest.raises(ValueError, match="transition"):
-        sdk.update_knowledge("evt-hybrid-9649", status="draft")
+        sdk.update_knowledge("src://hybrid-9649", status="draft")
     with pytest.raises(ValueError, match=r"was refused"):
-        sdk.update_knowledge("evt-hybrid-9649", status="garbage")
+        sdk.update_knowledge("src://hybrid-9649", status="garbage")
     assert _row(sdk, pid)["status"] == "live", (
         "a refused hybrid status write must not touch the row")
 
     draft_pid = sdk.create_point(
         "statement", "draft hybrid", dedup=False, status="draft")["id"]
     sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
-        params={"id": draft_pid, "eid": "evt-hybrid-draft-9649"})
-    sdk.update_knowledge("evt-hybrid-draft-9649", status="live")
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$u",
+        params={"id": draft_pid, "u": "src://hybrid-draft-9649"})
+    sdk.update_knowledge("src://hybrid-draft-9649", status="live")
     assert _row(sdk, draft_pid)["status"] == "live"
     recs = _mutations(events, draft_pid)
     assert recs, "the declared transition must be journaled against the POINT id"
     assert all(r.get("label") == "Point" for r in recs), (
         f"a restatus record must name the label the node replays as: {recs}")
-    assert _mutations(events, "evt-hybrid-draft-9649") == [], (
+    assert _mutations(events, "src://hybrid-draft-9649") == [], (
         "nothing may be journalled against the ADDRESS the caller typed")
     # …and the record must actually FOLD: a wrong label is only visible on replay
     # (a live write that makes `rebuild_all` raise `NonFoldedEventsError`).
@@ -1176,12 +1213,26 @@ def test_the_entailed_status_exemption_reads_the_write_row_set(env):
     an unaddressed terminal sibling satisfy "every row holds it", and the write
     then resurrected the sibling — measured on the `deprecated` twin of a
     `:Point:Event` addressed by its eventId.
+
+    ⛔ The fixture is a `:Point:Source` addressed by its `url` since #13100: an
+    `:Event` hybrid refuses EVERY `status`, so this arm (which is a status-only
+    claim) would be unreachable through it. The `url` arm matches just as
+    narrowly as the `eventId` arm while the write binds the whole id row set,
+    which is the shape this test needs — the arm's NAME is incidental, the
+    narrower-than-the-write relation is not.
+
+    ⛔ The TWIN is what the assertion is about, so the contrast is pinned beside
+    it: a hybrid with no unaddressed sibling echoes its own status through the
+    exemption (the #3305 read-modify-write capability) — the refusal above is
+    therefore caused by the twin, not by the `status` key merely being present.
+    A narrowed read would see `{live}` alone, call it entailed, skip the guard
+    and resurrect the twin.
     """
     sdk, _ = env
     pid = _live(sdk, "hybrid with twin")
     sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
-        params={"id": pid, "eid": "evt-twin-9649"})
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$u",
+        params={"id": pid, "u": "src://twin-9649"})
     sdk._get_proj().g.query(
         "CREATE (n:Point {id:$id, content:'twin', status:'deprecated'})",
         params={"id": pid})
@@ -1189,9 +1240,18 @@ def test_the_entailed_status_exemption_reads_the_write_row_set(env):
     assert before == ["deprecated", "live"], before
 
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_knowledge("evt-twin-9649", status="live")
+        sdk.update_knowledge("src://twin-9649", status="live")
     assert sorted(r[0] for r in _fan(sdk, pid)) == before, (
         "the unaddressed terminal twin must not be resurrected")
+
+    # The contrast: same hybrid, NO twin → every bound row already holds `live`,
+    # which is the entailed echo the exemption exists for.
+    solo = _live(sdk, "hybrid without twin")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$u",
+        params={"id": solo, "u": "src://solo-9649"})
+    sdk.update_knowledge("src://solo-9649", status="live")
+    assert _row(sdk, solo)["status"] == "live"
 
 
 def test_a_falsy_non_null_id_is_still_guarded(env):
@@ -1305,29 +1365,41 @@ def test_a_map_less_stored_status_still_defers(env):
     assert _row(sdk, pid)["status"] == "deprecated"
 
 
-def test_two_address_arms_resolving_one_id_journal_one_record(env):
+def test_two_address_arms_resolving_one_id_ask_the_guard_once(env, monkeypatch):
     """Review round 9, P2: the resolved-id list must be DE-DUPLICATED.
 
     A `:Point:Event` whose `id` and `eventId` are the same string is resolved by
-    two arms, so an un-deduplicated list journalled the SAME `restatus` twice for
-    one intent — the class `delete_point`'s own comment names ("a second
-    destruction record for one intent"). Replay is idempotent, so only a count
-    assertion catches it.
+    two arms, so an un-deduplicated list asked the lifecycle guard TWICE for one
+    intent and journalled the SAME `restatus` twice — the class `delete_point`'s
+    own comment names ("a second destruction record for one intent"). Replay is
+    idempotent, so only a count assertion catches it.
+
+    ⛔ The count is taken on the GUARD LOOP since #13100, not on the journal:
+    this hybrid can no longer take ANY `status` (that rule refuses it before the
+    arm that journals — the `draft -> live` promotion this test used was legal
+    only under #11825's interim boundary). A TEMPORAL write still reaches both
+    the resolution and the loop, and `_lifecycle_ids` — the very list the dedupe
+    produces — is what the loop iterates. Drop the `dict.fromkeys` and the guard
+    runs twice.
     """
-    sdk, events = env
-    pid = sdk.create_point(
-        "statement", "one node, two arms", dedup=False, status="draft")["id"]
+    sdk, _ = env
+    pid = sdk.create_point("statement", "one node, two arms", dedup=False)["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$id",
         params={"id": pid})
 
-    # ⛔ `draft -> live`, not `-> retracted`: since #11825 a TERMINAL status on
-    # an `:Event` is refused before this arm (measured), and this test is about
-    # the dedupe, not that rule. The promotion is a declared, non-terminal
-    # transition that still journals exactly one `restatus`.
-    sdk.update_knowledge(pid, status="live")
-    recs = [r for r in _mutations(events, pid) if r.get("op") == "restatus"]
-    assert len(recs) == 1, f"one intent must journal one record: {recs}"
+    seen: list = []
+    real = sdk._assert_lifecycle_guard
+
+    def spy(point_id, **kw):
+        seen.append(point_id)
+        return real(point_id, **kw)
+
+    monkeypatch.setattr(sdk, "_assert_lifecycle_guard", spy)
+    sdk.update_knowledge(pid, validTo="2031-01-01T00:00:00Z")
+    assert seen == [pid], (
+        f"two address arms resolving one id must ask the guard once: {seen}")
+    assert _row(sdk, pid)["validTo"] == "2031-01-01T00:00:00Z"
 
 
 def test_a_write_that_matches_no_row_journals_nothing(env, monkeypatch):

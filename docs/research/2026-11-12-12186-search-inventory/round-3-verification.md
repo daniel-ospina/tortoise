@@ -22,9 +22,9 @@ aboutObjects: research-brief.md (rounds 1–2), SEARCH-ARCHITECTURE.md §6.2, ST
 > head, and so do the four this round added** (`entity_resolver.py:739`/`:801`, `entity_identity.py:355`/`:417`)
 > (checked individually — `entity_resolver.py` `:207`/`:536`/`:547`/`:624`/`:694`/`:739`/`:801`/`:809`,
 > `entity_identity.py` `:355`/`:378`/`:384`/`:417`/`:499`/`:589`/`:594`, `search_engine.py`
-> `:2986`/`:3103`/`:4492`, `sparse.py` `:13-14`, `projection/edges.py` `:717-730`) — while
-> **`SEARCH-ARCHITECTURE.md` §6.2's do not**: its `search_engine.py` pins have drifted ~1,390 lines (`:3021` →
-> measured `:4411`) and its `sdk.py` pins ~2,825 (`:38401` → measured `:41226`). **A pin in a research doc must
+> `:3011`/`:3128`/`:4492`, `sparse.py` `:13-14`, `projection/edges.py` `:717-730`) — while
+> **`SEARCH-ARCHITECTURE.md` §6.2's do not**: its `search_engine.py` pins have drifted ~1,390 lines (`:3046` →
+> measured `:4466`) and its `sdk.py` pins ~2,825 (`:38401` → measured `:41226`). **A pin in a research doc must
 > name its head; a pin in an architecture doc must be refreshed by that doc's changelog.**
 > ⛔ **The exception, declared: round 2's `research-brief.md` §7 is NOT on `origin/main` at this head** — it lives
 > on `origin/research/12186-round2-depth` (956 lines, PR `#12270`). Any §7 citation below names the branch and
@@ -106,8 +106,8 @@ legs reach the graph through `search_engine`'s legs. Stated so a reviewer who gr
 table as a claim about the whole tree.
 
 Their only entity-family filter is **`status`** — `_status_vocab_for` (`search_engine.py:98-138`), the label list
-`_STATUS_FILTERED_LABELS` (`:148`), applied ahead of `ORDER BY`/`LIMIT` on the FTS leg (`:2973-2980`, cypher
-`:2986-2997`). And **`apply_entity_merge` writes no `status`** — its only candidate props are
+`_STATUS_FILTERED_LABELS` (`:148`), applied ahead of `ORDER BY`/`LIMIT` on the FTS leg (`:2998-3005`, cypher
+`:3011-3022`). And **`apply_entity_merge` writes no `status`** — its only candidate props are
 `resolved_from`, `dedup_reviewed='merge'`, `reviewed` (`entity_resolver.py:797-805`), plus `canonical_name` when
 absent; the survivor gets `aliases` (`:784`, `:792`). The carrier's `name` is never rewritten.
 
@@ -168,7 +168,7 @@ the same selector as `:382`), and comments/docstrings (`sdk.py:24087`, `:24321`,
 | `sdk.py:24415` | content arm, `$a` | whatever `approve_merge` accepted |
 | `sdk.py:24574` | entity reject | `'reject'` |
 | `review_verdicts.py:516` | the close verdict | `'close'` |
-| ⛔ **`sdk.py:51584 update_entity(id, **props)`** | the generic entity/point update door | **any string the caller passes** — it reaches `SET n += $props` (`:6499`, `:6526`, `:6688`), and `dedup_reviewed` is a declared point property (`tortoise/_placement_table.json:189`) |
+| ⛔ **`sdk.py:51584 update_entity(id, **props)`** | the generic entity/point update door | **any string the caller passes** — it reaches `SET n += $props` (`:6554`, `:6581`, `:6743`), and `dedup_reviewed` is a declared point property (`tortoise/_placement_table.json:189`) |
 
 #### Two corrections, both material
 
@@ -219,7 +219,7 @@ for ranking results"*. **The option surface the page actually names is five thin
 **(b) Our index is created with no `OPTIONS` block.** `_create_fulltext_index` (`projection/__init__.py:20755`)
 tries two forms (`:20785-20788`): `CREATE FULLTEXT INDEX FOR (n:{label}) ON ({fields_expr})`, then
 `CALL db.idx.fulltext.createNodeIndex('{label}', {...})`. Neither carries `OPTIONS`. The declared entity index
-fields are `("Subject", ["name"])` and `("Object", ["name"])` (`projection/__init__.py:6819`, `:6823`) — the
+fields are `("Subject", ["name"])` and `("Object", ["name"])` (`projection/__init__.py:6819`, `:6878`) — the
 detail that makes §8.2's D-1 bite.
 
 **(c) `sparse.py`'s "BM25-style" is a comment error, confirmed.** `sparse.py:13-14` verbatim: *"OR-union +
@@ -232,9 +232,9 @@ rows survive the LIMIT"* — is not what our code or our doc says.** It acts in
 **three** places, and `SEARCH-ARCHITECTURE.md` §6.2 (`:246-260`) already names the third:
 
 1. **`LIMIT` selection** — the FTS leg is `ORDER BY score DESC, <recency tie> LIMIT $limit`
-   (`search_engine.py:2992-2994`). Confirmed.
-2. **`rrf_fusion` discards it on the multi-leg arm** — `search_engine.py:4411` (def), the binding
-   `for rank, (pid, _score) in enumerate(ranked)` at `:4492`, rationale at `:4520`. Confirmed verbatim.
+   (`search_engine.py:3017-3019`). Confirmed.
+2. **`rrf_fusion` discards it on the multi-leg arm** — `search_engine.py:4466` (def), the binding
+   `for rank, (pid, _score) in enumerate(ranked)` at `:4492`, rationale at `:4575`. Confirmed verbatim.
 3. ⛔ **The single-leg / full-scan arm keeps the raw leg score as the output score AND as a floor** —
    `sdk.py:41223-41226`:
 
@@ -264,8 +264,8 @@ rows survive the LIMIT"* — is not what our code or our doc says.** It acts in
   `research-brief.md`, `:436`), so `:163` was never missed. `:163` also says TF-IDF
   (*"`db.idx.fulltext` — RediSearch's TF-IDF scorer, documented as BM25-style behaviour in `tortoise/sparse.py`"*).
   Both are correct in substance; both point at `sparse.py` as the source of the wrong claim.
-- ⛔ **§6.2's own locators are stale at `f33f5e2c3215`** — it cites `search_engine.py:3021` / `:3091-3093` and
-  `sdk.py:38401` / `:38445` / `:37470`. Measured now: `rrf_fusion` **`:4411`**, the discard **`:4492`**, the
+- ⛔ **§6.2's own locators are stale at `f33f5e2c3215`** — it cites `search_engine.py:3046` / `:3116-3118` and
+  `sdk.py:38401` / `:38445` / `:37470`. Measured now: `rrf_fusion` **`:4466`**, the discard **`:4492`**, the
   single-leg floor **`:41226`**, the `threshold` default **`:39852`**. A lane that trusts §6.2's pins will land on
   the wrong lines. **This is a doc-drift finding, not a re-scope: §6.2's content is right and must not be edited
   by this lane** — the pins are what needs refreshing, and that is `SEARCH-ARCHITECTURE-CHANGELOG.md`'s job.
@@ -279,7 +279,7 @@ fixture"*. Given (d), **a distributions-only M3 under-reads and a rank-only M3 o
    scorer (§6.2's own 8–23 nDCG@10 is a *rank* gap measured elsewhere, between other implementations).
 2. **The FTS leg in isolation** — `run_fts_query` with the vector leg off. On the multi-leg arm the score is
    discarded (`:4492`), so **no hybrid measurement can say anything about the scorer**.
-3. **Recall@k of the leg, not only nDCG.** The scorer acts on *selection* (`:2992-2994`). A scorer that ranks
+3. **Recall@k of the leg, not only nDCG.** The scorer acts on *selection* (`:3017-3019`). A scorer that ranks
    better but admits fewer relevant rows at `K` is a **regression** for a 3-deep window — `#11901` measured
    61.3 % @3, so `K ∈ {3, 5, 10, 15}`, not a top-10-only number.
 4. **The single-leg floor arm stated explicitly** — record whether `threshold` was held at `0.0` and why that is
@@ -287,7 +287,7 @@ fixture"*. Given (d), **a distributions-only M3 under-reads and a rank-only M3 o
 5. **The `#8933` identifier fixture** — unchanged, and it is a **correctness** gate, not a quality one:
    `to_tsvector` cannot reproduce `ERR-4032 → err4032` **plus** the adjacency phrase.
 6. **A stated tie rule.** Both scorers must be read through the same `recency_tie_clause`
-   (`search_engine.py:2993`), or the comparison is measuring tie order.
+   (`search_engine.py:3018`), or the comparison is measuring tie order.
 
 **Contradiction test:** no recorded decision is reversed. The **text-index** ruling gates the **index location** —
 *"the text index **stays** until **M3** measures a BM25-capable Postgres option"* (`SEARCH-ARCHITECTURE.md:268`) — and
@@ -399,25 +399,25 @@ The chain, all at `f33f5e2c3215`:
 1. `apply_entity_merge` stamps `resolved_from` / `dedup_reviewed='merge'` / `reviewed` and **no `status`**
    (`entity_resolver.py:797-805`); the carrier's `name` is untouched (`canonical_name` is only *filled*, never
    rewritten — `:799-805`).
-2. `:Object` and `:Subject` are full-text indexed **by `name` alone** (`projection/__init__.py:6823`, `:6819`).
-3. The FTS leg filters **`status`** and nothing else (`search_engine.py:148`, `:2973-2980`, cypher `:2986-2997`).
+2. `:Object` and `:Subject` are full-text indexed **by `name` alone** (`projection/__init__.py:6823`, `:6874`).
+3. The FTS leg filters **`status`** and nothing else (`search_engine.py:148`, `:2998-3005`, cypher `:3011-3022`).
    ⇒ a search for the merged-away spelling **still returns the carrier**; the survivor joins it only where its own
    `name` shares query tokens with that spelling, because the FTS fields are `name` alone
-   (`projection/__init__.py:6819`, `:6823`) and `aliases` — though written (`entity_resolver.py:792`) — is in
+   (`projection/__init__.py:6819`, `:6878`) and `aliases` — though written (`entity_resolver.py:792`) — is in
    neither field list.
 4. **The capture path does not consult the resolver at all.** S3's entity prior set is built by `_fts_rows`
    (`extractor_v2.py:2887`) → `sdk.tortoise_fts_query(entity_type="object"|"subject", limit=3,
-   include_terminal=True, …)` (`:2906-2907`, `:2908-2911`). Note `include_terminal=True` — the leg explicitly
+   include_terminal=True, …)` (`:2931-2932`, `:2933-2936`). Note `include_terminal=True` — the leg explicitly
    opts *back into* a wider status view, and **nothing opts back out of `resolved_from`**.
 5. `_find_existing_entity` (`extractor_v2.py:5769-5788`) then matches by folded name over that row set and
-   returns `exact[0]` — and `:6022-6026` binds `resolved[name] = {"id": str(ex.get("id"))}`. Nothing collapses
+   returns `exact[0]` — and `:6077-6081` binds `resolved[name] = {"id": str(ex.get("id"))}`. Nothing collapses
    through `resolved_from`.
    ⛔ **Correction to this lane's first draft, which said `exact[0]` is "the higher-scoring one". It is not.**
    The rows are accumulated into an **id-keyed dict** (`extractor_v2.py:3076-3081`) and re-listed by
-   `.values()` (`:3104-3106` in the degraded branch, `:3118-3120` in the normal one); the code's own comment states it — *"S3's rows are accumulated into id-keyed
-   dicts by `search_graph` (**order DISCARDED**)"* (`:2913-2914`). So `exact[0]` is first-**seen across the
+   `.values()` (`:3129-3131` in the degraded branch, `:3143-3145` in the normal one); the code's own comment states it — *"S3's rows are accumulated into id-keyed
+   dicts by `search_graph` (**order DISCARDED**)"* (`:2938-2939`). So `exact[0]` is first-**seen across the
    query sequence**, not highest-scoring. And inside one query the two candidates **tie** on score (same folded
-   name, same `name`-only index), so their order is decided by `recency_tie_clause` (`search_engine.py:2993`),
+   name, same `name`-only index), so their order is decided by `recency_tie_clause` (`search_engine.py:3018`),
    which is **newest-first**. ⇒ **the tie rule predicts the CARRIER is preferentially picked**, not the survivor —
    so D-1 is plausibly *worse* than the neutral statement, for a reason this lane did not originally give.
 
@@ -428,7 +428,7 @@ The chain, all at `f33f5e2c3215`:
 - **A candidate slot can be spent on a retired carrier.** ⛔ **Correction to this lane's first draft, which said
   "one of the three slots … up to a third of the window `#11901` measured at 61.3 %": that conflated two different
   windows and is withdrawn.** `limit=3` is **per FTS query** (`extractor_v2.py:3076`), and the S3 prior set is the
-  **union over the whole query budget**, keyed by id (`:3076-3081`) — so the prior set is not `#11901`'s recall@3
+  **union over the whole query budget**, keyed by id (`:3101-3106`) — so the prior set is not `#11901`'s recall@3
   window and its size is not 3. What survives is the qualitative claim and nothing more: **a dead twin occupies a
   slot in some query's 3-row window that a live node could have occupied**, and no counter counts it. **The
   magnitude is unmeasured** — it needs the census in §8.7 item 1.
@@ -537,7 +537,7 @@ a fan-out cap.
 | element | code |
 |---|---|
 | **how the entity collection is BUILT at `add()`** | `extract_entities(text)` — **deterministic spaCy NER + heuristics, no LLM** (`entity_extraction.py`: `_add_ner_candidates` `:498`, `_add_technical_identifier_candidates` `:528`, `_add_proper_name_candidates` `:543`, `_add_quoted_candidates` `:581`, `_add_topic_phrase_candidates` `:590`, `_resolve_candidates` `:705`; the pipeline calling them in order is `:743-748`). Then `_upsert_entity` (`main.py:605`, exact-normalised match at `:610`): **exact normalised-text match first** (`_existing_entities_by_text`, `_normalize_entity_text`), else a **semantic `top_k=1` match at `score >= 0.95`** (`:614-621` — `top_k=1` at `:617`, the gate at `:621`), else insert. A match appends `memory_id` to `linked_memory_ids` (`:624-629`) |
-| **search-side pool** | `internal_limit = max(limit*4, 60)` (`main.py:1655`, again at `:3344`); semantic, keyword, entity searches all sized to that |
+| **search-side pool** | `internal_limit = max(limit*4, 60)` (`main.py:1655`, again at `:3369`); semantic, keyword, entity searches all sized to that |
 | **candidate pool is SEMANTIC-ONLY** | `main.py:1674-1684`, comment *"Step 7: Build candidate set from semantic results"* — the BM25 arm scores rows already in that pool; so does the entity arm. **A keyword-only or entity-only hit cannot enter** |
 | **BM25 normalisation** | query-length-adaptive **sigmoid**: midpoint 5 / 7 / 9 / 10 / 12, steepness 0.7 / 0.6 / 0.5 / 0.5 / 0.5 by term count (`scoring.py:16-40`), `1/(1+exp(−s·(x−m)))` (`:43-54`) |
 | **the entity boost, exactly** | `main.py:1747-1827`: ≤ 8 deduped query entities → entity store `search(top_k=500)` → skip `similarity < 0.5` → `num_linked = max(len(linked_memory_ids), 1)` → **`memory_count_weight = 1/(1 + 0.001·(num_linked−1)²)`** → `boost = similarity × ENTITY_BOOST_WEIGHT × memory_count_weight`, `ENTITY_BOOST_WEIGHT = 0.5` (`scoring.py:57`) → taken as **`max`** per memory, never summed |

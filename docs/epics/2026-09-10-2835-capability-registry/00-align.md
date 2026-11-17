@@ -26,7 +26,7 @@ aboutObjects: tortoise-hosted-platform
 | Component-class gap is real | **True, and narrower than the epic implies.** No registered class covers `reviewer`, `extension`, `script`, `hook`, `template`, or `mcpServer` in any core or pack vocabulary. That is the genuine ontology delta. | `grep` across ONTOLOGY §5 + all `packs/*/manifest.yaml` |
 | Mechanism provenance modelled | **True.** `(Event)-[:uses]->(Object {objectKind: skill\|tool\|agent\|workflow})` — *"the mechanism is therefore searchable and shared (finite skill set, not per-event)"*. | `docs/ONTOLOGY.md` §3.5 L256 |
 | Hybrid retrieval exists | **True.** *"Hybrid search engine for Tortoise — RRF fusion of FTS + vector + structural queries"*, with a documented degradation chain and TF-IDF fallback. | `tortoise/search_engine.py:1` |
-| Point-level dedup adjudication exists | **True.** `DEDUP_REVIEW_THRESHOLD = 0.84`, `DEDUP_AUTO_MERGE_THRESHOLD = 0.94`, `approve_merge`. | `tortoise/sdk.py:5305-5306`, `:5468` |
+| Point-level dedup adjudication exists | **True.** `DEDUP_REVIEW_THRESHOLD = 0.84`, `DEDUP_AUTO_MERGE_THRESHOLD = 0.94`, `approve_merge`. | `tortoise/sdk.py:5305-5306`, `:5523` |
 | Decision machinery exists | **True.** `file_decision(options, evidence, choice)` — decision + options + evidence + IMPL edges, atomic, explicitly *"for low-stakes decisions"* (no EP, no calibration). | `tortoise/sdk.py:8191` |
 | Multi-repo tenancy exists | **True.** `graph_list(org_id)`, `list_graphs()` — the multi-graph work (#2083) landed. | `tortoise/sdk.py:14529`, `:8385` |
 | Naming precedent for a catalog | **True but small.** `CAPABILITY_CATALOG` is **4 hand-written rows**, 1 of them `available=False` (planned). It is a literal, not a mechanism. | `tortoise/tool_registry.py:1378-1406` |
