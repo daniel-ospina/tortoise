@@ -787,6 +787,26 @@ def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
             f"{transposed} is in no committed artifact — a falsifier must quote "
             "the artifact it points at")
 
+    # ⛔ F3, third generation: the "no retrieval behaviour changed" cell quoted a
+    # `git diff --stat` TALLY, and a tally is a MOVING number — it grows with
+    # every commit the evidence itself adds and every merge of `main`, so the
+    # quoted value was already stale at the head that published it (measured: the
+    # row said 8,454 while `git diff --stat origin/main...HEAD` printed 8,509; the
+    # round before it quoted a 3-file list the tree does not produce either).
+    # What the claim is about is the SET OF TOUCHED PATHS, and that set is stable,
+    # so the cell names the set and the command that reproduces it. A quoted tally
+    # is not a falsifier: nobody can reproduce it, and the re-stale class this pin
+    # exists for would come back a fourth time.
+    for tally in ("insertions(+)", "deletions(-)", "files changed"):
+        assert tally not in brief, (
+            f"the falsifier quotes a `git diff --stat` {tally!r} tally — that "
+            "number moves with every commit the evidence adds and every merge of "
+            "main, so the cell can never be reproduced; quote the touched-path "
+            "set, which is what the claim is about")
+    assert "git diff --name-only origin/main...HEAD" in brief, (
+        "the cell must name the command whose OUTPUT it publishes — the whole "
+        "#13267 F3 class is prose that quotes a command the tree does not print")
+
     # F6: the pairing datum is the NAME digest
     assert head["items"]["name_digest"] == head["population"]["names_sha256"]
     assert short["items"]["name_digest"] == head["items"]["name_digest"]
