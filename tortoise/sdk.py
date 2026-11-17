@@ -42427,7 +42427,7 @@ class TortoiseSDK:
         """Batch ingestion — walk directory, parse YAML frontmatter,
         create/update Event nodes. Returns {ingested, updated, skipped, failed, errors}.
 
-        DEPRECATED — use ``index_directory`` (epic #900). During the W3
+        DEPRECATED — use ``index_sources_from_directory`` (epic #900). During the W3
         deprecation window this FROZEN legacy branch keeps its behavior
         byte-identical (SC4). FLAG-SEMANTICS DIVERGENCE (W3, §6.1):
         ``extract_metadata=False`` STILL computes session embeddings on the
@@ -56414,7 +56414,7 @@ class TortoiseSDK:
                        progress_file: str | None = None) -> dict:
         """Index session files as AgentSession Events.
 
-        DEPRECATED — use ``index_directory`` (epic #900). Thin wrapper
+        DEPRECATED — use ``index_sources_from_directory`` (epic #900). Thin wrapper
         around the frozen legacy ``ingest_corpus`` (SC4 — behavior
         unchanged); see its docstring for the ``extract_metadata``
         flag-semantics divergence (W3, §6.1).

@@ -64,9 +64,11 @@ import json
 import logging
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 import uuid
 from pathlib import Path
@@ -2748,6 +2750,151 @@ def test_a_failing_byte_meter_cannot_roll_back_a_record_write(monkeypatch, tenan
         assert dict(monitoring.record_write_failure_counts()) == failures_before, (
             "a metering fault was charged to `record_write_failures` — that "
             "counter names a WRITE that did not land, and this write did")
+    finally:
+        conn.close()
+
+
+#: The `application_name` this leg's arm carries. TWO jobs, both needed: it
+#: gives the leg its OWN pool bucket (the pool is keyed on the DSN), so it can
+#: neither inherit nor disturb a sibling's parked handle, and it makes the
+#: leg's backends addressable for the kill below by something narrower than
+#: `usename='record'` — which is every connection in this file, including the
+#: assertion connection itself.
+PARKED_HANDLE_APP_NAME = "record-parked-handle-probe-"
+
+
+def _leg_app_dsn(leg: str) -> str:
+    """The app-role DSN for `leg`, with its own `application_name`."""
+    base = _app_role_dsn(os.environ[RECORD_DB_ENV])
+    return f"{base}&application_name={leg}"
+
+
+def test_a_parked_handle_whose_backend_died_costs_a_reconnect_not_a_record(
+        monkeypatch, tenant):
+    """The IDLE park's hole, on a REAL backend — one lost record per death.
+
+    `record_write_failures.write_failed` is the counter that flips
+    `record.degraded`, and a capstone lane measured it climbing on the hosted
+    deployment (8 lost / 1292 attempts, ~0.6 %, no recovery) without an
+    exception text. Reproduced in a lane and pinned here: the pool parks the
+    write door's handle **IDLE**, and every field
+    `record_writer._connection_is_reusable` used to read is a CLIENT-side cache
+    that psycopg2 only refreshes when a statement touches the socket. So a
+    handle whose peer went away while parked still read `closed=0`
+    `transaction_status=IDLE`, was lent to the door, and its FIRST statement —
+    `_apply_tenant_scope`'s `TENANT_GUC_SQL` — raised
+
+        psycopg2.OperationalError: server closed the connection unexpectedly
+
+    which `write_live_record` swallows into `REFUSED/'write_failed'` (the row is
+    lost, replay is owed, and on a CUT-OVER graph an enumerated replay is
+    refused — see that warning). Measured on PG16 with the parked backends
+    terminated from the outside: 18 lost records / 400 writes, 4.5 %.
+
+    WHY THIS LEG EXISTS IN ADDITION TO THE HERMETIC PIN: a fake can be made to
+    agree with the probe's reasoning, and this is the only place the WHOLE chain
+    runs — real psycopg2 handle, real parked socket, real `pg_terminate_backend`,
+    real projection, real counter. It runs in the `test-record-postgres` job.
+
+    FALSIFIER, and the mutant that was OBSERVED to red it: delete the
+    `_socket_has_pending_input`/`_verify_pending_input` pair from
+    `record_writer._take_idle_connection` and the
+    second write comes back `REFUSED/'write_failed'` with one row instead of
+    two, and `record_write_failures` moves by one. The leg asserts its own
+    premise first (the corpse is still invisible to `closed` /
+    `transaction_status`) so that revert cannot be masked by the kill happening
+    to land where the old predicate can see it.
+    """
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _seed_tenant(conn, tenant)
+        leg = f"{PARKED_HANDLE_APP_NAME}{uuid.uuid4().hex[:8]}"
+        dsn = _leg_app_dsn(leg)
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV, dsn)
+        before = _count(conn, "session", tenant)
+        failures_before = dict(monitoring.record_write_failure_counts())
+
+        def session_record(tag: str) -> dict:
+            return {"type": "SessionRecorded", "ts": "2026-11-17T00:00:00Z",
+                    "id": f"sess-parked-{leg}-{tag}", "turn_count": 1,
+                    "is_episodic": True, "capture_redactions": 0}
+
+        first = record_writer.write_live_record(
+            session_record("a"), seq=1, tenant=tenant)
+        assert first is not None and first.applied, (
+            f"the first write was not applied: {first!r}")
+        first.connection.close()      # RELEASE: parks the handle IDLE
+        with record_writer._IDLE_CONNECTIONS_LOCK:
+            parked = record_writer._IDLE_CONNECTIONS[
+                record_writer._pool_key(dsn)][-1]
+
+        # The peer hangs up while the handle sits parked — a pooler's idle
+        # timeout, a failover, an operator restart. Server-side and real.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(pg_terminate_backend(pid)) "
+                "FROM pg_stat_activity WHERE application_name = %s "
+                "AND state = 'idle' AND pid <> pg_backend_pid()", (leg,))
+            killed = int(cur.fetchone()[0])
+        assert killed >= 1, (
+            "no idle backend of this leg was terminated, so nothing was parked "
+            "and this leg measured nothing (DoD rule 1: an empty population is "
+            "not a green measurement)")
+        # ⚠️ THE KILL IS SERVER-SIDE AND THE EOF IS NOT: `pg_terminate_backend`
+        # returns before the FIN reaches this client, and a probe run 1 ms later
+        # would correctly see a socket that has not been told yet (measured:
+        # the assertions below red without this wait). In the production case
+        # worth fixing the peer went away seconds-to-minutes earlier, so the
+        # wait is a TEST settling a race, not a property of the fix.
+        #
+        # ⛔ THIS WAIT MUST NOT CALL THE CODE UNDER TEST (fresh-context review,
+        # P1). The first version waited on the module's own probe
+        # — which DRAINS the socket with `poll()`, and psycopg2's `poll()` can
+        # leave the handle reporting `closed=2 / transaction_status=4`. The
+        # pre-fix arms of `_connection_is_reusable` then discard the corpse on
+        # their own, so the leg PASSED with the fix removed (measured by the
+        # reviewer: 1 passed on four consecutive runs) while claiming to be the
+        # falsifier for that exact revert. `select` on the fd is the same
+        # readiness fact with no side effect, so the mutant is measured against
+        # the real predicate. It is `select.poll` rather than `select.select`
+        # because the latter REFUSES an fd at or above `FD_SETSIZE` (1024): a
+        # long-lived process would raise here, and the production probe would
+        # have read "nothing pending" for every such handle (cycle-3 finding).
+        poller = select.poll()
+        poller.register(parked.fileno(), select.POLLIN)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if poller.poll(0):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(
+                "this leg's socket never reported the peer as gone, so the kill "
+                "did not reach the client and nothing was measured")
+        # ⛔ AND THE LEG ASSERTS ITS OWN PREMISE: the death must be INVISIBLE to
+        # the two fields the pre-fix predicate trusted, or a pre-fix tree would
+        # discard the corpse for a reason that has nothing to do with this fix
+        # and this leg would pass on it. An empty population is not a green
+        # measurement (DoD rule 1) — a premise that is not true is not a test.
+        assert parked.closed == 0 and parked.info.transaction_status == 0, (
+            "this corpse is already visible to `closed`/`transaction_status` "
+            f"({parked.closed}, {parked.info.transaction_status}), so a tree "
+            "WITHOUT the socket probe would discard it anyway — this leg cannot "
+            "discriminate on this database")
+
+        second = record_writer.write_live_record(
+            session_record("b"), seq=2, tenant=tenant)
+        assert second is not None and second.applied, (
+            "a parked handle whose backend died was handed to the door: the "
+            f"record was REFUSED as {getattr(second, 'refusal', None)!r} instead "
+            "of being written on a fresh connect")
+        assert _count(conn, "session", tenant) == before + 2, (
+            "the write after the kill did not land — a dead parked handle still "
+            f"costs a record ({before} -> {_count(conn, 'session', tenant)})")
+        assert dict(monitoring.record_write_failure_counts()) == failures_before, (
+            "a dead parked handle was charged to `record_write_failures` — that "
+            "counter names a record that did NOT land, and this one did")
     finally:
         conn.close()
 
