@@ -23,13 +23,24 @@ control-plane RPC seam:
    until)``: an EXACT per-org ``count(*)`` for ``analytics_events`` in a
    half-open window — an org's analytics row growth.
 
-⛔ **THE ATTRIBUTION BOUNDARY — bytes are DATABASE-grain, rows are per-org.**
-Postgres records no per-org byte ownership, so a per-org BYTE figure would be
-an ALLOCATION mislabelled as a measurement. This module therefore publishes
-exactly two things, each named for what it is: a DATABASE/TABLE-grain byte
-footprint, and a PER-ORG ROW count. The parent substrate (#5045) is where an
-allocation rule would be declared, if one is ever wanted; nothing here
-invents one.
+⛔ **THE ATTRIBUTION BOUNDARY — THIS module's bytes are DATABASE-grain, rows are
+per-org; the PER-ORG BYTES live in a sibling module (#12762).** A per-org byte
+figure that apportions the database TOTAL by a proxy would be an ALLOCATION
+mislabelled as a measurement, and this module still publishes none: it
+publishes exactly two things, each named for what it is — a DATABASE/TABLE-grain
+byte footprint, and a PER-ORG ROW count.
+⚠️ **"No per-org byte figure is possible" would be FALSE, and this note used to
+imply it.** Rows are keyed by ``org_id``, so the bytes THEY occupy are
+measurably that org's own, stored size (``sum(pg_column_size(row))``, which
+follows the TOAST pointer and reports the compressed stored size — measured
+PG 16.9/17.12/18.3). That measurement is
+:mod:`tortoise.postgres_bytes` (``measure_written_rows`` / ``per_org_bytes`` /
+``PerOrgPostgresBytes.for_org``), and the byte components that CANNOT be
+attributed per org (heap slack, dead tuples, indexes, TOAST chunk headers)
+travel there as a stated residual rather than being folded into a per-org
+number. ``cost_dimensions``' ``postgres_storage`` attribution carries the
+``OVERRIDES:`` of the older position — read it before assuming the split is
+the only option.
 
 ⛔ **PRECISION.** ``total_bytes``/``heap_bytes``/``index_bytes`` are EXACT
 on-disk figures. ``live_rows`` is ``pg_stat_user_tables.n_live_tup`` — a
@@ -128,11 +139,12 @@ PRECISION_NOTE = (
 #: per org. This is the property that keeps the number from being read as a
 #: per-org cost.
 ATTRIBUTION_NOTE = (
-    "DISTRIBUTION: the byte footprint is DATABASE/TABLE-grain — Postgres "
-    "records no per-org byte ownership, so a per-org byte split would be an "
-    "ALLOCATION, not a measurement, and is not offered here. Per-org "
-    "attribution exists for ROW GROWTH "
-    "(read_analytics_row_growth → analytics_events_rows_by_org)."
+    "DISTRIBUTION: this byte footprint is DATABASE/TABLE-grain — a per-org "
+    "split of the database TOTAL would be an ALLOCATION, not a measurement, "
+    "and is not offered here. Two per-org figures DO exist elsewhere: ROW "
+    "GROWTH (read_analytics_row_growth → analytics_events_rows_by_org) and "
+    "stored BYTES (tortoise.postgres_bytes, #12762), which measures the rows "
+    "an org wrote and publishes the unattributable remainder as a residual."
 )
 
 #: The retention finding (issue #4492 indicator 3), carried on every growth

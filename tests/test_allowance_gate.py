@@ -210,20 +210,30 @@ def test_ruled_dimension_three_extraction_tokens():
 
 
 def test_ruled_dimension_one_postgres_bytes_is_BLOCKED_and_refuses():
-    """Unit 1 of #5331 — Postgres bytes — has NO per-org meter.
+    """Unit 1 of #5331 — Postgres bytes — has no per-org RESIDENCY gauge.
 
-    ``postgres_storage`` measures at DATABASE grain and its declared
-    ``attribution`` says a per-org split would be an ALLOCATION, not a
-    measurement. So configuring the key must REFUSE (fail closed, naming the
-    block) rather than pass on a figure nobody measured, and rather than charge
-    one tenant for the whole database.
+    ⚠️ This test used to assert the refusal said *"no per-org byte meter"* and
+    justified it with *"a per-org split would be an ALLOCATION, not a
+    measurement"*. #12762 landed a per-org byte attribution that IS a
+    measurement (``postgres_bytes.PerOrgPostgresBytes.for_org``), and
+    ``cost_dimensions`` carries an explicit ``OVERRIDES:`` of that sentence — so
+    the block now rests on the two grounds that are still true: there is no
+    per-org RESIDENCY GAUGE (the audit is a whole-table pass; the ledger reader
+    is the window ADDEND), and the free/anon included amounts are unconfirmed.
+
+    The behaviour under test is unchanged and is the important half: configuring
+    the key REFUSES (fail closed, naming the block) rather than passing on a
+    figure nobody may cap against, and rather than charging one tenant for the
+    whole database.
     """
     limits = _limits(max_postgres_storage_bytes=10 ** 9)
     with pytest.raises(QuotaCheckError) as caught:
         enforce_allowances(limits)
     message = str(caught.value)
     assert "postgres_storage" in message
-    assert "no per-org byte meter" in message
+    assert "RESIDENCY GAUGE" in message
+    # The falsified ground must not come back: the attribution EXISTS (#12762).
+    assert "no per-org byte meter" not in message, message
 
 
 # ── the gate is ONE gate, on the declared registry ─────────────────────────
