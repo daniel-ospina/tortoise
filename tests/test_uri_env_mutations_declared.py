@@ -462,6 +462,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # arms skip), never to a silently-embedded green, and nothing leaks into a
     # later docker-lane test.
     "test_12360_underscore_or_terms.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # #12184: the entity-row ranker's live half. `test_12184_ranker_entity_signals.py`
+    # is the 8933/12360 shape a third time — a module-level live probe (set to
+    # `_DB_URI`, restore the previous value in a `finally`, pop when it was unset:
+    # 3 sites) plus an autouse per-test fixture that re-points the lane at THIS
+    # module's own graph and restores it (3 more). DELIBERATE_URI is the point: the
+    # claim under test is that entity rows are scored from the `:Subject` signals a
+    # READER derives on a REAL FalkorDB index, so the ranker must be handed that
+    # graph — no pure-function test can observe it. An unreachable lane degrades to
+    # `FALKORDB_AVAILABLE = False` (the live arms `skipif`, they never run
+    # embedded-green), and neither the probe's `finally` nor the fixture's restore
+    # lets the lane leak into a later docker-lane test.
+    "test_12184_ranker_entity_signals.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
