@@ -34796,13 +34796,15 @@ def _drop_org_acl_users(org_id: str) -> None:
             org_id, e)
         return
     if not complete:
-        # Not fatal — C4/#2113 above; and not silent, which is the failure mode.
+        # Not fatal — the policy this docstring records (`e2131c6847`) — and not
+        # silent, which is the failure mode.
         _logger.warning(
             "team ACL-user enumeration for %s is a LOWER BOUND (%d gid(s), walk "
             "UNCERTIFIED): only the enumerated graphs' `tenant_<gid>` users are "
             "dropped here. `_org_graph_names` walks the same table with the same "
             "bounds and refuses this purge on the same condition, so this stays "
-            "best-effort (#2113) — but that is a SECOND walk, not a derivation, "
+            "best-effort (the `e2131c6847` policy) — but that is a SECOND walk, "
+            "not a derivation, "
             "so a transient anomaly visible only here still orphans credentials "
             "(#13287): check this org's `tenant_*` users by hand",
             org_id, len(ids))

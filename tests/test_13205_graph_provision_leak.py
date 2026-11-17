@@ -373,7 +373,7 @@ class TestDeprovisionOnDelete:
             "users outlive the purge that deletes the graphs")
 
     def test_an_uncertified_acl_walk_DROPS_what_it_saw_and_says_SO(self, monkeypatch, caplog):
-        """The recorded decision is best-effort — C4/#2113, "Best-effort per
+        """The policy is best-effort — recorded by C4 in `e2131c6847`, "Best-effort per
         graph (a committed purge never fails on a drop)" — so an uncertified walk
         must NOT raise. It must be LOUD instead: the ids it saw are a LOWER
         BOUND, and the credential on any graph past it outlives every way to name
@@ -381,7 +381,9 @@ class TestDeprovisionOnDelete:
 
         Mutant: delete the `if not complete:` block — the drop still happens, so
         this reds on the LOG assertion, which is why the assertion is the log and
-        not the exception: making this raise would reverse #2113.
+        not the exception: making this raise would reverse that policy (`e2131c6847`),
+        which is a docstring review finding, NOT a decision stated on #2113 (see the
+        function's own docstring).
         """
         from tortoise import hosted_api as ha
 
@@ -400,7 +402,7 @@ class TestDeprovisionOnDelete:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: _CP())
         caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
-        ha._drop_org_acl_users("o1")           # must NOT raise (#2113)
+        ha._drop_org_acl_users("o1")           # must NOT raise (`e2131c6847`)
         assert dropped == ["g_1"], dropped     # best-effort still drops what it saw
         text = " ".join(r.getMessage() for r in caplog.records)
         assert "LOWER BOUND" in text and "o1" in text, text
@@ -412,7 +414,7 @@ class TestDeprovisionOnDelete:
         predates the walk therefore raises `AttributeError` into the best-effort
         handler below, which logs and returns having dropped NO user.
 
-        Continuing is correct per the RECORDED DECISION C4/#2113 ("Best-effort
+        Continuing is correct per the policy C4 recorded in `e2131c6847` ("Best-effort
         per graph (a committed purge never fails on a drop)"), but only while it
         is ANNOUNCED: `tenant_<gid>` users are GLOBAL state that nothing else
         names, so the operator can only drop them by hand if the failure is said
@@ -423,7 +425,7 @@ class TestDeprovisionOnDelete:
 
         Mutant: delete the `_logger.warning` in the handler (keep the `return`)
         — reds on the log assertion here, while the sweep still does not raise
-        (#2113).
+        (`e2131c6847`; not a decision stated on #2113).
         """
         from tortoise import hosted_api as ha
 
@@ -441,7 +443,7 @@ class TestDeprovisionOnDelete:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: _NoWalker())
         caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
-        ha._drop_org_acl_users("o1")       # must NOT raise (#2113)
+        ha._drop_org_acl_users("o1")       # must NOT raise (`e2131c6847`)
         assert dropped == [], dropped      # nothing was named, nothing dropped
         text = " ".join(r.getMessage() for r in caplog.records)
         assert "ACL-user enumeration failed" in text and "o1" in text, text
@@ -451,7 +453,7 @@ class TestDeprovisionOnDelete:
         """⛔ The `except` arm is a fail-open that #13287 owns, and it is the
         WORSE of the two: `query_all` RAISES on an outage by contract, so this arm
         returns with `ids == []` and the caller still drops EVERY graph and
-        cascades the naming rows. It cannot refuse (C4/#2113, best-effort), so the
+        cascades the naming rows. It cannot refuse (`e2131c6847`, best-effort), so the
         least it must do is SAY so — and it never reaches the `LOWER BOUND`
         warning below, so without a sentence of its own the total loss of every
         `tenant_<gid>` credential is completely silent.
@@ -470,7 +472,7 @@ class TestDeprovisionOnDelete:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: _Broken())
         caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
-        assert ha._drop_org_acl_users("o1") is None   # must not raise (#2113)
+        assert ha._drop_org_acl_users("o1") is None   # must not raise (`e2131c6847`)
         text = " ".join(r.getMessage() for r in caplog.records)
         assert "NOT blocked" in text, text
         assert "tenant_*" in text and "13287" in text, text
