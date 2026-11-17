@@ -44,37 +44,65 @@ jobs:
   differential:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    services:
-      graph:
-        # ⛔ PINNED, like every other FalkorDB job in this repo
-        # (`.github/actions/falkordb-provision/action.yml`'s default is the same
-        # tag, and `tools/test_lane.py` REFUSES a floating tag outright). A
-        # floating app-image tag makes this gate's engine a function of the
-        # calendar rather than of the commit: `falkordb/falkordb:latest` resolved
-        # to engine 6.0.x on 2026-11-17 (module `graph` ver 60004) where the pin
-        # is 4.20.x (ver 42006), and the 6.0 family is the one whose
-        # `reply_compact` panics (`#13098` review). A gate whose engine can change
-        # under it cannot attribute a red to a commit.
-        image: falkordb/falkordb-server:v4.20.6
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 5s
-          --health-timeout 5s --health-retries 20
-      record:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_PASSWORD: s3cret
-          POSTGRES_DB: cypher_diff
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres" --health-interval 5s
-          --health-timeout 5s --health-retries 20
-    env:
-      GRAPH_URI: "docker://:@127.0.0.1:6379"
-      RECORD_DSN: "postgresql://postgres:s3cret@127.0.0.1:5432/cypher_diff"
+    # ⛔ NO `services:` BLOCK — THE TWO STORES ARE PROVISIONED BY ACTION (#6673).
+    # A `services:` block pins a FIXED host port, and every self-hosted runner on
+    # this host shares ONE Docker daemon, so `6379:6379` / `5432:5432` is a single
+    # global namespace: a second concurrent job's `docker start` dies with "Bind
+    # for 0.0.0.0:6379 failed: port is already allocated", which aborts the
+    # RUNNER in its `initialize_containers` pre-step and reds the job in ~9s with
+    # ZERO tests (measured, `#6673`). The actions assign ephemeral loopback ports
+    # and read them back, so nothing here names a port number.
+    #
+    # ⛔ AND THE GUARD THAT WOULD HAVE REFUSED THIS SHIPPED BLIND TO THIS FILE.
+    # `tests/test_runner_ports_6673.py::test_no_fixed_port_service_mapping_anywhere`
+    # was parametrised over a hard-coded `[python-ci.yml, post-merge-validation.yml]`
+    # and `PROVISIONED_JOBS` was a literal list, so this workflow could be added
+    # with a fixed-port `services:` block and stay green by ABSENCE of a check
+    # that is green over the population it can see (`#13098` review P1). Both
+    # populations are now derived from `.github/workflows/` and from the provision
+    # calls found in it, so a new workflow is covered the moment it is added.
     steps:
       - uses: actions/checkout@v4
+      # ⛔ PINNED, like every other FalkorDB job in this repo
+      # (`.github/actions/falkordb-provision/action.yml`'s default is the same
+      # tag, and `tools/test_lane.py` REFUSES a floating tag outright). A
+      # floating app-image tag makes this gate's engine a function of the
+      # calendar rather than of the commit: `falkordb/falkordb:latest` resolved
+      # to engine 6.0.x on 2026-11-17 (module `graph` ver 60004) where the pin
+      # is 4.20.x (ver 42006), and the 6.0 family is the one whose
+      # `reply_compact` panics (`#13098` review). A gate whose engine can change
+      # under it cannot attribute a red to a commit.
+      #
+      # `legacy: "false"` — this job replaced a ONE-service block (the passworded
+      # service only), exactly like `test-track-b` / `test-concurrency-falkor`.
+      # Starting the passwordless 16379 family here would be new surface this job
+      # never had. `uri_graph` stays empty: the harness takes its graph from
+      # `--graph-uri`, and the step below computes it from the ASSIGNED port.
+      - name: Provision FalkorDB (ephemeral port, #6673)
+        uses: ./.github/actions/falkordb-provision
+        with:
+          image: falkordb/falkordb-server:v4.20.6
+          legacy: "false"
+      # `pgvector/pgvector:pg16`, not `postgres:16`: `--bootstrap-record` applies
+      # the product's own migrations, and `20261109000001_record_embedding_vector.sql`
+      # (`CREATE EXTENSION vector`) reds on a server without pgvector (#11660).
+      # `dsn_var: RECORD_DSN` keeps the name this workflow already used, so the
+      # harness steps below read the DSN the provisioner exported.
+      - name: Provision the record Postgres (ephemeral port, #9551)
+        uses: ./.github/actions/postgres-provision
+        with:
+          image: pgvector/pgvector:pg16
+          database: cypher_diff
+          dsn_var: RECORD_DSN
       - uses: astral-sh/setup-uv@v7
+      - name: Compute GRAPH_URI from the ASSIGNED port
+        # The host port is Docker's, not a literal (see the job comment). The
+        # `:?` guard makes a missing export a red step rather than a URI built
+        # against `127.0.0.1:`, which would dial a closed port and report it as
+        # a store that "could not run" — the same fail-loud form the `#6673`
+        # consumers use in `python-ci.yml`.
+        run: |
+          echo "GRAPH_URI=docker://:falkordb@127.0.0.1:${TORTOISE_TEST_DOCKER_PORT:?the #6673 provision step did not export it}" >> "$GITHUB_ENV"
       - name: install (every extra named)
         run: uv sync --extra embeddings --extra parity --extra postgres
       # ⛔ THE HARNESS RUNS BEFORE THE CENSUS ON PURPOSE. The census pins are
@@ -108,5 +136,16 @@ jobs:
             echo "::error::the mutated run returned $rc; the harness must report a difference (1). A 0 here means the harness cannot fail."
             exit 1
           fi
-      - name: census pins match the doc (LAST — a base-drift pin must not mask the runs above)
+      - name: census pins match the doc (LAST of the checks — a base-drift pin must not mask the runs above)
         run: uv run python tools/cypher_inventory.py --check
+      # ⛔ BOTH TEARDOWNS ARE UNCONDITIONAL (`if: always()`), and they are the
+      # LAST steps: a failed or cancelled job must not leave a container holding
+      # memory on a runner host shared by every other lane (#6673). They select
+      # by the ownership label each provision step exported, so this job removes
+      # exactly its own two containers and never a peer's.
+      - name: Tear down the record Postgres (#9551)
+        if: always()
+        uses: ./.github/actions/postgres-teardown
+      - name: Tear down FalkorDB (#6673)
+        if: always()
+        uses: ./.github/actions/falkordb-teardown
