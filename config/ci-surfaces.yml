@@ -2505,6 +2505,15 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
+  # #13034: the reader rule reads BOTH axes (the lifecycle word and the position
+  # axis), plus the pins that no consumer re-spells it. Registered HERE rather than
+  # under the `core` fallback it would take by accident: the file arrived with
+  # a09a0b3840 without a row, so `tools/ci_selection.py --integrity` reported
+  # manifest drift on main and this merge inherited it. `core` is the surface the
+  # fallback already chose (the subjects are `tortoise/live.py`'s predicate and its
+  # consumers, none of which is an EXACT `SOURCE_PATTERNS` match), so this row
+  # declares the same lane explicitly — no behaviour change, only the drift gone.
+  - test_13034_currency_rule_reads_position.py
   - test_13100_planned_occurrences.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
