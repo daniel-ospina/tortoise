@@ -243,11 +243,63 @@ class TestThePlanPipeline:
             g.query(f"MATCH (p:Object {{id:$p}}) {mutate}",
                     params={"p": plan["id"]})
             for _ in range(2):
-                with pytest.raises(ValueError, match="already settled"):
+                with pytest.raises(ValueError, match="no stage move can be validated"):
                     PO.record_occurrence(sdk, plan["id"])
             assert g.query(
                 "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
                 params={"p": plan["id"]}).result_set[0][0] == 0, label
+
+    def test_the_broken_binding_names_its_own_repair_and_is_performable(self, sdk):
+        """NOT "already settled": the plan is open and one call repairs it.
+
+        Folding the two preconditions into one sentence told an agent the plan had
+        ended and sent it off to mint a duplicate; the advertised repair must be a
+        call that works on this row.
+        """
+        plan = PO.create_plan(sdk, "Drifted key")
+        g = sdk._get_proj().g
+        g.query("MATCH (p:Object {id:$p}) SET p.pipelineStageKey=null",
+                params={"p": plan["id"]})
+        with pytest.raises(ValueError) as exc:
+            PO.settle_plan(sdk, plan["id"], PO.STAGE_MISSED)
+        message = str(exc.value)
+        assert "already settled" not in message, message
+        assert "update_knowledge" in message and "pipelineStageKey" in message
+        # the named repair is performable, and the same call then succeeds
+        sdk.update_knowledge(plan["id"], pipelineStageKey=PO.PLAN_PIPELINE_KEY)
+        PO.settle_plan(sdk, plan["id"], PO.STAGE_MISSED)
+        assert _stage(sdk, plan["id"])["stageId"] == "missed"
+
+    def test_a_lying_SUBCLASS_key_cannot_slip_past_the_creation_guard(self, sdk):
+        """The guard asks the RENDERER UNION, not a literal-name membership test.
+
+        A `str` subclass key that lies about `__hash__`/`__eq__` is invisible to
+        `k in merged` while the writer still files it under the name — measured
+        at this guard: the position parked, the advance failed, and the refused
+        create left the Object behind.
+        """
+
+        class _KeyHash(str):
+            def __hash__(self):
+                return 0
+
+            def __eq__(self, other):
+                return False
+
+            __ne__ = __eq__
+
+        class _KeyStr(str):
+            def __str__(self):
+                return "pipelineStageId"
+
+        g = sdk._get_proj().g
+        for label, key in (("hash", _KeyHash("pipelineStageId")),
+                           ("renders", _KeyStr("harmless"))):
+            with pytest.raises(ValueError, match="cannot be set on a plan at CREATION"):
+                PO.create_plan(sdk, f"liar {label}", **{key: "held"})
+            assert g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
+                           params={"n": f"liar {label}"}
+                           ).result_set[0][0] == 0, label
 
     def test_a_nested_props_map_cannot_park_a_position_at_creation(self, sdk):
         """`create_entity` flattens `props={...}`, so the guard must read the map

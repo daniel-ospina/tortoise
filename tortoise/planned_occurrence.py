@@ -266,7 +266,21 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     if isinstance(_nested, dict):
         for _k, _v in _nested.items():
             merged.setdefault(_k, _v)
-    shadowed = sorted(k for k in _STAGE_OWNED_PROPS if k in merged)
+    # ⛔ THE RENDERER UNION, not `k in merged`. A `str` SUBCLASS key that lies
+    # about `__hash__`/`__eq__` is invisible to a literal-name membership test
+    # while the writer still files it under the name — measured at this very
+    # guard: `create_plan(**{KHash("pipelineStageId"): "held"})` parked the
+    # position, the advance then failed, and the refused create left the Object
+    # behind (the #9287 atomicity rule). `live.lifecycle_props_by_rendering` is
+    # built on the ONE definition of "which name does this key land under"
+    # (`live._event_state_key_names`), shared with the `:Event` status guards
+    # (#9649 review 13) — do not re-spell it here.
+    from .live import lifecycle_props_by_rendering
+
+    # The dict's KEYS are the guarded names — naming the key's own content
+    # rendering instead indicted `harmless` for a key the writer filed under
+    # `pipelineStageId`, which is not what the caller has to remove.
+    shadowed = sorted(lifecycle_props_by_rendering(merged, _STAGE_OWNED_PROPS))
     if shadowed:
         raise ValueError(
             f"Refused: {', '.join(shadowed)} cannot be set on a plan at CREATION "
@@ -331,7 +345,7 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     pos = plan_position(cur.get("stageId"), cur.get("slot"), cur.get("outcome"),
                         is_closed=bool(cur.get("isClosed")),
                         pipeline_key=cur.get("pipelineKey"))
-    if pos["ended"] or pos["unresolvable"]:
+    if pos["ended"]:
         raise ValueError(
             f"Refused: the plan {plan_ref!r} is already settled at "
             f"{pos.get('stageId')!r} (outcome {pos.get('outcome')!r}"
@@ -340,6 +354,19 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
             f"write the :Event directly (`create_entity(type='event')`) — the "
             f"dated fact stands on its own; to correct the plan, that is a new "
             f"plan, not a stage flip on a settled one.")
+    if pos["unresolvable"]:
+        # ⛔ NOT "already settled": the plan is OPEN (its stage may read
+        # `scheduled`) and the only thing wrong is the stored key, which one
+        # supported call repairs. Folding the two preconditions into one sentence
+        # told an agent the plan had ended — and sent it off to mint a duplicate.
+        raise ValueError(
+            f"Refused: the plan {plan_ref!r} sits at stage "
+            f"{pos.get('stageId')!r}, but its stored `pipelineStageKey` "
+            f"({cur.get('pipelineKey')!r}) is not this pipeline's "
+            f"{PLAN_PIPELINE_KEY!r}, so no stage move can be validated. WHAT TO "
+            f"DO: repair the binding first — "
+            f"`update_knowledge(<id>, pipelineStageKey={PLAN_PIPELINE_KEY!r})` — "
+            f"then record the occurrence; the plan itself is still open.")
 
     event_name = name or cur.get("name") or plan_id
     created = sdk.create_entity(
@@ -399,7 +426,7 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
     pos = plan_position(cur.get("stageId"), cur.get("slot"), cur.get("outcome"),
                         is_closed=bool(cur.get("isClosed")),
                         pipeline_key=cur.get("pipelineKey"))
-    if pos["ended"] or pos["unresolvable"]:
+    if pos["ended"]:
         # The same resolved answer `record_occurrence` uses, and the only place
         # that NAMES the marker when the stage itself does not.
         raise ValueError(
@@ -407,6 +434,15 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
             f"{pos.get('stageId')!r}"
             f"{' (closed marker set)' if cur.get('isClosed') else ''}. WHAT TO "
             f"DO: a plan ends once; a new plan is a new record.")
+    if pos["unresolvable"]:
+        raise ValueError(
+            f"Refused: the plan {plan_ref!r} sits at stage "
+            f"{pos.get('stageId')!r}, but its stored `pipelineStageKey` "
+            f"({cur.get('pipelineKey')!r}) is not this pipeline's "
+            f"{PLAN_PIPELINE_KEY!r}, so no stage move can be validated. WHAT TO "
+            f"DO: repair the binding first — "
+            f"`update_knowledge(<id>, pipelineStageKey={PLAN_PIPELINE_KEY!r})` — "
+            f"then settle the plan; the plan itself is still open.")
     move = pipeline.advance_stage(
         sdk, plan_id, PLAN_PIPELINE_KEY, stage, at=at,
         declared=PLAN_PIPELINE_DECL, reason=reason, source="settle",
