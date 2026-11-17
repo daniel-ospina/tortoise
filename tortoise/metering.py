@@ -2268,10 +2268,12 @@ def get_current_usage(org_id: str) -> dict:
 #
 # ⛔ WHAT THIS IS NOT. This is ARITHMETIC, not enforcement. Nothing here prices,
 # caps, throttles or refuses. The refusal half ("free/anon refuse at the
-# included amount") is ``tortoise/allowance_gate.py``, where BOTH storage
-# dimensions are currently BLOCKED on instrument defects — so no shipped path
-# can refuse on them yet, and claiming otherwise would be the false claim this
-# note exists to prevent. What IS available, and is pinned by test, is the
+# included amount") is ``tortoise/allowance_gate.py``, and since ``#13084`` the
+# two storage dimensions are in DIFFERENT states there: ``postgres_storage`` is
+# still BLOCKED (no per-org byte meter exists), while ``graph_storage`` is ARMED
+# at the tier's hot window and hard-refuses a WRITE at 1.5x it — on an ESTIMATE,
+# which is why that refusal is the one-directional test rather than a number
+# from this file. What IS available, and is pinned by test, is the
 # billing SEMANTICS the artifact and ``#4815`` already state: a tier that is not
 # overage-eligible cannot be billed for overage, and every paid tier can.
 
@@ -2349,8 +2351,8 @@ def storage_overage_cost_usd(tier: str, dimension: str, used, *,
 
     ⛔ ``overage_purchasable`` is a BILLING SEMANTIC, not an enforcement result:
     it says whether this tier may be billed for overage at all. Whether a write
-    is REFUSED at the allowance is the allowance gate's answer, and for both
-    storage dimensions that gate is BLOCKED — see the section note above.
+    is REFUSED at the allowance is the allowance gate's answer — ARMED for
+    ``graph_storage`` since ``#13084``, still BLOCKED for ``postgres_storage``.
 
     RAISES (never degrades to a zero) for an unusable input: a non-finite or
     negative ``used``/``included``, or an undeclared dimension/unit. Coercing a
