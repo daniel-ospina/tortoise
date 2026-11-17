@@ -177,26 +177,26 @@ harness's `--sessions-dir` default; §8 passes it explicitly so the corpus is pa
 than an accident of `HOME`.
 
 ⚠️ **`corpus.files: 14` is the artifact's recorded input.** Two lanes measured *the path written above*
-while this PR was under review and got different counts — because they were **not reading the same
-directory**, not because one directory changed. Both readings are recorded, labelled by environment:
+while this PR was under review and got different counts. Both readings are recorded here, labelled by
+environment, and **neither is declared the truthful one** — each lane can only see its own mount view,
+and the two counts are not reconcilable as one directory observed twice:
 
 | environment | `*.jsonl` at `/home/cmux/.tortoise/session-events` | range | newest member's birth | directory `mtime` |
 |---|---|---|---|---|
 | the artifacts (`corpus.files`, `corpus.dir`) | **14** | — | — | — |
-| the `cmux` cell, re-measured `~03:22Z` and again `~03:35Z` | **14** | 2026-11-04 … 2026-11-17 | `2026-11-17T00:02:44.189Z` | `2026-11-17T00:02:44.189Z` |
-| a lane that reported 22 for "the same path" | 22 | 2026-10-27 … 2026-11-17 | `2026-11-17T00:07:44.424Z` | `2026-11-17T00:07:44.424Z` |
+| lane A, `~03:22Z` and again `~03:35Z` | **14** | 2026-11-04 … 2026-11-17 | `2026-11-17T00:02:44.189Z` | `2026-11-17T00:02:44.189Z` |
+| lane B, `03:10Z` / `03:23Z` / `03:25Z` / `03:26Z` / `03:29Z` | **22** | 2026-10-27 … 2026-11-17 | `2026-11-17T00:07:44.424Z` | `2026-11-17T00:07:44.424Z` |
 
-**On the `cmux` cell the 14-reading is what the path holds**, and it is reproducible here:
-`ls -1 /home/cmux/.tortoise/session-events/*.jsonl | wc -l` → **14**, `stat -c '%w'` on the newest
-member → `2026-11-17T00:02:44.189Z`, and the directory's own `mtime` is that same nanosecond. The
-22-row names a range and a birth that **do not exist at this path on this box** — `/tmp/cell-home`
-(this fleet's `CELL_HOME`) has no `.tortoise/session-events` at all — so that row describes another
-environment, and presenting it as the same path observed at another time is what the counts cannot
-support: a directory's `mtime` moves on every create, unlink and rename, so **each row's own reading is
-internally consistent, and the two rows are two directories**. The artifacts' `corpus.files: 14` agrees
-with the `cmux` row, and the newest member predates the first run, so the file SET that path held at
-run time is the set it holds now; what moved between runs is the corpus's CONTENT, which the artifacts
-record (`corpus.input.lines` `10 746 → 10 761`, §3's table).
+**Why these cannot be one directory, on either lane's own reading:** a directory's `mtime` moves on
+every create, unlink and rename, so each row is *internally* consistent — and the newest member's
+birth time differs between the rows (`00:02:44.189Z` vs `00:07:44.424Z`) on a filesystem where a birth
+time cannot be rewritten from userspace (`/dev/root`, ext4), so the two rows are different inodes, i.e.
+**two directories or two mount views, not one directory at two times**. Lane B's reading is the one
+that can be reproduced from this checkout's shell (five consecutive counts, newest member's birth
+identical to the directory `mtime` at the same nanosecond); lane A's `00:02:44Z` birth does not exist
+in this view at all. **This brief therefore does not claim to know which view produced the artifacts' 14
+— that question is open, not settled in either direction**, and the only safe statement about it is
+the one both rows agree on: 14 is what the artifacts recorded.
 
 What follows for a reader either way: the corpus is live and per-box, so re-running §8 reads a
 **different** corpus, and every number below is its own artifact's recorded input — never a statement
@@ -444,11 +444,11 @@ not an expansion one.
 
 ## 7. What this document does NOT claim
 
-- **Not a production census.** The population is a stratified 300-name sample of **this box's** capture
-  corpus (the artifacts record `corpus.files: 14`, and the `cmux` cell's path holds exactly 14 —
-  2026-11-04 … 2026-11-17, §3), and `/home/cmux/.tortoise/session-events` is not the population a
-  hosted graph holds. Every number here measures the mechanism on a real name distribution, never
-  production.
+- **Not a production census.** The population is a stratified 300-name sample of a live capture
+  corpus (the artifacts record `corpus.files: 14`; the two readings of that path taken during review
+  disagree — 14 and 22 — and §3 records both without settling which view produced the artifacts'), and
+  `/home/cmux/.tortoise/session-events` is not the population a hosted graph holds. Every number here
+  measures the mechanism on a real name distribution, never production.
 - **Not a hybrid-vs-lexical comparison as an effect size, and NOT a paired ablation.** The five runs
 do **not** share a population: `corpus.population_digest` differs in every run (§3's table). The
 `index_stats` counts agree, which is a count identity and not a member identity — reading it as
