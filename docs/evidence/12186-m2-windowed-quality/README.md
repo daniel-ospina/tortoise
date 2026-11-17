@@ -338,7 +338,8 @@ so part of this ceiling is the **query set**, not the leg, and the leg's share i
 
 **The window must not be armed on the strength of these numbers.** The decision §7 asks for is
 *"does a windowed graph lose retrieval quality beyond an accepted bound"*, and the measured answer is
-that the loss is **equal to the eviction and unlabelled** — so any bound below "the whole evicted
+that the loss is **equal to the eviction on `:Object`, and on `:Point` the eviction plus the claim leg's
+own ceiling** — and in both it is **unlabelled** — so any bound below "the whole evicted
 share" is exceeded, and the bound cannot be met by choosing a better eviction policy (Finding 4).
 
 There are three ways forward, and they are **architecture decisions, not tuning** (§10: *"M2 showing
@@ -407,7 +408,8 @@ costs **~3 points** of ceiling against the adopted one (Finding 7 — a supersed
 artifact). The band is larger than either of those, which is exactly why neither is quoted as a number
 to act on. **The verdict does not depend on any of them** — `found_deep_of_demoted == 0` and
 `recall@k <= resident_share` are *not* tie-counting quantities, they held in every arm of every run, and
-they are what make the loss equal to the eviction. A reader comparing two runs of their own should
+they are what make the loss equal to the eviction **on `:Object`** (on `:Point` the loss
+is the eviction plus the claim leg's own ceiling — Finding 2). A reader comparing two runs of their own should
 expect the same split — the bound is a property of the instrument, and the artifact records it rather
 than assuming it. And a reproducer should get the artifact's own block back: `tools/window_quality_m2.py`
 emits it from `REPRODUCIBILITY_BOUND`, and `tests/test_window_quality_m2.py` pins the committed
