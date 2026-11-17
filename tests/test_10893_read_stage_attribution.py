@@ -187,9 +187,13 @@ def test_the_graph_ordering_branch_still_reaches_the_terminal_stage():
     assert source.index("_mark_read_stage(STAGE_ORDERING)") < branch
 
 
-def _post_retrieval_returns() -> list[tuple[int, str | None]]:
-    """Every ``return`` in ``tortoise_fts_query`` that runs AFTER the retrieval
-    mark, paired with the nearest ``_mark_read_stage`` in **its own block**.
+def _post_retrieval_returns():
+    """``(returns, fn)`` — every ``return`` in ``tortoise_fts_query``, paired with
+    the nearest ``_mark_read_stage`` in **its own block**, plus the function node.
+
+    The CALLER filters to the post-retrieval ones (a line comparison against the
+    ``retrieval`` mark): the pre-retrieval returns are the argument guards and
+    carry no retrieval work.
 
     The block matters (round-3 review F3 discipline): a global "nearest preceding
     mark" scan passes when a *different arm's* terminal mark sits earlier in the
@@ -311,6 +315,32 @@ def test_every_return_after_the_retrieval_mark_reaches_the_terminal_stage():
             "block — a breach there would be blamed on a stage that had already "
             "returned"
         )
+def test_the_terminal_mark_never_covers_a_graph_round_trip():
+    """#10893 review F4: ``response`` claims "every stage finished, the answer is
+    late" — so it must not cover a graph fetch, or the instrument reports the
+    work as DONE at the moment the store is the blocking call.
+
+    Round 3 put the mark before ``_decorate_fallback_hits(...)`` inside a return
+    expression, which is evaluated AFTER the preceding statement: the whole
+    decoration fetch (``fetch_point_epistemic_state`` + the
+    ``subject_binding_available`` probe) ran with ``response`` open. Pinned
+    structurally: between each terminal mark and the NEXT ``return`` there must be
+    no ``graph`` token at all.
+    """
+    source = _SDK.read_text(encoding="utf-8")
+    marks = [i for i in range(len(source))
+             if source.startswith("_mark_read_stage(STAGE_RESPONSE)", i)]
+    assert marks, "no terminal mark found — this pin would be vacuous"
+    for start in marks:
+        nxt = source.find("return ", start)
+        assert nxt != -1, "a terminal mark with no following return"
+        window = source[start:nxt]
+        assert "graph" not in window, (
+            "a graph round trip sits between the terminal mark and the return "
+            f"({window.strip()!r}) — a breach blocked in the store would be "
+            "published as 'the work is done, the answer is late'"
+        )
+
 
 
 def test_the_fold_guard_is_observable_while_the_restage_is_still_open():
