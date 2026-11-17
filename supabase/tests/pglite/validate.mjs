@@ -1,7 +1,7 @@
 // PGlite harness — validate Supabase control-plane migrations + SQL assertion
 // suites WITHOUT Docker (issue #770). Supabase-local bootstrap (roles,
 // default privileges, auth schema with auth.uid()/auth.jwt() GUC shims),
-// applies EVERY migration in supabase/migrations (filename order), then runs ALL assertion suites
+// applies EVERY migration in supabase/migrations (version order), then runs ALL assertion suites
 // (0006–0009 from #769, 0010 from #770, 2026 token suites, 20260827000001 blog CMS) with ON_ERROR_STOP semantics.
 //
 // Run:   npm install   (once, in this directory)
@@ -178,14 +178,25 @@ await db.exec(`
 // Real deployments hit the same path; the end state is the single 4-arg
 // function. Drop the stale 3-arg overload before applying so the harness
 // mirrors that end state exactly.
-// ENUMERATED FROM DISK, filename order — Supabase's own migration order.
+// ENUMERATED FROM DISK, in the APPLIER'S order — the VERSION substring compared
+// as a string, never the whole filename. `supabase db push` re-sorts local paths
+// by the version before applying (`sortMigrationPathsByVersion` in
+// `apps/cli/src/command-internal/migration-history.ts`, v2.122.1), and filename
+// order only agrees with it while every prefix has the same width — which this
+// tree does not guarantee (`check-migration-append-only` accepts ANY digit
+// count). A plain `.sort()` therefore replays in an order production never runs:
+// `20261117000003_b.sql` sorts before `2026111700_a.sql` by name (`'0'` < `'_'`)
+// but after it by version. "Supabase's own migration order" is the version order.
 // A hand-pinned array is what silently drifted: at #3543 it listed 31 of the
 // 38 migrations on disk, so 20260817000001 / 20260829000001 / 20260830000001 /
 // 20260907000001 / 2026090900000{1,2,3} were never applied by the harness,
 // and a migration added later would be silently uncovered again. Enumerating
 // the directory makes "every migration on disk is applied" a structural
 // property — a new migration cannot ship uncovered.
-const files = readdirSync(MIG_DIR).filter((f) => f.endsWith('.sql')).sort();
+const versionOf = (f) => (f.match(/^([0-9]+)_/) || [, f])[1];
+const files = readdirSync(MIG_DIR)
+  .filter((f) => f.endsWith('.sql'))
+  .sort((a, b) => (versionOf(a) < versionOf(b) ? -1 : versionOf(a) > versionOf(b) ? 1 : 0));
 
 // ── Extensions PGlite does not ship ─────────────────────────────────────────
 // ⛔ A MIGRATION THAT NEEDS ONE CANNOT BE APPLIED HERE, AND SAYING SO IS THE
