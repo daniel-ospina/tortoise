@@ -1512,14 +1512,21 @@ def test_sc4_deprecation_markers_present():
         # offer placed above or below the token.
         #
         # But a paragraph-scoped arm FAILS OPEN when the offer arrives in a SEPARATE
-        # paragraph — measured: `DEPRECATED — see the note below (epic #900).` in one
-        # paragraph plus `Use ``index_directory`` if the container is unavailable.` in
-        # the next stays GREEN. That is the very defect this arm exists to catch, so
-        # the blanket ban below is not redundant belt-and-braces — it is the arm that
-        # catches it.
+        # paragraph. The shape that demonstrates it must keep the POSITIVE arm above
+        # satisfied — with the live name absent, the call reds there first and the
+        # escape is not observable at all. Measured (in-memory `__doc__` swap, real
+        # test function, no file edited):
+        #
+        #   "DEPRECATED — see the note below (epic #900).\n"
+        #   "The live path is index_sources_from_directory.\n\n"
+        #   "Use ``index_directory`` if the container is unavailable.\n"
+        #
+        # stayed GREEN before this commit and REDS after it — on the blanket arm, never
+        # reaching the scoped one. That is the very defect this test exists to catch, so
+        # the blanket ban is not redundant belt-and-braces: it is the arm that catches it.
         #
         # The blanket ban is cheap HERE because it is measured, not assumed: at this
-        # head both in-scope docstrings carry ZERO occurrences of `index_directory`
+        # head both in-scope docstrings carry ZERO occurrences of the retired name
         # (`ingest_corpus` and `_index_sessions` are legacy surfaces that have nothing
         # to record about what absorbed their old pointer — the live replacement is
         # named in the same breath). If one later needs to RECORD the absorbed name,
@@ -1527,20 +1534,29 @@ def test_sc4_deprecation_markers_present():
         # OFFERS a live replacement, so such history belongs on the docstring of the
         # method that absorbs it, not on these two.
         #
+        # ⛔ Neither arm may match a SUBSTRING: `_index_directory` and
+        # `_index_directory_locked` are LIVE (`sdk.py:53928`, `:54038`), and the live
+        # `index_sources_from_directory` docstring itself says "See `_index_directory`
+        # for the return envelope" (`sdk.py:57204-57205`). A bare `in` therefore reds a
+        # perfectly good marker and calls it the retired name — measured. Both arms
+        # match a word-DELIMITED occurrence so the private seam may be named.
+        #
         # Residual, one-sided on purpose: the paragraph arm keys on the word DEPRECATED,
         # so a paragraph that merely MENTIONS it while recording history also reds —
         # keep such history out of these two docstrings (the blanket ban says so).
+        retired = re.compile(r"(?<!\w)index_directory(?!\w)")
         offending = [p.strip() for p in re.split(r"\n\s*\n", doc)
-                     if "DEPRECATED" in p and "index_directory" in p]
+                     if "DEPRECATED" in p and retired.search(p)]
         assert not offending, (
             f"{method_name}'s DEPRECATED paragraph offers the retired index_directory: "
             f"{offending!r}")
         # ...and the blanket ban catches the offer that arrives in a SEPARATE paragraph,
         # which the scoped arm above provably misses (see the block comment).
-        assert "index_directory" not in doc, (
+        assert not retired.search(doc), (
             f"{method_name} names the retired ``index_directory`` anywhere in its "
             "docstring — the live replacement is index_sources_from_directory, and "
-            "that is the only name this marker may offer")
+            "that is the only name this marker may offer (the private "
+            "_index_directory seam is still nameable)")
 
     # the retired PUBLIC name is gone, and its frozen private path is still served
     assert not hasattr(TortoiseSDK, "index_sessions"), \
