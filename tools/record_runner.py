@@ -890,7 +890,8 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
     of asserting the state cannot occur, because a maintainer reading "impossible"
     would not go looking for it.
     """
-    if j["corrupt_lines"] is None or j["torn_tails"] is None:
+    corrupt, torn = j["corrupt_lines"], j["torn_tails"]
+    if corrupt is None and torn is None:
         return ["  ⚠ damage counters NOT REPORTED: this read returned no counters "
                 "(a `Journal` built outside `read_journal`), so damage here "
                 "is unmeasured rather than absent"]
@@ -909,11 +910,23 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
             f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s) — a "
             f"SKIPPED line SHIFTS every later record's position, so this is NOT "
             f"a completeness claim")
-    if j["torn_tails"]:
+    if torn:
         lines.append(
-            f"  ⚠ torn tail: {j['torn_tails']} fragment(s) — a tail fragment was "
+            f"  ⚠ torn tail: {torn} fragment(s) — a tail fragment was "
             f"never a complete record, so positions are UNSHIFTED; a dropped "
             f"removal record is #3316's check (#13280)")
+    # ⛔ A PARTIAL REPORT SAYS WHICH HALF IS MISSING (review P3, #13275). This arm
+    # used to be triggered by a plain OR, so a `corrupt=3, torn=None` payload was
+    # told "this read returned NO counters" one line before the report named three
+    # of them — and `completeness_lines` then said "SKIPPED", so the two sentences
+    # in the same report contradicted each other. Both helpers key on the same
+    # convention now: "not reported" is per COUNTER, not per report.
+    unmeasured = [name for name, value in (("mid-file", corrupt),
+                                           ("torn tail", torn)) if value is None]
+    if unmeasured:
+        lines.append(
+            f"  ⚠ the {' and '.join(unmeasured)} count was NOT REPORTED — damage "
+            f"of that class is unmeasured here, not absent")
     return lines
 
 
@@ -949,8 +962,16 @@ def completeness_lines(j: dict[str, Any]) -> list[str]:
                 "and this read was taken with --salvage; a salvage read's "
                 "completeness is not a claim (#13272)"]
     if corrupt is None or torn is None:
-        return ["complete: UNKNOWN — this layout's reader reports no damage "
-                "counters, so it cannot account for input"]
+        # one counter measured, one not: the sentence names the UNKNOWN class rather
+        # than claiming the reader reports nothing (review P3, #13275).
+        missing = " and ".join(name for name, value in (("mid-file", corrupt),
+                                                        ("torn tail", torn))
+                               if value is None)
+        if corrupt is None and torn is None:
+            return ["complete: UNKNOWN — this layout's reader reports no damage "
+                    "counters, so it cannot account for input"]
+        return [f"complete: UNKNOWN — the {missing} count was not reported, so "
+                f"this read cannot account for input"]
     return ["complete: UNKNOWN — this read was taken with --salvage, and a salvage "
             "read's completeness is not a claim; the counters above measured no "
             "damage (#13272)"]

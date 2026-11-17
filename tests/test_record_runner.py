@@ -1236,8 +1236,14 @@ def test_the_unknown_completion_sentence_names_the_REASON_it_was_withdrawn(
     `corrupt_lines: 0, torn_tails: 0`. Nothing asserted it: `grep -rn 'SKIPPED
     damaged' tests/` had 0 hits, so the wording could be reverted freely.
 
-    Three arms, so the sentence is a function of the read's own counters rather
-    than of the flag that happens to have withdrawn the claim.
+    One arm per REACHABLE CELL of the counter pair (both measured, one measured,
+    neither measured, and the two damage classes separately), so the sentence is a
+    function of the read's own counters rather than of the flag that happens to
+    have withdrawn the claim. ⛔ And it is checked against the DAMAGE line printed
+    above it in the same report: at `a8c37342b3` the two disagreed for a partial
+    report — the damage line said "this read returned NO counters" while this
+    sentence named three skips (review P3, #13275), which no arm caught because it
+    only forbade the completeness wording.
     """
     for counters, expected, forbidden in (
             # a read that skipped nothing: no invented damage
@@ -1255,7 +1261,13 @@ def test_the_unknown_completion_sentence_names_the_REASON_it_was_withdrawn(
             # ⛔ a PARTIAL report (`corrupt=3, torn=None`) must not claim the reader
             # "reports no counters" over a payload carrying `corrupt_lines: 3`
             # (review P3, #13275): the measured skip wins.
-            ((3, None), "SKIPPED damaged input", "reports no damage counters")):
+            ((3, None), "SKIPPED damaged input", "reports no damage counters"),
+            # …and with NOTHING measured in the other class it names that class
+            # instead, so the sentence and the damage line above it agree.
+            ((0, None), "the torn tail count was not reported",
+             "reports no damage counters"),
+            ((None, 0), "the mid-file count was not reported",
+             "reports no damage counters")):
         corrupt, torn = counters
         journal = Journal(path=FIXTURE,
                           records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
@@ -1270,6 +1282,13 @@ def test_the_unknown_completion_sentence_names_the_REASON_it_was_withdrawn(
         assert "complete: UNKNOWN" in out, out
         assert expected in out, f"counters={counters}: {out}"
         assert forbidden not in out, f"counters={counters}: {out}"
+        # ⛔ the two sentences in one report must not contradict each other: a
+        # PARTIAL report names the class it could not measure, and the completeness
+        # line must not then call the whole read "no counters".
+        if (corrupt is None) != (torn is None):
+            assert "count was NOT REPORTED" in out, (
+                f"counters={counters}: the damage line did not name the unmeasured "
+                f"class: {out}")
 
 
 def test_the_counters_REACH_plan_and_apply_from_a_real_graph_directory(
