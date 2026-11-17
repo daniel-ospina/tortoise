@@ -11,16 +11,24 @@ different loads**. The arithmetic retires the claim on its own: the @15 delta is
 is distinguishable from noise, and the truth was *we do not know*.
 
 ⛔ **And that comparison was not merely underpowered — it was structurally blind,
-which this tool demonstrates rather than asserts.** `entity_key_expansion` arms
+which the call site says and this tool MEASURES.** `entity_key_expansion` arms
 only when `entity_type == "point"` (`sdk.SDK.search_graph`: the sparse half and
 the dense half both sit behind `entity_key_expansion and entity_type == "point"`),
 while `tools/candidate_recall_11901.py` measures the **OBJECT** leg. On the object
 arm the two switch states are the SAME code path, byte-identically. So the
 brief's two numbers differ by corpus drift, machine load and sampling noise only.
-This tool runs that arm anyway (`--object-arm`, on by default) and refuses to call
-its null a result: it reports the leg-trace provenance count
-(``provenance == "entity_key_expansion"``) beside it, so a reader sees *the lever
-never fired* rather than *the lever did nothing*.
+This tool runs that arm anyway (both arms are on by default) and refuses to call
+its null a result: it records **every item's ranked list on BOTH sides** and
+derives the ON-vs-OFF delta from that element-wise comparison, so *the lever never
+fired* is a counted identity (`expansion_fired_items: 0 of N`) rather than an
+assertion. ⛔ Recording the ranked list for one arm only is how this claim was
+briefly `None == None` — a constant reported as a measurement (`#13267` F1);
+`_read_delta` now REFUSES an arm whose ranked lists were not recorded.
+
+The leg-trace `provenance` count is recorded too (`expansion_provenance_entries`),
+but it is **not** the firing signal: only the DENSE half tags its trace entries,
+so a sparse-only run reports `0` entries on BOTH sides even when the expansion
+demonstrably changed the answer. Detect firing from the READ.
 
 WHAT IS MEASURED, IN ONE TOOL
 -----------------------------
@@ -81,7 +89,6 @@ import json
 import math
 import os
 import random
-import re
 import shutil
 import sys
 import time
@@ -104,6 +111,14 @@ EXPANSION_PROVENANCE = "entity_key_expansion"
 SNAPSHOT_SCHEMA = "paired-expansion-ab-2518.snapshot.v1"
 POPULATION_SCHEMA = "paired-expansion-ab-2518.population.v1"
 ARTIFACT_SCHEMA = "paired-expansion-ab-2518.artifact.v1"
+
+#: Refusal CLASSES, so an opt-out can be scoped to the class it is about.
+#: ⛔ `--allow-mixed-modes` used to excuse EVERY class, which made a "tolerate a
+#: contaminated window-mode mix" flag also un-refuse a structurally-blind run and
+#: an inert harvest — the exact exit-3 property the tool advertises (`#13267` F7).
+MODE_REFUSAL = "window_modes"
+STRUCTURAL_REFUSAL = "structurally_blind"
+INERT_REFUSAL = "inert_harvest"
 
 
 class Refused(Exception):
@@ -580,6 +595,78 @@ def _rank_of(ids: list[str], target: str) -> int | None:
         return None
 
 
+def _ids_digest(ids: list[str] | None) -> str | None:
+    """sha256 over a ranked list, or None when no list was recorded.
+
+    Recorded per item per side so the ON-vs-OFF identity is checkable FROM THE
+    ARTIFACT. ``None`` is kept distinct from the digest of an EMPTY list — a
+    recorded empty read ("the query matched nothing") and an unrecorded one are
+    different facts, and conflating them is how `None == None` passed for
+    evidence.
+    """
+    if ids is None:
+        return None
+    return _sha256_bytes("\n".join(ids).encode())
+
+
+def _read_delta(per_item_off: dict, per_item_on: dict,
+                item_ids: list[str]) -> dict:
+    """The ON-vs-OFF read delta, item by item — the only "did the lever fire" signal.
+
+    ⛔ A side whose ranked list was NOT recorded is REFUSED, never scored.
+    Scoring it as `(ids or [])` made `[] == []` for every item on an arm that
+    recorded no ids, so the ON side was reported as producing "the identical
+    ranked list for all N items" from `None == None` — a constant dressed as a
+    measurement, moved by nothing the retrieval code does (`#13267` F1). The
+    refusal is the fix: an arm with no ranked list has no firing evidence, and
+    saying so is the only honest report.
+    """
+    fired: list[str] = []
+    identical: list[str] = []
+    gained = 0
+    unmeasured: list[str] = []
+    for iid in item_ids:
+        off_ids = per_item_off[iid]["ids"]
+        on_ids = per_item_on[iid]["ids"]
+        if off_ids is None or on_ids is None:
+            unmeasured.append(iid)
+            continue
+        if off_ids != on_ids:
+            fired.append(iid)
+        else:
+            identical.append(iid)
+        if len(on_ids) > len(off_ids):
+            gained += 1
+    if unmeasured:
+        raise Refused(
+            f"{len(unmeasured)} of {len(item_ids)} items recorded NO ranked list "
+            "on one or both sides — the ON==OFF identity is UNMEASURED for this "
+            "arm, not true. Record `ids` for every arm (recording them for one "
+            "arm only is how this claim became `None == None`, #13267 F1)")
+    return {"fired": fired, "identical": identical,
+            "items_whose_read_grew": gained, "compared": len(item_ids)}
+
+
+def _exit_code(refusals: list[tuple[str, str]], *,
+               allow_mixed_modes: bool) -> int:
+    """0 when every refusal is excused, else 3 (the artifact is already written).
+
+    ⛔ ``--allow-mixed-modes`` excuses ONLY a mixed window-mode refusal — the
+    contamination its name describes. A structurally-blind run and an inert
+    harvest stay refusals under it: those are the properties the tool exists to
+    refuse, and a flag about modes silently un-refusing them is how a null gets
+    published as a result (`#13267` F7).
+    """
+    blocking = [msg for kind, msg in refusals
+                if kind != MODE_REFUSAL or not allow_mixed_modes]
+    if not blocking:
+        return 0
+    print("\nREFUSED to publish a verdict: " + "; ".join(blocking) +
+          "\n  (the artifact is still written so the evidence is not lost)",
+          file=sys.stderr)
+    return 3
+
+
 def read_arm(sdk, items: list[dict], *, arm: str, expansion: bool,
              read_limit: int, dedupe_queries: bool = True) -> dict:
     """One read per item at ``read_limit``; every k is derived as a prefix.
@@ -621,7 +708,13 @@ def read_arm(sdk, items: list[dict], *, arm: str, expansion: bool,
             # and `_entity_key_dense_pass` says so explicitly; this measures it
             # rather than quoting the docstring.
             "seed_rank": _rank_of(ids, it["query_point_id"]) if arm == "point" else None,
-            "ids": ids if arm == "point" else None,
+            # ⛔ RECORDED FOR EVERY ARM. This was `ids if arm == "point" else
+            # None`, so ``(ids or []) == (ids or [])`` made the object arm's
+            # "identical ranked list" a `None == None` constant that no retrieval
+            # behaviour could move — the one claim the tool advertised as
+            # measured (`#13267` F1). A ranked list is the cheapest datum here;
+            # an arm without one has no firing evidence at all.
+            "ids": ids,
             "provenance_entries": _trace_provenance(trace),
         }
     return {"per_item": per_item, "window_modes": dict(sorted(modes.items())),
@@ -733,7 +826,7 @@ def paired_bootstrap(off: list[int], on: list[int], *, resamples: int,
     n = len(off)
     if n == 0:
         return {"delta": float("nan"), "ci95": [float("nan")] * 2}
-    diffs = [o - f for o, f in zip(on, off)]
+    diffs = [o - f for o, f in zip(on, off, strict=True)]
     delta = sum(diffs) / n
     rng = random.Random(seed)
     means = []
@@ -762,7 +855,7 @@ def outcome_correlation(off: list[int], on: list[int]) -> dict:
         return {"rho": float("nan"), "se_reduction": float("nan")}
     mo = sum(off) / n
     mn = sum(on) / n
-    cov = sum((a - mo) * (b - mn) for a, b in zip(off, on)) / n
+    cov = sum((a - mo) * (b - mn) for a, b in zip(off, on, strict=True)) / n
     so = math.sqrt(sum((a - mo) ** 2 for a in off) / n)
     sn = math.sqrt(sum((b - mn) ** 2 for b in on) / n)
     if so == 0 or sn == 0:
@@ -777,8 +870,8 @@ def analyze(off_hits: list[int], on_hits: list[int], *, ks: tuple[int, ...],
     """The paired comparison at every k, with the MDE stated beside the verdict."""
     out: dict = {}
     n = len(off_hits)
-    b = sum(1 for o, f in zip(off_hits, on_hits) if o == 0 and f == 1)
-    c = sum(1 for o, f in zip(off_hits, on_hits) if o == 1 and f == 0)
+    b = sum(1 for o, f in zip(off_hits, on_hits, strict=True) if o == 0 and f == 1)
+    c = sum(1 for o, f in zip(off_hits, on_hits, strict=True) if o == 1 and f == 0)
     p_bar = (sum(off_hits) + sum(on_hits)) / (2 * n) if n else float("nan")
     disc = (b + c) / n if n else float("nan")
     out.update({
@@ -976,13 +1069,12 @@ def run(args: argparse.Namespace) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(artifact, indent=2, sort_keys=True))
     _print_summary(artifact)
-    refused = artifact["refusals"]
-    if refused and not args.allow_mixed_modes:
-        print("\nREFUSED to publish a verdict: " + "; ".join(refused) +
-              "\n  (the artifact is still written so the evidence is not lost)",
-              file=sys.stderr)
-        return 3
-    return 0
+    # ⛔ Rebuilt from the artifact's own two parallel lists, so the exit rule reads
+    # the CLASS of each refusal and `--allow-mixed-modes` can be scoped to the
+    # one it names (`#13267` F7).
+    return _exit_code(list(zip(artifact.get("refusal_kinds", []),
+                               artifact["refusals"], strict=True)),
+                      allow_mixed_modes=args.allow_mixed_modes)
 
 
 def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
@@ -990,7 +1082,9 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
                     pop_file) -> dict:
     ks = [k for k in KS if k <= args.read_limit]
     out_arms: dict = {}
-    refusals: list[str] = []
+    # (class, message) — the class is what an opt-out is scoped to, the message is
+    # what the artifact publishes.
+    refusals: list[tuple[str, str]] = []
     for arm, blocks in arms.items():
         off, on = blocks["off"], blocks["on"]
         per_k: dict = {}
@@ -1008,10 +1102,10 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
         modes = {"off": off["window_modes"], "on": on["window_modes"]}
         for side, counter in modes.items():
             if len(counter) > 1:
-                refusals.append(
-                    f"arm {arm}/{side} has MIXED window modes {counter} — a "
-                    f"comparison across modes is contaminated by the leg, not "
-                    f"the lever")
+                refusals.append((MODE_REFUSAL,
+                                 f"arm {arm}/{side} has MIXED window modes "
+                                 f"{counter} — a comparison across modes is "
+                                 f"contaminated by the leg, not the lever"))
         repeat = blocks.get("repeat")
         repeat_identical = None
         if repeat is not None:
@@ -1027,32 +1121,30 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
         # which carry `leg/ran/degraded/reason/count` and no provenance at all.
         # Measured: a point-arm run in which the expansion demonstrably changed
         # the answer reported ``provenance_entries: 0`` on BOTH sides. So the
-        # firing signal is the READ ITSELF — the ids the ON side produced that
-        # the OFF side did not.
-        fired = [iid for iid in item_ids
-                 if (off["per_item"][iid]["ids"] or []) !=
-                    (on["per_item"][iid]["ids"] or [])]
-        identical = [iid for iid in item_ids
-                     if (off["per_item"][iid]["ids"] or []) ==
-                        (on["per_item"][iid]["ids"] or [])]
-        gained_items = sum(
-            1 for iid in item_ids
-            if len(on["per_item"][iid]["ids"] or []) >
-               len(off["per_item"][iid]["ids"] or []))
+        # firing signal is the READ ITSELF — compared, item by item, by
+        # `_read_delta`, which REFUSES a side whose ranked list was not recorded.
+        delta = _read_delta(off["per_item"], on["per_item"], item_ids)
+        fired, identical = delta["fired"], delta["identical"]
         # The object arm is gated out of the mechanism at the call site
         # (`entity_key_expansion and entity_type == "point"`), so an element-wise
-        # identity on EVERY item is structural, not an effect size.
+        # identity on EVERY item is structural, not an effect size. ⛔ The
+        # identity must still be MEASURED — `_read_delta` guarantees that — or
+        # this is a claim about the arm's name.
         structurally_blind = (arm != "point" and len(fired) == 0)
         out_arms[arm] = {
             "structurally_blind": structurally_blind,
             "why": ("the two switch states produced the SAME ranked list for all "
-                    f"{len(item_ids)} items, and this arm is `{arm}` — the "
-                    "expansion is armed only for `entity_type == 'point'` at "
-                    "the call site, so the identity is the GATE, not a null "
-                    "effect" if structurally_blind else ""),
+                    f"{delta['compared']} items (element-wise, recorded ids on "
+                    f"both sides), and this arm is `{arm}` — the expansion is "
+                    "armed only for `entity_type == 'point'` at the call site, "
+                    "so the identity is the GATE, not a null effect"
+                    if structurally_blind else ""),
             "expansion_fired_items": len(fired),
             "expansion_identical_items": len(identical),
-            "items_whose_read_grew": gained_items,
+            "items_whose_read_grew": delta["items_whose_read_grew"],
+            # How many items actually carry a compared ranked list — 0 would
+            # mean the field above is not a measurement (see `_read_delta`).
+            "ranked_lists_compared": delta["compared"],
         }
         out_arms[arm].update({
             "expansion_provenance_entries": {"off": prov_off, "on": prov_on},
@@ -1063,23 +1155,31 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
             "per_item": {iid: {
                 "off_rank": off["per_item"][iid]["rank"],
                 "on_rank": on["per_item"][iid]["rank"],
+                # ⛔ A DIGEST of each side's ranked list, so the ON==OFF claim is
+                # checkable FROM THE ARTIFACT rather than only from the tool's
+                # own summary counts (`#13267` F1).
+                "off_ids_digest": _ids_digest(off["per_item"][iid]["ids"]),
+                "on_ids_digest": _ids_digest(on["per_item"][iid]["ids"]),
                 "provenance_off": off["per_item"][iid]["provenance_entries"],
                 "provenance_on": on["per_item"][iid]["provenance_entries"],
             } for iid in item_ids} if args.include_per_item else None,
         })
     if not any(not a["structurally_blind"] for a in out_arms.values()):
-        refusals.append(
-            "EVERY arm is structurally blind to the lever — no arm read the leg "
-            "the expansion arms (`entity_type == 'point'`), so no verdict on "
-            "'does it help or hurt' can be drawn from this run")
+        refusals.append((STRUCTURAL_REFUSAL,
+                         "EVERY arm is structurally blind to the lever — no arm "
+                         "read the leg the expansion arms (`entity_type == "
+                         "'point'`), so no verdict on 'does it help or hurt' "
+                         "can be drawn from this run"))
     point = out_arms.get("point")
     if point is not None and not point["structurally_blind"] \
             and point["expansion_fired_items"] == 0:
-        refusals.append(
-            "the point arm reached the mechanism but the expansion changed NO "
-            "read (0 of " + str(point["expansion_identical_items"]) +
-            " items) — every item's anchor resolution returned nothing to add, "
-            "so the run measures an inert harvest, not the lever")
+        refusals.append((INERT_REFUSAL,
+                         "the point arm reached the mechanism but the expansion "
+                         "changed NO read (0 of " +
+                         str(point["expansion_identical_items"]) +
+                         " items) — every item's anchor resolution returned "
+                         "nothing to add, so the run measures an inert "
+                         "harvest, not the lever"))
     return {
         "schema": ARTIFACT_SCHEMA,
         "measured_at": datetime.now(UTC).isoformat(),
@@ -1093,19 +1193,39 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
         "population_file": str(pop_file),
         "items": {"sampled": pop_body["sample"], "with_item": len(items),
                   "dropped": dropped,
+                  # ⛔ `id_digest` is sha256 over the SYNTHETIC ids every draw
+                  # assigns (`item-000000…item-000299`), so it is a function of
+                  # the sample SIZE and nothing else: `4d6899d3…` is the constant
+                  # for ANY 300-item sample and `9eeb9c4f…` the constant for 60.
+                  # It was cited as the "same items in both arms" evidence and
+                  # could not carry it (`#13267` review 2, finding 1).
                   "id_digest": _sha256_bytes("\n".join(item_ids).encode()),
+                  "id_digest_note": (f"sha256 over {len(item_ids)} synthetic "
+                                     "`item-NNNNNN` ids — a function of the "
+                                     "sample SIZE only, NOT pairing evidence; "
+                                     "use name_digest"),
+                  # The DISCRIMINATING digest: sha256 over the sampled NAMES, in
+                  # item order. Two runs that drew the same names agree here and
+                  # nowhere else (`#13267` F6).
                   "name_digest": _sha256_bytes(
                       "\n".join(it["name"] for it in items).encode()),
-                  # ⛔ The falsifier "the same sampled items are used in both
-                  # arms", asserted rather than described: every arm's per-item
-                  # map must be EXACTLY the item id list, or the pairing is a
-                  # fiction and no paired statistic below is meaningful.
-                  "ids_match_all_arms": all(
-                      arm_block.get("per_item") is not None
-                      and set(arm_block["per_item"]) == set(item_ids)
-                      for arm_block in out_arms.values()),
                   "median_target_overlap_with_query": _median(
                       [it["target_overlap_with_query"] for it in items])},
+        # The falsifier "the same sampled items are used in both arms" is TRUE BY
+        # CONSTRUCTION here (one `items` list, built once, read by every arm in
+        # one process) — so it is recorded as such, with the count that IS a
+        # reading, instead of as a predicate over the comprehensions that build
+        # `per_item` (which was `True` for every reachable input: `#13267` F6).
+        "pairing": {
+            "unit": "the item",
+            "items_read_per_arm": {arm: blocks["off"]["reads"]
+                                   for arm, blocks in arms.items()},
+            "same_item_list_is_structural": (
+                "one `items` list is built once and handed to every arm in the "
+                "same process, so a different sample per arm is not reachable; "
+                "`items.name_digest` (and `population.names_sha256`) is the "
+                "discriminating record of WHICH names those items came from"),
+        },
         "construction": {
             "graph": seeded,
             "arm": "point = the leg the expansion arms; object = the leg the "
@@ -1116,6 +1236,22 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
                             "the mechanism's ceiling under a clean key set"),
             "distractors": args.distractors,
             "read_limit": args.read_limit,
+            # ⛔ THE TREATMENT VARIABLE, recorded. The robustness arm IS
+            # `--query-chars 200`; an artifact that recorded `read_limit` and not
+            # the query cap could not say what made the two 300-item point runs
+            # different, and a reader was left to attribute the whole difference
+            # to a knob the artifact never named (`#13267` F5 / review 2
+            # finding 3).
+            "query_chars": args.query_chars,
+            "key_tokens": args.key_tokens,
+            "min_query_tokens": args.min_query_tokens,
+            "min_items": args.min_items,
+            "population": args.population,
+            "sample": args.sample,
+            "seed": args.seed,
+            "arms": list(args.arms),
+            "repeat_arm": args.repeat_arm,
+            "bootstrap_resamples": args.bootstrap,
             "per_k_from_one_read": True,
             "declared_not_a_production_census": True,
         },
@@ -1133,7 +1269,16 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
             "db_uri_scheme": (os.environ.get("TORTOISE_DB_URI") or "").split("://")[0],
             "embedder": _has_embedder(),
         },
-        "refusals": refusals,
+        # ⛔ WHICH BYTES produced this artifact, not just which commit.
+        "provenance": _tool_provenance(
+            git_head=_git_head(),
+            git_head_note=("`git_head` is the REPO commit, not the code: a run "
+                           "from a dirty tree records the commit it sits on. "
+                           "`tool_sha256` is the digest of the tool's own bytes "
+                           "and `tool_uncommitted` says whether those bytes "
+                           "were committed (#13267 F4).")),
+        "refusals": [msg for _kind, msg in refusals],
+        "refusal_kinds": [kind for kind, _msg in refusals],
     }
 
 
@@ -1161,6 +1306,41 @@ def _git_head() -> str | None:
                               ).stdout.strip() or None
     except Exception:
         return None
+
+
+def _tool_provenance(*, git_head: str | None, git_head_note: str) -> dict:
+    """WHICH BYTES produced the artifact — not just which commit they sat on.
+
+    ⛔ `git_head` alone LIED here: the committed artifacts record
+    `44a1b82` — the previous commit — while carrying fields (`seed_effect`,
+    `off_topk_displacement`, `off_top1_kept_in_window`) that do not exist at that
+    commit, so they were produced by a DIRTY tree and the one field a reader uses
+    to locate the producing code pointed at different code (`#13267` F4).
+    `tool_sha256` is self-identifying bytes; `tool_uncommitted` says whether those
+    bytes were in the commit at all.
+    """
+    path = Path(__file__).resolve()
+    try:
+        digest = _sha256_bytes(path.read_bytes())
+    except OSError:
+        digest = None
+    uncommitted: bool | None = None
+    try:
+        import subprocess
+        root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True, timeout=10
+                              ).stdout.strip()
+        if root:
+            rel = str(path.relative_to(root))
+            dirty = subprocess.run(
+                ["git", "status", "--porcelain", "--", rel],
+                capture_output=True, text=True, timeout=10).stdout.strip()
+            uncommitted = bool(dirty)
+    except Exception:
+        uncommitted = None
+    return {"tool_path": "tools/paired_expansion_ab_2518.py",
+            "tool_sha256": digest, "tool_uncommitted": uncommitted,
+            "git_head": git_head, "git_head_note": git_head_note}
 
 
 def _print_summary(artifact: dict) -> None:

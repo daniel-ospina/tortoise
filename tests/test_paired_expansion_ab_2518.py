@@ -331,6 +331,258 @@ def test_displacement_counts_ids_the_merged_pass_moved_out():
     assert out["abs_rank_shift_of_kept"] == 3  # x 0->1 (1), z 2->0 (2)
 
 
+# ── 2b. "did the lever fire" — a comparison, not a constant ─────────────────
+
+def test_read_delta_compares_the_recorded_ranked_lists():
+    """The firing signal must move with the READS, on every arm."""
+    off = {"a": {"ids": ["x", "y"]}, "b": {"ids": ["p"]}, "c": {"ids": []}}
+    on = {"a": {"ids": ["x", "z"]}, "b": {"ids": ["p"]}, "c": {"ids": ["q"]}}
+    out = P._read_delta(off, on, ["a", "b", "c"])
+    assert out["fired"] == ["a", "c"]
+    assert out["identical"] == ["b"]
+    assert out["items_whose_read_grew"] == 1     # c: 0 ids -> 1 id
+    assert out["compared"] == 3
+    # the same reads for the same answers => nothing fired, and that IS measured
+    assert P._read_delta(off, off, ["a", "b", "c"])["fired"] == []
+
+
+def test_read_arm_records_the_ranked_list_for_every_arm():
+    """⛔ The other half of F1: `read_arm` recorded ids for the POINT arm only.
+
+    Driven through a stub SDK, so the mutation "put `ids if arm == "point" else
+    None` back" reds here rather than only on a box with a database.
+    """
+    class _FakeSDK:
+        def tortoise_fts_query(self, query, *, entity_type, limit,
+                               include_terminal, _record_reads,
+                               _valid_time_rerank, leg_trace,
+                               entity_key_expansion):
+            ids = (["on-1", "off-1"] if entity_key_expansion
+                   else ["off-1", "off-2"])
+            return [{"id": i} for i in ids]
+
+    items = [{"item_id": "item-000000", "name": "the plan doc",
+              "query": "what did the plan doc say",
+              "target_point_id": "t1", "query_point_id": "q1",
+              "object_id": "o1"}]
+    off = P.read_arm(_FakeSDK(), items, arm="object", expansion=False,
+                     read_limit=5)["per_item"]["item-000000"]
+    on = P.read_arm(_FakeSDK(), items, arm="object", expansion=True,
+                    read_limit=5)["per_item"]["item-000000"]
+    assert off["ids"] == ["off-1", "off-2"], (
+        "an arm with no recorded ranked list makes the ON==OFF claim `None == None`")
+    assert on["ids"] == ["on-1", "off-1"]
+    delta = P._read_delta({"item-000000": off}, {"item-000000": on},
+                          ["item-000000"])
+    assert delta["fired"] == ["item-000000"]
+    assert P._ids_digest(off["ids"]) != P._ids_digest(on["ids"])
+
+
+def test_read_delta_refuses_an_arm_with_no_recorded_ranked_list():
+    """⛔ THE PRE-FIX SHAPE (`#13267` F1), reproduced as a refusal.
+
+    `read_arm` recorded `ids` for the point arm only, so on the object arm both
+    sides were `None`; scored as `(ids or [])` that is `[] == []` for every item,
+    i.e. "the identical ranked list for all N items" from a constant that no
+    retrieval behaviour can move. A side with no ranked list must be refused, not
+    scored — this test reds if anything reintroduces the `or []` collapse.
+    """
+    unrecorded = {"a": {"ids": None}, "b": {"ids": None}}
+    with pytest.raises(P.Refused, match="UNMEASURED"):
+        P._read_delta(unrecorded, unrecorded, ["a", "b"])
+    # ONE missing side is enough, and a RECORDED empty read is not missing
+    with pytest.raises(P.Refused, match="UNMEASURED"):
+        P._read_delta({"a": {"ids": []}, "b": {"ids": None}},
+                      {"a": {"ids": ["x"]}, "b": {"ids": ["x"]}},
+                      ["a", "b"])
+
+
+def test_a_recorded_empty_read_is_not_an_unrecorded_one():
+    assert P._ids_digest(None) is None
+    assert P._ids_digest([]) == P._sha256_bytes(b"")
+    assert P._ids_digest(["a", "b"]) != P._ids_digest(["b", "a"])
+
+
+def test_the_item_id_digest_is_a_function_of_the_sample_size_only():
+    """`id_digest` was published as the "same items in both arms" evidence.
+
+    It is sha256 over the SYNTHETIC ids every draw assigns, so it is identical
+    for ANY sample of the same size — two draws sharing no name agree on it. The
+    discriminating datum one line below is `name_digest`.
+    """
+    ids_300 = [f"item-{i:06d}" for i in range(300)]
+    assert P._sha256_bytes("\n".join(ids_300).encode()).startswith("4d6899d3d0b62543")
+    ids_60 = [f"item-{i:06d}" for i in range(60)]
+    assert P._sha256_bytes("\n".join(ids_60).encode()).startswith("9eeb9c4f")
+    # same size, disjoint names: the id digest CANNOT tell them apart, the name
+    # digest must
+    a = P._sha256_bytes("\n".join(f"name {i}" for i in range(300)).encode())
+    b = P._sha256_bytes("\n".join(f"other {i}" for i in range(300)).encode())
+    assert a != b
+
+
+# ── 2c. the refusals, and the flag that must not disable two of them ────────
+
+def test_allow_mixed_modes_excuses_only_window_mode_refusals(capsys):
+    """⛔ `--allow-mixed-modes` gated EVERY refusal class (`#13267` F7).
+
+    A flag named for window-mode contamination also un-refused a structurally
+    blind run and an inert harvest — the two properties the tool exists to refuse.
+    """
+    mixed = (P.MODE_REFUSAL, "arm point/off has MIXED window modes {}")
+    blind = (P.STRUCTURAL_REFUSAL, "EVERY arm is structurally blind to the lever")
+    inert = (P.INERT_REFUSAL, "the point arm reached the mechanism but ...")
+    assert P._exit_code([], allow_mixed_modes=False) == 0
+    assert P._exit_code([mixed], allow_mixed_modes=False) == 3
+    assert P._exit_code([mixed], allow_mixed_modes=True) == 0
+    assert P._exit_code([blind], allow_mixed_modes=True) == 3
+    assert P._exit_code([inert], allow_mixed_modes=True) == 3
+    assert P._exit_code([mixed, blind], allow_mixed_modes=True) == 3
+    assert "REFUSED to publish a verdict" in capsys.readouterr().err
+
+
+def test_the_dense_switch_refusal_fires_before_any_database_is_needed(
+        tmp_path, monkeypatch, capsys):
+    """`TORTOISE_ENTITY_KEY_DENSE` is a SECOND lever — the tool refuses it.
+
+    A refusal with no test is a refusal anyone can delete; this one also pins the
+    ORDER (it fires before the DB probe, so it is a hermetic case).
+    """
+    monkeypatch.setenv("TORTOISE_ENTITY_KEY_DENSE", "1")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    src = tmp_path / "live"
+    _write_corpus(src, names=["the road bike repairs"])
+    code = P.main(["--sessions-dir", str(src), "--freeze", str(tmp_path / "snap"),
+                   "--population", "10", "--sample", "5", "--min-items", "1",
+                   "--out", str(tmp_path / "artifact.json")])
+    assert code == 3
+    assert "DENSE" in capsys.readouterr().err
+    assert not (tmp_path / "artifact.json").exists()
+
+
+def _fake_args(**over):
+    import types
+    base = dict(arms=["point", "object"], read_limit=20, query_chars=200,
+                key_tokens=4, min_query_tokens=3, min_items=2, population=40,
+                sample=4, seed=7, repeat_arm="point", bootstrap=100,
+                distractors=4, include_per_item=True, graph=None, out=None,
+                allow_mixed_modes=False, namespace="paired2518")
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+def _fake_arm(ids_by_item, *, seed_ranks=None, mode="keyword_only"):
+    ids_by_item = dict(ids_by_item)
+    seed_ranks = seed_ranks or {}
+    per_item = {iid: {"rank": None, "seed_rank": seed_ranks.get(iid),
+                      "ids": ids, "provenance_entries": {}}
+                for iid, ids in ids_by_item.items()}
+    return {"per_item": per_item, "window_modes": {mode: len(per_item)},
+            "provenance_counts": {}, "reads": len(per_item)}
+
+
+def _build_fake_artifact(*, point_off, point_on, object_off, object_on,
+                         args=None):
+    item_ids = sorted(point_off)
+    names = [f"the name {i}" for i in range(len(item_ids))]
+    items = [{"item_id": iid, "name": name, "target_overlap_with_query": 0}
+             for iid, name in zip(item_ids, names, strict=True)]
+    manifest = {"schema": "s", "digest": "0" * 64, "file_count": 1,
+                "total_bytes": 1, "total_lines": 1, "files": []}
+    pop_body = {"schema": P.POPULATION_SCHEMA, "snapshot_digest": "0" * 64,
+                "population": 40, "sample": len(item_ids), "seed": 7,
+                "names_sha256": P._sha256_bytes("\n".join(names).encode())}
+    arms = {
+        "point": {"off": _fake_arm(point_off, seed_ranks={i: 0 for i in item_ids}),
+                  "on": _fake_arm(point_on, seed_ranks={i: 0 for i in item_ids})},
+        "object": {"off": _fake_arm(object_off), "on": _fake_arm(object_on)},
+    }
+    art = P._build_artifact(
+        args or _fake_args(), manifest, pop_body, items, {}, {"anchors": 1},
+        arms, item_ids, load_start={"load_1m": 1.0, "load_5m": 1.0,
+                                    "load_15m": 1.0, "cpus": 1},
+        load_end={"load_1m": 1.0, "load_5m": 1.0, "load_15m": 1.0, "cpus": 1},
+        graph_nodes=1, elapsed=1.0, pop_file=Path("/tmp/population.json"))
+    return art, item_ids
+
+
+@pytest.fixture()
+def _no_embedder_probe(monkeypatch):
+    """The artifact's structure is what these two tests assert, and
+    `EmbeddingModel.get()` loads a model on first call (~2 min on this box) — a
+    cost that belongs to a real RUN, not to a structural pin."""
+    monkeypatch.setattr(P, "_has_embedder", lambda: False)
+
+
+def test_the_artifact_records_the_treatment_knobs_the_pairing_and_the_tool_bytes(
+        _no_embedder_probe):
+    """The three evidence fields the review found stating more than they held.
+
+    * `construction` recorded `read_limit` but NOT `--query-chars`, so the arm the
+      robustness claim leans on was not reproducible from its own artifact (F5);
+    * `items.id_digest` was cited as pairing evidence although it is a function of
+      the sample SIZE, and `ids_match_all_arms` was a tautology (F6);
+    * `git_head` was the repo commit, not the code (F4).
+    """
+    point_ids = {"item-000000": ["a"], "item-000001": ["b"]}
+    point_on = {"item-000000": ["a", "c"], "item-000001": ["b"]}
+    art, item_ids = _build_fake_artifact(
+        point_off=point_ids, point_on=point_on,
+        object_off={"item-000000": ["a"], "item-000001": ["b"]},
+        object_on={"item-000000": ["a"], "item-000001": ["b"]})
+    c = art["construction"]
+    assert c["query_chars"] == 200 and c["read_limit"] == 20
+    assert c["key_tokens"] == 4 and c["min_query_tokens"] == 3
+    assert art["items"]["id_digest"] != art["items"]["name_digest"]
+    assert art["items"]["name_digest"] == art["population"]["names_sha256"]
+    assert "NOT pairing evidence" in art["items"]["id_digest_note"]
+    assert "ids_match_all_arms" not in art["items"]
+    assert art["pairing"]["items_read_per_arm"] == {"point": len(item_ids),
+                                                    "object": len(item_ids)}
+    digest = P._sha256_bytes(Path(P.__file__).resolve().read_bytes())
+    assert art["provenance"]["tool_sha256"] == digest
+    assert art["provenance"]["tool_path"].endswith("paired_expansion_ab_2518.py")
+    assert art["provenance"]["git_head"] == P._git_head()
+    # the per-item identity claim is checkable FROM the artifact
+    per_item = art["arms"]["object"]["per_item"]
+    assert all(row["off_ids_digest"] and row["on_ids_digest"]
+               for row in per_item.values())
+    assert per_item["item-000000"]["off_ids_digest"] == \
+        per_item["item-000000"]["on_ids_digest"]
+
+
+def test_the_object_arms_blindness_is_a_measured_identity_and_the_point_arms_null_is_refused(
+        _no_embedder_probe):
+    """The PR's headline refusal, pinned: an INERT point arm stays exit 3.
+
+    `_build_artifact` derived `expansion_identical_items` from `(ids or [])`. With
+    both arms now recording their ranked lists, the object arm's identity is a
+    real comparison, so mutating EITHER side of it moves the count.
+    """
+    same = {"item-000000": ["a"], "item-000001": ["b"]}
+    art, _ = _build_fake_artifact(point_off=same, point_on=same,
+                                  object_off=same, object_on=same)
+    assert art["arms"]["object"]["structurally_blind"] is True
+    assert art["arms"]["object"]["expansion_identical_items"] == 2
+    assert art["arms"]["object"]["ranked_lists_compared"] == 2
+    assert "element-wise" in art["arms"]["object"]["why"]
+    # the point arm fired on nothing => the INERT refusal, which the mode flag
+    # must NOT excuse
+    assert art["refusal_kinds"] == [P.INERT_REFUSAL]
+    assert len(art["refusals"]) == len(art["refusal_kinds"])
+    assert P._exit_code(list(zip(art["refusal_kinds"], art["refusals"],
+                                 strict=True)), allow_mixed_modes=True) == 3
+    # and the same builder, once the point arm's read actually differs, is clean
+    fired, _ = _build_fake_artifact(
+        point_off=same, point_on={"item-000000": ["a", "z"],
+                                  "item-000001": ["b"]},
+        object_off=same, object_on=same)
+    assert fired["arms"]["point"]["expansion_fired_items"] == 1
+    assert fired["arms"]["point"]["items_whose_read_grew"] == 1
+    assert P.MODE_REFUSAL not in fired["refusal_kinds"]
+    assert P.INERT_REFUSAL not in fired["refusal_kinds"]
+
+
 # ── 3. the pair, live ───────────────────────────────────────────────────────
 
 def _falkordb_available() -> bool:
@@ -387,15 +639,31 @@ def test_the_point_arm_reaches_the_lever_and_the_object_arm_cannot(tmp_path,
         "--seed", "5", "--out", str(out),
     ])
     art = json.loads(out.read_text())
-    assert code in (0, 3), art["refusals"]
+    # ⛔ A refusal used to be ACCEPTED here (`code in (0, 3)`), which made the
+    # only live assertions in this file unable to fail on a refused run. The one
+    # class that may legitimately refuse on a loaded box is window-mode
+    # contamination (an embedder present and a 30-wide window losing the dense
+    # leg); anything else means the run did not measure what this test claims.
+    mode_only = bool(art["refusals"]) and all(
+        "MIXED window modes" in r for r in art["refusals"])
+    assert code == 0 or (code == 3 and mode_only), art["refusals"]
     assert art["snapshot"]["digest"]
     assert art["items"]["with_item"] >= 1
     point, obj = art["arms"]["point"], art["arms"]["object"]
     assert point["structurally_blind"] is False
     assert obj["structurally_blind"] is True
+    # the object arm's identity is a COMPARISON of two recorded ranked lists, not
+    # `None == None` — the count of compared items is the reading that says so
+    assert point["ranked_lists_compared"] == art["items"]["with_item"]
+    assert obj["ranked_lists_compared"] == art["items"]["with_item"]
     assert obj["expansion_identical_items"] == art["items"]["with_item"]
-    # the same items on both sides
-    assert set(point["per_item"]) == set(obj["per_item"])
-    assert art["items"]["id_digest"]
+    assert all(row["off_ids_digest"] and row["on_ids_digest"]
+               for row in obj["per_item"].values())
+    # the same items on both sides, recorded discriminatingly
+    if art["items"]["with_item"] == art["items"]["sampled"]:
+        assert art["items"]["name_digest"] == art["population"]["names_sha256"]
+    # `id_digest` is a function of the sample SIZE only — pinned so it can never
+    # be cited as pairing evidence again
+    assert art["items"]["name_digest"] != art["items"]["id_digest"]
     # and the mechanism demonstrably changed at least one point read
     assert point["expansion_fired_items"] >= 1
