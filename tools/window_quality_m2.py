@@ -58,9 +58,12 @@ THE ARMS
  window keeps" is a policy and a random eviction is not a policy anyone would
  ship:
 
- ``tail``     evict in ASCENDING popularity — the cold tail goes first, which is
-              the recency/frequency policy §7 describes (*"recency beats static
-              degree ranking"*). This is the realistic arm.
+ ``tail``     evict in ASCENDING popularity — the cold tail goes first. ⛔ This is a
+              STATIC popularity count, NOT the recency/frequency policy §7
+              describes: this corpus carries no read ledger, so a true recency
+              policy cannot be built from it, and M2 therefore measures the
+              static axis only — it does NOT test §7's "recency beats static
+              degree ranking". This is the realistic arm.
  ``random``   a seeded uniform shuffle. The neutral control: it separates "the
               window costs this much" from "this POLICY costs this much".
 
@@ -209,8 +212,10 @@ DEEP_LIMIT = 50
 #: arming question at the size the document actually proposes.
 COVERAGES: tuple[float, ...] = (1.0, 0.90, 0.75, 0.50, 0.25, 0.10)
 
-#: The two eviction orders. `tail` is the realistic policy (§7: recency beats
-#: static degree); `random` is the neutral control.
+#: The two eviction orders. `tail` is the realistic policy — a STATIC popularity
+#: count, NOT recency (§7 describes a recency policy this corpus cannot supply:
+#: there is no read ledger, so that claim is untested here). `random` is the
+#: neutral control.
 POLICIES: tuple[str, ...] = ("tail", "random")
 
 #: The two measured populations. `point` first: it is the population the window

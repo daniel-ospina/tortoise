@@ -13,10 +13,14 @@ aboutObjects: "#12186, SEARCH-ARCHITECTURE.md §7, SEARCH-ARCHITECTURE.md §9, #
 
 **Verdict: §7's window is NOT SAFE AS SPECIFIED — it must not be armed.**
 On the **text leg** — the one §6.2 keeps in the graph, and the only leg this run exercised — the
-window's retrieval cost is **exactly its eviction share, with nothing compensating**, and the
-loss is **silent**: a demoted node is never returned, the caller is never told a store was partial,
-and on the claim population a demoted query returns a **different claim** rather than an empty
-answer. At §8's own target size (≈50 % of the complete graph) lexical recall@3 on entity names falls
+window's retrieval cost is **the eviction itself, with nothing compensating**: a demoted node is never
+handed back as a candidate at any rank, the caller is never told a store was partial, and on the claim
+population a demoted query returns a **different claim** rather than an empty answer. ⛔ **"Cost equals
+the eviction share" is a `:Object` identity, not a statement about the text leg as a whole.**
+`found@deep` equals the resident share in every `:Object` arm but in **no** `:Point` arm, where the loss
+is the eviction **plus** a ranking weakness the window did not cause — and the two must not be added
+into one number (Finding 2).
+At §8's own target size (≈50 % of the complete graph) lexical recall@3 on entity names falls
 **88.3 % → 46.0 %** and the wrong-answer rate at rank 1 rises **27.7 % → 41.0 %**.
 
 This bundle is a measurement, not a proposal. No threshold was tuned; the only code added is the
@@ -78,7 +82,9 @@ Two populations, because the window does not demote one kind of node:
   kept because it makes M2's curve comparable with the recall figures the epic already carries.
 
 Each population is measured **complete**, then at coverages 0.90 / 0.75 / 0.50 / 0.25 / 0.10 under
-**two** eviction policies: `tail` (coldest/most-boilerplate first — the recency policy §7 describes)
+**two** eviction policies: `tail` (coldest/most-boilerplate first — a **static popularity** count; §7
+describes a *recency* policy, which this corpus cannot supply and this run did **not** test — see
+Finding 4)
 and `random` (a seeded control). **300 queries per arm, sampled once and reused by every arm**, so
 arms compare graph states and not populations. Every query makes **one** read at depth 50: `recall@k`
 is a slice of it and `found@deep` is the whole of it, which separates *"the leg cannot rank it"* from
@@ -218,9 +224,11 @@ two rates *are* informative.
 
 ### 4. No eviction policy protects retrieval quality
 
-`tail` (evict the least-referenced/most-boilerplate first) is **not separated from `random`** by this
-measurement at any coverage: recall@3 **46.0 vs 46.3** at 0.50 and 81.0 vs 81.7 at 0.90 — but ⚠️ the two
-diverged by more at the LOW coverages, where the realized resident share itself differs: 20.3 vs 25.3 at
+`tail` (evict the least-referenced/most-boilerplate first) never **buys back** quality against
+`random`: recall@3 **46.0 vs 46.3** at 0.50 and 81.0 vs 81.7 at 0.90. It is **not separated** from the
+control at those coverages — and ⚠️ it is **not** "at any coverage", which an earlier cut of this
+record claimed: the two
+diverge by more at the LOW coverages, where the realized resident share itself differs: 20.3 vs 25.3 at
 0.25 and 8.7 vs 12.0 at 0.10, i.e. a 5.0-point gap that is 5× the artifact's own `recall@k`
 reproducibility bound of 1.0 pp. Per resident query the two policies are 87.1 % vs 100.0 % at 0.25, so
 the point stands where the verdict needs it: **a demoted node is unretrievable whatever reason selected

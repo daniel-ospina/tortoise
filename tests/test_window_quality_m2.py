@@ -39,6 +39,7 @@ ARTIFACT = EVIDENCE / "measurement.json"
 README = EVIDENCE / "README.md"
 ARCH = ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md"
 TOOL = ROOT / "tools" / "window_quality_m2.py"
+CHANGELOG = ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE-CHANGELOG.md"
 
 sys.path.insert(0, str(ROOT))
 
@@ -688,13 +689,20 @@ def test_every_result_table_cell_is_recomputed_from_the_artifact(
 
 
 def test_no_doc_states_a_percentage_the_artifact_does_not_hold():
-    """Every `N.N %` in the record and §9.1 must be a figure the artifact holds.
+    """Every `N.N %` in the record, §9.1 **and the changelog entry** is held.
 
     ⛔ This is the check that catches the defect the first review round found: a
     HEADING reading `89.0 % → 47.0 %` left behind by a re-run survived a
     substring check, because the body three lines below still contained the
     correct pair. Membership in the artifact's own figure set is the property
     that a stale number violates.
+
+    ⛔ The CHANGELOG is scanned because `config/ci-surfaces.yml` lists it among
+    the GUARDED artifacts — the paths that take the docs-only tier1 early return
+    — and nothing read it (`grep -n CHANGELOG` on this module was empty). The
+    `#12186` entry carries the same figures as the record and §9.1, so a
+    docs-only edit staling one of them selected no surface and redded nothing:
+    the #11739/#12295 silent-drop class the tier1 registration exists to close.
     """
     art = json.loads(ARTIFACT.read_text(encoding="utf-8"))
     allowed = set(_NON_ARTIFACT_FIGURES) | _derived_figures(art)
@@ -716,8 +724,13 @@ def test_no_doc_states_a_percentage_the_artifact_does_not_hold():
     arch_91 = ARCH.read_text(encoding="utf-8")
     start = arch_91.index("### 9.1 M2")
     end = arch_91.index("\n---", start)
+    changelog = CHANGELOG.read_text(encoding="utf-8")
+    # the entry is the LAST `##` block in the file, so slice to the end: a figure
+    # appended below it is still scanned rather than silently out of scope.
+    entry_start = changelog.index("## `#12186`")
     bad = []
-    for name, text in (("README", readme), ("§9.1", arch_91[start:end])):
+    for name, text in (("README", readme), ("§9.1", arch_91[start:end]),
+                       ("changelog #12186", changelog[entry_start:])):
         # the RANGES first, so their lower bound is checked too (P2-5)
         for m in _DOC_RANGE_RE.finditer(text):
             low, high = m.group(1), m.group(2)
