@@ -5149,9 +5149,16 @@ surfaces:
   # fallback — MEASURED with this `core` row alone, `--changed-files tortoise/hosted_api.py`
   # resolves `['api','onboarding']` with this file ABSENT, so the #432/#689 arm carried no
   # guard on its own module's diff (the #1349/#3332 silent-drop class). `--surface-audit`
-  # reported it as an api addition candidate FOR THAT REASON, before the `api` row existed
-  # (it is no longer in that list; the `onboarding` candidate it does still appear under is
-  # the audit's weak string-reference half, not an api pin).
+  # reported it as an api addition candidate FOR THAT REASON, before the `api` row existed.
+  # ⛔ `--surface-audit` now reports it under `onboarding` instead, and that one is NOT noise:
+  # `tortoise/hosted_api.py` is an EXACT `onboarding` SOURCE_PATTERNS entry as well as an
+  # `api` one, the file's `from tortoise import hosted_api` is a STRONG pin (the audit's
+  # `strong: true` half, not its string-only list), and MEASURED `--changed-files
+  # website/product.html` resolves `['onboarding']` with this file ABSENT. That is a real
+  # unregistered arm of the same #1349/#3332 class — pre-existing rather than introduced
+  # here (the audit lists 233 such files on that surface), and deliberately NOT closed by
+  # this PR, whose scope is the `manifest-integrity` red. Named rather than left to be read
+  # as covered.
   # ⛔ NOT hermetic, contrary to a first reading of it: its own header says "Lane: needs a
   # live FalkorDB" and the live classes are `skipif(not FALKORDB_AVAILABLE)` — on a leg with
   # no database they SKIP GREEN rather than fail, and a `durations` row is exactly what a
