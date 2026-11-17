@@ -880,6 +880,11 @@ def _code_only(path: Path) -> str:
 def _dispatch_bindings(path: Path) -> list[str]:
     """Lines that BIND ``args.cmd == "record-restore"`` to its handler, in code.
 
+    A line qualifies only if the comparison's own line (or the next code line)
+    also names ``_cmd_record_restore`` — so a gutted branch (`return None`) with
+    the handler left orphaned is NOT a binding, which is the fact the message
+    below claims.
+
     ⛔ Token-level, not text-level. A line grep is satisfied by a docstring (one
     STRING token) or an inline comment, so a renamed dispatch literal with the
     old text left in prose stayed GREEN — measured, with ``ruff`` also clean
@@ -896,12 +901,25 @@ def _dispatch_bindings(path: Path) -> list[str]:
                             tokenize.ENCODING, tokenize.ENDMARKER):
                 continue
             per_line.setdefault(tok.start[0], []).append(tok.string)
-    for lineno in sorted(per_line):
+    lines = sorted(per_line)
+    for pos, lineno in enumerate(lines):
         toks = per_line[lineno]
         for i in range(len(toks) - 5):
             window = toks[i:i + 6]
             if (window[0] == "args" and window[1] == "." and window[2] == "cmd"
                     and window[3] == "==" and window[4] == '"record-restore"'):
+                # ⛔ THE BRANCH MUST REACH THE HANDLER, not merely mention the
+                # subcommand. Reviewer round 8 measured the comparison-only form:
+                # gutting the branch to `return None` (handler still defined,
+                # never called) left both checks GREEN while the CLI verb was
+                # dead — falsifying the very premise the pin states. So the
+                # comparison line's REMAINDER, or the next non-blank code line,
+                # must carry the handler name.
+                reach = " ".join(toks[i:])
+                if pos + 1 < len(lines):
+                    reach += " " + " ".join(per_line[lines[pos + 1]])
+                if "_cmd_record_restore" not in reach:
+                    continue
                 found.append(f"{lineno}: {' '.join(toks)}")
     return found
 
@@ -952,7 +970,8 @@ def test_the_restore_verb_still_exists():
     # token, which can never form the comparison's token sequence.
     bound = _dispatch_bindings(main_path)
     assert bound, (
-        'no non-comment line binds `args.cmd == "record-restore"` to a handler in '
-        "tortoise/__main__.py — the verb is quoted only in prose (or renamed), so "
-        "the G5 pin's premise (a door a tenant reaches) is false. Re-derive which "
-        "file now holds the restore door and add it to the G5 scan set")
+        'no code line binds `args.cmd == "record-restore"` to its handler in '
+        "tortoise/__main__.py — the subcommand is quoted only in prose, renamed, "
+        "or its branch no longer CALLS the handler, so the G5 pin's premise (a "
+        "door a tenant reaches) is false. Re-derive which file now holds the "
+        "restore door and add it to the G5 scan set")
