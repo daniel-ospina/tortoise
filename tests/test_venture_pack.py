@@ -274,8 +274,14 @@ class TestVentureManifest:
         forbidden = {"pipeline", "pipelines", "statusFolds", "statuses",
                      "folds", "values", "valueFields", "domainDetection"}
         assert not (set(RAW_MANIFEST["ontology"]) & forbidden)
+        # ⛔ #11824 S0: `pipeline` LEFT this per-kind forbidden set, and it is
+        # the STATE surface on the position axis rather than a value surface —
+        # a kind's own words are its pipeline stages now (design §3.2/§4), so
+        # forbidding the key would forbid the model. `pipelines` (plural, the
+        # retired top-level spellings) stays forbidden: the declaration belongs
+        # on each `kindDef`.
         for kd in RAW_MANIFEST["ontology"]["kindDefs"].values():
-            assert not (set(kd) & {"pipeline", "pipelines", "statusFolds",
+            assert not (set(kd) & {"pipelines", "statusFolds",
                                    "values", "valueFields", "domainDetection"})
 
 
@@ -370,27 +376,47 @@ class TestKindCoverage:
 
 class TestStateSupersedeShape:
     def test_every_object_kind_declares_a_lifecycle(self, venture):
-        # #2729: the machine-readable per-kind lifecycle surface has landed —
-        # `kindDefs[<kind>].statuses` (the closed status vocabulary) plus, where
-        # the pack owns the driving event, `kindDefs[<kind>].folds` (event kind
-        # → status). The prose "Lifecycle: …" in the description stays as
-        # extractor prompt material and is still asserted, but it is no longer
-        # the only declaration.
+        # #2729 landed the machine-readable per-kind lifecycle surface —
+        # `kindDefs[<kind>].statuses` (the closed status vocabulary) — and #11824
+        # S0 moved each kind's own words onto `kindDefs[<kind>].pipeline` (the
+        # position axis; `status` is the four-word lifecycle vocabulary now).
+        # EITHER declaration is the machine-readable lifecycle; the prose
+        # "Lifecycle: …" in the description stays as extractor prompt material
+        # and is still asserted, but it is not the only declaration.
         for kind in venture.object_kinds:
-            statuses = venture.kind_defs[kind].get("statuses")
-            assert statuses, f"{kind}: no declared statuses (#2729)"
-            assert all(isinstance(s, str) and s for s in statuses), kind
-            assert len(set(statuses)) == len(statuses), kind
-            desc = venture.kind_defs[kind]["description"]
+            spec = venture.kind_defs[kind]
+            stages = (spec.get("pipeline") or {}).get("stages") or []
+            statuses = spec.get("statuses")
+            assert stages or statuses, f"{kind}: no declared state surface (#2729)"
+            if statuses:
+                assert all(isinstance(s, str) and s for s in statuses), kind
+                assert len(set(statuses)) == len(statuses), kind
+            if stages:
+                ids = [st["id"] for st in stages]
+                assert all(isinstance(i, str) and i for i in ids), kind
+                assert len(set(ids)) == len(ids), kind
+            desc = spec["description"]
             assert "Lifecycle:" in desc, kind
             assert "→" in desc, kind
 
-    def test_declared_folds_target_declared_statuses_and_events(self, venture):
-        """#2729: every fold is internally consistent and its event exists."""
+    def test_declared_folds_target_declared_states_and_events(self, venture):
+        """#2729: every fold is internally consistent and its event exists.
+
+        ⛔ AXIS-AWARE since #11824 S0: a `stage`-targeted fold must name a stage
+        of the kind's declared `pipeline`, a `status`-targeted one a declared
+        `statuses` value. Reading only `statuses` KeyErrors on every migrated
+        kind (this pack migrated all seven).
+        """
         for kind in venture.object_kinds:
-            statuses = set(venture.kind_defs[kind].get("statuses", []))
-            for fold in venture.kind_defs[kind].get("folds", []):
-                assert fold["status"] in statuses, (kind, fold)
+            spec = venture.kind_defs[kind]
+            statuses = set(spec.get("statuses", []))
+            stages = {st.get("id") for st in
+                      (spec.get("pipeline") or {}).get("stages") or ()}
+            for fold in spec.get("folds", []):
+                if "stage" in fold:
+                    assert fold["stage"] in stages, (kind, fold)
+                else:
+                    assert fold["status"] in statuses, (kind, fold)
                 local = fold["event"].partition(":")[2] or fold["event"]
                 assert local in venture.event_kinds, (kind, fold)
 
@@ -425,10 +451,14 @@ class TestStateSupersedeShape:
         model rides); the pack-shape half of the requirement is pinned by the
         DB-free tests above.
         """
+        # #11824 S0: `pending`/`released` are POSITIONS — the tranche kind's
+        # pipeline stages — not lifecycle words, so a create names a lifecycle
+        # word. This test's subject is SUPERSESSION (the engine's state-version
+        # fold), not the vocabulary, and supersession is unchanged.
         sdk.create_object("Tranche T2 — pending", objectKind="venture:tranche",
-                          status="pending")
+                          status="live")
         sdk.create_object("Tranche T2 — released", objectKind="venture:tranche",
-                          status="released")
+                          status="live")
 
         warns: list[str] = []
         applied = apply_supersessions(
@@ -441,7 +471,7 @@ class TestStateSupersedeShape:
 
         assert _object_state(sdk, "Tranche T2 — pending") == [
             "superseded", "Tranche T2 — released"]
-        assert _object_state(sdk, "Tranche T2 — released") == ["released", None]
+        assert _object_state(sdk, "Tranche T2 — released") == ["live", None]
 
         # The CURRENT-STATE read carries only the latest claim.
         live = sdk.recall_state(kind="venture:tranche", object_centric=True,
@@ -457,10 +487,12 @@ class TestStateSupersedeShape:
     def test_a_re_mention_cannot_resurrect_a_superseded_object(self, sdk):
         """The clobber guard: append-without-supersede must not be able to make
         a superseded state current again."""
+        # #11824 S0: `unmet`/`met` are the condition kind's STAGES; the create
+        # names a lifecycle word (the subject here is the resurrection guard).
         sdk.create_object("Condition C1", objectKind="venture:condition",
-                          status="unmet")
+                          status="live")
         sdk.create_object("Condition C2", objectKind="venture:condition",
-                          status="met")
+                          status="live")
         apply_supersessions(
             sdk._get_proj(), sdk,
             [{"superseded": "Condition C1", "supersedes_by": "Condition C2",
@@ -470,7 +502,7 @@ class TestStateSupersedeShape:
 
         # A later meeting re-mentions the old condition.
         sdk.create_entity("object", "Condition C1",
-                          objectKind="venture:condition", status="unmet")
+                          objectKind="venture:condition", status="live")
         assert _object_state(sdk, "Condition C1")[0] == "superseded"
 
     @requires_db

@@ -9,14 +9,29 @@ from __future__ import annotations
 
 import pytest
 
+from tortoise.live import is_terminal_status
 from tortoise.sdk import POINT_STATUS_VALUES
 
 
 def test_status_vocabulary():
+    # ⚠️ #11824 S0 NARROWED this deliberately, and the narrowing is the slice's
+    # deliverable: every knowledge kind's `status` is the same closed FOUR words,
+    # because the rule that separates the two endings is one rule — `superseded`
+    # NAMES ITS SUCCESSOR, and if nothing replaced it the word is `deprecated`.
+    # The previous six (`retracted`, `outdated`, `archived` extra) were the #432
+    # set plus two words that were never lifecycle states: `outdated` (meaning
+    # already carried by the pair, and ambiguous between them) and `archived` (a
+    # collision of "this ended" with "do not show me this").
+    #
+    # ⛔ The READ vocabulary did NOT narrow (`live.TERMINAL_EXCLUDED_STATUSES`
+    # still names every legacy word) — stored rows keep what they hold.
     assert POINT_STATUS_VALUES == frozenset(  # noqa: SIM300
-        {"draft", "live", "retracted", "superseded", "outdated", "archived"}
+        {"draft", "live", "deprecated", "superseded"}
     )
     assert "challenged" not in POINT_STATUS_VALUES
+    # the retired words are refused at the door, not merely absent from the set
+    for retired in ("outdated", "archived", "retracted"):
+        assert retired not in POINT_STATUS_VALUES
 
 
 def test_transition_guards_live_to_draft(sdk_factory, tmp_path):
@@ -155,10 +170,18 @@ def test_code_writes_only_valid_statuses(sdk_factory, tmp_path):
     assert sdk.get_point(p2["id"])["status"] == "live"
     assert "live" in POINT_STATUS_VALUES
 
-    # retract_point: sets retracted
+    # retract_point: sets the LEGACY word `retracted`
     r = sdk.retract_point(p["id"])
+    # ⚠️ #11824 S0 states a RESIDUAL here rather than work around it: the verb
+    # still writes `retracted` through its own CAS, while the write DOOR's
+    # vocabulary is the four words. Migrating the verb to `deprecated` is plan
+    # slice S2 (`retract_point` targets `deprecated`), and it is not done in S0 —
+    # so the assertion is inverted to pin the truth: the value the ENGINE produces
+    # is a READ-side legacy word, not a word a caller may mint.
     assert r["status"] == "retracted"
-    assert "retracted" in POINT_STATUS_VALUES
+    assert "retracted" not in POINT_STATUS_VALUES
+    # …and it is terminal to every reader, which is why the residual is safe.
+    assert is_terminal_status("retracted")
 
     # supersede_point: sets superseded
     old = sdk.create_point("statement", "old-parity")
@@ -174,35 +197,49 @@ def test_code_writes_only_valid_statuses(sdk_factory, tmp_path):
 
 
 def test_all_documented_transitions_allowed(sdk_factory, tmp_path):
-    """Every transition documented in ONTOLOGY §5 is allowed by _ALLOWED_TRANSITIONS."""
+    """Every transition the MODEL declares is allowed by _ALLOWED_TRANSITIONS."""
     from tortoise.sdk import _ALLOWED_TRANSITIONS
 
-    # Canonical transitions from ONTOLOGY §5 table (#432 code-review decision:
-    # a draft point can go terminal before ever going live; #2498 removed the
-    # outdated→retracted edge — `outdated` is terminal in the shared vocabulary):
-    # draft → live, retracted, superseded
-    # live → retracted, superseded
-    # outdated → (none)  [#2498]
-    # retracted → (none)
-    # superseded → (none)
-    # archived → (none)
+    # #11824 S0: the LIVE rows now offer `deprecated` — it is a declared word of
+    # the four-word vocabulary, and before S0 it was absent from
+    # POINT_STATUS_VALUES, so the vocabulary gate raised before this table was
+    # ever read.
+    #
+    # draft → live, deprecated, superseded      (#432: a draft can end)
+    # live  → deprecated, superseded
+    #
+    # ⛔ The legacy spellings keep TERMINAL rows rather than being deleted, and
+    # that is a READ delta, not a write path: `retracted` is still written by
+    # `retract_point`'s own CAS (S2 migrates it), `outdated`/`archived` are words
+    # stored rows hold. A stored word with NO row would DEFER — i.e. silently
+    # become transitionable — which is the opposite of terminal.
+    #
+    # ⚠️ ONTOLOGY §5 still documents `retracted`, because removing it from that
+    # document needs the owner's exact-text approval and is NOT this slice's.
 
     assert "live" in _ALLOWED_TRANSITIONS["draft"], \
         "draft → live must be allowed"
-    assert "retracted" in _ALLOWED_TRANSITIONS["draft"], \
-        "draft → retracted must be allowed (#432: draft can go terminal)"
+    assert "deprecated" in _ALLOWED_TRANSITIONS["draft"], \
+        "draft → deprecated must be allowed (#11824 S0)"
     assert "superseded" in _ALLOWED_TRANSITIONS["draft"], \
         "draft → superseded must be allowed (#432: draft can go terminal)"
-    assert "retracted" in _ALLOWED_TRANSITIONS["live"], \
-        "live → retracted must be allowed"
+    assert "deprecated" in _ALLOWED_TRANSITIONS["live"], \
+        "live → deprecated must be allowed (#11824 S0)"
     assert "superseded" in _ALLOWED_TRANSITIONS["live"], \
         "live → superseded must be allowed"
+    # …and NO live row still offers a retired spelling (the door refuses it, so
+    # a transition entry would name a target no write can reach).
+    for retired in ("retracted", "outdated", "archived"):
+        assert retired not in _ALLOWED_TRANSITIONS["draft"], retired
+        assert retired not in _ALLOWED_TRANSITIONS["live"], retired
     assert _ALLOWED_TRANSITIONS["outdated"] == frozenset(), \
         "outdated is terminal — no outgoing transitions (#2498)"
     assert _ALLOWED_TRANSITIONS["retracted"] == frozenset(), \
         "retracted is terminal — no outgoing transitions"
     assert _ALLOWED_TRANSITIONS["superseded"] == frozenset(), \
         "superseded is terminal — no outgoing transitions"
+    assert _ALLOWED_TRANSITIONS["deprecated"] == frozenset(), \
+        "deprecated is terminal — no outgoing transitions (#11824 S0)"
     assert _ALLOWED_TRANSITIONS["archived"] == frozenset(), \
         "archived is terminal — no outgoing transitions"
 
@@ -215,6 +252,16 @@ def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):
         assert status in _ALLOWED_TRANSITIONS, \
             f"{status!r} in POINT_STATUS_VALUES but missing from _ALLOWED_TRANSITIONS"
 
+    # ⚠️ The reverse direction is deliberately NOT an equality any more (#11824
+    # S0): the table also carries the RETIRED spellings as terminal rows, because
+    # a stored row may still hold one and a word with no row would DEFER (become
+    # transitionable) instead of being terminal. So the pin is: every key is
+    # either a writable word or a declared legacy word, and every legacy key is
+    # terminal.
+    legacy = {"retracted", "outdated", "archived"}
     for status in _ALLOWED_TRANSITIONS:
-        assert status in POINT_STATUS_VALUES, \
-            f"{status!r} in _ALLOWED_TRANSITIONS but not in POINT_STATUS_VALUES"
+        assert status in POINT_STATUS_VALUES or status in legacy, \
+            f"{status!r} in _ALLOWED_TRANSITIONS but is neither writable nor legacy"
+        if status in legacy:
+            assert _ALLOWED_TRANSITIONS[status] == frozenset(), \
+                f"the legacy word {status!r} must have no outgoing transition"
