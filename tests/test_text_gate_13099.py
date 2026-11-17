@@ -276,8 +276,14 @@ def _artifact() -> dict:
     return json.loads(ARTIFACT.read_text())
 
 
-def _published_tables() -> dict[str, dict[str, list[str]]]:
-    """Parse §5's per-class arm rows: {class: {arm: [ndcg@10, ndcg@100, recall@100]}}."""
+def _published_rows() -> dict[str, dict[str, list[str]]]:
+    """Parse §5's per-class arm rows into the SIGNED numbers each row prints.
+
+    {class: {arm: [ndcg@10, ndcg@100, recall@100, (d10 mean,lo,hi) x3, returned]}}
+    for a non-baseline arm, `[ndcg@10, nDCG@100, recall@100, returned]` for the
+    baseline (its Δ cells are em-dashes, which yield no number). Everything is
+    normalised to ASCII: the README prints the Δ sign as U+2212.
+    """
     out: dict[str, dict[str, list[str]]] = {}
     cls: str | None = None
     for line in README.read_text().splitlines():
@@ -291,70 +297,152 @@ def _published_tables() -> dict[str, dict[str, list[str]]]:
         m = _ARM_ROW.match(line)
         if not m:
             continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        # strip emphasis first: a bolded cell (`**1.0000**`) is still a number, and
-        # skipping it shifts the window onto the delta columns.
-        nums = [c.replace("**", "")
-                for c in cells[1:] if re.fullmatch(r"\*{0,2}[0-9]+\.[0-9]+\*{0,2}", c)]
-        if len(nums) < 3:
-            continue
-        out[cls][m.group("arm")] = nums[:3]
+        row = line.replace("**", "").replace("\u2212", "-").replace("\u00d7", "x")
+        # only the cells after the arm name, and only numeric content
+        body = row.strip().strip("|").split("|")[1:]
+        nums = re.findall(r"-?\d+\.\d+", " ".join(body))
+        out[cls][m.group("arm")] = nums
     return out
 
 
+def _same_cells(got: list[str], want: list[str]) -> bool:
+    """Cellwise equality, with the `returned` column compared numerically.
+
+    That column is the only one whose value the artifact stores pre-rounded
+    (`mean_returned`, 2 dp), so `20.25` prints `20.2` or `20.3` depending on the
+    formatter's tie rule — a difference of no consequence, unlike a drifted
+    metric or delta, which this still compares exactly.
+    """
+    if len(got) != len(want):
+        return False
+    for i, (g, w) in enumerate(zip(got, want, strict=True)):
+        if i == len(want) - 1:
+            # A 1-dp tie is the whole width (20.25 prints 20.2 or 20.3 depending
+            # on the formatter); 0.15 leaves for binary float noise in 20.3-20.2.
+            if abs(float(g) - float(w)) > 0.15:
+                return False
+        elif g != w:
+            return False
+    return True
+
+
 def test_the_published_tables_are_the_artifact_to_four_decimals():
-    """Every §5 cell is recomputed from `artifact.json`, per arm and per class.
+    """EVERY §5 number is recomputed from `artifact.json` — not just the metrics.
 
     A table that drifts from the artifact is the evidence record going wrong in
-    the one direction a reader cannot check cheaply. Class → arm → the three
-    headline metrics, compared at the precision the README prints.
+    the one direction a reader cannot check cheaply. The record's HEADLINE number
+    is a Δ (and §0 repeats it), so pinning only the three metric columns would
+    leave the figure the decision rests on free to drift — which is exactly how
+    the §6 row this file also pins came to quote numbers no run had produced.
     """
     art = _artifact()
-    published = _published_tables()
+    published = _published_rows()
     assert set(published) == set(art["results"]), (
         "the README's §5 classes and the artifact's classes disagree: "
         f"{sorted(published)} vs {sorted(art['results'])}")
+
     drift: list[str] = []
-    for cls, arms in published.items():
-        assert arms, f"§5.{cls} parsed no arm rows — the parser, not the record, is wrong"
-        for arm, cells in arms.items():
-            metrics = art["results"][cls]["arms"][arm]["metrics"]
+    for cls, rows in published.items():
+        blk = art["results"][cls]
+        assert rows, f"§5.{cls} parsed no arm rows — the parser, not the record, is wrong"
+        # ARM COMPLETENESS: a row deleted from the table is drift, not a shortcut.
+        if set(rows) != set(blk["arms"]):
+            drift.append(f"§5 {cls}: README carries {sorted(rows)}, "
+                         f"artifact carries {sorted(blk['arms'])}")
+        for arm, nums in rows.items():
+            if arm not in blk["arms"]:
+                continue
+            metrics = blk["arms"][arm]["metrics"]
             want = [f"{metrics[m]:.{_DP}f}"
                     for m in ("ndcg@10", "ndcg@100", "recall@100")]
-            if cells != want:
-                drift.append(f"§5 {cls}/{arm}: README {cells} != artifact {want}")
+            if arm == "in_graph_fulltext":
+                want.append(f"{blk['result_depth'][arm]['mean_returned']:.1f}")
+            else:
+                deltas = blk["arms"][arm].get("delta_vs_baseline") or {}
+                for m in ("ndcg@10", "ndcg@100", "recall@100"):
+                    d = deltas[m]
+                    want += [f"{d['mean']:.2f}", f"{d['lower']:.2f}", f"{d['upper']:.2f}"]
+                want.append(f"{blk['result_depth'][arm]['mean_returned']:.1f}")
+            if not _same_cells(nums, want):
+                drift.append(f"§5 {cls}/{arm}: README {nums} != artifact {want}")
     assert drift == [], "\n".join(drift)
 
 
-def test_the_operational_facts_table_quotes_the_artifact():
-    """§6's build times, memory figure and index sizes come from `artifact.json`.
+def _sec6_row(label: str) -> str:
+    """The §6 table row whose primary cell names `label` (one row, by position)."""
+    readme = README.read_text()
+    sec6 = readme.split("## 6. Operational facts", 1)[1].split("\n## ", 1)[0]
+    for line in sec6.splitlines():
+        if line.startswith("|") and label in line.split("|")[1]:
+            return line
+    raise AssertionError(f"§6 has no row for {label!r} — the table or this pin is wrong")
 
-    This row is the adoption-cost argument, and it is labelled as measured — so
-    it must quote measurements the committed artifact actually holds. The
-    defect this pins: it carried build times that appear in NO run, and a
-    7.58 MB figure that is the Postgres table's size (`sizes_bytes.tg_docs`)
-    printed under a FalkorDB `used_memory` label.
+
+def test_the_operational_facts_table_quotes_the_artifact():
+    """§6's figures come from `artifact.json`, in the RIGHT ROW.
+
+    This table is the adoption-cost argument and it is labelled as measured, so
+    it must quote measurements the committed artifact holds — and each figure
+    must sit under the backend that produced it. Both halves are pinned here
+    because both have been wrong: build times that appear in NO run, and a
+    7.58 MB figure that is the POSTGRES table's size (`sizes_bytes.tg_docs`)
+    printed under a FalkorDB `used_memory` label. A presence-only check over the
+    whole section would pass a table with the two labels swapped.
     """
     art = _artifact()
     graph = art["corpus"]["graph_seed"]
     pg = art["corpus"]["postgres_seed"]
     sizes = pg["sizes_bytes"]
-    readme = README.read_text()
-    sec6 = readme.split("## 6. Operational facts", 1)[1].split("\n## ", 1)[0]
 
-    expected = [
-        f"{pg['gin_index_build_s']:.3f} s",       # ts_rank GIN build
-        f"{pg['bm25_index_build_s']:.3f} s",      # pg_search BM25 build
-        f"{graph['seed_s']:.3f} s",               # seeding the graph
-        f"{graph['fulltext_index_build_s']:.3f} s",  # in-graph index build
-        graph["graph_memory_usage"]["used_memory_human"].rstrip("M") + " MB",  # e.g. "7.73 MB"
-        f"{sizes['tg_docs_tsv_en'] / 1024:.0f} KB",        # GIN index size
-        f"{sizes['tg_docs_bm25'] / 1e6:.2f} MB",           # BM25 index size
-        f"{round(sizes['tg_docs_bm25'] / sizes['tg_docs_tsv_en'])}×",  # the ratio
-    ]
-    missing = [e for e in expected if e not in sec6]
-    assert missing == [], (
-        "§6 quotes figures the committed artifact does not hold: " + repr(missing))
+    per_row = {
+        "in-graph": [
+            f"{graph['fulltext_index_build_s']:.3f} s",   # index build
+            f"{graph['seed_s']:.3f} s",                   # seeding
+            f"{graph['graph_memory_usage']['used_memory_human'].rstrip('M')} MB",
+        ],
+        "ts_rank": [
+            f"{pg['gin_index_build_s']:.3f} s",
+            f"{sizes['tg_docs_tsv_en'] / 1024:.0f} KB",
+            f"{sizes['tg_docs_tsv_simple'] / 1024:.0f} KB",
+        ],
+        "pg_search": [
+            f"{pg['bm25_index_build_s']:.3f} s",
+            f"{sizes['tg_docs_bm25'] / 1e6:.2f} MB",
+            f"{round(sizes['tg_docs_bm25'] / sizes['tg_docs_tsv_en'])}x",
+        ],
+    }
+    drift: list[str] = []
+    for label, expected in per_row.items():
+        row = _sec6_row(label)
+        for e in expected:
+            # the ratio is printed as "48×"; normalise the glyph here, not in the row
+            if e.replace("x", "\u00d7") in row or e in row:
+                continue
+            drift.append(f"§6 row {label!r} is missing {e!r} (row: {row.strip()[:120]})")
+    assert drift == [], "\n".join(drift)
+
+
+def test_the_like_for_like_store_comparison_is_quoted():
+    """The adoption-cost claim compares INDEX to INDEX and STORE to STORE.
+
+    §0's "cheapest by a wide margin" sets a 64 KB GIN index against the whole
+    FalkorDB store (7.73 MB `used_memory`, embeddings included). The like-for-like
+    Postgres figure is the table itself — content + `vector(384)` + both
+    tsvectors — and the artifact holds it (`sizes_bytes.tg_docs`). Quoting only
+    the index would overstate the difference by two orders of magnitude, so it is
+    pinned: the two store figures must appear together.
+    """
+    art = _artifact()
+    store_pg_mb = art["corpus"]["postgres_seed"]["sizes_bytes"]["tg_docs"] / 1e6
+    store_fg_mb = float(
+        art["corpus"]["graph_seed"]["graph_memory_usage"]["used_memory_human"].rstrip("M"))
+    readme = README.read_text()
+    sec0 = readme.split("## 0.", 1)[1].split("\n## ", 1)[0]
+    assert f"{store_pg_mb:.1f} MB" in sec0 or f"{store_pg_mb:.2f} MB" in sec0, (
+        f"§0 never quotes the Postgres store ({store_pg_mb:.2f} MB from "
+        "sizes_bytes.tg_docs), so its index-vs-store comparison is not like-for-like")
+    assert f"{store_fg_mb:.2f} MB" in sec0 or f"{store_fg_mb:.1f} MB" in sec0, (
+        "§0 never quotes the FalkorDB store figure from `used_memory`")
 
 
 def test_an_arm_that_raised_is_disqualified_not_scored_as_a_loss():
@@ -375,7 +463,8 @@ def test_an_arm_that_raised_is_disqualified_not_scored_as_a_loss():
     v = verdict(results, errors)
 
     assert v["headline_ndcg@10"]["pg_bm25"]["short_keyword"]["status"] == "disqualified"
-    assert v["disqualified_arms"] == ["pg_bm25"]
+    assert v["disqualified_arms"] == ["hybrid_bm25", "pg_bm25"], (
+        "the hybrid built from the dead lexical leg must be disqualified too")
     assert "pg_bm25" not in v["qualifying_candidates"]
     assert "DISQUALIFIED" in v["decision"], (
         "the decision line must say a candidate was not scored, or the reader "
@@ -442,3 +531,54 @@ def test_both_committed_verdicts_are_what_this_code_produces():
     first = json.loads(ARTIFACT.read_text())["verdict"]
     repeat = json.loads(ARTIFACT_REPEAT.read_text())["verdict"]
     assert first["qualifying_candidates"] == repeat["qualifying_candidates"]
+
+
+def test_a_dead_baseline_produces_no_verdict():
+    """If the ARM EVERYTHING IS MEASURED AGAINST raised, there is no verdict.
+
+    The basline's empty result list makes every candidate look like a large gain,
+    so the decision line would say the opposite of what the instrument knows —
+    with a `disqualified` note about the baseline sitting beside it. The rule is
+    the same failure direction as the uninstallable-candidate case, moved to the
+    reference arm, so it gets the same treatment: refuse.
+    """
+    v = verdict(_results({"pg_ts_rank": {
+        "short_keyword": (40.0, 30.0, 50.0), "entity_name": (40.0, 30.0, 50.0)}}),
+        [{"class": "short_keyword", "qid": "kw-0",
+          "arm": "in_graph_fulltext", "error": "ConnectionError: refused"}])
+
+    assert v["baseline_disqualified"] is True
+    assert v["qualifying_arms"] == [] and v["qualifying_candidates"] == []
+    assert "NO VERDICT" in v["decision"]
+    assert "pg_ts_rank" not in v["decision"], (
+        "a dead baseline must not leave a candidate named as the answer")
+
+
+def test_an_arm_built_from_a_disqualified_arm_is_disqualified_too():
+    """`rrf_fusion([[], vlist])` SUCCEEDS — so a half-dead hybrid would be scored.
+
+    Both hybrids are built from other arms: one leg empty yields a valid fused
+    list, an ordinary-looking metric, and a qualifying candidate. The rule has to
+    close over the dependency graph or it is defeated one level up.
+    """
+    results = _results({"hybrid_bm25": {
+        "short_keyword": (0.5, -1.0, 2.0), "entity_name": (0.5, -1.0, 2.0)}})
+    results["short_keyword"]["arms"]["pg_bm25"] = {
+        "n_queries": 1, "metrics": {},
+        "delta_vs_baseline": {"ndcg@10": {"mean": 0.0, "lower": -1.0,
+                                          "upper": 1.0, "n": 100}}}
+
+    v = verdict(results, [{"class": "short_keyword", "qid": "kw-0",
+                           "arm": "pg_bm25", "error": "ModuleNotFoundError"}])
+    assert "hybrid_bm25" in v["disqualified_arms"], (
+        "the hybrid's lexical leg raised, so its numbers are not a measurement of "
+        "hybrid_bm25")
+    assert "hybrid_bm25" not in v["qualifying_candidates"]
+
+    # …and via the vector leg, which has no row of its own in any table
+    v2 = verdict(_results({"hybrid_baseline": {
+        "short_keyword": (0.5, -1.0, 2.0), "entity_name": (0.5, -1.0, 2.0)}}),
+        [{"class": "short_keyword", "qid": "kw-0", "arm": "pg_vector",
+          "error": "psycopg.OperationalError"}])
+    assert "hybrid_baseline" in v2["disqualified_arms"]
+

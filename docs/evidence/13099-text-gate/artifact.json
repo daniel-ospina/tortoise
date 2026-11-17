@@ -14699,7 +14699,7 @@
  },
  "errors": [],
  "verdict": {
-  "rule": "a candidate qualifies unless it is significantly WORSE (paired 90% CI upper < 0) on any query class on ANY of the published metrics (ndcg@10, ndcg@100, recall@100), or was disqualified by a recorded error",
+  "rule": "a candidate qualifies unless it is significantly WORSE (paired 90% CI upper < 0) on any query class on ANY of the published metrics (ndcg@10, ndcg@100, recall@100), or was disqualified by a recorded error (inherited by arms built from a disqualified arm); NO VERDICT AT ALL if the baseline was disqualified",
   "metrics_checked": [
    "ndcg@10",
    "ndcg@100",
@@ -15592,6 +15592,7 @@
    "in_graph_fulltext_raw"
   ],
   "disqualified_arms": [],
+  "baseline_disqualified": false,
   "decision": "a Postgres option does not lose to the in-graph leg on any query class at any published metric (ndcg@10, ndcg@100, recall@100): pg_ts_rank, pg_ts_rank_cd, pg_ts_rank_simple, pg_bm25, hybrid_baseline, hybrid_bm25"
  }
 }

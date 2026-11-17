@@ -537,6 +537,17 @@ ARM_NAMES = (
     "hybrid_bm25",
 )
 
+BASELINE_ARM = "in_graph_fulltext"
+
+# An arm built FROM other arms inherits their disqualification. Without this the
+# rule is defeated one level up: `rrf_fusion([[], vlist])` succeeds, so a hybrid
+# whose lexical leg never ran still scores — and can qualify — on half of its own
+# definition, which is the failure the disqualification rule exists to prevent.
+ARM_DEPENDS_ON: dict[str, tuple[str, ...]] = {
+    "hybrid_baseline": (BASELINE_ARM, "pg_vector"),
+    "hybrid_bm25": ("pg_bm25", "pg_vector"),
+}
+
 
 def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         reuse: bool = False, full: bool = False) -> dict:
@@ -589,11 +600,9 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         pq_by_arm: dict[str, dict[str, dict[str, float]]] = {a: {} for a in ARM_NAMES}
         depths: dict[str, list[int]] = {a: [] for a in ARM_NAMES}
         arm_errors: dict[str, int] = {}
-        labels_by_q: dict[str, dict[str, int]] = {}
 
         for q in qs:
             labels = labels_for(oracle, live_by_topic, q["target"])
-            labels_by_q[q["qid"]] = labels
             text = q["text"]
 
             from tortoise.search_engine import rrf_fusion
@@ -740,6 +749,16 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         "verdict": verdict(results, errors),
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if errors:
+        # ⛔ NEVER clobber a published record with a run that had a failed arm. The
+        # documented invocation points `--out` at the committed evidence file, so a
+        # half-failed rerun would otherwise overwrite the record with one that
+        # cannot support a decision. The failed run still lands — beside it.
+        failed = out_path.with_suffix(".failed.json")
+        failed.write_text(json.dumps(artifact, indent=1, sort_keys=False))
+        print(f"!! wrote {failed} (NOT {out_path}) — the run had "
+              f"{len(errors)} arm error(s)")
+        return artifact
     out_path.write_text(json.dumps(artifact, indent=1, sort_keys=False))
     return artifact
 
@@ -782,7 +801,13 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
                        `arm_errors`), so its metrics are an empty result list,
                        not a quality statement. Checked BEFORE the three above:
                        a candidate that could not be installed must never be
-                       reported as a significant loss.
+                       reported as a significant loss — and an arm BUILT from a
+                       disqualified arm inherits it (`ARM_DEPENDS_ON`).
+
+    ⛔ If the BASELINE raised, there is no verdict at all. Every delta is
+    measured against that arm, so a dead baseline turns every candidate into a
+    large, meaningless GAIN — the same wrong-direction failure, relocated to the
+    reference arm. `baseline_disqualified` is set and `decision` refuses.
 
     Treating ``better`` as "not within noise, therefore keep the index" would
     reverse the decision the issue exists to test.
@@ -804,6 +829,15 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
     disqualified: set[str] = {e["arm"] for e in (errors or []) if e.get("arm")}
     for blk in results.values():
         disqualified.update(a for a, n in (blk.get("arm_errors") or {}).items() if n)
+    # …and close over the dependency graph: a hybrid whose leg never ran is not a
+    # measurement of that hybrid.
+    grew = True
+    while grew:
+        grew = False
+        for arm, deps in ARM_DEPENDS_ON.items():
+            if arm not in disqualified and any(d in disqualified for d in deps):
+                disqualified.add(arm)
+                grew = True
 
     def _metric_row(d: dict, status: str) -> dict[str, Any]:
         return {
@@ -819,7 +853,7 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
     worst: dict[str, dict[str, str]] = {}
     for cls, blk in results.items():
         for arm, row in blk["arms"].items():
-            if arm == "in_graph_fulltext":
+            if arm == BASELINE_ARM:
                 continue
             deltas = row.get("delta_vs_baseline") or {}
             d = deltas.get("ndcg@10")
@@ -851,7 +885,14 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
         return bool(clsmap) and all(s not in ("worse", "disqualified")
                                     for s in clsmap.values())
 
-    qualifying = [arm for arm, clsmap in worst.items() if qualifies(clsmap)]
+    # ⛔ A dead baseline is not a result. Every delta is measured AGAINST
+    # `in_graph_fulltext`; if that arm raised, its empty result list makes every
+    # candidate look like a large gain, so the verdict must refuse rather than
+    # publish the opposite of what the instrument knows.
+    baseline_disqualified = BASELINE_ARM in disqualified
+
+    qualifying = [] if baseline_disqualified else [
+        arm for arm, clsmap in worst.items() if qualifies(clsmap)]
 
     # The DISQUALIFIED-BY-DESIGN arms are not candidates: they are diagnostics.
     # `in_graph_fulltext_raw` exists to decompose builder-vs-scorer, and it is
@@ -859,11 +900,28 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
     not_candidates = {"in_graph_fulltext_raw"}
     candidates = [a for a in qualifying if a not in not_candidates]
 
+    if baseline_disqualified:
+        decision = (
+            "NO VERDICT — the baseline arm (`in_graph_fulltext`) raised during the "
+            "run, so every candidate delta is measured against an empty result "
+            "list. Re-run before reading ANY number here, including the tables.")
+    elif candidates:
+        decision = ("a Postgres option does not lose to the in-graph leg on any "
+                    "query class at nDCG@10: " + ", ".join(candidates))
+    else:
+        decision = ("every Postgres option loses significantly on at least one "
+                    "query class; the text index stays")
+    if disqualified and not baseline_disqualified:
+        decision += (f" — but {len(disqualified)} arm(s) were DISQUALIFIED by a "
+                     f"recorded error and are not scored: {', '.join(sorted(disqualified))}")
+
     return {
         "rule": ("a candidate qualifies unless it is significantly WORSE "
                  "(paired 90% CI upper < 0) on any query class on ANY of the "
                  "published metrics (" + ", ".join(METRICS_CHECKED) + "), or was "
-                 "disqualified by a recorded error"),
+                 "disqualified by a recorded error (inherited by arms built from a "
+                 "disqualified arm); NO VERDICT AT ALL if the baseline was "
+                 "disqualified"),
         "metrics_checked": list(METRICS_CHECKED),
         "headline_ndcg@10": headline,
         "headline": by_metric,
@@ -872,7 +930,12 @@ def verdict(results: dict, errors: list[dict] | None = None) -> dict:
         "qualifying_candidates": candidates,
         "diagnostic_arms_not_candidates": sorted(not_candidates),
         "disqualified_arms": sorted(disqualified),
+        "baseline_disqualified": baseline_disqualified,
         "decision": (
+            "NO VERDICT — the baseline arm (`in_graph_fulltext`) raised during the "
+            "run, so every candidate delta is measured against an empty result "
+            "list. Re-run before reading ANY number here, including the tables."
+            if baseline_disqualified else
             ("a Postgres option does not lose to the in-graph leg on any query "
              "class at any published metric (" + ", ".join(METRICS_CHECKED) + "): "
              + ", ".join(candidates)
