@@ -104,8 +104,11 @@ SELECT tests.assert(
 -- this file is executed — `grep -rn 20261012000001_record_schema` confirms it)
 -- SKIPS `20261109000001_record_embedding_vector.sql`, which is what creates
 -- `public.vector` and `public.record_embedding_vector(jsonb)`; `20261117000001`
--- declares the same dependency so it is skipped too. Without the guard these
--- three assertions are RED in the only harness that runs them and absent
+-- declares the same dependency so it is skipped too. ⚠️ TWO of 2b's three
+-- assertions need pgvector (the column/index existence pair) and are the two
+-- inside the guard; the third — the props-CHECK refusal — needs none and is
+-- deliberately OUTSIDE it, which is why it is green in this drill regardless.
+-- Those two are RED in the only harness that runs them and absent
 -- everywhere else — a false RED here, and no coverage gained anywhere.
 --
 -- ⛔ THE GUARD IS SILENT ON PGlite, AND SAYING OTHERWISE WOULD BE FALSE. An
@@ -130,9 +133,9 @@ SELECT tests.assert(
 -- that the migration was applied for real (all 20 `RECORD_MIGRATIONS`,
 -- `applied=20 rc=0`) against a `pgvector/pgvector:pg16` container as recorded on
 -- #13265 — see also `test-record-postgres` (`tests/test_11642_vector_move_live.py`),
--- the job that owns pgvector coverage. Those three assertions were additionally
--- executed green against a real `pgvector/pgvector:pg16` in review (stubbing
--- `tests.assert`), so the block is live wherever the objects exist.
+-- the job that owns pgvector coverage. Those two guarded assertions were
+-- additionally executed green against a real `pgvector/pgvector:pg16` in review
+-- (stubbing `tests.assert`), so the block is live wherever the objects exist.
 DO $$
 BEGIN
   IF to_regprocedure('public.record_embedding_vector(jsonb)') IS NULL THEN

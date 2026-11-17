@@ -325,9 +325,9 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # columns under TWO names — two bindable (`embedding`, one per table, which the
     # record writer derives) and two GENERATED (`embedding_vec`, one per table) —
     # counted per COLUMN, the way the entry above counts its three — and it
-    # relaxes NO props refusal: `chk_object_props_no
-    # _derived`/`chk_subject_props_no_derived` still refuse `embedding` (and
-    # `status`) in the props tail.
+    # relaxes NO props refusal: `chk_object_props_no_derived` /
+    # `chk_subject_props_no_derived` still refuse `embedding` (and `status`) in the
+    # props tail.
     "20261117000001_record_object_subject_embedding.sql",
 )
 

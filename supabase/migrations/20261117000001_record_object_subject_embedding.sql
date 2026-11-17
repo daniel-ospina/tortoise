@@ -148,8 +148,8 @@
 --     a `record_runner` re-fold leaves the vector ALONE on rows that already
 --     have one — `embedding` is absent from the node UPSERT's column list, and
 --     `ON CONFLICT … DO UPDATE SET` names only the BOUND columns, so a live-written
---     vector survives a no-derived re-fold untouched (measured against a
---     a real Postgres carrying the extension: `payload_SURVIVED=t vec_SURVIVED=t
+--     vector survives a no-derived re-fold untouched (measured on a real
+--     Postgres carrying the extension: `payload_SURVIVED=t vec_SURVIVED=t
 --     dims=384`). The image is deliberately not named here — this census counts
 --     lines matching the extension's own name, and a citation is not a use.
 --     What lands NULL is every row the re-fold **CREATES** — i.e. the historic
@@ -187,9 +187,15 @@
 -- ⚠️ MEASURED DEFECT this line fixes: a first cut of this file had no
 -- `CREATE EXTENSION` (correctly — `20261109000001` already made one), so the
 -- drill APPLIED it while SKIPPING the file that defines everything it calls, and
--- `schema-drill` (a REQUIRED context — `docs/ci/required-contexts.json`) failed
--- with `type "vector" does not exist` / `function public.record_embedding_vector
--- does not exist`. `IF NOT EXISTS` makes this a no-op wherever the extension is
+-- `schema-drill` failed with `type "vector" does not exist` / `function
+-- public.record_embedding_vector does not exist`. ⛔ ITS GATING STATUS, stated
+-- precisely because an earlier cut of this line called it "a REQUIRED context"
+-- and that is FALSE: `docs/ci/required-contexts.json`'s `required_contexts` is a
+-- seven-name list that does NOT contain `schema-drill` (it appears only under
+-- `emitters`, and `live_observed_contexts` — GitHub's live required set — agrees).
+-- So this was a RED CHECK on the pull request, visible and fixable, not a
+-- formally blocking one; the fix is right either way, and the overstatement was
+-- mine. `IF NOT EXISTS` makes this a no-op wherever the extension is
 -- already installed, and `SCHEMA public` matches `20261109000001` so the type
 -- resolves the same way. The declaration is the fix rather than a wider
 -- detector: a migration knows what it needs, and this is how the harness is told.
