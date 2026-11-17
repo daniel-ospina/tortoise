@@ -75,7 +75,7 @@ pin. The shared corpus is:
 
 USAGE
 =====
-    # 0 = equal · 1 = different · 2 = could not run · 3 = no verdict (a benchmark
+    # 0 = equal · 1 = different · 2 = could not run · 3 = no verdict (--bench / --list)
     uv run python tools/cypher_diff_harness.py \
         --graph-uri "docker://:pw@127.0.0.1:16404" \
         --record-dsn "postgresql://postgres:s3cret@127.0.0.1:15499/cypher_diff" \
