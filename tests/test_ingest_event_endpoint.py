@@ -709,9 +709,15 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     it is WRITER AGREEMENT rather than over-rejection. Asserting the old shape
     would pin a divergence the slice exists to remove.
 
-    The `:Event` half is unchanged and still proves the other direction: an Event
-    has no lifecycle (#11825), so a non-persistable status is DROPPED there and
-    the bundle must stay accepted — the arm is not simply "reject every non-str".
+    The `:Event` half flipped direction with `#13100`, which landed on this
+    branch and NOT on `main`. `main`'s cut of this test asserted that a
+    non-persistable `:Event` status is DROPPED and the bundle stays accepted —
+    measured before `#13100` removed the Event lifecycle entirely, so ANY
+    declared `:Event` status is now refused at Phase 1. Asserting the old shape
+    would pin a door this tree no longer has; the refusal and the
+    still-accepted status-less Event are pinned here instead, and
+    `test_direct_route_live_event_status_is_refused` pins the same rule for a
+    plain word.
     """
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
@@ -720,29 +726,37 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     bundle = {
         "entities": [{"ref": "o1", "type": "object", "name": "Alpha",
                       "status": {"a": 1}},
-                     {"ref": "o2", "type": "object", "name": "Beta"},
-                     # The `:Event` half of the contrast — no lifecycle, so the
-                     # value is dropped there and the bundle stays accepted.
-                     {"ref": "e1", "type": "event", "name": "Happened",
-                      "eventKind": "sessionCaptured", "status": {"a": 1}}],
+                     {"ref": "o2", "type": "object", "name": "Beta"}],
         "connections": [{"from": "o1", "to": "o2", "operator": "IMPL"}],
     }
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("declares status" in m and ":Object" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(bundle)
-    # ZERO mutation: the predecessor object and the Event never land.
+    # ZERO mutation: the predecessor object never lands.
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 0
-    assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 0
 
-    # …and the Event's dropped-value shape alone IS accepted.
-    event_only = {"entities": [
+    # The `:Event` half, re-derived for #13100: a NON-PERSISTABLE status on an
+    # `:Event` is refused at Phase 1 too (there is no lifecycle to drop it into).
+    event_bundle = {"entities": [
         {"ref": "o", "type": "object", "name": "Solo"},
         {"ref": "e1", "type": "event", "name": "OnlyEvent",
          "eventKind": "sessionCaptured", "status": {"a": 1}},
     ]}
-    assert sdk._validate_bundle(event_only) == []
-    sdk.ingest(event_only)
+    event_msgs = [v["message"] for v in sdk._validate_bundle(event_bundle)]
+    assert any("for an :Event" in m for m in event_msgs), event_msgs
+
+    # …and the arm is NOT "reject every non-str": a VALID lifecycle word on an
+    # `:Object` beside a status-less `:Event` is accepted, which is what keeps the
+    # refusals above about the VALUE rather than about declaring a status at all.
+    ok = {"entities": [
+        {"ref": "o", "type": "object", "name": "Solo", "status": "live"},
+        {"ref": "e1", "type": "event", "name": "OnlyEvent",
+         "eventKind": "sessionCaptured"},
+    ]}
+    assert sdk._validate_bundle(ok) == []
+    sdk.ingest(ok)
+    assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 1
     assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 1
 
 

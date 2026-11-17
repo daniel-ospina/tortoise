@@ -1021,8 +1021,14 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
         "MATCH (e:Event {eventId:'ev-9649-prov'}) RETURN e.validTo",
     ).result_set == [["2031-01-01T00:00:00Z"]], (
         "the Event the caller addressed must take the write")
-    assert sdk.get_entity(provenance)["status"] == "retracted", (
+    assert sdk.get_entity(provenance)["status"] == "deprecated", (
         "the provenance Point must be untouched")
+    # `retracted` is a SYNONYM, stored as its canonical word since `#11824 S0`
+    # (`read_caller_status` normalises at the create door too), so the read-back
+    # is `deprecated` — still terminal, which is what makes the provenance Point
+    # the terminal claim the address probe above must NOT hand to the guard.
+    # (The assertion read `"retracted"` on both sides of this merge and was
+    # already red on `main`: the create door normalises there as well.)
 
 
 def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
