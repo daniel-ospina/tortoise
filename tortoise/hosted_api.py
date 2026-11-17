@@ -448,10 +448,10 @@ _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
 # branch on the refusal must prose-match the message, and the only machine-
 # readable form of the retry instruction was the `Retry-After` HEADER — which the
 # capture clients that produced the issue's log lines never read
-# (`reflect-hook.ts`, `.../tortoise-capture.ts`: neither parses the header — each
-# re-arms on its own 30 s × 2^(n-1) backoff; `docs/research/2026-11-16-12992-
-# capture-429.md` §5, #11225). So the delay is published in the BODY as well: a
-# JSON client gets it for free; the header stays for HTTP clients that honour it.
+# (`reflect-hook.ts`, `.../tortoise-capture.ts`: neither parses the header — the
+# first does one POST and throws, the deployed one re-arms on 30 s × 2^(n-1)
+# (research §5, #11225). So the delay is published in the BODY as well: a JSON
+# client gets it for free; the header stays for HTTP clients that honour it.
 #
 # ⚠️ The `message` keeps the EXACT pre-#12992 wording. A body that is now an
 # object is a shape change for any reader that did `detail in text`; keeping the
