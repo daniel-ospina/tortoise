@@ -89,6 +89,7 @@ RETIRED_THIS_WAVE: dict[str, tuple[str, str]] = {
     "tortoise_create_document": ("create_entity", 'type="document"'),
 }
 
+
 def _require_non_empty(what: str, kinds: tuple[str, ...]) -> tuple[str, ...]:
     """A derivation that produced NOTHING reds here rather than passing vacuously.
 
