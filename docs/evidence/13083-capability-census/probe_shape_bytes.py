@@ -101,17 +101,25 @@ def _property_bytes(g) -> dict:
             f"MATCH (n:{label}) UNWIND keys(n) AS k RETURN DISTINCT k").result_set]
         per: dict[str, int] = {}
         for key in keys:
-            # Values are summed in PYTHON, not by the engine: `size()` refuses a
-            # scalar and `toString()` refuses a list, so no single Cypher
-            # spelling covers every property type a writer may store. The corpus
-            # is small and fixed, so reading the values is exact and cheap.
+            # ⚠️ THIS IS A **RENDERED** SIZE, NOT THE ENGINE'S STORED SIZE, and
+            # the name below says so (`repr_bytes`) because conflating the two
+            # inflates every numeric ARRAY by an order of magnitude: `str()` of a
+            # 384-dim float vector is ~7,187 characters of digits, commas and
+            # spaces, while the stored `float32` payload is 384 × 4 = 1,536 bytes.
+            # A review caught the first cut of this instrument publishing the
+            # rendered figure AS bytes. `size()` is not a substitute either: it
+            # refuses a scalar and returns an ELEMENT COUNT for a list, so no
+            # single Cypher spelling yields stored bytes for every property type.
+            # String properties (the ones that dominate prose) are exact; array
+            # and numeric properties are OVER-REPORTED here and their stored
+            # footprint must be derived from the width, not read off this column.
             rows = g.query(f"MATCH (n:{label}) RETURN n.`{key}`").result_set
             total = 0
             for (value,) in rows:
                 if value is None:
                     continue
                 total += len(str(value).encode())
-            per[key] = total
+            per[key] = total  # rendered bytes — see the note above
         out[label] = dict(sorted(per.items(), key=lambda kv: -kv[1]))
     return out
 
@@ -125,10 +133,13 @@ def main() -> int:
     ap.add_argument("--namespace", default="test_r13083_shapes")
     ap.add_argument(
         "--legacy-prose", action="store_true",
-        help="seed each turn's :Point with §9.1's narrative in its props TAIL "
-             "— the shape a pre-#13083 record->cache projection produced. The "
-             "`before` arm measures it; `after` is the same corpus without it, "
-             "which is what the declaration makes the projection produce.")
+        help="REQUIRED for both arms of the prose A/B. Seeds each turn's :Point "
+             "with §9.1's narrative in its row props TAIL — the shape a pre-move "
+             "record->cache projection produced. `before` POPS the declaration "
+             "and keeps the key; `after` SETS it and drops the key. Both arms "
+             "must pass this flag: an `after` run without it produces a corpus "
+             "with no prose at all, which differs from `before` by the SEEDING "
+             "rather than by the declaration, and looks like a valid A/B.")
     args = ap.parse_args()
 
     os.environ["TORTOISE_SESSION_LLM_MOCK"] = "1"
@@ -142,6 +153,17 @@ def main() -> int:
     # land as NODES. That is deliberate — this instrument measures what the
     # graph holds on the documented capability FALLBACK, which is the
     # population a `record_only` move would remove from.
+    # ⛔ The prose A/B's invariant is asserted OUTSIDE the flag: running `after`
+    # without `--legacy-prose` is exactly the confounded arm a review caught
+    # (the arms would differ by SEEDING, not by the declaration), so it is
+    # refused rather than silently produced.
+    if args.arm == "after" and not args.legacy_prose:
+        print("refusing: the `after` arm is the declaration arm of the prose "
+              "A/B and must be run WITH --legacy-prose, or the two arms differ "
+              "by whether prose was seeded rather than by the declaration.",
+              file=sys.stderr)
+        return 2
+
     os.environ.pop("TORTOISE_RECORD_DSN", None)
     journal_dir = tempfile.mkdtemp(prefix="r13083-")
     sdk = TortoiseSDK(namespace=args.namespace,
@@ -251,7 +273,7 @@ def main() -> int:
                        "turn_chars": args.turn_chars, "dim": DIM},
             "graph": {"graph_name": proj.graph_name, "nodes_by_label": census},
             "used_memory_bytes": {"before": before, "after": after, "delta": after - before},
-            "property_bytes_by_label": _property_bytes(g),
+            "repr_bytes_by_label": _property_bytes(g),
             "legacy_prose_arm": bool(args.legacy_prose),
             "limits": [
                 "sum(size(prop)) is stored VALUE bytes; it excludes the per-property "

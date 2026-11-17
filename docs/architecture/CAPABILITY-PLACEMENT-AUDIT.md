@@ -170,6 +170,15 @@ a **property-level** question and is listed in §6, not silently folded into thi
 | `tortoise/definite_description_backfill.py:433` | `MATCH (o:Object) OPTIONAL MATCH (o)<-[r]-() WITH o, count(r) …` — degree census | **adjacency** |
 | `tortoise/sdk.py:34355` | `MATCH (s:Subject {id:$sid})-[r]->(n)` | **adjacency** |
 
+`:Tag` belongs on this row too, and an earlier draft got it **wrong** by calling it bookkeeping: every tag
+read resolves the node **through the edge** — `sdk.py:28069`
+(`MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) RETURN properties(p)`),
+`sdk.py:28051` (`MATCH (t:Tag) OPTIONAL MATCH (p:Point)-[:TAGGED]->(t) …` — the tag list with counts),
+`sdk.py:21865` / `mcp_server.py:10730` (`OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
+`sdk.py:22209` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC). A traversal needs its
+**endpoint in the graph**, so "the node is only the endpoint label" is not an exemption — it is the
+justification. **Verdict: `graph`.**
+
 **Verdict: `graph`** for both.
 
 ### 2.6 `:GraphEvent` — the shape with no graph-capability reader
@@ -181,11 +190,11 @@ a **property-level** question and is listed in §6, not silently folded into thi
 | `tortoise/event_store.py:645`, `:1103` | `min(e.seq)` / `max(e.seq)` over `:GraphEvent` — aggregates | **none** |
 | `tortoise/event_store.py:801`, `:879`, `:1043` | per-page key existences and predicate deletes inside the emit/purge paths | **none** |
 | `tortoise/event_store.py:1014` `purge_expired`, `:1038` `purge_overflow` | predicate deletes | **none** |
-| `tortoise/hosted_backup.py:842`, `:890` | `max(last_seq), max(first_seq)` — aggregates | **none** |
+| `tortoise/hosted_backup.py:842`, `:890`, `:1182`, `:1383` | `max(last_seq), max(first_seq)` and whole-graph export scans — aggregates | **none** |
 | `tortoise/sdk.py:13766` (the `read_after` call inside `poll_events`, `:13642`) | pages the feed | **none** |
-| `tortoise/webhook_delivery.py:1041`, `:1300` | page the feed / cursor read for delivery | **none** |
 | `tortoise/why_snapshot.py:526` | pages the feed to rebuild a why-snapshot | **none** |
-| `tortoise/hosted_api.py:4091`, `:4104` | subscriber poll | **none** |
+| `tortoise/webhook_delivery.py:1041` (`event_head_seq`) | `max(e.seq)` — aggregate | **none** |
+| `tortoise/webhook_delivery.py:1300` | `read_after(proj, int(sub.get("cursor") …))` — the subscriber delivery page | **none** |
 
 **Verdict: `record_only`.** Not one traversal, not one adjacency, not the fulltext index, not EP state,
 not a vector. This is the single largest remaining graph resident on the record-armed lane: §9.1's own
@@ -204,15 +213,14 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:EpMeta` | `sdk.py:36069`, `:36491`; `ep.py:473` | **none** |
 | `:Meta` | `residency.py:244`, `:284`, `:292`, `:298`; `sdk.py:55647` | **none** |
 | `:WhySnapshot` | `why_snapshot.py:237`, `:303`, `:350`, `:484` | **none** |
-| `:Tag` | `sdk.py:21865`, `:22209`, `:28051`, `:28069`; `mcp_server.py:10730` | **none** (the `TAGGED` edges are the traversal; the node is the endpoint label) |
 | `:CommitRecord` | `commit_idempotency.py:45`, `:57`, `:65`, `:194` | **none** |
 | `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`), `:502` (page) — `:487` is the CREATE, not a reader | **none** |
 | `:Batch` | `mining.py:94`, `:150`, `:178`; `projection/__init__.py:14295` | **none** |
 | `:PipelineStage` | `pipeline.py:349`, `:482`, `:685`, `:731` | **none** |
-| `:PackInstall` / `:PackSelection` | `export.py:126`; `hosted_api.py:32965`; `projection/__init__.py:1563`, `:2310`, `:14424` | **none** |
+| `:PackInstall` / `:PackSelection` | `export.py:126` (`:PackInstall`); `pack_state.py:878-881` (`MATCH (s:PackSelection) RETURN s.revision, s.configured_at, s.updated_by`) | **none** |
 | `:ContextSubscription` | `webhook_delivery.py:406` (CREATE), `:425`, `:435`, `:444`, `:452`, `:461`, `:1113`; `why_snapshot.py:557` | **none** |
 
-**Verdict `record_only` for all eleven**, with the §5.2 blocker recorded — none has a record table, so none
+**Verdict `record_only` for all eleven** (⚠️ `:Tag` was in this list in an earlier draft and is **`graph`** — see §2.5), with the §5.2 blocker recorded — none has a record table, so none
 can be expressed as a tier today. They are cheap *individually* (1–2 nodes per graph) and this document
 does not pretend otherwise: they are listed because the census is complete, not because they are a lever.
 
@@ -236,6 +244,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 9 | `story_arc` (on **any** label) | **none** — zero Cypher readers | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one reader is `public.session_narrative`; the mechanism CAN deny it, two policy pins currently refuse the entry |
 | 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no record table (§5.2) |
 | 11 | bookkeeping labels (§2.7) | §2.7 | **no** | **`record_only`** ⛔ blocked | key lookups; no record table (§5.2) |
+| 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
 | 12 | `_searchText` on a **non**-episodic `:Source` | FTS | **yes** | **graph** | the fulltext index's field set |
 | 13 | `Source.summary`/`_searchText` on an **episodic** Source | declined already (`#10853`) | **no** | **`record_only`** ✅ already shipped | §9.1's prose rule, per ROW |
 | 14 | prompt-side `Point.aboutEntities`, `mentions` | `search_engine` flattening | **yes** — feeds the vector/text leg | **graph** | it is input to the embedding text |
@@ -249,23 +258,35 @@ nodes — the population a `record_only` move removes from). Payload = `sum(size
 (§1.1). Full output: `docs/evidence/13083-capability-census/measurement-*.json`; every figure below is
 re-derived from those files.
 
-| shape | nodes | payload bytes | share of payload |
-|---|---|---|---|
-| `:Point` | 66 | **668,014** | **97.8 %** |
-| … of which `embedding` | | 474,348 | 69.4 % |
-| … of which `content` | | 93,287 | 13.7 % |
-| … of which `story_arc` (this arm only) | | 90,000 | 13.2 % |
-| `:GraphEvent` | 67 | **12,768** | **1.87 %** |
-| `:Source` | 2 | 916 | 0.13 % |
-| `:Event` | 3 | 680 | 0.10 % |
-| `:Session` | 7 | 303 | 0.04 % |
-| `:Object` | 2 | 198 | 0.03 % |
-| `:Subject` | 2 | 139 | 0.02 % |
-| `:GraphEventMeta` / `:EpMeta` | 2 | 4 | 0.001 % |
-| **total** | | **683,022** | |
+**⚠️ The per-property column is a RENDERED size, not the engine's stored size.** The probe reads each value
+and sums `len(str(value).encode())`; `size()` cannot substitute (it refuses a scalar and returns an element
+COUNT for a list). For **string** properties the two coincide and the figure is exact. For **numeric arrays
+they do not**, and the gap is an order of magnitude: the rendered text of a 384-dim float vector is ~7,187
+characters of digits, commas and spaces, while its stored `float32` payload is 384 × 4 = **1,536 bytes**. A
+review caught the first cut publishing the rendered figure as bytes. Both are shown below; the **stored**
+figure is derived from the width, never read off the rendered column.
 
-**Read this table carefully.** The payload census says the graph is **`:Point`-shaped (97.8 %)** and that
-inside `:Point` it is **vector- and content-shaped** — both of which are `graph` verdicts (§3 rows 1–3).
+| shape | nodes | rendered bytes | stored footprint | share of stored |
+|---|---|---|---|---|
+| `:Point` | 66 | **668,014** | | |
+| … of which `embedding` | | 474,348 (rendered) | **101,376** (66 × 384 × 4 B, `float32`) | **14.8 %** |
+| … of which `content` | | 93,287 (exact — a string) | 93,287 | **13.7 %** |
+| … of which `story_arc` (this arm only) | | 90,000 (exact) | 90,000 | 13.2 % |
+| `:GraphEvent` | 67 | **12,768** | 12,768 | **1.87 %** |
+| `:Source` | 2 | 916 | 916 | 0.13 % |
+| `:Event` | 3 | 680 | 680 | 0.10 % |
+| `:Session` | 7 | 303 | 303 | 0.04 % |
+| `:Object` | 2 | 198 | 198 | 0.03 % |
+| `:Subject` | 2 | 139 | 139 | 0.02 % |
+| `:GraphEventMeta` / `:EpMeta` | 2 | 4 | 4 | 0.001 % |
+| **total (rendered)** | | **683,022** | | |
+
+(Percentages are of the rendered total, 683,022 — the only total the instrument can produce without a
+per-type conversion for every property. They are used for SHAPE, not for a billing estimate.)
+
+**Read this table carefully.** The census says the graph is **`:Point`-shaped (97.8 % of rendered bytes)** and
+that inside `:Point` the two largest families are **`embedding` (101,376 B stored, 14.8 %) and `content`
+(93,287 B, 13.7 %)** — comparable, not one dominating the other — and both are `graph` verdicts (§3 rows 1–3).
 `:GraphEvent` is **1.87 %** of payload but is the **largest non-Point resident** and the only label with no
 capability reader at all; its ~190 B/node payload understates it, because §9.1's own measurement puts it at
 **801 B/turn** once block overhead is counted.
@@ -332,8 +353,8 @@ prose-bearing one.
 | **Δ** | **−90,000** | **−90,000** | 0 |
 
 That is **exactly 1,500 B/turn** over 60 seeded legacy turn points, and the whole delta is `story_arc` —
-`Point.content` and `Point.embedding` are byte-identical between the arms (93,287 and 474,348 in both), which
-is the check that the arms are one variable. Total `:Point` payload falls **13.5 %**.
+`Point.content` and `Point.embedding` are identical between the arms (93,287 and 474,348 in both), which is
+the check that the arms are one variable. Total `:Point` payload falls **13.5 %**.
 
 ⚠️ **`used_memory` is NOT quoted for this pair.** The two runs' baselines differ by **847,688 B** — larger
 than the payload delta — so the residency marginal is inside the instrument's noise and would be a fabricated
@@ -449,7 +470,7 @@ provider was queried directly, and that substitution is disclosed rather than pa
 |---|---|
 | RAM is the scarce resource, disk is cheap | §5/§2.1: **$73/GB-month** resident vs **$0.125/GB** disk — 584× |
 | resorting to disk costs a cold-restore penalty | §12/§A4: **0.03 s** index-dropped, **1.585 s** index-kept (and that one blocks the instance) |
-| the vector index dominates residency | §12.1, and §4 above: `Point.embedding` is the single largest payload family in the corpus |
+| the vector index is a major residency term | §12.1, and §4 above: `embedding` (101,376 B stored) and `content` (93,287 B) are the two largest payload families in the corpus — comparable, neither dominating |
 | a shape nothing reads cannot help the hit ratio | this document's own §2: `:GraphEvent` has **zero** capability readers and is **801 B/turn** of the armed-lane residue |
 
 **What the source did NOT license.** It is a statement about **residency sizing inside a graph**, not about

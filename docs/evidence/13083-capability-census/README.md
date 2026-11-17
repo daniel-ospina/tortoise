@@ -12,7 +12,9 @@ ownedBy: epistemic-team
 
 # `#13083` — what each stored shape costs the graph
 
-**Measured:** 2026-11-17, on `8762578f8c` (`origin/main` at dispatch), private lane
+**Measured:** 2026-11-17, at head `17307a1b1502` (this branch's own first commit; the audit's base is
+`8762578f8c` = `origin/main` at dispatch, where the probe does not yet exist — the JSON's `tree.git_head` is
+the authority for what ran, and it names this branch), private lane
 `docker://:@127.0.0.1:16397/tortoise_test_matrix` (`tools/test_lane.py`). Instrument:
 `probe_shape_bytes.py` in this directory. Raw output: `measurement-before.json`,
 `measurement-after.json`.
@@ -40,8 +42,12 @@ lane is the population a `record_only` move would remove from.
   `GRAPH.MEMORY USAGE` is not used as the primary: it reports whole MB and is blind to the HNSW
   `vectorset` module (`#5331`).
 - **Per-shape payload**: for each label, `keys(n)` from the graph (what a WRITER put there, not what a
-  declaration says should be), then each value's byte length summed **in Python**. `size()` refuses a
-  scalar and `toString()` refuses a list, so no single Cypher spelling covers every property type.
+  declaration says should be), then each value's **rendered** length summed in Python (`repr_bytes_by_label`
+  in the JSON names it honestly). `size()` cannot substitute — it refuses a scalar and returns an element
+  COUNT for a list. ⚠️ **For a numeric ARRAY this over-reports by ~4.7×**: a 384-dim float vector renders as
+  ~7,187 characters of digits and commas, while its stored `float32` payload is `384 × 4 = 1,536` bytes.
+  String properties are exact; array properties' stored footprint must be **derived from the width**, never
+  read off this column. A review caught the first cut publishing the rendered figure *as* bytes.
 
 ## ⚠️ Limits — quoted, not discovered later
 
@@ -56,10 +62,12 @@ lane is the population a `record_only` move would remove from.
    by **847,688 B** (4,163,696 vs 5,011,384), which is larger than the 90,000 B payload delta — so
    `used_memory` is **not used** for any figure in this record or the audit. Only the deterministic
    `sum(size())` payload numbers are quoted.
-4. **Six shapes are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`, `:Tag`,
-   `:CommitRecord`, `:DeliveryReceipt`, and the `:Batch`/`:PipelineStage`/`:PackInstall`/`:PackSelection`
-   group. The corpus does not create them, so this document has no measurement of them — which is a gap
-   in the evidence, not a claim that they are free.
+4. **Seven shape-groups are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`,
+   `:Tag`, `:ContextSubscription`, `:CommitRecord`, `:DeliveryReceipt`, and the
+   `:Batch`/`:PipelineStage`/`:PackInstall`/`:PackSelection` group. The corpus does not create them, so this
+   document has no measurement of them — which is a gap in the evidence, not a claim that they are free.
+   (`:Tag` is `graph`-verdicted in the audit; it is unexercised **here**, which is a coverage gap, not a
+   `record_only` verdict.)
 
 ## The two arms
 
@@ -93,14 +101,14 @@ honour the entry (`_props_from_row`'s `tail_denied` is the plain forbidden set p
 
 | shape | payload bytes | note |
 |---|---|---|
-| `:Point` | 668,014 | 66 nodes · `embedding` 474,348 · `content` 93,287 · `story_arc` 90,000 (this arm) · the rest < 11,000 |
-| `:GraphEvent` | 12,768 | 67 nodes × ~190 B payload; the §9.1 figure of 801 B/turn includes block overhead |
+| `:Point` | 668,014 | 66 nodes · `content` **93,287 (exact)** · `embedding` 474,348 **rendered** = **101,376 stored** (66 × 384 × 4 B) · `story_arc` 90,000 (this arm) · the rest < 11,000 |
+| `:GraphEvent` | 12,768 | 67 nodes × ~190 B rendered; the §9.1 figure of 801 B/turn includes block overhead |
 | `:Source` | 916 | 2 nodes |
 | `:Event` | 680 | 3 nodes |
 | `:Session` | 303 | 7 nodes — the capture-telemetry family is ~20 B/session |
 | `:Object` | 198 | 2 nodes |
 | `:Subject` | 139 | 2 nodes |
-| **total** | **683,022** | `:Point` is 97.8 % of payload |
+| **total (rendered)** | **683,022** | `:Point` is 97.8 % of rendered payload |
 
 ## Re-running it
 
@@ -111,6 +119,9 @@ uv run python docs/evidence/13083-capability-census/probe_shape_bytes.py \
     --arm before --sessions 6 --turns 10 --legacy-prose > measurement-before.json
 uv run python docs/evidence/13083-capability-census/probe_shape_bytes.py \
     --arm after  --sessions 6 --turns 10 --legacy-prose > measurement-after.json
+# ⛔ BOTH arms carry --legacy-prose. `--arm after` WITHOUT it exits 2 by design:
+# it would seed no prose at all, differing from `before` by the SEEDING rather
+# than by the declaration — the confound a review caught in the first cut.
 uv run python tools/test_lane.py down
 ```
 
