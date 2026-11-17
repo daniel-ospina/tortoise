@@ -6383,12 +6383,30 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 f"every other reader.{_also}\n"
                 f"Two ways to fix it, either is accepted:\n"
                 f"  1. add the ending to `status` — pass "
-                + ("status='superseded' together with the successor's id, "
-                    "supersededBy=<successor id>"
+                + ("status='superseded' together with the successor's NAME, "
+                    "supersededBy=<successor name>"
                     if goal_state == _SUPERSEDED_STATUS else
-                    "status='archived' (or 'retracted'; the legacy "
-                    "'deprecated' spelling is accepted on goals whose door "
-                    "carries it)")
+                    # ⛔ #13065 review ROUND 22, finding 2 (P3): CARRIER-AWARE,
+                    # the same clause the sibling successor repair carries. The
+                    # `superseded` arm was made carrier-aware in an earlier
+                    # round and the `abandoned` arm was left carrier-BLIND, so
+                    # its first-named repair was `status='archived'` — which
+                    # `_ALLOWED_TRANSITIONS` REFUSES on a `:Point` (*"terminal
+                    # (reserved — no v1 write path)"*, ONTOLOGY §5), i.e. the
+                    # first thing this message told a Point caller to do, the
+                    # same door then refused. Measured in the new suite
+                    # (`test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal`):
+                    # the pre-fix text raised `update_entity refused the status
+                    # transition 'live' -> 'archived'` from the call it
+                    # prescribed. `retracted` is a declared transition from
+                    # every live state on BOTH carriers, so it is named first on
+                    # the one carrier where `archived` is not reachable.
+                    "status='archived' on an Object/Subject goal, or "
+                    "status='retracted' on a :Point goal (whose declared "
+                    "transitions from a live state are exactly "
+                    "{retracted, superseded}, so 'archived' is REFUSED there as "
+                    "reserved); the legacy 'deprecated' spelling is accepted on "
+                    "goals whose door carries it")
                 + f";\n"
                 f"  2. drop the ending from `goalState` — pass a word that "
                 f"describes a live commitment {sorted(GOAL_LIVE_STATES)} (or "
@@ -6404,10 +6422,26 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 f"replaced it — so the successor is part of the ending, not "
                 f"an optional extra.\n"
                 f"Two ways to fix it, either is accepted:\n"
-                f"  1. name the successor — `supersededBy=<successor id>` on an "
-                f"Object (or Subject) goal, or `supersede_point(goal, "
+                # ⛔ #13065 review ROUND 22, finding 1 (P2): the column is
+                # NAME-keyed — ONTOLOGY §4.2/§4.3 *"successor NAME (stored
+                # verbatim)"* — and every reader of it resolves a NAME
+                # (`assembly._probe_visible_successors` matches
+                # `o.name IN $names`). This prescription said `<successor id>`,
+                # which no read surface can resolve: the same defect
+                # `_supersede_entity` names in its own docstring (*"storing an id
+                # here would write a pointer no read surface can resolve, i.e.
+                # the same defect as storing none"*). The text is CALLER-facing,
+                # so it says what the caller needs (the value the field reads,
+                # and the verb that turns an id into one) and nothing about this
+                # review.
+                f"  1. name the successor — `supersededBy=<successor NAME>` on "
+                f"an Object (or Subject) goal (that column stores the "
+                f"successor's NAME, which is what every reader of it resolves, "
+                f"so an id matches nothing), or `supersede_point(goal, "
                 f"successor)` on a Point goal, which records it as the "
-                f"CORRECTS edge;\n"
+                f"CORRECTS edge. If you only hold the successor's ID, "
+                f"`supersede_knowledge(<this id>, <successor id>)` is the verb "
+                f"that resolves it to the name;\n"
                 f"  2. if nothing replaced it, say so — pass "
                 f"goalState='abandoned' with a status that ENDS it on the door "
                 f"you are using: status='retracted' on a :Point goal (its "
@@ -6467,8 +6501,10 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                     if not _by_status else
                     ("add the ending to `goalState` — pass goalState="
                      f"{want!r}"
-                     + (" together with the successor's id, supersededBy=<successor "
-                        "id>" if want == _SUPERSEDED_STATUS else "")))
+                     # ⛔ ROUND 22, finding 1 (P2): NAME, not id — see the
+                     # successor arm's note above.
+                     + (" together with the successor's NAME, supersededBy=<successor "
+                        "name>" if want == _SUPERSEDED_STATUS else "")))
         _repair2 = (("leave the achievement word alone — writing a LIVE word over a "
                      "row the legacy flag already retired is what this guard refuses "
                      "(`outdated=False` is server-managed, so it is not a repair "
@@ -6529,9 +6565,15 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             f"ended, and an ending cannot be undone by writing a live pair "
             f"over it: the node keeps the ending it had.\n"
             f"Two ways to fix it, either is accepted:\n"
+            # ⛔ ROUND 22, findings 1 and 2: the same two defects the arms above
+            # fixed, in the family's LAST refusal. `archived` is not reachable
+            # on a `:Point` (ONTOLOGY §5), and `supersededBy` holds a NAME.
             f"  1. keep the ending — pass status='archived' with "
-            f"goalState='abandoned' (or status='superseded' plus "
-            f"supersededBy=<successor id>);\n"
+            f"goalState='abandoned' on an Object/Subject goal, or "
+            f"status='retracted' with goalState='abandoned' on a :Point goal "
+            f"(whose 'archived' ending is REFUSED there as reserved); or "
+            f"status='superseded' plus supersededBy=<successor NAME> (the column "
+            f"holds the successor's name, not its id);\n"
             f"  2. if this is genuinely a NEW goal, give it its own id "
             f"instead of reusing the ended one."
         )

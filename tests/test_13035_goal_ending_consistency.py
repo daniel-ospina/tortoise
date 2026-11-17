@@ -1693,3 +1693,147 @@ def test_the_family_Supersede_verb_aligns_a_GOALs_achievement_word(sdk):
     assert bare["status"] == "superseded", bare
     assert bare.get("goalState") in (None, ""), (
         f"the verb stamped an achievement word nobody claimed: {bare.get('goalState')!r}")
+
+
+# ── 22. the AX half: what the refusals PRESCRIBE ──────────────────────────────
+# Round 22's two findings are both about the REPAIR TEXT rather than the rule it
+# announces: the rule holds at this head (no door can leave the two axes
+# disagreeing), but four messages prescribed a successor value no reader of that
+# column can resolve, and the `abandoned` arm first-named a status the door a
+# `:Point` goal is using then REFUSES. Both are AX rule 2's third part — the
+# prescription must be PERFORMABLE and must name the value the field reads — so
+# each test below performs the prescribed call rather than grepping for it, and
+# each one fails on the pre-fix text (that non-vacuity is measured in the
+# docstrings, against the exact strings the pre-fix code emitted).
+
+def test_the_SUCCESSOR_repairs_prescribe_the_NAME_the_carrier_RESOLVES(sdk):
+    """F1 (P2) — `supersededBy` is NAME-keyed; all four repairs said `<successor id>`.
+
+    ``_successor_name_of`` answers *"is this a NAME?"* with presence, not
+    resolution, so a caller following the old prescription got an ADMITTED write
+    that satisfied the obligation in form only — ``assembly._probe_visible_successors``
+    matches ``o.name IN $names``, so an id resolves nothing and the render
+    degrades to the name-only annotation printing the raw id. That is the state
+    ``_supersede_entity`` calls *"the same defect as storing none"*.
+
+    ⛔ MEASURED before the fix: all four sites emitted
+    ``... together with the successor's id, supersededBy=<successor id>`` /
+    ``supersededBy=<successor id>`` verbatim, so each ``in`` assertion below was
+    FALSE. No assertion anywhere constrained this value, which is why it shipped.
+    """
+    # (a) the pair arm — `goalState` ends it, `status` still running
+    goal = _goal(sdk, tag="f1-pair")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="superseded")
+    msg = str(exc.value)
+    assert "supersededBy=<successor name>" in msg, msg
+    assert "supersededBy=<successor id>" not in msg, msg
+
+    # (b) the successor arm — both fields ended, no successor named
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="superseded",
+                             status="superseded")
+    msg = str(exc.value)
+    assert "supersededBy=<successor NAME>" in msg, msg
+    assert "supersededBy=<successor id>" not in msg, msg
+    # ...and the id-taking verb is named, so a caller holding only an id has a
+    # one-step route to the name (AX rule 2: say exactly what to do)
+    assert "supersede_knowledge(" in msg, msg
+
+    # (c) the reverse arm — `status` ends it, `goalState` still running
+    goal2 = _goal(sdk, tag="f1-reverse", goalState="met")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal2["id"], status="superseded")
+    msg = str(exc.value)
+    assert "supersededBy=<successor name>" in msg, msg
+    assert "supersededBy=<successor id>" not in msg, msg
+
+    # (d) the finality arm — a coherent LIVE pair over an ALREADY ENDED node
+    ended = sdk.create_point("goal", "GOAL - ended [f1-finality]",
+                             goalState="abandoned", status="archived")
+    with pytest.raises(ValueError) as exc:
+        sdk.create_point("goal", "GOAL - revived [f1-finality]",
+                         id=ended["id"], goalState="met", status="live")
+    msg = str(exc.value)
+    assert "ALREADY ENDED" in msg, msg
+    assert "supersededBy=<successor NAME>" in msg, msg
+    assert "supersededBy=<successor id>" not in msg, msg
+
+    # (e) the prescription is PERFORMABLE and lands the value the reader keys on:
+    # a NAME is stored verbatim and is what `_probe_visible_successors` resolves.
+    target = sdk.create_object("GOAL - successor [f1-name]",
+                               objectKind="goal", goalState="active")
+    goal3 = _goal(sdk, tag="f1-name")
+    sdk.update_knowledge(goal3["id"], goalState="superseded",
+                         status="superseded", supersededBy=target["name"])
+    node = sdk.get_entity(goal3["id"])
+    assert node["supersededBy"] == target["name"], node
+    assert node["supersededBy"] != target["id"], node
+
+
+def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
+    """F2 (P3) — the `abandoned` arm first-named `status='archived'`, which a
+    `:Point` goal's own door REFUSES, so the repair was a circle.
+
+    ``_ALLOWED_TRANSITIONS`` is ``live -> {retracted, superseded}`` and annotates
+    ``archived`` as *"terminal (reserved — no v1 write path)"* (ONTOLOGY §5);
+    ``_update_entity``'s Point status arm enforces it. This PR already made the
+    SIBLING `superseded` arm carrier-aware and pinned it
+    (``test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT``) — the
+    `abandoned` arm kept the carrier-blind wording, and every message assertion
+    on it used an OBJECT fixture, so nothing measured the Point path.
+
+    ⛔ MEASURED before the fix: the message contained no ``status='retracted'``
+    at all (so the first ``in`` assertion was FALSE), and performing the word it
+    did first-name on a Point raised
+    ``update_entity refused the status transition 'live' -> 'archived'``.
+    """
+    goal = sdk.create_point("goal", "GOAL - abandoned repair [point]",
+                            goalState="active")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], goalState="abandoned")
+    msg = str(exc.value)
+    assert "REFUSED" in msg, msg
+    # the message names the :Point route, the way the sibling arm does
+    assert "status='retracted'" in msg, msg
+    # ...and it says why `archived` is the wrong half on this carrier
+    assert "'archived' is REFUSED there as reserved" in msg, msg
+    # ⛔ the pre-fix prescription, PERFORMED, is refused — this is the circle
+    with pytest.raises(ValueError) as refused:
+        sdk.update_knowledge(goal["id"], status="archived")
+    assert "archived" in str(refused.value), refused.value
+    # ⛔ and the prescription the message now names LANDS, in ONE write
+    sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
+    node = sdk.get_point(goal["id"])
+    assert node["goalState"] == "abandoned", node
+    assert node["status"] == "retracted", node
+    # both surfaces agree the goal is over — the rule the message serves
+    assert (node["goalState"] in RETIRED_GOAL_STATES,
+            not live.is_terminal_status(node.get("status"),
+                                        bool(node.get("outdated")))) == (True, False), node
+
+
+def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
+    """F2's second site — the family's last refusal named the same Object-only word.
+
+    ``sdk.py``'s finality arm said *"keep the ending — pass status='archived' with
+    goalState='abandoned'"*, which a `:Point` goal cannot perform. The assertion
+    at ``test_the_create_door_cannot_RESURRECT_an_ended_goal_by_naming_both`` only
+    checks ``ALREADY ENDED``, so this clause was unconstrained.
+
+    ⛔ MEASURED before the fix: the Point route was absent from the message, so
+    ``status='retracted'`` was FALSE.
+    """
+    ended = sdk.create_point("goal", "GOAL - ended [finality-point]",
+                             goalState="abandoned", status="retracted")
+    with pytest.raises(ValueError) as exc:
+        sdk.create_point("goal", "GOAL - revived [finality-point]",
+                         id=ended["id"], goalState="met", status="live")
+    msg = str(exc.value)
+    assert "ALREADY ENDED" in msg, msg
+    assert "status='retracted'" in msg, msg
+    assert "supersededBy=<successor NAME>" in msg, msg
+    # the ending survived the refused write
+    after = sdk.get_point(ended["id"])
+    assert after["goalState"] == "abandoned", after
+    assert after["status"] == "retracted", after
