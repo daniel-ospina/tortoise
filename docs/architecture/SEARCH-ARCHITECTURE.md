@@ -34,6 +34,26 @@ speed matters but is **not** the top criterion. That ranking is **this document'
 owner ruling** (no artefact carries the sentence), and every ordering below follows it; §5 states it as Q1–Q5
 so a reader can disagree with the ranking explicitly rather than inherit it.
 
+**Decision (owner, 2026-11-17) — every served label's embeddings belong in Postgres, and the search is to
+be aligned with that** (`#13220`). The owner's words: *"if indexing improves search for
+Object/Subject/Event of course we want that, and we just need it in Postgres and the search aligned with
+that and everything armed and working"* … *"we should likely also index source also in postgres"*. **This
+answers the two questions that were still open in `STORAGE-ARCHITECTURE.md` §14.3:** **V2** — a `:Source`
+gets one — and **V3's remaining half** — `:Object`/`:Subject` get one, with `:Event` named
+beside them. ⚠️ **It is a PLACEMENT ruling, and placement is what makes it cheap:** the record's
+mechanism is an `embedding_vec` column plus a pgvector index on the table that owns the rows, the shape
+`public.point`/`public.source`/`public.event` already carry — **`#11901`'s *"not earned"* verdict answered
+the FalkorDB question** (four more HNSW structures, five total, on provisioned RAM with no eviction —
+`STORAGE-ARCHITECTURE.md` §12.1c) **and does not reach a pgvector index.** ⛔ **The same day's SECOND ruling
+reopens the KEEP half — for the GRAPH COPY only** (owner, 2026-11-17, `#11395` comment `6956793300`,
+`OVERRIDES:` recorded there): the `:Object`/`:Subject` embeddings
+may be removed from the graph and stop being written there **once the record holds and indexes them** —
+record first, graph removal second, in a later release, never the other way round. `:Event`/`:Source` were
+never named by the KEEP ruling, and were already retirable once the record serves them. **What it adds
+to this document is COVERAGE, not a new leg:** §3's mechanism, §6.1's filter guard and §6.2's
+text-index decision are unchanged, and the work it orders (the columns and the writer, the record-served
+dense leg, the arming) is not a question this document decides.
+
 **Sibling documents:** `STORAGE-ARCHITECTURE.md` owns authority per layer (§2.0/§3) and the cost model
 (§17.4); `CONSUMPTION-MODEL.md` owns metering; **this document owns where each search leg executes, and
 what the graph engine holds.**
@@ -159,7 +179,7 @@ shows a RAM-resident index returning better answers at this scale.
 | job | home | change |
 |---|---|---|
 | authoritative state (claims, entities, connections, operators, text, embeddings, turns, narrative) | **Postgres** | none — already the record |
-| **vector search** — ANN over embeddings | **Postgres** (`pgvector` + HNSW) | **MOVES** — was `db.idx.vector.queryNodes` (2 executing sites) |
+| **vector search** — ANN over embeddings, on EVERY served label (`Point`, `Event`, `Object`, `Source`, `Subject` — 2026-11-17, above) | **Postgres** (`pgvector` + HNSW) | **MOVES** — was `db.idx.vector.queryNodes` (2 executing sites), and was one label's index |
 | **text search** — over 7 fields / 5 labels | **FalkorDB** (`db.idx.fulltext` — RediSearch's TF-IDF scorer, documented as BM25-style behaviour in `tortoise/sparse.py`) | **stays** — see §6.2; the move is deferred behind M3 |
 | **multi-hop traversal** (2-hop epistemic minimum: claim → operator → claim) | **FalkorDB** (Cypher) | none |
 | **writes, projections, backup/restore** | **FalkorDB** (Cypher) | none |

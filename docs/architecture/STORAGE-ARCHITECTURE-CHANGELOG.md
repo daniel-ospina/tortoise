@@ -2330,3 +2330,91 @@ re-derived from the tree rather than read back:
   (`test_section_9_1_cites_symbols_not_lines_and_its_symbols_resolve`,
   `test_the_design_documents_carry_no_issue_state_or_change_narration`) hold on symbols, which is the
   form this file uses.
+
+## 2026-11-17 — two owner rulings on the same day: every served label's embeddings get their index in Postgres, and the `:Object`/`:Subject` GRAPH copy retires once the record holds it (`#13220`, `#11395`)
+
+**Ruling 1, verbatim:** *"if indexing improves search for Object/Subject/Event of course we want that,
+and we just need it in Postgres and the search aligned with that and everything armed and working"* …
+*"we should likely also index source also in postgres"*. It is recorded on `#13220`, whose body also
+carries the measurement the question was asked against.
+
+**What it answers, in the design document's own question numbers.** **V2** — *does a `Source` get a
+summary vector?* — **YES, in Postgres.** **V3's surviving half** — *are `:Object`/`:Subject` indexed?* —
+**YES, in Postgres**, with `:Event` named beside them by the same sentence. Both are **PLACEMENT**
+answers, consistent with V1 (2026-11-07) and with `#13082`'s rule that anything no graph query reads is
+Postgres-only by default. With those, **every DECISION §14.3's table carried is answered**, and its heading
+says so — the one thing the table still names as open is V2's own design choice, *which text a `:Source`
+with no session narrative embeds*, which no ruling of this date reaches.
+
+**Ruling 2 (the reopen), and it is a separate ruling of the same day, not a corollary:** the 2026-11-10
+KEEP half is **SUPERSEDED for the GRAPH COPY** (owner, `#11395` comment `6956793300`, carrying its own
+`OVERRIDES:` line) — see the paragraph below for what it authorises and what it forbids.
+
+**The two things that made "not earned" stop applying, stated so neither is re-derived.** `#11901`
+closed the *index half* as not earned on a 390 s sweep — and that reasoning was about **FalkorDB**
+indexes: `CALL db.indexes()` showed one vector index (`Point`), so indexing the served-but-unindexed
+labels meant **four further resident HNSW structures — five total — on the most expensive resource we
+have** (`§12.1c`). **The record's mechanism is an `embedding_vec` column plus a pgvector index on the table
+that owns the rows — the shape `public.point`/`public.source`/`public.event` already carry** — so the
+ruling is cheap there and was expensive in the graph. ⚠️ **Named because it is easy to repeat wrongly:** §12.1c's *"**one** index over a shared table, filtered by
+kind"* is that section's comparison of capability, **not** the record's schema — the record
+keeps one table per label (`public.point`, `public.object`, `public.subject`, `public.event`,
+`public.source`) and a pgvector index is per table, which is also why `#13220`'s sequencing names an
+HNSW index for each new label. That sentence in §12.1c is pre-existing design text this change did not
+touch, and it is recorded on `#13220` so the implementing lane reconciles it rather than building
+toward a shape the schema does not have. **Second — and this is the same day's SECOND ruling, not a corollary of the first — the 2026-11-10 KEEP
+half is SUPERSEDED for the GRAPH COPY** (owner, 2026-11-17, `#11395` comment `6956793300`, carrying its own
+`OVERRIDES:` line against that ruling's *"no pass may remove those embeddings"*): the `:Object`/`:Subject`
+embeddings **may be removed from the graph and stop being written there, once the record holds and indexes
+them.** The reopen's own reason is recorded there and is worth keeping: the KEEP ruling was made when
+`public.object`/`public.subject` had no embedding column at all, so the graph was the ONLY copy and removing
+it would have deleted the fingerprint outright; once the record holds and indexes it, the graph copy is rent
+on something already durable. ⛔ **What it does NOT authorise, per the same comment:** removing the property
+BEFORE the record holds it, and any change to the resolution BEHAVIOUR. **Its sequencing is explicit — record
+first (`#13220` step 1), graph removal second, in a later release, not in one release** — and the design
+document states that condition at §14.3 and at every site that carried the KEEP refusal as if it were still
+absolute. `:Event`/`:Source`/`:Document` were never named by that ruling, so their graph copies were already
+retirable once the record serves them.
+
+**The state the ruling was given against (2026-11-17, `instance-yxwgk64it`).** *In the graph:* `:Point`
+14,593 embeddings with the only HNSW index; `:Object` 7,865 and `:Event` 4,893 stored and unindexed
+(a full scan at 13–17 ms that reports `ok`); `:Subject` 1 node; `:Source` full-text only **as an INDEX** — a document `:Source` does write an `embedding` (§12.1b), so the row is an index fact and not a property claim, exactly as §12.1b warns. *In the
+record:* `point` 33,873 rows carry a vector behind an HNSW index; `event` and `source` each already
+have a `vector(384)` generated column and an HNSW index **and zero rows carrying a vector** (`#11660`'s
+migration — the infrastructure is not new); **`object` and `subject` have no embedding column at all**
+and their props CHECK constraints refuse a derived field, so their fingerprints live only in FalkorDB
+today. That last row is the durability gap against *"Postgres is the system of record"*, and it is why
+the ruling cannot be implemented by switching a read on.
+
+**What it changes in the design document — the regions listed below, and no figure moved.** ⚠️ **Beyond §14.3, every site that stated the KEEP ruling as an absolute refusal now reconciles with ruling 2**
+— §2's cost section (*"the class that dominates our bill"*), §12.1's stored-vector note, §12.1b's `#4997`
+sentence, §12.1c's context paragraph, §12.1c's decided marker, §12.2c's resolution section, §13's
+unindexed-embeddings bullet, and §14.3's own V1 row. **Six of them carry a one-line pointer** to the
+supersession (§2, §12.1, §12.1b, §12.1c's context, §13 and §14.3's V1 row); **§12.1c's decided marker and
+§12.2c state it in place**, because each was already asserting a consequence of the KEEP ruling (the
+graph-side copy *staying*) and a bare pointer would have left the contrary claim standing. The pre-existing sentences are left as they were otherwise: they are the record of
+what the 2026-11-10 ruling said, and it is the pointer, not a rewrite, that tells a reader it moved. ⚠️ **A
+site NOT touched, deliberately:** the verbatim KEEP quotation inside §14.3's V3 row is left exactly as it was written — editing a
+quotation would falsify the record. What was added beside it is a ⛔ marker **immediately after the
+quotation, saying that it is the 2026-11-10 ruling and not the current one**, because that row's
+supersession sits at its far end: without the marker a reader meets an absolute refusal at the head of the
+row and has no reason to read on. In `STORAGE-ARCHITECTURE.md`: §14.3's heading, lead paragraph and **table header** (all three answers, the ruling quoted, and the third column renamed from *"why it is not settled"* to *"why it was a decision, not a tune"*); **V2's row** (answered as a placement question, keeping the evidence caveat it always carried and naming the one thing the ruling does **not** answer — *which text a `:Source` with no session narrative embeds*); **V3's row** (the answer beside the retired arithmetic, the `#13108` read-time measurement, the append-only migration note and the PRE-ANSWER sequencing frame it reconciles); **§13's unindexed-embeddings bullet (`V3`, §12.1b)** (its *"the surviving reading is make index creation label-generic"* is marked SUPERSEDED — that reading was a FalkorDB per-label HNSW, which is not what the answer builds); **§12.1c's and §12.2c's** *"what survives / remains is whether they are INDEXED"* sentences (wording kept, answer appended); **§12.1b's `#4997` sentence** (answer appended); **§12.1b's `:Source` footnote** and **§9.4's pointer** (both name the ruling's own remainder instead of calling V2 open). In `SEARCH-ARCHITECTURE.md`: a **decision block** after the 2026-11-07 one, and **§3's vector-search row** (it names the served set). **No measurement was re-read and no figure was retired** — 12,657, 33,580 / ≈51.6 MB, 3,742 /
+5.48 MiB, 93 MB of indices on a 195 MB graph, the `#13108` read-time row and the 4.4 MB all stand as
+they were, and the census pointer is unchanged: a per-label count still needs `tools/dod_5090_probe.py
+--census` on a named graph.
+
+**The work it orders is `#13220`'s, not this entry's:** the `object`/`subject` embedding columns and the
+writer for all four labels, `record_vector.LABEL_SERVED` extended so the dense leg answers from the
+record, the graph-side retirement of `:Event`/`:Source` (never `:Object`/`:Subject`), and the arming,
+which is downstream of `#11691` and `#13082` P0-b rather than parallel to them. ⚠️ **Sites in code and tooling
+still state V3 as open-or-not-earned, and they are named rather than edited here (this change is
+documentation-only).** *Group 1 — still says V3 is open:* `projection._record_vector_index_inventory`'s
+warning text (*"Whether those labels get an index is §14.3 V3 of STORAGE-ARCHITECTURE.md"*) and its
+docstring, and `projection._ensure_indexes_declared`'s docstring (*"stays open"*). *Group 2 — says V3 is
+reopened, or attributes the answer to `#11901`'s "not earned" verdict:*
+`tests/test_dense_leg_probe_13108.py`'s module docstring (*"`#13108` reopens … §14.3 V3"*),
+`tools/dense_leg_probe_13108.py`'s docstring (*"an OWNER decision `#11901` closed as \"not earned\""*), and
+`tools/ci_selection.py`'s selection comment (*"the latency/mechanism table `#13108` reopens §14.3 V3
+on"*). `search_engine.run_vector_query`'s docstring is **not** stale — it says the scan-fallback repair is
+*"NOT the index decision"*, which remains true. The record of these sites is a comment on `#13220` — `6956046832`, extended by `6956280005` for group 2 — rather
+than a peer issue, because the lane that implements the answer owns them.
