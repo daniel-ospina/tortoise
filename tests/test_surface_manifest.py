@@ -899,10 +899,13 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   re-keys carry both columns again. The number is re-derived from the MERGED manifest,
 #:   never carried from either side — 38 was main's own measured count and was two short
 #:   here, which is exactly the allowance this floor exists to forbid.
-#:   40 -> 25 on 2026-11-16 (#12901 wave 2): fifteen of the sixteen retired rows carried a
-#:   caller list in both columns (`org_create`'s N1 neighbours are the exception), so they
-#:   left the comparison with the row. Re-derived from THIS manifest, never carried.
-COMPARABLE_CALLER_ROWS_FLOOR = 25
+#:   40 -> 27 on 2026-11-16 (#12901 wave 2): the wave-2 branch re-derived this on the merged
+#:   manifest and measured **27**, not the 25 this file's own comment carried: `_caller_lists`
+#:   reads 27 two-sided rows here (`uv run python -c` over `tests/test_surface_manifest.py`'s
+#:   own `_manifest()`/`_caller_lists()`), and the arm below is a `>=` — so 25 would have left
+#:   the very two-row allowance this history paragraph exists to forbid. The conflict between
+#:   the two sides' numbers was settled by that measurement, not by picking a side.
+COMPARABLE_CALLER_ROWS_FLOOR = 27
 
 
 def test_the_reason_dependency_cross_check_can_fail():
