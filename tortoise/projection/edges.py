@@ -1544,6 +1544,31 @@ class _EdgeHandlers:
         that let R5 sit. That seam also RECORDS the skip, so a run boundary can
         count what a rebuild will not restore instead of reading a log.
         """
+        # #12943 (reopened, review cycle 2): RECORD THIS LANE'S TARGET TOO.
+        # A structural edge is a live cache write that does NOT pass
+        # `FalkorProjection.apply` — both mints (`create_edge` and the
+        # about-lane) raw-`MERGE` under `_structural_edge_write_scope` — so
+        # without this a process whose writes are edges registers NO target and
+        # `metrics()['cache_write_targets']` reads `{}`, byte-identical to "this
+        # process took no live cache write": the same illusion the registry
+        # exists to end. This is the ONE producer both mints call, and they call
+        # it only when a row was actually created, so it is the landed-write
+        # point rather than an attempt. Replay is excluded below, before the
+        # recorder gate (a projection with no recorder still WROTE the cache).
+        try:
+            # Lazy imports: `tortoise.projection` imports THIS module, and this
+            # mixin's `self` IS the projection (`_stable_endpoint` is its own).
+            from tortoise.cache_leg import note_cache_write_target
+            from tortoise.projection import replay_window_open
+
+            if not replay_window_open():
+                endpoint = getattr(self, "_cache_target_endpoint", None)
+                if endpoint is None:
+                    endpoint = self._stable_endpoint() or ()
+                    self._cache_target_endpoint = endpoint
+                note_cache_write_target(endpoint, getattr(self, "graph_name", None))
+        except Exception:  # noqa: BLE001, RUF100 — never break a live write
+            pass
         recorder = getattr(self, "_structural_edge_recorder", None)
         if recorder is None:
             return

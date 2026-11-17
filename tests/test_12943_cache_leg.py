@@ -947,3 +947,81 @@ def test_an_UNREADABLE_target_registry_is_NULL_and_never_an_empty_map(monkeypatc
     assert payload["cache_write_targets"] is None, (
         "an unreadable registry must be null, never {} — {} means 'this "
         f"process took no live write' — got {payload['cache_write_targets']!r}")
+
+
+def test_a_SKIPPED_fold_is_not_recorded_as_a_landed_write(monkeypatch, tmp_path):
+    """The registry counts folds that RETURNED, not folds that were attempted.
+
+    A malformed event is logged and skipped (`FalkorProjection.apply`'s own type
+    guard) — nothing is written — so counting it would tell an operator the cache
+    holds a write it never made, which is the wrong direction for a number read
+    beside `record_writes_applied` (#12943 review cycle 2, finding 1: the hook
+    used to sit ABOVE that guard).
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    reset_cache_write_targets()
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        proj.apply({"event_id": "ev-skip", "type": 123})     # skipped, no write
+        assert cache_write_targets() == {}, (
+            "a skipped fold must not be counted as a landed write — got "
+            f"{cache_write_targets()!r}")
+        sdk.create_object("landed-after-skip", objectKind="goal")
+        assert sum(cache_write_targets().values()) == 1, cache_write_targets()
+    finally:
+        sdk.close()
+
+
+def test_the_structural_edge_lane_records_its_target_too(monkeypatch, tmp_path):
+    """`create_edge` raw-MERGEs without passing `apply` — so it needs the hook.
+
+    Without it a process whose writes are edges registers NO target, and
+    `metrics()['cache_write_targets']` reads `{}` — byte-identical to "this
+    process took no live cache write", the illusion the key exists to end
+    (#12943 review cycle 2, finding 2).
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    reset_cache_write_targets()
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        a = sdk.create_object("edge-source", objectKind="goal")
+        b = sdk.create_object("edge-target", objectKind="goal")
+        reset_cache_write_targets()      # only the EDGE is under test
+        created = sdk._get_proj().create_edge(a["id"], b["id"], "related")
+        assert created is True
+        assert sum(cache_write_targets().values()) == 1, cache_write_targets()
+    finally:
+        sdk.close()
+
+
+def test_a_malformed_uri_does_not_turn_binding_a_tenant_into_a_failure(
+        monkeypatch, tmp_path):
+    """#5148 protects the CALL, not its argument (#12943 review cycle 2, finding 4).
+
+    `_cache_graph_name` parses the URI, and `urlparse('docker://[::1/db')` raises
+    `ValueError: Invalid IPv6 URL`. Evaluated outside the guard, that turned a
+    tenant bind on the hosted per-request path into a 500 for a write that could
+    have been served — the exact class `cache_leg`'s "observability must never
+    deny a caller a graph it can use" rule forbids.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://[::1/db")
+    _arm_record(monkeypatch)
+    from tortoise.sdk import TortoiseSDK
+
+    before = dict(monitoring.cache_leg_failure_counts())
+    sdk = TortoiseSDK()
+    try:
+        sdk._bind_record_tenant("orgA", "g_B")     # must not raise
+        # The derivation itself is still as strict as it always was — the point
+        # is only that BINDING never depends on it succeeding.
+        with pytest.raises(ValueError):
+            sdk._cache_graph_name()
+        assert dict(monitoring.cache_leg_failure_counts()) == before, (
+            "binding a tenant must not add a cache-leg failure of any kind")
+    finally:
+        sdk.close()
