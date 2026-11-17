@@ -69,10 +69,10 @@ import json
 # cannot import the full vocabulary (``POINT_STATUS_VALUES``, canonical in
 # ``tortoise/sdk.py``) at import time. The partition below is therefore held
 # to that vocabulary by ``tests/test_terminal_status_vocabulary.py``, which
-# DERIVES the expected terminal set as
-# ``POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES`` and asserts equality —
-# so adding a status to the vocabulary without classifying it here REDs that
-# test instead of silently defaulting to "current" on every read surface.
+# proves every WRITE word is current-or-hidden and that this READ set is never
+# NARROWER than the write set (#11824 S0 split the two — design §8), so adding
+# a status to that vocabulary without classifying it here REDs that test instead
+# of silently defaulting to "current" on every read surface.
 # (A parity test, not import-time coercion, is the guard: the alternative —
 # declaring POINT_STATUS_VALUES here — would need sdk.py to stop declaring it,
 # and a circular import makes the reverse direction impossible.)

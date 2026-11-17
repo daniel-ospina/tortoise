@@ -249,7 +249,7 @@ _FACTOR_EDGE_TYPES = frozenset({"IMPL", "NAND"})
 #: AND its mirror ``(s)-[:INPUT]->(o)`` in one statement (``sdk.py:22405-22407``),
 #: so such an operator acquires an outgoing ``:INPUT`` edge to a ``:Point`` — and
 #: THIS read, like the engine's, counts it as a gating endpoint
-#: (``epistemic_disjunction`` admits ``:Point``, ``live.py:509``). With ``A``'s
+#: (``epistemic_disjunction`` admits ``:Point``, ``live.py:522``). With ``A``'s
 #: operand ``B`` and ``B``'s ``:INPUT`` target ``A``, each keeps the other draft
 #: FOR EVER: a mutual deadlock whose fixed point is "both draft", so re-running
 #: cannot break it. MEASURED at this head — two such operators over two live
