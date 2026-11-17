@@ -10,9 +10,11 @@ argument order alike — measured on FalkorDB v4.20.6 with
 ``tools/dense_leg_probe_13108.py``, where the two refused round trips cost
 **20.17 ms of a 34.45 ms ``:Object`` dense read at 1,000 nodes** (58 %;
 ``fix-1000-paired-at-rest.json`` → ``index_attempt[0].elapsed_ms``, 10.18 + 9.97).
-⛔ ``#13121`` review round 4 (F5) corrected an earlier ``≈23 ms of 36.5 ms (63 %)``
-here: 23.45 ms is the SCAN's cost and 36.5 ms was a single sample, not an arm
-statistic. The figures now match `tortoise/search_engine.py:3650` and brief §3.4.
+⛔ ``#13121`` rounds 4/5/8 corrected an earlier ``≈23 ms of 36.5 ms (63 %)`` here. Neither
+``23.45 ms`` nor ``36.5 ms`` is in ANY committed artifact: the artifact-backed scan is
+**13.26 ms** (``fix-1000-paired-at-rest.json`` → ``arms["object[hint]@c1"].latency_ms.p50``),
+and 23.45 ms would be arithmetically impossible beside a 34.45 ms total. The figures now match
+`tortoise/search_engine.py` (the skip site) and brief §3.4.
 
 So the injected inventory lets the read skip them. Four things must stay true,
 and this module pins each:

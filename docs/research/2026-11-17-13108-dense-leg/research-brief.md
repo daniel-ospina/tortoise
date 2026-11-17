@@ -42,9 +42,14 @@ rests on the docs, and the graph is recorded as **not readable here** — never 
 `INCOMPLETE (exit 2)` because `lane-registry.tsv` was never provisioned in this cell. No lane is
 attributable to the issue; the only HITs were this lane's own branch and worktree.
 
-**The box:** 16 CPUs, 31 GB. "At rest" below means load ≈ 3–8; "under load" means **load
-114–135**, produced by 22 real embedder processes (`TORTOISE_EMBED_THREADS=8`) — the capture
-write path's own work, not a burn loop.
+**The box:** 16 CPUs, 31 GB. "At rest" below means load ≈ 3–8; "under load" means the RECORDED
+range **load 114–142** (the highest is `windows-8000-under-load-timeout.json` →
+`box.loadavg` = `[140.03, 142.31, 139.81]`; `#13121` round 8 F5 widened the band to what the
+artifacts hold), produced by 22 real embedder processes (`TORTOISE_EMBED_THREADS=8`) — the capture
+write path's own work, not a burn loop. ⛔ **The `eval-*.json` artifacts record NO load field**
+(`grep -c load eval-*.json` → 0 0 0), so any load figure attached to an eval row is the operator's
+reading of the box at the time, not a measurement; the probe's own `windows`/`arms` rows DO write
+`load.loadavg`.
 
 ---
 
@@ -73,8 +78,10 @@ without reading the source.
    The claim that matters is the CODE one, and it is verifiable at `sdk.py`: the encode call
    precedes the chain, so its cost is charged to the caller's thread, not to the leg's budget.
 2. **It is submitted and runs out of budget.** Two budgets, both 500 ms by default: the
-   per-leg driver timeout (`timeout_ms=500`, `search_engine.py:2832` for the vector leg,
-   `:4673` `runner_timeout` in `degradation_chain`) and the collector's
+   per-leg driver timeout (`timeout_ms: int = 500` on the VECTOR leg, `search_engine.py:3526`;
+   `:2832` is `run_fts_query`'s — the LEXICAL leg's — and `runner_timeout` in `degradation_chain`
+   is defined at `:4839`, not `:4673`, which is a comment line about `#4210`/`#3019`;
+   `#13121` round 8 F4) and the collector's
    `as_completed(timeout=0.5)`. A leg **still not done at the post-deadline rescan** is
    recorded `reason="timeout", ran=True, degraded=True` (`#8450`, `#6851`).
    ⛔ **The cap bounds the WAIT, never the COLLECTION** (`#6851`): `as_completed` can overshoot
@@ -136,7 +143,20 @@ cheaper — it would only move the threshold the queueing crosses.
 
 ### 2.2 What a full scan costs versus an ANN index
 
-Published, 384-dim `all-MiniLM-L6-v2`, cosine, k=10, 100k vectors, 500 queries:
+384-dim `all-MiniLM-L6-v2`, cosine, k=10, 100k vectors, 500 queries.
+
+**PROVENANCE (`#13121` round 8 F3):** this table is reproduced verbatim on two PyPI package pages —
+<https://pypi.org/project/mnemolith/0.3.3/> and <https://pypi.org/project/aether-cache/0.1.8/> (the
+second adds an `ef=200` row). ⛔ **It is a library README benchmark, not a peer-reviewed study**, and
+PyPI serves those pages only to a browser, so the numbers below cannot be re-fetched by a script —
+they are cited as the table's own claim, and the ratios derived from them inherit that weight.
+**An independently verifiable cross-check disagrees by ~20× and does not weaken the conclusion:**
+<https://zayunsna.github.io/tips/2026-10-19-vector_search_hnsw/> (fetched 2026-11-17; scripts and raw
+output published) measures an exact NumPy scan at **0.805 ms per query on 133,957** real embeddings
+and HNSW at 0.167 ms, with its own stated caveat that NumPy batches 500 queries across cores while
+the HNSW queries ran single-threaded. Whichever table a reader prefers, the tuned exact scan of a
+100k class corpus is **sub-millisecond**, and ours is **13.26 ms at 1,000** documents (§3.4) — the
+gap argument below does not depend on which of the two is used.
 
 | method | recall@10 | p50 | p99 |
 |---|---|---|---|
