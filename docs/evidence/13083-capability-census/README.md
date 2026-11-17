@@ -12,7 +12,7 @@ ownedBy: epistemic-team
 
 # `#13083` — what each stored shape costs the graph
 
-**Measured:** 2026-11-17, at head `17307a1b1502` (this branch's own first commit; the audit's base is
+**Measured:** 2026-11-17, at head `6850b74c14` (the head both JSONs record as `tree.git_head`; the audit's base is
 `8762578f8c` = `origin/main` at dispatch, where the probe does not yet exist — the JSON's `tree.git_head` is
 the authority for what ran, and it names this branch), private lane
 `docker://:@127.0.0.1:16397/tortoise_test_matrix` (`tools/test_lane.py`). Instrument:
@@ -20,8 +20,9 @@ the authority for what ran, and it names this branch), private lane
 `measurement-after.json`.
 
 **Provenance, stated precisely.** Each JSON records `tree.git_head` = the branch head **at run time**. ⚠️ That
-is **not** `8762578f8c` (`origin/main` at dispatch — the probe does not exist there), and it is not necessarily
-the final tip either: the instrument was corrected twice under review, so the head moved between runs.
+is **not** `8762578f8c` (`origin/main` at dispatch — the probe does not exist there), and it is not the final tip
+either: **both arms record `6850b74c14`**, because the instrument was corrected under review and both were
+re-run at that head.
 **The tree to reproduce these figures from is the commit that contains the probe AND both JSONs** (they land
 together), not the sha inside the JSON. The audit's base is `8762578f8c`.
 

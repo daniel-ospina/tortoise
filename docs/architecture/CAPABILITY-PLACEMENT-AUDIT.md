@@ -51,8 +51,8 @@ every number rather than trust it.
 
 The population is not the ontology's wish list; it is what a writer **actually puts on a node**. ⚠️ **The claim
 is scoped, not 'everything in the database':** it covers the **memory substrate** (rows 1–6) plus every
-**graph-only bookkeeping label reached from the code paths this audit read** (rows 7–16). It is **not** a census
-of the registry / tenancy / metering substrate — and the labels found but NOT censused are listed in row 17
+**graph-only bookkeeping label reached from the code paths this audit read** (rows 7–17). It is **not** a census
+of the registry / tenancy / metering substrate — and the labels found but NOT censused are listed in row 18
 rather than silently omitted.
 
 Two writers reach the graph, and both were read:
@@ -91,7 +91,7 @@ labels on their paths; it did **not** classify the billing / tenancy / pipeline 
 decision on `:Pipeline` or `:MeteringRecord` may be made from this document.** (`:Pipeline` is named
 explicitly because the same module writes the censused `:PipelineStage`.)
 
-Rows 10–16 are declared **not exercised by the instrument** rather than counted as zero-cost — a shape
+Rows 10–17 are declared **not exercised by the instrument** rather than counted as zero-cost — a shape
 the corpus does not create is a shape this document has *not* measured, and saying so is the difference
 between a census and a guess.
 
@@ -114,8 +114,9 @@ baseline drifts between runs; and the per-property column is a **rendered** size
 
 ## 2. The reader census — every reader at `file:line`, by capability
 
-Each row is a **reader**, not a mention. The capability column is what the reader *needs*; a reader that
-needs none of the five is SQL-shaped and is marked **none**.
+Each row is a **reader**, not a mention — and a `SET` expression that READS the node counts as a reader. The
+capability column is what the reader *needs*; a reader that needs none of the five is SQL-shaped and is
+marked **none**.
 
 ### 2.1 `:Point`
 
@@ -138,7 +139,8 @@ needs none of the five is SQL-shaped and is marked **none**.
 
 **Verdict: `graph`.** Thirteen capability-carrying readers across six files (§2.1's table spans
 `projection/propagation.py`, `sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`,
-`domain_validators.py`); a record-backed copy could not answer any of them without re-implementing belief
+`domain_validators.py`; its fourteenth row, `domain_validators.py:105`, is deliberately **`none`**); a
+record-backed copy could not answer any of them without re-implementing belief
 propagation, the fulltext index or HNSW in SQL (which is `#13082` Phase 2 and its stop condition).
 
 ⚠️ **A correction this census needed against itself.** An earlier draft cited
@@ -159,10 +161,10 @@ prevent — recorded rather than quietly edited.
 | `tortoise/sdk.py:52878` | `MATCH (s:Source {url:$url})-[:references]->(n)` | **traversal**. |
 | `tortoise/sdk.py:15659` (target side) | `(p:Point)-[:extractedFrom]->(s:Source)` — every claim must reach its source (§9.4 ①) | **traversal** |
 | `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('<label>', $query)` — the index `:3011`'s note says is built on **`Source._searchText` for every Source** | **fulltext index** |
-| `tortoise/session_source_migration.py:432-434` | `SET new.provenance_spans = CASE WHEN coalesce(size(new.provenance_spans),0)=0 THEN $spans ELSE new.provenance_spans END` — a **`SET` that READS the node**, i.e. a reader by §1's rule | **none** |
+| `tortoise/session_source_migration.py:432-434` | `SET new.provenance_spans = CASE WHEN coalesce(size(new.provenance_spans),0)=0 THEN $spans ELSE new.provenance_spans END` — a **`SET` that READS the node**, i.e. a reader by §2's rule | **none** |
 
-⚠️ **That last row is the rule that put it here.** §1 says a `SET` expression that reads the node is a
-reader. `provenance_spans` is this audit's own instance of that — and it was **missing from an earlier
+⚠️ **That last row is the rule that put it here.** §2's method statement says a `SET` expression that reads
+the node is a reader. `provenance_spans` is this audit's own instance of that — and it was **missing from an earlier
 draft**, which is the more instructive failure: a `SET`-that-reads is exactly what a `MATCH`-only grep walks
 past. Capability `none` (a property guard: it fills an absent value and never walks), so the verdict stands.
 
@@ -220,13 +222,6 @@ read resolves the node **through the edge** — `sdk.py:28069`
 `sdk.py:22209` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC). A traversal needs its
 **endpoint in the graph**, so "the node is only the endpoint label" is not an exemption — it is the
 justification. **Verdict: `graph`.**
-
-| `tortoise/session_source_migration.py:432-434` | `SET new.provenance_spans = CASE WHEN coalesce(size(new.provenance_spans),0)=0 THEN $spans ELSE new.provenance_spans END` — a **`SET` that READS the node**, i.e. a reader by §1's rule | **none** |
-
-⚠️ **This row is the rule that put it here.** §1 says a `SET` expression that reads the node is a reader;
-`provenance_spans` is the audit's own instance of that, and it was **missing from an earlier draft** — which
-is the more interesting failure, because a `SET`-that-reads is exactly what a `MATCH`-only grep walks past.
-Capability `none` (a property guard: it fills an absent value, never walks), so it does not move the verdict.
 
 **Verdict: `graph`** for both.
 
@@ -287,7 +282,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 
 | # | shape | readers (summary) | needs graph? | verdict | one-line reason |
 |---|---|---|---|---|---|
-| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 14 readers | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW | **graph** | the belief walk *is* the product; six capabilities read it |
+| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 14 readers | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW | **graph** | the belief walk *is* the product; four of the five capabilities read it |
 | 2 | `:Point.ep_*`, `baseline_set`, `confidence` | `propagation.py:81,86`; `sdk.py:38073` | **yes** — EP state | **graph** | there is no EP in SQL without building one |
 | 3 | `:Point.embedding` | vector leg (HNSW) | **yes** — vector index | **graph** | the index lives in the engine (§12.1) |
 | 4 | `:Source` identity + `_searchText` | §2.2 | **yes** — `references`/`extractedFrom`, FTS | **graph** | §9.4 ① makes the link load-bearing |
@@ -303,7 +298,18 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
 | 12 | `_searchText` on a **non**-episodic `:Source` | FTS | **yes** | **graph** | the fulltext index's field set |
 | 13 | `Source.summary`/`_searchText` on an **episodic** Source | declined already (`#10853`) | **no** | **`record_only`** ✅ already shipped | §9.1's prose rule, per ROW |
-| 14 | prompt-side `Point.aboutEntities`, `mentions` | `search_engine` flattening | **yes** — feeds the vector/text leg | **graph** | it is input to the embedding text |
+| 14 | `Point.mentions` (the held-phrase JSON tail prop, `projection/entities.py:1206`) | `projection/__init__.py:22118-22120` (`SET n.mentions = NULL` / `= $mentions` — an **RMW**, `none`); `sdk.py:18841` (`pt.get("mentions")`, a whole-node read) | **no** | **`record_only`** ⛔ gated — the two test pins refuse the declaration (§5.1) | nothing walks, filters or indexes it, and it is **not** an embedding input (`sdk.py:15975` composes from `quote`/`content` only) — but the move is blocked |
+
+⚠️ **Row 14 was corrected in review, and the correction is the instructive part.** It read `prompt-side
+Point.aboutEntities, mentions` with a **`graph`** verdict whose reader was "`search_engine` flattening" — a
+reader with no `file:line` that does not exist. Two separate defects: (a) `aboutEntities` is not a node
+property at all — `projection/entities.py:1808` lists it in `_META_KEYS` under *"handled as graph edges"*, and
+the edge it becomes is `aboutSubject`, already censused at §2.5, so the row double-counted a censused shape;
+(b) `mentions` **is** stored (`projection/entities.py:1206`, `_POINT_JSON_RECORD_PROPS`), but nothing needs a
+graph capability to read it, and the embedding text is `quote` + edge-derived names (`embed_compose.py:284`,
+called at `sdk.py:15975`) — neither half is an input. The owner's rule therefore puts it at `record_only`,
+blocked by exactly what gates `story_arc`: the mechanism CAN deny a tail-only key (§5.1 measures it), and the
+two test pins are what refuse the declaration.
 
 ---
 
@@ -325,7 +331,7 @@ figure is derived from the width, never read off the rendered column.
 | shape | nodes | rendered bytes | stored footprint | share (of the RENDERED total) |
 |---|---|---|---|---|
 | `:Point` | 66 | **668,014** | | |
-| … of which `embedding` | | 474,348 (rendered) | **101,376** (66 × 384 × 4 B, `float32`) | **14.8 %** |
+| … of which `embedding` | | 474,348 (rendered) | **101,376** (66 × 384 × 4 B, `float32`) | **69.4 %** |
 | … of which `content` | | 93,287 (exact — a string) | 93,287 | **13.7 %** |
 | … of which `story_arc` (this arm only) | | 90,000 (exact) | 90,000 | 13.2 % |
 | `:GraphEvent` | 67 | **12,768** | 12,768 | **1.87 %** |
@@ -341,8 +347,11 @@ figure is derived from the width, never read off the rendered column.
 per-type conversion for every property. They are used for SHAPE, not for a billing estimate.)
 
 **Read this table carefully.** The census says the graph is **`:Point`-shaped (97.8 % of rendered bytes)** and
-that inside `:Point` the two largest families are **`embedding` (101,376 B stored, 14.8 %) and `content`
-(93,287 B, 13.7 %)** — comparable, not one dominating the other — and both are `graph` verdicts (§3 rows 1–3).
+that inside `:Point` the two largest families are **`embedding` (474,348 B rendered, 69.4 %; 101,376 B stored)
+and `content` (93,287 B rendered and stored, 13.7 %)**. ⚠️ **Those two are comparable only on the STORED
+basis** (101,376 vs 93,287 B) — on the rendered basis the vector is not comparable at all, which is exactly
+the ~4.7× over-report the paragraph above warns about. Quoting 14.8 % for a stored figure against a rendered
+total was wrong and was corrected in review. Both families are `graph` verdicts (§3 rows 1–3).
 `:GraphEvent` is **1.87 %** of payload but is the **largest non-Point resident** and the only label with no
 capability reader at all; its ~190 B/node payload understates it, because §9.1's own measurement puts it at
 **801 B/turn** once block overhead is counted.
