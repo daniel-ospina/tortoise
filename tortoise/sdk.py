@@ -16334,13 +16334,17 @@ class TortoiseSDK:
         # CREATE always LANDS a `status` (the default is `"live"`, popped above).
         # A bag naming only `goalState` therefore leaves a pair the bag never
         # spelled, and asking the stored side about the ABSENT status would
-        # refuse a write whose RESULT is coherent —
-        # `create_point(id=<ended goal>, goalState="active")` writes
-        # `status="live"`, i.e. (live, active), and must stay admitted. With the
-        # resolved status in the bag the probe is not even read for it (the
-        # helper only reads the stored half when one endpoint is missing).
-        # A genuinely fresh explicit id costs one read that answers `{}`, and an
-        # id-less create pays nothing (there is no node it could reach).
+        # grade a state the write never leaves.
+        #
+        # ⛔⚠️ REVIEW ROUND 3, FINDING 4 SUPERSEDED THE COST NOTE THAT USED TO SIT
+        # HERE ("with the resolved status in the bag the probe is not even read
+        # for it"). It IS read on this leg, for EVERY explicit-id create,
+        # because the pair alone cannot answer whether the node it lands on is
+        # ALREADY ENDED — and an ending is final
+        # (`create_point(id=<ended goal>, goalState="active")` used to write a
+        # coherent LIVE pair over the ending and is now REFUSED). A genuinely
+        # fresh explicit id costs one read that answers `{}`, and an id-less
+        # create pays nothing (there is no node it could reach).
         #
         # ⛔ PLACED AFTER the dedup block, and that placement is load-bearing: a
         # dedup HIT does not land `status` (it is popped before the fold, #1905)

@@ -234,17 +234,15 @@ def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
     # instead, so it never even pays for the read. Proven by handing the probe a
     # view that WOULD refuse (stored deprecated/abandoned): if the door graded
     # the bag, this call raises.
-    # ⛔ REVIEW ROUND 3, FINDING 4 CHANGED THIS ARM'S PREMISE. It used to assert
-    # that the door NEVER reads the stored half when the caller names both
-    # endpoints. That premise is what let `create_point(id=<retired goal>,
-    # goalState="met")` write a coherent LIVE pair over an ending: the CREATE
-    # always lands a status (the door's default `"live"` when the caller names
-    # none), so "both endpoints named" does not mean "the stored ending is
-    # irrelevant". The door now reads the stored half on this leg WHATEVER the
-    # caller names, and a stored ENDING refuses the resurrection (the test below
-    # pins that). What survives, and is what this arm still proves: when the
-    # stored node is NOT ended the write LANDS — the read cannot manufacture a
-    # false refusal.
+    # ⛔ REVIEW ROUND 3, FINDING 4: the explicit-id leg now reads the node's
+    # STORED ending on EVERY create (see the arm's finality branch), so the pair
+    # the caller names can no longer resurrect an ended goal.
+    #
+    # the FALSE-REFUSAL arm below: this write LANDS `status="live"` (the create
+    # default, which the caller never names), so the pair it leaves is (live,
+    # active) — coherent, and the node it addresses is NOT ended, so the stored
+    # read must not refuse it. That is what pins the read as non-destructive;
+    # the RESURRECT test below pins the other direction.
     import tortoise.sdk as sdk_mod
     calls = []
     real = sdk_mod._stored_goal_ending_view
