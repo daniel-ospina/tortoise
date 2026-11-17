@@ -331,6 +331,48 @@ class TestDeprovisionOnDelete:
         text = " ".join(r.getMessage() for r in caplog.records)
         assert "LOWER BOUND" in text and "o1" in text, text
 
+    def test_a_seam_without_query_all_is_ANNOUNCED_not_silent(self, monkeypatch, caplog):
+        """⛔ THE FAILURE MODE THE DELETED `getattr` SEAM INTRODUCED (#13205
+        review round 9, finding 2). Both reads of this table now use ONE bare
+        `query_all` shape — deliberately not a `getattr` fallback. A seam that
+        predates the walk therefore raises `AttributeError` into the best-effort
+        handler below, which logs and returns having dropped NO user.
+
+        Continuing is correct per the RECORDED DECISION C4/#2113 ("Best-effort
+        per graph (a committed purge never fails on a drop)"), but only while it
+        is ANNOUNCED: `tenant_<gid>` users are GLOBAL state that nothing else
+        names, so the operator can only drop them by hand if the failure is said
+        out loud. `test_a_seam_double_without_query_all_still_enumerates` pinned
+        the old fallback until it was deleted with the seam; this pins the log
+        that replaced it, which is all that stands between the removal and
+        silence.
+
+        Mutant: delete the `_logger.warning` in the handler (keep the `return`)
+        — reds on the log assertion here, while the sweep still does not raise
+        (#2113).
+        """
+        from tortoise import hosted_api as ha
+
+        dropped: list[str] = []
+        monkeypatch.setattr(ha, "_acl_user_drop_hook", dropped.append)
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+
+        class _NoWalker:
+            """A control-plane seam from BEFORE the `query_all` walk: `query` only."""
+
+            def query(self, table, **kw):
+                return []
+
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: _NoWalker())
+        caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
+        ha._drop_org_acl_users("o1")       # must NOT raise (#2113)
+        assert dropped == [], dropped      # nothing was named, nothing dropped
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "ACL-user enumeration failed" in text and "o1" in text, text
+        assert "query_all" in text, text   # names the seam that cannot walk
+
     def test_an_unreadable_enumeration_REFUSES_rather_than_erasing_a_subset(self, monkeypatch):
         """⛔ A failure to ask is not an answer (review round 4, P1).
 
