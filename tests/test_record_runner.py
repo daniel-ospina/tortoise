@@ -447,11 +447,15 @@ def test_apply_refuses_an_impossible_bound_and_does_not_call_it_a_completion(
         # The fold must never be reached: a refusal that folded first would be a
         # write behind a rejected invocation.
         monkeypatch.setattr(_replay_attr(), "replay", _must_not_run)
-        rc = main(["apply", "--org-id", "o", "--graph-id", "g",
-                   "--journal", str(FIXTURE), flag[0], flag[1],
-                   "--acknowledge-plan", "39"])
+        with pytest.raises(SystemExit) as exc:
+            main(["apply", "--org-id", "o", "--graph-id", "g",
+                  "--journal", str(FIXTURE), flag[0], flag[1],
+                  "--acknowledge-plan", "39"])
         captured = capsys.readouterr()
-        assert rc == EXIT_REFUSED, (flag, rc, captured)
+        # ⛔ rc 2 (USAGE), not 1 (REFUSED): a bad bound is a fact about THIS
+        # INVOCATION, and `1` means "the record said no, do not re-run blindly".
+        # A backfill chain that reads 1 halts on its own typo.
+        assert exc.value.code == EXIT_USAGE, (flag, captured)
         assert f"{flag[0]} must be >= 1" in captured.err, captured.err
         # ⛔ The false sentence, asserted ABSENT — the whole defect was this line.
         assert "NOTHING TO DO" not in captured.out, captured.out
@@ -480,9 +484,10 @@ def test_an_impossible_bound_is_refused_BEFORE_any_record_is_read(monkeypatch, c
         ["plan", "--limit", "0"],
         ["plan", "--batch-size", "0"],
     ):
-        rc = main([argv[0], "--org-id", "o", "--graph-id", "g",
-                   "--journal", str(FIXTURE), *argv[1:]])
-        assert rc == EXIT_REFUSED, (argv, rc)
+        with pytest.raises(SystemExit) as exc:
+            main([argv[0], "--org-id", "o", "--graph-id", "g",
+                  "--journal", str(FIXTURE), *argv[1:]])
+        assert exc.value.code == EXIT_USAGE, argv
         assert "must be >= 1" in capsys.readouterr().err, argv
 
 

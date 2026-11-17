@@ -95,7 +95,11 @@ EXIT CODES — `record_allocator_cli`'s contract, so a chain reads one way
   this journal does not have, an unacknowledged/stale plan, a cut-over graph
   refusing an enumerated replay, a batch that raised (rolled back), or a commit
   that raised (no batch is claimed).
-* ``2``  USAGE — argparse rejected the invocation.
+* ``2``  USAGE — argparse rejected the invocation, or a bound it could not
+  honour (``--limit``/``--batch-size`` below 1) refused BEFORE anything was
+  read. These are facts about the INVOCATION, not about the record, so they must
+  not wear the record's verdict — a chain that reads ``1`` halts a healthy
+  backfill over a typo in its own flags.
 
 ``--json`` prints the same report as JSON on stdout and nothing else.
 """
@@ -1004,17 +1008,29 @@ def _refuse_impossible_bounds(args: argparse.Namespace) -> None:
     refused the identical input with `--limit must be >= 1`.
 
     Two facts had been merged and they must not be: an invalid bound is an
-    ARGUMENT failure (rc 1, nothing read, nothing claimed), and "nothing to do"
+    ARGUMENT failure (rc 2, nothing read, nothing claimed), and "nothing to do"
     is a VERIFIED statement about the remainder. A scripted backfill reads
     `rc=0` plus that sentence as *complete*, so the merge is a false completion
     claim rather than a cosmetic one. The bound describes the INVOCATION, so it
     is checked from the parsed arguments — before the journal is read, before a
     connection is opened, and on every code path the verb could take.
+
+    ⛔ THE CODE IS 2 (USAGE), NOT 1 (REFUSED) — review P2. `1` is reserved for
+    "REFUSED by the record: the graph is unchanged, read the reason, do not
+    re-run blindly" (see the module's EXIT CODES and
+    `record_allocator_cli:54-59`), and the #5128 guard added above argues the
+    same doctrine about the interpreter. A typo in the caller's own flags is not
+    a claim about the record, and a backfill chain that reads `1` as "the record
+    said no" stops work on a healthy store.
     """
-    if args.batch_size < 1:
-        raise RunnerError(f"--batch-size must be >= 1 (got {args.batch_size!r})")
-    if args.limit is not None and args.limit < 1:
-        raise RunnerError(f"--limit must be >= 1 (got {args.limit!r})")
+    for flag, value in (("--batch-size", args.batch_size),
+                        ("--limit", args.limit)):
+        if value is not None and value < 1:
+            sys.stderr.write(
+                f"record_runner: {flag} must be >= 1 (got {value!r}) — this is "
+                f"a usage error (exit 2), not a refusal by the record: "
+                f"nothing was read and nothing was written\n")
+            raise SystemExit(EXIT_USAGE)
 
 
 def cmd_plan(args: argparse.Namespace, *, echo) -> int:
