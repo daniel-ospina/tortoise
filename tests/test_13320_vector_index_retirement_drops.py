@@ -517,6 +517,24 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
         "deployment (R3, the reason `_retirement_failure_is_news` exists)")
 
 
+class _RefusedWithUnparsedNeighbour(_EngineLikeGraph):
+    """Every DROP refused with the engine's own `no such index`, and the GATE read
+    carries one row the store cannot interpret beside the target.
+
+    Nothing is written, so the inventory reuses the gate's rows; the unparsed
+    neighbour withholds the property half. The sweep still MEASURED the index
+    present — that is what armed it — so the line must be SURVIVED.
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="none")
+        self._rows = [
+            _catalogue_row("Point", "embedding", "VECTOR"),
+            ("Object", ["name"], "a reshaped cell", 0, 0, 0, "NODE",
+             "OPERATIONAL", ""),
+        ]
+
+
 def _retirement_warnings(caplog) -> list[str]:
     return [
         r.getMessage() for r in caplog.records
@@ -928,6 +946,12 @@ def test_an_ANSWERED_but_unparseable_catalogue_is_not_a_measurement_of_absence(
     assert warnings, (
         "an armed store whose catalogue answered but could not be parsed was "
         "silent — 'cannot read it' and 'there is none' are indistinguishable")
+    # ⛔ ONE line (#13330 review 7): the PARTIALLY-readable arm must not also fire
+    # here and claim "some rows were readable" when none were.
+    assert len(warnings) == 1, (
+        f"one unreadable catalogue produced {len(warnings)} #13320 lines: {warnings}")
+    assert "could not be fully parsed" not in warnings[0], (
+        f"the line misdescribes the cause as a partial read: {warnings[0]!r}")
     assert "could not read the index catalogue" in warnings[0], warnings[0]
     assert "not one of them parsed" in warnings[0], (
         f"the line must say the catalogue ANSWERED and could not be parsed: "
@@ -1125,3 +1149,31 @@ def test_a_DEFINITIVE_refusal_does_not_cost_an_extra_catalogue_read(
     assert len(reads2) == 3, (
         "an AMBIGUOUS drop failure must still force the confirmation read: "
         f"{len(reads2)} reads, calls={t.calls!r}")
+
+
+def test_a_REUSED_pre_drop_read_is_reported_as_the_MEASUREMENT_it_is(
+        monkeypatch, caplog):
+    """No write ⇒ the gate's reading stands; do not call it "nothing measured" (#13330 review 7).
+
+    When every candidate DROP is DEFINITIVELY refused, the inventory reuses the
+    gate's pre-drop rows — there is no post-drop read. If an unrelated row in that
+    reuse failed to parse, `_vector_index_props` is withheld and the sweep
+    reported "was NOT CONFIRMED removed: the post-drop catalogue answered in a
+    shape this store could not parse" — naming a read that never happened, and
+    demoting the SURVIVED measurement it DID take (that measurement is why the
+    gate fired at all).
+    """
+    _arm(monkeypatch)
+    graph = _RefusedWithUnparsedNeighbour()
+    proj = _bare(graph, graph="test_13320_reused_rows")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "the survivor was silent"
+    line = warnings[0]
+    assert "SURVIVED" in line, (
+        f"a measured survivor was reported as unmeasured: {line!r}")
+    assert "post-drop" not in line, (
+        f"there was no post-drop read — the rows were the gate's: {line!r}")

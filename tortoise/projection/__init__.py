@@ -21889,6 +21889,13 @@ class FalkorProjection(
         if (not _has_vector_index
                 and getattr(self, "_vector_index_props", None) is None
                 and getattr(self, "_vector_index_served_labels", None) is not None
+                # ⛔ #13330 review 7: this arm is for a catalogue that is
+                # PARTIALLY readable. Without this the FULLY unreadable lane —
+                # already classified and already warned by the gate above — fell
+                # into it too, emitting a SECOND line that claimed "some rows
+                # were readable" when zero were, contradicting the accurate line
+                # immediately before it.
+                and _catalogue_unreadable is None
                 and self._retirement_failure_is_news(
                     "catalogue-partially-unreadable")):
             _log.warning(
@@ -21912,7 +21919,18 @@ class FalkorProjection(
             # is a false PASS the report itself would print. Residual: none for
             # the property question; the inventory now counts unparsed rows and
             # withholds this half when any row failed to parse.
+            # ⛔ #13330 review 7 (P2): WHEN NOTHING WAS WRITTEN, THE GATE'S OWN
+            # READING STANDS. If every candidate DROP was DEFINITIVELY refused,
+            # the inventory reuses the gate's pre-drop rows (there is no
+            # post-drop read), and `_vector_index_props` can be withheld because
+            # an unrelated row did not parse. Consulting it then reported "NOT
+            # CONFIRMED removed: the post-drop catalogue ..." — naming a read
+            # that never happened, and demoting the SURVIVED measurement this
+            # sweep did take (it is why `_has_vector_index` is True) to
+            # "nothing measured".
             _still_indexed = (
+                # no write ⇒ the gate's pre-drop measurement is current
+                True if not _attempted else
                 None if getattr(self, "_vector_index_props", None) is None
                 else "embedding" in self._vector_index_props.get(
                     "Point", frozenset()))
@@ -21954,6 +21972,13 @@ class FalkorProjection(
                 # facts and the line must not merge them (#13330 review P2 x2):
                 # "SURVIVED" is a MEASUREMENT, and it is only made when the
                 # post-drop catalogue actually answered.
+                # ⛔ WHICH READ IS BEING DESCRIBED (#13330 review 7): with no
+                # write the rows in hand are the GATE's pre-drop read, so calling
+                # them "the post-drop catalogue" names a read that never
+                # happened.
+                _read_noun = ("the post-drop catalogue" if _attempted
+                              else "the catalogue read before the sweep "
+                                   "(no DROP was written, so that read is current)")
                 if _still_indexed is None:
                     # ⛔ #13330 review (P2): `None` has TWO causes and the line
                     # must not fabricate the wrong one. The read RAISING is a
@@ -21964,18 +21989,18 @@ class FalkorProjection(
                     # is a set whenever the inventory completed, and None only when
                     # the read itself did not.
                     _why = (
-                        "the post-drop catalogue read FAILED"
+                        f"{_read_noun} read FAILED"
                         if self._vector_index_served_labels is None
-                        else "the post-drop catalogue answered in a shape this "
-                             "store could not parse"
+                        else f"{_read_noun} answered in a shape this store "
+                             "could not parse"
                     )
                     _verdict = (
                         f"was NOT CONFIRMED removed: {_why}, so nothing measured "
                         "whether it is still there")
                 else:
                     _verdict = (
-                        "SURVIVED an ARMED retirement sweep: the post-drop "
-                        "catalogue still reports it")
+                        f"SURVIVED an ARMED retirement sweep: {_read_noun} "
+                        "still reports it")
                 _what_the_engine_did = (
                     f"the engine accepted {_dropped_with!r} and the index is "
                     "still in the catalogue — a FALSE PASS, which is why the "
