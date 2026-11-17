@@ -630,8 +630,8 @@ ALLOWANCE_GATED_RESOURCES = frozenset().union(
 # source grep stays green on `if False:`. A callable can be handed synthetic
 # dimensions, so each arm is proved to RAISE instead of proved to be spelled.
 def _check_release_conditions(
-        dims: Iterable[AllowanceDimension]) -> tuple[str, ...]:
-    """Refuse a block that cannot be revalidated (#9559 R11). Returns the NAMES.
+        dims: Iterable[AllowanceDimension]) -> tuple[Any, ...]:
+    """Refuse a block that cannot be revalidated (#9559 R11). Returns RECORDS.
 
     Three arms, each a distinct way a ``release`` declaration goes wrong: a block
     that names nothing that would end it, a condition carried by a dimension that
@@ -642,14 +642,33 @@ def _check_release_conditions(
     ``_check_release_conditions()`` a silent no-op, i.e. exactly the inert
     enforcer this function exists to be the opposite of.
 
-    ⛔ IT RETURNS NAMES, NOT A COUNT — and that is load bearing, not style. An
-    integer result is forgeable: reviewer round 5 measured that
-    ``RELEASE_CHECKED = len(DIMENSIONS)`` stays GREEN, because 3 is what a run
-    over 3 dimensions also returns, so the "Existence is not wiring: the check
-    must have RUN" claim could be satisfied by an edit that never calls it. A
-    tuple of the validated names cannot be produced that way.
+    ⛔ IT RETURNS VALIDATED RECORDS, NOT NAMES — and that is load bearing, not
+    style. An integer result was measured forgeable first (``RELEASE_CHECKED =
+    len(DIMENSIONS)``), so it became a tuple of names; reviewer round 6 then
+    measured the trivial enumeration that defeats the names too:
+    ``RELEASE_CHECKED = tuple(d.dimension for d in DIMENSIONS)`` — a one-line edit
+    that never calls this function — reproduced the published value and stayed
+    GREEN. So each element is now an instance of ``_ValidatedBlock``, a class
+    created INSIDE this call: no other code can name that type, it carries a seal
+    object that exists nowhere else, and every call produces a fresh one. A forger
+    must reconstruct that record shape and stamp, i.e. REIMPLEMENT the function —
+    which is the honest limit of the guard, stated rather than overclaimed.
     """
     materialised = tuple(dims)
+
+    # One seal per call, captured by the record class below. Two calls never share
+    # it, so "this value came out of a run" is observable from outside without
+    # exposing anything a module-constant enumeration could reproduce.
+    seal = object()
+
+    class _ValidatedBlock:
+        __slots__ = ("dimension", "release", "seal")
+
+        def __init__(self, d: AllowanceDimension) -> None:
+            self.dimension = d.dimension
+            self.release = tuple(d.release)
+            self.seal = seal
+
     for d in materialised:
         if d.blocked and not d.release:
             raise RuntimeError(
@@ -668,15 +687,15 @@ def _check_release_conditions(
                 f"allowance dimension {d.dimension!r} declares release "
                 f"condition(s) {unknown!r} that RELEASE_CONDITIONS does not "
                 f"define — a typo'd condition would never be revalidated")
-    return tuple(d.dimension for d in materialised)
+    return tuple(_ValidatedBlock(d) for d in materialised)
 
 
-#: The declared dimensions the import-time release check VALIDATED, by name. ⛔
+#: The declared dimensions the import-time release check VALIDATED, as records. ⛔
 #: Published so the WIRING is testable: delete the call below and this name is
 #: absent (AttributeError in the test), delete the assignment and the module does
 #: not import — so "the check exists" and "the check RUNS" cannot drift apart. A
 #: source-grep test could not tell those apart: `if False:` leaves the text.
-#: Names, not a count, for the reason in the docstring above.
+#: Records with a per-call seal, not names, for the reason in the docstring above.
 RELEASE_CHECKED = _check_release_conditions(DIMENSIONS)
 
 

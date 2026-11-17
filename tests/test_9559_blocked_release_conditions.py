@@ -48,6 +48,7 @@ is the defect it exists to prevent). It is:
 """
 from __future__ import annotations
 
+import re
 import tokenize
 from pathlib import Path
 from typing import Any
@@ -238,6 +239,17 @@ def test_every_release_token_has_a_predicate_and_vice_versa():
     assert set(_RELEASED_PHRASES) == set(RELEASE_CONDITIONS), (
         "a release token has no phrase list, so its staleness guard is "
         f"vacuous: {sorted(set(RELEASE_CONDITIONS) - set(_RELEASED_PHRASES))}")
+    # ⛔ NON-EMPTY PER TOKEN, not merely the KEY's presence. Reviewer round 6
+    # measured the hole: `"storage_included_amounts_confirmed": ()` keeps the key,
+    # so the set comparison above passes while that token's staleness arm covers
+    # NOTHING — exactly the silent hole the sentence above says this assertion
+    # prevents. Key granularity cannot see it; the entry's own length can.
+    empty_phrases = sorted(t for t in RELEASE_CONDITIONS
+                           if not _RELEASED_PHRASES.get(t))
+    assert not empty_phrases, (
+        "release token(s) carry an EMPTY phrase list, so the staleness guard is "
+        f"vacuous for them: {empty_phrases} — declare the wording the condition "
+        "would appear as, or the arm protects nothing")
 
 
 def test_the_residency_refusal_still_fires():
@@ -455,6 +467,102 @@ def test_the_falsified_premise_is_actually_recorded_as_released():
         f"product/pricing.json reports them confirmed — re-ground the block:\n  {evidence}")
 
 
+# ── the falsified-premise scan, as a UNIT, so its GRANULARITY is testable ─────
+#
+# Phrasings that assert the per-org byte attribution does NOT exist.
+_RELEASED_ASSERTIONS = (
+    "no per-org figure at all",
+    "HAS NO PER-ORG BYTE METER",
+    "records no per-org byte ownership",
+    "no per-org byte meter",
+    "only once a per-org attribution exists",
+    "no per-org split",
+)
+
+#: The marker a superseded position is quoted beside (``OVERRIDES:`` — the
+#: repo's rule for a deliberate departure). It exempts the SENTENCE carrying it.
+_OVERRIDES_MARKER = "OVERRIDES"
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _sentences(flat: str) -> list[str]:
+    """Split a flattened paragraph into sentences.
+
+    Sentence granularity is a measurement, not taste: reviewer round 6 inserted an
+    assertion into the OVERRIDES paragraph of
+    ``metering.storage_overage_cost_usd.__doc__`` — ~700 characters from the
+    marker — and the paragraph-wide exemption left all 16 tests GREEN.
+    """
+    return [s for s in _SENTENCE_END.split(flat) if s]
+
+
+def _scannable(flat: str) -> list[str]:
+    """The sentence(s) of a flattened paragraph the premise scan MUST read.
+
+    ⛔ The exemption is marker-ADJACENT, never paragraph-wide. A paragraph skip
+    was measured INERT-WHILE-BLIND: this very change added the word OVERRIDES to
+    ``metering.storage_overage_cost_usd``'s ``used:`` block, so that surface —
+    the one the PR names as a restatement site — became permanently unscannable,
+    and re-asserting the falsified premise anywhere else in its ~2,000-character
+    paragraph stayed GREEN. A sentence that QUOTES the superseded position beside
+    the marker is an argument; anything else is the defect.
+    """
+    return [s for s in _sentences(flat) if _OVERRIDES_MARKER not in s]
+
+
+def _premise_offenders(text: str) -> list[str]:
+    """Released phrasings ``text`` still asserts as CURRENT, with their context."""
+    hits: list[str] = []
+    for para in text.split("\n\n"):
+        # ⛔ NORMALISE FIRST: these are WRAPPED docstrings, so on the pre-fix tree
+        # the phrase could carry a line break inside it and never match the text
+        # it was written to catch. Whitespace is collapsed before splitting too.
+        flat = " ".join(para.split())
+        # ⛔ SKIP EMPTY PARAGRAPHS: ``str.split`` returns at least one element for
+        # ANY string (``"".split("\n\n") == [""]``), so an empty paragraph is
+        # always present and would otherwise be scanned as text. A genuinely
+        # empty SURFACE is a separate, per-surface assertion in the caller — the
+        # ``scanned``/``nonempty`` counters were each measured unfalsifiable.
+        if not flat:
+            continue
+        for sentence in _scannable(flat):
+            for phrase in _RELEASED_ASSERTIONS:
+                if " ".join(phrase.split()) in sentence:
+                    hits.append(f"{phrase!r} in: {sentence[:90]}")
+    return hits
+
+
+def test_the_marker_exemption_covers_only_the_sentence_that_asks_for_it():
+    """★ Marker-ADJACENCY, proved on synthetic text: the granularity IS the guard.
+
+    Reviewer round 6 measured the paragraph-wide exemption as a false PASS on the
+    one surface this change annotated — a falsified sentence inserted anywhere in
+    the OVERRIDES paragraph stayed GREEN. This pins BOTH halves, so the next
+    narrowing cannot quietly become a widening: a marker sentence quoting the
+    superseded position is exempt, and the same words one sentence away, asserted
+    as current, are reported.
+    """
+    argument = (
+        "The per-org attribution exists (#12762). "
+        'OVERRIDES: the older text claimed "no per-org figure at all" — that '
+        "sentence is superseded, not current."
+    )
+    assert _premise_offenders(argument) == [], (
+        "a sentence that QUOTES the superseded position beside the marker is an "
+        "argument and must not be reported")
+    smuggled = (
+        "The per-org attribution exists (#12762). "
+        "OVERRIDES: the older text claimed the figure did not exist. "
+        "There is no per-org figure at all."
+    )
+    hits = _premise_offenders(smuggled)
+    assert hits and "no per-org figure at all" in hits[0], (
+        "the falsified premise was re-asserted OUTSIDE the marker's own sentence "
+        "— in the very paragraph the exemption was meant to narrow — and the "
+        f"scan did not fire: {hits!r}")
+
+
 def test_no_other_surface_still_asserts_a_released_ground_as_current():
     """The scan surface for the falsified premise, beyond ``blocked_reason``.
 
@@ -477,45 +585,13 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
         # is the drift this issue is about.
         "cost_dimensions module docstring": cost_dimensions.__doc__ or "",
     }
-    # Phrasings that assert the attribution does NOT exist.
-    released_assertions = (
-        "no per-org figure at all",
-        "HAS NO PER-ORG BYTE METER",
-        "records no per-org byte ownership",
-        "no per-org byte meter",
-        "only once a per-org attribution exists",
-        "no per-org split",
-    )
+    # Phrasings and the exemption's granularity live in ``_premise_offenders``
+    # above, so the GRANULARITY is itself asserted
+    # (``test_the_marker_exemption_covers_only_the_sentence_that_asks_for_it``)
+    # instead of only being described in a comment.
     offenders = []
     for name, text in surfaces.items():
-        # ⛔ NORMALISE FIRST. These are wrapped docstrings, so on the pre-fix tree
-        # the phrase "no per-org figure at all" appeared with a line break inside
-        # it and could never match the very text it was written to catch.
-        # Whitespace is collapsed before matching.
-        #
-        # ⛔ THE EXEMPTION IS PER-PARAGRAPH, NOT PER-SURFACE — and that is load
-        # bearing, not tidiness. A whole-surface skip was measured INERT on
-        # ``metering.storage_overage_cost_usd.__doc__``, because this very change
-        # added the word OVERRIDES to it: the surface the commit message names as
-        # a restatement site became permanently unscannable, and appending the
-        # pre-fix sentence to it stayed GREEN. A paragraph that quotes the
-        # superseded position beside the marker is an argument; a paragraph that
-        # asserts it without one is the defect.
-        for para in text.split("\n\n"):
-            flat = " ".join(para.split())
-            # ⛔ SKIP EMPTY PARAGRAPHS: `str.split` returns at least one element
-            # for ANY string (`"".split("\n\n") == [""]`), so an empty paragraph
-            # is always present and would otherwise be matched as text. The
-            # surface-level half is the `empty` assert after the loop — the
-            # `scanned` and `nonempty` counters were each measured to be
-            # unfalsifiable in turn, so this is a PER-SURFACE property now.
-            if not flat:
-                continue
-            if "OVERRIDES" in flat:
-                continue
-            for phrase in released_assertions:
-                if " ".join(phrase.split()) in flat:
-                    offenders.append(f"{name}: {phrase!r} in: {flat[:90]}")
+        offenders.extend(f"{name}: {hit}" for hit in _premise_offenders(text))
     # ⛔ PER SURFACE, not aggregated. Reviewer round 5 measured the aggregate
     # form: emptying ONE surface left 21 non-empty paragraphs across 4, so
     # ``nonempty >= len(surfaces)`` stayed GREEN — the third round running in
@@ -569,11 +645,14 @@ def test_the_gate_import_check_rejects_all_three_shapes():
         allowance_gate._check_release_conditions((unknown_token,))
 
     # …and the real registry passes, so the check is not just always-raising.
-    # ⛔ NAMES, not a count: reviewer round 5 measured that an integer result is
-    # forgeable — `RELEASE_CHECKED = len(DIMENSIONS)` is the same value a real run
-    # returns, so a count-based assertion stays green over a check that never ran.
-    assert allowance_gate._check_release_conditions(DIMENSIONS) == tuple(
-        d.dimension for d in DIMENSIONS)
+    # ⛔ RECORDS, not names and not a count. Round 5 measured the COUNT forgeable
+    # (``RELEASE_CHECKED = len(DIMENSIONS)``); round 6 then measured the NAMES
+    # forgeable by a one-line comprehension over the same registry. The records
+    # carry the validated tokens, so a release declaration is compared through
+    # the same path a real run produces.
+    records = allowance_gate._check_release_conditions(DIMENSIONS)
+    assert [(r.dimension, r.release) for r in records] == [
+        (d.dimension, tuple(d.release)) for d in DIMENSIONS]
 
 
 def test_the_release_check_actually_RAN_at_import():
@@ -586,18 +665,48 @@ def test_the_release_check_actually_RAN_at_import():
     deleting the call makes the name absent (AttributeError here) and deleting the
     assignment makes the module fail to import.
 
-    ⛔ IT PINS THE NAMES, not a count. Reviewer round 5 measured the count form:
-    ``RELEASE_CHECKED = len(DIMENSIONS)`` — an edit that never calls the check —
-    produced the same integer and stayed GREEN, so "the check RUNS" could be
-    satisfied by a value that only resembles a run. A tuple of the validated names
-    cannot be forged that way without reimplementing the function.
+    ⛔ IT PINS A RECORD PRODUCED BY THE FUNCTION, not a value that resembles one.
+    Round 5 measured the count form forgeable (``RELEASE_CHECKED = len(
+    DIMENSIONS)``); round 6 measured the NAMES form forgeable too —
+    ``RELEASE_CHECKED = tuple(d.dimension for d in DIMENSIONS)`` is a one-line
+    edit that never calls the check and reproduced the published value, staying
+    GREEN. So three properties are asserted now, and no single line produces
+    them: each element exposes the VALIDATED tokens, its type is created inside
+    the function (a qualname no other code resolves), and the seal is per-call
+    (a second call cannot share it). Reproducing all three is reimplementing the
+    function — the honest limit of this pin, stated instead of overclaimed.
     """
-    expected = tuple(d.dimension for d in DIMENSIONS)
-    assert expected == allowance_gate.RELEASE_CHECKED, (
+    records = allowance_gate.RELEASE_CHECKED
+    assert [getattr(r, "dimension", r) for r in records] == [
+        d.dimension for d in DIMENSIONS], (
         "the import-time release check validated "
-        f"{allowance_gate.RELEASE_CHECKED!r}, not {expected!r} — a dimension can "
-        "now carry a block nothing revalidates, or the published value was "
-        "replaced by something that only looks like a run")
+        f"{[getattr(r, 'dimension', r) for r in records]!r}, not the declared "
+        f"dimensions {[d.dimension for d in DIMENSIONS]!r} — a dimension can now "
+        "carry a block nothing revalidates, or the published value was replaced "
+        "by something that only looks like a run")
+    assert [getattr(r, "release", None) for r in records] == [
+        tuple(d.release) for d in DIMENSIONS], (
+        "RELEASE_CHECKED carries release tokens that are not the ones the "
+        "dimensions declare — the published value did not come from validating "
+        "this registry")
+    # (2) The record TYPE is one the function creates (its qualname resolves to no
+    #     module attribute), so a plain tuple/namespace comprehension cannot stand
+    #     in for it.
+    record_type = type(records[0])
+    assert record_type.__qualname__ == (
+        "_check_release_conditions.<locals>._ValidatedBlock"), (
+        "RELEASE_CHECKED is not made of records produced inside "
+        f"_check_release_conditions (got {record_type.__qualname__!r}) — the "
+        "import-time check can be bypassed with the suite green")
+    # (3) The seal is PER CALL: every element of one run shares it, and a second
+    #     run cannot. A module constant or an enumeration has no such object.
+    assert all(r.seal is records[0].seal for r in records), (
+        "RELEASE_CHECKED's elements do not share one run's seal, so they were "
+        "not produced by a single validation pass")
+    fresh = allowance_gate._check_release_conditions(DIMENSIONS)
+    assert fresh[0].seal is not records[0].seal, (
+        "two calls share one seal, so the seal is a constant rather than proof "
+        "that the check RAN")
 
 
 def test_the_database_grain_reader_no_longer_denies_the_per_org_byte_figure():
