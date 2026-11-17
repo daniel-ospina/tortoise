@@ -709,6 +709,20 @@ _EVENT_KEY_RENAME_RE = re.compile(
     r"(?P<new>[\"']?[A-Za-z0-9_]+[\"']?)",
     re.IGNORECASE)
 
+#: A statement that removes the PREMISE **without naming the constraint**: the
+#: table itself, or the `node_key` column the CHECK pins (`CASCADE` takes the
+#: constraint with it). ⛔ `ALTER TABLE … DROP CONSTRAINT` IS NOT THE ONLY WAY IT
+#: DIES — measured before this pattern existed, both shapes below left the reader
+#: answering the HISTORICAL expression while the record enforced nothing, the same
+#: false-green class the reader exists for.
+_EVENT_KEY_OWNER_GONE_RE = re.compile(
+    r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:public\.)?\"?event\"?"
+    r"(?![A-Za-z0-9_$])"
+    r"|ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?\"?event\"?"
+    r"(?![A-Za-z0-9_$])[^;]*?DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?\"?node_key\"?"
+    r"(?![A-Za-z0-9_$])",
+    re.IGNORECASE | re.DOTALL)
+
 
 def _strip_sql_comments(sql: str) -> str:
     """Drop `--` line and `/* … */` block comments, WITHOUT touching literals.
@@ -826,6 +840,12 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     for the rest of the file, which can make a COMMENTED-OUT statement read as
     DDL (measured: false red). No record migration does either today.
 
+    ⚠️ It DOES model the premise dying without a `DROP CONSTRAINT` — the table
+    dropped, or `node_key` dropped (which cascades the CHECK) — because both read
+    as a drop, not as "unchanged". It does NOT model a `DROP SCHEMA` or a
+    `SET SCHEMA` move of the table, which would move the premise's owner without
+    touching these statements at all.
+
     ⚠️ "LAST" MEANS LAST IN `RECORD_MIGRATIONS`, WHICH IS HAND-MAINTAINED LIST
     ORDER AND NOT FILE-NAME SORTED (measured: the list is not `sorted()` — two
     entries are out of date order). Today only one migration names this
@@ -853,6 +873,8 @@ def _effective_event_node_key_check(sql: str) -> str | None:
         events.append((match.start(), "drop", None))
     for match in _EVENT_KEY_DECL_RE.finditer(sql):
         events.append((match.start(), "decl", match.group("expr")))
+    for match in _EVENT_KEY_OWNER_GONE_RE.finditer(sql):
+        events.append((match.start(), "drop", None))
     for match in _EVENT_KEY_RENAME_RE.finditer(sql):
         old = match.group("old").strip('"').lower()
         new = match.group("new").strip('"').lower()
@@ -1053,6 +1075,16 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
     assert _effective_event_node_key_check(commented_key) is None, (
         "a COMMENTED-OUT re-key was read as the enforced expression — the premise "
         "would be pinned to DDL the record never ran")
+
+    # 1g. THE PREMISE DIES WITHOUT A `DROP CONSTRAINT` TOO — the table dropped, or
+    #     the `node_key` column dropped (CASCADE takes the CHECK with it). Measured
+    #     before this arm existed: both shapes left the row GREEN on the historical
+    #     expression while the record enforced nothing.
+    for gone in ("\nDROP TABLE public.event;\n",
+                 "\nALTER TABLE public.event DROP COLUMN node_key CASCADE;\n"):
+        assert _effective_event_node_key_check(landed + gone) is None, (
+            f"`{gone.strip()}` removes the constraint without naming it, and the "
+            "reader still reported an expression the record no longer enforces")
 
     # 2. A forward DROP with no re-declaration. The constraint is GONE, so no
     #    expression is enforced and the premise is not merely different — it is
