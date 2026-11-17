@@ -669,6 +669,13 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # list in config/ci-surfaces.yml (the two are one set in two homes;
     # tests/test_ci_selection.py pins the equality).
     "test_verbatim_embedding_read_8316",
+    # #8430 / #8419: the embedding BOUNDARY. `embedded_only` and it drives a REAL
+    # embedded store (a wrong-width / non-numeric stored `List` for the read seam;
+    # `_upsert_document` for the composed document vector), so a URI-set lane would
+    # redirect the construction onto the server and certify nothing. Registered with
+    # the carve_out list in config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality).
+    "test_embedding_boundary_8419_8430",
     # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`
     # (it constructs a real embedded store), so it is a permanently green,
     # permanently unexecuted gate on main unless this stem is routed to the

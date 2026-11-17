@@ -79,8 +79,11 @@ must NOT be routed into it:
   overwrite the embedded engine would otherwise DISCARD. (Before #8316 that
   flip also made the next dense READ raise ``Type mismatch: expected Null or
   Vectorf32 but was List``; the read boundary now normalises a right-width
-  ``List``, so only a wrong width or a non-numeric value still aborts the
-  MATCH — #8430.)
+  ``List``, and #8430 makes it DROP a stored value it cannot consume — a wrong
+  width or a non-numeric value costs its OWN row instead of aborting the whole
+  MATCH. The one value it still cannot vet is a wrong-width *typed* row
+  (``size()`` raises on a ``Vectorf32`` on both engines) — the seam's declared
+  residual.)
 * **Caller-supplied — WRITE verbatim, READ normalised.** The verbatim
   ``embedding`` prop (``update_point`` with an explicit vector, and the
   ``update_entity`` Point branch, which never derives) still passes the
@@ -1552,7 +1555,7 @@ def set_embedding_clause(alias: str,
     )
 
 
-def stored_embedding_vector_expr(alias: str) -> str:
+def stored_embedding_vector_expr(alias: str, query_dim: int | None = None) -> str:
     """The READ half of the shape contract — ``<alias>.embedding`` as a vector.
 
     ``alias`` is the node binding of the caller's ``MATCH`` (``n``). Returns a
@@ -1580,9 +1583,54 @@ def stored_embedding_vector_expr(alias: str) -> str:
 
     Callers must filter ``WHERE <alias>.embedding IS NOT NULL`` (the dense read
     does): a NULL embedding yields NULL here, like any null Cypher argument.
+
+    #8430 — an UNREADABLE value yields NULL instead of raising (#8316's
+    sibling root). #8316 made the SHAPE readable; a value the cast or the
+    distance expression itself cannot consume still aborted the WHOLE ``MATCH``,
+    so one such node cost every OTHER node its dense leg (``run_vector_query``
+    recorded ``query_failed`` and returned ``[]``). Two families, one exit:
+
+    * a ``List`` of NON-NUMERIC values — ``vecf32(["x"] * 384)`` passes the
+      shape filter and then raises ``vectorf32 expects an array of numbers``;
+    * a ``List`` whose WIDTH does not match the query vector — it casts
+      fine and then ``vec.euclideanDistance`` raises a dimension mismatch.
+
+    Both are dropped by narrowing the SAME lazy filter: an element check
+    (``toFloat(_e) IS NULL``) and, when ``query_dim`` is supplied, a width test
+    against the QUERY vector's own width. A row that fails is absent from the
+    expression → NULL → the caller's ``WHERE distance IS NOT NULL`` drops
+    it, and every OTHER row keeps its leg.
+
+    ⛔ THE WIDTH TEST CANNOT BE APPLIED TO A ``Vectorf32``: ``size()`` raises
+    ``Type mismatch: expected List, String, or Null but was Vectorf32`` on BOTH
+    engines (measured on embedded FalkorDBLite and falkordb-server v4.20.6), and
+    a ``Vectorf32`` cannot be iterated into a list to measure it either (same
+    measurement). So the typed arm is returned UNCHECKED and a wrong-width
+    TYPED vector still takes the whole ``MATCH`` down — the declared residual
+    in :func:`tortoise.search_engine.run_vector_query`. Every writer here lands
+    the store's own width, so reaching it needs a raw ``vecf32(...)`` write or
+    an encoder change with no re-embed (#1349's class).
+
+    ⛔ TWO NESTED COMPREHENSIONS, not one filter joined with ``AND``: both
+    engines were measured to short-circuit ``typeof(z) = 'List' AND size(z) = n``
+    today, but the nested form does not RELY on it — the inner comprehension
+    only ever binds a value the outer filter already proved is a ``List``, so an
+    engine that evaluates eagerly degrades to "slower", never to "every dense
+    read raises".
+
+    ⚠️ The typed arm is ALSO a comprehension rather than a bare ``{prop}``
+    fallback (#8430): falling back to the raw property would hand a plain
+    ``List`` straight back to the caller whenever the list arm declined it —
+    exactly the unreadable value this function now filters out.
     """
     prop = f"{alias}.{EMBEDDING_PROPERTY}"
+    #: The width test, spelled only where it cannot meet a ``Vectorf32``.
+    _width = "" if query_dim is None else f"size(_w) = {int(query_dim)} AND "
     return (
-        f"coalesce([_v IN [{prop}] WHERE typeof(_v) = 'List' | vecf32(_v)][0], "
-        f"{prop})"
+        f"coalesce([_v IN [{prop}] WHERE typeof(_v) = 'List' "
+        f"| [_w IN [_v] WHERE "
+        f"{_width}"
+        f"size([_e IN _w WHERE toFloat(_e) IS NULL]) = 0 "
+        f"| vecf32(_w)][0]][0], "
+        f"[_t IN [{prop}] WHERE typeof(_t) = 'Vectorf32' | _t][0])"
     )

@@ -929,6 +929,14 @@ def test_no_redirect_stems_registry_exact():
         # pin working as designed, so the stem is DECLARED here rather than
         # exempted.
         "test_verbatim_embedding_read_8316",
+        # #8430 / #8419: the embedding BOUNDARY — the read seam dropping an
+        # unreadable stored `List` (#8430) and `_upsert_document` embedding the
+        # surface the node holds (#8419). Module-level `embedded_only` AND a real
+        # embedded store, so the exemption's load-bearing reason is the SKIP *and*
+        # the REDIRECT. The third leg of the three-way mirror:
+        # config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS were
+        # registered with the PR.
+        "test_embedding_boundary_8419_8430",
         # #5097 (lane L5, gate item 2): the capture path's session `:Source`
         # journal carrier. The fixture builds `TortoiseSDK(<tmpfile>)`, captures
         # a session and drives BOTH replay engines (`rebuild()` and

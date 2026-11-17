@@ -3595,10 +3595,16 @@ def run_vector_query(
     {0-row result set with embedded points present → ``empty_results``},
     {the caller supplied NO query vector → ``no_query_vector``, with
     ``ran=False``/``degraded=False`` — the leg was never asked (#5412)},
-    {an embedding the distance expression cannot read — a non-numeric value, or
-    a width the query vector cannot pair with (a plain ``List`` of the RIGHT
-    width is normalised by ``vector_write.stored_embedding_vector_expr``, #8316)
-    — or a driver exception → ``query_failed``}. Default None = no trace.
+    {an embedding the distance expression cannot read — a non-numeric ``List``,
+    or a ``List`` whose width the query vector cannot pair with — is NOT a
+    failure: ``vector_write.stored_embedding_vector_expr`` drops that ROW and the
+    leg answers from the others (#8316 normalised the shape, #8430 closes the
+    unreadable-value half). A DRIVER exception still → ``query_failed``}.
+    Default None = no trace.
+    ⚠️ #8430's DECLARED RESIDUAL: a wrong-width ``Vectorf32`` row still aborts
+    the ``MATCH`` (→ ``query_failed``, ``[]``): ``size()`` raises on a
+    ``Vectorf32`` on both engines, so it cannot be width-checked in place — see
+    the seam. No writer here lands a width other than the store's.
 
     In Docker/server mode (is_embedded=False), uses the HNSW vector index
     via CALL db.idx.vector.queryNodes — with both known argument orders
@@ -4156,100 +4162,130 @@ def run_vector_query(
                 # #561: latency warning only — keep the rows.
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("vector", True)
-            # #6214: EQUAL-DISTANCE ROWS MUST COME BACK IN ONE ORDER. This
-            # index leg feeds rank-based RRF fusion, so a tie-order flip
-            # changes the fused ranking. Both signatures now RETURN a cosine
-            # DISTANCE — B yields the engine's own score, A computes
-            # vec.cosineDistance over the yielded node (the pre-#6214 A
-            # substituted the row POSITION for a score, so ANY re-sort would
-            # have reversed its ranking) — and the engine's tie order is
-            # replaced here, ONCE, by (distance ASC, then the shared
-            # recency/id key DESC — #3019, #10121). There is deliberately no
-            # second ordering predicate (no per-signature Cypher ORDER BY):
-            # one Python sort, over the one shape both signatures now produce,
-            # so the two cannot drift apart.
-            #
-            # ⛔ RESIDUAL (`#10121` review): this replaces the tie order **of
-            # the rows the engine chose**, not the CHOICE. `queryNodes` picks
-            # its `$limit` rows by distance with an arbitrary order WITHIN a
-            # distance tie, and the sort below can only reorder what it was
-            # handed — so on an INDEXED store whose tie group is larger than
-            # the caller's `limit`, a member of that group (in principle the
-            # NEWEST) can sit outside the window and no sort here can recover
-            # it. That is NOT the `#10121` defect: it needs an exact distance
-            # tie across more than `limit` rows on an indexed store, where
-            # `#10121` is the lexical scorer's constant score across the whole
-            # corpus. It is stated rather than over-fetched because a bigger k
-            # only shrinks the window (any tie group above it still
-            # truncates) and would change this leg's cost and its
-            # `min_similarity` semantics for a case no pin covers yet. A
-            # remedy belongs here as its own change — over-fetch or an ordered
-            # scan — with a docker-lane pin that ties MORE rows than the
-            # caller's `limit`; `tests/test_search_engine_gaps.py::
-            # TestRunVectorQuery`'s `#6214` case ties THREE rows at `limit=10`
-            # and cannot see it.
-            #
-            # #5583: the engine's value is a DISTANCE (lower is better), NOT a
-            # similarity. `db.idx.vector.queryNodes` returns `1 - cosine` for a
-            # `similarityFunction: 'cosine'` index: a PERFECT match comes back
-            # as 0.0 and an orthogonal one as 1.0. Passing that through as a
-            # similarity inverted this leg exactly — the WORST row scored
-            # highest, and every `min_similarity` floor discarded the rows it
-            # exists to keep. Measured on the docker lane (falkordb-server,
-            # module ver 42004): a query identical to the stored vector scored
-            # 0.0, an orthogonal one scored 1.0.
-            #
-            # The conversion mirrors this function's own scan fallback below
-            # (`1.0 / (1.0 + distance)`): both derive a similarity from a
-            # distance, so they agree on polarity. Cosine distance lies in
-            # [0, 2], so `1 - d` lies in [-1, 1] and the [0, 1] clamp still
-            # maps a perfect match to 1.0.
-            # #10121: the equal-distance tie is the SAME recency-then-id rule the
-            # other legs use. Before this, the index branch sorted
-            # ``(distance, id ASC)`` while the scan branch used the recency tie,
-            # so on an indexed store the dense and sparse legs handed DIFFERENT
-            # twins rank 0 — and RRF is rank-based, so the fused order depended
-            # on whether an HNSW index happened to exist. The recency column
-            # rides the cypher RETURN above; a row shape without it (an older
-            # signature, a degraded path) falls back to ``''``, which sorts as
-            # OLDEST exactly as the shared clause does.
-            annotated: list[tuple[float | None, tuple[str, str], object]] = []
-            for row in rows:
-                try:
-                    distance = float(row[1])
-                except (IndexError, TypeError, ValueError):
-                    distance = None
-                recency = row[2] if len(row) > 2 else None
-                annotated.append((distance, recency_tie_key(recency, row[0]),
-                                  row[0]))
-            # (distance ASC, then the SHARED recency/id key DESCENDING). An
-            # unreadable distance carries no evidence of similarity — rank it
-            # LAST; `inf` is the sort key, not the reported score. Two stable
-            # passes: the secondary key first, then the primary one.
-            annotated.sort(key=lambda item: item[1], reverse=True)
-            annotated.sort(key=lambda item: (
-                item[0] if item[0] is not None else float("inf")))
-            out = [
-                (pid, 0.0 if dist is None else max(0.0, min(1.0, 1.0 - dist)))
-                for dist, _key, pid in annotated
-            ]
-            if min_similarity is not None and out:
-                # Score is a true cosine similarity now, for BOTH signatures —
-                # filter directly. Only claim the FLOOR when there was
-                # something to filter: a zero-row index result is
-                # `empty_results`, not a relevance verdict (claiming the floor
-                # there would suppress the caller's legitimate degraded
-                # fallback, #4028 review P1).
-                kept = [(pid, s) for pid, s in out if s >= min_similarity]
-                if not kept:
-                    _record(ran=True, degraded=False,
-                            reason=BELOW_RELEVANCE_FLOOR, count=0,
-                            mechanism=MECHANISM_INDEX)
-                    return []
-                out = kept
-            _record(ran=True, degraded=False, reason="ok", count=len(out),
-                    mechanism=MECHANISM_INDEX)
-            return out
+            # ⏔ #8429 — A ZERO-ROW INDEX ANSWER IS NOT A VERDICT ABOUT THE LABEL.
+            # The HNSW index holds ``Vectorf32`` values ONLY, so a node whose
+            # embedding is stored VERBATIM as a plain ``List`` (PR #3018's
+            # recorded decision) is not in the index COHORT at all: it is
+            # silently absent from ``queryNodes``, and an index branch that
+            # returned ``[]`` used to record ``ok`` with count 0 and exit —
+            # indistinguishable from "no near neighbour". Measured (#8429): a
+            # store whose indexed neighbour set is emptied by such a node
+            # returns 0 rows, so the node is unreachable by the dense leg for
+            # as long as the index exists.
+            # Zero rows therefore FALLS THROUGH to the brute-force scan below,
+            # which reads BOTH shapes through the shared seam — the same verdict
+            # #11642 already applies to an empty RECORD answer ("a fold with no
+            # backfill is not an empty corpus"). ``index_attempted`` is already
+            # True, so the scan records ``scan_fallback``: an index was expected
+            # and did not answer.
+            # ⚠️ DECLARED RESIDUAL: this recovers the cohort only when the index
+            # returns NOTHING. A store whose index DOES return rows still hides a
+            # verbatim node that would have out-ranked a member of the returned
+            # window, and no sort here can recover what ``queryNodes`` never
+            # yielded. Closing that half is #8429's option (b) — widen the index
+            # cohort at the WRITE boundary — which reverses PR #3018 and
+            # belongs to the #5046/#5048 reopen, never a quiet re-route. Pinned
+            # by ``tests/test_verbatim_index_cohort_8429.py``.
+            if not rows:
+                logger.info(
+                    "vector index returned no rows for %s — the index cohort "
+                    "holds Vectorf32 values only, so scanning for the shapes it "
+                    "cannot hold (recorded scan_fallback)", label)
+            else:
+                # #6214: EQUAL-DISTANCE ROWS MUST COME BACK IN ONE ORDER. This
+                # index leg feeds rank-based RRF fusion, so a tie-order flip
+                # changes the fused ranking. Both signatures now RETURN a cosine
+                # DISTANCE — B yields the engine's own score, A computes
+                # vec.cosineDistance over the yielded node (the pre-#6214 A
+                # substituted the row POSITION for a score, so ANY re-sort would
+                # have reversed its ranking) — and the engine's tie order is
+                # replaced here, ONCE, by (distance ASC, then the shared
+                # recency/id key DESC — #3019, #10121). There is deliberately no
+                # second ordering predicate (no per-signature Cypher ORDER BY):
+                # one Python sort, over the one shape both signatures now produce,
+                # so the two cannot drift apart.
+                #
+                # ⛔ RESIDUAL (`#10121` review): this replaces the tie order **of
+                # the rows the engine chose**, not the CHOICE. `queryNodes` picks
+                # its `$limit` rows by distance with an arbitrary order WITHIN a
+                # distance tie, and the sort below can only reorder what it was
+                # handed — so on an INDEXED store whose tie group is larger than
+                # the caller's `limit`, a member of that group (in principle the
+                # NEWEST) can sit outside the window and no sort here can recover
+                # it. That is NOT the `#10121` defect: it needs an exact distance
+                # tie across more than `limit` rows on an indexed store, where
+                # `#10121` is the lexical scorer's constant score across the whole
+                # corpus. It is stated rather than over-fetched because a bigger k
+                # only shrinks the window (any tie group above it still
+                # truncates) and would change this leg's cost and its
+                # `min_similarity` semantics for a case no pin covers yet. A
+                # remedy belongs here as its own change — over-fetch or an ordered
+                # scan — with a docker-lane pin that ties MORE rows than the
+                # caller's `limit`; `tests/test_search_engine_gaps.py::
+                # TestRunVectorQuery`'s `#6214` case ties THREE rows at `limit=10`
+                # and cannot see it.
+                #
+                # #5583: the engine's value is a DISTANCE (lower is better), NOT a
+                # similarity. `db.idx.vector.queryNodes` returns `1 - cosine` for a
+                # `similarityFunction: 'cosine'` index: a PERFECT match comes back
+                # as 0.0 and an orthogonal one as 1.0. Passing that through as a
+                # similarity inverted this leg exactly — the WORST row scored
+                # highest, and every `min_similarity` floor discarded the rows it
+                # exists to keep. Measured on the docker lane (falkordb-server,
+                # module ver 42004): a query identical to the stored vector scored
+                # 0.0, an orthogonal one scored 1.0.
+                #
+                # The conversion mirrors this function's own scan fallback below
+                # (`1.0 / (1.0 + distance)`): both derive a similarity from a
+                # distance, so they agree on polarity. Cosine distance lies in
+                # [0, 2], so `1 - d` lies in [-1, 1] and the [0, 1] clamp still
+                # maps a perfect match to 1.0.
+                # #10121: the equal-distance tie is the SAME recency-then-id rule the
+                # other legs use. Before this, the index branch sorted
+                # ``(distance, id ASC)`` while the scan branch used the recency tie,
+                # so on an indexed store the dense and sparse legs handed DIFFERENT
+                # twins rank 0 — and RRF is rank-based, so the fused order depended
+                # on whether an HNSW index happened to exist. The recency column
+                # rides the cypher RETURN above; a row shape without it (an older
+                # signature, a degraded path) falls back to ``''``, which sorts as
+                # OLDEST exactly as the shared clause does.
+                annotated: list[tuple[float | None, tuple[str, str], object]] = []
+                for row in rows:
+                    try:
+                        distance = float(row[1])
+                    except (IndexError, TypeError, ValueError):
+                        distance = None
+                    recency = row[2] if len(row) > 2 else None
+                    annotated.append((distance, recency_tie_key(recency, row[0]),
+                                      row[0]))
+                # (distance ASC, then the SHARED recency/id key DESCENDING). An
+                # unreadable distance carries no evidence of similarity — rank it
+                # LAST; `inf` is the sort key, not the reported score. Two stable
+                # passes: the secondary key first, then the primary one.
+                annotated.sort(key=lambda item: item[1], reverse=True)
+                annotated.sort(key=lambda item: (
+                    item[0] if item[0] is not None else float("inf")))
+                out = [
+                    (pid, 0.0 if dist is None else max(0.0, min(1.0, 1.0 - dist)))
+                    for dist, _key, pid in annotated
+                ]
+                if min_similarity is not None and out:
+                    # Score is a true cosine similarity now, for BOTH signatures —
+                    # filter directly. Only claim the FLOOR when there was
+                    # something to filter: a zero-row index result is
+                    # `empty_results`, not a relevance verdict (claiming the floor
+                    # there would suppress the caller's legitimate degraded
+                    # fallback, #4028 review P1).
+                    kept = [(pid, s) for pid, s in out if s >= min_similarity]
+                    if not kept:
+                        _record(ran=True, degraded=False,
+                                reason=BELOW_RELEVANCE_FLOOR, count=0,
+                                mechanism=MECHANISM_INDEX)
+                        return []
+                    out = kept
+                _record(ran=True, degraded=False, reason="ok", count=len(out),
+                        mechanism=MECHANISM_INDEX)
+                return out
         except Exception as e:
             msg = str(e).lower()
             if "index" in msg or "not found" in msg or "does not exist" in msg:
@@ -4279,6 +4315,17 @@ def run_vector_query(
         # to be typed, because a caller-supplied embedding is stored VERBATIM
         # as a plain `List` by a recorded decision (PR #3018) — see
         # `stored_embedding_vector_expr` (#8316).
+        # #8430: the query vector's OWN WIDTH is passed to the seam, so a stored
+        # row whose width cannot pair with it is DROPPED rather than raised —
+        # one wrong-width node used to abort the whole `MATCH` and cost every
+        # other node its dense leg (`query_failed`, `[]`). The seam also drops a
+        # non-numeric `List`. Both are read-boundary decisions: the stored value
+        # is untouched, so PR #3018's verbatim decision stands.
+        # ⚠️ DECLARED RESIDUAL: a wrong-width TYPED (`Vectorf32`) row still
+        # aborts the `MATCH` — `size()` raises on a `Vectorf32` on both engines
+        # (measured, see the seam), so it cannot be width-checked in place. No
+        # writer here lands a width other than the store's; reaching it needs a
+        # raw `vecf32(...)` write or an encoder change with no re-embed.
         # #689: retracted Points must not leak into vector results.
         # D10 (#5026): discriminate the document Source from the
         # corpus/provenance Source in the MATCH's WHERE — the brute-force
@@ -4298,7 +4345,7 @@ def run_vector_query(
             f"MATCH (n:{label}) "
             "WHERE n.embedding IS NOT NULL" + bf_status_clause +
             " WITH vecf32($query_vec) AS _qv, n "
-            f"WITH n, vec.euclideanDistance({stored_embedding_vector_expr('n')}, _qv) AS distance "
+            f"WITH n, vec.euclideanDistance({stored_embedding_vector_expr('n', query_dim=len(query_vec))}, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
             # #3019: a distance tie (equal values, or repeated rows) must not fall
