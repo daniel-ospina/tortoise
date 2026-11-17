@@ -110,6 +110,16 @@ class Refused(Exception):
     """A measurement the tool will not take. Every caller returns exit 3."""
 
 
+def _log(stage: str, **fields) -> None:
+    """Progress to stderr, flushed. ⛔ Not decoration: the first full-scale run
+    was killed at 55 minutes with no output because the only print was at the
+    end, and a lane that leaves no trace of WHERE it was is a lane whose result
+    cannot be resumed. Each stage line is one resumable boundary."""
+    extra = "  ".join(f"{k}={v}" for k, v in fields.items())
+    print(f"[paired-ab] {stage}" + (f"  {extra}" if extra else ""),
+          file=sys.stderr, flush=True)
+
+
 # ── the frozen corpus ────────────────────────────────────────────────────────
 def _sha256_bytes(blob: bytes) -> str:
     return hashlib.sha256(blob).hexdigest()
@@ -402,6 +412,15 @@ def build_items(rows: list[dict], records: list[dict], *, query_chars: int,
     from tortoise.sparse import tokenize_sparse_query
     items: list[dict] = []
     drop = collections.Counter()
+    # ⛔ PRECOMPUTE each record's token set ONCE. The first version computed it
+    # inside the target-selection ``min(key=...)``, i.e. once per CANDIDATE per
+    # item — 300 items x ~14,000 records = 4.2 M tokenizations of a ~1 KB span.
+    # Measured: the tool sat at 100 % CPU for 55 minutes and had not yet seeded
+    # its graph. One pass over the records is ~15 s; the same code is now linear
+    # in the corpus instead of linear in corpus x sample.
+    from tortoise.sparse import tokenize_sparse_query as _tok
+    for rec in records:
+        rec["tokens"] = set(_tok(rec["text"][:4000]))
     for row in rows:
         name = row["name"]
         needle = " ".join(name.lower().split())
@@ -440,7 +459,7 @@ def build_items(rows: list[dict], records: list[dict], *, query_chars: int,
             drop["no_other_session"] += 1
             continue
         t_idx = min(candidates,
-                    key=lambda i: (len(set(tokenize_sparse_query(records[i]["text"])) & q_tokens),
+                    key=lambda i: (len(records[i]["tokens"] & q_tokens),
                                    -len(records[i]["text"]), i))
         t_rec = records[t_idx]
         target_text = t_rec["turns"][0]["content"][:query_chars]
@@ -458,8 +477,7 @@ def build_items(rows: list[dict], records: list[dict], *, query_chars: int,
             "target_session": t_rec["session_id"],
             "target_keys": " ".join(keys),
             "target_overlap_with_query": len(
-                set(tokenize_sparse_query(target_text)) & q_tokens),
-        })
+                set(tokenize_sparse_query(target_text)) & q_tokens),        })
     return items, dict(drop)
 
 
@@ -595,6 +613,14 @@ def read_arm(sdk, items: list[dict], *, arm: str, expansion: bool,
             prov[k] += v
         per_item[it["item_id"]] = {
             "rank": _rank_of(ids, target),
+            # ⛔ THE SEED IS REAL GOLD. The item's own query point matches the
+            # question by construction (its content IS the question), so its rank
+            # is the one HARM signal available on an item set whose only other
+            # labelled point is the target. `_entity_key_expansion_pass`'s merge
+            # contract says the pass-1 seed is never dropped but CAN be demoted,
+            # and `_entity_key_dense_pass` says so explicitly; this measures it
+            # rather than quoting the docstring.
+            "seed_rank": _rank_of(ids, it["query_point_id"]) if arm == "point" else None,
             "ids": ids if arm == "point" else None,
             "provenance_entries": _trace_provenance(trace),
         }
@@ -770,23 +796,59 @@ def _hits_at(per_item: dict, item_ids: list[str], *, k: int) -> list[int]:
     return out
 
 
+def _seed_effect(per_item_off: dict, per_item_on: dict, item_ids: list[str],
+                 *, k: int) -> dict:
+    """Did the merged, re-ranked pass COST the plain best match its slot?
+
+    ``off`` and ``on`` are the two arms' per-item records. Reported for the seed
+    point only, because the seed is the one id in the graph whose relevance is
+    known without a qrel.
+    """
+    demoted = lost = top1_off = top1_on = 0
+    shift = 0
+    for iid in item_ids:
+        ro = per_item_off[iid]["seed_rank"]
+        rn = per_item_on[iid]["seed_rank"]
+        if ro is not None and ro == 0:
+            top1_off += 1
+        if rn is not None and rn == 0:
+            top1_on += 1
+        if ro is not None and ro < k and (rn is None or rn >= k):
+            lost += 1
+        elif ro is not None and rn is not None and rn > ro:
+            demoted += 1
+        if ro is not None and rn is not None:
+            shift += rn - ro
+    return {"seed_at_top1_off": top1_off, "seed_at_top1_on": top1_on,
+            "seed_lost_from_window": lost, "seed_demoted_but_kept": demoted,
+            "seed_rank_shift_sum": shift}
+
+
 def _displacement(per_item_off: dict, per_item_on: dict, item_ids: list[str],
                   *, k: int) -> dict:
     """How much of the OFF top-k the merged, re-ranked pass moved out of the window."""
     lost = 0
     present = 0
     rank_shift = 0
+    top1_kept = 0
     for iid in item_ids:
         off_ids = (per_item_off[iid]["ids"] or [])[:k]
         on_ids = (per_item_on[iid]["ids"] or [])[:k]
         if not off_ids:
             continue
         present += 1
+        if off_ids[0] in on_ids:
+            top1_kept += 1
         kept = [i for i in off_ids if i in on_ids]
         lost += len(off_ids) - len(kept)
         rank_shift += sum(abs(on_ids.index(i) - off_ids.index(i)) for i in kept)
     return {"items_with_off_topk": present, "displaced_ids": lost,
-            "abs_rank_shift_of_kept": rank_shift}
+            "off_top1_kept_in_window": top1_kept,
+            "abs_rank_shift_of_kept": rank_shift,
+            "note": ("CHURN, not harm, unless the ids carry qrels — the OFF "
+                     "top-k here is mostly unrelated competition, so this counts "
+                     "how much the window moved, not what was lost (see the "
+                     "seed_effect block for the one labelled harm signal)")}
 
 
 def _load() -> dict:
@@ -840,7 +902,11 @@ def run(args: argparse.Namespace) -> int:
         pop_file, harvested=harvested, snapshot_digest_=snap_digest,
         population=args.population, sample=args.sample, seed=args.seed)
 
+    _log("snapshot", digest=snap_digest[:16], files=manifest["file_count"],
+         lines=manifest["total_lines"])
+    _log("population", names=len(rows), file=str(pop_file))
     records = read_records(snapshot_path)
+    _log("records", n=len(records))
     items, dropped = build_items(
         rows, records, query_chars=args.query_chars,
         key_tokens=args.key_tokens, min_query_tokens=args.min_query_tokens)
@@ -849,6 +915,7 @@ def run(args: argparse.Namespace) -> int:
             f"only {len(items)} of {len(rows)} sampled names formed an item "
             f"(dropped: {dropped}) — --min-items {args.min_items} is the floor "
             f"below which a paired comparison cannot say anything")
+    _log("items", with_item=len(items), dropped=dropped)
     distractors = pick_distractors(items, records, args.distractors,
                                    query_chars=args.query_chars)
 
@@ -858,6 +925,7 @@ def run(args: argparse.Namespace) -> int:
     artifact: dict = {}
     try:
         seeded = seed_graph(sdk, items, distractors)
+        _log("seeded", **seeded)
         # One warm read so the first measured query is not paying a cold cost.
         sdk.tortoise_fts_query("warm", entity_type="point", limit=1,
                                include_terminal=True, _record_reads=False,
@@ -867,8 +935,10 @@ def run(args: argparse.Namespace) -> int:
         for arm in args.arms:
             off = read_arm(sdk, items, arm=arm, expansion=False,
                            read_limit=args.read_limit)
+            _log(f"arm {arm} OFF done", modes=off["window_modes"])
             on = read_arm(sdk, items, arm=arm, expansion=True,
                           read_limit=args.read_limit)
+            _log(f"arm {arm} ON done", modes=on["window_modes"])
             arms[arm] = {"off": off, "on": on}
             if args.repeat_arm == arm:
                 again = read_arm(sdk, items, arm=arm, expansion=False,
@@ -914,6 +984,8 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
                             seed=args.seed)
             if arm == "point":
                 entry["off_topk_displacement"] = _displacement(
+                    off["per_item"], on["per_item"], item_ids, k=k)
+                entry["seed_effect"] = _seed_effect(
                     off["per_item"], on["per_item"], item_ids, k=k)
             per_k[f"k={k}"] = entry
         modes = {"off": off["window_modes"], "on": on["window_modes"]}
@@ -1007,6 +1079,14 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
                   "id_digest": _sha256_bytes("\n".join(item_ids).encode()),
                   "name_digest": _sha256_bytes(
                       "\n".join(it["name"] for it in items).encode()),
+                  # ⛔ The falsifier "the same sampled items are used in both
+                  # arms", asserted rather than described: every arm's per-item
+                  # map must be EXACTLY the item id list, or the pairing is a
+                  # fiction and no paired statistic below is meaningful.
+                  "ids_match_all_arms": all(
+                      arm_block.get("per_item") is not None
+                      and set(arm_block["per_item"]) == set(item_ids)
+                      for arm_block in out_arms.values()),
                   "median_target_overlap_with_query": _median(
                       [it["target_overlap_with_query"] for it in items])},
         "construction": {
@@ -1025,6 +1105,12 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
         "arms": out_arms,
         "environment": {
             "load_start": load_start, "load_end": load_end,
+            "load_delta_1m": round(load_end["load_1m"] - load_start["load_1m"], 2),
+            "same_load_note": ("both arms ran back to back in ONE process on ONE "
+                               "box, so the loads below bracket the whole "
+                               "comparison rather than one arm — and the delta "
+                               "is reported so a reader can see whether the box "
+                               "moved under it"),
             "graph_nodes": graph_nodes, "elapsed_s": round(elapsed, 1),
             "graph": args.graph or "(run-scoped)",
             "db_uri_scheme": (os.environ.get("TORTOISE_DB_URI") or "").split("://")[0],
