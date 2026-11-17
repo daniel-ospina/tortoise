@@ -181,6 +181,17 @@ def plan_position(stage_id, *, outcome=None, is_closed=False,
       id — reading the id alone let a refused call write and journal the
       ``:Event`` first, with every retry compounding it.
 
+    ⛔ ``outcome`` is the SECOND parameter (the first keyword-only) and
+    deliberately NOT an input: it is never read. It stays in the signature
+    because the negative-control pins pass a stored ``pipelineOutcome`` word and
+    prove the answer does not come from it, and it must leave only together with
+    those pins. The answer is the RESOLVED stage's outcome, or ``None`` (#13100
+    review rounds 13–14). ⛔ Do NOT "restore" a read of it: the
+    ``else (None if unresolvable else outcome)`` fallback that did exactly that
+    was the mixed-cache defect this helper removed — ``pipelineOutcome`` is a
+    cache a generic-door ending leaves stale, and reading it paired
+    ``ended: False`` with ``outcome: 'lost'`` for a position-less plan.
+
     ``has_position`` says whether any stage was recorded: a plan with NO position
     (an extractor-minted ``core:plan`` Object) is not evidence of anything, so it
     is neither ended nor "not yet" — that is why the promotion gate needs the
