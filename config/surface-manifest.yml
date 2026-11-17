@@ -1213,7 +1213,10 @@ rows:
   # axis") and left `served_from` at the value #12726 had hand-refreshed, so
   # `surface_manifest.py check --provenance-strict` has been red on `main` ITSELF since
   # then — the same FAIL row measured on a pristine `origin/main` worktree (`55ec2c71b1`)
-  # as on this head, so it is `main`'s third red and not this diff's. It is the SECOND
+  # and on this branch BEFORE the re-stamp below, so it is `main`'s third red and not
+  # this diff's. With the re-stamp applied this head prints no such row; what it still
+  # prints is `cut_at_commit … UNPROVABLE`, the artifact of a shallow checkout, which
+  # `main` prints too and which the tool itself declines to read as a verdict. It is the SECOND
   # half of `a09a0b3840`'s fallout: the same commit added
   # `tests/test_13034_currency_rule_reads_position.py` unregistered, which reds
   # `manifest-integrity`, and this PR repairs that half above. `served_from` is
