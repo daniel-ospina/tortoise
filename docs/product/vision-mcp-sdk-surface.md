@@ -102,24 +102,24 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 
 | | |
 |---|---|
-| Registry tools | **103** |
-| Absorbed into the 27 MCP targets | **100** |
+| Registry tools | **108** |
+| Absorbed into the 27 MCP targets | **105** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
 | Retired | **0** |
 | MCP target tools | **27** |
 
-**The four bucket rows sum to 103.** (The last row is the target *surface*, not a bucket —
+**The four bucket rows sum to 108.** (The last row is the target *surface*, not a bucket —
 27 targets received those 100 absorbed tools many-to-one, so it is not part of the sum.)
 
-> ⚠️ **This table predates #11609 family A (#12951) and lane E's door retirement and its bucket
-> rows have NOT been re-derived.**
-> The served population is **108** today (48 live + 60 retired shims, `tools/bridge_table.py
-> --check`), so the `103` above and the per-bucket split are two cuts stale. The bucket counts have
-> no generator — `bridge_table.py` emits Part A/B/C but not this split — so re-deriving them means
-> re-bucketing by hand, which is why this is flagged rather than guessed at. The two numbers the
-> machine-checked claims read (`48 live` and `60 retired`) are correct everywhere else in this
-> document.
+> ✅ **These rows are the generator's current output, not a hand copy.** They are read out of
+> `docs/product/bridge-table.md`'s headline by
+> `tests/test_bridge_table.py::test_vision_doc_buckets_match_generated_doc`, which fails if any row
+> disagrees with what `tools/bridge_table.py` computes — so a stale figure here is a build failure
+> rather than a silent drift. What the counts are OVER: the **served** registry, i.e. the 48 live
+> tools plus the 60 retired names that still answer through the #3883 shim. `Retired: 0` is the
+> no-destination sense (`archive/mcp-tools/`), NOT the shim sense — every retired-forward name has a
+> destination, which is why it is absorbed rather than retired.
 
 The **Retired** row fell **4 → 0** in #11609 **batch 1**: the last four
 no-destination tools — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
