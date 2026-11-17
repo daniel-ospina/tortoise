@@ -839,11 +839,30 @@ def _cmd_record_reconcile(args):
         # journal-projected point reports a permanent mismatch and this verb
         # exits 3 forever on a healthy pair (#9196 review, P1).
         scan = scan_cache_view(proj.g, timeout_ms=timeout_ms)
+        # #13331 — the THIRD leg: does the record hold every position the JOURNAL
+        # holds? A journal position the record never consumed is invisible to the
+        # record↔cache comparison (both sides can agree perfectly while a whole
+        # write is missing), so it is named here rather than reasoned about. The
+        # journal's own enumeration is `EventLog.position()` — the SAME reader a
+        # replay numbers against — and the record side is
+        # `record_projection.journal_coverage`, the reader the live chokepoint and
+        # the dense-leg gate share.
+        journal_leg = None
+        if args.journal:
+            from tortoise.log import EventLog
+            from tortoise.record_projection import journal_coverage as _coverage
+
+            log = EventLog(args.journal)
+            enumerated = log.position()
+            journal_leg = _coverage(
+                conn, org_id=args.org, graph_id=args.graph,
+                enumerated=enumerated)
         result = reconcile_record_and_cache(
             record_key_map(view),
             scan.view,
             declaration=declaration,
             placed=scan.placed,
+            journal=journal_leg,
         )
     except ReconciliationUnavailable as e:
         print(f"Record↔cache reconciliation UNAVAILABLE: {e}", file=sys.stderr)
@@ -17512,6 +17531,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="Bound on EACH cache-label read (default: 2000, must "
                          "be positive). A read that hits it refuses (exit 2) "
                          "— it never returns a partial answer")
+    rr.add_argument("--journal", default=None,
+                    help="Path to the tenant's JSONL journal (events.jsonl). "
+                         "With it, the run also reports #13331's third leg: how "
+                         "many of the journal's enumerated positions the record "
+                         "does NOT hold (verdict=unprojected_journal, exit 3). "
+                         "Heal with `tools/record_runner.py apply`. Without it, "
+                         "the journal leg is reported as null — not as zero")
     rr.add_argument("--json", action="store_true",
                     help="Machine-readable JSON output")
     # #9557 (R9): the RECORD's backup. Deliberately not `backup` (that verb

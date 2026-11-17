@@ -330,6 +330,7 @@ from .reconciliation import (
     ReconciliationUnavailable,
     reconcile_views,
 )
+from .record_projection import JournalCoverage
 from .residency import ResidencyDeclaration
 
 __all__ = [
@@ -343,6 +344,7 @@ __all__ = [
     "VERDICT_CLEAN",
     "VERDICT_DIVERGENT",
     "VERDICT_UNANSWERABLE",
+    "VERDICT_UNPROJECTED",
     "CacheScan",
     "RecordReconcileResult",
     "exit_code_for",
@@ -362,10 +364,19 @@ LOG_NAME = "tortoise.record_reconcile"
 VERDICT_CLEAN = "clean"
 VERDICT_DIVERGENT = "divergent"
 VERDICT_UNANSWERABLE = "unanswerable"
+#: #13331 — a FOURTH answer, and it is not a cache divergence: the RECORD is
+#: short of positions the JOURNAL holds. It is the one disagreement the
+#: journal/Postgres split can produce (the chokepoint reports it per write as
+#: `LiveWrite.unprojected`), the repair is `record_runner apply`, and folding it
+#: into ``divergent`` would send an operator to look for a second cache writer
+#: that does not exist.
+VERDICT_UNPROJECTED = "unprojected_journal"
 
 #: Process exit codes. ``2`` is the tree's "a surface could not be queried"
 #: convention (``tools/collision_preflight.py``; the #3061 gate's INCOMPLETE),
-#: and ``3`` is a real answer rather than an error.
+#: and ``3`` is a real answer rather than an error. #13331's
+#: ``unprojected_journal`` is a real answer too, so it shares ``3`` — a scheduler
+#: that already alerts on divergence must alert on a lagging record as well.
 EXIT_CLEAN = 0
 EXIT_UNAVAILABLE = 2
 EXIT_DIVERGENT = 3
@@ -376,6 +387,7 @@ _LOG_LEVEL = {
     VERDICT_CLEAN: logging.INFO,
     VERDICT_DIVERGENT: logging.WARNING,
     VERDICT_UNANSWERABLE: logging.ERROR,
+    VERDICT_UNPROJECTED: logging.WARNING,
 }
 
 #: How long a single cache read may block — the DEFAULT, overridable per run
@@ -624,6 +636,14 @@ class RecordReconcileResult:
     #: positional-rebind reason ``form_normalized`` is.
     graph_only: tuple[tuple[str, int], ...] = ()
 
+    #: #13331 — the RECORD's coverage of the JOURNAL, or ``None`` when the caller
+    #: did not supply the journal's enumeration. This is the third leg of §17.2's
+    #: observation: the cache comparison sees record↔cache, and a journal position
+    #: the record never consumed is invisible to it (the cache row and the record
+    #: row can agree perfectly while a whole write is missing from both). APPENDED
+    #: LAST for the positional-rebind reason ``form_normalized`` is.
+    journal: JournalCoverage | None = None
+
     @property
     def graph_only_total(self) -> int:
         """Properties the CACHE holds that the comparison did not judge.
@@ -643,6 +663,19 @@ class RecordReconcileResult:
         return sum(count for _, count in self.graph_only)
 
     @property
+    def unprojected_journal(self) -> int:
+        """Journal positions the record does NOT hold (``0`` when not measured).
+
+        ``0`` for a caller that supplied no journal enumeration is deliberate and
+        is NOT a claim of coverage: :meth:`as_dict` omits the field in that case
+        (``journal: null``), so "we did not look" and "we looked and found none"
+        stay distinguishable at the boundary — the `#5090` Q2 rule.
+        """
+        if self.journal is None:
+            return 0
+        return int(self.journal.unprojected or 0)
+
+    @property
     def checked(self) -> int:
         return self.report.checked
 
@@ -651,15 +684,22 @@ class RecordReconcileResult:
         return self.report.divergent
 
     def verdict(self) -> str:
-        """``clean`` | ``divergent`` | ``unanswerable`` — never a bare boolean.
+        """``clean`` | ``divergent`` | ``unprojected_journal`` | ``unanswerable``.
 
         ``unanswerable`` when NOTHING was compared (``checked == 0``): an empty
         record and an empty cache agree perfectly, which is the vacuous
         agreement this whole surface exists to refuse. A run that compared
         nothing is not a clean bill of health.
+
+        #13331 — a lagging record outranks a clean cache comparison, and LOSES to
+        a cache divergence: the cache divergence is the more specific finding
+        (a second writer, a failed fold), and an operator chasing a missing
+        journal position must not be told the cache is fine when it is not.
         """
         if self.divergent > 0:
             return VERDICT_DIVERGENT
+        if self.unprojected_journal > 0:
+            return VERDICT_UNPROJECTED
         if self.checked == 0:
             return VERDICT_UNANSWERABLE
         return VERDICT_CLEAN
@@ -673,6 +713,8 @@ class RecordReconcileResult:
             "graph_only_total": self.graph_only_total,
             "declaration_coverage": self.declaration.coverage,
             "declaration_source": self.declaration.source,
+            "journal": None if self.journal is None else self.journal.as_dict(),
+            "unprojected_journal": self.unprojected_journal,
         })
         return payload
 
@@ -683,6 +725,7 @@ def reconcile_record_and_cache(
         declaration: ResidencyDeclaration | None = None,
         sample_limit: int = SAMPLE_LIMIT,
         placed: Mapping[str, frozenset[str]] | None = None,
+        journal: JournalCoverage | None = None,
         ) -> RecordReconcileResult:
     """Compare the two keyed views, PARTITIONING divergence from residency.
 
@@ -837,6 +880,7 @@ def reconcile_record_and_cache(
         else ResidencyDeclaration(source=None),
         not_hot=not_hot,
         graph_only=graph_only,
+        journal=journal,
     )
 
 
@@ -962,15 +1006,30 @@ def log_result(result: RecordReconcileResult,
                  f"property occurrence(s) not compared ({names}{more})]")
     verdict = result.verdict()
     line = f"{line} verdict={verdict}"
+    if result.journal is not None and result.unprojected_journal:
+        # #13331 — the THIRD leg, rendered beside the cache comparison so a reader
+        # cannot mistake a coherent cache for a coherent pair. The repair is named
+        # because it is a single idempotent command, not an investigation.
+        cov = result.journal
+        line += (f" [journal: {cov.unprojected} of {cov.enumerated} enumerated "
+                 f"position(s) NOT in the record (present={cov.present}, "
+                 f"high={cov.high_seq}, first_gap={cov.first_gap}) — the record "
+                 f"LAGS the journal; heal with `tools/record_runner.py apply`]")
     (logger or logging.getLogger(LOG_NAME)).log(
         _LOG_LEVEL[verdict], "%s", line)
     return line
 
 
 def exit_code_for(result: RecordReconcileResult) -> int:
-    """``0`` clean · ``3`` divergence observed · ``2`` the comparison could not be made."""
+    """``0`` clean · ``3`` divergence observed · ``2`` the comparison could not be made.
+
+    #13331: ``unprojected_journal`` is a real ANSWER (the record lags the journal
+    by N positions), so it exits ``3`` — the same code a scheduler already alerts
+    on. Returning ``2`` there would report a measured disagreement as "no verdict",
+    which is the reading that lets a lagging record sit unnoticed.
+    """
     verdict = result.verdict()
-    if verdict == VERDICT_DIVERGENT:
+    if verdict in (VERDICT_DIVERGENT, VERDICT_UNPROJECTED):
         return EXIT_DIVERGENT
     if verdict == VERDICT_CLEAN:
         return EXIT_CLEAN

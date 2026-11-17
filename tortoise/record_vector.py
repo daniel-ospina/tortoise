@@ -57,6 +57,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -66,10 +68,13 @@ __all__ = [
     "HNSW_ITERATIVE_SCAN",
     "LABEL_SERVED",
     "LOG_NAME",
+    "READINESS_TTL_SECONDS",
+    "RECORD_JOURNAL_ENV",
     "RecordVectorError",
     "VectorShortfall",
     "armed",
     "cutover_armed",
+    "journal_ready",
     "searcher",
 ]
 
@@ -446,6 +451,172 @@ def cutover_armed() -> bool:
     return is_truthy(os.environ.get(ARMING_ENV))
 
 
+#: Where this process's tenant journal lives — the SECOND input a coverage check
+#: needs. `journal_coverage` reads the RECORD; the journal's own enumeration is
+#: the caller's fact, and on the read path nobody holds it (the searcher has the
+#: record's `(org_id, graph_id)`, never the cache graph name the journal path is
+#: derived from). So the operator DECLARES it — the same declaration discipline
+#: `TORTOISE_RECORD_SINGLE_TENANT` already takes, and for the same reason: a
+#: wrong guess about which tenant this process serves would gate the wrong one.
+#:
+#: Unset is NOT an error and NOT a silent skip: the gate CANNOT answer without
+#: it, so `journal_ready` returns "not enforced" and a WARNING is emitted once per
+#: process naming exactly what is unchecked (see :func:`journal_ready`).
+RECORD_JOURNAL_ENV = "TORTOISE_RECORD_JOURNAL"
+
+#: How long one tenant's readiness verdict is trusted. A coverage read is one
+#: aggregate over `journal_event`, but this gate runs on EVERY read construction,
+#: and a search must not pay a round trip it does not need. 30 s bounds how long
+#: a record that has just fallen behind can still be served by the dense leg —
+#: and a positive verdict is the only one that can be wrong in that direction
+#: (a NEGATIVE verdict keeps the graph branch, which is always correct).
+READINESS_TTL_SECONDS = 30.0
+
+#: `(dsn, org, graph, journal) -> (checked_at, ready)`.
+_READINESS: dict[tuple[str, str, str, str], tuple[float, bool]] = {}
+_READINESS_LOCK = threading.Lock()
+
+
+def _readiness_key(scope: _Scope, record_dsn: str | None) -> tuple[str, str, str, str]:
+    # The DSN is keyed by its FINGERPRINT, never by value (#2903/#2796): this
+    # dict is process-global and a raw DSN is secret material.
+    from .record_writer import dsn_fingerprint
+    from .record_writer import record_dsn as _resolve
+
+    dsn = _resolve(record_dsn) or ""
+    return (dsn_fingerprint(dsn) if dsn else "", scope.org_id,
+            scope.graph_id, os.environ.get(RECORD_JOURNAL_ENV, ""))
+
+
+def reset_readiness_cache() -> None:
+    """Forget every readiness verdict. For tests, and for an operator who has
+    just completed a backfill and does not want to wait out the TTL."""
+    with _READINESS_LOCK:
+        _READINESS.clear()
+
+
+def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
+                  now: float | None = None) -> bool:
+    """Does the record hold this tenant's journal? The dense leg's gate (#13331).
+
+    `ARMING_ENV` is a DEPLOYMENT switch; this is the per-tenant CONDITION that
+    keeps it honest. Requirement 5 of `#13331`: *"do not arm the dense leg for a
+    tenant whose backfill is incomplete."* The record is a fold of the journal,
+    so a fold that is short of positions is a corpus that is short of memories
+    — and the dense leg would answer from it with `mechanism=pgvector,
+    reason=ok`, which is the silent-invisibility class `#5090` Q2 forbids.
+
+    THE CHECK IS EXACT AND IT NEEDS BOTH SIDES: `journal_event`'s positions (the
+    RECORD) against the journal's own enumeration (`EventLog.position()`), which
+    is the number a replay numbers against. The read path holds only the
+    record's `(org_id, graph_id)` — the journal path is derived from the CACHE
+    graph's name, which this scope does not carry — so the operator DECLARES the
+    path (:data:`RECORD_JOURNAL_ENV`), the same declaration discipline
+    `TORTOISE_RECORD_SINGLE_TENANT` takes and for the same reason.
+
+    ⛔ WITHOUT THE DECLARATION THE CHECK CANNOT RUN, and this is stated rather
+    than papered over. The tempting record-only fallback is WRONG in both
+    directions and is therefore not implemented:
+
+    * requiring a contiguous prefix from 1 would refuse EVERY live-write tenant —
+      a fresh graph is seeded at its journal's floor and legitimately starts at
+      position N > 1 (`record_runner.read_checkpoint`'s `allocated` arm exists
+      for exactly that shape), so the gate would disable the very population
+      this issue is about;
+    * accepting any contiguous suffix would never catch an incomplete backfill,
+      which is the defect the gate exists for.
+
+    So an undeclared journal returns ``True`` (the deployment switch decides, as
+    it did before this issue) and emits ONE WARNING per process naming what is
+    unchecked. The arming procedure makes the declaration part of the act: read
+    `python -m tortoise record-reconcile --journal <path>` (it exits 3 with
+    `verdict=unprojected_journal` while the record lags), and declare the path
+    for any tenant the leg is armed for.
+
+    FAIL-CLOSED once declared: an unreadable journal, an unreadable record, a
+    missing dependency — every failure keeps the graph branch, which is a correct
+    answer (`#11642` P1), and a check that cannot run must never be read as
+    "ready".
+    """
+    if not os.environ.get(RECORD_JOURNAL_ENV):
+        _warn_readiness_undeclared()
+        return True
+    clock = time.monotonic() if now is None else now
+    key = _readiness_key(scope, record_dsn)
+    with _READINESS_LOCK:
+        cached = _READINESS.get(key)
+    if cached is not None and clock - cached[0] < READINESS_TTL_SECONDS:
+        return cached[1]
+    ready = _measure_readiness(scope, record_dsn=record_dsn)
+    with _READINESS_LOCK:
+        _READINESS[key] = (clock, ready)
+    return ready
+
+
+#: One warning per process, not one per read.
+_WARNED_UNDECLARED = False
+_WARN_LOCK = threading.Lock()
+
+
+def _warn_readiness_undeclared() -> None:
+    global _WARNED_UNDECLARED
+    with _WARN_LOCK:
+        if _WARNED_UNDECLARED:
+            return
+        _WARNED_UNDECLARED = True
+    logging.getLogger(LOG_NAME).warning(
+        "record dense leg: %s is armed but %s is unset, so the PER-TENANT "
+        "backfill-coverage gate cannot run — the leg will serve any tenant the "
+        "deployment switch admits, including one whose record is short of "
+        "journal positions (#13331 requirement 5, #5090 Q2). Declare the "
+        "tenant's journal path and re-check with `python -m tortoise "
+        "record-reconcile --journal <path>` before arming a tenant",
+        ARMING_ENV, RECORD_JOURNAL_ENV)
+
+
+def _measure_readiness(scope: _Scope, *, record_dsn: str | None) -> bool:
+    """The coverage read behind :func:`journal_ready`. Never raises.
+
+    ⛔ ``present > 0`` IS PART OF THE ANSWER, not a formality: `contiguous` is
+    true for an EMPTY record (there is no hole to find), so without it a tenant
+    whose backfill never ran would read as ready and be served an empty dense
+    leg as though it were a small corpus.
+    """
+    path = os.environ.get(RECORD_JOURNAL_ENV)
+    try:
+        from .log import EventLog
+
+        enumerated = EventLog(path).position()
+    except Exception as exc:
+        logging.getLogger(LOG_NAME).debug(
+            "record dense leg: the declared journal %r could not be counted "
+            "(%s) — keeping the graph branch", path, type(exc).__name__)
+        return False
+    conn = None
+    try:
+        from .record_projection import journal_coverage
+        from .record_serve import open_record
+
+        conn = open_record(record_dsn)
+        cov = journal_coverage(conn, org_id=scope.org_id,
+                               graph_id=scope.graph_id,
+                               enumerated=enumerated)
+    except Exception as exc:
+        logging.getLogger(LOG_NAME).debug(
+            "record dense leg: the coverage check could not answer (%s) — "
+            "keeping the graph branch", type(exc).__name__)
+        return False
+    finally:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+    # Exact: no position the journal enumerates may be missing from the record.
+    # `present > 0` guards the shape where the journal itself is empty (a brand
+    # new tenant whose first live write has not landed): there is nothing to
+    # serve, and the graph branch is the correct answer.
+    return cov.unprojected == 0 and cov.present > 0
+
+
 #: The shape `run_vector_query` consumes for BOTH legs: ``(id, distance,
 #: recency)`` rows, or ``None`` for "this label is not served here". The FOURTH
 #: positional argument is the caller's `#689` `excluded_statuses` — declared so a
@@ -564,6 +735,18 @@ def searcher(
         return None
     scope = _resolve_scope(carried)
     if scope is None:
+        return None
+    # #13331 requirement 5 — the PER-TENANT condition on the deployment switch:
+    # a tenant whose record does not hold its journal is not served from it. This
+    # is the arm `#13210` §7.4 said could only start moving once live writes were
+    # wired: a fresh tenant's positions are consumed at write time, so its record
+    # is authoritative for new rows with no backfill to wait for.
+    if not journal_ready(scope, record_dsn=record_dsn):
+        logging.getLogger(LOG_NAME).debug(
+            "record dense leg: tenant %s/%s's record does not hold its journal "
+            "yet (or could not be measured) — the graph branch answers, which "
+            "is the correct branch and not a degraded one (#11642 P1, #13331)",
+            scope.org_id, scope.graph_id)
         return None
 
     def _search(

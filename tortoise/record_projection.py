@@ -7620,6 +7620,160 @@ def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# #13331 — JOURNAL COVERAGE: naming the ONE disagreement the split can produce
+# ══════════════════════════════════════════════════════════════════════════
+#
+# The live chokepoint (`tortoise/live_write.py`) appends the journal and then
+# projects it. The append is a file write and the projection is Postgres, so the
+# pair CANNOT share one transaction (#13210 §7: "it is a JSONL file — it
+# cannot"), and the only direction that disagreement may take is JOURNAL AHEAD
+# OF RECORD — the direction `derived = replay(journal)` heals. What makes that a
+# guarantee rather than a hope, and lives here so every caller shares one
+# reading:
+#
+#   * :func:`journal_coverage` — the record's own answer to "which journal
+#     positions has this tenant consumed", so the disagreement has a NAME and one
+#     reader (`record_reconcile`, `record_vector`) rather than a different count
+#     in each tool. The cutover rule itself (#9190) is
+#     `_refuse_an_enumerated_replay`'s and is asked by `replay()` at execute
+#     time; the live path reports that refusal as its NAMED disagreement, never
+#     as a silent renumbering.
+
+#: One scan, four facts: the high-water mark, the row count, the LOW edge, and
+#: how many of the positions the JOURNAL currently enumerates the record holds.
+#: `unprojected` is therefore `enumerated - within_prefix`, which is exact for the
+#: prefix the journal claims (a hole below `high` is still count(*)ed here; the
+#: record's own contiguity is :func:`_first_gap`'s separate question).
+_COVERAGE_SQL = """
+SELECT coalesce(max(seq), 0) AS high_seq,
+       count(*) AS present,
+       coalesce(min(seq), 0) AS min_seq,
+       count(*) FILTER (WHERE seq <= %s) AS within_prefix
+FROM public.journal_event
+WHERE org_id = %s AND graph_id = %s
+"""
+
+#: A hole BETWEEN two rows. It cannot see the prefix edge (`min(seq) > 1`), which
+#: is why :class:`JournalCoverage` carries `min_seq` as its own fact.
+_FIRST_GAP_SQL = """
+WITH paged AS (
+    SELECT seq, lead(seq) OVER (ORDER BY seq) AS nxt
+    FROM public.journal_event
+    WHERE org_id = %s AND graph_id = %s
+)
+SELECT min(seq) + 1 AS gap
+FROM paged
+WHERE nxt IS NOT NULL AND nxt <> seq + 1
+"""
+
+
+@dataclass(frozen=True)
+class JournalCoverage:
+    """How much of a journal the record holds — the ONE coverage reading.
+
+    ``enumerated`` is the caller's fact (``EventLog.position()``): this module
+    reads the RECORD, never the journal file, so a number it derived itself
+    would be a second opinion about the journal rather than a reading of the
+    record. ``None`` means "the caller did not say", and then
+    :attr:`unprojected` is ``None`` too — unknown, never zero (#13331).
+    """
+
+    present: int = 0
+    high_seq: int = 0
+    min_seq: int = 0
+    within_prefix: int = 0
+    first_gap: int | None = None
+    enumerated: int | None = None
+
+    @property
+    def unprojected(self) -> int | None:
+        """Journal positions the record does NOT hold, or ``None`` if unknown.
+
+        The disagreement #13331 names. ``0`` is the healthy answer and is
+        reachable only with a known ``enumerated``; a caller that cannot say how
+        many records its journal holds must not be handed a zero it did not
+        measure.
+        """
+        if self.enumerated is None:
+            return None
+        return max(int(self.enumerated) - int(self.within_prefix), 0)
+
+    @property
+    def contiguous(self) -> bool:
+        """No hole below the high-water mark AND no missing prefix.
+
+        Both edges, because they are different defects: a hole means a middle
+        position was never consumed, a missing prefix means the record starts
+        above position 1 (the ordinary shape for a graph armed after its journal
+        already held lines — `record_runner.read_checkpoint` measures the same
+        edge and refuses to call it contiguous either).
+        """
+        return self.first_gap is None and self.min_seq in (0, 1)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "present": self.present,
+            "high_seq": self.high_seq,
+            "min_seq": self.min_seq,
+            "within_prefix": self.within_prefix,
+            "first_gap": self.first_gap,
+            "enumerated": self.enumerated,
+            "unprojected": self.unprojected,
+            "contiguous": self.contiguous,
+        }
+
+
+def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
+                     enumerated: int | None = None) -> JournalCoverage:
+    """Read the record's coverage of one tenant's journal (#13331).
+
+    SCOPES THE CONNECTION (§R6): `journal_event`'s policy filters on
+    `app.current_org_id`, so an unscoped read returns ZERO rows and this would
+    report a fully-consumed journal as fully unprojected — the silent zero-row
+    shape `#9600` cycle 1 closed for UPDATE-only plans, reintroduced in a
+    reader. `scope_connection` also verifies the GUC and the role, so a
+    bypassing DSN is refused rather than read as "every tenant's rows are this
+    tenant's".
+
+    ⛔ IT RAISES ON A FAILED READ. A coverage reading that failed must not come
+    back as ``present=0`` — that is the vacuous green this whole module refuses
+    elsewhere (`_refuse_vacuous`), one surface over.
+    """
+    cursor = scope_connection(conn, org_id)
+    try:
+        cursor.execute(_COVERAGE_SQL, (0 if enumerated is None else int(enumerated),
+                                       org_id, graph_id))
+        row = cursor.fetchone()
+        if not row:
+            raise RecordProjectionError(
+                "the record's coverage read returned no row — an aggregate over "
+                "an empty set always returns one, so this is not 'empty', it is "
+                "unreadable; refusing rather than reporting zero consumed "
+                "(#13331)")
+        if isinstance(row, Mapping):
+            high, present, low, within = (row["high_seq"], row["present"],
+                                          row["min_seq"], row["within_prefix"])
+        else:
+            high, present, low, within = row[0], row[1], row[2], row[3]
+        high, present, low = int(high or 0), int(present or 0), int(low or 0)
+        within = int(within or 0)
+        gap = None
+        if present:
+            cursor.execute(_FIRST_GAP_SQL, (org_id, graph_id))
+            gap_row = cursor.fetchone()
+            if gap_row:
+                gap = gap_row["gap"] if isinstance(gap_row, Mapping) else gap_row[0]
+                gap = None if gap is None else int(gap)
+    finally:
+        cursor.close()
+    return JournalCoverage(
+        present=present, high_seq=high, min_seq=low, within_prefix=within,
+        first_gap=gap,
+        enumerated=None if enumerated is None else int(enumerated),
+    )
+
+
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
            position: bool = True,
