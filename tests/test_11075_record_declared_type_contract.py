@@ -1135,6 +1135,24 @@ def test_comment_stripping_is_what_keeps_a_DOWN_direction_out_of_the_read():
     plain = ("COMMENT ON COLUMN public.point.id IS 'C:" + chr(92) + "';\n"
              "/* ALTER COLUMN search_keys TYPE jsonb */\n")
     assert "TYPE jsonb" not in rp._strip_sql_comments(plain)
+    # ⛔ POSTGRESQL NESTS BLOCK COMMENTS, so the FIRST `*/` does not end one.
+    # `find("*/")` (the whole implementation until #13354) closed the outer
+    # comment at the INNER terminator, leaving a commented-out declaration in the
+    # text as CODE — measured on the props-ban pin, whose read then took a
+    # disabled `ADD CONSTRAINT` for an executed one. The nesting case is pinned
+    # HERE, with the function it belongs to, rather than only in that pin's file.
+    nested = (
+        "ALTER TABLE public.point\n"
+        "    ALTER COLUMN search_keys TYPE text;\n"
+        "/* history:\n"
+        "   /* moved here from 2026-10 */\n"
+        "   ALTER TABLE public.point ALTER COLUMN search_keys TYPE jsonb;\n"
+        "*/\n")
+    stripped = rp._strip_sql_comments(nested)
+    assert "TYPE jsonb" not in stripped, (
+        "a NESTED block comment ended at the inner `*/`, so its body stayed in the "
+        f"text as code: {stripped!r}")
+    assert "TYPE text" in stripped, "the nesting scan swallowed the live statement"
 
 
 def test_the_stripper_is_load_bearing_at_the_PARSE_level(tmp_path):

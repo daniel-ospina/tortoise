@@ -1943,6 +1943,26 @@ _PROPS_BAN_PIN_HEADER_RE = re.compile(
     r"(ADD\s+)?CONSTRAINT\s+(?:[\w\"]+\s*\.\s*)?[\"]?chk_(\w+)_props_no_derived[\"]?\s*CHECK\b",
     re.I,
 )
+#: The STATEMENT a props-ban event must sit in. ⛔ NOT EVERY MATCH IS DDL: the
+#: scanner KEEPS string and dollar-quoted literals (it must — `ARRAY['embedding']`
+#: is a literal), so DDL-shaped text inside DATA matched these patterns and was
+#: read as executed. Measured (round 6 P2, reproduced at 697e939386): a
+#: `COMMENT ON TABLE public.subject IS $c$ was: ADD CONSTRAINT chk_subject_props_no_derived
+#: CHECK (NOT (props ?| ARRAY['embedding','status'])) $c$` appended after a real
+#: shrink to `{status}` left BOTH pins GREEN — a false pass, in the green direction.
+#: So an event counts only when the text since the previous `;` opens a table
+#: statement, and its target table must AGREE with the table in its name.
+#: ⚠️ STATED RESIDUAL: DDL executed dynamically (`DO $$ … EXECUTE 'ALTER TABLE …' $$`)
+#: is inside a literal and is therefore NOT read. That is today's corpus (measured:
+#: the only `EXECUTE 'ALTER TABLE` statements touch triggers), and
+#: `test_no_migration_executes_dynamic_DDL_for_a_props_ban` reds if one appears,
+#: so the blind spot cannot be entered silently.
+_PROPS_BAN_STMT_RE = re.compile(
+    r"\s*(?:CREATE|ALTER)\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+(?:NOT\s+)?EXISTS\s+)?"
+    r"(?:[\w\"]+\s*\.\s*)?[\"]?(\w+)[\"]?",
+    re.I,
+)
+
 #: The CHECK's OWN expression. ⛔ ANCHORED AT THE START of the declaration's own
 #: body (`CHECK` is followed immediately by it), not SEARCHED for later in the
 #: text: an unanchored search could take a LATER, unrelated statement's
@@ -1990,6 +2010,7 @@ class PropsBanEvent:
     is_redeclaration: bool
     names: frozenset[str]
     snippet: str
+    declared_on: str | None = None   # the statement's table, when it is a table DDL
 
 
 def props_ban_events(text: str) -> list[PropsBanEvent]:
@@ -1999,13 +2020,29 @@ def props_ban_events(text: str) -> list[PropsBanEvent]:
     a second one here. A regex stripper is quote-unaware, so a `--` or `/*` inside
     a string literal deletes real DDL and a dropped ban reads as in force (round 5
     P1, measured); that module's scanner is quote-, dollar-quote- and escape-aware
-    and is already pinned by `tests/test_cost_dimensions.py`. This pin imports it
-    rather than growing a variant that can drift from the parser the product uses.
+    and its behaviour is pinned by `tests/test_11075_record_declared_type_contract.py`
+    (a DIFFERENT `_strip_sql_comments` lives in `tools/cost_coverage_audit`, pinned by
+    `test_cost_dimensions.py` — not this one). This pin imports the product's rather
+    than growing a variant that can drift from it, and the NESTING case I added to
+    that scanner is pinned there too.
     """
     clean = record_projection._strip_sql_comments(text)
-    headers = list(_PROPS_BAN_PIN_HEADER_RE.finditer(clean))
-    others = [m for m in list(_PROPS_BAN_DROP_RE.finditer(clean))
-              + list(_PROPS_BAN_RENAME_RE.finditer(clean))]
+
+    def declared_on(position: int) -> str | None:
+        """The table this event's own STATEMENT targets, or None if it is not one."""
+        prefix = clean[clean.rfind(";", 0, position) + 1:position]
+        target = _PROPS_BAN_STMT_RE.match(prefix)
+        return target.group(1) if target is not None else None
+
+    headers = [
+        m for m in _PROPS_BAN_PIN_HEADER_RE.finditer(clean)
+        if declared_on(m.start()) is not None
+    ]
+    others = [
+        m for m in list(_PROPS_BAN_DROP_RE.finditer(clean))
+        + list(_PROPS_BAN_RENAME_RE.finditer(clean))
+        if declared_on(m.start()) is not None
+    ]
     events: list[PropsBanEvent] = []
     for index, match in enumerate(headers):
         # The declaration's span ends at the NEXT event of any kind, and its
@@ -2024,15 +2061,15 @@ def props_ban_events(text: str) -> list[PropsBanEvent]:
                 names = frozenset(_QUOTED_PROPERTY_RE.findall(array.group(1)))
         events.append(PropsBanEvent(
             match.start(), "declare", match.group(2), bool(match.group(1)), names,
-            span[:_PROPS_BAN_SNIPPET_CHARS]))
+            span[:_PROPS_BAN_SNIPPET_CHARS], declared_on(match.start())))
     for match in _PROPS_BAN_DROP_RE.finditer(clean):
         events.append(PropsBanEvent(
             match.start(), "drop", match.group(1), False, frozenset(),
-            match.group(0)))
+            match.group(0), declared_on(match.start())))
     for match in _PROPS_BAN_RENAME_RE.finditer(clean):
         events.append(PropsBanEvent(
             match.start(), "rename", match.group(1), False, frozenset(),
-            match.group(0)))
+            match.group(0), declared_on(match.start())))
     events.sort(key=lambda event: event.position)
     return events
 
@@ -2072,7 +2109,14 @@ def props_ban_in_force(text: str, table: str) -> tuple[str, frozenset[str]]:
     events = [event for event in props_ban_events(text) if event.table == table]
     if not events:
         return ("none", frozenset())
-    return (events[-1].kind, events[-1].names)
+    last = events[-1]
+    if last.declared_on is not None and last.declared_on != table:
+        # ⛔ A NAME IS NOT A TARGET: constraint names are per-table, so
+        # `ALTER TABLE public.other ADD CONSTRAINT chk_subject_props_no_derived`
+        # is legal and constrains NOTHING on `subject` while answering for it
+        # (round 6 P3, measured). Loud, never silent.
+        return ("mismatch", frozenset())
+    return (last.kind, last.names)
 
 
 def all_migration_text() -> str:
@@ -2273,6 +2317,25 @@ def test_the_props_ban_pin_reads_the_CHECKS_own_expression_not_the_tail():
         f"certifying a ban the database no longer has: {(kind, sorted(names))}")
 
 
+def test_no_migration_executes_dynamic_DDL_for_a_props_ban():
+    """The blind spot of the target check, made LOUD instead of silent.
+
+    An event must sit in a `CREATE|ALTER TABLE` statement, so DDL executed
+    DYNAMICALLY (inside `DO $$ … EXECUTE '…' $$`, i.e. inside a literal) is not
+    read. That is safe only while no migration does it for these constraints:
+    measured at this head, the corpus's only `EXECUTE 'ALTER TABLE` statements
+    touch triggers. If that changes, this test reds and the reader decides —
+    rather than the pin silently losing an event.
+    """
+    for path in sorted((REPO_ROOT / "supabase" / "migrations").glob("*.sql")):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"EXECUTE\s+'([^']*)'", text, re.I):
+            executed = match.group(1)
+            assert not re.search(r"(?:ADD|DROP|RENAME)\s+CONSTRAINT", executed, re.I), (
+                f"{path.name} executes dynamic constraint DDL ({executed[:80]!r}) — "
+                "the props-ban parse cannot see it; teach the parse or record the gap")
+
+
 def test_the_snippet_cap_clears_every_declaration_gap():
     """The 400-char snippet cap is only diagnostic if it cannot reach the next ban.
 
@@ -2332,6 +2395,17 @@ def test_legal_sql_spellings_cannot_false_pass_the_props_ban():
       no longer exists. Fixed by making RENAME an event.
     * **F** a `::text` cast inside the literal leaked type tokens (`text`) into the
       property-name set. Fixed by taking the QUOTED entries only.
+
+    Round 6 added two more, both in the GREEN direction (a false pass):
+
+    * **G** DDL-shaped text inside DATA — `COMMENT ON … IS $c$ was: ADD CONSTRAINT … $c$`
+      — was read as executed DDL, so a history note re-declared the ban the
+      migration had just shrunk. An event now counts only when its own statement
+      (text since the previous `;`) opens `CREATE|ALTER TABLE`, and its target
+      table must agree with the table in its name.
+    * **H** a constraint named `chk_subject_…` created ON ANOTHER TABLE
+      (`ALTER TABLE public.other …`) answered for `subject`, which it does not
+      constrain. Now `mismatch`, which is loud.
     """
     # ROUND 5 vehicle A — a `--` inside a STRING LITERAL must not swallow the DDL
     # after it (that is why the read reuses the product's quote-aware scanner).
@@ -2427,6 +2501,31 @@ def test_legal_sql_spellings_cannot_false_pass_the_props_ban():
 
 
 
+    # ROUND 6 vehicle G — DDL-shaped text inside DATA is not executed DDL.
+    history_note = (
+        "ALTER TABLE public.subject DROP CONSTRAINT chk_subject_props_no_derived;\n"
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['status']::text[]));\n"
+        "COMMENT ON TABLE public.subject IS $c$ was: ADD CONSTRAINT\n"
+        "  chk_subject_props_no_derived CHECK (NOT (props ?| ARRAY['embedding','status'])) $c$;\n")
+    kind, names = props_ban_in_force(history_note, "subject")
+    assert (kind, names) == ("declare", frozenset({"status"})), (
+        "a COMMENT's dollar-quoted history note was read as executed DDL and "
+        f"re-declared the ban it merely describes: {(kind, sorted(names))}")
+
+    # ROUND 6 vehicle H — the NAME is not the TARGET: a same-named constraint on
+    # another table constrains nothing here, so answering for it is a lie.
+    wrong_table = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n"
+        "ALTER TABLE public.other ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n")
+    kind, names = props_ban_in_force(wrong_table, "subject")
+    assert kind == "mismatch", (
+        "a constraint on ANOTHER table answered for `subject`: "
+        f"{(kind, sorted(names))}")
+
+
 def test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one():
     """F8's own non-vacuity pin: the LAST declaration read is the one in force.
 
@@ -2491,10 +2590,14 @@ def test_relation_is_never_a_bare_id():
     # `MIGRATIONS` list: that list is hand-maintained, so a future FORWARD
     # migration that re-declares a pin would re-create exactly the same defect
     # (the list is pinned by nothing — `RECORD_MIGRATIONS`' completeness has its
-    # own guard in `test_9231`, this one does not). Measured: over all 79 files
-    # the pin set is identical to the 6-file list's (`source 1 · event 1 ·
-    # session 1 · object 2 · subject 2 · point 1`), so reading the directory is
-    # free and closes the recurrence instead of patching this round of it.
+    # own guard in `test_9231`, this one does not). ⛔ THE CLAIM THAT THE DIRECTORY
+    # READ IS FREE IS ASSERTED BELOW, NOT NARRATED HERE. This comment used to state
+    # a hand-copied census ("over all 79 files … `source 1 · event 1 · session 1 ·
+    # object 2 · subject 2 · point 1`") — the file count rotted with the next
+    # migration, and round 6's re-measure compared the figures against the
+    # **props-ban** pin family rather than this one, which is the same
+    # hand-copied-census failure it was reporting. An equality assertion cannot
+    # rot and cannot cite the wrong family.
     # The LAST declaration wins (append-only history; the same rule
     # `key_properties()` reads), and the files are read in filename order — which
     # IS chronological, because the name is the migration timestamp.
@@ -2502,6 +2605,11 @@ def test_relation_is_never_a_bare_id():
         p.read_text(encoding="utf-8")
         for p in sorted((REPO_ROOT / "supabase" / "migrations").glob("*.sql"))
     )
+    assert contract_key_pins(all_text) == contract_key_pins(
+        "\n".join(p.read_text(encoding="utf-8") for p in MIGRATIONS)), (
+        "reading the whole migrations DIRECTORY and reading the hand-maintained "
+        "`MIGRATIONS` list now give different node_key pin sets — the directory "
+        "read is no longer free, and which list is authoritative is a decision")
     assert "src_label" in all_text and "src_key" in all_text
     assert "FOREIGN KEY (org_id, graph_id, src_label, src_key)" in all_text
     assert "FOREIGN KEY (org_id, graph_id, tgt_label, tgt_key)" in all_text
