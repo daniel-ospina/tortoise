@@ -98,7 +98,7 @@ door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
 1,620 occurrences of the door predicate across 107 files
-2,341 occurrences of the verb predicate across 143 files   (upper-bound shape, see below)
+2,339 occurrences of the verb predicate across 141 files   (upper-bound shape, see below)
 
 1,620  regex door-pattern occurrences
   −53  occurrences on a line carrying NO door call (comments and docstrings)
@@ -109,17 +109,17 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (301 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (297 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 301 files>` → **1,620** across **107** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,620** across **107** files: exactly the
 tool's number. A bare `rg … tortoise/` gives 1,626 / 108, the 6 extra occurrences living in
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,620 / 107 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 301 files>` → **2,328** across **142** files, while the tool
-reports 2,341 / 143. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,326** across **140** files, while the tool
+reports 2,339 / 141. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
 concatenation leaves `MATCH` and its `(` on two lines, one occurrence to the tool and none to `rg`.
 (A bare case-sensitive `rg tortoise/` gives 2,060, and `-i` over the whole tree 2,398 — which is why the
 number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
@@ -392,17 +392,22 @@ halves:
    that only counts its own diff) is a snapshot wearing a census's name.
 
 **Where these numbers were last cut:** the merges of `origin/main` **`6c1a01df87`** and then
-**`534f3e1bee`** into this branch, measured at the merged tree — **nothing but `files_scanned` moved**:
-`297` → **`301`** (four new tracked `tortoise/` modules, `tools/record_runner.py`'s read container among
-them, none of which carries a statement site — `files_with_sites` stays `98`), while `sites` `1309`,
+**`534f3e1bee`** into this branch, measured at the merged tree — **NO pin moved at all** (`sites` `1309`,
 `plain` `857` (read `576`/write `281`), `candidates` `576`, `unresolved` `106`,
-`non_cypher_door_calls` `258` (`ast_door_calls` `1567`) and every `shape_*` count are UNCHANGED, so
-Appendix A needed no regeneration. §1's `rg` reconciliation WAS re-measured on the 301-file population:
-the verb figures became **2,341 / 143** (tool) and **2,328 / 142** (shell `rg`), the door pair staying
-`1,620` / `107`. ⏤ This is the THIRD cut inside one stack: `#13215` had independently brought `main` to
-`1308`, the three commits `main` landed after it (`#13121`, `#13218`, `#13222`) added one more site, and
-this merge adds FILES but no site — which is why §7 sends the merger back to re-measure rather than to
-carry a cut forward.
+`non_cypher_door_calls` `258`, `ast_door_calls` `1567`, `files_scanned` `297`, `files_with_sites` `98`,
+every `shape_*` count), because neither commit adds a product statement site or a product module —
+`#13214` edits existing `tortoise/` modules and `#13210` adds `tools/`, which is not the product
+surface. Appendix A needed no regeneration (re-diffed: 0 rows). §1's `rg` reconciliation IS unchanged
+too (`1,620` / `107` door, `2,339` / `141` verb, bare `rg` `1,626` / `108`).
+
+⛔ **A census measured while a merge is UNRESOLVED is not a census of any tree.** `surface_files()`
+reads `git ls-files`, and an unmerged path is listed once per stage, so `files_scanned` reads high by
+one per conflicted file (measured in this very stack: `299` with two unmerged paths, `301` with four,
+`297` once committed). Two cuts of this doc briefly pinned those inflated values; measure AFTER the
+merge commit, never between `git merge` and `git commit`. ⏤ This is the THIRD cut inside one stack:
+`#13215` had independently brought `main` to `1308`, the three commits `main` landed after it
+(`#13121`, `#13218`, `#13222`) added one more site, and the next merges add files under `tools/` but no
+product site — which is why §7 sends the merger back to re-measure rather than to carry a cut forward.
 
 **The cut this one replaces:** the merge of `origin/main` **`2060c92fd3`**, measured at the same tree —
 `sites` 1308→1309, `plain` 856→857 (read 575→576; the 281 write half unchanged), `candidates` 575→576,
@@ -425,7 +430,7 @@ the order was fixed (`#13098` review F8).
 
 <!-- cypher-inventory:sites = 1309 -->
 <!-- cypher-inventory:files = 98 -->
-<!-- cypher-inventory:files_scanned = 301 -->
+<!-- cypher-inventory:files_scanned = 297 -->
 <!-- cypher-inventory:unresolved = 106 -->
 <!-- cypher-inventory:candidates = 576 -->
 <!-- cypher-inventory:shape_adjacency = 292 -->
