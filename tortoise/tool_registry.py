@@ -1377,9 +1377,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_get_entity",
         id="surface.get_entity",
         description="Get any entity by ID, eventId, or url. `type` selects the node kind "
-                    "(point | entity | operator | events | governance), dispatching exactly as "
-                    "the retired per-type getters did; omit it to look the entity up by id. "
-                    "The canonical fetch-by-id tool.",
+                    "(point | entity | operator | event | session | events | governance), "
+                    "dispatching exactly as the retired per-type getters did; omit it to "
+                    "look the entity up by id. The canonical fetch-by-id tool.",
         risk="read",
         http_policy=True,
         sdk_method="get_entity",
@@ -2805,18 +2805,25 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_find_cross_lens_candidates":
         'tortoise_review_link_candidates(kind="cross_lens", limit=..., threshold=...)',
     "tortoise_list_batch": 'tortoise_list_knowledge(kind="batch", id=...)',
+    # ⛔ THE KIND RIDES INSIDE `props`, because that is the only place the container
+    # accepts it: `tortoise_create_entity(type, name, props=None)` has no
+    # `subjectKind`/`objectKind`/`eventKind`/`documentKind` PARAMETER — the SDK pops
+    # each from `props` and REFUSES the write without one ("create_entity(type='event')
+    # requires eventKind"). A pointer naming it as a top-level kwarg is a `TypeError`
+    # for the migrating caller, and one naming it nowhere silently files the entity as
+    # `'other'` (`entities.py`'s `coalesce($sk, 'other')`), so both are written out.
     # `create_entity`'s document arm also materialises the `:Source` a declared
-    # `extractedFrom` names (#8171), so the pointer carries `documentKind=`
-    # rather than leaving it to be guessed.
+    # `extractedFrom` names (#8171), so the pointer carries `documentKind` too rather
+    # than leaving it to be guessed.
     "tortoise_create_subject":
-        'tortoise_create_entity(type="subject", name=..., props=...)',
+        'tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})',
     "tortoise_create_object":
-        'tortoise_create_entity(type="object", name=..., props=...)',
+        'tortoise_create_entity(type="object", name=..., props={"objectKind": ...})',
     "tortoise_create_event":
-        'tortoise_create_entity(type="event", name=..., eventKind=..., props=...)',
+        'tortoise_create_entity(type="event", name=..., props={"eventKind": ...})',
     "tortoise_create_document":
-        'tortoise_create_entity(type="document", name=<title>, documentKind=..., '
-        'props=...)',
+        'tortoise_create_entity(type="document", name=<title>, '
+        'props={"documentKind": ..., ...})',
 }
 
 

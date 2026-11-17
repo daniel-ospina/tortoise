@@ -124,7 +124,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 8762578f8c70e817875f66876f8ecebe3f798206
+cut_at_commit: aa8413ca38c747242d5917acb3f4d8a99ce06b8b
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -987,17 +987,17 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_create_document
-  use_instead: tortoise_create_entity(type="document", name=<title>, documentKind=..., props=...)
+  use_instead: 'tortoise_create_entity(type="document", name=<title>, props={"documentKind": ..., ...})'
   sdk_method: create_document
   http_policy: true
   approval: null
 - name: tortoise_create_event
-  use_instead: tortoise_create_entity(type="event", name=..., eventKind=..., props=...)
+  use_instead: 'tortoise_create_entity(type="event", name=..., props={"eventKind": ...})'
   sdk_method: create_event
   http_policy: true
   approval: null
 - name: tortoise_create_object
-  use_instead: tortoise_create_entity(type="object", name=..., props=...)
+  use_instead: 'tortoise_create_entity(type="object", name=..., props={"objectKind": ...})'
   sdk_method: create_object
   http_policy: true
   approval: null
@@ -1007,7 +1007,7 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_create_subject
-  use_instead: tortoise_create_entity(type="subject", name=..., props=...)
+  use_instead: 'tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})'
   sdk_method: create_subject
   http_policy: true
   approval: null
@@ -1434,9 +1434,10 @@ rows:
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  recommendation: fix-declaration
+  basis: decided
+  reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
+    is a false declaration to correct (or a tool to retire — that part is the owner's call)
   recommended_family: null
   proposed: false
   exemption: false
@@ -1776,9 +1777,9 @@ rows:
   keyword_rank: 1
   cluster: fetch-by-id
   canonical: true
-  job: Get any entity by ID, eventId, or url. `type` selects the node kind (point | entity | operator | events |
-    governance), dispatching exactly as the retired per-type getters did; omit it to look the entity up by id. The
-    canonical fetch-by-id tool.
+  job: Get any entity by ID, eventId, or url. `type` selects the node kind (point | entity | operator | event |
+    session | events | governance), dispatching exactly as the retired per-type getters did; omit it to look the
+    entity up by id. The canonical fetch-by-id tool.
   dependency: declares TortoiseSDK.get_entity (resolves)
   lifecycle: active
   used_by: never called, tooling, docs

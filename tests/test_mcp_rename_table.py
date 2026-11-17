@@ -179,13 +179,18 @@ RETIRED_LITERAL: dict[str, str] = {
         'tortoise_review_link_candidates(kind="cross_lens", limit=..., threshold=...)'
     ),
     "tortoise_list_batch": 'tortoise_list_knowledge(kind="batch", id=...)',
-    "tortoise_create_subject": 'tortoise_create_entity(type="subject", name=..., props=...)',
-    "tortoise_create_object": 'tortoise_create_entity(type="object", name=..., props=...)',
+    "tortoise_create_subject": (
+        'tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})'
+    ),
+    "tortoise_create_object": (
+        'tortoise_create_entity(type="object", name=..., props={"objectKind": ...})'
+    ),
     "tortoise_create_event": (
-        'tortoise_create_entity(type="event", name=..., eventKind=..., props=...)'
+        'tortoise_create_entity(type="event", name=..., props={"eventKind": ...})'
     ),
     "tortoise_create_document": (
-        'tortoise_create_entity(type="document", name=<title>, documentKind=..., props=...)'
+        'tortoise_create_entity(type="document", name=<title>, '
+        'props={"documentKind": ..., ...})'
     ),
 }
 

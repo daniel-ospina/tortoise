@@ -30,15 +30,15 @@ not something to reconcile silently.
 | 10 | `tortoise_check_structure` | `tool_registry.py:337` | **no replacement** | `graph_overview` | absent |
 | 11 | `tortoise_checkpoint` | `tool_registry.py:922` | `tortoise_mine_knowledge_from_session(items=..., agent_name=..., threshold=...)` | `mine_knowledge_from_session` | warning shim |
 | 12 | `tortoise_compute_confidence` | `tool_registry.py:627` | **no replacement** | `check_confidence` | absent |
-| 13 | `tortoise_create_document` | `tool_registry.py:1304` | `tortoise_create_entity(type="document", name=<title>, documentKind=..., props=...)` | `create_entity` | warning shim |
+| 13 | `tortoise_create_document` | `tool_registry.py:1304` | `tortoise_create_entity(type="document", name=<title>, props={"documentKind": ..., ...})` | `create_entity` | warning shim |
 | 14 | `tortoise_create_edge` | `tool_registry.py:1469` | **no replacement** | `link_entities` | absent |
 | 15 | `tortoise_create_entity` | `tool_registry.py:1405` | **no replacement** | `create_entity` | absent |
-| 16 | `tortoise_create_event` | `tool_registry.py:1240` | `tortoise_create_entity(type="event", name=..., eventKind=..., props=...)` | `create_entity` | warning shim |
-| 17 | `tortoise_create_object` | `tool_registry.py:1228` | `tortoise_create_entity(type="object", name=..., props=...)` | `create_entity` | warning shim |
+| 16 | `tortoise_create_event` | `tool_registry.py:1240` | `tortoise_create_entity(type="event", name=..., props={"eventKind": ...})` | `create_entity` | warning shim |
+| 17 | `tortoise_create_object` | `tool_registry.py:1228` | `tortoise_create_entity(type="object", name=..., props={"objectKind": ...})` | `create_entity` | warning shim |
 | 18 | `tortoise_create_operator` | `tool_registry.py:722` | **no replacement** | `link_entities` | absent |
 | 19 | `tortoise_create_point` | `tool_registry.py:267` | **no replacement** | `create_entity` | absent |
 | 20 | `tortoise_create_source` | `tool_registry.py:1322` | `tortoise_register_source(url, sourceKind, tier=...)` | `register_source` | warning shim |
-| 21 | `tortoise_create_subject` | `tool_registry.py:1215` | `tortoise_create_entity(type="subject", name=..., props=...)` | `create_entity` | warning shim |
+| 21 | `tortoise_create_subject` | `tool_registry.py:1215` | `tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})` | `create_entity` | warning shim |
 | 22 | `tortoise_delete` | `tool_registry.py:1439` | **no replacement** | `delete_knowledge` | absent |
 | 23 | `tortoise_delete_entity` | `tool_registry.py:1395` | **no replacement** | `delete_knowledge` | absent |
 | 24 | `tortoise_delete_point` | `tool_registry.py:805` | **no replacement** | `delete_knowledge` | absent |
@@ -208,11 +208,11 @@ resolving *which* destination is right is a design decision, not a build step.
 | `tortoise_audit` | `graph_overview` | `tortoise_graph_overview(section="audit", point_kinds=...)` | `graph_overview` | AGREE |
 | `tortoise_belief_timeline` | `check_confidence` | `tortoise_check_confidence(topic=...)` | `check_confidence` | AGREE |
 | `tortoise_checkpoint` | `mine_knowledge_from_session` | `tortoise_mine_knowledge_from_session(items=..., agent_name=..., threshold=...)` | `mine_knowledge_from_session` | AGREE |
-| `tortoise_create_document` | `create_entity` | `tortoise_create_entity(type="document", name=<title>, documentKind=..., props=...)` | `create_entity` | AGREE |
-| `tortoise_create_event` | `create_entity` | `tortoise_create_entity(type="event", name=..., eventKind=..., props=...)` | `create_entity` | AGREE |
-| `tortoise_create_object` | `create_entity` | `tortoise_create_entity(type="object", name=..., props=...)` | `create_entity` | AGREE |
+| `tortoise_create_document` | `create_entity` | `tortoise_create_entity(type="document", name=<title>, props={"documentKind": ..., ...})` | `create_entity` | AGREE |
+| `tortoise_create_event` | `create_entity` | `tortoise_create_entity(type="event", name=..., props={"eventKind": ...})` | `create_entity` | AGREE |
+| `tortoise_create_object` | `create_entity` | `tortoise_create_entity(type="object", name=..., props={"objectKind": ...})` | `create_entity` | AGREE |
 | `tortoise_create_source` | `register_source` | `tortoise_register_source(url, sourceKind, tier=...)` | `register_source` | AGREE |
-| `tortoise_create_subject` | `create_entity` | `tortoise_create_entity(type="subject", name=..., props=...)` | `create_entity` | AGREE |
+| `tortoise_create_subject` | `create_entity` | `tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})` | `create_entity` | AGREE |
 | `tortoise_dream` | `refresh_confidence` | `tortoise_refresh_confidence(scope="dirty"\|"full", ...)` | `refresh_confidence` | AGREE |
 | `tortoise_dream_health` | `graph_overview` | `tortoise_graph_overview(section="dream_health")` | `graph_overview` | AGREE |
 | `tortoise_entity_profile` | `explore_connections` | `tortoise_explore_connections(node_id, hops=...)` | `explore_connections` | AGREE |

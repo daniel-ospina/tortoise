@@ -16,6 +16,18 @@ those are what this file measures:
      reach it — not by reading a docstring. A container that answers with something else
      is the failure mode this wave exists to avoid: it would delete the door and keep the
      name, with no capability behind either.
+     ⛔ ALL SEVEN, and the two shapes differ on purpose:
+       · the three READ doors (`get_session`, `list_batch`, `get_cross_lens_candidates`)
+         are substituted at their container's own METHOD — the pointer's `type=`/`kind=`
+         is what selects the arm, so the read is measured through `tortoise_get_entity` /
+         `tortoise_list_knowledge` / `tortoise_review_link_candidates`;
+       · the four `create_*` doors share ONE container method (`create_entity`) whose
+         `type=` selects a per-label WRITE, so substitution goes one level deeper: the
+         test drives `create_entity(type=..., props={"<kind>": ...})` and records the
+         `_create_entity` call it lands on. That is the only seam that can catch an arm
+         routing `type="subject"` to an OBJECT write, or one that drops the
+         `props`-carried kind the pointer advertises — a check against the
+         `_ENTITY_ITEM_LABELS` constant alone leaves both green (#13052 review F3).
 
 ⛔ AND THE HALF THAT IS A RECORDED DECISION, NOT A CHOICE THIS FILE MAKES
 -----------------------------------------------------------------------
@@ -41,6 +53,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from typing import ClassVar
 
 import pytest
 
@@ -94,6 +107,28 @@ PROTECTED = {
     "tortoise_recall": "check_confidence has no recall arm",
 }
 
+#: The other NINE of the registry block's 25: live, off the 27-target, and held for a
+#: reason with no PROPERTY to assert — their recorded destination is not live on `main`
+#: yet, so there is no container to answer through and nothing that can be measured
+#: beyond "still live, still not retired" (which `TestProtectedDoorsStayLive` pins for
+#: every name in this table too). ⛔ Kept as a separate table rather than folded into
+#: `PROTECTED`, because `PROTECTED`'s contract is a retaining artefact this file READS
+#: BACK from the code; a name here has none, and pretending otherwise would make the
+#: table's own docstring false. What the split buys: `len(PROTECTED) + len(NO_CONTAINER_YET)
+#: == 25` turns the registry's prose enumeration into a checked POPULATION, so a live
+#: door dropped from either table reds here instead of surviving as a comment.
+NO_CONTAINER_YET = {
+    "tortoise_delete": "delete_knowledge not live",
+    "tortoise_delete_point": "delete_knowledge not live",
+    "tortoise_delete_entity": "delete_knowledge not live",
+    "tortoise_create_edge": "link_entities not live",
+    "tortoise_create_operator": "link_entities not live",
+    "tortoise_events_poll": "poll_events not live",
+    "tortoise_org_create": "account tenancy, not on the MCP (#11609 settled 2026-09-22)",
+    "tortoise_ingest": "write_knowledge_batch not live",
+    "tortoise_list_graphs": "inside `overview`; no container row yet",
+}
+
 
 def _live() -> dict:
     return {t.name: t for t in TOOL_REGISTRY}
@@ -137,6 +172,65 @@ class TestTheSevenAreRetiredForward:
         archived = {e["symbol"] for e in manifest["entries"] if e.get("kind") == "mcp-tool"}
         assert not (archived & set(RETIRED_USE_INSTEAD)), (
             "a name is both archived (not served) and retired-forward (still served)")
+
+
+class TestThePointerIsCallableAtTheContainer:
+    """A pointer is a MIGRATION INSTRUCTION, so its arguments must be accepted.
+
+    `test_the_pointer_names_its_container_and_discriminator` asserts the container and
+    the discriminator are NAMED; that is satisfiable by a pointer the container would
+    reject with `TypeError`, which is the same dead end as no pointer at all. Measured
+    failure this class exists for: the four `create_*` pointers named
+    `eventKind=`/`documentKind=` as TOP-LEVEL kwargs, and `tortoise_create_entity`
+    takes `(type, name, props=None)` — the kinds ride INSIDE `props` (the SDK pops them
+    and refuses the write without one). `tortoise_create_subject`/`_object` named the
+    kind NOWHERE, which is quieter and worse: `entities.py` defaults it to `'other'`.
+
+    ⛔ Scoped to THIS WAVE's seven on purpose. The same scan over all 60 pointers
+    finds one PRE-EXISTING stray that this change did not introduce and must not
+    silently "fix" (`tortoise_mine_conversations` names `conversation`/`source_id`; its
+    target takes `directory`/`extract_entities`), reported as a follow-up issue. A
+    global assertion here would fail on main too — that is a different change's work.
+    """
+
+    #: The kind each retired `create_*` door REQUIRED, and the container takes inside
+    #: `props`. Absent from the pointer, the caller loses the discriminator silently.
+    REQUIRED_KIND: ClassVar[dict[str, str]] = {
+        "tortoise_create_subject": "subjectKind",
+        "tortoise_create_object": "objectKind",
+        "tortoise_create_event": "eventKind",
+        "tortoise_create_document": "documentKind",
+    }
+
+    @pytest.mark.parametrize("name", sorted(RETIRED_THIS_WAVE))
+    def test_every_named_argument_is_one_the_container_accepts(self, name):
+        """BIND the pointer's own call against the live tool's signature."""
+        pointer = RETIRED_USE_INSTEAD[name]
+        target = _live()[_POINTER_TARGET.match(pointer).group(1)]
+        fn = getattr(ms, target.name, None)
+        assert fn is not None, f"{target.name} is advertised but not defined on the server"
+        sig = inspect.signature(fn)
+        accepts_kwargs = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        named = re.findall(r"(?:^|[(,]\s*)([A-Za-z_][A-Za-z0-9_]*)=(?!=)", pointer)
+        assert named, f"{name}'s pointer names no argument at all: {pointer!r}"
+        rejected = [kw for kw in named if kw not in sig.parameters and not accepts_kwargs]
+        assert not rejected, (
+            f"{name} is pointed at {pointer!r}, which passes {rejected} — "
+            f"{target.name}{sig} does not take them, so a migrating caller gets a "
+            "TypeError from the pointer that is supposed to migrate them")
+
+    @pytest.mark.parametrize("name,kind", sorted(REQUIRED_KIND.items()))
+    def test_the_required_kind_is_carried_where_the_container_reads_it(self, name, kind):
+        pointer = RETIRED_USE_INSTEAD[name]
+        assert f'"{kind}"' in pointer, (
+            f"{name} is pointed at {pointer!r} without {kind!r}: the retired door could "
+            "not be called without a kind, and the container's create path DEFAULTS an "
+            f"absent {kind} to 'other' (entities.py), so the caller loses the "
+            "discriminator with no error")
+        assert f'props={{"{kind}": ' in pointer, (
+            f"{name}'s {kind} must be INSIDE props — `tortoise_create_entity(type, name, "
+            f"props=None)` has no {kind} parameter: {pointer!r}")
 
 
 class TestEveryPointerResolvesInOneHop:
@@ -216,6 +310,66 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
             ms._transport_mode.reset(token)
         assert reached == [(("s-1",), {})], reached
 
+    @pytest.mark.parametrize("entity_type,label,event_type,kind_key", [
+        ("subject", "Subject", "SubjectAdded", "subjectKind"),
+        ("object", "Object", "ObjectRegistered", "objectKind"),
+        ("event", "Event", "EventRecorded", "eventKind"),
+        ("document", "Document", "DocumentCreated", "documentKind"),
+    ])
+    def test_a_create_door_lands_on_its_own_arm_and_carries_its_kind(
+            self, entity_type, label, event_type, kind_key, monkeypatch):
+        """Substitute the write the container performs — for all four `create_*` doors.
+
+        ⛔ THE ASSERTION PAIR A `_ENTITY_ITEM_LABELS` MEMBERSHIP CHECK CANNOT MAKE. The
+        pointer advertises `tortoise_create_entity(type="subject", name=...,
+        props={"subjectKind": ...})`; two ways that advertisement can be a lie while the
+        registry, the pointer and the label constant all stay green:
+
+          1. the `type="subject"` arm writes an OBJECT (wrong label, wrong journal);
+          2. the kind never reaches the write — `subjectKind` is dropped from the props
+             bag, which is the silent `'other'` default `_entity_door_props`' docstring
+             was written to stop (and for `event`/`document` a hard refusal instead).
+
+        Measured at the ONE seam every arm funnels through (`_create_entity`) rather than
+        at the graph: the container is `TortoiseSDK.__new__` with its persistence and
+        advisory legs stubbed, so this asserts DISPATCH and the prop bag, never storage.
+        """
+        reached: list[tuple] = []
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+
+        def record(_self, _label, id_val, props, _event_type, **_kwargs):
+            reached.append((_label, dict(props), _event_type))
+            return {"id": id_val, "label": _label}
+
+        # Every stub below is a leg this test does NOT measure, and each needs a live
+        # graph: identity minting, the nudge query, the provenance advisory, the
+        # projection object the event branch builds before it writes.
+        monkeypatch.setattr(TortoiseSDK, "_create_entity", record, raising=True)
+        monkeypatch.setattr(TortoiseSDK, "_entity_identity_for",
+                            lambda _self, _l, _n, explicit_id=None: "fixed-id",
+                            raising=True)
+        monkeypatch.setattr(TortoiseSDK, "_get_proj",
+                            lambda _self: type("P", (), {"g": None})(), raising=True)
+        monkeypatch.setattr(TortoiseSDK, "_nudge_candidates",
+                            lambda _self, _name, exclude_ids=None: [], raising=True)
+        monkeypatch.setattr(TortoiseSDK, "_provenance_advisory",
+                            lambda _self, _node, _props, entity_type=None: None,
+                            raising=True)
+
+        sdk.create_entity(entity_type, "Ada", props={kind_key: "person"})
+
+        assert len(reached) == 1, f"one create produced {len(reached)} writes: {reached}"
+        got_label, got_props, got_event = reached[0]
+        assert (got_label, got_event) == (label, event_type), (
+            f"create_entity(type={entity_type!r}) wrote a {got_label!r} ("
+            f"{got_event!r}), not a {label!r} ({event_type!r}) — the retired door is "
+            "pointed at an arm that creates a DIFFERENT entity")
+        assert got_props.get(kind_key) == "person", (
+            f"create_entity(type={entity_type!r}, props={{{kind_key!r}: 'person'}}) "
+            f"reached the write as {got_props!r}: the kind is not in the bag, so the "
+            "pointer's discriminator is dropped (subject/object fold it to 'other'; "
+            "event/document refuse) and a migrating caller loses the kind silently")
+
     @pytest.mark.parametrize("entity_type", _CREATE_ENTITY_TYPES)
     def test_create_entity_routes_every_retired_create_type(self, entity_type):
         """The arm exists for every `create_*` door this wave retires.
@@ -245,7 +399,39 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
 
 
 class TestProtectedDoorsStayLive:
-    """A recorded decision, asserted against the code that makes it true."""
+    """A recorded decision, asserted against the code that makes it true.
+
+    ⛔ WHAT IS PINNED, AND WHAT IS ONLY ENUMERATED. The registry's `#11609 lane E` block
+    names 25 live doors off the 27-target. SIXTEEN of them carry a retaining PROPERTY
+    this file asserts (`PROTECTED`: the list envelope, the `rest_spec`, a paged
+    destination, or a container with no arm). The other NINE (`NO_CONTAINER_YET`) have
+    no live container at all, so the only thing to measure is "still live, still not
+    retired" — pinned below for them too. The two tables together are what make the
+    enumeration checkable as a POPULATION; neither alone is 25 of 25.
+    """
+
+    def test_the_two_tables_cover_the_enumerated_population_and_do_not_overlap(self):
+        live = _live()
+        assert len(PROTECTED) == 16, (
+            f"PROTECTED holds {len(PROTECTED)}: the registry block names 16 doors with a "
+            "retaining property — if a door gained or lost one, move it in the batch that "
+            "changed the code, not to wherever a green run lands")
+        assert len(NO_CONTAINER_YET) == 9, (
+            f"NO_CONTAINER_YET holds {len(NO_CONTAINER_YET)}: nine names are held because "
+            "their recorded destination is not live — a container landing moves one")
+        both = set(PROTECTED) & set(NO_CONTAINER_YET)
+        assert not both, f"a door is in both tables, which is a contradiction: {both}"
+        population = set(PROTECTED) | set(NO_CONTAINER_YET)
+        assert len(population) == 25, (
+            f"the two tables cover {len(population)} names, not the 25 live names off the "
+            "27-target that the registry block enumerates — a live door dropped from both "
+            "is a door with NO recorded reason to stay live")
+        missing = sorted(n for n in population if n not in live)
+        assert not missing, (
+            f"these are named as protected but are no longer live: {missing} — if they "
+            "were retired, a recorded decision was reversed; reopen it instead")
+        retired = sorted(n for n in population if n in RETIRED_USE_INSTEAD)
+        assert not retired, f"protected doors must not carry a retirement pointer: {retired}"
 
     @pytest.mark.parametrize("name", sorted(PROTECTED))
     def test_the_door_is_live_and_not_retired(self, name):
