@@ -7546,6 +7546,19 @@ surfaces:
   # (the inventory read), which fall to the `core` fallback — same rationale as
   # test_4999_vector_mechanism.py above.
   - test_4997_vector_index_parity.py
+  # #13320: an ARMED store (record DSN + `TORTOISE_RECORD_VECTOR_LEG`) must
+  # REMOVE the in-graph `Point.embedding` VECTOR index, and must not be silent
+  # when it cannot. The retirement shipped two `DROP INDEX` forms the engine
+  # refuses (`no such index`, even while `CALL db.indexes()` reports the index)
+  # and logged the refusals at DEBUG only, so a production box kept paying for
+  # the index with nothing in its log. Pins
+  # `tortoise/index_catalogue.py::vector_index_drop_statement` (the ONE rendering,
+  # shared with `graph_key_restore`) plus `tortoise/projection/`'s sweep — both
+  # unpatterned modules that fall to the `core` fallback, same rationale as
+  # test_4997_vector_index_parity.py above. DB-free except the live falsifier
+  # (`test_an_armed_setup_REMOVES_a_real_in_graph_vector_index`), which module-
+  # skips without `TORTOISE_DB_URI` and runs in the docker legs.
+  - test_13320_vector_index_retirement_drops.py
   # #5404: the entity_type -> Cypher-label guard must be ENFORCED, not merely
   # declared — `tortoise/security.py::validate_entity_type` was inert while the
   # legs interpolated a caller-controlled string into a Cypher LABEL. Pins the
