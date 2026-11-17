@@ -1,0 +1,724 @@
+"""#13093 — an Object read back as `{}`: the entity door's verdict, then the record.
+
+WHY THIS FILE EXISTS
+====================
+Measured 2026-11-17 on the hosted app `tortoise-y4mjjq`, graph
+`g_311d79c684de4d0e8953d189ed`, `TORTOISE_RECORD_SERVE=prefer`,
+`TORTOISE_RECORD_DSN` present: the record held **8 objects / 39 events / 5
+points**, `POST /v1/points` → `GET /v1/points/{id}` answered **200
+`servedFrom: "record"`**, and the canonical entity door answered
+
+    MCP `tortoise_get_entity(id=<goal id>)`  →  `{}`
+
+— not `not-hot`, not the node. A bare `{}` is the one wrong answer that is
+indistinguishable from a right one (#7952): *"we cannot see it from here"* and
+*"it does not exist"* came back as the same bytes on the only by-id door an agent
+has for **Objects and Events**, and the owner's migration writes those two.
+
+WHAT IS PINNED HERE — one test per door, plus the coverage rule
+==============================================================
+1. **an Object round-trips** — written to the record, cache COLD, the read
+   returns the node and names the store (`servedFrom: "record"`). On the pre-fix
+   tree this returns `{}` with `prefer` armed: the door never consulted the seam.
+2. **an Event does NOT round-trip, and says so** — its parity is open (#9721), so
+   the honest answer is `residency: "not-hot"`, NEVER `{}`. The parity dependency
+   is named in the assertion's own message because that message is what the next
+   lane will read.
+3. **a record that cannot be asked is `not-hot`, never `{}`** — the record-down
+   arm, on both the SDK and the MCP door.
+4. **the coverage rule is conditional** — with full coverage the SAME miss is an
+   established absence (`{}`), so the abstention is a declared coverage gap and
+   not a blanket refusal to answer.
+5. **the internal accessor stays cache-only** — `_get_entity` must not open the
+   record even when armed: the write echoes and the mid-sweep read paths call
+   it, and a record answer there reads a store a write has not projected.
+6. **`off` is byte-identical** — the default does not move.
+
+⚠️ DB-FREE on purpose (the repo's `test_record_serve.py` S9 pattern, reused by
+`test_12941_read_your_writes.py`): a fake record answers the row queries per
+TABLE and a fake cache answers the union query, so these pin the SEAM and the
+DOORS, not a live deployment. The live arm would need a throwaway graph AND a
+throwaway record tenant; `tests/test_record_serve_live.py` is where that class of
+evidence lives, and it must never point at `live-v5`.
+"""
+from __future__ import annotations
+
+import pytest
+
+from tests.test_record_serve import (
+    TENANT,
+    _FakeConn,
+    _FakeCursor,
+    _opener,
+)
+from tortoise import record_serve as rs
+from tortoise.residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
+
+# ── the two stores, faked ──────────────────────────────────────────────────
+
+
+class _TableCursor(_FakeCursor):
+    """The shared fake cursor, plus PER-TABLE rows.
+
+    ⛔ This is the whole point of the fake: the union read asks each label's OWN
+    table, so one blob of rows would let an Object row answer a `public.point`
+    query and the test would never notice the door asking the wrong table. The
+    prologue (tenant GUC + role posture) is the parent's, unchanged.
+    """
+
+    def execute(self, sql, params=()):
+        super().execute(sql, params)
+        norm = " ".join(sql.split())
+        if "FROM public." in norm:
+            table = norm.split("FROM public.", 1)[1].split(" ", 1)[0].strip()
+            self._rows = list(self._conn.tables.get(table, []))
+        return None
+
+
+class _TableConn(_FakeConn):
+    """A record connection that answers a DIFFERENT row set per table."""
+
+    def __init__(self, tables=None, *, error=None):
+        super().__init__(rows=[], error=error)
+        self.tables = dict(tables or {})
+
+    def cursor(self):
+        return _TableCursor(self)
+
+    def table_statements(self):
+        return [(" ".join(s[0].split()).split("FROM public.", 1)[1].split(" ", 1)[0])
+                for s in self.row_statements()]
+
+
+class _UnionG:
+    """The cache graph: answers `_resolve_entity`'s UNION query.
+
+    `nodes` are the rows `_resolve_entity` expects — ``[label, key, value,
+    props]`` per branch — so the REAL `_resolve_entity`/`_get_entity` body runs
+    under the test and the cache side is not a stub of the thing under test.
+    """
+
+    def __init__(self, nodes=None):
+        self.nodes = list(nodes or [])
+        self.queries: list[str] = []
+
+    def query(self, sql, params=None, **_kw):
+        self.queries.append(" ".join(sql.split()))
+
+        class _R:
+            # An INSTANCE attribute, not a class one: a mutable class attribute
+            # would be shared across responses and is what `ruff` RUF012 refuses.
+            def __init__(self, rows):
+                self.result_set = list(rows)
+
+        return _R(self.nodes)
+
+
+class _Proj:
+    """The REAL projector's union resolver over the fake graph.
+
+    `_resolve_entity` is bound off the real class so the body that runs is the
+    production resolution ORDER (Point → Subject → Object → Source → Event →
+    Source) — a hand-written stub here would pin the stub, and the precedence
+    is half of what the record read has to mirror.
+    """
+
+    def __init__(self, g):
+        self.g = g
+
+    def _resolve_entity(self, *a, **kw):
+        from tortoise.projection import FalkorProjection
+
+        return FalkorProjection._resolve_entity(self, *a, **kw)
+
+    def __getattr__(self, name):
+        # `_RESOLVE_BRANCHES` and its siblings are CLASS attributes the real
+        # resolver reads off `self`; take them from the real class rather than
+        # restating the branch table in the test.
+        from tortoise.projection import FalkorProjection
+
+        return getattr(FalkorProjection, name)
+
+
+def _sdk_class():
+    """The REAL `TortoiseSDK`, so `get_entity` is the method under test."""
+    from tortoise.sdk import TortoiseSDK
+
+    class _Stub(TortoiseSDK):
+        def __init__(self, nodes=None, *, tenant=TENANT):
+            self._g = _UnionG(nodes)
+            self._record_tenant = tenant
+            self.handle_opens = 0
+
+        def _get_proj(self):
+            self.handle_opens += 1
+            return _Proj(self._g)
+
+    return _Stub
+
+
+def _object_row(**kwargs):
+    """A record row for an `:Object` — the schema's columns, not graph names."""
+    row = {"id": "obj-1", "name": "migration-goal", "props": {}}
+    row.update(kwargs)
+    return row
+
+
+def _event_row(**kwargs):
+    row = {"event_id": "ev-1", "name": "decided", "props": {}}
+    row.update(kwargs)
+    return row
+
+
+def _cache_object():
+    return [["Object", "id", "obj-1",
+             {"id": "obj-1", "name": "migration-goal", "objectKind": "other",
+              "title": ""}]]
+
+
+@pytest.fixture
+def armed(monkeypatch):
+    """Arm `prefer` and install a fake record opener that records its calls."""
+    def _arm(tables=None, *, error=None):
+        monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+        rs.reset_fallback_counts()
+        conn = _TableConn(tables, error=error)
+        opened = _opener(conn)
+        monkeypatch.setattr(rs, "open_record", opened)
+        return conn, opened
+
+    return _arm
+
+
+# ── 1. an Object round-trips through the record ────────────────────────────
+
+
+def test_SDK_an_OBJECT_written_to_the_record_is_not_absent(armed):
+    """THE ISSUE. Pre-fix this is `{}` — the measured production answer."""
+    armed({"object": [_object_row()]})
+    sdk = _sdk_class()(nodes=[])  # the cache is COLD
+
+    out = sdk.get_entity("obj-1")
+
+    assert isinstance(out, dict) and out.get("id") == "obj-1", (
+        "an Object the RECORD holds read back as absent through the canonical "
+        f"entity door — got {out!r}. This is #13093's measured production "
+        "answer (8 objects in the record, `tortoise_get_entity` -> `{}`).")
+    assert out.get("servedFrom") == "record", (
+        "the read must name the store that answered; without it a caller "
+        f"cannot tell a record-served node from a cache hit — got {out!r}")
+
+
+def test_SDK_the_union_asks_each_labels_OWN_table_in_the_cache_order(armed):
+    """The union is not a single blob query — it is per-label, first hit wins.
+
+    ⛔ NON-VACUOUS: an Object row is present under the OBJECT table only, so a
+    door that asked the wrong table (or one shared row set) could not find it.
+    The statement order IS asserted as a literal list, which is deliberate —
+    `:test_the_coverage_domain_is_the_cache_resolvers_branch_labels` is what
+    pins the declaration, and a literal here is what catches a reordering of the
+    SERVED subset (mutating the tuple reddens it). An earlier docstring claimed
+    this was "asserted against the declaration rather than against a hard-coded
+    list"; it is not, so the claim is corrected rather than the assertion
+    (#13322 review observation 4).
+    """
+    conn, _ = armed({"object": [_object_row()]})
+    sdk = _sdk_class()(nodes=[])
+
+    assert sdk.get_entity("obj-1").get("id") == "obj-1"
+    asked = [t for t in conn.table_statements() if t != "journal_event"]
+    assert asked == ["point", "subject", "object"], (
+        "the union must ask every served label's own table, in the cache "
+        f"resolver's order — asked {conn.table_statements()}")
+    # The `journal_event` read is the `status` fold `read_node` applies to the
+    # label it HIT (`EVENT_STREAM_FOLDS`), not a fourth union branch.
+    assert conn.table_statements().count("object") == 1
+
+
+def test_MCP_an_OBJECT_written_to_the_record_is_not_absent(armed, monkeypatch):
+    """The door an agent actually uses — `tortoise_get_entity(id)`."""
+    from tortoise import mcp_server
+    from tortoise.mcp_auth import (
+        _current_org_id,
+        _current_org_limits,
+        _transport_mode,
+    )
+
+    armed({"object": [_object_row()]})
+    stub = _sdk_class()(nodes=[])
+    _transport_mode.set("http")
+    _current_org_id.set("org_t")
+    _current_org_limits.set(None)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
+    try:
+        out = mcp_server.tortoise_get_entity("obj-1")
+    finally:
+        _transport_mode.set(None)
+        _current_org_id.set(None)
+        _current_org_limits.set(None)
+
+    assert isinstance(out, dict) and out.get("id") == "obj-1", (
+        f"MCP `tortoise_get_entity` answered {out!r} for an Object the record "
+        "holds — the production defect #13093 measured")
+    assert out.get("servedFrom") == "record", out
+
+
+def test_SDK_a_cache_hit_still_answers_when_the_record_misses(armed):
+    """A `prefer` MISS falls back to the cache and NAMES the reason.
+
+    ⛔ The reason is the COVERAGE one, not `record-miss` — this union's `no row`
+    settles only `ENTITY_UNION_LABELS`, so it cannot be read as an established
+    absence (that is the difference from the single-label point door, whose
+    `record-miss` IS one). `answered_by_cache` is what counts it, so the
+    fallback stays measurable.
+    """
+    armed({"object": []})
+    sdk = _sdk_class()(nodes=_cache_object())
+
+    out = sdk.get_entity("obj-1")
+
+    assert out.get("id") == "obj-1", out
+    assert out.get("fallbackReason") == rs.FALLBACK_RECORD_LABEL_NOT_SERVED, out
+    assert rs.fallback_counts().get(rs.FALLBACK_RECORD_LABEL_NOT_SERVED) == 1
+
+
+# ── 2. an Event: no parity, so an HONEST verdict — never `{}` ──────────────
+
+
+def test_SDK_an_EVENT_is_not_hot_and_never_an_empty_answer(armed):
+    """#9721 is the named dependency, and it is NOT silently widened here.
+
+    A record-sourced `:Event` loses SEVEN fold-written `ON CREATE` properties
+    (`id`, `eventKind`, `subject`, `object`, `startedAt`, `classificationLevel`,
+    `format`, `participants`) and `FOLD_ON_CREATE_DEFAULTS` has no `Event` row —
+    so `parity_difference(label='Event')` reports them UNEXPLAINED. Serving it
+    would ship a silent parity gap (a lost `id`) through the door whose whole
+    purpose is honest reads; answering `{}` would claim it does not exist. The
+    door abstains.
+    """
+    armed({"event": [_event_row()]})
+    sdk = _sdk_class()(nodes=[])  # cold cache, Event only in the record
+
+    out = sdk.get_entity("ev-1")
+
+    assert out != {}, (
+        "an Event read back as a BARE EMPTY DICT — that is the 'cannot see it' "
+        "/ 'does not exist' conflation #7952 forbids, and the exact production "
+        "defect #13093 measured")
+    assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
+        f"expected the honest impairment marker, got {out!r}")
+    # The reason names the COVERAGE gap, not a plain record miss: `record-miss`
+    # would make this an ESTABLISHED absence (`RECORD_ANSWERED_REASONS`).
+    assert out.get("fallbackReason") == rs.FALLBACK_RECORD_LABEL_NOT_SERVED, out
+
+
+def test_the_coverage_reason_is_never_read_as_an_established_absence():
+    """⛔ THE LOAD-BEARING PIN on the reason vocabulary.
+
+    `RECORD_ANSWERED_REASONS` is what turns an empty answer into an established
+    absence. Adding the coverage reason there would convert "this door does not
+    serve that label" into "the node does not exist" — #7952 re-introduced by a
+    string.
+    """
+    assert rs.FALLBACK_RECORD_LABEL_NOT_SERVED not in rs.RECORD_ANSWERED_REASONS
+    assert rs.FALLBACK_RECORD_LABEL_NOT_SERVED in rs.FALLBACK_REASONS
+
+
+# ── 3. a record that cannot be asked ───────────────────────────────────────
+
+
+def test_SDK_says_not_hot_when_the_record_could_not_be_asked(monkeypatch):
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    rs.reset_fallback_counts()
+    monkeypatch.setattr(rs, "open_record", _opener(OSError("record is down")))
+    sdk = _sdk_class()(nodes=[])
+
+    out = sdk.get_entity("obj-1")
+
+    assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
+        f"an unaskable record must answer not-hot, got {out!r}")
+    assert out.get("fallbackReason") == rs.FALLBACK_RECORD_UNAVAILABLE, out
+    assert rs.fallback_counts().get(rs.FALLBACK_RECORD_UNAVAILABLE) == 1, (
+        "the fallback must be COUNTED, not only named")
+
+
+def test_MCP_a_record_that_could_not_be_asked_is_not_hot(monkeypatch):
+    from tortoise import mcp_server
+    from tortoise.mcp_auth import (
+        _current_org_id,
+        _current_org_limits,
+        _transport_mode,
+    )
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    rs.reset_fallback_counts()
+    monkeypatch.setattr(rs, "open_record", _opener(OSError("record is down")))
+    stub = _sdk_class()(nodes=[])
+    _transport_mode.set("http")
+    _current_org_id.set("org_t")
+    _current_org_limits.set(None)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
+    try:
+        out = mcp_server.tortoise_get_entity("obj-1")
+    finally:
+        _transport_mode.set(None)
+        _current_org_id.set(None)
+        _current_org_limits.set(None)
+
+    assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
+        f"the MCP door answered {out!r} for a record it could not ask")
+    assert out != {}
+
+
+def test_SDK_record_mode_refuses_instead_of_inventing_an_absence(monkeypatch):
+    """`record` has no cache branch, so a structural failure RAISES."""
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    monkeypatch.setattr(rs, "open_record", _opener(OSError("record is down")))
+    sdk = _sdk_class()(nodes=[])
+
+    with pytest.raises(rs.RecordUnavailable):
+        sdk.get_entity("obj-1")
+
+
+# ── 4. the coverage rule is CONDITIONAL, not a blanket refusal ─────────────
+
+
+def test_the_abstention_is_a_COVERAGE_gap_not_a_refusal_to_answer(monkeypatch):
+    """With every addressable label served, the SAME miss is an established absence.
+
+    ⛔ This is what makes the abstention honest rather than convenient: the
+    door answers `{}` the moment nothing is outside its coverage, so the
+    `not-hot` above is caused by #9721's open labels and not by a rule that
+    never yields an answer.
+
+    ⛔ THE STATE PATCHED IN HERE MUST BE REACHABLE (#13322 review F2). The
+    previous spelling patched `ENTITY_UNION_LABELS` to `tuple(NODE_TABLES)` —
+    six labels including `Session`, which is in NO resolve branch — so it
+    asserted the `{}` verdict in a configuration the door can never occupy, and
+    it hid the fact that the predicate as shipped was `False` forever. The
+    state patched below is the jurisdiction set itself: exactly the tuple #9721
+    landing produces, where the two unserved labels join the union.
+    """
+    answer = rs.ServedAnswer(read=rs.READ_ENTITY_UNION_BY_ID, coordinate="c",
+                             served_from="record", props=None)
+    assert rs.entity_absent_wire(answer) != {}
+    assert rs.entity_coverage_complete() is False, (
+        "Source and Event are addressable by a bare id and are not served — "
+        "coverage cannot be complete while that is true (the `{}` arm must "
+        "stay unreachable rather than be fabricated)")
+
+    monkeypatch.setattr(rs, "ENTITY_UNION_JURISDICTION", rs.ENTITY_UNION_LABELS)
+    assert rs.entity_coverage_complete() is True
+    assert rs.entity_absent_wire(answer) == {}, (
+        "with complete coverage the record's `no row` IS an absence, and the "
+        "answer must be the FALSY empty dict (a verifier written as `if out:` "
+        "must not read an absence as a success, #12941 review P0-1)")
+
+
+def test_the_coverage_domain_is_the_cache_resolvers_branch_labels():
+    """The declared domain IS the labels a bare id can name — pinned to its owner.
+
+    `ENTITY_UNION_JURISDICTION` is a local literal because `record_serve` imports
+    no graph driver; this is the pin that stops it drifting from
+    `_RESOLVE_BRANCHES`, the resolver whose branches make a label addressable at
+    all. ⛔ Non-vacuous on the failure that produced #13322 review F2: the
+    previous `entity_coverage_complete` measured `cache_projection.NODE_TABLES`,
+    which carries `Session` — a label in NO branch. Re-measuring `NODE_TABLES`
+    reddens this row.
+    """
+    from tortoise.cache_projection import NODE_TABLES
+    from tortoise.projection import FalkorProjection
+
+    branch_labels = tuple(dict.fromkeys(
+        label for label, _prop in FalkorProjection._RESOLVE_BRANCHES))
+    assert tuple(rs.ENTITY_UNION_JURISDICTION) == branch_labels, (
+        "the coverage domain drifted from the resolver's own branch labels — "
+        f"declared {rs.ENTITY_UNION_JURISDICTION}, resolver {branch_labels}")
+    assert set(rs.ENTITY_UNION_JURISDICTION) <= set(NODE_TABLES), (
+        "every addressable label must still be a record table")
+    assert "Session" in NODE_TABLES, (
+        "if Session ever leaves NODE_TABLES this row's premise changed")
+    assert "Session" not in rs.ENTITY_UNION_JURISDICTION, (
+        "#13322 F2: Session is in the record's table list but in no resolve "
+        "branch — measuring it made the coverage predicate False forever")
+
+
+def test_naming_an_unaddressable_label_is_not_coverage():
+    """Coverage is SERVED, not merely NAMED (#13322 review F2, point 3).
+
+    `read_entity` skips any label whose record contract key is not the `id` the
+    door is handed, so a future lane adding `Event`/`Source` to
+    `ENTITY_UNION_LABELS` on the belief that #9721 landed would otherwise flip
+    `entity_coverage_complete()` to `True` while the read still served nothing
+    for that label — and the door would answer `{}` for an Event the record
+    holds, which is #13093 itself re-opened by a green suite.
+    """
+    from tortoise.cache_projection import KEY_PROPERTY
+
+    assert all(KEY_PROPERTY.get(label) == "id"
+               for label in rs.ENTITY_UNION_LABELS), (
+        "every SERVED label must be addressable by a bare id")
+    assert [label for label in rs.ENTITY_UNION_JURISDICTION
+            if KEY_PROPERTY.get(label) != "id"] == ["Source", "Event"], (
+        "the unaddressable labels are Source (url) and Event (eventId) — the "
+        "exact pair condition 2 of entity_coverage_complete excludes")
+    served = set(rs.ENTITY_UNION_LABELS)
+    assert not set(rs.ENTITY_UNION_JURISDICTION) <= served, (
+        "if every addressable label is served, revisit this file's `{}` arm — "
+        "the abstention is caused by THIS gap")
+
+def test_read_entity_skips_a_label_keyed_on_something_other_than_id():
+    """The mechanism condition 2 rests on, measured on the real reader."""
+    conn = _TableConn({"source": [{"url": "url-1", "name": "a source"}]})
+    out = rs.read_entity(conn, org_id=TENANT[0], graph_id=TENANT[1],
+                         id_val="url-1", labels=("Source",))
+    assert out is None, (
+        "read_entity answered for a label keyed `url` — then condition 2 of "
+        f"entity_coverage_complete would be dead weight, got {out!r}")
+    assert conn.table_statements() == [], (
+        "it must not even ask the source table for a key it cannot address")
+
+
+
+def test_the_INTERNAL_goal_readers_never_open_the_record(armed):
+    """The ten internal `cache_only=True` CALL SITES, driven for real (#13322 F4).
+
+    ⛔ THE SDK-SIDE FLAG IS NOT THE SITE-SIDE ONE. `test_the_INTERNAL_accessor_
+    never_consults_the_record` pins that `cache_only=True` stays cache-only, but
+    it says nothing about whether the internal readers PASS it — and nothing did:
+    every suite driving these paths runs in `off`, where the two spellings are
+    byte-identical, while the same diff widened the stubs to `(**kwargs)` /
+    `(*args, **kwargs)` so a dropped keyword no longer even `TypeError`s.
+    Measured consequence: delete `cache_only=True` from
+    `derived_invalidation.py:325` and NO row reddened.
+
+    The two readers below are the real functions on two of the ten sites, run
+    against the real SDK with `prefer` armed and a record that WOULD answer, so a
+    reader that dropped the flag consults the record and reddens here.
+    """
+    from tortoise import goal_judgement as gj
+    from tortoise.derived_invalidation import reconcile_goal_state_cache
+
+    _, opened = armed({"object": [_object_row()]})
+    sdk = _sdk_class()(nodes=[["Object", "id", "goal-1",
+                               {"id": "goal-1", "status": "archived",
+                                "goalState": "blocked"}]])
+
+    # goal_judgement.py:1534 — the status axis, read mid-`_cache_then_arrow`.
+    assert gj._goal_retired_on_status(sdk, "goal-1") is True, (
+        "the reader did not see the archived status — the fixture is wrong")
+    # derived_invalidation.py:1134 — the public idempotent repair route.
+    assert reconcile_goal_state_cache(sdk, "goal-1")["preserved"] is True, (
+        "a human word must be preserved, and the read must still be cache-only")
+    assert opened.calls == [], (
+        "an INTERNAL reader opened the record — a mid-write reader must read a "
+        "store the write has already finished projecting, and a truthy "
+        "`{\"residency\": \"not-hot\"}` here would be read as a found node by "
+        "`or {}` (#13322 review F4)")
+    # …and the caller-facing door in the SAME armed state DOES reach it, so the
+    # absence of a consult above is the flag's effect and not an unarmed env.
+    assert sdk.get_entity("obj-1").get("id") == "obj-1"
+    assert opened.calls
+
+
+def test_every_INTERNAL_get_entity_call_site_declares_cache_only():
+    """All TEN sites, site by site — not just the two exercised above.
+
+    ⛔ The behavioural arm above proves the MECHANISM on two real readers; this
+    one proves COVERAGE of the whole set, which is the finding: a single site
+    losing the keyword is invisible to every suite that drives it (they all run
+    in `off`, where both spellings are byte-identical). A source-level sweep is
+    the only cheap way to hold all ten, and it is a coarse but honest instrument:
+    it reddens on a dropped keyword, which is exactly the mutant the review named.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    sites: list[tuple[str, int, bool]] = []
+    for rel in ("tortoise/derived_invalidation.py",
+                "tortoise/goal_judgement.py"):
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get_entity"):
+                flagged = any(
+                    kw.arg == "cache_only"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                    for kw in node.keywords)
+                sites.append((rel, node.lineno, flagged))
+
+    unflagged = [(rel, lineno) for rel, lineno, ok in sites if not ok]
+    assert unflagged == [], (
+        "these internal `get_entity` call sites do NOT declare "
+        f"`cache_only=True` — {unflagged}. The public door honours "
+        "`TORTOISE_RECORD_SERVE` since #13093, so a plain call here can answer "
+        "from the record or hand back a TRUTHY `{'residency': 'not-hot'}` that "
+        "`or {}` / `or MISSING` reads as a found node")
+    assert len(sites) >= 10, (
+        f"only {len(sites)} internal `get_entity` call sites found in the two "
+        "reader modules — the measured set is 10 (derived_invalidation x4, "
+        "goal_judgement x6); if sites were legitimately removed, re-derive this "
+        "floor from the tree rather than dropping the row")
+
+
+def test_the_deferred_and_inline_paths_spell_one_coordinate(armed):
+    """One coordinate, one spelling (#13322 review observation 3).
+
+    `serve_entity` builds `union:<labels>:<id>`; `_get_entity_served`'s deferred
+    path used to build `union:<id>`, so the SAME fallback was attributed to two
+    different coordinates depending on which of the two shapes answered it and an
+    ops join across them silently missed. The value is attribution only — it
+    never reaches the wire — so this pins hygiene, not a verdict.
+    """
+    armed({"object": []})  # the record answers `no row`
+    seen: list[str] = []
+    real = rs.answered_by_cache
+
+    def _spy(**kwargs):
+        seen.append(kwargs["coordinate"])
+        return real(**kwargs)
+
+    monkeypatch_target = rs
+    monkeypatch_target.answered_by_cache = _spy
+    try:
+        sdk = _sdk_class()(nodes=[])
+        sdk.get_entity("obj-1")           # deferred shape (sdk-side spelling)
+        rs.serve_entity(                  # inline shape (module-side spelling)
+            tenant=TENANT, id_val="obj-1", cache_answer=lambda: {},
+            connect=rs.open_record, mode=rs.MODE_PREFER)
+    finally:
+        monkeypatch_target.answered_by_cache = real
+
+    assert len(seen) == 2, f"expected both shapes to fall back, got {seen}"
+    assert seen[0] == seen[1], (
+        f"the same fallback is attributed to two coordinates: {seen}")
+    assert seen[0] == f"union:{'|'.join(rs.ENTITY_UNION_LABELS)}:obj-1", seen[0]
+
+
+def test_the_served_labels_are_the_ones_with_measured_parity():
+    """The declaration, pinned to the evidence rather than to a count.
+
+    `Subject`/`Object` are cleared by #9634 (`FOLD_ON_CREATE_DEFAULTS` covers
+    their fold constants) and `Point` by `point-by-id`'s measured parity; `Event`
+    and `Source` are the open #9721 list. A label added here without that
+    evidence would serve a silent parity gap through an honesty door.
+    """
+    from tortoise.cache_projection import FOLD_ON_CREATE_DEFAULTS, KEY_PROPERTY
+
+    assert set(rs.ENTITY_UNION_LABELS) == {"Point", "Subject", "Object"}
+    assert {"Subject", "Object"} <= set(FOLD_ON_CREATE_DEFAULTS), (
+        "#9634's declared fold constants are what clear Subject/Object for a "
+        "record-served read")
+    assert "Event" not in FOLD_ON_CREATE_DEFAULTS, (
+        "if #9721 lands, revisit ENTITY_UNION_LABELS — the abstention is caused "
+        "by THIS gap")
+    # Every served label must be addressable by the bare id this door is handed.
+    for label in rs.ENTITY_UNION_LABELS:
+        assert KEY_PROPERTY.get(label) == "id", (
+            f"{label} is keyed by {KEY_PROPERTY.get(label)!r} in the record, so "
+            "a bare id cannot address it — that is Source's own exclusion")
+
+
+# ── 5. the internal accessor stays cache-only ──────────────────────────────
+
+
+def test_the_INTERNAL_accessor_never_consults_the_record(monkeypatch):
+    """⛔ `_get_entity` / `get_entity(..., cache_only=True)` is the write echo and
+    the mid-sweep read path.
+
+    Serving it would make a writer read a store the same write has not finished
+    projecting, and would hand `derived_invalidation` / `goal_judgement` a
+    TRUTHY `{"residency": "not-hot"}` where they test `or MISSING` and read it
+    as a found node. So both spellings of the internal read stay cache-only, and
+    only the plain caller-facing call reaches the seam.
+    """
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    opened = _opener(_TableConn({"object": [_object_row()]}))
+    monkeypatch.setattr(rs, "open_record", opened)
+    sdk = _sdk_class()(nodes=[])
+
+    assert sdk._get_entity("obj-1") == {}, (
+        "the internal accessor answered from something other than the cache")
+    assert sdk.get_entity("obj-1", cache_only=True) == {}, (
+        "`cache_only=True` did not stay cache-only")
+    assert opened.calls == [], (
+        "an internal read opened the record — a mid-write reader must not")
+    # …and the caller-facing call in the same armed state DOES reach it, so the
+    # absence of a record consult above is the flag's effect, not an unarmed env.
+    assert sdk.get_entity("obj-1").get("id") == "obj-1"
+    assert opened.calls
+
+
+# ── 6. the default does not move ───────────────────────────────────────────
+
+
+def test_off_mode_is_byte_identical_and_consults_nothing(monkeypatch):
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
+    monkeypatch.delenv("TORTOISE_RESIDENCY", raising=False)
+    opened = _opener(_TableConn({"object": [_object_row()]}))
+    monkeypatch.setattr(rs, "open_record", opened)
+    sdk = _sdk_class()(nodes=[])
+
+    assert sdk.get_entity("obj-1") == {}, (
+        "off mode changed shape — the default must stay byte-identical")
+    assert opened.calls == [], "off mode consulted the record"
+
+
+def test_off_mode_still_answers_a_cache_hit_unchanged(monkeypatch):
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
+    monkeypatch.delenv("TORTOISE_RESIDENCY", raising=False)
+    sdk = _sdk_class()(nodes=_cache_object())
+
+    out = sdk.get_entity("obj-1")
+
+    assert out == {"id": "obj-1", "name": "migration-goal",
+                   "objectKind": "other", "title": ""}, (
+        f"off mode must carry NO attribution and no marker — got {out!r}")
+
+
+# ── 7. the bounded door shares the point door's policy ────────────────────
+
+
+def test_the_entity_door_is_BOUNDED_like_the_point_door(monkeypatch):
+    """A slow record must yield `prefer`'s cache answer, not the transport's
+    `-32009` (#12947 finding 1, one door over)."""
+    import time
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    rs.reset_fallback_counts()
+    monkeypatch.setattr(rs, "open_record", _opener(_SlowConn(0.4)))
+    monkeypatch.setattr("tortoise.monitoring.record_read_timeout_s",
+                        lambda: 0.05)
+    sdk = _sdk_class()(nodes=_cache_object())
+
+    started = time.monotonic()
+    out = sdk.get_entity("obj-1")
+    elapsed = time.monotonic() - started
+
+    assert out.get("fallbackReason") == rs.FALLBACK_RECORD_BOUND_MISS, out
+    assert elapsed < 0.4, (
+        f"the read waited {elapsed:.2f}s for a record the bound had abandoned")
+    assert rs.fallback_counts().get(rs.FALLBACK_RECORD_BOUND_MISS) == 1
+
+
+class _SlowConn(_TableConn):
+    """A record connection that answers after a delay."""
+
+    def __init__(self, delay):
+        super().__init__({"object": [_object_row()]})
+        self.delay = delay
+
+    def cursor(self):
+        import time
+
+        time.sleep(self.delay)
+        return _TableCursor(self)
+
+
+def test_a_negative_bound_is_refused_rather_than_unbounded():
+    with pytest.raises(ValueError):
+        rs.serve_entity_bounded(bound_s=0, tenant=TENANT, id_val="x",
+                                cache_answer=lambda: None, mode=rs.MODE_PREFER)

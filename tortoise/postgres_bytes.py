@@ -77,7 +77,7 @@ MISSING. The gate can also not read this module's whole-table audit on a write
 path (a per-row TOAST lookup per call), and the ledger reader is the window
 addend rather than the stored footprint — so for a while ``postgres_storage``
 was blocked on a per-org RESIDENCY gauge as well. #9559 wires one:
-``org_postgres_residency`` (migration ``20261117000001``) is refreshed OFFLINE
+``org_postgres_residency`` (migration ``20261117000002``) is refreshed OFFLINE
 from :func:`per_org_bytes` by ``postgres_residency_snapshot()``, and the gate
 reads one row by primary key through ``metering.get_postgres_residency``. The
 divide is deliberate: this module stays the MEASUREMENT, ``metering`` owns every
