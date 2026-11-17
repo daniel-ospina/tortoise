@@ -68,11 +68,43 @@ def _stage(sdk, plan_id):
 #: word here is the retired third case wearing the marker's name.
 INGEST_EVENT_STATES = frozenset({"pending", "indexed"})
 
-#: The Cypher half of the pin above ``_event_status_writes``:
-#: ``e.eventStatus='pending'`` / ``eventStatus = 'indexed'`` inside a query
-#: string. The AST readers are the structural half (kwargs and dict literals).
+#: The ingest-state writers this pin SCANS, declared rather than assumed: the
+#: test below separately PROVES that no other ``tortoise/`` module carries a
+#: write-shaped ``eventStatus`` literal, so a new writer module reds this file
+#: instead of slipping into the blind spot its first version had (review round
+#: 2, P2: a fourth module's lifecycle write stayed GREEN because the tuple was
+#: hardcoded and the ``>= 7`` floor counted only the modules already scanned).
+EVENT_STATUS_WRITER_MODULES = ("tortoise.sdk", "tortoise.hosted_api",
+                               "tortoise.session_indexer")
+
+#: The Cypher half of the pin: ``e.eventStatus='pending'`` /
+#: ``eventStatus = 'indexed'`` inside a query string. Read from STRING LITERALS
+#: in the AST (never from the raw source), so a docstring or a comment that
+#: merely spells the word is not indexed as a write.
 _EVENT_STATUS_LITERAL = re.compile(
     r"eventStatus[\"']?\s*[:=]\s*[\"']([A-Za-z_][\w-]*)[\"']")
+
+
+def _docstring_nodes(tree) -> set[int]:
+    """The ``id()`` of every module/class/function docstring node in ``tree``.
+
+    Prose is not a write: without this, a docstring that says *"never write
+    ``eventStatus='completed'``"* would be enumerated as a writer and the pin
+    would have to be taught about text that writes nothing.
+    """
+    import ast
+
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", None) or []
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            ids.add(id(body[0].value))
+    return ids
 
 
 def _event_status_writes(source: str) -> list[tuple[int, str]]:
@@ -81,15 +113,17 @@ def _event_status_writes(source: str) -> list[tuple[int, str]]:
     Three spellings, because the tree uses all three: a **kwarg**
     (``eventStatus="indexed"``), a **dict literal**
     (``{"eventStatus": "indexed"}``) and a **Cypher string**
-    (``e.eventStatus='pending'``). The first two are read from the AST, so a
+    (``e.eventStatus='pending'``). The first two are structural AST nodes, so a
     fourth Python spelling cannot defeat the pin; the third is text inside a
-    query, so the regex reads it. Results are de-duplicated, since a kwarg is
-    matched by both readers.
+    query string, so the regex reads the AST's string CONSTANTS (docstrings
+    excluded). Results are de-duplicated.
     """
     import ast
 
+    tree = ast.parse(source)
+    docstrings = _docstring_nodes(tree)
     found: set[tuple[int, str]] = set()
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             for kw in node.keywords:
                 if (kw.arg == "eventStatus"
@@ -102,8 +136,13 @@ def _event_status_writes(source: str) -> list[tuple[int, str]]:
                         and isinstance(value, ast.Constant)
                         and isinstance(value.value, str)):
                     found.add((value.lineno, value.value))
-    for match in _EVENT_STATUS_LITERAL.finditer(source):
-        found.add((source.count("\n", 0, match.start()) + 1, match.group(1)))
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docstrings):
+            for match in _EVENT_STATUS_LITERAL.finditer(node.value):
+                # the query may span lines; report the line the WRITE is on
+                found.add((node.lineno + node.value.count("\n", 0,
+                                                         match.start()),
+                           match.group(1)))
     return sorted(found)
 
 
@@ -870,7 +909,7 @@ class TestTheIngestMarkerIsNotAnOccurrence:
         assert PO.planned_without_occurrence(g) == []
 
     def test_no_in_tree_writer_emits_a_lifecycle_shaped_ingest_word(self):
-        """The ingest vocabulary is pinned at EVERY writer, in every spelling.
+        """The ingest vocabulary is pinned at every writer in ``tortoise/``.
 
         ``eventStatus`` is ingest BOOKKEEPING (``pending`` -> ``indexed``); a
         lifecycle word in it is the #13100 defect wearing the marker's name —
@@ -881,14 +920,27 @@ class TestTheIngestMarkerIsNotAnOccurrence:
         dict-literal spelling ``"eventStatus": "indexed"`` — which is how five
         of the seven writers in the tree are written, so reverting one of them
         to ``completed`` left this pin GREEN (#13100 review F2).
+
+        ⛔ And it reads every MODULE, not a hardcoded list. Its second version
+        enumerated the three modules below and said "EVERY writer" — so a
+        lifecycle write in a FOURTH ``tortoise/`` module stayed green (measured
+        in review round 2: the same probe appended to ``record_writer.py``
+        passed). The sweep at the end of this test is what makes the claim
+        true: the tuple is a DECLARATION the sweep checks, and a new writer
+        module reds here and is named.
         """
         import inspect
+        import pathlib
 
         from tortoise import hosted_api, sdk, session_indexer
 
+        scanned = {"tortoise.sdk": sdk, "tortoise.hosted_api": hosted_api,
+                   "tortoise.session_indexer": session_indexer}
+        assert tuple(scanned) == EVENT_STATUS_WRITER_MODULES
+
         writes = []
-        for module in (sdk, hosted_api, session_indexer):
-            writes += [(module.__name__, line, value)
+        for name, module in scanned.items():
+            writes += [(name, line, value)
                        for line, value in _event_status_writes(
                            inspect.getsource(module))]
 
@@ -898,6 +950,30 @@ class TestTheIngestMarkerIsNotAnOccurrence:
             "a writer stamps a lifecycle-shaped ``eventStatus``: "
             f"{bad} — the ingest marker takes {sorted(INGEST_EVENT_STATES)} "
             "only; a not-yet-happened thing is a PLAN (#13100 §8)")
+
+        # ⛔ EXHAUSTIVE BY CONSTRUCTION: the tuple above is a declaration, and
+        # THIS is what checks it. Any ``tortoise/`` module carrying a
+        # write-shaped literal must be one of the scanned three — otherwise the
+        # value check above never sees its writes and the pin is green over a
+        # writer it claims to cover. Files are read, not imported.
+        package = pathlib.Path(sdk.__file__).resolve().parent
+        unlisted = []
+        for path in sorted(package.rglob("*.py")):
+            name = "tortoise." + ".".join(
+                path.relative_to(package).with_suffix("").parts)
+            name = name.removesuffix(".__init__")
+            if name in scanned:
+                continue  # already read above; re-parsing it buys nothing
+            source = path.read_text(encoding="utf-8", errors="replace")
+            if "eventStatus" not in source:
+                continue
+            sites = _event_status_writes(source)
+            if sites:
+                unlisted.append((name, sites))
+        assert not unlisted, (
+            "a ``tortoise/`` module writes ``eventStatus`` and this pin does "
+            f"not scan it: {unlisted} — add it to EVENT_STATUS_WRITER_MODULES "
+            "(and to `scanned` above), or the value check never reads it")
 
         # ⛔ NON-VACUITY (agent-infra#3442): a pin that enumerates nothing is
         # green for ever. The tree has SEVEN literal sites at this head; if the
