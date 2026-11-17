@@ -76,6 +76,35 @@
 --     MISSING key rather than "a malformed audit".) The single-org erasure (1)
 --     still zeroes — that is the case the harness asserts.
 --
+--     ⛔ THE GUARD IS A THRESHOLD, NOT A PROPORTIONALITY TEST, AND THE RESIDUAL IS
+--     STATED RATHER THAN IMPLIED (review of this head, P2). `> 0` speaks for the
+--     WHOLE audit, so it cannot distinguish "this org's journal rows are gone"
+--     from "the audit stopped seeing this org" — the same two readings, one org
+--     lower down. It is sound TODAY, and only because of a property of the audit
+--     that this file does not own: `public.postgres_per_org_bytes()` takes NO
+--     parameter and aggregates `FROM public.journal_event t GROUP BY t.org_id`
+--     with no filter (`20261114000001_per_org_postgres_bytes.sql:259-260`,
+--     `:284-285` — the TOAST and non-TOAST arms of the same aggregate), so an
+--     org ABSENT from `orgs` provably has zero journal rows and the zero is
+--     TRUTHFUL, while `orgs = '[]'` proves the whole journal is empty. ⛔ IF THAT
+--     FUNCTION EVER GAINS A FILTER (an org scope, a retention window, a
+--     table-name parameter), the zeroing below becomes UNSOUND for every org the
+--     filter excludes: it would write a fresh measured zero for orgs the audit
+--     merely did not look at, which is the fleet-wide fail-open of (2) in its
+--     PARTIAL form. That change must revisit this function; it is named here
+--     because a property relied on and not written down is the defect class this
+--     whole header exists to prevent.
+--
+--     ⚠️ AND THE ZEROING BRANCH DELIBERATELY DOES NOT `RAISE WARNING`, unlike the
+--     empty-audit branch above — not an omission. That branch fires once, on an
+--     ANOMALY (nobody reported while rows exist). This one fires on ROUTINE
+--     state: the `NOT EXISTS` is re-satisfied on EVERY refresh for every org
+--     holding no journal rows — that re-fire is REQUIRED, because `measured_at`
+--     must advance or the row goes stale and refuses its own next write — so a
+--     warning here would repeat for ever for exactly the orgs this migration is
+--     fixing. The operator signal for the erasure is the zeroed row itself, which
+--     is what `stored_bytes`/`rows`/`source` already record.
+--
 -- Asserted in `supabase/tests/pglite/validate.mjs`'s `#9559` block: the vanished
 -- org KEEPS its row, carries 0 bytes / 0 rows, is stamped with THIS refresh's
 -- instant, and the zero does not touch a still-reported org; and a refresh over
