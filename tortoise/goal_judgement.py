@@ -343,7 +343,11 @@ def _assert_supersession_scope(
     claim scoped to goal B ends up driving goal A's belief. MEASURED through the
     seam: goal A ended with zero live judgements and its belief still moving.
     """
-    node = sdk.get_entity(previous_point_id) or {}
+    # ⛔ `_get_entity`, not `get_entity` (#13093): the public method is the
+    # caller-facing door and honours `TORTOISE_RECORD_SERVE`, so it can answer
+    # from the record or with a truthy `{"residency": "not-hot"}` marker. This
+    # judgement logic wants the CACHE's answer, `{}` for "not there".
+    node = sdk._get_entity(previous_point_id) or {}
     if not node:
         # ⛔ A MISSING predecessor is not a FOREIGN one, and the distinction is
         # what a caller acts on: `get_entity` answers `{}` for an id no node
@@ -859,7 +863,7 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
     if not indicator_id:
         return None
     try:
-        node = sdk.get_entity(indicator_id)
+        node = sdk._get_entity(indicator_id)
     except Exception:
         return BOUNDARY_UNREADABLE
     if not node:
@@ -1476,7 +1480,7 @@ def _subject_for(sdk: Any, indicator_id: str | None, goal_id: str) -> str:
         if not node_id:
             continue
         try:
-            node = sdk.get_entity(node_id)
+            node = sdk._get_entity(node_id)
         except Exception:  # pragma: no cover - a missing node is not fatal here
             node = None
         if node and node.get("name"):
@@ -1527,7 +1531,7 @@ def _goal_retired_on_status(sdk: Any, goal_id: str) -> bool:
     cannot turn a judgement into a ``TypeError`` (#13065 review finding 1).
     """
     try:
-        node = sdk.get_entity(goal_id) or {}
+        node = sdk._get_entity(goal_id) or {}
     except Exception:
         # ⛔ #13065 review round 13, finding 2 (P2): this is FAIL-CLOSED, and the
         # `# pragma: no cover` that used to sit here is gone so the coverage floor
@@ -1676,7 +1680,7 @@ def _point_status(sdk: Any, point_id: str) -> Any:
     """The point's stored ``status``; ``_ABSENT`` if there is no such point;
     ``_READ_FAILED`` if the read itself failed."""
     try:
-        node = sdk.get_entity(point_id) or {}
+        node = sdk._get_entity(point_id) or {}
     except Exception:
         return _READ_FAILED
     if not node:
@@ -1974,7 +1978,7 @@ def record_judgement(
     # refuse it is `create_operator`, which runs AFTER the point and its baseline
     # have landed — leaving a live `derived` claim with `goalId` pointing at
     # nothing and no arrow (measured with a stale/typo'd id).
-    if not (sdk.get_entity(goal_id) or {}):
+    if not (sdk._get_entity(goal_id) or {}):
         raise ValueError(
             f"goal {goal_id!r} does not exist — refusing to mint a judgement for "
             "a goal that cannot receive its belief arrow."
