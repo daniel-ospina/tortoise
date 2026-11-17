@@ -67,12 +67,18 @@ WHAT IT REWRITES, AND WHAT IT DELIBERATELY DOES NOT
   it is what the owner's decision names. `retracted` → `deprecated` is a
   dead→dead move, which `_update_entity`'s non-Point arm admits by design;
   `outdated` is NOT in the family's dead set, so that move is live→dead.
-* **No:** the `outdated` **boolean flag** (`n.outdated = true`), on any label.
-  It is a different axis (ONTOLOGY §5's Point lifecycle flag, read by
-  `live.is_terminal_status`), the owner's decision excludes it, and this tool
-  would corrupt Points if it touched it. It is **reported** (count + sample) so
-  an operator can see it is there and knows it was left alone.
-* **No:** `:Point` / `:Subject` / `:Event` rows. This is the Object family only.
+* **No:** the `outdated` **boolean flag** (`n.outdated = true`). It is a different
+  axis (ONTOLOGY §5's Point lifecycle flag, read by `live.is_terminal_status`),
+  the owner's decision excludes it, and this tool would corrupt Points if it
+  touched it. ⚠️ The count+sample the preview prints is `:Object` rows only —
+  the query is `MATCH (n:Object)`, and the flag is NOT counted on `:Point`
+  rows, which is where it is meaningful. Read the number as "Object-side
+  `outdated` flags", never as "the flag population".
+* **No:** `:Point` / `:Subject` / `:Event` / `:Source` rows. This is the Object
+  family only, and "only" is enforced by RESOLVING THE ID, not merely by the
+  row's own labels: `update_knowledge` binds an addressed row by every identity
+  key the write door declares (`id` per label, plus the declared secondary — a
+  url-only `:Source` stub is reached by an id it does not carry).
 * **No:** a row's supersession carriers (`supersededBy` / `supersededAt`). A row
   that carries both a legacy status word and a carrier is **counted separately**
   in the preview, because rewriting the status leaves the carrier in place — the
@@ -131,9 +137,9 @@ EXIT CODES
     0   the run completed — a preview, or an execute whose population is now 0
     1   the run did not reach its post-condition: rows remain, a row failed,
         the read was truncated, or a row is UNADDRESSABLE (no `id`, so the SDK
-        cannot rewrite it) or its `id` is bound by more than one node. A PREVIEW
-        over such a read exits 1 too — the preview is the measurement that
-        unblocks the sequenced drop, so it must not read as complete.
+        cannot rewrite it), or a record did not land. A PREVIEW over such a read
+        exits 1 too — the preview is the measurement that unblocks the sequenced
+        drop, so it must not read as complete.
     2   refused before touching anything: no journal, an empty target flag; and
         on `--execute` a TRUNCATED read or an UNADDRESSABLE row (no `id`) — both
         exit 1 on a preview (an incomplete measurement) and 2 on the write arm
@@ -198,18 +204,94 @@ def _journal_position(log):
 
 
 def _nodes_sharing_id(g, rid: str) -> list[list[str]]:
-    """Every node bound by ``rid``, as its label list.
+    """Every node the WRITE DOOR would bind for ``rid``, as its label list.
 
-    `update_knowledge` binds on the **ID**, not on the row, so a `:Point` or
-    `:Subject` node that merely SHARES an `:Object`'s id is invisible in that
-    row's `labels(n)` while the write still reaches it (#12855: Points keep
-    their words — touching one is a regression). Resolving the id is the only
-    honest guard; measured 2026-11-17, a sibling Point went `live -> deprecated`
-    while the Object stayed `outdated` and the call still returned `deprecated`.
+    `update_knowledge` binds on identity keys, not on the row: `id` for every
+    canonical label, plus each label's DECLARED secondary key — `Source.url` is
+    one, because `_link_source`/`_mint_source_stub` mint url-only stubs with no
+    `id` (`tortoise/projection/__init__.py`, ``_CANONICAL_ENTITY_SECONDARY_ID_
+    PROPS``). So a `:Point`/`:Subject`/`:Event`/`:Source` node that merely shares
+    an `:Object`'s address is invisible in that row's `labels(n)` while the write
+    still reaches it (#12855: Points keep their words).
+
+    ⛔ The arms are DERIVED from the door's own tables, never hand-written: a
+    hand-written subset is the #2901/#4653 failure shape (a value silently
+    omitted from the set that decides). Measured 2026-11-17: a sibling Point went
+    `live -> deprecated` while its Object stayed `outdated`, and an id-addressed
+    run over a url-only `:Source` stub wrote the Source and exited 0.
     """
     return [list(labs or []) for (labs,) in g.query(
-        "MATCH (m) WHERE m.id = $rid RETURN labels(m)",
-        params={"rid": rid}).result_set]
+        _binding_cypher(), params={"rid": rid}).result_set]
+
+
+_BINDING_CYPHER: str | None = None
+
+
+def _binding_cypher() -> str:
+    """The identity resolution used by :func:`_nodes_sharing_id`, built from the
+    write door's canonical identity tables (so it cannot drift from them)."""
+    global _BINDING_CYPHER
+    if _BINDING_CYPHER is None:
+        from tortoise.projection import (
+            _CANONICAL_ENTITY_ID_PROPS,
+            _CANONICAL_ENTITY_SECONDARY_ID_PROPS,
+        )
+        pairs = (list(_CANONICAL_ENTITY_ID_PROPS)
+                 + list(_CANONICAL_ENTITY_SECONDARY_ID_PROPS))
+        arms = " OR ".join(
+            f"(m:{label} AND m.{prop} = $rid)" for label, prop in pairs)
+        _BINDING_CYPHER = f"MATCH (m) WHERE {arms} RETURN labels(m)"
+    return _BINDING_CYPHER
+
+
+def _binding_refusal(rid: str, nodes: list[list[str]]) -> str:
+    """Why a row whose id is not bound by this `:Object` alone is refused.
+
+    Two shapes, and they need different words: a SECOND binding (the write would
+    restamp a sibling), or a single binding whose labels put the write on another
+    family's arm — where the two knowledge families behave differently, and the
+    message must say which: on the POINT arm the rewrite never lands (a stored
+    synonym ECHOES, a stored `outdated` RAISES the #2498 refusal), while on the
+    SUBJECT arm the word IS written and stored (measured 2026-11-17), so the
+    refusal there is this tool's SCOPE.
+    """
+    if len(nodes) > 1:
+        return (
+            "REFUSED (id-fanout): this address is bound by "
+            f"{len(nodes)} nodes -> {nodes!r}. update_knowledge binds on the "
+            "identity keys, not on the row, so writing here could restamp a "
+            "sibling :Point/:Subject/:Event/:Source (#12855 keeps their words) "
+            "and could leave THIS row untouched while the call reports the "
+            "sibling. Nothing was written for this row. Resolve the duplicate "
+            "address by hand, then re-run.")
+    labels = list(nodes[0]) if nodes else []
+    if not labels:
+        return (
+            "REFUSED (unbound): no node is bound by this address, so the write "
+            "would match nothing and this row would be a silent no-op. Nothing "
+            "was written.")
+    foreign = sorted(lbl for lbl in labels
+                     if lbl in _FOREIGN_KNOWLEDGE_LABELS)
+    if foreign:
+        return (
+            "REFUSED (dual-labelled): this :Object also carries "
+            f"{', '.join(':' + lbl for lbl in foreign)} — update_knowledge "
+            "dispatches on the label, so the write takes that family's arm. "
+            "On the POINT arm the rewrite never lands: that arm either ECHOES a "
+            "stored synonym back (the row keeps its word, #11824 S0) or REFUSES "
+            "a dead claim (a claim is answered by minting a successor, never by "
+            "re-stamping it — #2498). On the SUBJECT arm the caller's word IS "
+            "written and stored (measured 2026-11-17) — the refusal there is "
+            "this tool's SCOPE, not a limitation: it rewrites a row that is an "
+            "`:Object` and nothing else, because a node that is also a "
+            "`:Subject` carries a lifecycle another family owns (#12855 keeps "
+            "their words). Either way the row is reported here instead of being "
+            "counted as rewritten. Mint a successor, or correct the label, and "
+            "re-run.")
+    return (
+        "REFUSED (not an :Object binding): the node at this address is labelled "
+        f"{labels!r}, so the write would not restamp the :Object this tool read. "
+        "Nothing was written.")
 
 
 def _is_clean_object_row(nodes: list[list[str]]) -> bool:
@@ -442,42 +524,18 @@ def rewrite(sdk, rep: Report) -> Report:
                           "word and no `id`, so the SDK cannot rewrite it"),
             })
             continue
-        foreign = [lbl for lbl in row.get("labels") or []
-                   if lbl in _FOREIGN_KNOWLEDGE_LABELS]
-        if foreign:
+        proj = sdk._get_proj()
+        # ⛔ RE-RESOLVE AT WRITE TIME. `row["nodes"]` is a SNAPSHOT taken by
+        # `collect()` — and on `--execute` it is the PREVIEW's snapshot, since
+        # the write acts on the Report its refusals were checked against. A
+        # sibling created between the read and this write is invisible in that
+        # snapshot and the call would restamp it with no undo. One indexed query
+        # per row, beside the two `position()` probes already taken.
+        nodes_now = _nodes_sharing_id(proj.g, rid)
+        if not _is_clean_object_row(nodes_now):
             rep.failures.append({
                 "id": rid, "graph_id": row.get("graph_id"),
-                "error": (
-                    "REFUSED (dual-labelled): this :Object also carries "
-                    f"{', '.join(':' + lbl for lbl in foreign)} — "
-                    "update_knowledge dispatches on the label, so the write "
-                    "takes that family's arm. On the POINT arm that arm either "
-                    "ECHOES a stored synonym back (the row keeps its word, "
-                    "#11824 S0) or REFUSES a dead claim (a claim is answered "
-                    "by minting a successor, never by re-stamping it — "
-                    "#2498), so the rewrite never lands. On the SUBJECT arm the "
-                    "caller's word IS written and stored (measured 2026-11-17) "
-                    "— the refusal there is this tool's SCOPE, not a "
-                    "limitation: it rewrites a row that is an `:Object` and "
-                    "nothing else, because a node that is also a `:Subject` "
-                    "carries a lifecycle another family owns (#12855 keeps "
-                    "their words). Either way the row is reported here rather "
-                    "than written. Mint a successor, or correct the label, "
-                    "and re-run."),
-            })
-            continue
-        if not _is_clean_object_row(row.get("nodes") or []):
-            rep.failures.append({
-                "id": rid, "graph_id": row.get("graph_id"),
-                "error": (
-                    "REFUSED (id is not bound by this :Object alone): node(s) "
-                    f"carrying id {rid!r} -> {row.get('nodes')!r}. "
-                    "update_knowledge binds on the ID, not on the row, so "
-                    "writing here would restamp a sibling :Point/:Subject "
-                    "(#12855 keeps their words) and could leave THIS row "
-                    "untouched while the call reports the sibling. Nothing "
-                    "was written for this row. Resolve the duplicate id by "
-                    "hand, then re-run."),
+                "error": _binding_refusal(rid, nodes_now),
             })
             continue
         _row_before = _journal_position(log)
@@ -495,6 +553,21 @@ def rewrite(sdk, rep: Report) -> Report:
                 "id": rid,
                 "error": (f"write left the :Object at status {actual!r} "
                           f"(sdk returned {landed.get('status') if isinstance(landed, dict) else landed!r})"),
+            })
+            continue
+        # ⛔ The binding set can change UNDER the write. Report that by name
+        # rather than as "the Object was not rewritten": the sibling may have
+        # been restamped by this very call, and there is no undo.
+        nodes_after = _nodes_sharing_id(proj.g, rid)
+        if nodes_after != nodes_now:
+            rep.failures.append({
+                "id": rid,
+                "error": ("RACED (id-fanout): the node(s) addressed by this id "
+                          f"CHANGED during the write — {nodes_now!r} -> "
+                          f"{nodes_after!r} — so a sibling may have been "
+                          "restamped by the same call. Not counted as "
+                          "rewritten; inspect this id by hand (#12855 keeps "
+                          ":Point/:Subject words)."),
             })
             continue
         # ⛔ A JOURNAL RECORD IS PART OF THE WRITE. The SDK's append is
@@ -594,16 +667,34 @@ def render(rep: Report) -> str:
             f"{w}={rep.remaining.get(w, 0)}" for w in LEGACY_WORDS))
     else:
         lines.append("")
+        # ⛔ Do not advise an arm that will REFUSE. `--execute` proves the READ
+        # complete before its first write, so telling an operator to re-run on a
+        # graph that fails those checks sends them to an exit-2 refusal. A
+        # fan-out / dual-labelled row is NOT one of those (it is a per-row
+        # refusal — the safe rows still get rewritten), so it does not gate this
+        # advice; it is named beside them instead.
+        blockers = bool(rep.truncated or rep.unaddressable)
         if rep.total == 0 and not rep.truncated:
             lines.append(
                 "  ⇒ 0 rows carry 'outdated' or 'retracted' on this graph. No rewrite "
                 "is needed, and `assembly._RECALL_OBJECT_EXCLUDED_STATUSES`'s "
                 "`outdated` member is dead weight HERE — the drop is a separate, "
                 "sequenced change (#12855 step 3).")
+        elif blockers:
+            lines.append(
+                "  ⇒ preview only; nothing was written. ⛔ `--execute` would REFUSE "
+                "this target (see the refusals above): resolve them first — an "
+                "incomplete read by a larger page/batch, a missing `id` at the "
+                "writer — then re-run.")
         else:
+            note = ("  ⚠ the row(s) flagged above are refused PER ROW: `--execute` "
+                    "rewrites the clean rows and reports those by id (exit 1)."
+                    if rep.fanout else "")
             lines.append(
                 "  ⇒ preview only; nothing was written. Re-run with --execute "
                 "to rewrite these rows through the journaled update path.")
+            if note:
+                lines.append(note)
     return "\n".join(lines)
 
 

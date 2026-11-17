@@ -293,6 +293,63 @@ def test_a_failed_journal_append_is_a_failure_and_exits_1(tmp_path, monkeypatch)
         sdk.close()
 
 
+def test_a_sibling_created_after_the_read_is_refused_at_write_time(env):
+    """The fan-out guard is re-resolved AT THE WRITE, not trusted from the read.
+
+    On `--execute` the Report is the PREVIEW's, so a sibling created between the
+    preview and the write is invisible in its snapshot. Guarding only from the
+    snapshot writes the sibling and leaves the `:Object` untouched — with no
+    undo. Measured precondition: this exact sequence restamped the Point.
+    """
+    sdk, _events = env
+    oid = sdk.create_object("late-sibling", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+
+    preview = tool.run(sdk, execute=False)
+    assert preview.fanout == [], "precondition: the snapshot shows no fan-out"
+
+    # …the sibling appears AFTER the read, BEFORE the write.
+    sdk.create_point("stmt", "late sibling claim", id=oid)
+
+    rep = tool.run(sdk, execute=True, report=preview)
+
+    assert rep.rewritten == [], "a raced row must never be counted as rewritten"
+    assert [f.get("id") for f in rep.failures] == [oid], rep.failures
+    both = sdk._get_proj().g.query(
+        "MATCH (n) WHERE n.id=$id RETURN labels(n), n.status",
+        params={"id": oid}).result_set
+    statuses = {",".join(labs): st for labs, st in both}
+    assert statuses["Point"] == "live", "the late sibling :Point must be untouched"
+    assert statuses["Object"] == "outdated"
+
+
+def test_a_url_only_source_stub_sharing_the_id_is_refused(env):
+    """The resolution uses the WRITE DOOR's identity keys, not just `m.id`.
+
+    `Source` declares a secondary identity key (`url`) because url-only stubs
+    are minted with no `id`, so a `:Source {url: <object id>}` is bound by an
+    id-addressed write while carrying no `id` at all. A `m.id = $rid`-only guard
+    misses it, writes the Source, and still exits 0 (measured).
+    """
+    sdk, _events = env
+    oid = sdk.create_object("with-stub", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    sdk._get_proj().g.query(
+        "CREATE (s:Source {url:$url, title:'url-only stub'})",
+        params={"url": oid})
+
+    preview = tool.run(sdk, execute=False)
+    assert [r["id"] for r in preview.fanout] == [oid], preview.fanout
+
+    rep = tool.run(sdk, execute=True)
+
+    assert rep.rewritten == [], rep.failures
+    stub = sdk._get_proj().g.query(
+        "MATCH (s:Source) WHERE s.url=$url RETURN s.status",
+        params={"url": oid}).result_set
+    assert stub == [[None]], f"the Source stub must be untouched, got {stub!r}"
+
+
 def test_a_point_sharing_the_id_is_refused_and_never_written(env):
     """`update_knowledge` binds on the ID, not on the row.
 
