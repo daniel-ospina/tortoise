@@ -186,7 +186,30 @@ def _render(value: object) -> str:
     try:
         return repr(value)
     except Exception:
-        return f"<{type(value).__name__} whose repr() raised>"
+        return f"<{_type_name(value)} whose repr() raised>"
+
+
+def _type_name(value: object) -> str:
+    """``type(value).__name__`` that CANNOT escape as its own exception.
+
+    The sibling of ``_render``, for the OTHER caller-controlled operand in a
+    refusal: a ``type`` whose metaclass defines ``__name__`` as a raising
+    property. ``isinstance`` consults ``__class__``, not ``__name__``, so such a
+    value reaches the message with the value's type still unrenderable — measured
+    (`RuntimeError: name-boom` out of `create_object`), which replaces the
+    promised ``ValueError`` exactly as a raising ``__repr__`` does. One
+    definition, so no refusal in this module can reintroduce the raw spelling.
+    """
+    try:
+        name = type(value).__name__
+    except Exception:  # noqa: BLE001 — a hostile metaclass is the point
+        return "unreadable (its metaclass raises)"
+    # The READ surviving is not enough: the property may ANSWER with something
+    # that is not a `str`, and an f-string then renders it with the caller's own
+    # `__format__`. Exact-`str` also keeps the result safe to hash and sort —
+    # the same two-clause rule `sdk._refusal_type_name` applies, which is why
+    # this returns the identical wording rather than a third spelling of it.
+    return name if type(name) is str else "unreadable (its name is not a str)"
 
 
 def _refusal(value: object, fault: str, repair: str, *,
@@ -253,7 +276,7 @@ def read_caller_status(value: object, *, kind: str = "",
     if not issubclass(type(value), str):
         raise _refusal(
             value,
-            f"a status must be a plain string, and {type(value).__name__} is "
+            f"a status must be a plain string, and {_type_name(value)} is "
             f"not one",
             "Pass the word itself, as a string.",
             count=count,

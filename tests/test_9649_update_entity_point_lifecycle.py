@@ -1021,7 +1021,12 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
         "MATCH (e:Event {eventId:'ev-9649-prov'}) RETURN e.validTo",
     ).result_set == [["2031-01-01T00:00:00Z"]], (
         "the Event the caller addressed must take the write")
-    assert sdk.get_entity(provenance)["status"] == "retracted", (
+    # ⛔ `retracted` is a DECLARED SYNONYM of `deprecated` and is STORED as it
+    # (`lifecycle_vocabulary.py:97`, `#11824` S0) — the Point was created with
+    # `status="retracted"`, so the canonical spelling is what "untouched" means
+    # here. The claim under test is unchanged: the Event write must not touch
+    # this Point.
+    assert sdk.get_entity(provenance)["status"] == "deprecated", (
         "the provenance Point must be untouched")
 
 

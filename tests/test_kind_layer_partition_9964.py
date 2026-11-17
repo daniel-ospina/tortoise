@@ -614,7 +614,11 @@ def test_an_unhashable_status_is_refused_not_a_crash_in_the_routing_guard(sdk):
     ).result_set == [[0]], "a refused write must land nothing"
 
     # ── 2. #12869: the unhashable shape is a REFUSAL, never a crash ─────
-    with pytest.raises(ValueError, match="refused a non-string status"):
+    # ⛔ S0's type arm is the one that answers (arm 1 immediately above pins the
+    # same value at the same door), so the message is the type door's; what this
+    # arm keeps is the #12869 property — a designed `ValueError`, not a
+    # `TypeError` from hashing, and nothing written.
+    with pytest.raises(ValueError, match="must be a plain string"):
         sdk.create_object("Q3b", objectKind="core:team", status=["active"])
     assert sdk._get_proj().g.query(
         "MATCH (n:Object {name:'Q3b'}) RETURN count(n)").result_set[0][0] == 0, (

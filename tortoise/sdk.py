@@ -32375,8 +32375,14 @@ class TortoiseSDK:
                 continue
             violations.append({
                 "section": "entities", "index": i,
+                # ⛔ `_refusal_repr`, never the raw `!r` (#12910 review, the
+                # site the bundle-validator arms pin): this message is RETURNED
+                # in a violations list that `ingest` raises on, so a caller
+                # `__repr__` that raises would replace the refusal with its own
+                # `RuntimeError` out of `_validate_bundle`. `_refusal_repr`'s
+                # own docstring states the one-definition rule this site broke.
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{own_status!r} for a :{_item_label} — the writer "
+                           f"{_refusal_repr(own_status)} for a :{_item_label} — the writer "
                            f"validates against the declared lifecycle and "
                            f"refuses it mid-write, so the bundle is "
                            f"rejected at validation. {_status_refusal}",
@@ -32486,8 +32492,14 @@ class TortoiseSDK:
             # this arm exists to prevent.
             violations.append({
                 "section": "entities", "index": i,
+                # ⛔ `_refusal_repr`, never the raw `repr` — the same reason as
+                # the `:Object`/`:Subject` arm above: this message is RETURNED
+                # in a violations list that `ingest` raises on, so a caller
+                # `__repr__` that raises would replace the refusal with its own
+                # exception out of `_validate_bundle` (#12910 review; a verifier
+                # flagged this sibling site after the first one was fixed).
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{', '.join(repr(v) for v in _status_values)} for an "
+                           f"{', '.join(_refusal_repr(v) for v in _status_values)} for an "
                            f":Event — an :Event "
                            f"carries no lifecycle at all (#13100), so its door "
                            f"refuses the declaration mid-write and the bundle is "
@@ -54721,10 +54733,21 @@ class TortoiseSDK:
             # onto it, and `_upsert_object`'s ON MATCH lane never rewrites
             # `status` (it is projection-owned) — so a declared status is
             # DROPPED there and that row is never poisoned. Refusing it would
-            # reverse the recorded `#7925` round-4 decision that the bundle's
-            # array refusal fires ONLY at the item that MINTS the name (pinned by
-            # `test_object_item_status_is_accepted_when_a_holder_owns_the_name`
-            # and `test_second_same_name_item_declaring_array_is_dropped`).
+            # reverse the recorded `#7925` round-4 decision that this refusal
+            # fires ONLY where the value would LAND (pinned by
+            # `tests/test_status_projection.py`'s
+            # `TestNonScalarStatus12869.test_the_CREATE_guard_is_a_LANDING_test_not_a_presence_test`
+            # — the MERGE and the id-less ADOPT — and by
+            # `…test_a_NON_PERSISTABLE_status_is_still_DROPPED_not_refused`).
+            # ⛔ THE BUNDLE-LEVEL NAMES THIS COMMENT USED TO CITE
+            # (`test_object_item_status_is_accepted_when_a_holder_owns_the_name`,
+            # `test_second_same_name_item_declaring_array_is_dropped`) exist
+            # NOWHERE at this head: `#11824` S0 renamed and INVERTED both — the
+            # `:Object` arm now refuses every non-`str` at its own door
+            # (`test_object_item_declaring_a_non_string_status_is_refused_in_phase_1`),
+            # so the bundle refuses before this writer arm is reached. What this
+            # arm still owns is the value the door ACCEPTS but the transport
+            # drops, and the landing scope that keeps that refusal off a merge.
             #
             # ⛔ SO THE TEST IS "WILL THIS CALL CREATE THE NODE?", AND
             # `resolve_or_mint`'s `created` FLAG IS NOT THAT QUESTION. It means
