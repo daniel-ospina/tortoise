@@ -2386,12 +2386,14 @@ def list_backups(storage: BackupStorage, org_id: str,
       | 0 ms | 2–3 | 5 | 9 | 17 |
       | 50 ms | 7 | 17 | 37 | 40 |
 
-      Read cells, not a rule — this table has now outlived three prose summaries of
-      it, and each summary was false in a different direction. Two shapes the cells
-      support without extrapolation: with a slow failing key beside FAST peers the
-      rest of the listing runs before the error surfaces (50 ms column), while a
-      backend that stalls EVERY request stays in the 0 ms column (measured 9 of 40
-      at w=8 with all keys at 500 ms — it does not drain). `map`'s `with` block then
+      Read cells, not a rule — this paragraph has now outlived three prose
+      summaries of this table, and each summary was false in a different
+      direction, so the cells are the statement. Two facts about the table itself:
+      the 0 ms / w=2 cell is a RACE (both 2 and 3 observed across runs), and the
+      50 ms row moves 7 → 17 → 37 → 40 with `w` alone, so a number quoted from it
+      means nothing without its column. Measured separately: a backend that stalls
+      every request (all keys 500 ms, w=8) issues 9 of 40 downloads — it does not
+      drain. `map`'s `with` block then
       waits for the in-flight batch before the exception reaches the caller, so a
       decisive failure can arrive up to one download CALL later than the serial
       loop, which never started the keys after the failing one. ⚠️ That call is not
