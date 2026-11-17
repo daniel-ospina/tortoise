@@ -1126,10 +1126,16 @@ def endpoint_permits_operator_promotion(
     if (status or "live") != "live":
         return False
     if plan_state is not None:
-        # A plan that HAS a position, is not ended, and still resolves to a stage
-        # has not happened yet. One expression, so the arm reads as the rule is.
+        # A plan that HAS a position, is not ended, and RESOLVES to a
+        # non-terminal stage has not happened yet. ⛔ The discriminant is the
+        # resolved SLOT, not `unresolvable`: a plan whose stored stage key is
+        # missing still resolves its stage, so treating "unresolvable" as
+        # fail-open let one supported write on the plan
+        # (`update_knowledge(id, pipelineStageKey=None)`) turn the suppression
+        # off for an occurrence that demonstrably has not happened. A stage id
+        # that does not resolve at all has no slot, and stays fail-open.
         not_yet = (plan_state["has_position"] and not plan_state["ended"]
-                   and not plan_state["unresolvable"])
+                   and plan_state["slot"] not in (None, "terminal"))
         return not not_yet
     return True
 
