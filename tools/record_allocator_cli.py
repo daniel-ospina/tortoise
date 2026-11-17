@@ -348,9 +348,14 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     its first append.
 
     ⛔ THE FLOOR IS NOT `max_seq`. For a born-uncut graph the journal's own
-    COUNT is the floor, and a `max_seq` that is LOWER than it (lines whose rows
-    were refused) seeds the counter BEHIND the journal, which does not heal: it
-    wedges every later armed write. So each entry carries `journal_max_seq`,
+    COUNT is the floor, and the two are NOT interchangeable: a refused seq leaves
+    a GAP, so `COUNT(*) < MAX(seq)`, and a floor taken from `MAX(seq)` would seed
+    the counter AHEAD of the journal — positions no row claims. (The reverse
+    ordering, `COUNT(*) > MAX(seq)`, is unrepresentable and must not be reasoned
+    from: `journal_event` carries `PRIMARY KEY (org_id, graph_id, seq)` +
+    `CHECK (seq > 0)`, so N distinct positive seqs with maximum M always satisfy
+    N <= M — see :data:`ra.JOURNAL_COUNT_SQL`.) So each entry carries
+    `journal_max_seq`,
     named for the aggregate it actually ran (`MAX(seq)`), and this verb never
     claims that number is the count: `journal_count` is the `COUNT(*)` of the
     same rows, and `floor_is_the_journals_count` compares the floor with THAT,
@@ -407,8 +412,12 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         # ⛔ `journal_max_seq` IS `MAX(seq)` AND NOTHING ELSE. It had been called
         # `journal_row_max`, beside a `floor_is_the_journals_count: True` literal,
         # which asserts the two are the same quantity — false whenever the seq
-        # axis has a gap or a tail, which `_cmd_status` treats as a real state in
-        # both directions (#13043 review findings B and 4).
+        # axis has a gap (`COUNT(*) < MAX(seq)`). The opposite ordering cannot
+        # exist, and the only other direction anything here cares about is an
+        # OPERATOR-stated floor above the max (`_cmd_status`'s `healed_tail`),
+        # which is a comparison against a claim, never a reading of the journal
+        # (#13043 review findings B and 4, plus the re-review row that caught
+        # "or a tail" stated as a state of the seq axis).
         journal_count = int(count_row[0]) if count_row else 0
         entry: dict[str, Any] = {
             "graph_id": graph_id,

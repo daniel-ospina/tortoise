@@ -347,7 +347,9 @@ def test_the_sweep_does_not_assert_a_floor_it_never_counted() -> None:
     reason = payload["floor_is_the_journals_count_reason"]
     assert reason, "the sweep answered `null` without saying why"
     # ⛔ THE REASON MUST NOT DISOWN THE NUMBER IN ITS OWN ENTRY (#13043 review P2).
-    # `journal_count` is read and emitted unconditionally (`:414`), but the reason
+    # `journal_count` is read and emitted unconditionally in `_cmd_sweep` — the
+    # `JOURNAL_COUNT_SQL` read, and the entry's `"journal_count"` key, which the
+    # assertion below pins — but the reason
     # used to say "`sweep` reads MAX(seq), not the journal's enumeration — pass
     # --journal … to have the count reported beside it": an operator was told to
     # re-run for a count the payload already carried, in the verb whose whole
