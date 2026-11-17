@@ -62,7 +62,14 @@ from tortoise.sdk import POINT_STATUS_VALUES, TortoiseSDK
 #: to the question these tests ask, and neither may be weakened: the assertion is
 #: the STATE (nothing stored, nothing journalled), so the pattern accepts either
 #: and the ordering is main's to decide.
-_EITHER_REFUSAL = r"(not writable on an :Event|not an exact `str`)"
+#: ⛔ THREE refusals can answer these payloads, and the set grew twice after this
+#: file was written: `#13065`\'s CONFLICTING-status arm (two keys rendering as
+#: `status` is refused rather than guessed, and it is landing-aware since
+#: `#12869`\'s atomicity fix) and `#11824 S0`\'s shape arm. The property these
+#: arms pin is that a MASKED key cannot bypass a guard — which refusal names it
+#: is not the pin, so the match accepts any of the three.
+_EITHER_REFUSAL = (r"(not writable on an :Event|not an exact `str`"
+                   r"|CONFLICTING status write|must be a plain string)")
 
 #: The terminal half, as a sorted tuple so a parametrized id list is stable.
 _TERMINAL = tuple(sorted(TERMINAL_EXCLUDED_STATUSES))
@@ -645,7 +652,10 @@ class TestTheEventApiDoor:
                 return isinstance(other, _AliasOutdated) and str.__eq__(self, other)
 
         eid = _event(sdk, name="Masked")
-        with pytest.raises(ValueError, match="not writable on an :Event"):
+        # The payload names the field TWICE, so the ambiguity refusal answers it
+        # first (see `_EITHER_REFUSAL`); the masked key still cannot bypass the
+        # guard, which is what this arm exists to pin.
+        with pytest.raises(ValueError, match=_EITHER_REFUSAL):
             sdk.update_knowledge(eid, **{"status": "superseded",
                                       _AliasHarmless("status"): "live"})
         assert "status" not in _props(sdk, eid)
