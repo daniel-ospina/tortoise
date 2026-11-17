@@ -2931,7 +2931,7 @@ def write_live_record(record: Mapping[str, Any], *,
                     # here instead of invented.
                     try:
                         connection.rollback()
-                    except Exception as rollback_exc:  # noqa: BLE001
+                    except Exception as rollback_exc:  # noqa: BLE001, RUF100
                         _logger.warning(
                             "the divergence guard could NOT roll the allocation "
                             "back (%s: %s) — the counter may be one ahead of "

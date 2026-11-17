@@ -1764,7 +1764,10 @@ def test_the_blocked_writer_detector_does_not_fire_without_contention(
     _seed_and_arm(app, org, graph, 0)
     statement = ra.allocation_statement(org_id=org, graph_id=graph,
                                         records=[RECORD])
-    first = ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
+    # The CALL is load-bearing and its return is not: it advances THIS graph's
+    # counter past 1, which is what makes the free graph's `first_seq == 1`
+    # below prove the counter is per graph rather than global.
+    ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
     # A DIFFERENT graph: nothing to contend over, so no backends wait.
     with schema.cursor() as cur:
         other = f"{graph}-free"

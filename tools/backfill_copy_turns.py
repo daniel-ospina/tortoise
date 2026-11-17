@@ -908,11 +908,13 @@ def _stamp_record_only_tier(conn: object, org_id: str, graph_id: str,
     return stamped
 
 
-#: The verdict `_cutover_state` returns when it could not LOOK — no driver, or a
-#: record it could not read. It is deliberately NOT `None`, which this module
-#: defines as "this graph is not cut over": the two states have opposite
-#: consequences (`#13043 review finding 5`), and conflating them made the pre-flight
-#: report "this graph has NO record_cursor row" about a graph it never read.
+#: The verdict `_cutover_state` returns when it could not LOOK — no driver. A
+#: record it could not READ is the other half of "cannot answer": that error
+#: propagates out of `_cutover_state` and the caller's bare `except` declines to
+#: make a verdict at all. Deliberately NOT `None`, which this module defines as
+#: "this graph is not cut over": the two states have opposite consequences
+#: (`#13043 review finding 5`), and conflating them made the pre-flight report
+#: "this graph has NO record_cursor row" about a graph it never read.
 UNKNOWN_CUTOVER_STATE = object()
 
 
@@ -982,7 +984,7 @@ def _refuse_a_miscalibrated_cutover(dsn: str, org_id: str, graph_id: str, *,
     """
     try:
         state = _cutover_state(dsn, org_id, graph_id)
-    except Exception:  # noqa: BLE001 — see "AN UNREADABLE RECORD" above
+    except Exception:  # noqa: BLE001, RUF100 — see "AN UNREADABLE RECORD" above
         return
     if state is UNKNOWN_CUTOVER_STATE:
         # The record could not be LOOKED at (no driver). `None` would have been

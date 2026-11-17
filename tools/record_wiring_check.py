@@ -734,12 +734,12 @@ def the_door_reads_the_allocate_flag(
     problems: list[str] = []
     flag_value: str | None = None
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == "RECORD_ALLOCATE_ENV"
-                for t in node.targets):
-            if isinstance(node.value, ast.Constant) and isinstance(
-                    node.value.value, str):
-                flag_value = node.value.value
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "RECORD_ALLOCATE_ENV"
+                        for t in node.targets)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            flag_value = node.value.value
     if flag_value is None:
         problems.append(
             f"{rel}: no module-level `RECORD_ALLOCATE_ENV = \"…\"` constant — the "

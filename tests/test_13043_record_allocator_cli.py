@@ -173,6 +173,7 @@ def test_sweep_finds_a_born_uncut_graph_and_not_the_cut_over_one() -> None:
     import uuid
 
     import psycopg2
+
     from tests.test_9078_record_written_by_production_path import (
         _app_role_dsn,
         _ensure_metering_schema,
