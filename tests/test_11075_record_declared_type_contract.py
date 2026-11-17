@@ -1141,6 +1141,22 @@ def test_comment_stripping_is_what_keeps_a_DOWN_direction_out_of_the_read():
     # text as CODE — measured on the props-ban pin, whose read then took a
     # disabled `ADD CONSTRAINT` for an executed one. The nesting case is pinned
     # HERE, with the function it belongs to, rather than only in that pin's file.
+    # ⛔ THE `E` OF A PRECEDING WORD IS NOT AN ESCAPE PREFIX: `LIKE'C:\'` armed
+    # backslash-escapes, so the literal swallowed the rest of the file and DDL
+    # after it became invisible (round 11, measured on the props-ban read). The
+    # prefix must be a free-standing `e`/`E`.
+    word_prefix = "SELECT 1 FROM n WHERE x LIKE'C:" + chr(92) + "';\n-- later\n"
+    # Under the bug the literal stays OPEN to EOF, so the comment is inside it and
+    # `later` survives; when the literal ends at its closing quote the comment is
+    # stripped, which is what must happen.
+    assert "later" not in rp._strip_sql_comments(word_prefix), (
+        "a word-final `E` (`LIKE`) armed escapes and the literal swallowed the "
+        "rest of the file")
+    real_escape = "SELECT E'a" + chr(92) + "'--b';"
+    assert "--b" in rp._strip_sql_comments(real_escape), (
+        "a real `E'…'` escape stopped escaping — the `--` inside the literal was "
+        "read as a comment")
+
     nested = (
         "ALTER TABLE public.point\n"
         "    ALTER COLUMN search_keys TYPE text;\n"

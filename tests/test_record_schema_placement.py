@@ -1946,7 +1946,7 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #: fixture cannot fall over, and no migration uses it.
 _PROPS_BAN_PIN_HEADER_RE = re.compile(
     r"(?P<add>ADD\s+)?CONSTRAINT\s+(?:[\w\"]+\s*\.\s*)?(?P<quote>\"?)"
-    r"chk_(?P<table>\w+)_props_no_derived(?P=quote)\s*CHECK\b",
+    r"(?P<name>chk_(?P<table>\w+)_props_no_derived)(?P=quote)\s*CHECK\b",
     re.I,
 )
 #: The STATEMENT a props-ban event must sit in. ⛔ NOT EVERY MATCH IS DDL: the
@@ -2008,14 +2008,14 @@ _QUOTED_PROPERTY_RE = re.compile(r"'([^']*)'")
 #: ban in force, and a declaration-only reader cannot see that (round 4 N3).
 _PROPS_BAN_DROP_RE = re.compile(
     r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(?:[\w\"]+\s*\.\s*)?(?P<quote>\"?)"
-    r"chk_(?P<table>\w+)_props_no_derived(?P=quote)",
+    r"(?P<name>chk_(?P<table>\w+)_props_no_derived)(?P=quote)",
     re.I,
 )
 #: A `RENAME CONSTRAINT` is an event too, and it does NOT re-declare: after it the
 #: name the pins read no longer exists, so the in-force read must say so instead of
 #: certifying the renamed body (round 5 P3).
 _PROPS_BAN_RENAME_RE = re.compile(
-    r"RENAME\s+CONSTRAINT\s+(?P<quote>\"?)chk_(?P<table>\w+)_props_no_derived"
+    r"RENAME\s+CONSTRAINT\s+(?P<quote>\"?)(?P<name>chk_(?P<table>\w+)_props_no_derived)"
     r"(?P=quote)\s+TO\b",
     re.I,
 )
@@ -2037,9 +2037,20 @@ class PropsBanEvent:
 
 
 def event_table(match: re.Match) -> str:
-    """The table in a constraint NAME, folded per its quoting (`chk_<t>_…`)."""
-    name = match.group("table")
-    return name if match.group("quote") else name.lower()
+    """The table in a constraint NAME, folded per its quoting (`chk_<t>_…`).
+
+    ⛔ THE WHOLE NAME DECIDES, not just its `<table>` segment: the pattern is
+    case-insensitive, so a QUOTED `"CHK_subject_props_no_derived"` — a different
+    constraint in PostgreSQL — used to fold onto ours and certify a ban that had
+    been dropped (round 11 P3, measured: `('declare', {'status'})` after a real
+    DROP). A quoted name yields its `<table>` only when it EQUALS the canonical
+    spelling; otherwise it yields the raw name, which matches no table and is
+    therefore invisible.
+    """
+    name, table, quote = match.group("name"), match.group("table"), match.group("quote")
+    if not quote:
+        return table.lower()
+    return table if name == f"chk_{table}_props_no_derived" else name
 
 
 def props_ban_events(text: str) -> list[PropsBanEvent]:
@@ -2480,9 +2491,13 @@ def test_no_migration_executes_dynamic_DDL_for_a_props_ban():
     # a green false pass in the guard that exists to prevent exactly that.
     #
     # A `COMMENT ON …` statement is excluded so a HISTORY NOTE in
-    # `COMMENT ON TABLE … $c$ … $c$` does not read as a dropped event. (A
-    # `COMMENT ON CONSTRAINT chk_… IS '…'` needs no exclusion: measured, it matches
-    # none of the three DDL patterns — it has no CHECK, DROP or RENAME to match.)
+    # `COMMENT ON TABLE … $c$ … $c$` does not read as a dropped event. The
+    # exclusion is LOAD-BEARING for `COMMENT ON CONSTRAINT chk_… IS '…'` too
+    # whenever the comment's own text quotes DDL — measured: a comment whose text
+    # contains `ADD CONSTRAINT chk_… CHECK (…)` matches 2 patterns, so without the
+    # exclusion the count is 2 against 1 parsed event and legal SQL reds. (An
+    # earlier version of this note claimed such a statement "matches none of the
+    # three patterns", which is true only when its text quotes no DDL.)
     stripped = record_projection._strip_sql_comments(all_migration_text())
     spans = code_spans(stripped)
     hits = 0
@@ -2717,6 +2732,28 @@ def test_legal_sql_spellings_cannot_false_pass_the_props_ban():
     assert {event.table for event in props_ban_events(named_quoted)} == {"Subject"}, (
         "a QUOTED constraint name was folded to lower case, so a differently-named "
         "constraint was read as the `subject` one")
+
+    # ROUND 11 vehicle — the `E` of a preceding WORD is not an escape prefix, so
+    # `LIKE'C:\'` must not swallow the rest of the file (it hid a real DROP).
+    word_then_literal = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n"
+        "SELECT 1 FROM n WHERE x LIKE'C:\\';\n"
+        "ALTER TABLE public.subject DROP CONSTRAINT chk_subject_props_no_derived;\n")
+    assert props_ban_in_force(word_then_literal, "subject")[0] == "drop", (
+        "the `E` of `LIKE` armed backslash-escapes, the literal swallowed the file "
+        "and a real DROP became invisible")
+
+    # …and the WHOLE quoted name decides: `"CHK_subject_props_no_derived"` is a
+    # different constraint, so its ADD must not certify the ban we dropped.
+    quoted_other_name = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n"
+        "ALTER TABLE public.subject DROP CONSTRAINT chk_subject_props_no_derived;\n"
+        'ALTER TABLE public.subject ADD CONSTRAINT "CHK_subject_props_no_derived"\n'
+        "  CHECK (NOT (props ?| ARRAY['status']::text[]));\n")
+    assert props_ban_in_force(quoted_other_name, "subject")[0] == "drop", (
+        'a quoted "CHK_…" (a DIFFERENT constraint) certified the ban we dropped')
 
     # ROUND 10 vehicle — a BLOCK COMMENT is WHITESPACE in PostgreSQL, so deleting
     # it merged `DROP` with `CONSTRAINT` and a real drop became invisible. This is

@@ -2350,7 +2350,16 @@ def _scan_sql(sql: str):
             # a complete literal under `standard_conforming_strings=on` (the PG
             # default), so treating every literal as escape-carrying swallows the
             # closing quote and never leaves quote mode (#11075 review P2).
-            escapes = i > 0 and sql[i - 1] in ("E", "e")
+            # ⛔ NOT "any preceding E": `LIKE'C:\'` ends with the `E` of `LIKE`,
+            # so arming escapes there made the literal swallow the rest of the file
+            # and a real `DROP` after it became invisible — GREEN over a dropped ban
+            # (round 11 P3, measured; latent because the corpus's `E'…'` are all
+            # space-preceded). The prefix must be a FREE-standing `e`/`E`.
+            escapes = (
+                i > 0
+                and sql[i - 1] in ("E", "e")
+                and (i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] in "_$"))
+            )
             j = i + 1
             while j < n:
                 if escapes and sql[j] == "\\" and j + 1 < n:
