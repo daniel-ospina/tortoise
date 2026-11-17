@@ -1667,7 +1667,7 @@ def test_declaration_keys_are_unambiguous():
 _CLAIMS_DEL_ARM = "del\\s+"
 #: The del form itself, spelled as it appears in a test module — the string a
 #: claiming pattern must be able to match. Mirrors `_MUTATION_RE`'s del arm,
-#: including the `_os` alias the assignment/pop arms admit by substring.
+#: which — unlike its assignment/pop arms — does not admit the `_os` alias.
 _DEL_FORM = 'del os.environ["TORTOISE_DB_URI"]'
 
 
