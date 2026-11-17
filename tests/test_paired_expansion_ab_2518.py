@@ -1037,6 +1037,14 @@ def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
             f"the {arm} arm is not keyword_only for all {n} items")
     assert f"`keyword_only` {n}/{n}" in row, (
         "the row's window-mode cell is not the artifact's measured mode")
+    # ⛔ the row's OPENING quotation is the retired comparison's own published
+    # figures, and they are not derivable from these artifacts (they come from
+    # `#13118`), so they are pinned as quoted CONSTANTS — the row exists to retire
+    # that comparison, and a re-staled quote there misstates it (measured GREEN at
+    # `64504c6d20`: `76.3 → 79.9 @3` and `85.0 → 80.0 @15`). The brief's §0 copy is
+    # pinned elsewhere; the row's was not.
+    assert '"75.0 → 76.3 @3, 88.0 → 85.0 @15"' in row, (
+        "the index row must quote `#13118`'s published pair exactly as it was")
 
 
 # ── 2e. the published RESULT figures, recomputed cell by cell ────────────────
@@ -1399,10 +1407,47 @@ def test_the_briefs_result_tables_repeat_their_artifacts_cell_by_cell():
     assert f"+{delta15:.2f} pp @15" in brief, (
         "the §7 lift restatement must be the artifact's own k=15 delta")
     short_seed = short["arms"]["point"]["per_k"]["k=15"]["seed_effect"]
+    n_short = short["population"]["sample"]
     moved_short = (short_seed["seed_lost_from_window"]
                    + short_seed["seed_demoted_but_kept"])
-    assert f"{moved_short} of {short['population']['sample']} items whose seed moved" in brief, (
+    assert f"{moved_short} of {n_short} items whose seed moved" in brief, (
         "the §7 cost restatement must be the short arm's own seed cells")
+
+    # ⛔ §4.1 is where the COST side of the measurement actually lives — the
+    # paragraph §7's third decision rests on — and every figure in it was unpinned
+    # (measured GREEN at `64504c6d20`: `5 of 300 → 9 of 300`, `1.7 % → 9.9 %`,
+    # `3 out of the k-window, 2 demoted` → `1 …, 4 …`, and `(1 % of items) → (9 %)`).
+    # The copies in the index row and §7 were pinned; the brief, the document the
+    # row links to, was the weaker copy.
+    # the sentence wraps in the source, so it is compared against a
+    # whitespace-collapsed view — the numbers are the assertion, not the line breaks
+    flat_brief = " ".join(brief.split())
+    assert (f"**{moved_short} of {n_short} items "
+            f"({moved_short / n_short * 100:.1f} %) had their own best match moved "
+            f"— {short_seed['seed_lost_from_window']} out of the k-window, "
+            f"{short_seed['seed_demoted_but_kept']} demoted but kept**" in flat_brief), (
+        "the §4.1 harm sentence must be the short arm's own seed cells, including "
+        "the moved percentage")
+    assert (f"the {short_seed['seed_lost_from_window']} seeds lost are a bare count "
+            f"(1 % of items)") in brief, (
+        "the §4.1 bare-count caveat must name the short arm's own lost count")
+
+    # ⛔ and the two other prose sites that restate a measured figure with no pin
+    # (measured GREEN at `64504c6d20`): `keyword_only 300/300` at §1 and in the §5
+    # MET row (`→ 299/300` each), and `OFF is 0/300 at every k` (`→ 5/300`, which
+    # contradicted the table four lines above it).
+    modes = head["arms"]["point"]["window_modes"]
+    for arm, block in modes.items():
+        assert block["keyword_only"] == n, (
+            f"the {arm} arm is not keyword_only for all {n} items")
+    assert brief.count(f"`keyword_only` {n}/{n}") >= 2, (
+        f"`keyword_only` {n}/{n} is stated at §1 and in the §5 MET row")
+    k3_off = per_k["k=3"]["off_hits"]
+    for k, cell in per_k.items():
+        assert cell["off_hits"] == k3_off, (
+            f"OFF is not uniform across k ({k} says {cell['off_hits']})")
+    assert f"OFF is {k3_off}/{n} at every k BY CONSTRUCTION" in flat_brief, (
+        "the §4.1 construction caveat must be the artifact's own OFF count")
 
 
 def test_the_mde_direction_is_pinned_and_not_only_its_values():
@@ -1919,6 +1964,14 @@ def test_the_snapshot_digest_and_every_load_trace_are_pinned_where_quoted():
     assert len(triples) >= 2, (
         "the digest/files/lines/bytes trio is printed at TWO sites at least (§3 "
         f"and the §5 falsifier); found {len(triples)}")
+    # ⛔ a `files` figure with NO companion on the line is invisible to the sweep
+    # above (measured GREEN at `64504c6d20`: `23 files at the measurement → 14`),
+    # and it is the paragraph whose whole point is that the corpus drifted, so at
+    # `14` the sentence stops being a drift at all. Pinned as the one literal it is
+    # — a blanket `(\d[\d,]*) files` sweep would false-red on §0's deliberate
+    # quotation of `#13118`'s own `14 files`.
+    assert (f"drifted ({manifest['file_count']} files at the measurement" in brief), (
+        "the §7 reproducibility parenthetical must name the manifest's own file count")
     for shown_files, shown_lines, shown_bytes in triples:
         assert (_num(shown_files), _num(shown_lines), _num(shown_bytes)) == want, (
             f"a site prints {shown_files} files, {shown_lines} lines, "
