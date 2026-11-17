@@ -56,6 +56,23 @@ dense leg, the arming) is not a question this document decides.
 
 ⛔ **The read half is not a switch for `:Object`/`:Subject`, and the way it fails looks like a WIN.** `search_engine._STATUS_FILTERED_LABELS` is `("Point", "Object", "Subject")` (`search_engine.py:148`), so both graph branches drop a superseded / deprecated / archived / retracted entity out of the dense leg — and the record cannot yet express that: `record_vector._STATUS_COLUMN` has no entry for either label (`record_vector.py:337`, so `_status_predicates` emits NO clause for them), and the fold it would have to read (`public.object_current_status` / `subject_current_status`, `20261012000004_record_procedural.sql:56`) answers only `live` / `superseded`, collapsing `deprecated` / `archived` / `retracted` — which arrive as `EntityMutated op=restatus` — to `live`; `chk_object_props_no_derived` refuses a status column in the props tail. **So adding those two labels to `record_vector.LABEL_SERVED` before that gap is closed returns exactly the rows `#689` exists to hide, and it reports as better recall.** The status fold comes first; `_status_predicates`'s own docstring is the standing rule (*the record leg must not be a loophole around `#689`*).
 
+**What that means per label — the gates are not the same, so *"every served label"* is not *"every label at
+once"*:**
+
+| label | the record leg answers it (`record_vector.LABEL_SERVED`) | terminal-status gate on the dense leg | what has to be true before the record can serve it |
+|---|---|---|---|
+| `Point`, operator | **yes** — the `point` table, with the operator identity predicate | **yes**, and expressible: `_STATUS_COLUMN['point']` reads `status` (+ the legacy `outdated` flag) | no *structural* blocker — the status gate is already expressible in SQL. What remains is the record's own **no-backfill shortfall** (`record_vector.ARMING_ENV`'s comment, `record_vector.py:160`: a record holds a vector only for content written *after* the move is deployed; `cutover_armed`, :410, is the switch that decides it), which is why this is a cutover SWITCH and not a default |
+| `Source`, `Document` | **yes** — the `source` table, split on `document_kind` | no — `Source` is not in `_STATUS_FILTERED_LABELS` | the vector has to ARRIVE: the column and the HNSW index already exist (`20261109000001_record_embedding_vector.sql`, `#11660`) |
+| `Event` | **yes** — the `event` table | no — `Event` is not in the list either | same as `Source`: column and index exist, the vector has to arrive |
+| `Object` | **no** | **yes, and NOT expressible** — no status column, and the fold answers only `live`/`superseded` | the status fold first (paragraph above), then the label |
+| `Subject` | **no** | same as `Object` | same as `Object` |
+
+**⇒ The arming order follows from the table rather than from preference: `Point`/operator → `Source`/
+`Event` → `Object`/`Subject`, with the status fold as the last two labels' precondition.** Taking the labels
+in the order the ruling names them instead (`Object`/`Subject` first) would spend the longest stretch of the
+work on the two labels with the most still blocking them, and the shortest on the one that is already able
+to answer.
+
 **Sibling documents:** `STORAGE-ARCHITECTURE.md` owns authority per layer (§2.0/§3) and the cost model
 (§17.4); `CONSUMPTION-MODEL.md` owns metering; **this document owns where each search leg executes, and
 what the graph engine holds.**
