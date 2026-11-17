@@ -902,9 +902,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_entity_profile",
         id="surface.entity_profile",
+        # ⛔ This description reaches the CALLER (the retired-call message is
+        # `RETIRED — use {pointer}. {description}`), so it is a POINTER, not prose:
+        # naming a retired sibling sends the caller into a second hop that resolves
+        # nowhere (#12948 review F1, #12951 fallout). It names the live shallow door
+        # `tortoise_list_topics` itself retired into, not the retired name.
         description="Multi-hop BFS from an entity with optional filters (pointKind, "
                     "confidenceMin) — full neighborhood categorized by node type. Use for deep "
-                    "entity analysis; for a fast neighbor list use "
+                    'entity analysis; for a fast neighbor list use '
                     'tortoise_list_knowledge(kind="topic", entity_id=...).',
         risk="read",
         http_policy=True,
@@ -1110,6 +1115,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_list_topics",
         id="surface.list_topics",
+        # ⛔ Same rule as `tortoise_entity_profile` above: the description is the
+        # caller's next hop, so it names the LIVE multi-hop door, never the retired
+        # `tortoise_entity_profile` it used to point at (#12951 fallout).
         description="Fast one-hop neighbor enumeration for an entity — quick discovery and "
                     "navigation. Use for shallow context; for multi-hop filtered BFS use "
                     "tortoise_explore_connections(node_id, hops=...).",

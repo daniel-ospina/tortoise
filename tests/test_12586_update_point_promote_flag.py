@@ -173,7 +173,12 @@ def test_the_refused_promote_journals_nothing(env):
 
 
 def test_the_two_point_doors_agree_on_the_flag_dead_row(env):
-    """``update_point`` refuses exactly what ``update_entity`` refuses.
+    """``update_point`` refuses exactly what ``update_knowledge`` refuses.
+
+    #12915 retired the public ``update_entity`` into ``update_knowledge`` (the same
+    ``_update_entity_any`` relay), so the second door a caller can reach is the
+    container — the agreement this issue closed must hold through BOTH names that
+    still resolve, not through the retired one.
 
     FALSIFIABLE: revert either door and this fails on that door only, which is
     the disagreement the issue exists to close.
@@ -182,12 +187,7 @@ def test_the_two_point_doors_agree_on_the_flag_dead_row(env):
     pid = sdk.create_point("statement", "a claim to kill", dedup=False)["id"]
     _force(sdk, pid, status=None, outdated=True)
 
-    # ⛔ `update_entity` LEFT the public surface with #12901 wave 2 (#4282): its body
-    # survives as `_update_entity`, and the public name now raises the migration hint
-    # instead of guarding a row. The door under test is the SAME DOOR — assert it on the
-    # surviving body, because re-adding the public attribute would itself be a surface
-    # change (and would make this row pass for the wrong reason).
-    for door in ("update_point", "_update_entity"):
+    for door in ("update_point", "update_knowledge"):
         with pytest.raises(ValueError) as exc:
             getattr(sdk, door)(pid, status="live")
         assert "terminal" in str(exc.value), door

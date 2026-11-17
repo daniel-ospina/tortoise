@@ -5877,7 +5877,7 @@ _EPIC_CITE_SOURCES = {
     # until that number was re-measured in the tree this head merges — and the `#12295`
     # de-conflict re-derived the row to the same pair. Measured in THIS merged tree
     # (`grep -n 'export function postCapture(\|export function postInstallProbe('
-    # tortoise/pi-hooks/tortoise-capture.ts` -> `:1023`/`:1015`). That is this source key's case in one
+    # tortoise/pi-hooks/tortoise-capture.ts` -> `:1030`/`:1022`). That is this source key's case in one
     # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
     # its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
@@ -6082,11 +6082,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `#12545`'s commit, while `#12545` measured at `5bacb44e0b` which does NOT
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
         # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`, the
-        # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s, in
-        # `tortoise-capture.ts`, and re-derived no cite: `:1023`/`:1015` was the pair's
-        # value at `0449273b` (the head that narration was written against) — NOT here:
-        # the pin below is **`:1030`/`:1022`**, re-derived by CONTENT on THIS tree
-        # (`grep -n 'export function postCapture(\|export function postInstallProbe('
+        # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s
+        # (`:1007` -> `:1023`), and `#13039`'s `7520c6dafd` added 7 more (`-> :1030`);
+        # neither re-derived a cite, so `:1023`/`:1015` is the pair's value at
+        # `0449273b` and the pin HERE is **`:1030`/`:1022`**, re-derived by CONTENT on
+        # this tree (`grep -n 'export function postCapture(\|export function postInstallProbe('
         # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart); repaired
         # at this head rather than carried, because a red on `main` blocks every head.
         # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only; the rows
@@ -6101,11 +6101,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `6916a6cd89` `:957` is a comment and that list is at `:1009`. Re-open the
         # line; the row is held by CONTENT, so a wrong pair reds rather than
         # silently resolving.
-        # RE-DERIVED by CONTENT on the merged tree (re-measured for THIS head):
+        # RE-DERIVED by CONTENT on the merged tree (re-measured at THIS head):
         # `grep -n 'export function postCapture(\|export function postInstallProbe('
         # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart. The
         # `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
-        # and is RED here, measured: main's tortoise-capture.ts carries +16 lines above
+        # and is RED here, measured: main's tortoise-capture.ts carries +23 lines above
         # both `def`s that neither of that row's two sides moved.
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("1030", "export function postCapture("),
@@ -6136,9 +6136,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # insertion moves by +39 — this row's two, and the `19558`/`19583`/`19451`/`18991`
         # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
         # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
-        # pointer to a row that no longer exists). Measured at this head, not copied: `@app.post("/v1/sessions")` is
-        # `:18854` and `@app.post("/v1/sessions/install-probe")` is `:21409` (was `:18815`
-        # / `:21370`), each the file's ONLY occurrence of its needle.
+        # pointer to a row that no longer exists). Measured at THIS head, not copied: `@app.post("/v1/sessions")` is
+        # `:18885` and `@app.post("/v1/sessions/install-probe")` is `:21440` — the pair the row
+        # below pins, each the file's ONLY occurrence of its needle. (Prose here had `:18854`/`:21409`, `#12947`'s head.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("18885", ("exact", '@app.post("/v1/sessions")')),
             ("21440", '@app.post("/v1/sessions/install-probe")'),
