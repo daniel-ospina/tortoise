@@ -433,8 +433,13 @@ read 2,342 / 142, and `rg` reads 2,330 / 142, 2,064 and 2,402 where it read 2,32
 comment lines, which is why `#13249` took them `1,624` / `1,630` → `1,622` / `1,628` — and `#13265`
 added **0** door calls and exactly **1** verb
 occurrence (`git show 34bd33d22a -- tortoise/ | grep '^+' | grep -cE '\.(ro_)?(query|execute)\s*\('`
-→ `0`; `… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`). The 13-occurrence one-file whole-text gap and
-the ten-prose/three-Cypher split are UNCHANGED (the added match is single-line, not cross-line), and
+→ `0`; `… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`). The 13-occurrence one-file whole-text gap
+is UNCHANGED (the added match is single-line, not cross-line), and §1 — which ENUMERATES those 13
+by command — owns their prose/Cypher breakdown; this
+paragraph no longer restates it, because §1 said **nine** prose and **four** wrapped Cypher examples
+while this sentence said **ten** and **three**, and one of the 13 is genuinely borderline (in
+`record_projection.py` the verb ends an English phrase, ``… an INLINE property MATCH``, and opens a
+wrapped snippet) — a split restated here would be a classification this paragraph does not measure.
 §1's `record_projection.py:4777` citation is RETIRED rather than re-pinned: it read `:4830` after
 `#13265` moved the comment line again, and §1's own rule above is *enumerate by command, never by
 citing `file:line` in this paragraph* — re-pinning it here would restore the rot that rule exists to

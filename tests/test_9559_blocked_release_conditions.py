@@ -1645,9 +1645,159 @@ def test_the_restore_verb_still_exists():
 
 
 # --------------------------------------------------------------------------- #
+
+
+def _refresh_gate_body(root: Path) -> str:
+    """The EXECUTED text of the live `postgres_residency_snapshot()` body.
+
+    Split out of the test below so the SELECTOR can be driven against
+    synthetic migration sets. A gate whose selection logic is only ever
+    exercised on this tree cannot show that it can FAIL, and four false
+    PASSes reached it that way — one per review round. The cases are in
+    `test_the_refresh_gate_can_fail`.
+    """
+    # ⛔ SELECTED BY WHAT THE FILE CONTAINS, NOT BY ITS NAME. A glob on
+    # `*_postgres_residency_zero_*` binds this gate to one filename, and the
+    # append-only rule (#1095) GUARANTEES the next correction arrives under a NEW
+    # name — so a gate keyed on `zero` would keep asserting over a superseded body
+    # and stay green while the live function lost its guard. The candidate set is
+    # therefore every migration that DEFINES the function, and the newest one (the
+    # 14-digit prefix sorts chronologically) is the live definition.
+    #
+    # ⛔ `OR REPLACE` IS OPTIONAL, AND THAT IS NOT COSMETIC. A first cut matched
+    # only `CREATE OR REPLACE FUNCTION`, and this directory already writes the
+    # other spelling — 13 definitions across 6 migrations use
+    # `DROP FUNCTION IF EXISTS …; CREATE FUNCTION …` (e.g.
+    # `20260918000001_metering_period_window.sql`, `20261010000001_metering_
+    # period_end_refresh.sql`). A correction written that way was INVISIBLE to the
+    # selector: measured, a renamed `CREATE FUNCTION` redefinition carrying
+    # `IF TRUE` for the guard left this gate GREEN while the live function had no
+    # fail-closed arm — a false PASS of exactly the class this selection exists to
+    # close, one spelling further in. Both spellings are matched below.
+    #
+    # ⛔ COMMENTS ARE REMOVED BEFORE THE SELECTION IS MADE, not after. A header that
+    # QUOTES this DDL inside `--` or `/* … */` is not a definition, because the
+    # candidate needs an EXECUTED one. `_strip_sql_comments` below handles NESTED
+    # `/* /* … */ */` — PostgreSQL nests them (§4.1.5), unlike C — and leaves string
+    # literals alone.
+    #
+    # ⛔ AND ENUMERATING SPELLINGS IS A LOSING GAME, so the pattern is closed over
+    # the DEFINITION's spelling space instead of over the spellings seen so far. A
+    # second review round measured two more ways to write the same statement that an
+    # `OR REPLACE`-only pattern cannot see, each leaving this gate GREEN over a live
+    # body with no guard: an UNQUALIFIED name — precedent in this very directory,
+    # `0002_audit_events.sql:27`'s `CREATE OR REPLACE FUNCTION
+    # prevent_audit_mutation()`, which resolves through `search_path` to the same
+    # live object — and LOWERCASE keywords, legal and invisible to a case-exact
+    # pattern. What follows `CREATE [OR REPLACE] FUNCTION` is CLOSED: an optional
+    # schema qualifier, an optional quoted identifier, then the name — so
+    # qualification, quoting and case are all tolerated below. A file that merely
+    # MENTIONS the function is deliberately NOT a candidate: this matches a
+    # DEFINITION, which is what the body scan then reads.
+    defs_rx = re.compile(
+        r"create\s+(?:or\s+replace\s+)?function\s+"
+        r"(?:\"?public\"?\s*\.\s*)?\"?postgres_residency_snapshot\b\"?",
+        re.IGNORECASE)
+    candidates: list[tuple[Path, str]] = []
+    for path in sorted((root / "supabase" / "migrations").glob("*.sql")):
+        raw = path.read_text(encoding="utf-8")
+        if not defs_rx.search(raw):
+            continue
+        clean = _strip_sql_comments(raw)
+        if defs_rx.search(clean):
+            candidates.append((path, clean))
+    assert candidates, (
+        "no migration DEFINES postgres_residency_snapshot() any more — the "
+        "erased-org fix (an org the audit stops reporting must not be frozen "
+        "stale) has no home; restore it as an APPEND-ONLY migration (#1095)")
+    path, clean = candidates[-1]
+    # ⛔ THE LIVE DEFINITION IS THE **LAST** ONE IN THE FILE, NOT THE FIRST.
+    # `CREATE OR REPLACE` executes in order, so a later definition supersedes an
+    # earlier one and the LAST is the live object. Anchoring on the FIRST —
+    # `defs_rx.search(...)` — measured GREEN over a file whose earlier, guarded
+    # definition was followed by an UNGUARDED live one: the gate read the superseded
+    # body. No file in this directory does that today; the gate must not depend on
+    # that staying true.
+    #
+    # ⛔ AND THE BODY'S DOLLAR-QUOTE TAG IS CAPTURED, NOT ASSUMED. `AS $$` is both
+    # case-exact and tag-exact, while `defs_rx` is `IGNORECASE` by design: a legal
+    # lowercase `as $$` body REDded with a message that FALSIFIED the file ("declares
+    # no `AS $$` body") and a `$fn$`-tagged one escaped as an unhandled
+    # `ValueError: substring not found` instead of a diagnosis. Both measured.
+    #
+    # The window runs from the opener to the FIRST matching tag after it, so a
+    # helper function defined earlier no longer bounds the far end.
+    defines = list(defs_rx.finditer(clean))
+    opener = _DOLLAR_QUOTE_BODY.search(clean, defines[-1].end())
+    assert opener, (
+        f"{path.name} defines postgres_residency_snapshot() but declares no "
+        "`AS $tag$` body after that definition — the scan below cannot reach the "
+        "executed statements")
+    tag = f"${opener.group(1) or ''}$"
+    close = clean.find(tag, opener.end())
+    assert close != -1, (
+        f"{path.name}'s `AS {tag}` body is never closed by a second `{tag}` — the "
+        "scan below would read to end-of-file")
+    code = clean[opener.end():close]
+
+    return code
+
+
 # The fail-CLOSED arm of the refresh has no runtime gate, so it gets a
 # source-level one — scoped to the function BODY, never to the file.
 # --------------------------------------------------------------------------- #
+
+#: A dollar-quoted body opens with `AS $tag$` — `$$` when the tag is empty. The tag
+#: is CAPTURED rather than assumed: `AS $$` is case-exact and tag-exact, so a legal
+#: lowercase `as $$` or a `$fn$`-tagged body is invisible to it.
+_DOLLAR_QUOTE_BODY = re.compile(r"\bas\s+\$([A-Za-z_]\w*)?\$", re.IGNORECASE)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """`sql` with `--` line comments and NESTED `/* … */` blocks removed.
+
+    ⛔ NESTED, BECAUSE POSTGRESQL NESTS THEM (§4.1.5) — unlike C. A non-greedy
+    `re.sub(r"/\\*.*?\\*/")` stops at the FIRST `*/`, so a nested comment that
+    quotes a previous definition (guard included) leaves the quoted half reading as
+    CODE: measured, that put a quoted guard into the scanned body and left this gate
+    GREEN over an unguarded live function.
+
+    String literals are copied verbatim, so a `--` or `/*` inside one is not a
+    comment; newlines inside removed comments are KEPT so line structure survives.
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        if sql.startswith("--", i):
+            nl = sql.find("\n", i)
+            i = n if nl < 0 else nl
+        elif sql.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if sql.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif sql.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+        elif sql[i] == "'":
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if sql.startswith("''", j):
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(sql[i:j])
+            i = j
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
+
+
 def test_the_refresh_keeps_its_fail_closed_arm():
     """The empty-audit guard and its warning are asserted at SOURCE level, and the
     limitation is stated rather than papered over.
@@ -1673,80 +1823,7 @@ def test_the_refresh_keeps_its_fail_closed_arm():
     guard (the zeroing then fires over an empty audit — a fleet-wide fail-open),
     or delete the `RAISE WARNING` arm (the operator signal vanishes silently).
     """
-    # ⛔ SELECTED BY WHAT THE FILE CONTAINS, NOT BY ITS NAME. A glob on
-    # `*_postgres_residency_zero_*` binds this gate to one filename, and the
-    # append-only rule (#1095) GUARANTEES the next correction arrives under a NEW
-    # name — so a gate keyed on `zero` would keep asserting over a superseded body
-    # and stay green while the live function lost its guard. The candidate set is
-    # therefore every migration that DEFINES the function, and the newest one (the
-    # 14-digit prefix sorts chronologically) is the live definition.
-    #
-    # ⛔ `OR REPLACE` IS OPTIONAL, AND THAT IS NOT COSMETIC. A first cut matched
-    # only `CREATE OR REPLACE FUNCTION`, and this directory already writes the
-    # other spelling — 13 definitions across 6 migrations use
-    # `DROP FUNCTION IF EXISTS …; CREATE FUNCTION …` (e.g.
-    # `20260918000001_metering_period_window.sql`, `20261010000001_metering_
-    # period_end_refresh.sql`). A correction written that way was INVISIBLE to the
-    # selector: measured, a renamed `CREATE FUNCTION` redefinition carrying
-    # `IF TRUE` for the guard left this gate GREEN while the live function had no
-    # fail-closed arm — a false PASS of exactly the class this selection exists to
-    # close, one spelling further in. Both spellings are matched below.
-    #
-    # Residual, disclosed and fail-closed by construction: this scan reads the raw
-    # file, `--` comments included, while the body scan below strips them. A header
-    # that quotes this DDL therefore ADDS a candidate — which can only make the
-    # gate assert over a newer, comment-only file and RED, never pass over a live
-    # body it did not read.
-    #
-    # ⛔ AND ENUMERATING SPELLINGS IS A LOSING GAME, so the pattern is closed over
-    # the DEFINITION's spelling space instead of over the spellings seen so far. A
-    # second review round measured two more ways to write the same statement that an
-    # `OR REPLACE`-only pattern cannot see, each leaving this gate GREEN over a live
-    # body with no guard: an UNQUALIFIED name — precedent in this very directory,
-    # `0002_audit_events.sql:27`'s `CREATE OR REPLACE FUNCTION
-    # prevent_audit_mutation()`, which resolves through `search_path` to the same
-    # live object — and LOWERCASE keywords, legal and invisible to a case-exact
-    # pattern. What follows `CREATE [OR REPLACE] FUNCTION` is CLOSED: an optional
-    # schema qualifier, an optional quoted identifier, then the name — so
-    # qualification, quoting and case are all tolerated below. A file that merely
-    # MENTIONS the function is deliberately NOT a candidate: this matches a
-    # DEFINITION, which is what the body scan then reads.
-    defs_rx = re.compile(
-        r"create\s+(?:or\s+replace\s+)?function\s+"
-        r"(?:\"?public\"?\s*\.\s*)?\"?postgres_residency_snapshot\b\"?",
-        re.IGNORECASE)
-    candidates = [
-        p for p in sorted((_REPO / "supabase" / "migrations").glob("*.sql"))
-        if defs_rx.search(p.read_text(encoding="utf-8"))
-    ]
-    assert candidates, (
-        "no migration DEFINES postgres_residency_snapshot() any more — the "
-        "erased-org fix (an org the audit stops reporting must not be frozen "
-        "stale) has no home; restore it as an APPEND-ONLY migration (#1095)")
-    sql = candidates[-1].read_text(encoding="utf-8")
-    # ⛔ THE WINDOW IS BOUNDED BY THIS DEFINITION, NOT BY THE FILE'S FIRST AND LAST
-    # `$$` — and block comments are removed BEFORE either bound is taken. A third
-    # review round measured two false PASSes through the old window: a `/* … */`
-    # block quoting a previous definition (guard included) ABOVE the live one put
-    # `sql.index("AS $$")` inside that comment, so the scanned text carried the
-    # quoted guard while the live body had none; and a helper function defined
-    # before the live one made `rindex("$$")` bound only the far end. Both stayed
-    # GREEN over a body with no fail-closed arm. `/* */` is not exotic here
-    # (`20260915000001_tenancy_team_to_org.sql` uses it), so the window starts at
-    # the FIRST `AS $$` at or after the selected DEFINITION and ends at the FIRST
-    # `$$` after it.
-    stripped = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
-    marker = "AS $$"
-    assert defs_rx.search(stripped), (
-        f"{candidates[-1].name} matches the definition pattern only inside a "
-        "comment — the body scan cannot reach an executed definition there")
-    assert stripped.count(marker) >= 1, (
-        f"{candidates[-1].name} declares no `AS $$` body — the scan below cannot "
-        "reach the executed statements")
-    start = stripped.index(marker, defs_rx.search(stripped).end())
-    body = stripped[start + len(marker):]
-    body = body[:body.index("$$")]
-    code = "\n".join(line.split("--", 1)[0] for line in body.splitlines())
+    code = _refresh_gate_body(_REPO)
 
     guard = re.compile(
         r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0\s+THEN")
@@ -1764,3 +1841,90 @@ def test_the_refresh_keeps_its_fail_closed_arm():
     assert re.search(r"RETURN\s+QUERY\s+SELECT\s+v_written\s*\+\s*v_zeroed", code), (
         "`orgs_written` no longer counts the zeroed rows — the refresh would report "
         "fewer writes than it made, which is the figure the operator reads")
+
+
+_GATE_GUARD_RX = re.compile(
+    r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0\s+THEN")
+
+#: A body carrying the guard this gate asserts, and one that is identical except for
+#: it — so a case that fails to reach the guard fails for THAT reason alone. Both keep
+#: `RAISE WARNING` and the `v_zeroed` return, which the test above also asserts.
+_GUARDED_BODY = """BEGIN
+  IF jsonb_array_length(v_audit->'orgs') > 0 THEN
+    UPDATE postgres_residency SET bytes = 0;
+  ELSE
+    RAISE WARNING 'no orgs reported';
+  END IF;
+  RETURN QUERY SELECT v_written + v_zeroed;
+END;
+"""
+_UNGUARDED_BODY = """BEGIN
+  UPDATE postgres_residency SET bytes = 0;
+  RAISE WARNING 'no orgs reported';
+  RETURN QUERY SELECT v_written + v_zeroed;
+END;
+"""
+_FN_HEAD = (
+    "CREATE OR REPLACE FUNCTION postgres_residency_snapshot() "
+    "RETURNS void LANGUAGE plpgsql ")
+_HELPER_FN = (
+    "CREATE OR REPLACE FUNCTION helper() RETURNS void LANGUAGE plpgsql "
+    "AS $$ BEGIN END; $$;\n")
+
+
+@pytest.mark.parametrize(
+    "label, lines, guard_reaches",
+    [
+        # ⛔ EACH OF THESE FIVE WAS A MEASURED FALSE PASS OR A MEASURED FALSE
+        # DIAGNOSIS in a previous cut of this gate. They are the cases a selector
+        # has to survive, not hypotheticals.
+        ("two definitions: guarded FIRST, live(last) UNGUARDED",
+         [_FN_HEAD + "AS $$" + _GUARDED_BODY + "$$;\n",
+          _FN_HEAD + "AS $$" + _UNGUARDED_BODY + "$$;\n"], False),
+        ("two definitions: guarded LAST (live)",
+         [_FN_HEAD + "AS $$" + _UNGUARDED_BODY + "$$;\n",
+          _FN_HEAD + "AS $$" + _GUARDED_BODY + "$$;\n"], True),
+        ("nested /* /* */ */ quoting the guard, live UNGUARDED",
+         [_FN_HEAD + "AS $$" + "/* previous cut:\n  /* aside */\n"
+          + _GUARDED_BODY + "*/\n" + _UNGUARDED_BODY + "$$;\n"], False),
+        ("nested /* /* */ */ quoting the guard, live GUARDED",
+         [_FN_HEAD + "AS $$" + "/* old:\n  /* aside */\n"
+          + _UNGUARDED_BODY + "*/\n" + _GUARDED_BODY + "$$;\n"], True),
+        ("lowercase `as $$` body",
+         [_FN_HEAD.replace("AS $$", "as $$") + "as $$" + _GUARDED_BODY + "$$;\n"],
+         True),
+        ("`$fn$`-tagged body after an unrelated `AS $$` function",
+         [_HELPER_FN + _FN_HEAD + "AS $fn$" + _GUARDED_BODY + "$fn$;\n"], True),
+        ("a helper function defined BEFORE the live one",
+         [_HELPER_FN + _FN_HEAD + "AS $$" + _GUARDED_BODY + "$$;\n"], True),
+        ("a `--` header QUOTING the DDL above the live definition",
+         ["-- previous cut:\n-- " + _FN_HEAD + "AS $$\n-- "
+          + _GUARDED_BODY.replace("\n", "\n-- ") + "\n"
+          + _FN_HEAD + "AS $$" + _UNGUARDED_BODY + "$$;\n"], False),
+        ("control: one GUARDED definition",
+         [_FN_HEAD + "AS $$" + _GUARDED_BODY + "$$;\n"], True),
+    ])
+def test_the_refresh_gate_can_fail(tmp_path, label, lines, guard_reaches):
+    """The SELECTOR is driven against synthetic migration sets.
+
+    A gate that can only ever be exercised on THIS tree cannot show that it can
+    FAIL, and this one did not: a filename glob, a first-definition anchor and a
+    non-greedy block-comment strip each left it GREEN over a live body with no
+    guard, and the case-exact `AS $$` marker REDded a legal lowercase body with a
+    message that falsified the file. Those are the cases below.
+
+    `guard_reaches` is what the SELECTED body must contain — not what the gate
+    asserts. `test_the_refresh_keeps_its_fail_closed_arm` above is the assertion;
+    this one proves the selection feeds it the body it claims to.
+    """
+    migrations = tmp_path / "supabase" / "migrations"
+    migrations.mkdir(parents=True)
+    (migrations / "20260101000001_case.sql").write_text(
+        "\n".join(lines), encoding="utf-8")
+    code = _refresh_gate_body(tmp_path)
+    assert bool(_GATE_GUARD_RX.search(code)) is guard_reaches, (
+        f"{label}: the selector returned a body "
+        f"{'WITHOUT' if guard_reaches else 'WITH'} the fail-closed guard. "
+        "The scan below would report the opposite of the truth about the live "
+        "function — re-read how the candidate and the body window are chosen")
+
