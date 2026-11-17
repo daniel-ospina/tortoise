@@ -1,0 +1,1470 @@
+{
+ "arms": {
+  "object[hint]@c1": {
+   "concurrency": 1,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "object",
+   "external_load_procs": 0,
+   "index_hint": [
+    "Point"
+   ],
+   "label": "Object",
+   "latency_ms": {
+    "max": 62.6,
+    "mean": 45.59,
+    "p50": 47.47,
+    "p95": 55.94,
+    "p99": 56.8
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     41.07,
+     110.26,
+     128.75
+    ]
+   },
+   "mechanism": {
+    "scan_fallback": 60
+   },
+   "n": 60,
+   "over_budget": 0,
+   "reason": {
+    "ok": 60
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 31.78,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 32.7,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 34.2,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 34.26,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 35.0,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 35.23,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 35.29,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 35.55,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 36.85,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 37.5,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 37.95,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 37.98,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 38.09,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 38.23,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 38.32,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 38.82,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 38.93,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 40.71,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 40.76,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 41.25,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 42.06,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 42.25,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 42.45,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 42.82,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 43.46,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 44.19,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 44.29,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 44.56,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 44.74,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 45.04,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 47.47,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 47.51,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 47.75,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 47.85,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 48.22,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 48.4,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 48.4,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 49.42,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 49.59,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 49.69,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 49.8,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 49.91,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 49.99,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 51.56,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.1,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.32,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.78,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.83,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.08,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.31,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.32,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.71,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.57,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.59,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 55.06,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 55.38,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 55.94,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.19,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.8,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 62.6,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  },
+  "object[nohint]@c1": {
+   "concurrency": 1,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "object",
+   "external_load_procs": 0,
+   "index_hint": null,
+   "label": "Object",
+   "latency_ms": {
+    "max": 85.58,
+    "mean": 65.64,
+    "p50": 65.73,
+    "p95": 79.45,
+    "p99": 83.06
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     41.07,
+     110.26,
+     128.75
+    ]
+   },
+   "mechanism": {
+    "scan_fallback": 60
+   },
+   "n": 60,
+   "over_budget": 0,
+   "reason": {
+    "ok": 60
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 51.04,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.23,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.34,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.83,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 53.33,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.47,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.87,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 55.79,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.13,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.13,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.26,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.36,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.8,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 57.12,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 57.18,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 57.76,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 59.09,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 59.17,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 59.86,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 60.19,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 60.59,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 62.47,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 62.83,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 62.91,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 63.48,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 63.67,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 64.14,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 64.66,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 64.67,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 65.64,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 65.73,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 66.77,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 66.77,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 67.29,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 67.8,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 68.08,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 68.26,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 68.47,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 68.58,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 68.97,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 69.66,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 70.16,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 70.56,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 70.76,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 71.22,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 71.75,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 72.28,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 73.68,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 73.88,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 74.46,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 75.2,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.18,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.57,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.66,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 77.83,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 78.41,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 79.45,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 80.1,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 83.06,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 85.58,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  }
+ },
+ "box": {
+  "cpus": 16,
+  "loadavg": [
+   38.34,
+   108.55,
+   128.1
+  ]
+ },
+ "census": {
+  "labels": {
+   "Object": {
+    "embedded": 8000,
+    "stored": 8000
+   },
+   "Point": {
+    "embedded": 8000,
+    "stored": 8000
+   }
+  },
+  "vector_indexes": [
+   [
+    "Point",
+    "['id', 'pointKind', 'content_hash', 'key', 'lastDreamedAt', 'content', 'search_keys', 'quote', 'embedding']",
+    "OrderedDict({'id': ['RANGE'], 'pointKind': ['RANGE'], 'content_hash': ['RANGE'], 'key': ['RANGE'], 'lastDreamedAt': ['RANGE'], 'content': ['FULLTEXT'], 'search_keys': ['FULLTEXT'], 'quote': ['FULLTEXT'], 'embedding': ['VECTOR']})",
+    "OrderedDict({'id': OrderedDict(), 'pointKind': OrderedDict(), 'content_hash': OrderedDict(), 'key': OrderedDict(), 'lastDreamedAt': OrderedDict(), 'content': OrderedDict(), 'search_keys': OrderedDict(), 'quote': OrderedDict(), 'embedding': OrderedDict({'dimension': 384, 'similarityFunction': 'cosine', 'M': 16, 'efConstruction': 200, 'efRuntime': 10})})"
+   ]
+  ]
+ },
+ "code_head": "d93c4c99e970249de8336ae949c8418bee08538c",
+ "config": {
+  "concurrency": [
+   1
+  ],
+  "external_load": 0,
+  "labels": [
+   "object"
+  ],
+  "limit": 3,
+  "population": 1000,
+  "reads": 60,
+  "sessions_dir": "/home/cmux/.tortoise/session-events",
+  "timeout_ms": 500
+ },
+ "index_attempt": [
+  {
+   "answered_signature": null,
+   "attempts": [
+    {
+     "elapsed_ms": 10.02,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "A"
+    },
+    {
+     "elapsed_ms": 10.0,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "B"
+    }
+   ],
+   "elapsed_ms": 20.04,
+   "label": "Object",
+   "outcome": "refused-both-signatures"
+  }
+ ],
+ "issue": 13108,
+ "measured_at": "2026-11-17T03:32:15Z",
+ "seed": null,
+ "uri_graph": "dense13108_8000",
+ "windows": {}
+}

@@ -11045,7 +11045,7 @@ def _preview_family_supersede(sdk, label: str, old_id: str, new_id: str) -> dict
 
     ⛔ RESIDUAL (#12914 round-4 P1, filed not fixed): the family WRITE continues
     into ``update_knowledge`` -> ``_update_entity``, whose label-surface guards
-    (``refuse_terminal_event_state`` on an ``:Event`` row, the ``:Source``
+    (``refuse_event_lifecycle_state`` on an ``:Event`` row, the ``:Source``
     closed-surface refusal) are NOT part of ``_supersede_entity``'s own checks. On
     the HYBRID shapes ``:Object:Event`` / ``:Subject:Event`` / ``:Object:Source`` /
     ``:Subject:Source`` this preview therefore answers `would supersede` and the

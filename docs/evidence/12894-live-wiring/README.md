@@ -367,3 +367,61 @@ door twice in a chosen order, which is what two concurrent writers produce but i
 not itself two threads. `test_two_writers_allocate_in_commit_order` covers the
 allocator's own ordering; it cannot see the append/allocation split, because both
 of its writers arrive with no journal at all.
+
+---
+
+## 5. The follow-up review (#13043 comment `6938339131`) — what it found, and what changed
+
+A fresh-context review of the merged PR found **no P0** (commit point unmoved, the `seq` hole closed
+on both doors, the flag OFF and typo-safe, the seed reachable), and **three P1s** that were real. All
+three are closed on `fix/13043-cutover-blockers`, with the switch still **OFF**.
+
+**P1-3 — the carried ordinal was inferred from key PRESENCE.** Reproduced by the review:
+`replay_plan([{… "seq": 42}], start_seq=7)` → REFUSED. A pre-existing journal can hold such a line
+(the pre-reservation SDK put one there for `update_point(pid, seq=…)`, and a `:Session` copy carries
+one), so ONE legacy line made that record's live write **and** its only repair refuse, with no in-band
+fix. `replay` / `replay_plan` / `RecordWriter.write` / `write_records` now take `carried_positions`
+(default `False` = journal-sourced: enumerate, ignore the prop; `True` = record-sourced: read it, and
+refuse a disagreement naming both numbers). Shown red then green **on a real Postgres**: a line
+carrying `seq: 42` at journal position 3 refused `write_failed` before, applies at 3 after.
+
+**P1-4 — the fourth position-row writer was not wired to the cutover.**
+`tools/backfill_copy_turns.py` passed `position=True, first_seq=first` and no `allocate=`, so on a
+graph this feature had cut over the enumerated arm refused EVERY session batch — and #13043 is what
+made that state reachable (the seed was unreachable before it). It now passes `allocate`, with
+`first_seq=1` on that arm, compares the allocated number against the journal's reported position
+before committing (refusing + rolling back on a disagreement — the check the live door makes and this
+lane cannot borrow), and pre-flights the counter row BEFORE the first append, so a mis-set environment
+refuses while nothing has been written.
+
+**P1-1 / P1-2 — the flag is global, the cutover is per graph, nothing creates the row.**
+`provision_graph_record` (§A7.8 item 8) still has **zero hits in this tree**, and it is NOT built
+here: it is a migration plus two `hosted_api` call sites with a fail-hard/fail-soft split that
+`#10025` F1 governs, i.e. its own change. What this lane does instead is make the door *refuse to
+pretend*:
+
+* `arm` REFUSES without `--acknowledge-cutover`, and the refusal names the flag and its home (the
+  writer's environment, not the operator's shell), the order of operations, the per-graph scope, the
+  absent creation hook, and the backfill lane. The state that ate rows — counter armed, door not —
+  is no longer reachable by following the documented steps.
+* A read-only `sweep` finds the graphs the record has seen that have NO counter row, with the seed
+  command and the warning that the floor is the JOURNAL's count, not `row_max`.
+  ⚠️ Its first cut answered "no born-uncut graphs" on a real org: an unscoped connection returns zero
+  rows under RLS, and a false CLEAN is the worst answer a pre-flight can give. The DB-backed leg
+  caught it; `record_allocator.scope_tenant` is the fix.
+  ⛔ **And it reports only what it read.** The per-graph number is `journal_max_seq` — `MAX(seq)`, named
+  for the aggregate it is — and `floor_is_the_journals_count` is answered only where an enumeration
+  exists (`--journal` counted here, or `--enumerated-floor`); otherwise it is `null` beside the reason.
+  The first cut printed `true` as a literal and, worse, read the journal AFTER a `rollback()` had ended
+  the transaction carrying the transaction-local tenant GUC, so every entry said `0`. A single
+  `--enumerated-floor` on a sweep that finds more than one graph is REFUSED — the floor is per graph.
+  ⛔ **What it cannot see, stated on the verb itself:** a graph that has never been written (no
+  `journal_event` row) — the record role has no grant on `public.graphs`. Such a graph has lost
+  nothing yet; the first append is the moment it becomes visible and actionable.
+* `status` reports the RECORD's state (`allocates`, `allocates_scope`) separately from this box's
+  environment, because `allocates: true` on an unarmed door reads as "the door is allocating".
+
+**Residual, and it is the reason the switch stays OFF regardless:** the append/allocation ordering
+wedge in §4 above is unchanged by this lane — it belongs to `#9318`'s journal identity, not to the
+review's findings. Until a graph's creation provisions its counter, and the ordering is one lock, the
+honest state is: wired, tested, and unarmed.
