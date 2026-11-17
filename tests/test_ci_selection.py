@@ -22985,11 +22985,16 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     carrying a **`core`-ONLY row** — the intermediate state THIS BRANCH itself
     created in `7353be04b9c1` (`fix(ci): register
     test_13034_currency_rule_reads_position.py`), before `3c380b667fe8` added the
-    `api` row and made it dual. ⛔ NOT "main's state": `origin/main` carried
-    **zero** rows for the file (`grep -c` over
-    `git show origin/main:config/ci-surfaces.yml` -> 0), which is what the
-    docstring above means by "UNLISTED on `main`" and what commit `a36581fd`
-    retired by name — so do not re-read this clause as "main had a `core` row".
+    `api` row and made it dual. ⛔ NOT "main's state": the `main` this branch
+    forks from carried **zero** rows for the file — `grep -c` over
+    `git show 3d437429e9^:config/ci-surfaces.yml` -> 0, i.e. `main` immediately
+    before #13144 — which is what the docstring above means by "UNLISTED on
+    `main`" and what commit `a36581fd` retired by name — so do not re-read this
+    clause as "main had a `core` row". ⛔ That parenthetical is bound to the
+    pre-#13144 main it was measured at: the SAME `grep -c` against `origin/main`
+    reads **6** at this head, because `origin/main` IS `3d437429e9`. Re-running it
+    against today's `origin/main` does not falsify the clause — it measures a
+    different commit, and #13144 is the one that landed the rows.
     On that `core`-only manifest: `select(['tortoise/hosted_api.py'],
     'pull_request', manifest)` -> `surfaces=['api', 'onboarding']`, `full: False`,
     and this file ABSENT from `test_files`. (⛔ On the manifest WITH the `api` row
@@ -23002,15 +23007,18 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
 
     That is the #1349/#2938/#3154 silent-drop class in its harmful direction. It is
     the same defect `test_record_serve.py` and `test_12941_read_your_writes.py`
-    each record for themselves (`config/ci-surfaces.yml:351` and `:352` — the two
-    rows ABOVE where the registration sits on `main`). The `['api', 'core']`
+    each record for themselves (`config/ci-surfaces.yml:351` and `:352` — earlier
+    rows in the SAME `surfaces.api` list; ⛔ NOT the two rows adjacent to this
+    one: the registration `main` landed is at `:1109`, 757 lines below `:352`,
+    because `main`'s cut carries its own comment block above the row). The
+    `['api', 'core']`
     siblings, each at its OWN rows: `test_12941_read_your_writes.py` at `:352` /
     `:2574`, and `test_11892_health_quota.py` at `:1849` / `:2565` (both
     re-derived on the merged tree: taking `main`'s `ci-surfaces.yml` moved them
     from the `:1816` / `:2532` / `:2541` this docstring previously carried).
     ⛔ NOT "the only hosted-door guard registered
-    single-surface": on `main` this file was registered on **zero** surfaces
-    when #13075 landed it (both rows were added later, by #13144),
+    single-surface": `main` registered this file on **zero** surfaces when
+    #13075 landed it (both rows were added later, by #13144),
     and several hosted-door guards legitimately live on `api` alone
     (`test_hosted_api.py`, `test_billing.py`, `test_commit_endpoint.py`,
     `test_dr_endpoints.py` — all `['api']`, measured). The defect here is the
