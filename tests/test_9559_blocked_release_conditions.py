@@ -878,49 +878,60 @@ def _code_only(path: Path) -> str:
 
 
 def _dispatch_bindings(path: Path) -> list[str]:
-    """Lines that BIND ``args.cmd == "record-restore"`` to its handler, in code.
-
-    A line qualifies only if the comparison's own line (or the next code line)
-    also names ``_cmd_record_restore`` — so a gutted branch (`return None`) with
-    the handler left orphaned is NOT a binding, which is the fact the message
-    below claims.
+    """Lines that BIND ``args.cmd == "record-restore"`` to a CALL of its handler.
 
     ⛔ Token-level, not text-level. A line grep is satisfied by a docstring (one
     STRING token) or an inline comment, so a renamed dispatch literal with the
     old text left in prose stayed GREEN — measured, with ``ruff`` also clean
-    (reviewer round 7). Keeping ``STRING`` here and matching the token SEQUENCE
-    ``args . cmd == "record-restore"`` on a single line cannot be forged by
-    prose: a docstring's literal text is a single token, never six.
+    (reviewer round 7). Matching the token SEQUENCE
+    ``args . cmd == "record-restore"`` cannot be forged by prose: a docstring's
+    literal text is a single token, never six.
+
+    ⛔ AND THE BRANCH BODY MUST CALL THE HANDLER — a NAME token immediately
+    followed by ``(`` — not merely contain the name somewhere within one line of
+    the comparison. Both weaker forms were measured:
+      * comparison-only: a branch gutted to ``return None`` left the handler
+        orphaned while the check stayed green (round 8);
+      * one-line substring: a live verb that gained one statement inside its
+        branch went RED with the message "the door moved", while a ``STRING``
+        token naming the handler satisfied it for a dead verb (round 9).
+    The body is the contiguous code lines indented past the comparison, so a
+    notice line above the real call is fine and prose cannot stand in for the
+    call.
     """
     found: list[str] = []
+    per_line: dict[int, list[str]] = {}
+    col: dict[int, int] = {}
     with path.open("rb") as fh:
-        per_line: dict[int, list[str]] = {}
         for tok in tokenize.tokenize(fh.readline):
             if tok.type in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE,
                             tokenize.INDENT, tokenize.DEDENT,
                             tokenize.ENCODING, tokenize.ENDMARKER):
                 continue
             per_line.setdefault(tok.start[0], []).append(tok.string)
+            col.setdefault(tok.start[0], tok.start[1])
     lines = sorted(per_line)
     for pos, lineno in enumerate(lines):
         toks = per_line[lineno]
         for i in range(len(toks) - 5):
             window = toks[i:i + 6]
-            if (window[0] == "args" and window[1] == "." and window[2] == "cmd"
-                    and window[3] == "==" and window[4] == '"record-restore"'):
-                # ⛔ THE BRANCH MUST REACH THE HANDLER, not merely mention the
-                # subcommand. Reviewer round 8 measured the comparison-only form:
-                # gutting the branch to `return None` (handler still defined,
-                # never called) left both checks GREEN while the CLI verb was
-                # dead — falsifying the very premise the pin states. So the
-                # comparison line's REMAINDER, or the next non-blank code line,
-                # must carry the handler name.
-                reach = " ".join(toks[i:])
-                if pos + 1 < len(lines):
-                    reach += " " + " ".join(per_line[lines[pos + 1]])
-                if "_cmd_record_restore" not in reach:
-                    continue
-                found.append(f"{lineno}: {' '.join(toks)}")
+            if not (window[0] == "args" and window[1] == "."
+                    and window[2] == "cmd" and window[3] == "=="
+                    and window[4] == '"record-restore"'):
+                continue
+            # The branch BODY: following code lines, indented deeper than the
+            # comparison, up to the first line that is not.
+            body: list[str] = []
+            for nxt in lines[pos + 1:]:
+                if col[nxt] <= col[lineno]:
+                    break
+                body.extend(per_line[nxt])
+            called = any(
+                body[i] == "_cmd_record_restore" and body[i + 1] == "("
+                for i in range(len(body) - 1))
+            if not called:
+                continue
+            found.append(f"{lineno}: {' '.join(toks)}")
     return found
 
 
