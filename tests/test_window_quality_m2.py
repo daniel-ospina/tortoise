@@ -2052,12 +2052,41 @@ _NEGATION_CUE = re.compile(
     re.IGNORECASE)
 _NEGATION_CUE_WINDOW = 32
 
+# ⛔ A cue governs only the PHRASE it introduces, not every following word in the
+# clause. NegEx stops a negation's scope at a TERMINATION term (`but`, `however`,
+# `except`, `although`, …) as well as at the sentence end; the round-13 repair cut at
+# `;`/`:` only, so an unrelated negation in an earlier comma segment still laundered an
+# ASSERTED inversion — measured GREEN at `e24e8a209c`:
+# `There is no repair, and the loss is smaller than the eviction.` The `no` is 7
+# characters before the hit and belongs to a different clause of the same sentence, so
+# the matcher spared an inversion of the very claim the row names. This is the P1
+# class again (#13126 round 13), in the one direction the round-13 fix left open.
+#
+# The comma is a termination term here for the same reason `;` is: the record writes
+# `passes neither A nor B, and it passes both` — a cue may not reach across the
+# punctuated break that ends its own phrase. `and` / `or` are deliberately NOT in the
+# list (they are ordinary conjunctions inside a negation's scope: `no A or B`), which
+# is also why the canonical NegEx termination set names `but`/`however`/`except` rather
+# than the coordinating conjunctions.
+_TERMINATION = re.compile(
+    r"[,;:]|\b(?:but|however|nevertheless|though|although|yet|except|whereas|"
+    r"aside from|apart from)\b",
+    re.IGNORECASE)
+
 
 def _dismissed(prefix: str) -> bool:
-    """Is the spelling that FOLLOWS `prefix` negated by a cue in its own clause?"""
+    """Is the spelling that FOLLOWS `prefix` negated by a cue in its own PHRASE?
+
+    Four bounds, each added because a wider one was measured to launder an asserted
+    inversion: the SENTENCE (a negation in the previous sentence cannot dismiss this
+    one), the CLAUSE (`;`/`:`), the PHRASE (a termination term — NegEx's own scope
+    rule), and the row's own words, blanked out of `prefix` before this is called
+    (`_own_claim_spans`).
+    """
     sentence = _SENTENCE_END.split(prefix)[-1]
     clause = _CLAUSE_END.split(sentence)[-1]
-    return bool(_NEGATION_CUE.search(clause))
+    phrase = _TERMINATION.split(clause)[-1]
+    return bool(_NEGATION_CUE.search(phrase))
 
 
 def _own_claim_spans(doc: str, anchor: str, claim: Marker | None) -> list[tuple[int, int]]:
@@ -2582,6 +2611,37 @@ def test_the_claim_ledger_matcher_is_pinned_on_synthetic_input():
           "the finding.", "the loss is", "the finding",
           ("smaller than the eviction",))]), (
         "a negation in the PREVIOUS sentence must not dismiss this one")
+
+    # ── …and a cue governs only the PHRASE it introduces, not the whole sentence ─
+    # ⛔ The round-13 repair cut at `;`/`:`, so an unrelated `no` in an earlier COMMA
+    # segment still spared an ASSERTED inversion — measured GREEN at `e24e8a209c`:
+    # `There is no repair, and the loss is smaller than the eviction.` That is the
+    # recorded P1 class (round 13) in the one direction the round-13 fix left open: a
+    # cue 7 characters before the hit, belonging to a different clause of the same
+    # sentence, laundered an inversion of the very claim the row names. NegEx stops a
+    # negation's scope at a termination term; `_TERMINATION` is that rule, with the
+    # punctuated break as the term the record actually uses.
+    assert "claim inverted" in violations(
+        [("There is no repair, and the loss is smaller than the eviction.",
+          "the loss is", None, ("smaller than the eviction",))]), (
+        "an unrelated negation in an EARLIER clause of the same sentence must not "
+        "dismiss an asserted inversion (#13126 round 13, P1)")
+    assert "claim inverted" in violations(
+        [("It is not larger however the loss is smaller than the eviction.",
+          "the loss is", None, ("smaller than the eviction",))]), (
+        "a termination term (`however`) ends the cue's scope with no punctuation at "
+        "all")
+    # …while a cue in the hit's OWN phrase still spares it, and the scope bound is the
+    # termination term rather than "no cue may be far away".
+    assert violations([("Nothing here is measured, the loss is not smaller than the "
+                        "eviction and the finding stands.", "the finding stands", None,
+                        ("smaller than the eviction",))]) == "", (
+        "a cue in the same segment as the hit must still spare correct English")
+    assert _dismissed("three runs of identical input, NOT "), (
+        "a cue immediately before the hit dismisses it")
+    assert not _dismissed("There is no repair, and "), (
+        "the punctuated break ends the cue's scope — this is the fail-open that was "
+        "measured GREEN at e24e8a209c")
 
     # ── the vacuity refusal covers every shape `required` may take ────────────
     # ⛔ The guard was `isinstance(required, str)`, so the tuple/regex shapes
