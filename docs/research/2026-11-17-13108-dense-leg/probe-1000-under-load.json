@@ -1,0 +1,2876 @@
+{
+ "arms": {
+  "object@c1": {
+   "concurrency": 1,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "object",
+   "external_load_procs": 0,
+   "latency_ms": {
+    "max": 644.97,
+    "mean": 206.39,
+    "p50": 133.25,
+    "p95": 537.32,
+    "p99": 634.5
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     114.28,
+     50.74,
+     34.91
+    ]
+   },
+   "mechanism": {
+    "scan_fallback": 60
+   },
+   "n": 60,
+   "over_budget": 7,
+   "reason": {
+    "ok": 60
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 38.81,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 39.38,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 39.62,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 40.98,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 40.98,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 41.9,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 44.76,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 44.99,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 58.8,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 60.91,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 62.11,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 64.4,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 65.14,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 65.2,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 66.83,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 68.24,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 70.76,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 71.66,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 72.43,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 74.79,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.25,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.61,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 78.33,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 84.41,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 85.54,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 93.84,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 94.73,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 101.88,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 103.33,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 124.05,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 133.25,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 155.65,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 157.25,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 157.42,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 171.98,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 181.9,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 182.11,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 183.67,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 196.29,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 200.53,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 237.31,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 248.57,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 289.74,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 322.38,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 341.08,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 352.77,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 385.08,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 387.12,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 387.56,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 391.47,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 438.91,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 444.07,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 449.01,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 511.69,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 526.78,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 536.49,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 537.32,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 545.07,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 634.5,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 644.97,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  },
+  "object@c16": {
+   "concurrency": 16,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "object",
+   "external_load_procs": 0,
+   "latency_ms": {
+    "max": 906.79,
+    "mean": 578.77,
+    "p50": 551.78,
+    "p95": 821.04,
+    "p99": 860.21
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     124.68,
+     56.15,
+     36.93
+    ]
+   },
+   "mechanism": {
+    "scan_fallback": 60
+   },
+   "n": 60,
+   "over_budget": 43,
+   "reason": {
+    "ok": 60
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 326.19,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 366.8,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 370.99,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 383.12,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 387.6,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 393.8,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 418.57,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 429.03,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 435.16,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 454.61,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 463.0,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 481.16,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 484.85,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 489.93,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 493.63,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 498.52,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 499.63,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 504.4,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 509.56,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 511.4,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 515.58,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 515.82,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 516.41,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 519.75,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 527.43,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 527.68,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 537.54,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 538.02,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 539.87,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 549.19,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 551.78,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 567.64,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 591.0,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 591.89,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 604.21,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 617.06,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 618.46,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 618.93,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 621.26,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 622.23,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 625.32,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 625.67,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 631.39,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 631.53,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 635.45,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 671.42,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 672.19,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 673.76,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 695.38,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 724.1,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 730.07,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 733.87,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 754.69,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 755.23,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 766.7,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 775.73,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 821.04,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 842.0,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 860.21,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 906.79,
+     "entity_type": "object",
+     "mechanism": "scan_fallback",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  },
+  "point@c1": {
+   "concurrency": 1,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "point",
+   "external_load_procs": 0,
+   "latency_ms": {
+    "max": 431.42,
+    "mean": 101.45,
+    "p50": 62.15,
+    "p95": 324.73,
+    "p99": 370.33
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     124.68,
+     56.15,
+     36.93
+    ]
+   },
+   "mechanism": {
+    "index": 60
+   },
+   "n": 60,
+   "over_budget": 0,
+   "reason": {
+    "ok": 60
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 21.08,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.31,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.32,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 21.36,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.09,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 23.75,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 25.39,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 25.8,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 26.08,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 27.5,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 27.93,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 30.37,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 31.74,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 32.85,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 33.67,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 34.8,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 34.98,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 36.82,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 43.25,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 44.4,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 45.2,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 46.24,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 49.71,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 49.93,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 50.09,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 50.38,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 52.44,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 54.13,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 56.54,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 61.61,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 62.15,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 63.44,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 64.05,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 66.59,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 66.63,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 70.7,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 74.87,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 76.75,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 77.56,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 78.53,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 82.01,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 82.42,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 86.41,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 90.32,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 95.35,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 116.08,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 124.18,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 140.2,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 148.52,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 222.06,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 237.69,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 245.96,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 270.89,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 281.86,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 289.5,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 300.2,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 324.73,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 342.07,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 370.33,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 431.42,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  },
+  "point@c16": {
+   "concurrency": 16,
+   "count": {
+    "rows_mean": 3.0,
+    "zero_rows": 0
+   },
+   "degraded": 0,
+   "entity_type": "point",
+   "external_load_procs": 0,
+   "latency_ms": {
+    "max": 685.59,
+    "mean": 442.91,
+    "p50": 461.79,
+    "p95": 633.1,
+    "p99": 681.9
+   },
+   "load": {
+    "cpus": 16,
+    "loadavg": [
+     127.54,
+     59.01,
+     38.07
+    ]
+   },
+   "mechanism": {
+    "index": 60
+   },
+   "n": 60,
+   "over_budget": 24,
+   "reason": {
+    "ok": 60
+   },
+   "samples": [
+    {
+     "degraded": false,
+     "elapsed_ms": 148.15,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 161.37,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 198.95,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 199.85,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 201.65,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 217.06,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 221.85,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 223.33,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 231.36,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 231.47,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 256.69,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 277.8,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 293.39,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 293.78,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 313.86,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 335.37,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 390.38,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 391.86,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 392.59,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 396.59,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 400.18,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 409.81,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 424.38,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 426.96,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 444.81,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 448.82,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 450.13,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 450.77,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 452.17,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 461.11,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 461.79,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 466.37,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 469.55,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 471.56,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 481.21,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 484.18,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 505.64,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 516.07,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 520.06,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 525.7,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 529.36,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 535.68,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 552.9,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 555.74,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 557.97,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 559.75,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 563.49,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 573.97,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 581.57,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 588.64,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 589.14,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 589.43,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 617.24,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 617.77,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 625.68,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 627.12,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 633.1,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 660.11,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 681.9,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    },
+    {
+     "degraded": false,
+     "elapsed_ms": 685.59,
+     "entity_type": "point",
+     "mechanism": "index",
+     "raised": null,
+     "ran": true,
+     "reason": "ok",
+     "rows": 3,
+     "timeout_ms": 500
+    }
+   ]
+  }
+ },
+ "box": {
+  "cpus": 16,
+  "loadavg": [
+   127.54,
+   59.01,
+   38.07
+  ]
+ },
+ "census": {
+  "labels": {
+   "Object": {
+    "embedded": 1000,
+    "stored": 1000
+   },
+   "Point": {
+    "embedded": 1000,
+    "stored": 1000
+   }
+  },
+  "vector_indexes": [
+   [
+    "Point",
+    "['id', 'pointKind', 'content_hash', 'key', 'lastDreamedAt', 'content', 'search_keys', 'quote', 'embedding']",
+    "OrderedDict({'id': ['RANGE'], 'pointKind': ['RANGE'], 'content_hash': ['RANGE'], 'key': ['RANGE'], 'lastDreamedAt': ['RANGE'], 'content': ['FULLTEXT'], 'search_keys': ['FULLTEXT'], 'quote': ['FULLTEXT'], 'embedding': ['VECTOR']})",
+    "OrderedDict({'id': OrderedDict(), 'pointKind': OrderedDict(), 'content_hash': OrderedDict(), 'key': OrderedDict(), 'lastDreamedAt': OrderedDict(), 'content': OrderedDict(), 'search_keys': OrderedDict(), 'quote': OrderedDict(), 'embedding': OrderedDict({'dimension': 384, 'similarityFunction': 'cosine', 'M': 16, 'efConstruction': 200, 'efRuntime': 10})})"
+   ]
+  ]
+ },
+ "code_head": "d93c4c99e970249de8336ae949c8418bee08538c",
+ "config": {
+  "concurrency": [
+   1,
+   16
+  ],
+  "external_load": 0,
+  "labels": [
+   "object",
+   "point"
+  ],
+  "limit": 3,
+  "population": 1000,
+  "reads": 60,
+  "sessions_dir": "~/.tortoise/session-events",
+  "timeout_ms": 500
+ },
+ "index_attempt": [
+  {
+   "answered_signature": null,
+   "attempts": [
+    {
+     "elapsed_ms": 14.23,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "A"
+    },
+    {
+     "elapsed_ms": 14.08,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "B"
+    }
+   ],
+   "elapsed_ms": 28.36,
+   "label": "Object",
+   "outcome": "refused-both-signatures"
+  },
+  {
+   "answered_signature": "B",
+   "attempts": [
+    {
+     "elapsed_ms": 52.56,
+     "outcome": "refused",
+     "raised": "ResponseError: Invalid arguments for procedure 'db.idx.vector.queryNodes'",
+     "signature": "A"
+    },
+    {
+     "elapsed_ms": 11.64,
+     "outcome": "ok",
+     "raised": null,
+     "signature": "B"
+    }
+   ],
+   "elapsed_ms": 64.24,
+   "label": "Point",
+   "outcome": "ok"
+  }
+ ],
+ "issue": 13108,
+ "measured_at": "2026-11-17T02:20:12Z",
+ "seed": null,
+ "uri_graph": "dense13108_13108a",
+ "windows": {}
+}
