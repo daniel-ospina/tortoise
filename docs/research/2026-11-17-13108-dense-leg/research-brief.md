@@ -384,8 +384,8 @@ review round 4, F3).** Its `code_head` is `d93c4c99e970`, which does not contain
 `vector_indexed_labels` (`git show d93c4c99e9:tortoise/search_engine.py | grep -c
 vector_indexed_labels` → 0); the fix landed at `a2fe16beb8`. So that pair was measured against an
 UNCOMMITTED draft of the fix, the tool recorded no working-tree state, and "was the 8,000 pair
-measured on the fix?" was unanswerable from the artifact. The tool now records `worktree.dirty`
-+ a diff digest beside `code_head` so the next run cannot be ambiguous; the figure is otherwise
+measured on the fix?" was unanswerable from the artifact. The tool now records `worktree.dirty` +
+a diff digest beside `code_head` so the next run cannot be ambiguous; the figure is otherwise
 sound (both arms `scan_fallback`, `hint` 47.47 ms vs `nohint` 65.73 ms p50), and re-running the
 pair at the merged head is the way to remove the qualification entirely.
 
