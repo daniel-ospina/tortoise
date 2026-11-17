@@ -837,6 +837,12 @@ class TestThePlanPipeline:
             PO.record_occurrence(sdk, "dup-plan")
         assert len(non_folded_entries()) == before + 1, (
             "the duplicate-id refusal was recorded more than once")
+        # ⛔ The COUNT alone would pass if the gate filed one entry of the WRONG
+        # shape: the property the fix rests on is that the resolver's OWN
+        # `duplicate-id` record survives, not that some record exists.
+        entry = non_folded_entries()[-1]
+        assert entry.shape == "duplicate-id", entry
+        assert entry.name == "dup-plan", entry
 
     def test_a_name_held_by_a_SETTLED_and_a_LIVE_plan_resolves_the_LIVE_one(
             self, sdk):

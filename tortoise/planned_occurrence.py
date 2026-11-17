@@ -278,10 +278,11 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     """Create a plan Object and put it on the ``scheduled`` stage.
 
     Returns the created node (``create_entity``'s ``node`` payload), or — on the
-    has-position re-mention arm, which writes nothing — the existing record's own
-    stored properties. ⛔ Neither payload promises a POSITION: the door-props
-    node this call returns from the create path is the pre-advance shape, so a
-    caller that needs the stage reads it back (``pipeline.current_stage``).
+    positioned, bindable re-mention arm only (the short-circuit below), which is
+    the one success that writes nothing — the existing record's own stored
+    properties. ⛔ Neither payload promises a POSITION: the door-props node this
+    call returns from the create path is the pre-advance shape, so a caller that
+    needs the stage reads it back (``pipeline.current_stage``).
 
     The Object is created with the NAMESPACED kind so the pipeline can bind to
     it, then advanced to ``scheduled`` from birth: a plan with no stage would
@@ -313,7 +314,10 @@ def create_plan(sdk, name: str, *, title: str | None = None,
 
     Two further REFUSALS apply to an existing holder before any of that, and
     neither writes: a holder whose kind is not a plan (this call would retag it),
-    and a plan whose position does not resolve (`_unresolvable_message`).
+    and a plan whose position does not resolve (`_unresolvable_message`). A third
+    can arrive from the re-mention RESOLVE itself, before this function has a
+    holder at all: a name with two live carriers (``AmbiguousEntityName``, a
+    ``ValueError``), which the resolver records as an R8 refusal.
     """
     from . import pipeline
 
@@ -479,10 +483,14 @@ def create_plan(sdk, name: str, *, title: str | None = None,
             pipeline_key=cur.get("pipelineKey"))
         if (pos["stageId"] == STAGE_SCHEDULED and not pos["ended"]
                 and not pos["unresolvable"]):
-            # The ONE unapplied move that is not a lie: the name resolved to a
-            # plan already on `scheduled` and open, so the contract — "a
-            # scheduled, not-yet-happened plan exists under this name" — holds.
-            # This is the stale-`at` re-mention, and it is not an error.
+            # The ONE unapplied move that is not a lie: the plan is already on
+            # `scheduled` and open, so the contract — "a scheduled,
+            # not-yet-happened plan exists under this name" — holds.
+            # ⛔ The reachable shape is the BARE-SPELLING repair (the positioned
+            # re-mention above short-circuits, so it never gets here): the door
+            # repaired the kind and the stage move is a no-op because the record
+            # was already there. A stale-`at` re-mention also lands here, but
+            # only after that same fall-through.
             return node
         if pos["unresolvable"]:
             # The stored position cannot be validated, so NO stage move could be.
@@ -749,13 +757,21 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
     # refusal — NEVER by re-invoking the resolver: that arm records through
     # `_refuse`, which ignores `record_misses` on the duplicate-id shape, so a
     # second call would file the SAME entry twice and inflate the refused-event
-    # set (#13100 review round 6). The snapshot makes "once" true on both shapes.
+    # set (#13100 review round 6).
+    # ⛔ THE GUARD IS BY COORDINATE, not by entry COUNT: the R8 record is
+    # process-global and `_non_folded_lock` exists because several threads record
+    # into it, so a refusal from ANOTHER thread between the snapshot and this
+    # `except` would move the count and silently skip OUR record — losing the
+    # very evidence this arm exists to keep (#13100 review round 7).
     _entries_before = len(non_folded_entries())
     try:
         plan_id = resolve_entity_id_same_entity(graph, "Object", plan_ref,
                                                 record_misses=False)
     except AmbiguousEntityName as exc:
-        if len(non_folded_entries()) == _entries_before:
+        _filed_since = non_folded_entries()[_entries_before:]
+        if not any(str(e.label) == str(exc.label)
+                   and str(e.name) == str(exc.name)
+                   for e in _filed_since):
             record_non_folded(exc.label, exc.name, exc.candidate_ids)
         raise
     if plan_id is None:
