@@ -129,8 +129,15 @@ over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone 
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
 which is why the tool's verb total is an upper bound.
-(A bare case-sensitive `rg` gives 2,064, and `-i` without the exclusion 2,402 — which is why the
-number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
+(A bare case-sensitive `rg` gives 2,064, and `-i` without the exclusion 2,402 — ⛔ both over
+`tortoise/` with **no type filter**, which is not the population this row is about and is why the
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 297
+`.py` files the same two predicates read **2,061** and **2,330**; with `-t py` and the test-module
+exclusion dropped they read **2,063** and **2,333**. The 69-occurrence 2,333→2,402 gap is entirely
+`*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
+`tortoise/pi-hooks/tortoise-capture.test.ts` 14, `tortoise/pi-hooks/store-sync.test.mjs` 3,
+`tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
+`tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
 the **= 1,571 on a door-call line** are both counts, not differences.⛔ The **residual** row is
@@ -474,8 +481,9 @@ main-move cannot repeat it — which is step 1 of the procedure above enforced i
 the same cut can leave stale.** The pins are 25 scalars and the appendix is `file:line` rows; §0's
 `--all-surface` row (not a pin, deliberately), §1's `rg` cross-check and the prose that explains it
 are neither. Measured at `a218f8867b`, with `--check` printing `25 pinned counts match`: that row
-still said `8,908 / 805` against `8,939 / 810` on this tree, §1's bare case-sensitive count said
-`2,060` against `2,063`, and its stated CAUSE for the 13-occurrence gap was wrong outright — see
+still said `8,908 / 805` against `8,939 / 810` on this tree, §1's bare case-sensitive count quoted the
+NO-TYPE-FILTER population (`2,060` at that head, where the row is about `.py` files), and its stated
+CAUSE for the 13-occurrence gap was wrong outright — see
 §1. Re-derive the quoted prose too, not just the two carriers that are checked.
 
 <details><summary>the previous cut (kept as history)</summary>
