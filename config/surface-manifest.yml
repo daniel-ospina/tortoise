@@ -1220,11 +1220,15 @@ rows:
   # `_code_digest` of the handler's CODE OBJECT, so an edit INSIDE `tortoise_query`
   # re-stamps it: refreshed here to the value the tree DERIVES, which is what `check`
   # compares against.
-  # A full `cut` is deliberately NOT run: it is owner-gated (`tools/surface_manifest.py`),
-  # it re-emits only `MANIFEST_HEADER` (so every per-row rationale comment in this file is
-  # lost), and while a plain re-cut CARRIES the observed-usage columns forward (#10914 review
-  # P2), re-stamping them is exactly what `--refresh-observations` does from a machine-local
-  # call log — so a cut here would buy one cell and cost the rationale. No
+  # A full `cut` is deliberately NOT run: it is gated on the owner's approval DOCUMENT —
+  # `read_approval` (`tools/surface_manifest.py`) reads `docs/product/canonical-mcp-tools.md`
+  # and, through `build_doc`, REFUSES when that file is missing or carries no `approval_status`
+  # (a doc whose provenance was deleted cannot re-cut to `pending`) — and `cut` is documented
+  # as a human step, not an owner-only verb. It re-emits only `MANIFEST_HEADER`, so every
+  # per-row rationale comment in this file is lost. While a plain re-cut CARRIES the
+  # observed-usage columns forward (#10914 review P2), re-stamping them is exactly what
+  # `--refresh-observations` does from a machine-local call log — so a cut here would buy
+  # one cell and cost the rationale. No
   # tool or SDK method is added, removed or renamed here (55 MCP tools / 94 public SDK
   # methods, unchanged), so this is a fingerprint refresh, not a surface change.
   # IDENTICAL TO #13000's `c1e3ff8500` (#12992) IN THE VALUE it writes (`served_from:

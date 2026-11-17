@@ -11171,8 +11171,10 @@ durations_floors:
 durations:
   test_13034_currency_rule_reads_position.py: 2.0  # new in #13034 (#13075's merge) — the #3400/#4348 trap: a file a PR ADDS
   # cannot carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat
-  # `DEFAULT_FAST_WEIGHT` and NOT a local reading. The row must EXIST, not merely default: without it the `core`
-  # registration is what puts the file in `fast_pool()` while no weight records it. ⛔ Added in #13141 as main's repair —
+  # `DEFAULT_FAST_WEIGHT` and NOT a local reading. The row must EXIST, not merely default ("a default is not a
+  # reading"): without it the `core` registration is what puts the file in `fast_pool()` while no weight records it, and
+  # `--integrity` stays green either way (measured: deleting only this row leaves it rc=0, so only this row records the
+  # weight). ⛔ Added in #13141 as main's repair —
   # the file reached `main` unregistered, so `--integrity` redded and `manifest-integrity` (a `python-ci-gate` need)
   # blocked every merge.
   test_12592_supersede_door.py: 2.0  # new in #12592 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()` unless the `slow_files` entry takes it out, and `--integrity` stays green either way, so only this row records the weight. ⛔ No local timing is quoted beside this weight, on purpose — a seconds figure copied next to a shard-layout input re-stales against the run it came from. What the weight covers: BOTH halves of the asymmetry — the write-door refusal (every label, the fan-out rule, the snake/blank/stamp shapes that name nobody, and the Point's CORRECTS-edge arm) and the replay tolerance (a journalled successorless supersession still restores under `rebuild_all`) — plus the `supersede_knowledge` label dispatch, its family guards, and #12825's untouched un-supersede allowance. No model call, no network, no `gh`; embedded engines on the URI-less lane, the configured server on a URI-set one. ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
