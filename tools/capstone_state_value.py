@@ -783,6 +783,16 @@ class Ingestor:
         self.ops = ops
         self.refs: dict[str, str] = {}
         self.log: list[dict] = []
+        #: Refs whose OWN identity write succeeded but a LATER state-changing op on them
+        #: did not (an `advance_stage` refused by `terminal-guard`, a `retract_point`
+        #: rejected, a `supersede_point` whose successor is missing). `refs` cannot carry
+        #: this: the identity op is what puts the id in `refs`, so a refused
+        #: `advance_stage` leaves the ref present and the plan looking like it was never
+        #: cancelled — the question is then asked, the product serves a `live` row, and a
+        #: reader attributes the instrument's own refused write to a product issue (#13034).
+        #: This is the exact case `--allow-existing-graph` documents (a second terminal
+        #: advance is refused) and the exact inversion README:66 promises cannot happen.
+        self.failed_refs: set[str] = set()
 
     def _need(self, requires: list[str]) -> str | None:
         missing = [r for r in requires if r not in self.target.capabilities]
@@ -792,6 +802,8 @@ class Ingestor:
         self, entry_id: str, op: str, ok: bool, detail: str, product_id: str | None = None
     ) -> dict:
         row = {"op": op, "ref": entry_id, "ok": ok, "detail": _redact(detail)}
+        if not ok and entry_id:
+            self.failed_refs.add(entry_id)
         if product_id:
             row["product_id"] = product_id
         self.log.append(row)
@@ -943,6 +955,16 @@ def _signal_refs(answer: Answer, refs: dict[str, str], spec: dict) -> None:
         pid = refs.get(ref)
         if pid:
             answer.signals.append(f"{'found' if pid in served else 'NOT-SERVED'}: {ref} ({pid})")
+    # A ref that was never ingested used to be SKIPPED here (`if pid:`), so the reader saw
+    # nothing at all about the commitment it was asked about and could score the row `right`
+    # on a graph missing it. Absence is evidence: say so, in the same field a reader reads.
+    named = set(spec.get("must_appear") or []) | set(spec.get("must_not_appear") or [])
+    for ref in sorted(named):
+        if not refs.get(ref):
+            answer.signals.append(
+                f"NOT-INGESTED: {ref} — this question names an identity the run never created, "
+                "so an answer that omits it is a gap in the RUN, not a finding about the product"
+            )
     for call in answer.calls:
         if call.surface != "search" or not call.ok:
             continue
@@ -1236,7 +1258,19 @@ RECIPE_NEEDS = {
 #: `blocked`". This map is what makes the promise true, and the pins assert it covers
 #: every ref the recipes name (`test_every_recipe_declares_the_refs_it_needs`).
 RECIPE_REFS = {
-    "current_commitments": [],
+    "current_commitments": [
+        # Q1's answer key names FOUR current commitments (Q4 pricing, the 12 December launch
+        # plan, the Q4 uptime target) and two identities that must NOT appear as current
+        # (the replaced Q3 price, the retired onboarding flow). Every one of them is part of
+        # the question, so a missing or refused write makes the question unanswerable rather
+        # than merely harder — declaring `[]` here (as this map first did) asked Q1 against a
+        # graph the scenario had not created and let a reader score it.
+        "q3_pricing",
+        "q4_pricing",
+        "old_onboarding",
+        "launch_plan",
+        "uptime_goal",
+    ],
     "plan_vs_occurrence": ["launch_plan"],
     "why_changed": ["q3_pricing", "q4_pricing"],
     "goal_met": ["uptime_goal", "uptime_target"],
@@ -1245,9 +1279,18 @@ RECIPE_REFS = {
 }
 
 
-def refs_unresolved(recipe: str, refs: dict[str, str]) -> list[str]:
-    """The identities this recipe needs that the narrative's ingestion did not produce."""
-    return [r for r in RECIPE_REFS.get(recipe or "", []) if r not in refs]
+def refs_unresolved(
+    recipe: str, refs: dict[str, str], failed_refs: set[str] | None = None
+) -> list[str]:
+    """The identities this recipe needs that the narrative's ingestion did not produce.
+
+    Two failures make a ref unusable, and both are required: the ref may never have been
+    created (`refs`), or its identity was created and a later state-changing op on it was
+    refused (`failed_refs` — a cancelled plan that is still `live` is not the scenario, and
+    a question asked against it scores the instrument's own failed write as a product bug).
+    """
+    failed = failed_refs or set()
+    return [r for r in RECIPE_REFS.get(recipe or "", []) if r not in refs or r in failed]
 
 
 # ── the fresh-reader judge ───────────────────────────────────────────────────────
@@ -1933,7 +1976,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         recipe = RECIPES.get(q.get("recipe") or "")
         needs = RECIPE_NEEDS.get(q.get("recipe") or "", [])
         missing = [n for n in needs if n not in target.capabilities]
-        unresolved = refs_unresolved(q.get("recipe") or "", ingestor.refs)
+        unresolved = refs_unresolved(q.get("recipe") or "", ingestor.refs, ingestor.failed_refs)
         if recipe is None:
             answers.append(
                 Answer(q["id"], status="blocked", reason=f"unknown recipe {q.get('recipe')!r}")
@@ -2021,15 +2064,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             "`judge --verdicts`."
         )
 
-    if args.verdicts_out and judged:
-        _write_verdicts(
-            Path(args.verdicts_out).resolve(),
-            judged,
-            packet_path=packet_path,
-            mode=args.judge,
-            meta=judge_meta,
-        )
-
     header["notes"] = notes
     header["judge"] = judge_meta
 
@@ -2045,6 +2079,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_json.write_text(json.dumps(board, indent=2, default=str))
     md = render_markdown(board)
     (out_dir / f"scoreboard-{target.kind}.md").write_text(md)
+
+    # AFTER the scoreboard, deliberately: this write is secondary, and a bad path here
+    # used to abort the run once the 150 s reader had already been paid for, losing the
+    # verdicts AND the scoreboard. The primary artifact lands first; a verdicts-out failure
+    # is then loud but costs nothing that cannot be re-derived from the packet.
+    if args.verdicts_out and judged:
+        _write_verdicts(
+            Path(args.verdicts_out).resolve(),
+            judged,
+            packet_path=packet_path,
+            mode=args.judge,
+            meta=judge_meta,
+        )
 
     if args.drop_graph:
         print(f"capstone: cleanup — {target.drop()}", file=sys.stderr)
@@ -2083,6 +2130,7 @@ def _write_verdicts(path: Path, judged: dict, *, packet_path: Path, mode: str, m
         },
         **{k: v for k, v in judged.items() if not k.startswith("_")},
     }
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2, default=str))
 
 

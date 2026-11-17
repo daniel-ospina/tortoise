@@ -496,7 +496,15 @@ def test_an_unresolved_ref_is_reported_and_never_silently_ignored():
     assert cap.refs_unresolved("plan_vs_occurrence", full) == []
     assert cap.refs_unresolved("plan_vs_occurrence", {}) == ["launch_plan"]
     assert cap.refs_unresolved("why_changed", {"q4_pricing": "p2"}) == ["q3_pricing"]
-    assert cap.refs_unresolved("current_commitments", {}) == []
+    # Q1's answer key names four commitments and two identities that must not appear, so
+    # it waits for all of them — `[]` here was the hole the second review found.
+    assert cap.refs_unresolved("current_commitments", {}) == [
+        "q3_pricing",
+        "q4_pricing",
+        "old_onboarding",
+        "launch_plan",
+        "uptime_goal",
+    ]
     assert cap.refs_unresolved("unknown_recipe", {}) == []
 
 
@@ -680,3 +688,131 @@ def test_the_verdicts_file_the_instrument_writes_is_the_one_it_reads(tmp_path):
     # the consumer's own read path: `judged.get(id)` then a closed-vocabulary lookup
     for qid in judged:
         assert doc.get(qid, {}).get("verdict") in cap.VERDICTS
+
+
+# ── 6. the second review's findings (the merge of two fix chains) ───────────────
+
+
+def test_a_refused_lifecycle_op_blocks_the_question(narrative):
+    """A ref whose IDENTITY write landed but whose state op was REFUSED is not usable.
+
+    `Ingestor.refs` is filled by the identity op, so a refused `advance_stage` leaves the
+    plan in `refs` and looking never-cancelled: the question is asked, the product serves a
+    `live` row, and the reader attributes the instrument's own failed write to a product
+    issue (#13034). Measured shape: `advance_stage(cancelled)` → `applied: false`.
+    """
+    refs = {"partner_call": "p1", "launch_plan": "p2", "beach_club_claim": "p3"}
+    assert cap.refs_unresolved("planned_never_happened", refs) == []
+    assert cap.refs_unresolved("planned_never_happened", refs, {"partner_call"}) == [
+        "partner_call"
+    ], "a refused state-changing write left the question askable"
+    assert cap.refs_unresolved("current_commitments", {"launch_plan": "p2"}, {"launch_plan"}) != []
+
+
+def test_the_ingestor_records_the_ref_a_refused_op_was_about():
+    class _Target:
+        def __init__(self):
+            self.capabilities = set(cap.CAPABILITIES)
+
+        def advance_stage(self, *a, **k):
+            return {"applied": False, "reason": "terminal-guard"}
+
+        def create_object(self, name, kind, props=None):
+            return {"id": "n1"}
+
+    ing = cap.Ingestor(
+        _Target(),
+        [
+            {"op": "object", "ref": "partner_call", "name": "call", "kind": "plan"},
+            {
+                "op": "advance_stage",
+                "ref": "partner_call",
+                "pipeline": "p",
+                "stage": "cancelled",
+            },
+        ],
+    )
+    log = ing.run()
+    assert [r["ok"] for r in log] == [True, False], "the refusal was not recorded"
+    assert ing.failed_refs == {"partner_call"}, (
+        "a refused state-changing op must mark its ref failed — the ingest log alone let "
+        "the question be asked anyway"
+    )
+    assert cap.refs_unresolved("planned_never_happened", ing.refs, ing.failed_refs) == [
+        "partner_call"
+    ]
+
+
+def test_every_question_declares_the_refs_its_ANSWER_KEY_judges(narrative):
+    """The refs a question is scored against must be refs it waits for.
+
+    Q1's key names four commitments and two identities that must not appear; declaring `[]`
+    asked it against a graph the scenario had not created. This is the general form, so a
+    future edit cannot re-open the hole for a different question.
+    """
+    for q in narrative["questions"]:
+        judged = set(q.get("must_appear") or []) | set(q.get("must_not_appear") or [])
+        declared = set(cap.RECIPE_REFS[q["recipe"]])
+        assert judged <= declared, (
+            f"{q['id']} is scored against refs its recipe never waits for: "
+            f"{sorted(judged - declared)} — a refused write for one of them would not "
+            "block the question, and the reader would score a graph missing it"
+        )
+
+
+def test_a_ref_that_was_never_ingested_is_said_out_loud():
+    """Absence used to be silent (`if pid:`), so the reader saw nothing about the gap."""
+    ans = cap.Answer("Q1")
+    cap._signal_refs(ans, {}, {"must_appear": ["q4_pricing"], "must_not_appear": ["q3_pricing"]})
+    joined = " | ".join(ans.signals)
+    assert "NOT-INGESTED: q4_pricing" in joined and "NOT-INGESTED: q3_pricing" in joined
+
+
+def test_the_reader_is_spawned_without_tools_in_an_empty_sandbox(monkeypatch):
+    """The property that makes a later scoreboard meaningful: independence.
+
+    A reader holding tools, sitting in the repo, can re-read `run-{target}.json` /
+    `scoreboard-{target}.md` — both still on disk beside the packet when it is spawned — and
+    reproduce the PREVIOUS run's verdicts, so a later run could not show that a slice moved
+    the product. Pinned hermetically: no model, no real subprocess.
+    """
+    import subprocess as real_subprocess
+
+    seen: dict = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["cwd"] = kwargs.get("cwd")
+        seen["cwd_exists"] = Path(kwargs.get("cwd") or "/").is_dir()
+        seen["cwd_is_repo"] = Path(kwargs.get("cwd") or "/").resolve() == cap.ROOT
+
+        class _P:
+            stdout = "I could not decide."
+            stderr = ""
+            returncode = 0
+
+        return _P()
+
+    monkeypatch.setattr(cap.shutil, "which", lambda _: "/usr/bin/pi")
+    monkeypatch.setattr(cap.subprocess, "run", fake_run)
+
+    out = cap.judge_fresh({"narrative": {}, "questions": [], "product_answers": [], "rubric": {}})
+    assert "--no-tools" in seen["argv"], "the reader can still read the repo's artifacts"
+    assert "--no-session" in seen["argv"]
+    assert seen["cwd"] != str(cap.ROOT) and not seen["cwd_is_repo"], (
+        "the reader was spawned inside the repo, where the previous run's scoreboard sits"
+    )
+    assert seen["cwd_exists"], "the sandbox did not exist when the reader was spawned"
+    assert out["ok"] is False and out["verdicts"] == {}, (
+        "an unparseable reply must yield no verdicts — never a default"
+    )
+    assert isinstance(real_subprocess, type(cap.subprocess))
+
+
+def test_the_verdicts_file_write_creates_its_directory(tmp_path):
+    """A typo'd `--verdicts-out` used to abort the run AFTER the 150 s reader had run."""
+    target = tmp_path / "does" / "not" / "exist" / "verdicts.json"
+    cap._write_verdicts(
+        target, {"Q1": {"verdict": "right"}}, packet_path=tmp_path / "p.json", mode="fresh", meta={}
+    )
+    assert target.exists() and json.loads(target.read_text())["Q1"]["verdict"] == "right"
