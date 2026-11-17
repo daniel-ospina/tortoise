@@ -353,7 +353,11 @@ def test_a_terminal_in_scope_object_arm_cannot_launder_the_read(
             "MATCH (o:Object {id: $i}) "
             "RETURN o.status, o.embedding IS NOT NULL",
             params={"i": obj["id"]}).result_set
-        assert rows and rows[0][0] == "retracted" and rows[0][1] is True, rows
+        assert rows and rows[0][0] == "deprecated" and rows[0][1] is True, (
+            # ⛔ #11824 S0 stores the declared synonym `retracted` canonically as
+            # `deprecated`; the row is still TERMINAL, which is the property
+            # this pin needs (the Object arm's status clause excludes it).
+            rows)
 
         legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:

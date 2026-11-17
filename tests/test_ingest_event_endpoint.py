@@ -695,41 +695,55 @@ def test_direct_route_entity_unhashable_status_is_a_violation_not_a_crash(
     assert _count(sdk, "MATCH (n:Subject {name:'Gamma'}) RETURN count(n)") == 0
 
 
-def test_direct_route_object_status_values_not_over_rejected(sdk):
-    """#7925 review P3 (the other direction — guards the fix from over-rejecting).
+def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_writer(
+        sdk):
+    """⛔ #11824 S0 RETIRED THE PREMISE this test was built on.
 
-    Only `:Subject`'s writer validates its `status` vocabulary. The `:Object`
-    writer does NOT: a NON-PERSISTABLE value (a dict, bytes, a set) is
-    **dropped** by the writer — measured, the node keeps NO `status` at all
-    (absent READS live since #9974 R1) — so refusing it would reject a bundle
-    the writer accepts. That is the over-rejection class round 4 of this PR
-    already fixed once, and it is why the array refusal (a PERSISTABLE unhashable
-    value, which IS stored and then breaks the direct-edge terminal check) is
-    scoped by `_status_is_stored_unhashable` rather than by "not a string".
+    Its old name was `..._object_and_event_status_values_not_over_rejected`, and
+    it asserted that a NON-PERSISTABLE `:Object` status (a dict) passes Phase 1
+    because the `:Object` writer "does NOT validate: the value is DROPPED". That
+    was measured before S0 put the lifecycle door on the `:Object` arm. Measured
+    at this head, the writer now REFUSES it:
+    `create_entity("object", …, status={"a": 1})` raises
+    *"a status must be a plain string, and dict is not one"*, so Phase 1 refusing
+    it is WRITER AGREEMENT rather than over-rejection. Asserting the old shape
+    would pin a divergence the slice exists to remove.
 
-    ⛔ SCOPE CHANGE (#13100): the Event half this test used to cover is GONE from
-    it — an `:Event` now refuses ANY `status` declaration (terminal or not, and
-    whatever its type), so the non-over-rejection rule it pins applies to
-    `:Object` only. The Event refusal is pinned in
-    `tests/test_11825_event_terminal_status_refused.py` and
-    `tests/test_13100_planned_occurrences.py`.
+    The `:Event` half is unchanged and still proves the other direction: an Event
+    has no lifecycle (#11825), so a non-persistable status is DROPPED there and
+    the bundle must stay accepted — the arm is not simply "reject every non-str".
     """
+    # The WRITER's answer for the same value — the authority Phase 1 mirrors.
+    with pytest.raises(ValueError, match="must be a plain string"):
+        sdk.create_entity("object", "writer-probe-status", status={"a": 1})
+
     bundle = {
         "entities": [{"ref": "o1", "type": "object", "name": "Alpha",
                       "status": {"a": 1}},
-                     {"ref": "o2", "type": "object", "name": "Beta"}],
+                     {"ref": "o2", "type": "object", "name": "Beta"},
+                     # The `:Event` half of the contrast — no lifecycle, so the
+                     # value is dropped there and the bundle stays accepted.
+                     {"ref": "e1", "type": "event", "name": "Happened",
+                      "eventKind": "sessionCaptured", "status": {"a": 1}}],
         "connections": [{"from": "o1", "to": "o2", "operator": "IMPL"}],
     }
-    assert sdk._validate_bundle(bundle) == []
-    created = sdk.ingest(bundle)
-    assert created["created"]["connections"] == 1
-    assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 1
-    # The dict is DROPPED, not stored verbatim — the mechanism the scoping
-    # above depends on, so it is asserted rather than described.
-    # #9974 R1: dropped means ABSENT, not replaced by a fabricated 'live'
-    # (an absent status READS live via `live._terminal_excluded`).
-    assert sdk._get_proj().g.query(
-        "MATCH (n:Object {name:'Alpha'}) RETURN n.status").result_set == [[None]]
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("declares status" in m and ":Object" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    # ZERO mutation: the predecessor object and the Event never land.
+    assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 0
+
+    # …and the Event's dropped-value shape alone IS accepted.
+    event_only = {"entities": [
+        {"ref": "o", "type": "object", "name": "Solo"},
+        {"ref": "e1", "type": "event", "name": "OnlyEvent",
+         "eventKind": "sessionCaptured", "status": {"a": 1}},
+    ]}
+    assert sdk._validate_bundle(event_only) == []
+    sdk.ingest(event_only)
+    assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 1
 
 
 @pytest.mark.parametrize("spelling", ["top", "nested"])
@@ -1896,34 +1910,40 @@ def test_gated_policy_reads_point_status_at_the_dedup_depth(sdk):
         ).result_set == [["draft"]]
 
 
-def test_object_item_status_is_accepted_when_a_holder_owns_the_name(sdk):
-    """#7925 review round 4 (over-rejection): the array refusal fires only at
-    the item that MINTS the name.
+def test_object_item_declaring_a_non_string_status_is_refused_in_phase_1(sdk):
+    """⛔ #11824 S0 RETIRED THE PREMISE: the `:Object` writer no longer DROPS it.
 
-    The merge does not overwrite an existing node's `status` (it is
-    projection-owned for `:Object`), so an item re-declaring a status for a name
-    that already has a holder is DROPPED and the writer accepts it — measured:
-    `create_object("Held", status=["retracted"])` leaves the node with NO stored
-    status. Refusing the
-    bundle here would reject a write the writer performs, and the HOLDER's own
-    array status is the case the direct-route leg catches.
+    This test used to argue the opposite — that an item re-declaring a status for
+    a name that already has a holder is DROPPED and therefore must be accepted
+    ("refusing the bundle here would reject a write the writer performs"). That
+    was true while the `:Object` arm was exempt from the vocabulary. S0 puts the
+    `:Object` arm on the SAME lifecycle door as the `:Subject` one, and the door
+    refuses every non-`str` (`"a status must be a plain string"`), so the writer
+    now performs NO part of this write: Phase 1 refusing it is the agreement the
+    arm exists for, not over-rejection.
 
-    ⛔ PREMISE CHANGE (#9974 R1): the holder used to carry a FABRICATED
-    `status = 'live'` seeded by the door/fold default; that default is gone, so
-    the holder is born DERIVED-OR-ABSENT and the merge still writes nothing.
-    Pinned as ABSENCE — strictly stronger than `'live'`.
+    The `None` case keeps its own exemption (it is the DELETE sentinel, not a
+    word) — that is pinned in
+    `test_direct_route_explicit_null_status_is_the_delete_sentinel`, so this test
+    no longer has to carry it implicitly.
     """
     sdk.create_object("Held")
+    # The WRITER's answer for the same value — the authority Phase 1 mirrors.
+    with pytest.raises(ValueError, match="must be a plain string"):
+        sdk.create_object("Held", status=["retracted"])
+
     bundle = {
         "entities": [{"ref": "h", "type": "object", "name": "Held",
                       "status": ["retracted"]},
                      {"ref": "b", "type": "object", "name": "Beta"}],
         "connections": [{"from": "h", "to": "b", "operator": "IMPL"}],
     }
-    assert sdk._validate_bundle(bundle) == []
-    created = sdk.ingest(bundle)
-    assert created["created"]["connections"] == 1
-    # #9974 R1: a status-less holder stores NO status (absent READS live).
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("declares status" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    # #9974 R1: the holder is still born status-less (absent READS live) — the
+    # refusal wrote nothing.
     assert sdk._get_proj().g.query(
         "MATCH (n:Object {name:'Held'}) RETURN n.status").result_set == [[None]]
 
@@ -2338,25 +2358,26 @@ def test_first_same_name_item_declaring_array_is_refused(sdk):
                        "RETURN count(n)") == 0
 
 
-def test_second_same_name_item_declaring_array_is_dropped(sdk):
-    """A LATER same-name item does not create a node, so its status is dropped.
+def test_second_same_name_item_declaring_an_array_is_refused_in_phase_1(sdk):
+    """⛔ #11824 S0 RETIRED THE PREMISE: the `:Object` writer no longer DROPS it.
 
-    ⛔ PREMISE CHANGE (#3590): the retired text justified this with the
-    deterministic `entity_name_id(label, name)` id. The mechanism now is
-    resolve-or-mint — the FIRST item mints, every later same-name item RESOLVES
-    onto that node — and `status` is written `ON CREATE` only, so the
-    declaration is dropped. The two decoys the old fixture seeded are removed
-    because a name 2+ LIVE carriers hold is now REFUSED (R8) rather than minted
-    past, which would test the ambiguity arm instead of this one. Refusing the
-    declaration rejected a bundle the writer performs (measured at the writer:
-    one node, array not stored).
+    The old name was `..._declaring_array_is_dropped`, and the argument was that
+    a LATER same-name item does not CREATE a node, so its `status` is written
+    `ON CREATE` only and dropped — hence `_validate_bundle` had to accept it.
+    Two things retired that: the `:Object` arm is now on the same lifecycle door
+    as `:Subject` and refuses EVERY declared non-`str` status before any write
+    (measured at this head: `create_object("Acme", status=["retracted"])`
+    raises *"a status must be a plain string"*), so the value is never dropped.
 
-    ⛔ PREMISE CHANGE (#9974 R1): "the writer performs it" used to leave a
-    FABRICATED `status = 'live'` on the node. The door/fold default is gone, so
-    the first item mints a status-less node and the second item's `status` is
-    still dropped — the claim is now pinned as ABSENCE (`None`), which a
-    reinstated fabrication would fail.
+    What is preserved is the ordering claim that made this test worth having:
+    the FIRST item still mints the node and the second still RESOLVES onto it
+    rather than minting a second carrier. The refusal simply happens before any
+    of that, so the assertion moves from "one Acme, no status" to "no Acme at
+    all, and the writer would have refused the same value".
     """
+    with pytest.raises(ValueError, match="must be a plain string"):
+        sdk.create_object("Acme", status=["retracted"])
+
     bundle = {
         "entities": [
             {"ref": "a", "type": "object", "name": "Acme"},
@@ -2366,15 +2387,13 @@ def test_second_same_name_item_declaring_array_is_dropped(sdk):
         ],
         "connections": [{"from": "a", "to": "c", "operator": "IMPL"}],
     }
-    assert sdk._validate_bundle(bundle) == []
-    assert sdk.ingest(bundle)["created"]["connections"] == 1
-    # ONE Acme: the second item resolved onto the node the first one minted.
-    rows = sdk._get_proj().g.query(
-        "MATCH (o:Object {name:'Acme'}) RETURN o.id, o.status").result_set
-    assert len(rows) == 1, rows
-    # #9974 R1: the array was DROPPED, so the node keeps NO status (absent
-    # READS live) — a stored 'live' would be a fabrication.
-    assert rows[0][1] is None, rows
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("declares status" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    # ZERO mutation — neither the minting item nor the resolving one committed.
+    assert sdk._get_proj().g.query(
+        "MATCH (o:Object {name:'Acme'}) RETURN count(o)").result_set == [[0]]
 
 
 def test_two_bundle_refs_to_one_shared_name_are_a_self_edge(sdk):

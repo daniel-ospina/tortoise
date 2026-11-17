@@ -248,8 +248,12 @@ def test_vector_trace_empty_results_when_embedded_but_excluded(tmp_path):
         sdk.create_point("statement", "hello world", id="p1",
                          status="retracted")
         trace: list[dict] = []
+        # ⛔ #11824 S0 stores the declared synonym `retracted` canonically as
+        # `deprecated`, so the EXCLUDED set must name the word the row actually
+        # holds — excluding the caller's spelling would leave the row visible and
+        # the arm would read `ok`, which is the opposite of what this pins.
         hits = run_vector_query(sdk._get_proj().g, [0.0] * 384, limit=5,
-                                excluded_statuses=("retracted",),
+                                excluded_statuses=("deprecated",),
                                 leg_trace=trace)
         assert hits == []
         vec = next(e for e in trace if e["leg"] == "vector")
