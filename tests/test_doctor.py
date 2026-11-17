@@ -4165,17 +4165,32 @@ class TestDoctorImportHygiene:
         assert "Component already exists" not in p.stderr
         assert "no handler" not in p.stderr
 
-    def test_session_capture_registered_on_mcp_instance(self):
-        """tortoise_session_capture — a registry tool whose handler existed
-        but was never registered while register_all ran mid-module — must now
-        actually reach the MCP server (#2204; the #993 entrypoint regression
-        only asserts >=70 tools + the onboarding set, so it would not catch a
-        silent absence)."""
+    def test_session_capture_retirement_is_declared_not_silent(self):
+        """`tortoise_session_capture` retired (#12951) — and the #2204 defect this
+        test was written for WAS a silent absence, so the retirement must be the
+        DECLARED kind rather than the accidental one: the name is off the MCP
+        instance, it is in ``RETIRED_USE_INSTEAD``, and its pointer names the live
+        container that answers the same question. The container itself is still
+        registered — that is the #2204 arm, moved onto the name that resolves.
+
+        FALSIFIABLE: drop the ``RETIRED_USE_INSTEAD`` entry and a caller's call
+        dead-ends with no migration; unregister the container and the registration
+        arm reds, which is the original #2204 regression exactly.
+
+        (Was `test_session_capture_registered_on_mcp_instance`: it asserted the
+        name reaches the instance, which the retirement deliberately reverses —
+        the invariant worth keeping is "never ABSENT, either served or declared
+        retired with a one-hop pointer", not "this one name is served".)
+        """
         p = self._run_py(
             "import tortoise.mcp_server as m; "
+            "from tortoise.tool_registry import RETIRED_USE_INSTEAD; "
             "comps = m.mcp._local_provider._components; "
             "names = [getattr(c, 'name', '') for c in comps.values()]; "
-            "assert 'tortoise_session_capture' in names, names; "
+            "assert 'tortoise_session_capture' not in names, names; "
+            "ptr = RETIRED_USE_INSTEAD.get('tortoise_session_capture'); "
+            "assert ptr and 'tortoise_mine_knowledge_from_session' in ptr, ptr; "
+            "assert 'tortoise_mine_knowledge_from_session' in names, names; "
             "print('OK')"
         )
         assert p.returncode == 0, p.stderr
