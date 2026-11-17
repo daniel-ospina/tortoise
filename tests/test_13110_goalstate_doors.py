@@ -46,7 +46,7 @@ import pytest
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.sdk import GOAL_STATE_VALUES
+from tortoise.sdk import GOAL_ENDING_STATES, GOAL_STATE_VALUES
 
 _ORG = "team-13110"
 
@@ -646,6 +646,36 @@ def test_rest_refuses_an_ending_goal_state_the_status_contradicts(
         assert "ends the goal" in r.text, r.text
         # …and nothing was written (fail-closed at the door, not after the write).
         assert _objects_named(ha, "ENDING-MISMATCH") == 0
+
+
+@pytest.mark.parametrize("word", sorted(GOAL_ENDING_STATES))
+def test_the_mcp_door_refuses_a_bare_ending_the_rest_route_would_not_store(
+        tmp_path, word):
+    """The SAME rule on the OTHER door — the half the REST test above cannot see.
+
+    `_refuse_inconsistent_goal_ending` compares two fields, so a door that can
+    express only ONE of them cannot land an ending at all: a bare ending leaves
+    `status` absent, which the guard reads as "still running" and refuses. The
+    MCP door is that door — `tortoise_create_entity` takes `goalState` and the
+    free-form `props` bag, and a caller that names no `status` is asking for a
+    goal that ends while its lifecycle says it is live.
+
+    ⛔ The refusal must be the SDK's OWN sentence (``REFUSED: … leaves it
+    running``), not a bare error and not a silent 200: the two doors share ONE
+    home for the rule, which is what `test_the_sdk_guard_is_the_only_home_of_the
+    _vocabulary` pins from the vocabulary side. Nothing may be written either —
+    the guard runs before the store, and a refusal that still minted the node
+    would be the #13110 silent drop wearing an error message.
+    """
+    from tortoise import mcp_server
+
+    name = f"MCP-BARE-{word}".upper()
+    with _graph(str(tmp_path / f"mcp-bare-{word}.db")) as ha, _mcp_ctx():
+        out = mcp_server.tortoise_create_entity("object", name, goalState=word)
+        assert isinstance(out, dict) and out.get("error"), out
+        assert "REFUSED" in out["error"], out
+        assert "leaves it running" in out["error"], out
+        assert _objects_named(ha, name) == 0
 
 
 def test_the_sdk_guard_is_the_only_home_of_the_vocabulary(tmp_path):
