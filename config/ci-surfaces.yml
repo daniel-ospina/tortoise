@@ -1093,11 +1093,13 @@ surfaces:
   # exists because the file is no longer a CANDIDATE — not because the pin disappeared. An
   # earlier cut of this note read that disappearance as evidence the co-import was noise; it
   # is the opposite, and the audit never said otherwise. ⛔ Reproduce it from a FULL checkout,
-  # not an extracted subset of one: the audit resolves an import pin only where the referenced
-  # file exists on disk, so a tree holding `tests/` + `config/` but NOT `tortoise/` resolves no
-  # `from tortoise.…` import at all and prints the INVERSE of these lines — MEASURED at this
-  # head, the `api` summary reads `177 additions` from the repo root and `4` from the same
-  # extraction without `tortoise/`, where this file's candidate line is
+  # not a tree with `tortoise/` removed: the audit resolves an import pin only where the
+  # referenced file exists on disk, so the source tree is what decides — MEASURED at this
+  # head, the `api` summary reads `177 additions` from the repo root, `4` from the repo with
+  # `tortoise/` removed (those four pin `api` through `tools/sdk_surface_declaration.py` or
+  # `docs/client-server-split.md`, so the extraction must keep `tools/` and `docs/` for the
+  # reading to match), and `0` from a `tests/` + `config/`-only tree — and it is on THAT last
+  # reading that this file's candidate line turns into
   # `(shared: tests/_live_utils.py)  ⚠ no api pin resolved — … confirm before removing`. A
   # removal candidate in such a run is the ABSENT SOURCE TREE, not an unregistered arm.
   # ⛔ `test_12592_supersede_door.py` is NOT noise either: it is a PRE-EXISTING gap of the
