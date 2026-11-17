@@ -669,6 +669,33 @@ def test_a_measured_range_is_carried_from_the_ledger(monkeypatch):
     assert (reading.spread, reading.repeats, reading.low) == (4.0, 3, 8.0)
 
 
+def test_a_half_measured_range_is_discarded_WHOLE(monkeypatch):
+    """A usable minimum with an unusable spread is NO range — not a crash.
+
+    The verification pass measured the crash this prevents: with ``low`` present
+    and ``spread`` absent, the refusal text formatted ``None`` with ``:g`` and the
+    refusal path raised ``TypeError`` instead of a ``QuotaExceededError``. The pair
+    is now validated once (``_dispersion``), so a half-measured row degrades to the
+    declared margin rather than to an exception.
+    """
+    _ledger_reading(monkeypatch, graph_storage_mb=10.0,
+                    graph_storage_measured_at=datetime.now(UTC).isoformat(),
+                    graph_storage_repeats=3, graph_storage_spread_mb=None,
+                    graph_storage_min_mb=8.0)
+    reading = _graph_storage_mb(ORG)
+    assert reading is not None
+    assert (reading.spread, reading.low) == (None, None)
+    # …and a hand-built reading with a minimum but no spread renders a refusal,
+    # rather than raising out of the formatter.
+    fresh = datetime.now(UTC).isoformat()
+    with pytest.raises(QuotaExceededError) as caught:
+        enforce_allowances(_limits(max_graph_storage_mb=77),
+                           meters={"graph_storage": lambda _o: MeterReading(
+                               used=200.0, measured_at=fresh, estimated=True,
+                               low=100.0)})
+    assert "UNMEASURED" in str(caught.value)
+
+
 def test_a_low_above_the_measured_figure_is_discarded(monkeypatch):
     """A bound the instrument could not have produced must not ground a refusal."""
     _ledger_reading(monkeypatch, graph_storage_mb=10.0,

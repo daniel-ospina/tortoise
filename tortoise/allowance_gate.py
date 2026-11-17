@@ -568,7 +568,7 @@ def _graph_storage_mb(org_id: str) -> MeterReading | None:
         used=used,
         measured_at=str(measured_at),
         estimated=True,
-        spread=_measured_spread(reading),
+        spread=_measured_spread(reading, used),
         repeats=_repeat_count(reading),
         low=_measured_low(reading, used),
         # The note travels into the refusal, so it names the direction of the
@@ -597,27 +597,42 @@ def _repeat_count(reading: Mapping[str, Any]) -> int | None:
     return repeats if repeats > 0 else None
 
 
+def _dispersion(reading: Mapping[str, Any], used: float
+                ) -> tuple[float | None, float | None]:
+    """``(spread, low)`` — the reading's measured range, or ``(None, None)``.
+
+    ⛔ ONE SOURCE, VALIDATED ONCE (#13102 verification pass). ``low`` and
+    ``spread`` used to be two independent readers, so a row with a usable minimum
+    and an unusable spread could yield a reading whose minimum the gate acted on
+    but whose spread the refusal could not render — a formatter crash on the
+    refusal path. The pair now comes from here or not at all, and every value is
+    finite, non-negative, and consistent with the figure (``low <= used``).
+    """
+    if (_repeat_count(reading) or 0) < 2:
+        return None, None
+    try:
+        spread = float(reading.get("graph_storage_spread_mb"))
+        low = float(reading.get("graph_storage_min_mb"))
+    except (TypeError, ValueError):
+        return None, None
+    if not all(math.isfinite(v) for v in (spread, low)):
+        return None, None
+    if spread < 0 or low < 0 or low > used:
+        return None, None
+    return spread, low
+
+
 def _measured_low(reading: Mapping[str, Any], used: float) -> float | None:
     """The OBSERVED MINIMUM of the reading, or ``None`` when it is unmeasured.
 
-    Same rule as :func:`_measured_spread` — one repeat cannot report a range, so
-    the recorded ``0.0``/the single figure is absence of information rather than a
-    measured floor. A low end that cannot be a member of the reading (negative, or
-    above the recorded figure) is discarded rather than trusted: the refusal must
-    never rest on a bound the instrument could not have produced.
+    Delegates to :func:`_dispersion` (one validation for the pair), so a reading
+    whose SPREAD is unusable cannot still act on a minimum: the gate refuses from
+    ONE measured range or from none.
     """
-    if (_repeat_count(reading) or 0) < 2:
-        return None
-    try:
-        low = float(reading.get("graph_storage_min_mb"))
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(low) or low < 0 or low > used:
-        return None
-    return low
+    return _dispersion(reading, used)[1]
 
 
-def _measured_spread(reading: Mapping[str, Any]) -> float | None:
+def _measured_spread(reading: Mapping[str, Any], used: float) -> float | None:
     """The observed dispersion of the reading, or ``None`` when UNMEASURED.
 
     ⛔ ONE REPEAT CANNOT REPORT A SPREAD. The writer records ``0.0`` for it, and
@@ -625,15 +640,7 @@ def _measured_spread(reading: Mapping[str, Any]) -> float | None:
     exists to prevent: a single sample has no dispersion to report, so it is
     ``None`` (absence), not ``0.0`` (precision).
     """
-    if (_repeat_count(reading) or 0) < 2:
-        return None
-    try:
-        spread = float(reading.get("graph_storage_spread_mb"))
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(spread) or spread < 0:
-        return None
-    return spread
+    return _dispersion(reading, used)[0]
 
 
 def _describe_fault(reason: str) -> str:
@@ -1142,7 +1149,7 @@ _SERVED_UNMEASURED: dict[tuple[str, str], int] = {}
 #: a WARN emitted a minute earlier swallow the durable incident for a fault
 #: (measured: at-cap WARN for an org, then a `read_error` within the hour → the
 #: counter moved and NOTHING was filed).
-_LAST_SIGNAL: dict[tuple[str, str], float] = {}
+_LAST_SIGNAL: dict[tuple[str, str, str], float] = {}
 
 #: The bound on :data:`_LAST_SIGNAL`. A map keyed by org on a hot path must have a
 #: ceiling: it is pruned by age on the sweep below, and if a burst of distinct orgs
@@ -1258,7 +1265,14 @@ def _hard_stop(dim: AllowanceDimension, allowance: float,
     which is what the previous wording did.
     """
     declared = allowance * dim.cap_band.refuse_at
-    if dim.cap_band.refuse_at == 1.0 or reading.low is None:
+    # ⛔ A MEASURED RANGE IS THE PAIR. ``low`` without ``spread`` is not a
+    # measurement the refusal can render (and vice versa), so a half-set reading
+    # falls back to the declared margin instead of crashing the formatter — the
+    # reading's own contract is that both come from ``_dispersion`` or neither
+    # does, and a caller that hand-builds one must not be able to break the
+    # refusal path.
+    if (dim.cap_band.refuse_at == 1.0 or reading.low is None
+            or reading.spread is None):
         return declared
     return allowance + (reading.used - reading.low)
 
@@ -1568,7 +1582,7 @@ def enforce_allowances(
                 # refusal says the error is UNMEASURED rather than inventing one.
                 tier = limits.get("tier")
                 plan = f" on the {tier} plan" if tier else ""
-                if reading.low is None:
+                if reading.low is None or reading.spread is None:
                     basis = ("this figure is an ESTIMATE whose sampling error is "
                              "UNMEASURED (the reading comes from a single "
                              "sample), so it is a LOWER BOUND on what this "
