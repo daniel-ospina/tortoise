@@ -5257,7 +5257,7 @@ surfaces:
   # DELIBERATELY unset) and `test-record-postgres` (Postgres, not FalkorDB) have no FalkorDB
   # provision step, so a DB-armed file registered in `carve_out` would skip silently there —
   # this file is in neither `carve_out` nor `slow_files`, so it never runs in them.
-  # itself). ⛔ Not "any URI-less leg", and the two conditions part company: with NO `TORTOISE_DB_URI`
+  # ⛔ Not "any URI-less leg", and the two conditions part company: with NO `TORTOISE_DB_URI`
   # the P4 session gate REFUSES the run UNLESS `TORTOISE_TEST_CARVE_OUT` is set
   # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`);
   # measured on the default lane with no opt-in: 113 errors,
