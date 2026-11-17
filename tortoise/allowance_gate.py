@@ -258,12 +258,20 @@ BLOCKED = "blocked"
 class _Absent:
     """The meter's answer for "there is no row YET" — distinct from ``None``.
 
-    ``None`` means the meter could not produce a figure (a failure); this means
-    the figure is KNOWN to be zero for a cumulative flow nobody has started. The
-    two must not share a value: flattening them is either a fail-open (a broken
-    meter read as zero) or a deadlock (a fresh window refused forever). Only a
-    dimension that declares ``absent_is_zero`` may consume this as a zero; every
-    other dimension still refuses on it.
+    ``None`` means the meter could not produce a figure (a failure); this is the
+    reader's CERTAIN "nothing has been recorded yet" — a successful read that
+    found no row, which is not the same claim as "the figure is zero". The two
+    must not share a value: flattening them is either a fail-open (a broken
+    meter read as zero) or a deadlock (a fresh window refused forever).
+
+    ⛔ WHAT IT MEANS IS THE DIMENSION'S TO DECLARE, and the two declarations are
+    different claims (#13102 F3): for a cumulative FLOW it is a certain zero
+    (nobody has started the window), while for a GAUGE whose row is written by a
+    separate, scheduled job it is a deliberate UNDER-enforcement — the tenant is
+    served while its true residency is unknown, because a gauge cannot promise
+    that an absent row means zero bytes (`graph_storage`, whose declaration says
+    so in as many words). Only a dimension that declares ``absent_is_zero`` may
+    consume this as a zero; every other dimension still refuses on it.
     """
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
