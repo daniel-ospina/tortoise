@@ -323,31 +323,6 @@ class TestDeprovisionOnDelete:
         text = " ".join(r.getMessage() for r in caplog.records)
         assert "LOWER BOUND" in text and "o1" in text, text
 
-    def test_a_seam_double_without_query_all_still_enumerates(self, monkeypatch, caplog):
-        """A control-plane double that predates `query_all` must still DROP the
-        page it can read — the seam-tolerant `getattr` shape (the activation
-        scorecard's analytics read uses the same one). ⛔ The failure this pins is
-        silent: a bare `cp.query_all(...)` call on such a double raises
-        `AttributeError`, the surrounding best-effort `except` swallows it, and
-        EVERY acl user is skipped with no signal at all."""
-        from tortoise import hosted_api as ha
-
-        dropped: list[str] = []
-        monkeypatch.setattr(ha, "_acl_user_drop_hook", dropped.append)
-        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
-                            lambda: True)
-
-        class _CP:
-            def query(self, table, **kw):
-                return [{"id": "g_1"}] if table == "graphs" else []
-
-        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
-                            lambda: _CP())
-        caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
-        ha._drop_org_acl_users("o1")
-        assert dropped == ["g_1"], dropped
-        assert "LOWER BOUND" in " ".join(r.getMessage() for r in caplog.records)
-
     def test_an_unreadable_enumeration_REFUSES_rather_than_erasing_a_subset(self, monkeypatch):
         """⛔ A failure to ask is not an answer (review round 4, P1).
 

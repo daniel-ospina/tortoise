@@ -34713,14 +34713,20 @@ def _drop_org_acl_users(org_id: str) -> None:
     docstring calls orphaning "the live credentials forever". So the read is a
     certified `query_all` walk (cursor `id`, which must ride in `select`).
 
-    ⛔ WHAT AN UNCERTIFIED WALK MAY NOT DO IS RAISE. C4/#2113 is a RECORDED
-    DECISION — "Best-effort per graph (a committed purge never fails on a drop)"
-    — and making the enumeration fatal would reverse it: `_purge_registry_org`
-    calls this directly, so a lower-bound walk would abort an org delete that
-    used to complete, and an org beyond the walk's `max_pages` could never be
-    purged at all. The lower bound is therefore LOUD (a warning naming the org
-    and the count) rather than fatal: silence is the failure mode, because the
-    operator can only drop the orphaned credential by hand if it is announced.
+    ⛔ AN UNCERTIFIED WALK IS NOT PROMOTED TO A FAILURE HERE, and it does not
+    need to be. C4/#2113 is a RECORDED DECISION — "Best-effort per graph (a
+    committed purge never fails on a drop)" — and this function's job is to drop
+    users, not to adjudicate the purge. The ONE site that reaches this read (the
+    supabase lane of `_purge_deleted_orgs_locked`) calls `_drop_org_graphs_
+    strict` immediately after, whose `_org_graph_names` walk certifies the SAME
+    table with the SAME filter, cursor and page bounds and RAISES when it cannot
+    — so the graph drops and the row cascade never run, and the org row stays as
+    the #926 retry anchor. ⛔ Do NOT read the warning below as "this purge
+    deletes graphs whose users it could not name": on this path it cannot. The
+    warning exists so the lower bound is never SILENT if the two walks ever
+    diverge (different bounds, or that sibling's raise removed) — silence is the
+    failure mode, because the operator can only drop an orphaned credential by
+    hand if it is announced.
     """
     from tortoise.supabase_control import (
         get_control_plane,
@@ -34730,23 +34736,14 @@ def _drop_org_acl_users(org_id: str) -> None:
     ids: list = []
     try:
         if is_supabase_enabled():
-            cp = get_control_plane()
-            # `getattr`, not a bare call: the seam-tolerant shape the activation
-            # scorecard's analytics read uses, so a control-plane double that
-            # predates `query_all` still ENUMERATES (it simply cannot certify,
-            # which is told apart below). A bare call would raise AttributeError
-            # into the best-effort `except` below and skip EVERY user silently.
-            walker = getattr(cp, "query_all", None)
-            if callable(walker):
-                rows, complete = walker(
-                    "graphs", select=["id"],
-                    filters=[("org_id", "eq", org_id)], cursor="id",
-                )
-            else:
-                rows, complete = cp.query(
-                    "graphs", select=["id"],
-                    filters=[("org_id", "eq", org_id)],
-                ), False
+            # The same bare `query_all` the sibling `_org_graph_names` uses —
+            # deliberately NOT a `getattr` fallback: two reads of this table in
+            # one purge must have one shape, or a seam that lacks the walk gets a
+            # FALSE "lower bound" here and a refusing raise one call later.
+            rows, complete = get_control_plane().query_all(
+                "graphs", select=["id"],
+                filters=[("org_id", "eq", org_id)], cursor="id",
+            )
             ids = [r["id"] for r in rows]
         else:
             rows = _make_sdk(namespace="registry")._get_registry().query(
@@ -34760,12 +34757,14 @@ def _drop_org_acl_users(org_id: str) -> None:
             org_id, e)
         return
     if not complete:
+        # Not fatal — C4/#2113 above; and not silent, which is the failure mode.
         _logger.warning(
             "team ACL-user enumeration for %s is a LOWER BOUND (%d gid(s), walk "
-            "UNCERTIFIED): any graph beyond the certified page keeps its global "
-            "`tenant_<gid>` ACL user while this purge deletes the graph and the "
-            "rows naming it (C4/#2113 best-effort) — drop that credential by "
-            "hand",
+            "UNCERTIFIED): only the enumerated graphs' `tenant_<gid>` users are "
+            "dropped. `_org_graph_names` walks the same table with the same "
+            "bounds and refuses this purge on the same condition, so this stays "
+            "best-effort (#2113) — if the two walks ever diverge, drop that "
+            "credential by hand",
             org_id, len(ids))
     for gid in ids:
         try:  # noqa: SIM105
