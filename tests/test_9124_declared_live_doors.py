@@ -4838,7 +4838,11 @@ def _modules_reaching_the_handle():
 #: out of the unproven bucket. MEASURED 2026-10-20 over 59 modules: 307 unresolved
 #: statements in the population — 226 in the unproven bucket, 40 in functions
 #: that already declare a lane (no bucket), 39 in a function that also holds a
-#: provable write, and the 2 proven reads above.
+#: provable write, and the proven reads registered below — whose count lives in
+#: `_PROVEN_READS` itself and is deliberately NOT restated here. This sentence
+#: said "2 proven reads" while the set held five, then six: a count in prose next
+#: to the set it counts is the same staleness this comment warns about, so read
+#: the set. (The 307 / 226 / 40 / 39 figures are the 2026-10-20 reading above.)
 #:
 #: ⛔ THE KEY IS WHAT `enumerate_handle_surface` EMITS — scope-qualified, e.g.
 #: `("tortoise/sdk.py", "TortoiseSDK.delete_point")`, NOT `"delete_point"`. A
@@ -4931,7 +4935,12 @@ _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     # f-string). The other two are literal statements the resolver flattens into
     # provable READS, so they never enter `writes` and pinning them here would
     # make the extent lie. Measured with the module's own enumerator, not reasoned:
-    # `writes == [(48606, 'query', '<unresolved>')]`, `_is_unresolved_only` True.
+    # `writes == [(50056, 'query', '<unresolved>', 1)]`, `_is_unresolved_only` True.
+    # (Re-measured at #13164: the previous text quoted `[(48606, 'query',
+    # '<unresolved>')]` — a line that had drifted and a 3-tuple where the
+    # enumerator emits 4, the same arity defect e0d8b165b7 fixed for the
+    # `_hydrate_evidence` row below. Comment only: the assertion compares the
+    # VERB tuple, so no gate was ever defeated by it.)
     ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"): ("query",),
     # ONE, and it is `_hydrate_evidence`'s only handle reach: the baseline-load
     # read whose f-string interpolates `live._terminal_excluded('n.status')`
