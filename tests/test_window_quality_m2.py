@@ -1086,3 +1086,68 @@ def test_the_tool_refuses_without_a_live_graph():
     )
     assert proc.returncode == 3
     assert "REFUSED" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Finding 4's operands, bound POSITIONALLY.
+#
+# `test_no_doc_states_a_percentage_the_artifact_does_not_hold` is a MEMBERSHIP
+# test: it asks whether a figure appears in the artifact's figure SET, so a
+# re-stale whose replacement is another artifact figure stays green. Measured on
+# the previous revision (P2-4 recurrence, reproduced independently):
+#
+#   "recall@3 **46.0 vs 46.3** at 0.50"  ->  "47.0 vs 46.3"   => 0 errors
+#   "81.0 vs 81.7 at 0.90"               ->  "81.7 vs 81.0"   => 0 errors (inverted)
+#   "up to **2.00 pp on `found_deep` at 0.50**" -> "at 0.75"  => 0 errors
+#
+# Every comparable figure in §9.1 got a positional pin; these operands did not,
+# which is why the published bound could be guarded while the sentence stating it
+# was not. This binds (tail, random, coverage) as a TRIPLE, so value, direction
+# and position all have to be right at once.
+# ---------------------------------------------------------------------------
+
+
+def test_the_policy_comparison_operands_are_bound_to_their_cells(artifact):
+    """Each published `A vs B at COV` pair must be the real `:Object` recall@3 pair."""
+    import re
+
+    raw = README.read_text()
+    obj = _arms(artifact, "object")
+
+    # The Finding-4 paragraph: from its opening to the next rule.
+    start = raw.index("`tail` (evict the least-referenced/most-boilerplate first)")
+    body = raw[start:raw.index("---", start)]
+
+    # Every "A vs B **at COV**" — the pair bound to its OWN trailing coverage, so a
+    # coverage token from a later clause cannot be borrowed by an earlier pair.
+    bound = re.findall(r"(\d+\.\d)\s+vs\s+(\d+\.\d)\**\s+at\s+(0\.\d\d)", body)
+    assert len(bound) == 4, bound
+
+    for a, b, cov in bound:
+        k = str(float(cov))          # "0.50" -> "0.5"; arm keys are un-padded
+        tail = obj[f"tail@{k}"]["recall@3"] * 100
+        rnd = obj[f"random@{k}"]["recall@3"] * 100
+        assert float(a) == pytest.approx(tail, abs=0.05), (cov, a, tail)
+        assert float(b) == pytest.approx(rnd, abs=0.05), (cov, b, rnd)
+        # direction is part of the claim, not just the magnitudes
+        assert (float(a) > float(b)) == (tail > rnd), (cov, a, b, tail, rnd)
+
+    # The two "buys back" cells, each bound to its own population/arm/metric.
+    assert "up to **2.00 pp on `found_deep` at 0.50**" in body
+    d = (obj["tail@0.5"]["found_deep"] - obj["random@0.5"]["found_deep"]) * 100
+    assert f"up to **{d:.2f} pp on `found_deep` at 0.50**" in body, d
+
+    assert "2.33 pp on `:Point` `recall@10` at 0.90" in body
+    pt = _arms(artifact, "point")
+    d = (pt["tail@0.9"]["recall@10"] - pt["random@0.9"]["recall@10"]) * 100
+    assert f"**{d:.2f} pp on `:Point` `recall@10` at 0.90**" in body, d
+
+    # The two loss ranges, each bound to its own order.
+    for order in ("tail", "random"):
+        drops = [
+            abs(obj["complete"][m] - obj[f"{order}@0.5"][m]) * 100
+            for m in ("found_deep", "recall@3", "recall@5", "recall@10", "recall@15")
+        ]
+        lo, hi = min(drops), max(drops)
+        want = f"**{lo:.1f} to {hi:.1f}"
+        assert want in body, (order, want, lo, hi)

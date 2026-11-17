@@ -668,7 +668,12 @@ identity. And the lexical leg's own ceiling is low on claims even complete
 record carries its own reproducibility bound, in the artifact: across three runs of identical input
 `found@deep` moved by at most 0.33 points, `recall@k` by at most 1.0, and the tie-counting rates by at
 most 9.9 — the gaps the verdict rests on run 13.3 to 48.3 points, and the two quantities the verdict turns
-on (`found@deep == resident_share`, and `found_deep_of_demoted == 0`) held in every arm of every run.
+on (`found_deep_of_demoted == 0`, and `recall@k <= resident_share`) held in every arm of every run.
+⛔ **`found@deep == resident_share` does NOT hold in every arm** — that equality is `:Object`-only. On
+`:Point` the lexical leg's own ceiling keeps `found@deep` below the resident share in all ten windowed
+arms and on the complete graph (0.7133 against 1.0), so quoting it as a universal invariant is the same
+overclaim as the `:Point` 100 % wrong-answer figure: a property of the LEG, read as a property of the
+window (Finding 2).
 
 **Consequence for §7 — and §10's reopen trigger has FIRED.** Arming needs a decision this measurement
 cannot make on its own. §10 lists *"M2 showing a windowed graph loses retrieval quality beyond an
