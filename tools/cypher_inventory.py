@@ -153,9 +153,11 @@ VAR_LENGTH = re.compile(r"-\[[^\]]*\*[^\]]*\]-|<-\[[^\]]*\*[^\]]*\]-|shortestPat
 #: Cypher accepts `-->`, `<--` and a bare `--` between two node patterns, and the
 #: bracketed-only arm could not see any of them — so `MATCH (a)-->(b) RETURN b.id`
 #: fell through every shape arm to `plain`/`read` and was published as a migration
-#: CANDIDATE: the one direction the verdict flips (`#13098` review P3). No live site
-#: spelled it that way at this head, so this is prophylactic and the census counts
-#: do not move — the property `--check` proves below.
+#: CANDIDATE: the one direction the verdict flips (`#13098` review P3). There IS
+#: one live site in this form — `tortoise/domain_validators.py:240`'s
+#: `AND NOT (n)--()`, a real adjacency predicate — so this arm MOVED the census:
+#: `adjacency`/`read` 189 → 190 and `plain`/`read` 571 → 570, totals unmoved. The
+#: pins reflect it; `--check` proves below that nothing else followed.
 #:
 #: ⛔ IT IS CONTEXT-ANCHORED ON PURPOSE, and it is NOT added to `NODE_PATTERN`.
 #:
