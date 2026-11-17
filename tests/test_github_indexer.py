@@ -497,9 +497,18 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
     `1/1/1` on every shape below, the row never moving, one permanent Event per poll
     in the journal, and `-closed-N` without bound).
 
-    The read now goes through `live.is_terminal_status` — the composed mirror of the
-    Cypher predicate the recall/search legs use — and resolves the stage slot from
-    the declaration, as the fold does.
+    The read answers from the POSITION axis it shares with the fold, resolved both
+    from the stored `pipelineSlot` PROP and from the DECLARATION by
+    `pipelineStageId`, as `apply_stage_fold` resolves the current stage.
+
+    ⚠️ Every shape BELOW discriminates, and this loop covers the CLOSE direction
+    only. A truthy non-boolean `isClosed` row is deliberately NOT a member: it
+    already answered `"closed"` on pre-fix `main` (`is_position_ended` reads the
+    marker by `bool()` — round 1's own leg), so its value is fixed by code this
+    change does not touch and NO mutation of this diff can redden it as a row of
+    this dict (#13288 review F2). It is pinned at its own home, and its OPEN
+    direction is the reopen discriminator there:
+    `test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`.
     """
     oid = "github-issue-acme/repo1-1"
     shapes = {
@@ -511,9 +520,6 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
         "a legacy `outdated` flag with a live position": (
             "SET o.outdated=true, o.pipelineStageId='in_progress', "
             "o.pipelineSlot='active', o.isClosed=false"),
-        "a truthy NON-boolean isClosed marker": (
-            "SET o.isClosed=1, o.pipelineStageId='in_progress', "
-            "o.pipelineSlot='active'"),
     }
     for why, mutate in shapes.items():
         proj = sdk._get_proj()
@@ -538,7 +544,11 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
                      "o.pipelineSlot='active'")
         t.issues_by_repo["acme/repo1"] = [gh_issue(
             1, state="open", updated_at="2026-07-24T08:00:00Z")]
-        _run(_indexer(t), sdk)  # back to open (mints -reopened)
+        # The reset above already made the read answer `open`, so this poll is
+        # the OPEN→OPEN no-op: it mints NOTHING. (The earlier comment claimed
+        # `-reopened`, which a same-state poll cannot produce — a measurement
+        # claim that was simply wrong; asserted now instead of narrated.)
+        assert _run(_indexer(t), sdk)["events_minted"] == 0
         t.issues_by_repo["acme/repo1"] = [gh_issue(
             1, state="closed", closed_at="2026-07-25T08:00:00Z",
             updated_at="2026-07-25T08:00:00Z")]
