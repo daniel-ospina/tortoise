@@ -190,6 +190,77 @@ def test_no_verdict_is_unjudged_never_a_default_verdict(narrative):
     assert board["tally"]["right"] == board["tally"]["wrong"] == 0
 
 
+def test_a_question_that_was_never_asked_is_blocked_whatever_the_judge_said(narrative):
+    """No recorded Answer is the SAME case as a blocked one (#13303 review cycle 2, P2).
+
+    The row already renders `answer_status: "blocked"` and `product_answer: "(not
+    asked)"`, so letting a judge verdict stand there made a single row contradict
+    itself and scored the product for a question never put to it. Reachable through
+    `cmd_judge`: the answers come from `packet["product_answers"]`, so a packet whose
+    saved answers predate a question added to the narrative has none for that id.
+    """
+    q1, q2 = narrative["questions"][0], narrative["questions"][1]
+    board = cap.build_scoreboard(
+        narrative={"questions": [q1, q2]},
+        header={},
+        answers=[cap.Answer(q1["id"])],  # only Q1 was asked
+        judged={q2["id"]: {"verdict": "right", "because": "the judge guessed"}},
+        ingest=[],
+    )
+    unasked = board["rows"][1]
+    assert unasked["answer_status"] == "blocked"
+    assert unasked["product_answer"] == "(not asked)"
+    assert unasked["verdict"] == "blocked", "the row must not contradict its own answer_status"
+    assert board["tally"]["right"] == 0 and board["tally"]["blocked"] == 1
+    assert cap.exit_code(board["tally"]) != 0
+
+
+def test_an_empty_population_is_neither_scored_nor_successful():
+    """A scoreboard that scored nothing is not a completed run (#13303 cycle 2, P1).
+
+    Every count is 0, so the blocked/unjudged test passed vacuously and a 0-row
+    scoreboard reported exit 0 — measured over the committed baseline: `judge
+    --packet run-local.json` wrote `0 right · 0 wrong · 0 blocked · 0 unjudged` in
+    place of the real table while keeping the correct identity header.
+    """
+    assert cap.exit_code({v: 0 for v in cap.VERDICTS}) != 0
+    # …and a non-empty, fully-scored tally is still a success.
+    assert cap.exit_code({"right": 0, "wrong": 6, "blocked": 0, "unjudged": 0}) == 0
+
+
+def test_judge_refuses_a_document_that_is_not_a_judge_packet(tmp_path):
+    """`judge` must not render (and overwrite) from a run or verdicts file.
+
+    #13303 review cycle 2, P1. `_judge_packet` always wrote a `schema` and NOTHING read
+    it, while `judge` writes `run-{target}.json` / `scoreboard-{target}.md` into the
+    packet's OWN directory by default — so a mistyped `--packet` silently replaced the
+    committed baseline with a 0-row board and exited 0.
+    """
+    out = tmp_path / "evidence"
+    out.mkdir()
+    baseline = out / "run-local.json"
+    baseline.write_text(json.dumps({"schema": "capstone-state-value-scoreboard/v1"}))
+    before = baseline.read_bytes()
+
+    for name, payload in (
+        ("run-local.json", {"schema": "capstone-state-value-scoreboard/v1"}),
+        ("verdicts.json", {"Q1": {"verdict": "right"}}),
+        ("packet.json", {"schema": cap.PACKET_SCHEMA, "questions": []}),
+    ):
+        p = tmp_path / name
+        p.write_text(json.dumps(payload))
+        args = type("A", (), {"packet": str(p), "verdicts": None, "judge_cmd": None,
+                              "out": None})()
+        assert cap.cmd_judge(args) == 2, name
+        # It refused BEFORE writing: the run beside it is untouched.
+        assert baseline.read_bytes() == before, name
+        assert not (out / "scoreboard-local.md").exists(), name
+
+    # A real judge packet is still accepted (the guard must not block the real path).
+    real = json.loads((ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json").read_text())
+    assert real["schema"] == cap.PACKET_SCHEMA and real["questions"]
+
+
 # ── 3. the mechanical signals, and the fresh-reader parse ───────────────────────
 
 

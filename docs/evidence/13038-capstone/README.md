@@ -95,6 +95,13 @@ uv run python tools/capstone_state_value.py judge \
     --out docs/evidence/13038-capstone
 ```
 
+`judge` refuses a `--packet` that is not a judge packet (exit 2, nothing written). Without that
+guard a mistyped path — a `run-local.json`, a `verdicts-baseline.json` — rendered a **0-row**
+scoreboard that kept the correct identity header and the ingestion table while scoring nothing, and
+overwrote `run-{target}.json` / `scoreboard-{target}.md` in the packet's own directory. An empty
+scoreboard is not a result: `exit_code` treats an empty tally as a failure too, so that case cannot
+report success even if the shape check were bypassed.
+
 `--judge fresh` spawns the fresh reader itself as `pi -p --no-session --no-tools`, in an EMPTY
 sandbox directory rather than the repo root, and writes its verdicts. Both halves of that are
 load-bearing: the reader is spawned while this run's *previous* `run-{target}.json` and

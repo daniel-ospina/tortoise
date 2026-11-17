@@ -119,6 +119,7 @@ DEFAULT_NARRATIVE = ROOT / "docs" / "evidence" / "13038-capstone" / "narrative.j
 DEFAULT_OUT = ROOT / "docs" / "evidence" / "13038-capstone"
 
 VERDICTS = ("right", "wrong", "blocked", "unjudged")
+PACKET_SCHEMA = "capstone-state-value-judge-packet/v1"
 
 #: Target capabilities. An op or a question recipe that needs one of these is `blocked`
 #: (with its requirement named) rather than attempted and reported as a failure — the
@@ -1151,7 +1152,7 @@ def _judge_packet(
     ingest: list[dict] | None = None,
 ) -> dict:
     return {
-        "schema": "capstone-state-value-judge-packet/v1",
+        "schema": PACKET_SCHEMA,
         "issue": narrative.get("issue"),
         "instructions": JUDGE_PROMPT,
         "rubric": narrative.get("rubric"),
@@ -1423,6 +1424,13 @@ def exit_code(tally: dict) -> int:
     Extracted (from `cmd_run` and `cmd_judge`, which each carried a copy) so the rule
     has ONE definition and is pinnable without a graph, a model or a subprocess.
     """
+    # An EMPTY population is not a completed run (#13303 review cycle 2, P1). With no
+    # rows every count is 0, so the blocked/unjudged test below passes vacuously and a
+    # scoreboard that scored NOTHING reports success — measured as `judge --packet
+    # run-local.json` writing `0 right · 0 wrong · 0 blocked · 0 unjudged` over the
+    # committed baseline and exiting 0.
+    if sum(tally.get(v, 0) for v in VERDICTS) == 0:
+        return 1
     return 0 if tally.get("blocked", 0) == 0 and tally.get("unjudged", 0) == 0 else 1
 
 
@@ -1440,12 +1448,18 @@ def build_scoreboard(
         # is reading the packet's own framing rather than a product response. (HONESTY
         # RULE 2; #13303 review P1. Without the `right` arm the run exits 0 — "every
         # question was judged" — over a row that was never asked.)
-        if ans is not None and ans.status == "blocked":
+        #
+        # `ans is None` is the SAME case and was missed by that first fix (#13303
+        # review cycle 2, P2): a question with no recorded Answer already renders
+        # `answer_status: "blocked"` and `product_answer: "(not asked)"`, so letting
+        # the judge's `right` stand made one row contradict itself and scored the
+        # product for a question never put to it.
+        if ans is None or ans.status == "blocked":
             verdict = "blocked"
             j = {
                 "verdict": "blocked",
-                "because": ans.reason or "the question could not be asked",
-                "cause": ans.reason or None,
+                "because": (ans.reason if ans else "") or "the question was not asked",
+                "cause": (ans.reason if ans else None),
             }
         rows.append(
             {
@@ -1818,6 +1832,30 @@ def cmd_judge(args: argparse.Namespace) -> int:
         packet = json.loads(packet_path.read_text())
     except (OSError, ValueError) as exc:
         print(f"capstone: cannot read packet {packet_path}: {exc}", file=sys.stderr)
+        return 2
+    # REFUSE a document that is not a judge packet, BEFORE anything is written
+    # (#13303 review cycle 2, P1). This command renders a scoreboard from the
+    # packet's OWN `questions` and then OVERWRITES `run-{target}.json` /
+    # `scoreboard-{target}.md` in the packet's directory by default — so pointing
+    # `--packet` at a run file or a verdicts file produced a 0-row board that kept
+    # the correct identity header and ingestion table while scoring nothing, and
+    # exited 0 on top of the committed baseline. The schema was written by
+    # `_judge_packet` and read by no one; now it is the gate.
+    schema = str((packet or {}).get("schema") or "")
+    if schema != PACKET_SCHEMA:
+        print(
+            f"capstone: refusing {packet_path} — not a judge packet "
+            f"(schema={schema or 'absent'!r}, expected {PACKET_SCHEMA!r}); `judge` would "
+            "render an empty scoreboard and overwrite the run beside it",
+            file=sys.stderr,
+        )
+        return 2
+    if not packet.get("questions"):
+        print(
+            f"capstone: refusing {packet_path} — it carries no questions, so there is "
+            "nothing to score (an empty scoreboard is not a result)",
+            file=sys.stderr,
+        )
         return 2
     if args.verdicts:
         try:
