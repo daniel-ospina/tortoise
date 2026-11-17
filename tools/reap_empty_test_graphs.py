@@ -287,7 +287,16 @@ def _node_count(proj, graph_name: str) -> int | None:
 
 
 def _read_handle():
-    """A DB handle that CANNOT materialise the graph it lists (#13205).
+    """THE ONE store handle: a projection that CANNOT materialise a graph.
+
+    Used for BOTH phases (classify and delete) on purpose. Two handles with two
+    path policies would be a fail-OPEN: the tool would read emptiness from one
+    database and issue ``GRAPH.DELETE`` against another, so a graph could be
+    deleted on the strength of a DIFFERENT store's emptiness. `resolve_db_path`
+    (the CLI/dev default) and `hosted_api._resolve_embedded_db_path` (the server
+    process's policy) genuinely disagree — measured ``/home/cmux/.tortoise/
+    tortoise.db`` vs ``/tmp/tortoise.db`` — so the embedded branch addresses the
+    store THE HOSTED APP serves from, not the CLI's.
 
     ⛔ `_make_sdk(graph_name="tortoise")._get_proj()` is NOT read-only: the
     open-time health probe is a `GRAPH.QUERY`, and on a graph the store does not
@@ -308,10 +317,10 @@ def _read_handle():
         return FalkorProjection.from_uri(
             db_uri, graph_name="tortoise",
             skip_health_check=True, ensure_indexes=False)
-    from tortoise.config import resolve_db_path
+    from tortoise.hosted_api import _resolve_embedded_db_path
 
     return FalkorProjection(
-        path=resolve_db_path(), graph_name="tortoise",
+        path=_resolve_embedded_db_path(), graph_name="tortoise",
         skip_health_check=True, ensure_indexes=False)
 
 
@@ -377,8 +386,18 @@ def reap(report: dict, *, proj) -> list[dict]:
     credential live forever — the exact reason the org purge drops ACL users
     before the graphs (#2113 C4). The reaper keeps the org row, so nothing else
     will ever revisit it.
+
+    ⛔ AND THE DROP IS VERIFIED, not trusted. Both `drop_acl_user` and
+    `hosted_api._acl_user_drop_hook` are BEST-EFFORT by design (they log and
+    swallow), so a refused `ACL DELUSER` looks exactly like a success from the
+    caller's side — measured: with the real hook and a raising `drop_acl_user`
+    the graph was deleted and the outcome read clean. `acl_user_exists` is the
+    check that can fail: the deletion is SKIPPED when the user is still there
+    (a live credential must never outlive the graph that explains it), and
+    `acl_user_exists` answers False when the ACL layer is absent, which is the
+    correct semantics — a layer that is declared off has no user to orphan.
     """
-    from tortoise.hosted_api import _acl_user_drop_hook
+    from tortoise.acl_graph_users import acl_user_exists, drop_acl_user
     from tortoise.projection import is_missing_graph_error
 
     outcome = []
@@ -389,11 +408,18 @@ def reap(report: dict, *, proj) -> list[dict]:
                  "deleted": False, "error": None}
         if row.get("gid"):
             try:
-                _acl_user_drop_hook(str(row["gid"]))
+                drop_acl_user(str(row["gid"]))
+                still_live = acl_user_exists(str(row["gid"]))
             except Exception as e:
                 entry["error"] = f"acl-user drop failed: {type(e).__name__}: {e}"
                 outcome.append(entry)
-                continue  # never orphan a live credential behind a deletion
+                continue
+            if still_live:
+                entry["error"] = (
+                    f"acl user for {row['gid']!r} survived its drop — refusing "
+                    f"to orphan a live credential behind a deleted graph")
+                outcome.append(entry)
+                continue
         try:
             proj.db.select_graph(row["graph"]).delete()
             entry["deleted"] = True
@@ -446,15 +472,19 @@ def main(argv: list[str] | None = None) -> int:
     except Refusal as e:
         print(f"REFUSED — {e}", file=sys.stderr)
         return 2
-    _print_report(report, as_json=args.json)
+    if not args.json:
+        _print_report(report, as_json=False)
+    elif not args.execute:
+        _print_report(report, as_json=True)
     if not args.execute:
         _note("\nDRY RUN — nothing deleted. Re-run with --execute to delete the "
               f"{report['counts'].get(BUCKET_REAPABLE, 0)} reapable graph(s).",
               as_json=args.json)
         return 0
-    from tortoise.hosted_api import _make_sdk
-    proj = _make_sdk(graph_name="tortoise")._get_proj()
-    outcome = reap(report, proj=proj)
+    # The SAME write-free handle the report was built on — never `_make_sdk`,
+    # which would MINT the reserved `tortoise` graph on the deletion path (the
+    # very write `_read_handle` exists to avoid).
+    outcome = reap(report, proj=_read_handle())
     failed = [o for o in outcome
               if not o["deleted"] or o["error"] not in (None, "already absent")]
     if args.json:

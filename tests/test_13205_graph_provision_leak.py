@@ -556,11 +556,15 @@ class TestReaperExecute:
 
     def test_a_custom_graph_drops_its_acl_user_before_the_graph(self, monkeypatch):
         """Order, and the reason for it: the ACL user is the live credential that
-        outlives the graph. A failed user drop must SKIP the deletion rather
-        than orphan it."""
+        outlives the graph. The drop is VERIFIED via `acl_user_exists`, not
+        trusted — both `drop_acl_user` and `_acl_user_drop_hook` are best-effort
+        and swallow, so a refused `ACL DELUSER` reads as success from the caller
+        (measured). The real module is patched, not the swallowing hook."""
         order: list[str] = []
-        monkeypatch.setattr("tortoise.hosted_api._acl_user_drop_hook",
+        monkeypatch.setattr("tortoise.acl_graph_users.drop_acl_user",
                             lambda gid: order.append(f"acl:{gid}"))
+        monkeypatch.setattr("tortoise.acl_graph_users.acl_user_exists",
+                            lambda gid: False)
 
         class _Graph:
             def __init__(self, name):
@@ -582,13 +586,42 @@ class TestReaperExecute:
         assert order == ["acl:g_1", "graph:org_a_g_1", "graph:org_a"], order
         assert all(o["deleted"] for o in outcome)
 
+    def test_an_acl_user_that_SURVIVES_its_drop_blocks_the_deletion(self, monkeypatch):
+        """⛔ The round-1 arm could never fire: it wrapped
+        `hosted_api._acl_user_drop_hook`, which swallows `ImportError` and every
+        exception, so a refused `ACL DELUSER` still deleted the graph and
+        reported `error: None`. The gate is now the POSITIVE check — the user is
+        still there after the drop, so the graph is NOT deleted and the failure
+        is recorded. Measured: patching the hook to raise made the old test pass
+        over an arm production cannot reach."""
+        deleted: list[str] = []
+        monkeypatch.setattr("tortoise.acl_graph_users.drop_acl_user",
+                            lambda gid: None)  # "succeeds", silently
+        monkeypatch.setattr("tortoise.acl_graph_users.acl_user_exists",
+                            lambda gid: True)  # ... but the user is still live
+
+        class _Proj:
+            db = type("D", (), {
+                "select_graph": lambda self, n: type(
+                    "G", (), {"delete": lambda s: deleted.append(n)})()})()
+
+        report = {"graphs": [
+            {"graph": "org_a_g_1", "bucket": reaper.BUCKET_REAPABLE,
+             "org_id": "a", "gid": "g_1"}], "counts": {}, "total": 1}
+        outcome = reaper.reap(report, proj=_Proj())
+        assert deleted == [], "the graph was deleted with its ACL user still live"
+        assert outcome[0]["deleted"] is False
+        assert "refusing" in outcome[0]["error"]
+
     def test_a_failed_acl_drop_does_not_orphan_a_live_credential(self, monkeypatch):
         deleted: list[str] = []
 
         def _boom(gid):
             raise RuntimeError("ACL DELUSER refused")
 
-        monkeypatch.setattr("tortoise.hosted_api._acl_user_drop_hook", _boom)
+        monkeypatch.setattr("tortoise.acl_graph_users.drop_acl_user", _boom)
+        monkeypatch.setattr("tortoise.acl_graph_users.acl_user_exists",
+                            lambda gid: False)
 
         class _Proj:
             db = type("D", (), {
@@ -605,8 +638,9 @@ class TestReaperExecute:
 
     def test_json_stdout_is_one_parseable_document(self, monkeypatch, capsys):
         """`--json` is documented as machine-readable. The human notice used to
-        be appended to the same stdout, so `| jq` got a parse error (#13218
-        review)."""
+        be appended to the same stdout, so `| jq` got a parse error — and
+        `--execute --json` printed the report document AND the outcome document,
+        i.e. two documents, which `json.loads` rejects as "Extra data"."""
         import json as _json
 
         monkeypatch.setattr(reaper, "build_report", lambda **kw: _real_report(
@@ -617,4 +651,39 @@ class TestReaperExecute:
         out = capsys.readouterr().out
         doc = _json.loads(out)  # the whole stdout is ONE document
         assert doc["total"] == 3
+        assert rc == 0
+
+    def test_execute_json_emits_exactly_one_document(self, monkeypatch, capsys):
+        """The `--execute --json` shape: exactly one JSON document on stdout, and
+        the deletion must go through the write-free handle (never `_make_sdk`,
+        which would MINT the reserved `tortoise` graph on the delete path)."""
+        import json as _json
+
+        deleted: list[str] = []
+
+        class _Graph:
+            def __init__(self, name):
+                self.name = name
+
+            def delete(self):
+                deleted.append(self.name)
+
+        class _Proj:
+            db = type("D", (), {"select_graph": lambda self, n: _Graph(n)})()
+
+        monkeypatch.setattr(reaper, "build_report", lambda **kw: _real_report(
+            type("P", (), {"db": type("D", (), {
+                "list_graphs": lambda self: [
+                    "org_o1", "org_customer", "orphan"]})()})()))
+        monkeypatch.setattr(reaper, "_read_handle", lambda: _Proj())
+        monkeypatch.setattr("tortoise.hosted_api._make_sdk",
+                            lambda *a, **k: pytest.fail(
+                                "the delete path must not construct an SDK — it "
+                                "would mint the reserved `tortoise` graph"))
+        rc = reaper.main(["--json", "--execute"])
+        out = capsys.readouterr().out
+        doc = _json.loads(out)  # exactly ONE document, or this raises
+        assert doc["failed"] == 0
+        assert [o["graph"] for o in doc["outcome"]] == ["org_o1"]
+        assert deleted == ["org_o1"]
         assert rc == 0
