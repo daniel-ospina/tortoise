@@ -35,6 +35,7 @@ papered over here.
 from __future__ import annotations
 
 import ast
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -250,6 +251,92 @@ def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
         f"read — read {len(calls)} time(s)")
 
 
+def test_the_create_door_grades_the_DEFAULT_status_of_an_EXPLICIT_id(sdk):
+    """#13065 review P2 — the create door's probe must be asked for a
+    NON-terminal status too, because a CREATE always WRITES one.
+
+    ⛔ The suite was one shape short: the create-door assertion above varies the
+    CALLER-NAMED terminal status, while the path a caller actually takes —
+    ``create_point(..., id=<retired goal>)`` with no ``status`` at all — resolves
+    to the ``"live"`` default. The guard only asked the store when the status it
+    resolved was TERMINAL, so this write was ADMITTED and its fold landed
+    ``status="live"`` beside a stored ``goalState="abandoned"`` — the pair
+    ``test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing`` asserts cannot
+    exist, reached through the one door that test does not mint from.
+    """
+    # a `:Point` goal retired on BOTH fields — coherent, so its own create lands
+    # (`archived` is the ending a Point's own vocabulary accepts; `deprecated` is
+    # an Object word — see the residual recorded on the PR)
+    goal = sdk.create_point("goal", "GOAL - CI is fast [dup]",
+                            goalState="abandoned", status="archived")
+    stored = sdk.get_point(goal["id"])
+    assert stored["goalState"] == "abandoned"
+    assert live.is_terminal_status(stored["status"])
+
+    # the caller names NO status: the CREATE lands its own default
+    with pytest.raises(ValueError) as exc:
+        sdk.create_point("goal", "GOAL - duplicate [no status]", id=goal["id"])
+    msg = str(exc.value)
+    assert "REFUSED" in msg and "create_point" in msg, msg
+    assert "status='live'" in msg                # the pair it refused, named
+    assert "drop the ending from `goalState`" in msg   # repair 2: drop it
+
+    # nothing landed — the retired pair is untouched, and the two surfaces still
+    # read it the same way
+    after = sdk.get_point(goal["id"])
+    assert after["goalState"] == "abandoned"
+    assert after["status"] == "archived"
+    assert (after["goalState"] in RETIRED_GOAL_STATES) != (
+        not live.is_terminal_status(after.get("status"),
+                                    bool(after.get("outdated"))))
+
+    # a genuinely fresh explicit id under the same default still lands
+    fresh = sdk.create_point("goal", "GOAL - fresh [dup]", id=ulid())
+    assert not live.is_terminal_status(fresh["status"])
+
+
+def test_a_NON_WORD_status_never_reaches_a_frozenset():
+    """#13065 review P1 — a non-WORD `status` must never raise `TypeError`.
+
+    ``TERMINAL_EXCLUDED_STATUSES`` / the ``wanted`` sets / ``GOAL_ENDING_STATES``
+    are frozensets, so ``status in …`` hashes the operand and raises
+    ``TypeError: unhashable type`` — and this guard runs from
+    ``_sanitize_props`` on EVERY write door, BEFORE the door's own
+    ``isinstance(status, str)`` check can answer. Measured at the pre-fix head:
+    12 red in ``tests/test_status_projection.py::TestLifecycleCarrierCoherence``,
+    whose assertions expect the door's advertised ``ValueError``
+    ("is TERMINAL for a :Object"). ⛔ ``isinstance`` alone would not be enough —
+    a ``str`` SUBCLASS can null its own ``__hash__`` — so the helper that answers
+    these membership questions normalises with ``str.__str__`` (the transition
+    guard's settled idiom) rather than trusting the value's dunders.
+
+    ⛔ WHAT IS PINNED IS THE ERROR CLASS, not an abstention: a non-word beside an
+    ENDING ``goalState`` may legitimately be refused with ``ValueError`` (that is
+    the class every door advertises); what may never escape is ``TypeError``.
+    """
+    import tortoise.sdk as sdk_mod
+
+    class _UnhashableWord(str):
+        __hash__ = None          # a `str` that cannot be a frozenset member
+
+    for status in (["live"], {"a": 1}, _UnhashableWord("archived")):
+        with contextlib.suppress(ValueError):
+            sdk_mod._refuse_inconsistent_goal_ending(
+                {"goalState": "abandoned", "status": status}, surface="test")
+        # ⛔ suppressed ONLY the door's own refusal class: any OTHER exception
+        # (TypeError included) propagates and fails this test
+
+    # the abstention is NARROW: `None` is the documented CLEAR, and a goal ended
+    # on `goalState` beside it still ends with no reader able to see it ended
+    with pytest.raises(ValueError):
+        sdk_mod._refuse_inconsistent_goal_ending(
+            {"goalState": "abandoned", "status": None}, surface="test")
+    # ...and a real WORD on the wrong axis is still refused
+    with pytest.raises(ValueError):
+        sdk_mod._refuse_inconsistent_goal_ending(
+            {"goalState": "abandoned", "status": "live"}, surface="test")
+
+
 # ── 2. the ordinary verb: one write, and the two surfaces AGREE ────────────
 
 def _world(sdk, *, tag):
@@ -288,7 +375,9 @@ def test_retiring_with_the_ordinary_verb_ends_both_fields_and_the_surfaces_agree
     assert retired_by_the_invalidation_path is True
     assert current_to_the_reading_rule is False
     assert retired_by_the_invalidation_path != current_to_the_reading_rule, (
-        "the two surfaces disagree about this goal — the #13035 divergence")
+        "the two surfaces AGREE about this goal where they must DIFFER — one "
+        "reads it the opposite way from the other (the #13035 divergence, or a "
+        "goal neither surface serves)")
 
     found = verdicts(sdk, goal_id=goal["id"])
     assert len(found) == 1

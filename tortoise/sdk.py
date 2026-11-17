@@ -5952,7 +5952,8 @@ def _is_lifecycle_word(value: object, vocabulary) -> bool:
 
 
 def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
-                                     goal_ending=None) -> None:
+                                     goal_ending=None,
+                                     may_target_existing_node: bool = False) -> None:
     """Refuse a goal write that ends it on one field and runs it on the other.
 
     #13035. Operates on the STATE THE WRITE LEAVES — the value in ``props`` when
@@ -5964,6 +5965,16 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
     because this runs on every SDK write. ``None`` means the CREATE reading,
     where the node does not exist yet — so an absent ``status`` really is the
     ordinary LIVE birth state and an absent ``goalState`` really is no claim.
+
+    ``may_target_existing_node`` is for the ONE create leg that can land on an
+    ALREADY EXISTING node — ``create_point`` with a caller-supplied ``id``, whose
+    journal fold MERGEs on that id. There the stored ``goalState`` is part of the
+    state the write leaves for EVERY status, not only a terminal one, because a
+    CREATE always LANDS a status (the default is ``"live"``):
+    ``create_point(id=<retired goal>)`` with no ``status`` writes
+    ``status="live"`` beside a stored ``goalState="abandoned"`` — the same
+    divergence from the other side (#13065 review P2). A GENUINELY fresh id
+    answers ``{}`` and refuses nothing, and an id-less create never reads.
 
     REFUSED IN EITHER DIRECTION, with BOTH repairs named (the AX rule: say that
     it refused, exactly what failed, and exactly what to do): add the ending to
@@ -6001,8 +6012,9 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 and goal_state is not _GOAL_ENDING_UNSET):
             status = _stored_view().get("status")
         elif (goal_state is _GOAL_ENDING_UNSET
-                and _is_lifecycle_word(status,
-                                       TERMINAL_EXCLUDED_STATUSES)):
+                and (may_target_existing_node
+                     or _is_lifecycle_word(status,
+                                           TERMINAL_EXCLUDED_STATUSES))):
             goal_state = _stored_view().get("goalState")
 
     if _is_lifecycle_word(goal_state, GOAL_ENDING_STATES):
@@ -16219,12 +16231,25 @@ class TortoiseSDK:
         # and forwards `props` to `update_point`, whose own guard grades THAT
         # merged state — so grading the resolved `status` there would refuse a
         # write that never writes it. Past the block, a status provably lands.
+        #
+        # ⛔ `may_target_existing_node=True` (review P2, #13065): the resolved
+        # status is a STATEMENT, not a no-op — the CREATE always writes one — so
+        # the stored `goalState` is part of the state this write LEAVES for a
+        # NON-terminal status too. Without the flag the guard only asked the
+        # store when the status it resolved was terminal, and
+        # `create_point(id=<retired goal>)` with NO `status` (resolved `"live"`)
+        # folded `status="live"` beside a stored `goalState="abandoned"` — the
+        # exact pair `test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing`
+        # asserts cannot exist, through the one door that test does not mint
+        # from. A genuinely fresh explicit id still answers `{}` and refuses
+        # nothing.
         if explicit_id is not None:
             _refuse_inconsistent_goal_ending(
                 {**props, "status": status},
                 surface="create_point",
                 goal_ending=lambda: _stored_goal_ending_view(
                     proj, explicit_id, label="Point"),
+                may_target_existing_node=True,
             )
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
