@@ -1673,8 +1673,9 @@ def test_the_restore_verb_still_exists():
 #    re-sort.
 # 2. THE BODY IS THE FUNCTION'S OWN, not first-function-to-last-function in the
 #    file. Multi-function migrations are ordinary here — measured at this head,
-#    `20260915000001_tenancy_team_to_org.sql` defines 13 functions, and three
-#    others define 3–5 — so a slice from the file's first `AS $$` to its last `$$`
+#    `20260915000001_tenancy_team_to_org.sql` defines 13 functions, and TWELVE
+#    other files define 3–5 (13 files define three or more) — so a slice from the
+#    file's first `AS $$` to its last `$$`
 #    lets a SIBLING function's `RAISE WARNING` satisfy the assertion.
 # 3. THE SELECTOR IS CLOSED OVER THE DEFINITION'S SPELLING SPACE. `CREATE
 #    [OR REPLACE] FUNCTION [schema.]name` tolerates an optional `OR REPLACE`, an
