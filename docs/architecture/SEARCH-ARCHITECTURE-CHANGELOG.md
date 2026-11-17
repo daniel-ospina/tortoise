@@ -296,12 +296,14 @@ is unmet.
 
 **What changed is not only status wording — one content claim moved with it.** The decision block at the head of
 the document — not a §3 paragraph; §3's change is the vector-search table row — had replaced the reopen's own
-statement with a bare "the KEEP ruling is in force today". That is not what the record says: `#11395` comment
+statement with a bare "the KEEP ruling is in force today" (**that bare sentence was an intermediate revision of THIS
+PR** — `git grep -F` on `origin/main` → 0 hits — not the document's prior wording). That is not what the record says: `#11395` comment
 `6956793300` is itself headed **"SUPERSEDED 2026-11-17 — the KEEP ruling's *reason* no longer holds, so the graph
-copy retires"** and carries an `OVERRIDES:` line. The block now names that second ruling as the one that governs
-removal, scopes its permission to the **GRAPH COPY only**, and cites its `OVERRIDES:` marker — so the operative
-effect is unchanged (nothing may be removed or stop being written while `#13220` is in flight) and both owner
-statements are recorded rather than one cancelling the other.
+copy retires"** and carries an `OVERRIDES:` line. The block **restores** `origin/main`'s naming of that second ruling
+as the one that governs removal, with its **GRAPH COPY only** scope and its `OVERRIDES:` citation, and **adds** the
+two-rules split — so the operative effect is unchanged (nothing may be removed or stop being written while `#13220`
+is in flight, and never in the same release) and both owner statements are recorded rather than one cancelling the
+other.
 
 **The content claim that moved:** `origin/main`'s block ended *"`:Event`/`:Source` were never named by the KEEP
 ruling, and were already retirable once the record serves them"* — a permission no owner ruling grants, since

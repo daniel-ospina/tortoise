@@ -2425,11 +2425,12 @@ than a peer issue, because the lane that implements the answer owns them.
 Applies an owner instruction of 2026-11-17: the **INDEX** half stays *decided, implementation in flight — `#13220`*,
 and the 2026-11-10 KEEP ruling's prohibition is kept intact and is what binds **today**.
 
-**⚠️ These bullets describe what this PR's own revisions did, not a change from `origin/main`.** Three of the
-phrases they quote — *"STANDS, unchanged"*, *"the ruling on removal TODAY"*, *"IN FORCE TODAY"* — were written by
-intermediate revisions of this PR and appear nowhere on `origin/main` (`git grep -F` → 0 hits); `origin/main`
-already carried the reopen. What the net change corrects is the result, and one of the corrections below is
-**content, not wording**:
+**⚠️ These bullets describe what this PR's own revisions did, not a change from `origin/main`.** Four of the
+phrases they quote — *"STANDS, unchanged"*, *"the ruling on removal TODAY"*, *"IN FORCE TODAY"* and *"the record must
+hold a label's vectors before anything else about that label's storage is decided"* — were written by intermediate
+revisions of this PR and appear nowhere on `origin/main` (`git grep -F` → 0 hits); `origin/main` already carried the
+reopen, and phrased the record-first constraint as part of it. What the net change corrects is the result, and one of
+the corrections below is **content, not wording**:
 
 - **§12.1c's decided marker** called the KEEP half *"STANDS, unchanged"*. It now says the KEEP half's **prohibition**
   is what binds today, and names the same day's **second** ruling (`#11395` comment `6956793300`, with its
