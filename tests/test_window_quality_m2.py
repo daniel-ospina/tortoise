@@ -1551,3 +1551,68 @@ def test_every_published_arrow_is_bound_to_the_cell_it_reports(artifact):
             f"{pt['tail@0.5']['found_deep']:.3f} against a resident share of "
             f"{pt['tail@0.5']['resident_share']:.4f}")
     assert frag in arch, f"§1.5/§7's ceiling term not bound: {frag!r}"
+
+
+def test_the_claim_ceiling_pair_and_both_found_deep_series_are_bound(artifact):
+    """Two series the suite could not red on, both the one-of-two-siblings shape.
+
+    (1) The `:Point` "eviction + ceiling" pair `52.7 % / 41.0 %` is the whole evidence
+    of Finding 2's claim half AND the quantity §1.5/§7's "~11.7 points" is computed
+    from. It appears in three documents. Nothing read it: the test that calls binding
+    "this test's whole job" asserts the value in the ARTIFACT, never the quote, and the
+    §1.5/§7 pin binds the other spelling (0.410 / 0.5267). Measured on the previous
+    revision: `41.0 -> 40.0` in the README stayed GREEN at 47 passed while the sentence
+    became false and the derived headroom silently became 12.7.
+
+    (2) The `:Object` `found@deep` series for BOTH orders is published in the README and
+    the changelog, and pinned for §9.1 only. Measured: replacing the README's `random`
+    series with the `tail` series stayed GREEN at 47 passed, leaving the paragraph
+    contradicting itself one line later ("…not the tail series above").
+
+    Both are bound to their own arm and order here, so a series cannot be swapped for
+    its sibling — the failure the other order's numbers make invisible.
+    """
+    def _ws(s: str) -> str:
+        return " ".join(s.split())
+
+    obj = _arms(artifact, "object")
+    pt = _arms(artifact, "point")
+    covs = ("0.9", "0.75", "0.5", "0.25", "0.1")
+
+    readme = _ws(README.read_text())
+    arch = _ws((ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md").read_text())
+    changelog = _ws(
+        (ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE-CHANGELOG.md").read_text()
+    )
+
+    # (1) the `:Point` ceiling pair, in all three documents, derived from the arm.
+    keep = f"{pt['tail@0.5']['resident_share'] * 100:.1f}"
+    find = f"{pt['tail@0.5']['found_deep'] * 100:.1f}"
+    # ⛔ The PHRASE, not the two numbers: `"41.0 %"` also occurs in the README's
+    # `71.3 % → 41.0 %` arrow, so asserting the figure alone is membership again —
+    # measured: `41.0 -> 40.0` here stayed GREEN at 50 passed until this changed.
+    for name, doc, phrase in (
+        ("README", readme, f"(keeping {keep} % finds {find} %)"),
+        ("§9.1", arch, f"keeping {keep} % of claims finds only {find} %"),
+        ("changelog", changelog, f"keeping {keep} % finds only {find} %"),
+    ):
+        assert phrase in doc, (name, phrase)
+    # …and the pair must be the one the derived headroom is computed from.
+    assert abs(
+        (pt["tail@0.5"]["resident_share"] - pt["tail@0.5"]["found_deep"]) * 100
+        - (float(keep) - float(find))
+    ) < 0.06
+
+    # (2) both `:Object` found@deep series, each bound to its own ORDER.
+    def series(order):
+        return " / ".join(f"{obj[f'{order}@{c}']['found_deep'] * 100:.1f}" for c in covs)
+
+    tail_s, rand_s = series("tail"), series("random")
+    assert tail_s != rand_s, (tail_s, rand_s)      # else the swap below is undetectable
+    for name, doc in (("README", readme), ("changelog", changelog)):
+        assert tail_s in doc, (name, "tail series absent", tail_s)
+        assert rand_s in doc, (name, "random series absent", rand_s)
+    # the README states the random series a second time, separately; it must be the
+    # random one there too, not the tail series repeated.
+    assert f"The `random` arms read {rand_s}" in readme
+    assert f"the `random` arms read their **own** shares {rand_s}" in changelog
