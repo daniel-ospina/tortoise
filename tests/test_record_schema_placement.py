@@ -81,6 +81,16 @@ MIGRATIONS = sorted(
         # be removed this way, and a read that understood only the ADD would keep
         # certifying a column the database no longer has.
         "20261110000001_record_point_retire_as_of_11827.sql",
+        # `#13220` — the FORWARD migration that gives `public.object` and
+        # `public.subject` an `embedding` column + a GENERATED `embedding_vec` +
+        # an HNSW index each (owner ruling 2026-11-17). ⛔ Leaving it out was a
+        # FALSE PASS this pin's own review measured: `parse_sql_columns()` reads
+        # only this tuple, so the two `("object"|"subject", "embedding")` rows in
+        # the carve-out parametrisation below kept asserting the columns were
+        # ABSENT while the migration created them — green, about a schema the
+        # record no longer has. Append-only history means a column ARRIVES this
+        # way, which is exactly the reason the ADD file above is listed.
+        "20261117000001_record_object_subject_embedding.sql",
     )
 )
 
@@ -296,6 +306,25 @@ def parse_sql_columns() -> dict[str, set[str]]:
     return tables
 
 
+def declared_derived_column_exceptions() -> set[tuple[str, str]]:
+    """`{(table, column)}` — DERIVED names a DECISION gave a column (`#13220`).
+
+    Read from `record_projection.DERIVED_COLUMNS`, never re-listed here: that
+    mapping is the ONE home of "a DERIVED value that has a column and still may
+    not be carried by a payload", and a second copy in a test is how a declaration
+    and the code it describes drift apart.
+
+    ⛔ A DECLARATION, NOT A BLANKET EXEMPTION: the guard beside
+    `test_derived_and_volatile_properties_have_no_column` asserts every name in
+    here is genuinely DERIVED in the placement table AND genuinely a column, so a
+    name added to the code side cannot quietly widen the carve-out, and one that
+    stopped being a column reds rather than lingering.
+    """
+    from tortoise.record_projection import DERIVED_COLUMNS
+
+    return {(table, col) for table, cols in DERIVED_COLUMNS.items() for col in cols}
+
+
 def check_placement(rows, columns_by_table) -> list[str]:
     """The checker, as a pure function, so the mutation test can drive it."""
     problems: list[str] = []
@@ -319,7 +348,8 @@ def check_placement(rows, columns_by_table) -> list[str]:
                     problems.append(
                         f"MISSING COLUMN: {table}.{col} — {section}.{prop} is PRIMARY{note}"
                     )
-            elif cls == "D" and col in cols:
+            elif cls == "D" and col in cols and (
+                    (table, col) not in declared_derived_column_exceptions()):
                 problems.append(
                     f"DERIVED/VOLATILE AS AUTHORITY: {table}.{col} — "
                     f"{section}.{prop} is {cls} (§17.5 carve-out)"
@@ -1762,6 +1792,38 @@ def test_derived_and_volatile_properties_have_no_column():
     assert not derived, "\n".join(derived)
 
 
+def test_every_declared_derived_column_exception_is_REAL_and_still_DERIVED():
+    """The guard that keeps the declared exception from becoming a loophole.
+
+    Two directions, both measured against this tree: every exception names a
+    column `parse_sql_columns()` can see (a stale entry would otherwise silently
+    excuse a name that is not even there), and every exception names a property
+    the placement table really classifies DERIVED (an entry for a PRIMARY or
+    absent row would be excusing the wrong thing). Without this, adding a name to
+    `record_projection.DERIVED_COLUMNS` would widen §17.5's carve-out with no
+    test anywhere saying so.
+    """
+    exceptions = declared_derived_column_exceptions()
+    assert exceptions == {("object", "embedding"), ("subject", "embedding")}, (
+        "the declared exception is `#13220`'s two fingerprint columns and nothing "
+        f"else — a third entry is a §17.5 reopen, not a test edit ({exceptions})")
+    columns = parse_sql_columns()
+    for table, col in sorted(exceptions):
+        assert col in columns.get(table, set()), (
+            f"{table}.{col} is declared as a columned DERIVED value but is not a "
+            "column at this head — the declaration has outlived the schema")
+    derived_pairs = {
+        (SECTION_TABLE[section], normalize(name))
+        for section, prop, cls in parse_placement()
+        if cls == "D"
+        for name in (expand_edge_property(prop) if section == "Edges" else [prop])
+    }
+    for table, col in sorted(exceptions):
+        assert (table, col) in derived_pairs, (
+            f"{table}.{col} is declared an exception to the §17.5 carve-out but "
+            "the placement table does not classify it DERIVED")
+
+
 def test_no_unresolved_rows():
     assert not [r for r in parse_placement() if r[2] == "U"]
 
@@ -1784,8 +1846,6 @@ def test_every_predicate_the_table_names_is_declared():
         ("point", "content_hash"),
         ("point", "version"),
         ("object", "status"),  # the projection-owned status CACHE
-        ("object", "embedding"),
-        ("subject", "embedding"),
         ("source", "reliability"),
         ("relation", "msg_alpha"),
         ("relation", "msg_beta"),
@@ -1800,6 +1860,28 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
     `confidence` is PRIMARY on `relation`, DERIVED on `point`/`event`)."""
     columns = parse_sql_columns()
     assert col not in columns.get(table, set()), f"{table}.{col} must not be a record column"
+
+
+@pytest.mark.parametrize("table,col", [("object", "embedding"), ("subject", "embedding")])
+def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col):
+    """The ONE declared exception to the carve-out — asserted, not exempted.
+
+    `#13220` / owner ruling 2026-11-17: these two labels gain the fingerprint
+    column (it must be INDEXED in Postgres, impossible without storing it), which
+    is why they were REMOVED from the "absent from the SQL" parametrisation above
+    rather than left there going quietly green. Both halves are pinned here, in
+    one place: the column EXISTS (**this is the assertion that would have caught
+    the propagation defect** — the migration arrived while the pin still said the
+    column could not), and the open property tail still REFUSES the name, so the
+    column is the projection's to write and never a payload's.
+    """
+    columns = parse_sql_columns()
+    assert col in columns.get(table, set()), (
+        f"{table}.{col} is the #13220 fingerprint column and must be a record column")
+    text = "\n".join(p.read_text(encoding="utf-8") for p in MIGRATIONS)
+    assert f"chk_{table}_props_no_derived" in text
+    assert f"'{col}'" in text, (
+        f"the props CHECK must still name '{col}' — the ban is not relaxed by the column")
 
 
 def test_props_checks_refuse_the_derived_names():

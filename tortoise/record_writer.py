@@ -1699,6 +1699,165 @@ def _release_pooled_connections() -> None:
                 conn.close()
 
 
+#: The record types whose node carries an embedding the JOURNAL does not, and the
+#: carried keys its text is composed from — the RECORD half of #13220.
+#:
+#: ⛔ THIS TABLE IS THE WHOLE RULE, AND IT IS A PARITY TABLE RATHER THAN A
+#: PREFERENCE. Each text expression is the one the GRAPH fold already composes for
+#: the same label, so the record's vector and the node's vector are the same
+#: function of the same datum:
+#:
+#:   * `ObjectRegistered` / `SubjectAdded` — `encode_for_row(name)`
+#:     (`projection/entities.py::_upsert_object`, `::_upsert_subject`, #7845);
+#:   * `EventRecorded` — `" ".join([subject, eventKind, object])`
+#:     (`projection/entities.py::_upsert_event`);
+#:   * `DocumentCreated` — `" ".join([title, content])`
+#:     (`projection/entities.py::_upsert_document`, which computes it
+#:     UNCONDITIONALLY on the legacy path).
+#:
+#: ⚠️ `SourceCreated` IS DELIBERATELY ABSENT, and the reason is measured rather
+#: than assumed: the graph holds **0** `:Source` embeddings (#13220, 2026-11-17)
+#: because `_upsert_source` computes none. A Document IS a Source (`D10`) and lives
+#: in the same `public.source` table under `document_kind IS NOT NULL`; deriving a
+#: vector for a plain `:Source` row would make the record's dense leg return
+#: sources the graph leg never had — the divergence in the OTHER direction.
+_RECORD_EMBEDDING_TEXT: dict[str, tuple[str, ...]] = {
+    "ObjectRegistered": ("name",),
+    "SubjectAdded": ("name",),
+    "EventRecorded": ("subject", "eventKind", "object"),
+    "DocumentCreated": ("title", "content"),
+}
+
+
+@dataclass(frozen=True)
+class _DerivedEmbedding:
+    """One record's derived column values, and WHY it has none when it has none.
+
+    The second field is not decoration: a derivation that silently produced
+    nothing is indistinguishable from "this label carries no vector", and the
+    two have different causes (`the embedder is not installed`, `the text is
+    blank`, `the graph suppresses this write`). It rides the DEBUG log —
+    `RecordWriter.write` logs it per record — and nothing downstream branches on
+    it. (An earlier draft of this sentence said "rides the debug log" while
+    nothing logged it at all; the log call is what makes the sentence true.)
+    """
+
+    columns: Mapping[str, Any] = field(default_factory=dict)
+    skipped: str = ""
+
+
+def derived_embedding_columns(
+    record: Mapping[str, Any],
+) -> _DerivedEmbedding:
+    """The embedding the RECORD computes for one journal line (#13220).
+
+    The journal never carried a vector for `object`/`subject` (the graph fold
+    derives it and writes it straight onto the node, #7845) and carries none for
+    `event`/`document` unless a caller supplied one, so `public.event.embedding`
+    and `public.source.embedding` sat EMPTY under a built HNSW index. This is the
+    writer that fills them, and it fills them in the RECORD's own row — never in
+    `public.journal_event.payload`, because that row is the record's copy of the
+    journal line and a value the record invented would make a record-sourced
+    rebuild and a JSONL rebuild disagree.
+
+    ⛔ THE THREE OUTCOMES, and each is the graph fold's own choice mirrored rather
+    than invented:
+
+    * a CARRIED vector is honoured where the graph honours one — `_upsert_event`
+      consumes `inner["embedding"]` when present, so an event that already has a
+      vector keeps it and none is computed;
+    * a carried vector is IGNORED where the graph ignores one —
+      `_upsert_object`/`_upsert_subject` call `encode_for_row(name)`
+      unconditionally, so the record derives from `name` and the derived value
+      wins (`_declared_mutations` merges it over the snapshot);
+    * nothing is derived where the graph suppresses the write — an `EventRecorded`
+      whose `eventKind` is `meeting` (cycle-16: no subject/object ⇒ a junk vector
+      and an unbounded network call on every meeting write/repair/replay) and a
+      `DocumentCreated` carrying `suppress_embedding` (epic #900 T3).
+
+    ⛔ NO SECOND EMBEDDING RULE. The seam is `embeddings.encode_for_row` — the SAME
+    `#5008`-gated submission step every graph write calls — and the width passed is
+    `None`.
+
+    ⛔ THE WIDTH SENTENCE IS STATED FROM THE CODE, NOT FROM INTENT, because an
+    earlier draft of it was BACKWARDS. `None` does NOT avoid dropping a vector the
+    graph holds: on an UNARMED store the graph passes
+    `FalkorProjection.required_embedding_dim` (`projection/entities.py`'s
+    `_upsert_object`/`_upsert_subject`) and `_degrade_to_width` DROPS a row of the
+    wrong width there, while `_degrade_to_width(…, None)` drops nothing — so on
+    such a store, with a non-384 model, the record KEEPS a vector the graph
+    dropped. That divergence is real, bounded, and the right answer here:
+
+    * on an ARMED store — the target state — the graph's own answer is ALREADY
+      `None` (`required_embedding_dim` answers `None` once the in-graph index is
+      retired, #11642), so `None` is the SAME answer the graph gives;
+    * the record has no projection and must not invent a store width (the §12.2a
+      "second rule set" defect);
+    * the width's real home is the CONVERTER — `public.record_embedding_vector`
+      NULLs anything that is not a 384-long all-numeric array, so a wider vector is
+      STORED in `embedding` and NULLed out of the GENERATED `embedding_vec`, i.e.
+      present-but-unindexed rather than silently absent.
+
+    Byte-identical populations on an UNARMED store would need
+    `required_embedding_dim` threaded through the write seam; that is a follow-up,
+    not something this docstring may claim.
+
+    Anything that cannot be derived returns NO columns: an uninstalled embedder
+    (`compute_embeddings` answers `None`, #4280), an encode that raised, blank
+    text (the graph skips it for the same reason — an empty string earned a junk
+    vector in the HNSW index, #331), and a non-string part in the composed text
+    (the graph's `" ".join` raises and its `except Exception` swallows the
+    vector — mirroring the refusal is what keeps the two stores' population
+    identical).
+    """
+    record_type = record.get("type")
+    keys = (_RECORD_EMBEDDING_TEXT.get(record_type)
+            if isinstance(record_type, str) else None)
+    if keys is None:
+        return _DerivedEmbedding(skipped="no embedding rule for this record type")
+    # A producer may NEST its node under its own envelope key: `ConversationMiner`
+    # emits `{type: "EventRecorded", event: {...}}` and the fold reads
+    # `event.get("event", event)`. The derivation must read the same carrier, or a
+    # mined event derives from an EMPTY text while its node gets a vector.
+    inner = record.get("event") if record_type == "EventRecorded" else None
+    payload: Mapping[str, Any] = inner if isinstance(inner, Mapping) else record
+
+    if record_type == "EventRecorded":
+        if payload.get("embedding") is not None:
+            return _DerivedEmbedding(skipped="the record carries a vector")
+        if payload.get("eventKind") == "meeting":
+            return _DerivedEmbedding(
+                skipped="a meeting event is suppressed by the graph fold")
+    elif record_type == "DocumentCreated":
+        if payload.get("suppress_embedding") or record.get("suppress_embedding"):
+            return _DerivedEmbedding(skipped="suppress_embedding is set")
+
+    parts: list[str] = []
+    for key in keys:
+        value = payload.get(key)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str):
+            return _DerivedEmbedding(
+                skipped=f"{key} is {type(value).__name__}, which the graph's "
+                        "text composition refuses")
+        parts.append(value)
+    text = " ".join(parts)
+    if not text.strip():
+        return _DerivedEmbedding(skipped="the composed text is blank")
+    try:
+        from .embeddings import encode_for_row
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable seam derives nothing
+        return _DerivedEmbedding(skipped="the embedding seam is unimportable")
+    try:
+        vec = encode_for_row(text, None)
+    except Exception:  # noqa: BLE001, RUF100 — every failure is "this row has no vector"
+        return _DerivedEmbedding(skipped="the encode raised")
+    if not vec:
+        return _DerivedEmbedding(skipped="the embedder produced no vector")
+    return _DerivedEmbedding(columns={"embedding": list(vec)})
+
+
 @dataclass
 class RecordWriter:
     """The record-write seam. Cheap to construct; holds no connection.
@@ -1831,10 +1990,39 @@ class RecordWriter:
             opened = target
 
         try:
+            # #13220 — the values the RECORD computes and the JOURNAL does not
+            # carry (`object`/`subject` fingerprints, an event's composed vector, a
+            # document's title+content vector). Computed HERE, at the write seam,
+            # and not in the plan builder: the derivation needs the embedder, and
+            # `record_projection`'s statement set is pinned DB-FREE and
+            # deterministically (`tests/test_11075_record_declared_type_contract.py`
+            # closes over every declared column, so a column bound only where a
+            # model happened to load would turn those pins environment-dependent).
+            #
+            # Threaded into the plan as a per-record-index map and NOT stamped into
+            # the records, because `_journal_row` writes this same record into
+            # `public.journal_event.payload` — the record's copy of the JOURNAL
+            # line. A derived value in it would make a record-sourced rebuild carry
+            # a vector a JSONL rebuild has to derive, i.e. two rebuild routes that
+            # can disagree after an embedder rotation.
+            derived: dict[int, Mapping[str, Any]] = {}
+            for index, record in enumerate(records):
+                won = derived_embedding_columns(record)
+                if won.columns:
+                    derived[index] = won.columns
+                elif won.skipped:
+                    # The `skipped` field's ONE consumer — without this line it was
+                    # dead and its own docstring was a false claim (review, P2):
+                    # "no vector" and "this label carries no vector" are different
+                    # facts, and only the reason tells them apart.
+                    _logger.debug(
+                        "record embedding not derived (%s): %s",
+                        won.skipped, record.get("type"))
             report = record_projection.replay(
                 records, target, org_id=org_id, graph_id=graph_id,
                 start_seq=first_seq, position=position, allocate=allocate,
                 carried_positions=carried_positions,
+                derived=derived or None,
             )
         except Exception as exc:
             # Totality (an undeclared/refused record type raises before the

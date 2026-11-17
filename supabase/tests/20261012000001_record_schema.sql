@@ -75,14 +75,52 @@ SELECT tests.assert(
                          'last_dreamed_at','content_hash','inherited_at','version',
                          '_nid','_graph_id','reason'))
                   OR (table_name = 'event' AND column_name = 'confidence')
-                  OR (table_name = 'object' AND column_name IN ('status','embedding'))
-                  OR (table_name = 'subject' AND column_name = 'embedding')
+                  -- ⛔ `embedding` LEFT THIS BAN FOR `object`/`subject` (#13220,
+                  -- owner ruling 2026-11-17) and `status` did NOT: the owner
+                  -- requires those two fingerprints INDEXED IN POSTGRES, which
+                  -- is impossible without storing them, while `status` stays a
+                  -- projection-owned cache with no column. The carve-out this
+                  -- assertion encodes is "a RECOMPUTED value never becomes
+                  -- record AUTHORITY"; `20261117000001_record_object_subject_
+                  -- embedding.sql` keeps that purpose (the column is derivable
+                  -- from the carried `name` through the ONE seam, the props
+                  -- refusal is untouched, `embedding_vec` stays GENERATED) and
+                  -- states the override in full. Pinned below.
+                  OR (table_name = 'object' AND column_name IN ('status'))
+                  OR (table_name = 'subject' AND column_name IN ('status'))
                   OR (table_name = 'source' AND column_name IN
                         ('reliability','reliability_components','reliability_derived_at',
                          'previous_content_hash','__run_id'))
                   OR (table_name = 'relation' AND column_name IN
                         ('msg_alpha','msg_beta','back_msg_alpha','back_msg_beta')))),
   '7968: no DERIVED/VOLATILE property has a column (§17.5 carve-out)');
+
+-- ── 2b. #13220: the two fingerprints ARE columns, and only the fingerprints ──
+-- The positive half of the override above: it is not enough that the ban was
+-- narrowed, the columns the ruling requires have to EXIST and be INDEXABLE.
+SELECT tests.assert(
+  (SELECT count(*) FROM information_schema.columns
+   WHERE table_schema = 'public'
+     AND ((table_name = 'object' AND column_name IN ('embedding','embedding_vec'))
+       OR (table_name = 'subject' AND column_name IN ('embedding','embedding_vec')))) = 4,
+  '13220: object/subject carry `embedding` + `embedding_vec` (owner ruling 2026-11-17)');
+
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_indexes
+   WHERE schemaname = 'public'
+     AND indexname IN ('idx_object_embedding_vec_hnsw','idx_subject_embedding_vec_hnsw')) = 2,
+  '13220: both labels carry their HNSW index — an unindexed column is the §14.3 V3 defect again');
+
+-- ⛔ The `props` refusal is NOT relaxed by the column: the fingerprint's home is
+-- the COLUMN, and a payload still cannot smuggle the name into the open tail.
+SELECT tests.assert(
+  EXISTS (SELECT 1 FROM pg_constraint
+          WHERE conname = 'chk_object_props_no_derived'
+            AND pg_get_constraintdef(oid) LIKE '%embedding%')
+  AND EXISTS (SELECT 1 FROM pg_constraint
+              WHERE conname = 'chk_subject_props_no_derived'
+                AND pg_get_constraintdef(oid) LIKE '%embedding%'),
+  '13220: `props` still refuses `embedding` on object/subject — splitting the home from the tail');
 
 SELECT tests.assert(
   EXISTS (SELECT 1 FROM information_schema.columns
