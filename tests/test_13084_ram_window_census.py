@@ -11,8 +11,11 @@ and a payload the engine rejects must leave that key intact (#13102 F2).
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:  # pragma: no cover
@@ -240,3 +243,33 @@ def test_a_decoded_payload_is_refused_before_anything_is_written(monkeypatch,
     verbs = [c[0] for c in client.calls]
     assert "RESTORE" not in verbs and "DEL" not in verbs, client.calls
     assert "not bytes" in report["cold_restore"]["error"]
+
+
+def test_the_help_text_does_not_advertise_the_DEL_the_probe_removed(capsys):
+    """`--help` is the operator's only description of the destructive step.
+
+    #13102 F2 removed the `DEL`, so the flag now does `DUMP` -> `RESTORE ...
+    REPLACE` against the LIVE key. A help string still reading `DUMP/DEL/RESTORE`
+    (the shape it had before `48d0f216b5` and still had at `2b702f3e6b`, until
+    `ca307943d4`) tells an operator the probe deletes the graph's key first — the
+    exact hazard the fix removed, and enough to stop a cautious operator running
+    a probe that is now safe. `ca307943d4` corrected the text without an
+    assertion, so nothing stopped it drifting back: the docstring at the top of
+    `_restore_probe`, the rendered JSON (`del: n/a`) and this help line are the
+    same claim, and pinning the text is what keeps the claim single-sourced.
+    """
+
+    with pytest.raises(SystemExit) as exc:
+        census.main(["--help"])
+    assert exc.value.code == 0
+    text = capsys.readouterr().out
+    # `--restore-probe` appears twice: in the usage synopsis and on the option's
+    # own help line. The CLAIM lives on the help line, so grade the joined text
+    # of every line that carries the flag.
+    probe_lines = [ln for ln in text.splitlines() if "--restore-probe" in ln]
+    assert len(probe_lines) >= 2, text
+    joined = " ".join(probe_lines)
+    assert "DUMP" in joined and "REPLACE" in joined, joined
+    # The word DEL is allowed ONLY as the negation ("NO DEL"); any other mention
+    # is the pre-fix claim that the probe deletes the graph's key.
+    assert "DEL" not in re.sub(r"no\s+del", "", joined, flags=re.IGNORECASE).upper(), joined
