@@ -7589,6 +7589,33 @@ def _reset_graph_size_worker() -> None:
     reset_daemon_worker(GRAPH_SIZE_WORKER_NAME)
 
 
+def _cache_write_targets() -> dict[str, int] | None:
+    """This process's live-write targets, without a module-level import cycle.
+
+    ``cache_leg`` imports ``monitoring`` (it counts through
+    ``record_cache_leg_failure``), so the registry's accessor is reached HERE
+    rather than at module scope. A failure to reach it is reported as ``None``
+    and never raised: ``metrics()`` is a health surface and must answer
+    (#2850 — no I/O, and no exception, on the health path).
+
+    ⛔ ``None``, never ``{}`` (#12943 review, P1): the registry is `{target:
+    writes}`, so an EMPTY map is the SUCCESS reading — "this process has taken
+    no live cache write" — and publishing one from the failure arm would report
+    the unobservable case as the healthy one, byte-identical to the deployment
+    shape this key was added to expose (``{}`` while writes went elsewhere).
+    ``/health`` already seeds ``None`` for exactly this reason
+    (``hosted_api._record_health``); both surfaces read the same registry, so
+    "could not be READ" is spelled the same way on both. ``monitoring.py``'s
+    own rule for a counter it cannot read is ``None``, not ``{}``.
+    """
+    try:
+        from .cache_leg import cache_write_targets
+
+        return cache_write_targets()
+    except Exception:  # noqa: BLE001, RUF100 — a health surface always answers
+        return None
+
+
 def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
     """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
     errors, journal_write_failures, audit_fallback_drops, telemetry_drops,
@@ -7805,6 +7832,17 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # the measured shape (record 2 objects/3 points, cache 0/0) — so the
         # derived store gets its own key rather than a reason on the record's.
         "cache_leg_failures": cache_leg_failure_counts(),
+        # ...and WHERE the live writes actually landed (#12943 reopening). The
+        # key above counts ONE configuration shape (record armed + embedded
+        # cache); this one is cause-agnostic — `{store|graph: writes}` for this
+        # process, so a cache URI naming another SERVER, a credential class
+        # opening another GRAPH, or a lane binding a tenant it did not resolve
+        # all show up as a target an operator can compare against the cache they
+        # are looking at. Without it, the deployment's own reading was `{}` (a
+        # shared cache) while its in-process writes went elsewhere.
+        # Imported locally: `cache_leg` imports this module, so a module-level
+        # import here would be a cycle.
+        "cache_write_targets": _cache_write_targets(),
         # #10515: `update_point`'s ABSENT arm refused a write that may have been
         # a LEGITIMATE revision (the journal knows the id, or the graph key could
         # not be confirmed). Zero on a healthy lane means "no revision was lost in

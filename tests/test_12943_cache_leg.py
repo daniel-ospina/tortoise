@@ -105,6 +105,13 @@ def _delta(before: dict[str, int]) -> dict[str, int]:
             for k in after if after.get(k, 0) != before.get(k, 0)}
 
 
+def _delta_from(before: dict[str, int],
+                after: dict[str, int]) -> dict[str, int]:
+    """The same delta between two already-taken snapshots."""
+    return {k: after.get(k, 0) - before.get(k, 0)
+            for k in after if after.get(k, 0) != before.get(k, 0)}
+
+
 def _arm_record(monkeypatch, dsn: str = "postgresql://u:p@127.0.0.1:1/db"):
     """Arm the record WITHOUT connecting — arming is presence-based.
 
@@ -224,7 +231,8 @@ def test_the_health_block_carries_the_key_when_the_SNAPSHOT_fails(monkeypatch):
     # …and the key is still THERE, null, alongside every sibling.
     for key in ("record_write_failures", "record_non_journal_skips",
                 "record_position_unproven", "record_writes_applied",
-                "record_last_write_at", "cache_leg_failures"):
+                "record_last_write_at", "cache_leg_failures",
+                "cache_write_targets"):
         assert key in block, f"{key} vanished on the failure arm: {sorted(block)}"
         assert block[key] is None, f"{key} = {block[key]!r} on the failure arm"
 
@@ -714,3 +722,228 @@ def _embedded_sdk(tmp_path):
     from tortoise.sdk import TortoiseSDK
 
     return TortoiseSDK(db_path=str(tmp_path / "cache.db"))
+
+
+# ── 5. the CLASS: the tenant and the cache graph can be two answers (#12943) ─
+#
+# The reopening's evidence was that #12950 covered a DOOR, not the class: the
+# rest of this file grades ONE configuration split (record armed + embedded
+# cache, decided at construction). Three other shapes put a write in the record
+# and not in the cache, and NONE of them is a construction property:
+#
+#   * a cache URI naming a DIFFERENT SERVER (a stale/other FalkorDB);
+#   * a credential class that opens a different GRAPH — MEASURED on a coherent
+#     deployment: an org-wide credential writes ``org_<org>`` (the default
+#     graph's namespace) while the record files the same write under
+#     ``org_<org>_<gid>`` (`docs/evidence/12943-cache-leg/door_matrix.py`, the
+#     ``data_sdk_orgwide`` row: record 1 object / cache 1 object in the OTHER
+#     graph / the tenant's own graph never created);
+#   * a lane that binds a tenant it did not resolve, onto an SDK opened for
+#     another graph.
+#
+# Two instruments close them, and both are graded here rather than narrated:
+# the TENANT↔GRAPH check (decidable, below) and the per-process live-write
+# TARGET registry (cause-agnostic, below it).
+
+
+def test_a_tenant_bound_to_another_graphs_cache_is_COUNTED(monkeypatch,
+                                                          tmp_path):
+    """THE FIX'S CORE ASSERTION for the reopening — RED before this change.
+
+    An SDK opened for ``org_<org>_g_A`` whose writer binds the tenant
+    ``(org, g_B)`` files the record row under ``g_B`` and the cache node under
+    ``g_A``. Both calls return success; `record-reconcile --cache-graph
+    org_<org>_g_B` then reports the whole tenant ``missing_in_cache`` while
+    every counter on ``metrics()`` reads healthy.
+
+    Constructed THROUGH ``_make_sdk`` (the hosted opener) so the assertion is
+    about the shipped door, not about the pure predicate.
+    """
+    from tortoise import hosted_api
+
+    _arm_record(monkeypatch)
+    _drop_uri(monkeypatch)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "cache.db"))
+    sdk = hosted_api._make_sdk(graph_name="org_orgA_g_A")
+    try:
+        # Baseline AFTER the construction: an embedded construction is its own
+        # counted event (#12950's `cache_not_shared`), and folding that into
+        # this assertion would let the binding check be dead and still pass.
+        before = _counts()
+        sdk._bind_record_tenant("orgA", "g_A")   # coherent: NOT counted
+        mid = _counts()
+        sdk._bind_record_tenant("orgA", "g_B")   # misrouted: COUNTED
+        after = _counts()
+    finally:
+        sdk.close()
+    assert _delta_from(before, mid) == {}, (
+        "the coherent binding must stay silent — a counter that fires on the "
+        "ordinary case is noise, not observability")
+    assert _delta_from(mid, after) == {cache_leg.TENANT_GRAPH_MISMATCH: 1}
+
+
+def test_the_tenant_graph_counter_is_on_the_metrics_surface(monkeypatch,
+                                                           tmp_path):
+    """``monitoring.metrics()`` is the MCP health tool's and the scrape's read."""
+    from tortoise import hosted_api
+
+    _arm_record(monkeypatch)
+    _drop_uri(monkeypatch)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "cache.db"))
+    sdk = hosted_api._make_sdk(graph_name="org_orgA_g_A")
+    try:
+        sdk._bind_record_tenant("orgA", "g_B")
+    finally:
+        sdk.close()
+    payload = monitoring.metrics()
+    assert payload["cache_leg_failures"][cache_leg.TENANT_GRAPH_MISMATCH] >= 1
+    # …and the RECORD's own counters stay clean: nothing was lost, the cache
+    # copy is in a graph the reconciler will not read. Reporting it as a record
+    # failure would send an operator to the wrong store (#4034's misattribution).
+    assert payload["record_write_failures"] == {}
+
+
+def test_the_warning_names_both_graphs_and_the_remedy(monkeypatch, tmp_path,
+                                                     caplog):
+    """Silence is the defect; a number alone does not say WHICH graph."""
+    from tortoise import hosted_api
+
+    _arm_record(monkeypatch)
+    _drop_uri(monkeypatch)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "cache.db"))
+    with caplog.at_level("WARNING", logger=cache_leg.__name__):
+        sdk = hosted_api._make_sdk(graph_name="org_orgA_g_A")
+        try:
+            sdk._bind_record_tenant("orgA", "g_B")
+        finally:
+            sdk.close()
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "org_orgA_g_A" in text and "g_B" in text
+    assert "record-reconcile" in text
+    assert "cache_leg_failures" in text
+
+
+def test_an_org_level_graph_name_is_SILENT_and_that_is_DELIBERATE(monkeypatch,
+                                                                 tmp_path):
+    """The residual, pinned so a widening has to change a test.
+
+    ``org_<org>`` is the DEFAULT graph's namespace, and on a coherent hosted
+    deployment an org-wide credential binds exactly this pair (the default
+    graph's id) to exactly this graph. A constructor cannot tell it from a lane
+    that bound a CUSTOM graph's id onto an org-level SDK — that needs the
+    control plane — so grading it would count every ordinary org-wide request
+    as a fault. The shape is left ungraded ON PURPOSE, and the target registry
+    below is what makes it visible instead of silently trusted.
+    """
+    from tortoise import hosted_api
+
+    _arm_record(monkeypatch)
+    _drop_uri(monkeypatch)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "cache.db"))
+    sdk = hosted_api._make_sdk(namespace="orgA")
+    try:
+        before = _counts()   # after construction — see the sibling test
+        assert sdk._cache_graph_name() == "org_orgA"
+        sdk._bind_record_tenant("orgA", "g_custom")
+    finally:
+        sdk.close()
+    assert _delta(before) == {}, "the org-level shape must not be counted here"
+
+
+def test_a_live_fold_records_the_target_it_landed_in():
+    """THE CAUSE-AGNOSTIC INSTRUMENT — `{store|graph: writes}` per process.
+
+    Needs a real shared cache (``TORTOISE_DB_URI``): the target is read off the
+    REAL projection's own endpoint, which is the point — a fingerprint derived
+    from the environment would agree with itself while the write went elsewhere.
+    """
+    if not (os.environ.get("TORTOISE_DB_URI") or "").strip():
+        pytest.skip("TORTOISE_DB_URI not set — no shared cache to fold into")
+    from tortoise import hosted_api
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    reset_cache_write_targets()
+    import uuid
+
+    cache_graph = f"org_orgA_g_{uuid.uuid4().hex[:8]}"
+    sdk = hosted_api._make_sdk(graph_name=cache_graph)
+    try:
+        sdk.create_object("target-alpha", objectKind="goal")
+    finally:
+        sdk.close()
+    targets = cache_write_targets()
+    matching = [k for k in targets if k.endswith(f"|{cache_graph}")]
+    assert len(matching) == 1, targets
+    assert matching[0].startswith("server://"), (
+        f"the target must name the STORE, not only the graph: {matching[0]!r}")
+    assert targets[matching[0]] == 1, targets
+    # ⛔ THE PUBLICATION IS ASSERTED TOO (review cycle 1, finding 1). A registry
+    # nobody can read is not observability, and both surfaces are the ones an
+    # operator uses: `metrics()` for a scrape, `_record_health()` for the hosted
+    # app (which has no `/metrics` route). Without these two lines either
+    # publication can be deleted with the suite fully green — the same gap the
+    # sibling `cache_leg_failures` key closes at `test_the_counter_is_on_the_
+    # metrics_surface` / `test_the_health_block_carries_it_too`.
+    from tortoise import hosted_api
+
+    published = monitoring.metrics()["cache_write_targets"]
+    assert published.get(matching[0]) == 1, published
+    block = hosted_api._record_health()
+    assert block["cache_write_targets"] == published
+
+
+def test_a_replay_is_NOT_recorded_as_a_live_write(monkeypatch, tmp_path):
+    """A rebuild writes the same target on purpose.
+
+    Counting it would let a repair make the live picture look healthier than the
+    traffic it repaired — the inverse of what the instrument is for. Driven
+    through the SHIPPED replay engine (`rebuild_all`) over a real journal, not a
+    hand-opened scope.
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+    from tortoise.log import EventLog
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events.jsonl"
+    log = EventLog(str(events))
+    log.append({"event_id": "ev-replay-1", "type": "ObjectRegistered",
+                "ts": "2026-01-01T00:00:00+00:00",
+                "payload": {"id": "obj-replay-1", "name": "replayed",
+                            "objectKind": "goal"}})
+    reset_cache_write_targets()
+    sdk = TortoiseSDK(db_path=str(tmp_path / "cache.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.rebuild(log, confirm_destructive=True)
+    finally:
+        sdk.close()
+    assert cache_write_targets() == {}, (
+        "a replay must not be counted as a live write — got "
+        f"{cache_write_targets()!r}")
+
+
+def test_an_UNREADABLE_target_registry_is_NULL_and_never_an_empty_map(monkeypatch):
+    """The failure arm must not impersonate the success arm (#12943 review P1).
+
+    ``metrics()['cache_write_targets']`` is ``{target: writes}``, so ``{}`` is
+    the SUCCESS reading — "this process has taken no live cache write".
+    Publishing an empty map from the ``except`` arm makes an agent that cannot
+    READ the registry report byte-identically to the deployment shape this key
+    was added to expose (measured: ``{}`` while its in-process writes went
+    elsewhere), which is the illusion the whole change exists to end.
+    ``/health`` already seeds ``None`` on that arm; both surfaces read the same
+    registry, so both must spell "unreadable" the same way.
+    """
+    def _boom(*a, **k):
+        raise RuntimeError("target registry unreadable")
+
+    # Patched on `tortoise.cache_leg`, not through `monitoring`:
+    # `_cache_write_targets` imports the accessor INSIDE the function body, so
+    # the local import re-reads this attribute at call time.
+    monkeypatch.setattr("tortoise.cache_leg.cache_write_targets", _boom)
+    payload = monitoring.metrics()
+    assert "cache_write_targets" in payload, sorted(payload)
+    assert payload["cache_write_targets"] is None, (
+        "an unreadable registry must be null, never {} — {} means 'this "
+        f"process took no live write' — got {payload['cache_write_targets']!r}")
