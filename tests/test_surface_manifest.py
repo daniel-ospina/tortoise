@@ -425,41 +425,57 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # so every paragraph is FLATTENED before anything is read: emphasis/backtick characters are
     # stripped and all whitespace (including hard wraps) collapsed to single spaces. That single
     # step subsumes every spelling above, so this pin can no longer trail the next one.
-    # WHAT THE PIN READS, EXACTLY: within a paragraph, every statement whose SUBJECT is the
-    # (retired-forward) population must equal the manifest's retired count, and every
-    # `N of N verified` in the CLAUSE that contains that number must agree with it. Two boundaries
-    # are written as classes, not as spellings (#13052 review at 4d9c8c70, P3 each): the CLAUSE is
-    # cut at any sentence terminator FOLLOWED BY closing quotes/brackets if present (`"measurement."`
-    # and `measurement.)` end a sentence just as `measurement.` does), and the SUBJECT is read, so a
-    # present-tense statement about a DIFFERENT population ("The served population is 108." — the
-    # same document states that figure two paragraphs up) is not mistaken for this one.
+    # WHAT THE PIN READS, EXACTLY: within a paragraph, EVERY statement of the form
+    # `<subject> population is [now] <number>` is checked against the count its SUBJECT names —
+    # `retired`/unqualified -> the retired rows (what this pin is here for), `served` ->
+    # live + retired, `advertised`/`live` -> counts.tools, `sdk` -> counts.sdk_public_methods — and
+    # every `N of N verified` in the CLAUSE that contains that number must agree with it. Two
+    # boundaries are written as classes, not as spellings (#13052 review at 4d9c8c70 and 71afedb3,
+    # P3 each): the CLAUSE is cut at any sentence terminator FOLLOWED BY closing quotes/brackets if
+    # present (`"measurement."` and `measurement.)` end a sentence just as `measurement.` does),
+    # and the SUBJECT is read and COMPARED, not merely skipped — a skipped statement is an unchecked
+    # number, which is a false PASS on a figure this same test derives two blocks above.
     # OUT OF REACH, by construction and disclosed here: a paraphrase that never says `population
-    # is`; a figure stated only in a FOLLOWING sentence; a reworded sentence whose new wording drops
-    # the number from that clause; and a statement about a population whose subject does not name
-    # itself `served`/`advertised`/`live`/`sdk` (those four are the ones the doc uses; another word
-    # for a different population would be read as this one). The durable closure for any of those is
-    # to stop restating the count in free prose — not to widen this matcher again; a reworded
-    # statement must update this pin in the same change.
+    # is`; a figure stated only in a FOLLOWING sentence; and a reworded sentence whose new wording
+    # drops the number from that clause. The durable closure for any of those is to stop restating
+    # the count in free prose — not to widen this matcher again; a reworded statement must update
+    # this pin in the same change.
     clause_break = re.compile(r"[.!?;:][\"')\]]*\s|\s\u2014\s")
-    other_populations = ("served", "advertised", "live surface", "sdk")
+    #: subject word -> the count the manifest derives for THAT population. `endswith` is enough for
+    #: the two-word form too: `live surface` ends in `live` (#13052 review at 71afedb3, P3 — the
+    #: tuple said `live surface` while the comment said `live`, and a `live` subject was read as a
+    #: retired claim).
+    population_subjects = (
+        ("served", "served", live + retired),
+        ("advertised", "advertised", live),
+        ("live", "live", live),
+        ("sdk", "sdk", _manifest()["counts"]["sdk_public_methods"]),
+    )
     stated_now = []
     for paragraph in canonical.split("\n\n"):
         flat = re.sub(r"\s+", " ", re.sub(r"[*`_]", "", paragraph))
         breaks = [m.end() for m in clause_break.finditer(flat)]
         for statement in re.finditer(r"population is (?:now )?(\d+)", flat, re.I):
-            subject = flat[max(0, statement.start() - 40): statement.start()].lower()
-            if subject.rstrip().endswith(other_populations):
-                continue  # a different population's count, not this pin's subject
             stated = int(statement.group(1))
-            stated_now.append(stated)
+            subject = flat[max(0, statement.start() - 40): statement.start()].lower().rstrip()
+            named = next(((suffix, word, value) for suffix, word, value in population_subjects
+                          if subject.endswith(suffix)), None)
+            if named is None:
+                expected, word = retired, "retired"
+                stated_now.append(stated)
+            else:
+                _suffix, word, expected = named
+            assert stated == expected, (
+                f"canonical-mcp-tools.md says the {word} population is {stated}; the manifest "
+                f"derives {expected} for it ({retired} retired rows, {live} advertised tools)"
+            )
             head = max([b for b in breaks if b <= statement.start()], default=0)
             tail = min([b for b in breaks if b >= statement.end()], default=len(flat))
             for of_verified, verified in re.findall(r"(\d+) of (\d+) verified", flat[head:tail], re.I):
                 assert (int(of_verified), int(verified)) == (stated, stated), (
                     f"canonical-mcp-tools.md's clause around `{statement.group(0)!r}` says the "
-                    f"retired population is {stated} and then {of_verified} of {verified} "
-                    f"verified; the two halves of that sentence disagree, and the manifest's "
-                    f"retired rows number {retired}")
+                    f"{word} population is {stated} and then {of_verified} of {verified} "
+                    f"verified; the two halves of that sentence disagree")
     assert stated_now, (
         "canonical-mcp-tools.md no longer states the retired population in present tense at "
         "all (`population is [now] <N>`, any markup) — the amendment's SECOND statement of "
