@@ -187,15 +187,18 @@ and the two counts are not reconcilable as one directory observed twice:
 | lane A, `~03:22Z` and again `~03:35Z` | **14** | 2026-11-04 … 2026-11-17 | `2026-11-17T00:02:44.189Z` | `2026-11-17T00:02:44.189Z` |
 | lane B, `03:10Z` / `03:23Z` / `03:25Z` / `03:26Z` / `03:29Z` | **22** | 2026-10-27 … 2026-11-17 | `2026-11-17T00:07:44.424Z` | `2026-11-17T00:07:44.424Z` |
 
-**Why these cannot be one directory, on either lane's own reading:** a directory's `mtime` moves on
-every create, unlink and rename, so each row is *internally* consistent — and the newest member's
-birth time differs between the rows (`00:02:44.189Z` vs `00:07:44.424Z`) on a filesystem where a birth
-time cannot be rewritten from userspace (`/dev/root`, ext4), so the two rows are different inodes, i.e.
-**two directories or two mount views, not one directory at two times**. Which reading a shell sees is a
-property of that shell, not of the path: each lane reproduces **its own** row and neither reproduces
-the other's — from this checkout's shell (`HOME=/home/cmux`, `CELL_HOME=/home/cmux`) the count is
-**14** and the newest member's birth is `00:02:44.189Z`, identical to the directory `mtime`; the `22`
-and the `00:07:44.424Z` birth were reported from another lane's shell and are not reproducible here.
+**Why these are not one directory observed twice — and the warrant is the NAMES, not the newest inode.**
+A directory that merely gained files would have two different newest members at two times, so a
+differing newest-member birth is the *signature of growth* and proves nothing on its own. What rules
+growth out is the middle of the ranges: the eight members only the 22-reading lists are
+`2026-10-27 … 2026-11-03`, each born on its own calendar date (`stat -c '%w'` →
+`2026-10-27 00:02:00.760Z`, `2026-10-28 03:24:21.354Z`, … `2026-11-03 00:01:27.845Z`), i.e. **before the
+14-reading was taken** — growth would require them to have appeared between the two observations, and
+each row's directory `mtime` equals its own newest member's birth (to the nanosecond), so neither row
+has an entry created after its own reading. Two internally-consistent readings whose member sets differ
+in files that were already old at the earlier reading are therefore **two directories or two mount
+views**, not one directory at two times. Which reading a shell sees is a property of that shell: each
+lane reproduces its own row and neither reproduces the other's.
 **This brief therefore does not claim to know which view produced the artifacts' 14 — that question is
 open, not settled in either direction**, and the only safe statement about it is the one both rows
 agree on: 14 is what the artifacts recorded.
