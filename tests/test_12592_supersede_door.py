@@ -74,6 +74,17 @@ What this suite pins (each row names the mutation that reds it):
 * #12825's allowance is untouched: ``status='live'`` WITH both carriers cleared
   lifts a superseded row; a status-ONLY lift is still refused. Mutation: make
   the new guard fire on any status -> the un-supersede case reds.
+* THE GUARD ADJUDICATES ONLY THE WORD THE CALL **WRITES**, never the stored one
+  (#12914 review P2, completed at F1). With no ``status`` in the call there is no
+  transition to ask about (#12882 F2), and a bare ``supersededBy=None`` stays
+  ACCEPTED with OR WITHOUT a temporal prop riding along — the verdict may not
+  flip on an unrelated field. Mutation: restore a stored-word fallback —
+  unconditionally
+  (``test_a_no_status_update_on_a_LEGACY_successorless_row_is_not_refused`` reds)
+  or keyed on ``carrier_cleared``
+  (``test_a_bare_carrier_clear_is_still_ACCEPTED_when_a_temporal_prop_rides_along``
+  reds, 4 cases). Both spellings were measured wrong; the pins are kept apart so
+  neither can come back by accident.
 * The #12907 IMPOSTOR class, at all FOUR sites this door reads a caller value
   through a ``str`` test: ``update_knowledge(status=<impostor>)`` still answers the
   CARRIER ``ValueError``; ``supersede_knowledge(<live>, <impostor>)`` still answers
@@ -734,6 +745,60 @@ def test_a_bare_carrier_clear_stays_ACCEPTED_and_leaves_the_row_dead(sdk, label)
     row = _row(sdk, label, node)
     assert row[0] == "superseded", (
         f"a bare carrier clear must leave the row dead (#12882 F2): {row}")
+    assert row[1] is None, row
+
+
+@pytest.mark.parametrize("label", ["Object", "Subject"])
+@pytest.mark.parametrize("window", ["validTo", "expiredAt"])
+def test_a_bare_carrier_clear_is_still_ACCEPTED_when_a_temporal_prop_rides_along(
+        sdk, label, window):
+    """The verdict must not flip on an UNRELATED field (#12914 review F1, P2).
+
+    The guard is only *entered* when the call carries a member of
+    ``_GUARDED_LIFECYCLE_PROPS``, and that set is ``status`` plus the temporal
+    restamp props — ``supersededBy`` alone is NOT one. So a bare clear took the
+    guard's early exits, while the SAME clear with any temporal prop rode INTO
+    the guard, where the per-row verdict read the STORED word as the effective
+    word and refused it.
+
+    Measured on the reviewed head (`9cef4d7bd0`) on a legacy successorless row
+    stored ``('superseded', NULL)`` — the shape ``tests/test_11826``'s audit
+    exists to find — and compared against ``origin/main``'s tree:
+
+        update_knowledge(id, supersededBy=None)                  ACCEPTED / ACCEPTED
+        update_knowledge(id, supersededBy=None, validTo='…')     ACCEPTED / **REFUSED**
+
+    So the refusal named a ``status='superseded'`` the caller never sent, on a
+    write that changes no lifecycle fact, and it was a REGRESSION against
+    ``main``. It also breaks the read-modify-write the PR says is untouched: a
+    tenant PUT echoing a legacy row (the word, no carrier) beside a window edit.
+
+    Mutation: restore the stored-word fallback —
+    ``effective = word_after or (stored_status if carrier_cleared else None)``
+    -> all four cases below red with the "CLEARS ``supersededBy``" refusal, and
+    ``main``'s own answer is lost. Restoring it UNCONDITIONALLY reds the
+    temporal-only case in
+    ``test_a_no_status_update_on_a_LEGACY_successorless_row_is_not_refused`` —
+    the two shapes are pinned apart on purpose, because the fallback was wrong
+    in both spellings.
+    """
+    node = _make(sdk, label, f"ridealong-{window}-{label.lower()}")
+    # The legacy shape: the word with NO carrier (written raw — the door under
+    # test can no longer mint it, which is what makes this population honest).
+    sdk._get_proj().g.query(
+        f"MATCH (n:{label} {{id:$id}}) SET n.status='superseded', "
+        "n.supersededBy=NULL",
+        params={"id": node},
+    )
+    assert _row(sdk, label, node)[0] == "superseded"
+
+    # The clear, with a temporal prop riding along: no status is named, so there
+    # is no transition to ask about (#12882 F2). It must land.
+    sdk.update_knowledge(node, **{"supersededBy": None, window: "2026-01-02T00:00:00Z"})
+
+    row = _row(sdk, label, node)
+    assert row[0] == "superseded", (
+        f"a carrier clear beside a window must leave the row dead: {row}")
     assert row[1] is None, row
 
 
@@ -1667,7 +1732,7 @@ class _StrSubLyingRender(str):
 
     render_as = ""
 
-    def replace(self, sub, rep, *args):  # noqa: D401 - the driver's own call
+    def replace(self, sub, rep, *args):  # the driver's own call
         return self.render_as
 
     __hash__ = str.__hash__

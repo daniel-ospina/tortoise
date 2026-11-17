@@ -49915,21 +49915,33 @@ class TortoiseSDK:
             dead_words = _SUPERSESSION_DEAD_SETS[label]
             failed = False
             for _id, stored_status, stored_succ in rows:
-                # ⛔ ADJUDICATE ONLY WHAT THE CALL **WRITES** (#12914 review P2).
-                # The stored word is read here ONLY as the state a CARRIER CLEAR
-                # would leave behind ("a clear in the same breath as the word
-                # splits the pair"). Falling back to it unconditionally refused
-                # calls that name neither: measured on the reviewed head,
-                # `update_knowledge(<legacy successorless :Object>, expiredAt=…)`
-                # and the same with `validTo=…` raised "refused
-                # status='superseded' … with no successor" — naming a field the
-                # caller never sent — on exactly the population `tests/
-                # test_11826`'s audit exists to repair, contradicting this PR's
-                # own statement that a graph already holding the shape is
-                # untouched. A no-status, no-clear call changes no lifecycle
-                # word, so it has nothing to adjudicate.
-                effective = word_after or (stored_status if carrier_cleared
-                                           else None)
+                # ⛔ ADJUDICATE ONLY WHAT THE CALL **WRITES** — and that is the
+                # WORD, never the stored one (#12914 review P2, completed P2/F1).
+                # `word_after` is non-`None` only when the call itself writes
+                # `status='superseded'` (every other status returns above), so it
+                # IS the call's own word and the WHOLE of this question. A
+                # stored-word fallback was tried twice and was wrong both ways:
+                #
+                #   * UNCONDITIONAL — `update_knowledge(<legacy successorless
+                #     :Object>, expiredAt=…)` and the same with `validTo=…` raised
+                #     "refused status='superseded' … with no successor", naming a
+                #     field the caller never sent, on exactly the population
+                #     `tests/test_11826`'s audit exists to repair.
+                #   * KEYED ON `carrier_cleared` — the SAME refusal reappeared for
+                #     a bare clear the moment a temporal prop rode along (measured,
+                #     #12914 review F1): `update_knowledge(<legacy row>,
+                #     supersededBy=None)` was ACCEPTED, and that identical clear
+                #     with `validTo='…'` was REFUSED — while `main` accepts it. The
+                #     verdict flipped on an UNRELATED field.
+                #
+                # #12882 F2 settles it: "with no status named there is no
+                # transition to ask about". A temporal prop names no status either,
+                # so it cannot make one exist. `carrier_cleared` therefore keeps
+                # exactly ONE job: disqualifying the stored successor as a name
+                # (`names_after`, below) — a call that clears the carrier names
+                # nobody, whatever the pre-write row held. That is what keeps
+                # `status='superseded', supersededBy=None` refused.
+                effective = word_after
                 if effective == _SUPERSEDED_STATUS:
                     # The carrier IS the property for this family, so a call that
                     # clears it leaves the row naming nobody whatever the stored
