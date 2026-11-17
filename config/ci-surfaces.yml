@@ -1017,18 +1017,6 @@ surfaces:
   # one-surface registration drops this file on one of the two halves' own
   # diffs — the #1349/#3332 silent-drop class the manifest exists for.
   - test_10893_read_stage_attribution.py
-  # #13034 (PR #13075, merged at a09a0b3840): the currency rule reads BOTH axes and five
-  # readers stop answering it themselves. ⛔ REGISTERED LATE, and this row is the main-red
-  # repair: the file landed on main with NO manifest row, so `ci_selection.py --integrity`
-  # went red ('manifest drift') and `python-ci`'s manifest-integrity leg + surface-guard
-  # went with it — an unlisted file is a #1262 red AND runs in no leg (#1349/#2938).
-  # `core` because its subjects are `tortoise/live.py` (the predicate) and
-  # `tortoise/pipeline.py` (the position axis) — both EXACT `core` selections (measured:
-  # `--changed-files tortoise/live.py` -> surfaces: ['core']); its `tortoise/sdk.py` /
-  # `tortoise/mcp_server.py` imports select the FULL matrix, so no arm is dropped there.
-  # Hermetic per its own header: no docker, no graph, no network (the consumers are driven
-  # with fakes) — if that is wrong the reading will show it, not this note.
-  - test_13034_currency_rule_reads_position.py
   # surface, so a `-32009` refusal is observable in-process instead of only in
   # the best-effort analytics sink. Dual-registered for the same reason as its
   # sibling above and as the health guards below: the emit sites and the
@@ -5118,6 +5106,18 @@ surfaces:
   # CI has no safety suite.
   - test_container_reaper.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
+  # #13034 (PR #13075, merged at a09a0b3840): the currency rule reads BOTH axes and five
+  # readers stop answering it themselves. ⛔ REGISTERED LATE, and this row is the main-red
+  # repair: the file landed on main with NO manifest row, so `ci_selection.py --integrity`
+  # went red ('manifest drift') and `python-ci`'s manifest-integrity leg + surface-guard
+  # went with it — an unlisted file is a #1262 red AND runs in no leg (#1349/#2938).
+  # `core` because its subjects are `tortoise/live.py` (the predicate) and
+  # `tortoise/pipeline.py` (the position axis) — both EXACT `core` selections (measured:
+  # `--changed-files tortoise/live.py` -> surfaces: ['core']); its `tortoise/sdk.py` /
+  # `tortoise/mcp_server.py` imports select the FULL matrix, so no arm is dropped there.
+  # Hermetic per its own header: no docker, no graph, no network (the consumers are driven
+  # with fakes) — if that is wrong the reading will show it, not this note.
+  - test_13034_currency_rule_reads_position.py
   - test_10893_read_stage_attribution.py  # #10893: the stage attribution a breach publishes — `read_stages.py` matches no SOURCE_PATTERN (→ `core`), the seams are in `hosted_api.py`/`mcp_server.py` (→ `api`) and the marks are in `sdk.py` (dual: api)
   - test_10602_wait_bound_breach_visible.py  # #10602: the breach channel itself — `wait_bound_breaches` on `/health`, the counter family in `tortoise/monitoring.py` (which selects `core`) plus the two emit sites in `hosted_api.py`/`mcp_server.py` (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
