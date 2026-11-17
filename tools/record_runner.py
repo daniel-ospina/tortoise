@@ -918,26 +918,39 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
 
 
 def completeness_lines(j: dict[str, Any]) -> list[str]:
-    """The `complete: UNKNOWN` sentence, chosen by WHY the claim was withdrawn.
+    """The `complete: UNKNOWN` sentence, chosen by WHAT THE READ ACTUALLY MEASURED.
 
-    ⛔ `completeness_unknown` is `journal.salvage` (#13272's ruling), so the same
-    predicate covers three very different reads, and one sentence for all three
-    was false in two: a PRISTINE `--salvage` read was told *"this read SKIPPED
-    damaged input"* while the payload's own `corrupt_lines: 0, torn_tails: 0` (and
-    the absent damage line above it) denied it. The claim is withdrawn either way —
-    that is the ruling — but the REASON is the read's to state:
+    ⛔ ONE SENTENCE PER REASON, AND THE COUNTERS DECIDE (review P2/P3, #13275).
+    `completeness_unknown` is `journal.salvage` (#13272's ruling), so this line fires
+    for reads that skipped nothing, and a single sentence was false in three of them:
 
-    * no counters at all → the layout cannot account for input;
-    * a counter above zero → the read SKIPPED damaged input (or dropped a tail);
-    * counters clean → the mode alone withdrew the claim, and the sentence says so
-      instead of inventing damage.
+      * a PRISTINE `--salvage` read was told *"this read SKIPPED damaged input"* while
+        the same payload said `corrupt_lines: 0, torn_tails: 0`;
+      * a TORN-TAIL-only `--salvage` read was told the same, one line under a damage
+        line that says a tail fragment shifts NOTHING (positions stay unshifted, so
+        `fully_consumed: true` is correct for that input read strict — see
+        `test_a_TORN_TAIL_alone_does_NOT_withdraw_the_completion_claim`);
+      * a PARTIAL report (`corrupt=3, torn=None`) was told the reader "reports no
+        damage counters" over a payload carrying `corrupt_lines: 3`.
+
+    So the counters are consulted in the order that keeps every sentence true: a
+    MEASURED skip first, then a MEASURED tail, then "nothing is known" only when
+    nothing was measured, and the mode alone last. The claim is withheld in all four
+    cases — that is the ruling — but the sentence says WHY, and never attributes the
+    withdrawal to damage the run can see it did not take.
     """
-    if j["corrupt_lines"] is None or j["torn_tails"] is None:
-        return ["complete: UNKNOWN — this layout's reader reports no damage "
-                "counters, so it cannot account for input"]
-    if j["corrupt_lines"] or j["torn_tails"]:
+    corrupt, torn = j["corrupt_lines"], j["torn_tails"]
+    if corrupt:
         return ["complete: UNKNOWN — this read SKIPPED damaged input, so it is "
                 "not a completeness claim"]
+    if torn:
+        return ["complete: UNKNOWN — this read dropped a torn tail fragment, which "
+                "shifts no position but can lose a removal record (#3316/#13280), "
+                "and this read was taken with --salvage; a salvage read's "
+                "completeness is not a claim (#13272)"]
+    if corrupt is None or torn is None:
+        return ["complete: UNKNOWN — this layout's reader reports no damage "
+                "counters, so it cannot account for input"]
     return ["complete: UNKNOWN — this read was taken with --salvage, and a salvage "
             "read's completeness is not a claim; the counters above measured no "
             "damage (#13272)"]

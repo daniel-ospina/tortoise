@@ -1245,9 +1245,17 @@ def test_the_unknown_completion_sentence_names_the_REASON_it_was_withdrawn(
              "SKIPPED damaged input"),
             # a read that DID skip a line
             ((1, 0), "SKIPPED damaged input", "counters above measured no damage"),
+            # ⛔ a TORN TAIL is the class `_journal_damage_lines` says shifts NOTHING
+            # (review P2, #13275): attributing the withdrawal to a "SKIP" would
+            # contradict the damage line printed directly above it.
+            ((0, 1), "dropped a torn tail fragment", "SKIPPED damaged input"),
             # a layout whose reader cannot report: not "skipped", just unmeasured
             ((None, None), "reports no damage counters",
-             "SKIPPED damaged input")):
+             "SKIPPED damaged input"),
+            # ⛔ a PARTIAL report (`corrupt=3, torn=None`) must not claim the reader
+            # "reports no counters" over a payload carrying `corrupt_lines: 3`
+            # (review P3, #13275): the measured skip wins.
+            ((3, None), "SKIPPED damaged input", "reports no damage counters")):
         corrupt, torn = counters
         journal = Journal(path=FIXTURE,
                           records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
