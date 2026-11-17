@@ -1046,14 +1046,17 @@ def log_result(result: RecordReconcileResult,
     verdict = result.verdict()
     line = f"{line} verdict={verdict}"
     if result.journal is not None and result.journal.unprojected is None:
-        # #13331 review F3/B — the leg RAN and the journal could not be
-        # counted. Saying nothing here is the failure the whole leg exists to
-        # prevent: the default line would be the unqualified `record == cache`
-        # with `verdict=unanswerable` trailing it, and `record-reconcile
-        # --journal <typo>` would read as a clean pass.
-        line += (" [journal: the declared journal could NOT be counted, so the "
-                 "leg is UNKNOWN — not clean; check the path exists and holds "
-                 "the records a replay reads, then re-run]")
+        # #13331 review F3/B — the leg RAN and the journal answered nothing it
+        # could be trusted for. Saying nothing here is the failure the whole leg
+        # exists to prevent: the default line would be the unqualified
+        # `record == cache` with `verdict=unanswerable` trailing it, and
+        # `record-reconcile --journal <typo>` would read as a clean pass. The
+        # reason is the COVERAGE's own (`unprojected_unknown_reason`), so the
+        # unreadable-journal and the empty-journal-over-a-populated-record
+        # shapes are explained in one place and cannot disagree (#13345 P2).
+        line += (f" [journal: {result.journal.unprojected_unknown_reason}; "
+                 "the leg is UNKNOWN, not clean — check that the declared path "
+                 "names the journal that fed this record, then re-run]")
     elif result.journal is not None and result.unprojected_journal:
         # #13331 — the THIRD leg, rendered beside the cache comparison so a reader
         # cannot mistake a coherent cache for a coherent pair. The repair is named

@@ -800,6 +800,12 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
     # `present > 0` guards the shape where the journal itself is empty (a brand
     # new tenant whose first live write has not landed): there is nothing to
     # serve, and the graph branch is the correct answer.
+    # ⛔ `unprojected` answers `None` — never `0` — when the reading is not a
+    # measurement, and the JOURNAL-AHEAD-IMPOSSIBLE shape is one of them: a
+    # journal enumerating NO records cannot have fed a record holding rows, so
+    # `max(0 - 0, 0)` there is a detectable contradiction, and `== 0` below
+    # would arm the dense leg on the strength of it (JournalCoverage
+    # .unprojected_unknown_reason, #13371/#13345 P2).
     return cov.unprojected == 0 and cov.present > 0
 
 

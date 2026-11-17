@@ -7719,15 +7719,45 @@ class JournalCoverage:
     gap_measured: bool = True
 
     @property
+    def unprojected_unknown_reason(self) -> str | None:
+        """WHY :attr:`unprojected` is unknown, or ``None`` when it is measured.
+
+        ONE definition of "this leg cannot answer", so every surface that has to
+        explain a ``None`` (the reconcile line, `journal_ready`'s gate) quotes
+        this instead of re-deriving the test — two copies of the condition would
+        drift, and the copy that drifts is the one that reports a clean pass.
+
+        Two shapes, and the second is a CONTRADICTION rather than an absence:
+        a journal that ENUMERATES NO RECORDS cannot be the journal that fed a
+        record holding rows, so ``max(0 - 0, 0) == 0`` would report a measured
+        zero over a file that cannot have produced what is in the record — the
+        detectable contradiction `#13371` names, read as green. The arithmetic
+        predates #13331; what makes it dangerous here is that this PR is its
+        second and third consumer (the reconcile verdict at
+        `__main__._cmd_record_reconcile`, and the dense leg's readiness gate at
+        `record_vector._measure_readiness`), so it is refused at the source.
+        """
+        if self.enumerated is None:
+            return "the journal could NOT be counted"
+        if int(self.enumerated) == 0 and int(self.present) > 0:
+            return (f"the journal enumerates NO records while the record holds "
+                    f"{int(self.present)} of its positions — that file cannot "
+                    f"be the journal that fed this record")
+        return None
+
+    @property
     def unprojected(self) -> int | None:
         """Journal positions the record does NOT hold, or ``None`` if unknown.
 
         The disagreement #13331 names. ``0`` is the healthy answer and is
         reachable only with a known ``enumerated``; a caller that cannot say how
         many records its journal holds must not be handed a zero it did not
-        measure.
+        measure — and a file that CANNOT be the record's journal is one of those
+        callers (:attr:`unprojected_unknown_reason`). ``enumerated == 0`` with
+        an empty record is the one shape that still answers ``0``: both sides
+        genuinely hold nothing.
         """
-        if self.enumerated is None:
+        if self.unprojected_unknown_reason is not None:
             return None
         return max(int(self.enumerated) - int(self.within_prefix), 0)
 

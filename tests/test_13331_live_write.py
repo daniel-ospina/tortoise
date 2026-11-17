@@ -222,9 +222,40 @@ def _coverage(present, high, low, within, gap=None, enumerated=None):
     (_coverage(2, 3, 2, 2, None, 3), 1),          # a missing PREFIX
     (_coverage(0, 0, 0, 0, None, 5), 5),          # the backfill never ran
     (_coverage(5, 5, 1, 5, None, None), None),    # not measured
+    # ⛔ A CONTRADICTION IS NOT A ZERO (#13371, consumed here by #13345). A
+    # journal that enumerates NO records cannot be the journal that fed a record
+    # holding five of its positions, so `max(0 - 0, 0) == 0` used to report a
+    # measured agreement between a file and a record it never produced.
+    (_coverage(5, 5, 1, 0, None, 0), None),
+    # …while BOTH sides genuinely holding nothing is a real, healthy zero:
+    (_coverage(0, 0, 0, 0, None, 0), 0),
 ])
 def test_unprojected_is_measured_never_guessed(cov, expected):
     assert cov.unprojected == expected
+
+
+def test_an_empty_journal_over_a_populated_record_is_unknown_not_clean():
+    """The contradiction must not become a clean pass (#13345 review P2).
+
+    Pre-fix, `unprojected` answered `0` for `enumerated == 0` whatever the
+    record held, so this ran the whole verdict chain on a fabricated zero:
+    `clean`, exit 0, `unprojected_journal: 0` on the wire, and `journal_ready`
+    arming the dense leg — for a journal that cannot have fed the record.
+    """
+    contradiction = _coverage(5, 5, 1, 0, None, 0)
+    assert contradiction.unprojected is None
+    assert "NO records" in (contradiction.unprojected_unknown_reason or "")
+
+    result = _result(journal=contradiction)
+    assert result.verdict() == VERDICT_UNANSWERABLE
+    assert exit_code_for(result) == EXIT_UNAVAILABLE
+    assert result.as_dict()["unprojected_journal"] is None, (
+        "a `0` on the wire is a MEASURED zero, and this reading is no such thing")
+    line = log_result(result)
+    assert "enumerates NO records" in line, (
+        "the contradiction is reported as an uncountable journal — the operator "
+        "is sent to check file permissions for a file that reads fine")
+    assert "record_runner.py apply" not in line
 
 
 def test_contiguous_covers_both_edges():
@@ -389,7 +420,7 @@ def test_the_cli_threads_the_journal_leg_it_measured(monkeypatch, tmp_path):
     assert rc == EXIT_DIVERGENT
 
 
-@pytest.mark.parametrize("shape", ["missing", "directory"])
+@pytest.mark.parametrize("shape", ["missing", "directory", "empty"])
 def test_the_cli_refuses_a_journal_it_could_not_count(
         shape, monkeypatch, tmp_path):
     """An uncountable `--journal` is `unavailable` (2), never a clean pass.
@@ -401,6 +432,12 @@ def test_the_cli_refuses_a_journal_it_could_not_count(
     rotation race) escaped as a traceback instead, while the verb's own
     docstring promises `1` is never returned and `2` means "no verdict was
     produced" (#13331 review F3 / review B).
+
+    ⛔ `""` IS SUPPLIED, NOT ABSENT (#13345 review P1). `--journal "$UNSET_VAR"`
+    — the shape an unset variable takes on a shell command line — used to be
+    falsy at `if args.journal:`, so the leg was DROPPED and the run printed the
+    unqualified `✓ record == cache` with exit 0: the same false PASS, reached
+    one spelling over. The three shapes are one assertion on purpose.
     """
     import sys
     import types as _types
@@ -412,8 +449,10 @@ def test_the_cli_refuses_a_journal_it_could_not_count(
     import tortoise.residency as residency
     from tortoise.__main__ import _cmd_record_reconcile
 
-    target = (tmp_path / "absent" / "events.jsonl" if shape == "missing"
-              else tmp_path)
+    target = {"missing": tmp_path / "absent" / "events.jsonl",
+              "directory": tmp_path,
+              # the exact value `--journal "$UNSET_VAR"` produces:
+              "empty": ""}[shape]
 
     composed: list = []
 
@@ -636,6 +675,45 @@ def test_an_unreadable_journal_is_not_ready(vector, single_tenant, monkeypatch, 
     assert consulted == [], "the record door answered a question about the journal"
 
 
+def test_an_empty_journal_never_arms_the_dense_leg(
+        vector, single_tenant, monkeypatch, tmp_path):
+    """A journal enumerating nothing cannot be the one that fed the record.
+
+    ⛔ The SAME contradiction as `JournalCoverage.unprojected_unknown_reason`,
+    read at the gate (#13345 review P2): `enumerated == 0` with `present > 0`
+    used to produce `unprojected == 0`, and `unprojected == 0 and present > 0`
+    therefore returned **True** — the dense leg armed for a tenant whose
+    declared journal is not the journal behind its record (a rotated file, a
+    fresh file at the same path, a mistyped path that exists and is empty). The
+    graph branch is the correct answer, and it is what `False` keeps.
+    """
+    import tortoise.record_projection as record_projection
+    import tortoise.record_serve as record_serve
+
+    journal = tmp_path / "events.jsonl"
+    journal.write_text("")                   # EXISTS, and enumerates 0 records
+    monkeypatch.setenv(vector.RECORD_JOURNAL_ENV, str(journal))
+    scope = vector._Scope(org_id="org-1", graph_id="graph-1")
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(record_serve, "open_record",
+                        lambda dsn, **k: _Conn())
+    # this pin is the READINESS DECISION, not the SQL: the record holds five
+    # positions and the journal enumerates none (the contradiction).
+    monkeypatch.setattr(
+        record_projection, "journal_coverage",
+        lambda conn, *, org_id, graph_id, enumerated=None, want_gap=True:
+        _coverage(5, 5, 1, 0, None, enumerated))
+
+    assert vector._measure_readiness(scope, record_dsn=None) is False, (
+        "an empty journal over a five-row record read as READY — the dense leg "
+        "served a tenant whose record cannot have come from that journal")
+    assert vector.journal_ready(scope) is False
+
+
 def test_the_gate_refuses_a_process_global_journal_it_cannot_apply_to_every_tenant(
         vector, monkeypatch, tmp_path, caplog):
     """One path, process-global ⇒ one tenant (#9192, #13331 review F4).
@@ -675,6 +753,39 @@ def test_the_gate_refuses_a_process_global_journal_it_cannot_apply_to_every_tena
     monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
     assert vector.journal_ready(scope) is True
     assert measured == [1]
+
+
+def test_a_malformed_dsn_is_not_ready_rather_than_a_raise(
+        vector, single_tenant, monkeypatch, tmp_path):
+    """`_readiness_key` is reachable from the PUBLIC `journal_ready` (#13345 P2).
+
+    The `try/except` around `record_dsn()` arrived in `c3a36f3d95` with nothing
+    asserting it, so deleting it left every suite green — and the read path's
+    rule is that a check which cannot run keeps the graph branch, NOT that a
+    malformed `TORTOISE_RECORD_DSN` becomes a 500 inside a search.
+    """
+    from tortoise.record_writer import RecordWriteError, record_dsn
+
+    monkeypatch.setenv(vector.RECORD_JOURNAL_ENV, str(tmp_path / "events.jsonl"))
+    scope = vector._Scope(org_id="org-1", graph_id="graph-1")
+
+    consulted: list = []
+    monkeypatch.setattr(vector, "_measure_readiness",
+                        lambda scope, *, record_dsn=None, timeout_ms=None:
+                        consulted.append(1) or True)
+
+    # the raise this arm exists to absorb — proved, so the pin is not pinning a
+    # value nothing would ever raise.
+    with pytest.raises(RecordWriteError):
+        record_dsn("mysql://not-a-record-dsn")
+
+    assert vector._readiness_key(scope, "mysql://not-a-record-dsn") is None
+    assert vector.journal_ready(
+        scope, record_dsn="mysql://not-a-record-dsn") is False, (
+        "a DSN that a connection could never use was treated as measurable — "
+        "the coverage check would have run against nothing")
+    assert consulted == [], (
+        "the measurement ran for a DSN the key could not resolve")
 
 
 def test_an_uncountable_declared_journal_is_LOUD_once_per_path(
@@ -720,8 +831,20 @@ def test_the_read_only_count_takes_no_lock_and_needs_no_write_permission(
     concurrent writer's `seq` for half a minute) and opens the journal `a+b`
     (so a read-only mount cannot be counted at all). Both are proved here by
     making each of them FAIL while the read-only count still answers.
+
+    ⛔ THE WRITE-FD HALF IS GUARDED AT EVERY DOOR, not just `io.FileIO`
+    (#13345 review P2). The earlier cut patched `io.FileIO` — which the count
+    path does not use — so a `position_readonly` that recounted via
+    `Path.open("a+b")` (through `io.open`) or `os.open(O_WRONLY)` stayed GREEN:
+    the `AssertionError` the test observed came from `_append_lock` alone, and
+    the docstring claimed "Both are proved here". A write-INTENT open is now
+    refused wherever it is spelled (`io.open`/`builtins.open`/`Path.open`/
+    `os.open`), and the read-only doors stay open so the count can answer.
     """
+    import builtins
     import io
+    import os
+    from pathlib import Path
 
     import tortoise.log as log_module
     from tortoise.log import EventLog
@@ -735,9 +858,58 @@ def test_the_read_only_count_takes_no_lock_and_needs_no_write_permission(
             "lock and the `a+b` write fd are what a request path must not take")
 
     monkeypatch.setattr(log_module, "_append_lock", forbidden)
+    # the DIRECT descriptor door `position()` uses (`io.FileIO(path, "a+b")`):
+    # the count path never touches it, so a blanket refusal is both safe here and
+    # the only way to catch a mutant that opens the write fd without `io.open`.
     monkeypatch.setattr(io, "FileIO", forbidden)
 
-    assert EventLog(journal).position_readonly() == 3
+    # ── the write-permission half: no WRITE-INTENT open of any spelling ──
+    def write_intent_mode(mode) -> bool:
+        return any(ch in str(mode or "r") for ch in "wax+")
+
+    write_flags = (os.O_WRONLY | os.O_RDWR | getattr(os, "O_APPEND", 0)
+                   | os.O_CREAT | getattr(os, "O_TRUNC", 0))
+
+    real_open = io.open
+    real_path_open = Path.open
+    real_os_open = os.open
+
+    def guarded_open(file, mode="r", *a, **k):
+        if write_intent_mode(mode):
+            forbidden()
+        return real_open(file, mode, *a, **k)
+
+    def guarded_path_open(self, mode="r", *a, **k):
+        if write_intent_mode(mode):
+            forbidden()
+        return real_path_open(self, mode, *a, **k)
+
+    def guarded_os_open(path, flags, *a, **k):
+        if flags & write_flags:
+            forbidden()
+        return real_os_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(io, "open", guarded_open)
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(Path, "open", guarded_path_open)
+    monkeypatch.setattr(os, "open", guarded_os_open)
+
+    assert EventLog(journal).position_readonly() == 3, (
+        "the read-only count could not answer with every write door closed — "
+        "it is taking a side effect a request path must not pay")
+
+    # ⛔ THE GUARD IS DISCRIMINATING (so the green above is not an unfired
+    # patch): the mutant's own shapes trip it, including the exact one review P2
+    # reported as bypassing the `io.FileIO` patch.
+    with pytest.raises(AssertionError):
+        (tmp_path / "probe.jsonl").open("a+b")
+    with pytest.raises(AssertionError):
+        builtins.open(journal, "ab")          # noqa: SIM115 - it must REFUSE
+    with pytest.raises(AssertionError):
+        os.open(journal, os.O_WRONLY)
+
+    # …and `position()` still takes both — so the guard fires on REAL code, not
+    # merely on synthetic opens above.
     with pytest.raises(AssertionError):
         EventLog(journal).position()
 

@@ -858,8 +858,15 @@ def _cmd_record_reconcile(args):
         # The verb also promises `1` is never returned, and an unreadable path
         # used to escape as a traceback; both shapes are the "no verdict was
         # produced" answer this verb already has.
+        # ⛔ `is not None`, never truthiness: `--journal ""` — the shape
+        # `--journal "$UNSET_VAR"` takes — is a journal the operator SUPPLIED and
+        # that cannot be counted, so it must reach the refusal below (exit 2),
+        # not be dropped as though uninformed and leave the unqualified
+        # `✓ record == cache` printing an exit-0 pass (#13345 review P1). The
+        # neighbouring `TORTOISE_RECORD_BACKUP_DSN` arm already refuses
+        # set-but-blank for the same reason.
         journal_leg = None
-        if args.journal:
+        if args.journal is not None:
             from tortoise.log import EventLog
             from tortoise.record_projection import journal_coverage as _coverage
 
@@ -17550,6 +17557,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="Bound on EACH cache-label read (default: 2000, must "
                          "be positive). A read that hits it refuses (exit 2) "
                          "— it never returns a partial answer")
+    # ⛔ Deliberately NOT `type=Path`: the empty string must survive as a
+    # SUPPLIED value so the verb can refuse it (`--journal "$UNSET_VAR"`), and
+    # `Path("")` is `Path(".")` — a directory, i.e. a different diagnosis.
     rr.add_argument("--journal", default=None,
                     help="Path to the tenant's JSONL journal (events.jsonl). "
                          "With it, the run also reports #13331's third leg: how "
