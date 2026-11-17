@@ -2425,7 +2425,11 @@ than a peer issue, because the lane that implements the answer owns them.
 Applies an owner instruction of 2026-11-17: the **INDEX** half stays *decided, implementation in flight — `#13220`*,
 and the 2026-11-10 KEEP ruling's prohibition is kept intact and is what binds **today**.
 
-Status-word corrections, content unchanged:
+**⚠️ These bullets describe what this PR's own revisions did, not a change from `origin/main`.** Three of the
+phrases they quote — *"STANDS, unchanged"*, *"the ruling on removal TODAY"*, *"IN FORCE TODAY"* — were written by
+intermediate revisions of this PR and appear nowhere on `origin/main` (`git grep -F` → 0 hits); `origin/main`
+already carried the reopen. What the net change corrects is the result, and one of the corrections below is
+**content, not wording**:
 
 - **§12.1c's decided marker** called the KEEP half *"STANDS, unchanged"*. It now says the KEEP half's **prohibition**
   is what binds today, and names the same day's **second** ruling (`#11395` comment `6956793300`, with its
@@ -2446,6 +2450,14 @@ Status-word corrections, content unchanged:
   **and** `:Event` are to be indexed in Postgres, then said the index answer *"does not reach"* the `:Event`/`:Source`
   pair. It does reach them — for indexing. What it does not do is **retire** their graph copy, and the cell now says
   that instead.
+- **The `:Event`/`:Source` sentence — a CONTENT change, and the reason this entry is not "wording only":**
+  `origin/main` read *"`:Event`/`:Source` were never named by the KEEP ruling, so their graph copies were already
+  retirable once the record serves them"*, at §14.3's lead and in `SEARCH-ARCHITECTURE.md`'s decision block. No ruling
+  makes them retirable: `#11395` comment `6956793300` authorises retirement for `:Object`/`:Subject` and no other label.
+  Both sites now say the pair is neither protected by the KEEP ruling **nor retired by this one**, and state the
+  record-first condition as what it is — **SEQUENCING**, addressed to every label and scoping none — separate from the
+  label-scoped authorisation to retire. Left as a "wording" correction, the record would have kept a permission no
+  owner ruling grants and the changelog would have called it unchanged.
 
 ⛔ **Why this entry exists.** The entry above states that a ⛔ marker sits **immediately after** the KEEP quotation
 saying *"that it is the 2026-11-10 ruling and not the current one"*. An intermediate revision of the wording removed
