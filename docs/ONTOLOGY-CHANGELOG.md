@@ -33,6 +33,52 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.36 (2026-11-17 — one four-word lifecycle vocabulary; `guideline` leaves `goalState`):**
+>
+> **Owner approval of the exact changes:** 2026-11-17, given in-session. The approval's artifact is the
+> text itself: the six hunks below are what was approved, applied verbatim.
+>
+> Source: the approved target model, `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`, and the
+> decisions recorded on **#11824**.
+>
+> **What changed in the model:**
+>
+> - **§4.1 Point and §4.3 Object `status`** now declare **one closed set of four** — `draft`, `live`,
+>   `deprecated`, `superseded` — for every knowledge kind. `deprecated` is *ended, nothing replaced it*;
+>   `superseded` is *ended, a replacement is named*. **`archived` is a write-side synonym of
+>   `deprecated`** (the owner's ruling of 2026-11-17): accepted on write, stored as `deprecated`.
+>   `retracted`, `outdated` and `archived` are **no longer lifecycle words** and survive only as read
+>   deltas over stored rows (#12855); the model grants `retracted` no write-side synonym, and §4.2's
+>   Subject guard refuses it.
+> - **§4.3 Object** additionally records that **`in_progress` and `completed` are positions, not
+>   lifecycle words** — they become stages of the kind's declared pipeline (`pipelineStageId`, #2792) —
+>   and that a pack's declared words become its pipeline stages rather than a wider status list.
+> - **§4.2 Subject** states the same four words, with `archived` as a write-side synonym of `deprecated`.
+> - **§4.1 and §4.3 `goalState`** drop **`guideline`**. The owner's #6792 form ruling is **not
+>   withdrawn**; it is reassigned — directionality is a question about **priority**, not achievement,
+>   and priority has no design yet. The same two rows record that the goal's two endings are the
+>   lifecycle's endings on that axis (`abandoned` is `deprecated`; `superseded` is `superseded`), and
+>   that a write whose ending disagrees with `status` is refused.
+> - **§5's Object-kind blockquote** carries the dated status note recording the `guideline` removal and
+>   where it went, following this file's convention of correcting an approved clause with a dated note
+>   rather than rewriting it.
+>
+> **Two residues this edit leaves, named so the owner sees them rather than inheriting them silently:**
+> §5's *Point Status Vocabulary* table and a §9 comparison row still present the retired six words as the
+> model vocabulary. They fall outside the six approved hunks, and no unapproved edit is permitted in
+> that file — the exact corrective text is proposed on #11824 and applies only on approval.
+>
+> **What did NOT change:** the §4 field tables other than those five rows; every `Impl` status; the
+> valid-time rules (§4.7); the pack-declaration mechanics; and every stored value. Nothing is migrated
+> here — the stored-rows rewrite is a separate, owner-authorised step tracked on #12855.
+>
+> **Why this is a model change and not a status report:** the four-word set and the `goalState` removal
+> are *what we want*, stated as the specification. Whether the code already matches is a different
+> question with a different home: the plan's slices
+> (`docs/plans/2026-11-16-state-lifecycle-implementation.md`) and the issues that track them (#10371,
+> #12855, #13034, #13035, #13100).
+>
+
 > **Changelog v3.35 (2026-11-13 — the temporal-immutability constraint states the model, not its enforcement):**
 >
 > **Owner approval of the exact changes:** 2026-11-13, given in-session. The approval's artifact is the
