@@ -52,13 +52,16 @@ from __future__ import annotations
 import sys
 
 # #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
-# 3.11+-only import raises ImportError before a later guard could run.
+# 3.11+-only import (`from datetime import UTC`) raises ImportError before a
+# later guard could run.
 #
 # #4053/#11342: the refusal must not wear a VERDICT's status. This tool's answers
-# are 0 (measured) and 3 (unmeasurable); 2 is its USAGE code (argparse's own),
-# which an interpreter that cannot run the tool shares and which is never a
-# measurement. `SystemExit(<int>)` carries no message, so it is printed
-# explicitly. Pinned by `tests/test_entry_point_python_guard.py`.
+# are 0 (census produced) / 2 (usage) / 3 (the census could not be measured), and
+# `raise SystemExit(<message>)` exits 1 — a code it does not otherwise use, but
+# one that reads as a success-or-failure verdict to any caller. 2 is this tool's
+# own "could not run", which is what an old interpreter IS. `SystemExit(<int>)`
+# carries no message, so the refusal is printed explicitly.
+# Pinned by `tests/test_entry_point_python_guard.py`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     print(
         f"tools/ram_window_census.py requires Python >= 3.12 (got "
@@ -143,6 +146,26 @@ def _connection(endpoint):
     return client, db.select_graph(endpoint.graph_name)
 
 
+def _probe_unmeasurable(step: str, exc: BaseException, *, graph: str) -> dict:
+    """A probe step that could not be taken is a READING, never a traceback.
+
+    `#13102` review F2: only the `RESTORE` call had a handler, so a transport
+    failure (`ConnectionError`, a timeout on the bounded socket, `resolve_db_endpoint`
+    rejecting the URI, a missing driver) escaped `main()` as a traceback and **exit 1**
+    — outside this tool's declared answer set (0 / 2 / 3) and the exact opposite of
+    `_restore_probe`'s own contract. Every step this routes is a READ
+    (`GRAPH.LIST`, `DUMP`, connect), or happens BEFORE the connection exists, so the
+    graph's key cannot have been touched and the report says so rather than leaving
+    the operator to infer it.
+    """
+    return {
+        "error": (f"{step} could not be taken ({type(exc).__name__}: {exc}); "
+                  "no measurement was recorded, nothing was written to the "
+                  "instance, and the graph's key is unchanged"),
+        "graph": graph,
+    }
+
+
 def _restore_probe(uri: str, graph: str, confirm: str | None) -> dict:
     """Time a DUMP → RESTORE-REPLACE for ONE graph. Dry run unless confirmed.
 
@@ -169,26 +192,63 @@ def _restore_probe(uri: str, graph: str, confirm: str | None) -> dict:
             "dry_run": True,
             "recorded_reference": RECORDED_COLD_RESTORE_S,
         }
-    endpoint = _endpoint(uri)
+    # ⛔ EVERY instance step is inside a handler (#13102 review F2). The URI
+    # resolution, the connection and the two READ steps each reported a traceback
+    # with exit 1 before this, contradicting the contract above; `main()` cannot
+    # see an exception (it inspects the section's `error` key), so the only shape
+    # it can turn into `EXIT_UNMEASURABLE` is a returned measurement.
+    try:
+        endpoint = _endpoint(uri)
+    except Exception as exc:  # a malformed --graph-uri is UNMEASURABLE
+        return _probe_unmeasurable("resolving --graph-uri", exc, graph=graph)
     if endpoint.graph_name and endpoint.graph_name != graph:
         return {"error": (f"the URI names graph {endpoint.graph_name!r} but "
                           f"--graph is {graph!r}")}
-    client, _handle = _connection(endpoint)
     try:
-        # GRAPH.LIST creates nothing; a typo'd --graph would otherwise be
-        # MATERIALIZED by the first query and then measured as an empty graph.
-        names = {n if isinstance(n, str) else n.decode() for n in
-                 client.execute_command("GRAPH.LIST")}
+        client, _handle = _connection(endpoint)
+    except Exception as exc:  # unreachable instance / missing driver
+        return _probe_unmeasurable("connecting to the instance", exc,
+                                   graph=graph)
+    try:
+        # The failing step is NAMED, because two very different failures (a
+        # refused GRAPH.LIST vs a refused DUMP) otherwise share one message.
+        step = "GRAPH.LIST"
+        try:
+            # GRAPH.LIST creates nothing; a typo'd --graph would otherwise be
+            # MATERIALIZED by the first query and then measured as an empty graph.
+            names = {n if isinstance(n, str) else n.decode() for n in
+                     client.execute_command("GRAPH.LIST")}
+        except Exception as exc:
+            return _probe_unmeasurable(step, exc, graph=graph)
         if graph not in names:
             return {"error": (f"graph {graph!r} is not on this instance "
                               f"({len(names)} graph(s) listed) — refusing to "
                               f"measure a graph reading would CREATE")}
         t0 = perf_counter()
-        payload = client.dump(graph)
+        step = f"DUMP of graph {graph!r}"
+        try:
+            payload = client.dump(graph)
+        except Exception as exc:
+            return _probe_unmeasurable(step, exc, graph=graph)
         t1 = perf_counter()
         # A payload that is not raw bytes is not a payload `RESTORE` can verify
-        # (the client is built with `decode_responses=True`); refuse it HERE,
-        # while the graph is still the live key, rather than sending it on.
+        # — refused HERE, while the graph is still the live key, rather than sent
+        # on to fail.
+        #
+        # ⛔ NOT because the client decodes (#13102 review F3 CORRECTS the reason
+        # this guard first stated). `Redis.dump()` marks its reply `NEVER_DECODE`
+        # (`redis/commands/core.py`, `options[NEVER_DECODE] = []` at tag
+        # `v7.4.1`; `uv.lock` pins exactly `redis 7.4.1`), so `DUMP` arrives as
+        # raw `bytes` under EITHER `decode_responses` policy and a
+        # `UnicodeDecodeError` is not possible on this driver. The
+        # `decode_responses=True` client therefore stays as built: it was never
+        # what made a second, binary-only client necessary.
+        #
+        # The guard is dead in production today and CHEAP, and it becomes
+        # load-bearing the day the driver's decoding policy or its command table
+        # changes — so it is KEPT, and pinned (`test_a_decoded_payload_is_
+        # refused_before_anything_is_written` drives the `str` case the guard
+        # exists for).
         if not isinstance(payload, (bytes, bytearray)):
             return {"error": (
                 f"DUMP returned {type(payload).__name__}, not bytes — a decoded "

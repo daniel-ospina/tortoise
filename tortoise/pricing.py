@@ -159,10 +159,10 @@ def storage_limits(tier: str) -> dict:
     (no line citation on purpose: it drifted once already). Neither storage key
     may ride in the dict every caller treats as "the limits": that dict is one
     ``{**tier_limits(t), ...}`` away from arming a dimension on a path nobody
-    reviewed — a silent second arming seam for ``graph_storage`` (whose ONLY
-    arming seam is ``quota._arm_graph_storage``), and an HTTP 500 on every gated
-    write for ``postgres_storage`` (BLOCKED, so a configured allowance refuses).
-    This accessor is the ONLY route, and the graph arming goes through
+    reviewed — a silent second arming seam for ``graph_storage`` (which must
+    have exactly one, here), and an HTTP 500 on every gated write for
+    ``postgres_storage`` (BLOCKED, so a configured allowance refuses). This
+    accessor is the ONLY route, and the arming goes through
     ``quota._arm_graph_storage``.
 
     ⛔ **``graph_storage`` IS ARMED FROM HERE**, since ``#13084`` — this is the
@@ -178,9 +178,8 @@ def storage_limits(tier: str) -> dict:
     refuses at ``used >= allowance``: a 0 cap would refuse the first byte on a
     tier that still grants a graph. ``zero_means_unarmed`` is that departure, and
     it covers an EXACT zero only (a negative is a fault).
-    ``postgres_storage`` is the ONE dimension that is still **BLOCKED**, and its
-    key is carried here for the money arithmetic; it refuses (fail closed) if it
-    is ever configured.
+    ``postgres_storage`` remains **BLOCKED**, so its key is carried here for the
+    money arithmetic and refuses (fail closed) if it is ever configured.
 
     ⛔ **WHY a dimension is blocked is stated in ONE place, and it is not here.**
     ``allowance_gate.DIMENSIONS[*].blocked_reason`` carries the reason AND its

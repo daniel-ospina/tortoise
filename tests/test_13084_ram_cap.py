@@ -29,10 +29,14 @@ from tortoise.allowance_gate import (
     AT_CAP_WARNING,
     DIMENSIONS,
     HARD_STOP_MULTIPLE,
+    UNMEASURED_UNARMED_WARNING,
     MeterReading,
     _graph_storage_mb,
     enforce_allowances,
+    reset_signal_state_for_tests,
+    unarmed_served_counts,
 )
+from tortoise.allowance_gate import _reading as _gate_reading
 from tortoise.quota import QuotaCheckError, QuotaExceededError, _arm_graph_storage
 
 ORG = "team-13084"
@@ -163,7 +167,15 @@ def test_the_hard_stop_is_1_5x_the_cap_and_refuses_with_a_usable_message():
     # the cap, the tier, the hard stop, why they differ, and what to do
     assert "77 MB" in message and "solo plan" in message
     assert "115.5 MB" in message and "1.5x the cap" in message
-    assert "LOWER BOUND" in message and "under-reports" in message
+    # ⛔ AND THE CLAIM IS QUALIFIED (#13102 P1-3). The old text asserted the figure
+    # was a LOWER BOUND full stop; the systematic exclusions do remove bytes, but a
+    # SAMPLING estimate wobbles both ways, so the lower-bound property holds only
+    # UP TO the sampling error — and this reading has no measured spread, so the
+    # message must say the error is UNMEASURED rather than quote a number nobody
+    # took.
+    assert "LOWER BOUND" in message
+    assert "UNMEASURED" in message and "single sample" in message
+    assert "cannot be refused" not in message
     assert "Upgrade your plan" in message
     assert "reduce what you hold resident" in message
     # the structured payload carries the figures the gate COMPARED — including
@@ -349,19 +361,53 @@ def test_the_armed_cap_refuses_only_its_own_WRITE_doors():
         enforce_allowances(armed, resource=door, meters=over_cap)
 
 
-# ── 3. the meter's honesty: a stale/absent reading is NOT zero ────────────
+# ── 3. the meter's honesty: UNMEASURED is a state, never a refusal, here ───
 #
-# ⛔ BUT "absent" IS TWO THINGS, and #13102 measured the cost of one of them:
-# the reader's zero view carried ``measured_at is None`` for (a) a successful
-# read that found NO row — nobody has measured this tenant yet — and (b) a store
-# that refused the read / an unageable row. Treating (a) as a refusal refused
-# every write of a brand-new paying tenant (a 500 on ``POST /v1/points``), because
-# the gauge's only writer is the DEFAULT-OFF backup sweep. The reader now names
-# WHY (``unmeasured_reason``, the vocabulary ``get_capture_usage`` already
-# publishes) and the gate is DEFAULT-DENY on it: only ``"absent"`` is a fact.
+# ⛔ THE P0 OF #13102 (#13102 P0-1). "Absent" was already served (a row the
+# scheduled sweep has not written yet), but EVERY OTHER unmeasured state — a read
+# fault, an unageable row, a reading older than the bound — raised
+# ``QuotaCheckError``, which the REST/MCP seams surface as **HTTP 500**. The gauge
+# has exactly ONE production writer (the backup sweep), so that turned a stopped
+# sweep into a customer-wide write outage, blamed the tenant for our bookkeeping
+# state, and refused a brand-new paid org its FIRST write. The dimension now
+# declares ``unmeasured_is_unarmed``: the write is SERVED, the cap does not bind,
+# and the operator is told (log + counter + a durable incident for the fault
+# reasons). Default-deny is preserved as a DECLARATION — see the closing test.
 
 
-def test_a_tenant_with_NO_ledger_ROW_is_served_not_refused(monkeypatch):
+def _ledger_reading(monkeypatch, **fields):
+    """Stub the reader with one ledger payload (the real one's key vocabulary)."""
+    from tortoise import metering
+
+    payload = {"graph_storage_mb": 0.0, "graph_storage_measured_at": None,
+               "measured": False, "unmeasured_reason": "absent"}
+    payload.update(fields)
+    monkeypatch.setattr(metering, "get_graph_storage_reading",
+                        lambda _org: dict(payload))
+
+
+@pytest.fixture
+def signals():
+    """Reset the gate's signal state and capture the operator alerts it fires."""
+    from tortoise import operator_alert
+
+    reset_signal_state_for_tests()
+    fired: list[tuple[str, str | None, dict]] = []
+
+    def _capture(kind, org_id, detail=None):
+        fired.append((kind, org_id, dict(detail or {})))
+        return None
+
+    original = operator_alert.alert_operator
+    operator_alert.alert_operator = _capture
+    try:
+        yield fired
+    finally:
+        operator_alert.alert_operator = original
+        reset_signal_state_for_tests()
+
+
+def test_a_tenant_with_NO_ledger_ROW_is_served_not_refused(monkeypatch, signals):
     """The #13102 regression: a fresh paying tenant must be able to write.
 
     Pre-fix this raises ``QuotaCheckError`` ("has no reading … refusing to fail
@@ -371,87 +417,437 @@ def test_a_tenant_with_NO_ledger_ROW_is_served_not_refused(monkeypatch):
     appear. #3981's ruling forbids refusing a paying org over our own bookkeeping
     state.
     """
-    from tortoise import metering
-
-    monkeypatch.setattr(
-        metering, "get_graph_storage_reading",
-        lambda _org: {"graph_storage_mb": 0.0,
-                      "graph_storage_measured_at": None,
-                      "measured": False,
-                      "unmeasured_reason": "absent"})
+    _ledger_reading(monkeypatch, unmeasured_reason="absent")
     enforce_allowances(_limits(max_graph_storage_mb=102))  # the pro cap
     # …and the cost of that is stated where the arming is declared, not hidden:
     # the cap does not bind until the gauge first reports (under-enforcement).
     dim = {d.dimension: d for d in DIMENSIONS}["graph_storage"]
-    assert dim.absent_is_zero, (
-        "graph_storage must declare that an absent row is consumed as a fact; "
-        "without it the gate refuses a brand-new paid tenant")
+    assert dim.absent_is_zero and dim.unmeasured_is_unarmed, (
+        "graph_storage must declare that an absent row is consumed as a fact AND "
+        "that an unmeasured one never refuses; without either the gate refuses a "
+        "brand-new paid tenant")
+    # LOUD, but not an incident: this is every new tenant and every window
+    # boundary, so it is counted, not paged.
+    assert unarmed_served_counts()[("graph_storage", "absent")] == 1
+    assert not [f for f in signals if "ALLOWANCE_CAP" in f[0]], signals
 
 
-@pytest.mark.parametrize("reason", ["unreported", "read_error", "period_error",
-                                    "a_reason_this_gate_has_never_seen"])
-def test_every_OTHER_unmeasured_reason_STILL_refuses(monkeypatch, reason):
-    """The fix must not widen into a fail-open.
+def test_an_UNARMED_dimension_counts_NOTHING_as_under_enforcement(
+        monkeypatch, signals, caplog):
+    """#13102 review round 8 (F2): on the UNLIMITED path, `absent` is not a cost.
 
-    A row that exists but cannot be aged, a store that refused the read and an
-    unresolvable window are FAULTS — and an UNKNOWN reason is default-DENY, so a
-    future reason cannot silently disarm a configured allowance. Pre-fix these
-    already refused; this pins that the absent-row fix did not take them with it.
+    ``enforce_allowances`` calls ``_reading(..., observed_only=True)`` exactly
+    when the dimension is unarmed BY CONFIGURATION (``allowance is None``, or the
+    artifact's ``0`` unset sentinel with ``zero_means_unarmed`` — free/anon, and
+    any limits dict that spreads ``pricing.storage_limits()``). ``_reading``'s
+    ``ABSENT`` + ``absent_is_zero`` branch signalled anyway, so a deliberately
+    uncapped tenant produced, per org per hour, "the cap does NOT bind for this
+    org **until a usable reading exists** (under-enforcement)" — two false causal
+    claims, since nothing is armed and no reading can ever make a cap bind.
+
+    The counter is the instrument #9559 reads to tell *"the meter never reports
+    for a PAID tenant"* from *"free-tier traffic exists"*, so counting an unarmed
+    dimension there destroyed the very distinction the signal exists to make.
+    Every neighbouring branch already handled the unlimited case explicitly (a
+    fault and a non-reading both log "dimension unlimited, no refusal" and leave
+    the counter alone); ``absent`` was the one that did not.
+
+    RED on the pre-fix tree: the counter reads ``{('graph_storage', 'absent'): 2}``
+    and ``UNMEASURED_UNARMED_WARNING`` is in the log.
     """
-    from tortoise import metering
+    _ledger_reading(monkeypatch, unmeasured_reason="absent")
+    with caplog.at_level("WARNING"):
+        for limits in (
+                _limits(tier="free", max_graph_storage_mb=0),   # the unset sentinel
+                _limits(tier="free", max_graph_storage_mb=None),  # documented unlimited
+                # the "second arming seam" this PR guards against: a limits dict
+                # that spreads the artifact's figures, so an UNPAID tier arrives
+                # with the amount present-and-zero rather than absent.
+                {**_limits(tier="anon"),
+                 **pricing.storage_limits("anon")}):
+            enforce_allowances(limits)
+    assert unarmed_served_counts() == {}, (
+        "an unarmed dimension must not be counted as under-enforcement — that "
+        f"counter is how #9559 tells a broken meter from free-tier traffic: "
+        f"{unarmed_served_counts()}")
+    assert UNMEASURED_UNARMED_WARNING not in caplog.text, caplog.text
+    assert signals == [], signals
 
-    monkeypatch.setattr(
-        metering, "get_graph_storage_reading",
-        lambda _org: {"graph_storage_mb": 0.0,
-                      "graph_storage_measured_at": None,
-                      "measured": False,
-                      "unmeasured_reason": reason})
-    assert _graph_storage_mb(ORG) is None
-    with pytest.raises(QuotaCheckError):
+
+@pytest.mark.parametrize("reason", ["unreported", "read_error", "period_error"])
+def test_a_FAULT_on_the_gauge_is_served_AND_FILES_AN_INCIDENT(
+        monkeypatch, signals, caplog, reason):
+    """A fault is OURS, so it cannot refuse the tenant — and it must page.
+
+    RED pre-fix: ``QuotaCheckError`` → HTTP 500 for every gated write of the org
+    while the store is degraded (the review's "customer-wide write outage whose
+    message presents it as the tenant's own state").
+    """
+    _ledger_reading(monkeypatch, unmeasured_reason=reason)
+    with caplog.at_level("ERROR"):
         enforce_allowances(_limits(max_graph_storage_mb=102))
+    assert UNMEASURED_UNARMED_WARNING in caplog.text
+    assert reason in caplog.text
+    assert unarmed_served_counts()[("graph_storage", reason)] == 1
+    kinds = [(kind, org, detail.get("reason"))
+             for kind, org, detail in signals]
+    assert kinds == [("ALLOWANCE_CAP_UNENFORCEABLE", ORG, reason)], kinds
 
 
+def test_an_UNKNOWN_reader_reason_is_unarmed_here_but_never_read_as_absent(
+        monkeypatch, signals):
+    """Default-deny still governs the TOKEN: an unrecognised reason is not `absent`.
 
-def test_a_missing_measured_at_is_no_reading_not_zero(monkeypatch):
-    """A reading with no timestamp and NO named reason is still refused.
+    It is reported as ``unknown_reason`` (so a future reader reason cannot mint
+    free text in a create-once incident body) and, on this dimension, it is
+    unarmed rather than a refusal — because whatever the reason, the row is still
+    written by the sweep and the tenant still cannot influence it.
+    """
+    from tortoise.allowance_gate import MeterUnavailable
+
+    _ledger_reading(monkeypatch,
+                    unmeasured_reason="a_reason_this_gate_has_never_seen")
+    with pytest.raises(MeterUnavailable) as caught:
+        _graph_storage_mb(ORG)
+    assert caught.value.reason == "unknown_reason"
+    enforce_allowances(_limits(max_graph_storage_mb=102))
+    assert [d.get("reason") for _k, _o, d in signals] == ["unknown_reason"]
+
+
+def test_a_missing_measured_at_is_no_reading_and_serves_loudly(
+        monkeypatch, signals):
+    """A reading with no timestamp and NO named reason is still not a zero.
 
     The zero view and a degraded read both carry no timestamp, so the reason is
-    what decides: an omission (a stub, an older seam, a reason this gate never
-    saw) must not be read as ``absent``, or every fault would disarm the cap.
+    what decides: an omission (a stub, an older seam) must not be read as
+    ``absent``. It becomes the gate's ``unknown_reason`` and — on this dimension —
+    an unarmed serve, never a 0 MB comparison.
     """
-    from tortoise import metering
+    from tortoise.allowance_gate import MeterUnavailable
 
-    monkeypatch.setattr(
-        metering, "get_graph_storage_reading",
-        lambda _org: {"graph_storage_mb": 0.0,
-                      "graph_storage_measured_at": None})
-    assert _graph_storage_mb(ORG) is None
-    with pytest.raises(QuotaCheckError):
-        enforce_allowances(_limits(max_graph_storage_mb=77))
+    _ledger_reading(monkeypatch, unmeasured_reason=None)
+    with pytest.raises(MeterUnavailable):
+        _graph_storage_mb(ORG)
+    enforce_allowances(_limits(max_graph_storage_mb=77))
+    assert [d.get("reason") for _k, _o, d in signals] == ["unknown_reason"]
 
 
-def test_a_stale_reading_is_refused_rather_than_enforced(monkeypatch):
-    from tortoise import metering
+def test_a_PRESENT_timestamp_with_a_NULL_figure_is_not_zero(monkeypatch, signals):
+    """#13102 P2: ``float(x or 0.0)`` read a null figure as 0 MB — a fail-open.
 
+    A row can carry a valid age and no figure at all (the writer deposited an
+    unageable/absent total). The old line compared it as ``0 MB`` and passed it as
+    "under the cap" silently, which is the exact fail-open this dimension's
+    ``absent_is_zero=False`` posture exists to stop, one field narrower.
+    """
+    from tortoise.allowance_gate import MeterUnavailable
+
+    _ledger_reading(monkeypatch, graph_storage_mb=None,
+                    graph_storage_measured_at=datetime.now(UTC).isoformat())
+    with pytest.raises(MeterUnavailable) as caught:
+        _graph_storage_mb(ORG)
+    assert caught.value.reason == "missing_figure"
+    enforce_allowances(_limits(max_graph_storage_mb=77))
+    # served (this dimension is unarmed on an unmeasurable figure) and NAMED —
+    # never compared as a zero.
+    assert [d.get("reason") for _k, _o, d in signals] == ["missing_figure"]
+
+
+def test_a_NON_FINITE_figure_is_not_a_reading(monkeypatch):
+    from tortoise.allowance_gate import MeterUnavailable
+
+    _ledger_reading(monkeypatch, graph_storage_mb=float("nan"),
+                    graph_storage_measured_at=datetime.now(UTC).isoformat())
+    with pytest.raises(MeterUnavailable) as caught:
+        _graph_storage_mb(ORG)
+    assert caught.value.reason == "missing_figure"
+
+
+def test_a_STALE_reading_is_served_and_pages_rather_than_refusing(
+        monkeypatch, signals):
+    """The 24 h bound still exists — but it ARM-DISARMS, it does not refuse.
+
+    Enforcing a stale figure would decide from a number we cannot defend;
+    refusing it turns "the sweep stopped" into "the tenant cannot write". So the
+    gate serves, and the operator gets an incident naming ``stale``.
+    """
     stale = (datetime.now(UTC) - timedelta(days=2)).isoformat()
-    monkeypatch.setattr(
-        metering, "get_graph_storage_reading",
-        lambda _org: {"graph_storage_mb": 10.0,
-                      "graph_storage_measured_at": stale})
-    with pytest.raises(QuotaCheckError) as caught:
-        enforce_allowances(_limits(max_graph_storage_mb=77))
-    assert "older than" in str(caught.value)
+    _ledger_reading(monkeypatch, graph_storage_mb=10.0,
+                    graph_storage_measured_at=stale)
+    enforce_allowances(_limits(max_graph_storage_mb=77))
+    assert unarmed_served_counts()[("graph_storage", "stale")] == 1
+    assert [d.get("reason") for _k, _o, d in signals] == ["stale"]
 
 
 def test_a_fresh_reading_under_the_cap_is_served(monkeypatch):
+    _ledger_reading(monkeypatch, graph_storage_mb=12.5,
+                    graph_storage_measured_at=datetime.now(UTC).isoformat())
+    enforce_allowances(_limits(max_graph_storage_mb=77))
+    assert unarmed_served_counts() == {}
+
+
+def test_a_dimension_that_does_NOT_declare_it_STILL_refuses(monkeypatch):
+    """⛔ THE DEFAULT-DENY HALF — the declaration must not have widened anything.
+
+    ``capture_extraction``'s figure is a ledger row its OWN writes create, so an
+    absence there is genuinely a refusal (#686). Pinned twice: once at the gate on
+    a synthetic dimension, once on the real dimension's declaration.
+    """
+    from tortoise.allowance_gate import AllowanceDimension, MeterUnavailable
+
+    dim = {d.dimension: d for d in DIMENSIONS}
+    assert dim["capture_extraction"].unmeasured_is_unarmed is False
+    assert dim["postgres_storage"].unmeasured_is_unarmed is False
+    synthetic = AllowanceDimension(
+        dimension="capture_extraction", limit_key="max_extraction_tokens",
+        unit="tokens", meter=lambda _o: None, stale_after_seconds=60)
+    with pytest.raises(QuotaCheckError):
+        _gate_reading(synthetic, ORG, {"capture_extraction": lambda _o: None},
+                      observed_only=False)
+    with pytest.raises(MeterUnavailable):
+        _extraction_probe(monkeypatch)
+
+
+def _extraction_probe(monkeypatch):
+    """Drive ``_extraction_tokens``'s own fault arm (a reader with no window)."""
     from tortoise import metering
 
-    monkeypatch.setattr(
-        metering, "get_graph_storage_reading",
-        lambda _org: {"graph_storage_mb": 12.5,
-                      "graph_storage_measured_at":
-                          datetime.now(UTC).isoformat()})
+    monkeypatch.setattr(metering, "get_capture_usage",
+                        lambda _o: {"measured": False,
+                                    "unmeasured_reason": "period_error"})
+    from tortoise.allowance_gate import _extraction_tokens
+    return _extraction_tokens(ORG)
+
+
+# ── 3b. the deadband rests on a MEASURED spread where one exists ──────────
+#
+# #13102 P1-2: the 1.5x band used to be justified by "the meter's own reported
+# spread (a few percent)" — a figure the gate never read. It now reads the
+# ledger's own ``spread_mb``/``repeats``: where they are a MEASUREMENT (two or
+# more repeats) the hard stop moves out to the point where even the LOW end of the
+# observed range is over the cap; where they are not, the refusal says the error
+# is UNMEASURED.
+
+
+def test_the_measured_range_sets_the_hard_stop(monkeypatch):
+    """Where the dispersion is measured, the stop rests on the OBSERVED MINIMUM.
+
+    ``used`` is the MEDIAN of the repeats, not their midpoint, so ``used -
+    spread/2`` is NOT the low end of the reading (repeats ``[50, 200, 201]`` →
+    used 200, spread 151, observed minimum 50). The gate therefore compares the
+    recorded minimum: it refuses only once the lowest SAMPLE it took is itself over
+    the cap. With used 127 / min 77 on a 77 MB cap the stop is 127 MB, so 126.9 is
+    served and 127 is refused — where the pre-fix code refused both at 115.5, on a
+    band whose justification ("the meter's own spread") it never read.
+    """
+    fresh = datetime.now(UTC).isoformat()
+
+    def _ranged(used: float, low: float = 76.9):
+        return lambda _org: MeterReading(
+            used=used, measured_at=fresh, estimated=True, spread=50.0,
+            repeats=3, low=low)
+
+    enforce_allowances(_limits(max_graph_storage_mb=77),
+                       meters={"graph_storage": _ranged(126.9)})
+    with pytest.raises(QuotaExceededError) as caught:
+        enforce_allowances(_limits(max_graph_storage_mb=77),
+                           meters={"graph_storage": _ranged(127.0, low=77.0)})
+    message = str(caught.value)
+    assert "50 MB across 3 samples" in message, message
+    assert "lowest was 77 MB" in message, message
+    assert "from the observed samples" in message, message
+    assert "UNMEASURED" not in message
+    # the payload's `limit` is still the threshold the gate COMPARED
+    assert caught.value.limit == 127.0
+
+
+def test_a_measured_minimum_over_the_cap_MAY_refuse_before_the_declared_band():
+    """A refusal the measurement supports is not a "sole estimate" refusal.
+
+    The declared 1.5x margin exists because an UNMEASURED estimate must not be the
+    sole cause of a refusal. Once the reading carries several samples and ALL of
+    them are over the cap, the refusal rests on the measurement — so it may fire
+    inside the band (here at 70+ used with min 78 on a 77 MB cap).
+    """
+    fresh = datetime.now(UTC).isoformat()
+    with pytest.raises(QuotaExceededError):
+        enforce_allowances(_limits(max_graph_storage_mb=77),
+                           meters={"graph_storage": lambda _o: MeterReading(
+                               used=90.0, measured_at=fresh, estimated=True,
+                               spread=24.0, repeats=3, low=78.0)})
+    # …and the same figure with NO measured range is served (declared margin)
+    enforce_allowances(_limits(max_graph_storage_mb=77),
+                       meters={"graph_storage": _meter(90.0)})
+
+
+def test_the_half_spread_is_never_used_as_the_low_end():
+    """The counterexample, pinned: median 200 with a dip to 50 is NOT a 124.5 floor."""
+    fresh = datetime.now(UTC).isoformat()
+    enforce_allowances(_limits(max_graph_storage_mb=77),
+                       meters={"graph_storage": lambda _o: MeterReading(
+                           used=200.0, measured_at=fresh, estimated=True,
+                           spread=151.0, repeats=3, low=50.0)})
+
+
+def test_a_single_repeat_reports_NO_spread_or_low_not_zero(monkeypatch):
+    """``repeats == 1`` records ``0.0`` — that is ABSENCE, not precision."""
+    _ledger_reading(monkeypatch, graph_storage_mb=10.0,
+                    graph_storage_measured_at=datetime.now(UTC).isoformat(),
+                    graph_storage_repeats=1, graph_storage_spread_mb=0.0,
+                    graph_storage_min_mb=0.0)
+    reading = _graph_storage_mb(ORG)
+    assert reading is not None
+    assert reading.spread is None and reading.low is None
+    assert reading.repeats == 1
+
+
+def test_a_measured_range_is_carried_from_the_ledger(monkeypatch):
+    _ledger_reading(monkeypatch, graph_storage_mb=10.0,
+                    graph_storage_measured_at=datetime.now(UTC).isoformat(),
+                    graph_storage_repeats=3, graph_storage_spread_mb=4.0,
+                    graph_storage_min_mb=8.0)
+    reading = _graph_storage_mb(ORG)
+    assert reading is not None
+    assert (reading.spread, reading.repeats, reading.low) == (4.0, 3, 8.0)
+
+
+def test_a_half_measured_range_is_discarded_WHOLE(monkeypatch):
+    """A usable minimum with an unusable spread is NO range — not a crash.
+
+    The verification pass measured the crash this prevents: with ``low`` present
+    and ``spread`` absent, the refusal text formatted ``None`` with ``:g`` and the
+    refusal path raised ``TypeError`` instead of a ``QuotaExceededError``. The pair
+    is now validated once (``_dispersion``), so a half-measured row degrades to the
+    declared margin rather than to an exception.
+    """
+    _ledger_reading(monkeypatch, graph_storage_mb=10.0,
+                    graph_storage_measured_at=datetime.now(UTC).isoformat(),
+                    graph_storage_repeats=3, graph_storage_spread_mb=None,
+                    graph_storage_min_mb=8.0)
+    reading = _graph_storage_mb(ORG)
+    assert reading is not None
+    assert (reading.spread, reading.low) == (None, None)
+    # …and a hand-built reading with a minimum but no spread renders a refusal,
+    # rather than raising out of the formatter.
+    fresh = datetime.now(UTC).isoformat()
+    with pytest.raises(QuotaExceededError) as caught:
+        enforce_allowances(_limits(max_graph_storage_mb=77),
+                           meters={"graph_storage": lambda _o: MeterReading(
+                               used=200.0, measured_at=fresh, estimated=True,
+                               low=100.0)})
+    assert "UNMEASURED" in str(caught.value)
+
+
+def test_a_low_above_the_measured_figure_is_discarded(monkeypatch):
+    """A bound the instrument could not have produced must not ground a refusal."""
+    _ledger_reading(monkeypatch, graph_storage_mb=10.0,
+                    graph_storage_measured_at=datetime.now(UTC).isoformat(),
+                    graph_storage_repeats=3, graph_storage_spread_mb=4.0,
+                    graph_storage_min_mb=12.0)
+    reading = _graph_storage_mb(ORG)
+    assert reading is not None and reading.low is None
+
+
+# ── 3c. the at-cap signal is THROTTLED (it is on the hot write path) ───────
+
+
+def test_the_at_cap_warning_fires_ONCE_per_org_not_once_per_write(caplog):
+    """#13102 P2: every gated write in the 1.0–1.5x band used to log a line."""
+    reset_signal_state_for_tests()
+    with caplog.at_level("WARNING"):
+        for _ in range(25):
+            enforce_allowances(_limits(max_graph_storage_mb=77),
+                               meters={"graph_storage": _meter(100.0)})
+    assert caplog.text.count(AT_CAP_WARNING) == 1, caplog.text
+    # …and the throttle is per ORG: a second tenant still gets its own signal.
+    with caplog.at_level("WARNING"):
+        enforce_allowances(_limits(org_id="team-other", max_graph_storage_mb=77),
+                           meters={"graph_storage": _meter(100.0)})
+    assert caplog.text.count(AT_CAP_WARNING) == 2, caplog.text
+    reset_signal_state_for_tests()
+
+
+def test_an_at_cap_WARN_cannot_swallow_a_faults_INCIDENT(monkeypatch, signals):
+    """The two signals are throttled SEPARATELY (#13102 VGATE F2).
+
+    "Over the cap and still enforcing" and "not enforcing at all, our plumbing
+    broke" are different facts. A shared throttle key let a WARN emitted a minute
+    earlier suppress the durable incident for a later fault in the same hour —
+    measured: the counter moved and NOTHING was filed.
+    """
+    _ledger_reading(monkeypatch, unmeasured_reason="absent")
+    enforce_allowances(_limits(max_graph_storage_mb=77),
+                       meters={"graph_storage": _meter(100.0)})  # at-cap WARN
+    _ledger_reading(monkeypatch, unmeasured_reason="read_error")
     enforce_allowances(_limits(max_graph_storage_mb=77))
+    assert [d.get("reason") for _k, _o, d in signals] == ["read_error"], signals
+
+
+# ── 3d. THE P0 PROOF: a real org row, a real meter, no gauge ─────────────
+
+
+def test_a_brand_new_PAID_orgs_first_write_succeeds_against_a_REAL_ledger(
+        provision_test_user, signals):
+    """The definition-of-done test: a real Team row, the real reader, no refusal.
+
+    Nothing is stubbed on the store side: ``provision_test_user`` writes a real
+    ``Team`` row at tier ``pro`` (in the live lane's own per-test namespace), the
+    allowance is resolved from the REAL artifact through ``_arm_graph_storage``
+    for the tier that row actually stores, and the usage figure is read by the
+    REAL ``metering.get_graph_storage_reading`` — which, for this org's window,
+    has no row at all (the gauge's only writer is the backup sweep).
+
+    RED pre-fix: ``QuotaCheckError("graph_storage usage has no reading … rejecting
+    to fail open")``, i.e. HTTP 500 on the onboarding demo's first point.
+    """
+    from tortoise import metering
+
+    org = provision_test_user(tier="pro")
+    org_id = org["org_id"]
+    rows = org["sdk"]._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}
+    ).result_set
+    tier = rows[0][0]
+    assert tier == "pro"
+
+    # the REAL reader, over the REAL store: this org has no gauge yet
+    reading = metering.get_graph_storage_reading(org_id)
+    assert reading["measured"] is False, reading
+    assert reading["graph_storage_measured_at"] is None, reading
+    assert reading["unmeasured_reason"] in {"absent", "period_error",
+                                            "read_error"}, reading
+
+    limits = _arm_graph_storage({"org_id": org_id, "tier": tier}, tier)
+    assert limits["max_graph_storage_mb"] == 102  # the artifact's pro window
+    limits["org_id"] = org_id
+
+    # THE ASSERTION THIS TEST EXISTS FOR: the first write is SERVED.
+    enforce_allowances(limits, resource="points")
+    counters = unarmed_served_counts()
+    assert counters.get(("graph_storage", "absent"), 0) + counters.get(
+        ("graph_storage", "period_error"), 0) + counters.get(
+        ("graph_storage", "read_error"), 0) == 1, counters
+
+
+def test_the_REST_door_serves_where_it_used_to_answer_500(monkeypatch, signals):
+    """The seam the review measured: ``_check_org_limit`` → HTTP 500 → 200.
+
+    No DB needed for this half — the DB-backed half is the test above. This pins
+    that a configured allowance whose meter has NO reading no longer raises
+    ``HTTPException(500)`` at the ONE REST convergence point.
+    """
+    from tortoise import quota
+    from tortoise.hosted_api import _check_org_limit
+
+    _ledger_reading(monkeypatch, unmeasured_reason="read_error")
+    monkeypatch.setattr(
+        quota, "resolve_org_limits",
+        lambda org_id: {"org_id": org_id, "tier": "pro",
+                        "max_graph_storage_mb": 102})
+    _check_org_limit({"org_id": ORG, "tier": "pro", "max_points": None,
+                      "max_api_keys": None, "max_sessions": None,
+                      "max_users": None, "max_graphs": None},
+                     "points")  # must not raise
 
 
 # ── 4. the contracts the cap must not break ───────────────────────────────

@@ -216,16 +216,21 @@ def test_ruled_dimension_three_extraction_tokens():
 
 
 def test_ruled_dimension_one_postgres_bytes_is_BLOCKED_and_refuses():
-    """Unit 1 of #5331 — Postgres bytes — has no per-org RESIDENCY gauge.
+    """Unit 1 of #5331 — Postgres bytes — is BLOCKED, now on ONE ground.
 
-    ⚠️ This test used to assert the refusal said *"no per-org byte meter"* and
-    justified it with *"a per-org split would be an ALLOCATION, not a
-    measurement"*. #12762 landed a per-org byte attribution that IS a
-    measurement (``postgres_bytes.PerOrgPostgresBytes.for_org``), and
-    ``cost_dimensions`` carries an explicit ``OVERRIDES:`` of that sentence — so
-    the block now rests on the two grounds that are still true: there is no
-    per-org RESIDENCY GAUGE (the audit is a whole-table pass; the ledger reader
-    is the window ADDEND), and the free/anon included amounts are unconfirmed.
+    ⚠️ Two sentences in this docstring were true when written and are not now,
+    and both are recorded here rather than deleted:
+      * it used to assert the refusal said *"no per-org byte meter"*, justified by
+        *"a per-org split would be an ALLOCATION, not a measurement"* — #12762
+        landed a per-org attribution that IS a measurement
+        (``postgres_bytes.PerOrgPostgresBytes.for_org``);
+      * it then said the block rested on TWO grounds, the second being that no
+        per-org RESIDENCY gauge existed — #9559 wired one
+        (``metering.get_postgres_residency`` over ``org_postgres_residency``,
+        snapshotted offline, aged by ``stale_after_seconds``).
+    What remains is the owner's decision alone: the free/anon included amounts
+    are unconfirmed. ⛔ Read ``postgres_storage.blocked_reason`` for the live
+    state; this docstring is the history of why the assertion below changed.
 
     The behaviour under test is unchanged and is the important half: configuring
     the key REFUSES (fail closed, naming the block) rather than passing on a

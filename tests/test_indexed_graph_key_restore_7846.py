@@ -234,11 +234,18 @@ pytestmark = pytest.mark.skipif(
 
 
 def _redis(*, decode: bool = False, timeout: float = _RESTORE_TIMEOUT_S):
-    """A bounded raw client. ``decode=False`` is REQUIRED for ``DUMP``.
+    """A bounded raw client, kept BINARY-SAFE because the payload is opaque bytes.
 
-    ``DUMP`` returns a binary payload and a ``decode_responses=True`` client
-    raises ``UnicodeDecodeError`` on it — the first of the two traps the issue
-    lists. Every client in this module is binary-safe for that reason.
+    ``DUMP`` returns a binary payload and every client in this module is built
+    binary-safe so a decoded one can never be handed to ``RESTORE``. ⛔ The old
+    reason given here — *"a ``decode_responses=True`` client raises
+    ``UnicodeDecodeError`` on it"* — is FALSE on the pinned driver (``#13102``
+    review F3): ``Redis.dump()`` marks its reply ``NEVER_DECODE``
+    (``redis/commands/core.py`` at tag ``v7.4.1``; ``uv.lock`` pins exactly
+    ``redis 7.4.1``), so ``DUMP`` arrives as ``bytes`` under either policy and no
+    ``decode_responses`` setting can make it raise. The pin below is therefore a
+    POLICY statement — this module never wants text decoding on a client that
+    carries serialized bytes — not a workaround for a failure that occurs.
     """
     host, port, username, password, ssl = _TARGET
     return redis.Redis(

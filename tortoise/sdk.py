@@ -10207,19 +10207,29 @@ def _status_is_stored_unhashable(value: object) -> bool:
     """True when this value would be STORED on the node AND cannot be tested
     for membership.
 
-    :func:`_status_is_evaluable` alone over-refuses: a NON-persistable value is
-    DROPPED by the writers, so the node never carries it and the direct-edge
-    check never sees it (pinned by
+    :func:`_status_is_evaluable` alone over-refuses: a NON-persistable value
+    never LANDS on the node (no writer stores it), so the direct-edge check
+    never sees it. Only a PERSISTABLE unhashable value — an array — lands on
+    the node. The arm that pins this is
     ``test_direct_route_object_and_event_status_values_are_refused_in_phase_1_like_the_writer``
-    in ``tests/test_ingest_event_endpoint.py``). The name this comment used to cite,
-    ``…_not_over_rejected``, is the arm ``#13100`` INVERTED — read the new one.
-    Only a PERSISTABLE unhashable value — an array — lands on the node.
+    in ``tests/test_ingest_event_endpoint.py``; the name this comment used to
+    cite, ``…_not_over_rejected``, was INVERTED by ``#13100`` and exists nowhere.
+
+    ⛔ #11824 S0 superseded the ACCEPTANCE half of that sentence, not the
+    scoping half: the `:Subject`/`:Object` writers now run the four-word
+    lifecycle door, which refuses every non-`str` (`dict` included), so a dict
+    status is REFUSED at Phase 1 by the door arm above rather than
+    accepted-and-dropped, and it never reaches a writer at all (see the same
+    `test_direct_route_object_and_event_status_values_are_refused_in_phase_1_like_the_writer`).
+    This clause is kept as the STORED scoping of THIS arm — so it does not add
+    a second, differently-diagnosed violation for a value the door already
+    refused — and it stays load-bearing wherever the door is not the authority
+    (the graph-read legs below read whatever raw Cypher put on a node).
 
     Note the two clauses are independent: ``bytes`` passes
-    ``_status_is_evaluable`` (it IS hashable) and is dropped as
-    non-persistable, so it is accepted by the first clause rather than the
-    second; the non-persistable clause is what accepts ``dict``/``set``/
-    ``bytearray``.
+    ``_status_is_evaluable`` (it IS hashable) and is non-persistable, so it is
+    accepted by the first clause rather than the second; the non-persistable
+    clause is what excludes ``dict``/``set``/``bytearray`` from this arm.
     """
     from .projection.entities import _is_persistable_prop_value
 
