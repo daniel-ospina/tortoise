@@ -789,6 +789,58 @@ def test_a_FALSY_stageId_is_not_treated_as_unresolvable(sdk):
         f"the close was not recorded exactly once then converged ({mints})")
 
 
+def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
+    """#13289 review F6 (P1, crash): a stored ARRAY `status` must not raise.
+
+    Both lifecycle helpers were `frozenset` membership tests, and membership
+    HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
+    type`. That value is ONE supported write away (`update_knowledge(id,
+    status=['live'])` stores it verbatim; `live.py` documents the same hazard for
+    `endpoint_permits_operator_promotion`), and the FOLD tolerates it because its
+    own `excluded` is a LIST (an `==` scan, no hash).
+
+    A raise here is not a quiet skip: `_project_issue` runs BEFORE the Object
+    write and the exception lands in the per-issue handler, so that issue is
+    dropped on EVERY poll while the run still reports success — one cryptic
+    `repo#N: unhashable type: 'list'` per poll. Both helpers now hash only a
+    string, so a non-scalar status is simply not a vocabulary word and the read
+    falls through to the position axis.
+    """
+    from tortoise.indexer.github_indexer import (
+        _row_is_frozen,
+        _status_is_latched,
+    )
+
+    # Unit level: neither helper may raise on a non-scalar value.
+    for shape in (["live"], {"a": 1}):
+        assert _status_is_latched(shape) is False, (
+            f"{shape!r} was latched, or raised")
+        assert _row_is_frozen(shape, None) is False, (
+            f"{shape!r} was frozen, or raised")
+    # …and the scalar semantics are unchanged by the guard.
+    assert _status_is_latched("deprecated") is True
+    assert _status_is_latched("outdated") is False
+    assert _row_is_frozen("outdated", None) is True
+    assert _row_is_frozen(None, True) is True
+
+    # End to end: the read answers from the position axis and the run reports no
+    # per-issue error.
+    oid = "github-issue-acme/repo1-1"
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) SET o.status=['live'], "
+        "o.pipelineStageId='in_progress', o.pipelineSlot='active', "
+        "o.isClosed=false")
+    assert GitHubIndexer._object_state_to_issue_state(proj, oid) == "open", (
+        "a stored ARRAY status was not read from the position axis")
+    stats = _run(_indexer(t), sdk)
+    assert not stats.get("errors"), (
+        f"a stored ARRAY status raised into the per-issue handler: "
+        f"{stats.get('errors')}")
+
+
 def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
     """#13289 review F2 (P2): absent key and unrecognised key are DIFFERENT questions.
 

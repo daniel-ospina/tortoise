@@ -60,9 +60,9 @@ import httpx
 from tortoise import github_map
 from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
 from tortoise.live import (
+    TERMINAL_EXCLUDED_STATUSES,
     _terminal_excluded,  # #2901 canonical non-current predicate
     is_position_ended,
-    is_terminal_status,
 )
 from tortoise.pipeline import (
     CORE_WORK_ITEM_PIPELINE,
@@ -256,7 +256,21 @@ def _row_is_frozen(status, outdated) -> bool:
     is deliberately not passed: this helper answers only the lifecycle question.
     Position is the axis a diff CAN converge on, so it is read separately.
     """
-    return is_terminal_status(status, outdated)
+    # ⛔ HASHING GUARD (#13289 review F6): `live.is_terminal_status` is a
+    # `frozenset` membership test, and membership HASHES the value — so a stored
+    # ARRAY `status` raises `TypeError: unhashable type`. That value is ONE
+    # supported write away (`update_knowledge(id, status=['live'])` stores it
+    # verbatim; `live.py` documents the same hazard for
+    # `endpoint_permits_operator_promotion`), and the FOLD tolerates it because its
+    # own `excluded` is a LIST (an `==` scan, no hash). A raise here is not a quiet
+    # skip of one row: `_project_issue` runs BEFORE the Object write and the
+    # exception lands in the per-issue handler, so that issue is dropped on EVERY
+    # poll while the run still reports success.
+    # Spelling the two terms out (rather than calling the shared helper) keeps the
+    # reader agreeing with the fold on that row instead of introducing a crash path
+    # it did not have. A non-string status is simply not a vocabulary word.
+    return bool(outdated) or (
+        isinstance(status, str) and status in TERMINAL_EXCLUDED_STATUSES)
 
 
 def _status_is_latched(status) -> bool:
@@ -283,7 +297,11 @@ def _status_is_latched(status) -> bool:
     would have applied; answering ``"closed"`` for both loops the close. The
     reader answers each term by what its own direction can actually reach.
     """
-    return (status or "") in OBJECT_TERMINAL_STATUSES
+    # ⛔ HASHING GUARD (#13289 review F6) — see `_row_is_frozen`. `status` is
+    # stored VERBATIM by the public doors, so it can be a list/dict, and membership
+    # in the `frozenset` would raise. The fold's own list-based `in` does not, so a
+    # non-string status is simply not a latched word here either.
+    return isinstance(status, str) and status in OBJECT_TERMINAL_STATUSES
 
 
 def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
