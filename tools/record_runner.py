@@ -181,9 +181,14 @@ class Journal:
     #: readers now report both counters (`read_all_segments_reporting_damage` for
     #: a segmented layout, `EventLog.read_all` for a single file), so a
     #: `read_journal` result never carries ``None``; the default survives for a
-    #: hand-built ``Journal``, and it stays UNKNOWN rather than zero by contract.
-    corrupt: int | None = 0
-    torn: int | None = 0
+    #: hand-built ``Journal``, and it stays UNKNOWN rather than zero by contract —
+    #: the DEFAULT IS ``None`` FOR THAT REASON (review P2, #13275): a `Journal`
+    #: built without counters reports damage as UNMEASURED, where a `0` default
+    #: silently asserted "no damage" over a read that measured nothing, which is
+    #: the exact fail-open rendering the `None` arm of `_journal_damage_lines`
+    #: exists to prevent.
+    corrupt: int | None = None
+    torn: int | None = None
 
     def __len__(self) -> int:
         return len(self.records)
@@ -259,7 +264,9 @@ def read_journal(path: str | Path, *, salvage: bool = False) -> Journal:
         # `read_for_replay` half of that is true and the CONCLUSION was false:
         # `read_all_segments` REFUSES a segmented read with mid-file damage unless
         # the caller asked to salvage (`journal_segments.py`, strict-by-default),
-        # so a non-salvage read that RETURNS has skipped nothing; and it counted
+        # so a non-salvage read that RETURNS has skipped no MID-FILE LINE (a torn
+        # tail is the other class: NEITHER reader refuses it, both count it, and
+        # the render names it separately — see `_journal_damage_lines`); and it counted
         # both classes all along and threw the counts away. Every graph directory
         # is this arm, so `None` here made a documented `status --journal <graph
         # dir>` unable to report completion for ANY directory-backed graph — and
@@ -866,19 +873,22 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
 
     ⚠ WHAT `apply` DOES WITH WHAT IT NOW DISCLOSES IS STILL OPEN (review P2
     #13272; #13280). `apply` refuses `--salvage`, and a non-salvage read RAISES on
-    MID-FILE damage (`journal_segments.py:949-953`) — so a fold cannot skip a
-    RECORD that was never sealed. But a torn fragment is tolerated by BOTH readers:
-    the segmented one only warns (`:954-957`), and `EventLog.read_all` tolerates a
-    malformed line at EOF (`log.py:2491-2493`) AND a MID-FILE fragment sealed by
-    `append` (`:2494-2498`) — both via `_keep_torn` (`:2508-2525`), where the
-    fragment is SKIPPED, counted in `torn_trailing_count`, and its full text kept
-    in `torn_trailing_raw` for the #3316 classifier. So `apply` can DISCLOSE a
+    MID-FILE damage (`journal_segments.read_all_segments_reporting_damage`'s strict
+    arm) — so a fold cannot skip a RECORD that was never sealed. But a torn
+    fragment is tolerated by BOTH readers: the segmented one only warns
+    (`read_all_segments_reporting_damage`'s torn warning), and
+    `EventLog.read_all` tolerates a malformed line at EOF AND a MID-FILE fragment
+    sealed by `append` — both via `_keep_torn`, where the fragment is SKIPPED,
+    counted in `torn_trailing_count`, and its full text kept in `torn_trailing_raw`
+    for the #3316 classifier. Those citations name the FUNCTION, not a line range:
+    this refactor moved the body and left three stale line numbers in this
+    docstring (review P3, #13275). So `apply` can DISCLOSE a
     dropped fragment now, but it still never consults
     `torn_tail_revival_records()` — the #3316 contract that a torn tail whose loss
-    could REVIVE removed state must be refused before any wipe or fold
-    (`log.py:2355-2365`). That gap is pre-existing and out of this file's scope;
-    this docstring states it instead of asserting the state cannot occur, because
-    a maintainer reading "impossible" would not go looking for it.
+    could REVIVE removed state must be refused before any wipe or fold. That gap
+    is pre-existing and out of this file's scope; this docstring states it instead
+    of asserting the state cannot occur, because a maintainer reading "impossible"
+    would not go looking for it.
     """
     if j["corrupt_lines"] is None or j["torn_tails"] is None:
         return ["  ⚠ damage counters NOT REPORTED: this read returned no counters "

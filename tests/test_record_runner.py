@@ -563,14 +563,24 @@ def test_status_DISCLOSES_a_salvage_read_and_withdraws_the_completion_claim(
     assert "complete: UNKNOWN" in out
 
 
-def test_status_on_a_SALVAGED_segmented_layout_cannot_claim_completion(
+def test_status_on_a_HAND_BUILT_journal_cannot_claim_completion(
         monkeypatch, capsys):
-    """The segmented arm, SALVAGED — the only segmented state that skips a line.
+    """The NOT-REPORTED arm — now reachable only from a INCONSTRUCTED `Journal`.
 
-    `corrupt is None` means NOT REPORTED, so there is no number to print; and with
-    `salvage=True` a mid-file line WAS skipped, so `fully_consumed` must be `None`
-    and the text must say the damage is unreportable rather than print a
-    reassuring zero.
+    ⛔ THIS ROW USED TO DESCRIBE A SEGMENTED READ (review P2, #13275). It built
+    `Journal(segmented=True, salvage=True, corrupt=None, torn=None)` and asserted
+    the "damage counters NOT REPORTED" render — a state the branch's own change
+    makes IMPOSSIBLE: `read_journal`'s segmented arm now returns the counters it
+    measures (`read_all_segments_reporting_damage`), and the real-directory row
+    below measures `corrupt == 1` plus the "damaged input: 1 mid-file line(s)"
+    sentence for that same logical state. The suite was therefore asserting BOTH
+    renderings for one state, and this row passed only because it hand-built the
+    value the reader can no longer produce.
+
+    What it pins now is the contract that survives: a `Journal` that carries no
+    counters — the `None` DEFAULT, which a bare `Journal(...)` gets — must render
+    damage as UNMEASURED, never as zero. `salvage=True` keeps `fully_consumed`
+    `None` for its own reason (a salvage read skipped a mid-file line).
 
     ⛔ `salvage` is what makes it unknown, NOT `corrupt is None` (review P2,
     #13210): the segmented reader is strict unless asked to salvage, so a clean
@@ -580,7 +590,10 @@ def test_status_on_a_SALVAGED_segmented_layout_cannot_claim_completion(
     """
     journal = Journal(path=FIXTURE,
                       records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
-                      segmented=True, salvage=True, corrupt=None, torn=None)
+                      segmented=True, salvage=True)   # counters DEFAULT to None
+    assert journal.corrupt is None and journal.torn is None, (
+        "a bare Journal must default to NOT REPORTED, not to zero — a `0` default "
+        "asserts 'no damage' over a read that measured nothing")
     monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
     _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
 
@@ -765,6 +778,34 @@ def test_every_verb_discloses_the_damage_it_read(monkeypatch, capsys):
     assert rc == EXIT_OK
     assert "damage counters NOT REPORTED" in capsys.readouterr().out
 
+    # ⛔ AND THE ARM THAT MATTERS FOR A WRITE (review P2, #13275): the NOT-REPORTED
+    # fixture above is the easy half. Measured before this arm existed, making
+    # `apply` unable to disclose MEASURED damage —
+    # `*(_journal_damage_lines(report.journal) if report.journal["corrupt_lines"]
+    # is None else [])` — left **59 passed**: the write verb's only damaged-journal
+    # warning could be deleted and the suite stayed green.
+    # One sentence per DAMAGE CLASS (#13272): a mid-file skip voids the claim, a
+    # torn tail does not — so the two are named separately and this arm drives both.
+    for damage, sentence in (
+            ({"corrupt_lines": 1, "torn_tails": 0},
+             "damaged input: 1 mid-file line(s)"),
+            ({"corrupt_lines": 0, "torn_tails": 1},
+             "torn tail: 1 fragment(s)")):
+        measured = {"path": "j", "records": 1, "segmented": False,
+                    "salvage": False, **damage}
+        assert sentence in record_runner._journal_damage_lines(measured)[0]
+        applied = record_runner.ApplyReport(
+            org_id="o", graph_id="g", journal=measured, checkpoint_before={},
+            start_at=0)
+        assert sentence in record_runner._render_apply(applied), (
+            "the WRITE verb's report dropped the damage it read")
+        plan = record_runner.PlanReport(
+            org_id="o", graph_id="g", journal=measured, checkpoint=None, cursor=None,
+            start_at=0, events_to_consume=0,
+            totals={"events": 0, "statements": 0, "position_rows": 0,
+                    "events_by_type": {}})
+        assert sentence in record_runner._render_plan(plan)
+
 
 
 def test_apply_help_says_it_refuses_allocate(capsys, monkeypatch):
@@ -845,6 +886,40 @@ def test_a_DAMAGED_graph_dir_REFUSES_the_strict_read_and_MEASURES_the_salvaged_o
     assert "damage NOT REPORTED" not in out
     assert "cannot see it" not in out
 
+
+
+def test_a_TORN_TAIL_in_a_GRAPH_DIRECTORY_reaches_read_journal(tmp_path):
+    """⛔ P3 (review #13275): the segmented arm's `torn` plumbing was unfenced.
+
+    The row below drives a torn tail through a SINGLE-FILE journal, and the
+    mid-file row drives a graph directory with `torn == 0`. Neither exercises the
+    segmented branch's `torn` argument, so returning `torn=0` from `read_journal`'s
+    directory arm — discarding the count the reporting reader had just produced —
+    left **130 passed**: the counter could be reinstated as unmeasured for every
+    graph-directory read and nothing reddened. (`corrupt` was fenced, `torn` was
+    not.)
+
+    A REAL graph directory, so the assertion is about `read_journal`'s dispatch and
+    the reader's counting, not about a value this test set.
+    """
+    from tortoise import journal_segments
+
+    active = tmp_path / journal_segments.ACTIVE_NAME
+    good = json.dumps({"type": "IngestStarted"})
+    active.write_text(good + "\n" + good + "\n", encoding="utf-8")
+    with active.open("ab") as fh:
+        fh.write(b'{"type": "PointAd')            # SIGKILL mid-append, no newline
+
+    strict = read_journal(tmp_path)               # strict tolerates a torn tail
+    assert strict.segmented is True, "this row must take the DIRECTORY arm"
+    assert len(strict) == 2
+    assert strict.corrupt == 0, "a torn tail is not a mid-file damage count"
+    assert strict.torn == 1, (
+        f"the directory arm stopped passing the reader's torn count: {strict.torn!r} "
+        "— `torn=0` here is the defect this row exists for")
+
+    salvaged = read_journal(tmp_path, salvage=True)
+    assert (salvaged.corrupt, salvaged.torn) == (0, 1), salvaged
 
 
 def test_a_TORN_TAIL_alone_does_NOT_withdraw_the_completion_claim(
