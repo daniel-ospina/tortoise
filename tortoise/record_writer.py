@@ -2806,8 +2806,8 @@ def write_live_record(record: Mapping[str, Any], *,
             "later armed write refuses for the same reason until the gap is "
             "closed (an ARMED replay of the missing record closes it one record "
             "at a time, once the caller commits — but that is a CODE call "
-            "(`record_projection.replay(..., allocate=True)`); there is no CLI "
-            "verb for it in this tree). For the whole gap the remedy "
+            "(`record_projection`'s `replay(..., allocate=True)`); there is no "
+            "CLI verb for it in this tree). For the whole gap the remedy "
             "is the allocator's operator path: `halt` -> "
             "`seed --journal` -> `reopen` -> `arm`; record=%s %s",
             RECORD_ALLOCATE_ENV, record.get("type"), _record_identity(record),
