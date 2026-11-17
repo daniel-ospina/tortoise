@@ -350,6 +350,18 @@ surfaces:
   # half is `test_record_serve_live.py`.
   - test_record_serve.py
   - test_12941_read_your_writes.py    # #12941: dual: core
+  # #13034: the `api` arm of the dual registration, and it is not optional. The
+  # file's §5 census AST-walks `tortoise/hosted_api.py` (`_CENSUS_MODULES`) and
+  # its endpoint pin drives `hosted_api.list_points`
+  # (`test_the_hosted_list_route_drops_it`), so a `tortoise/hosted_api.py`-only
+  # diff is exactly the change it guards. `hosted_api.py` is an EXACT `api`
+  # SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()`, so
+  # without this arm such a diff selects `api`+`onboarding` and never runs the
+  # guard — the #1349/#2938/#3154 silent-drop class. The `core` arm (lower in
+  # this file, the row #13141 registered) covers a `tortoise/live.py`-only
+  # diff, where the rule itself changes. DB-free: the endpoint pin drives
+  # the route against a fresh embedded SDK, no server and no docker.
+  - test_13034_currency_rule_reads_position.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
