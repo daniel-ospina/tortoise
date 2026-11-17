@@ -313,8 +313,15 @@ def seed_graph(fg_host: str, fg_port: int, points: list[dict]) -> dict:
     from falkordb import FalkorDB
 
     from benchmarks.synthetic_corpus import seed_corpus
+    from tortoise.projection import _bounded_server_socket_kwargs
 
-    db = FalkorDB(host=fg_host, port=fg_port)
+    # #3065/#8118: a measurement tool is not exempt from the read bound. An
+    # unbounded socket is the defect this repo already carries a number for —
+    # a stalled engine parks the caller in `recv()` at 0% CPU with no error,
+    # which a run would then record as "no rows" rather than "no answer".
+    # The bound comes from the product's ONE resolution point, so the two
+    # `TORTOISE_DB_SOCKET_*` knobs reach this client too.
+    db = FalkorDB(host=fg_host, port=fg_port, **_bounded_server_socket_kwargs())
     g = db.select_graph(GRAPH_NAME)
     # A fresh graph has nothing to delete; either way the seed below is what
     # the measurement runs on, so a failing DROP is not a reason to abort.
@@ -480,7 +487,14 @@ class Arms:
         import psycopg
         from falkordb import FalkorDB
 
-        self.db = FalkorDB(host=fg_host, port=fg_port)
+        from tortoise.projection import _bounded_server_socket_kwargs
+
+        # #3065/#8118 — same bound as `seed_graph` above: the arms read the
+        # graph on the measurement path, so a stalled server must surface as a
+        # bounded read error (recorded as `arm_errors` → `disqualified`), never
+        # as an empty result set that scores 0.0 and reads as a quality loss.
+        self.db = FalkorDB(host=fg_host, port=fg_port,
+                           **_bounded_server_socket_kwargs())
         self.g = self.db.select_graph(GRAPH_NAME)
         self.pg = psycopg.connect(pg_dsn, autocommit=True)
 

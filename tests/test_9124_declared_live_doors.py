@@ -4881,6 +4881,26 @@ _PROVEN_READS: set[tuple[str, str]] = {
     # undeclared write (pinned statement extent below).
     ("tortoise/sdk.py", "TortoiseSDK._supersede_entity"),
     ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"),
+    # #13034 (a main red measured on `55ec2c71b1`, run 44025094904 job
+    # `test (k)`): `_hydrate_evidence`'s ONLY handle reach. #13034 replaced the
+    # hand-written `status <> 'retracted'` test with the shared terminal
+    # predicate, so the statement now interpolates `live._terminal_excluded(
+    # 'n.status')` — a CALL inside the f-string, which `_text` cannot unfold, so
+    # the census's over-report polarity counts it as a write. Checked by hand at
+    # this head: `MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS
+    # NOT NULL AND <live-only predicate> RETURN n.id, n.ep_alpha, n.ep_beta` — a
+    # read: no SET/CREATE/MERGE/DELETE/REMOVE, no write procedure, and the
+    # function appends no record. What it fills is the SDK's IN-MEMORY evidence
+    # map (`self._evidence`), never the graph; the graph write it loads priors
+    # FOR is `set_point_baseline`, its own censused door — so this read-side
+    # verdict blesses no undeclared write. ⛔ NOT an `_UNRESOLVED` row: that
+    # inventory satisfies the census test but NOT the flip gate (the arming test
+    # reads this register plus real lanes), so parking it there would leave the
+    # surface permanently "unproven" while looking inventoried. Flattening the
+    # predicate back into a literal is the #2901 defect class the shared
+    # predicate exists to stop, so the CODE is not the thing to change here;
+    # the systemic resolver work is #9387, and this row shrinks when it lands.
+    ("tortoise/sdk.py", "TortoiseSDK._hydrate_evidence"),
 }
 
 #: WHAT WAS PROVEN, not only whose statement was — keyed like `_PROVEN_READS`,
@@ -4913,6 +4933,11 @@ _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     # make the extent lie. Measured with the module's own enumerator, not reasoned:
     # `writes == [(48606, 'query', '<unresolved>')]`, `_is_unresolved_only` True.
     ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"): ("query",),
+    # ONE, and it is `_hydrate_evidence`'s only handle reach: the baseline-load
+    # read whose f-string interpolates `live._terminal_excluded('n.status')`
+    # (#13034). Measured with the module's own enumerator on this head:
+    # `writes == [(38824, 'query', '<unresolved>')]`, `_is_unresolved_only` True.
+    ("tortoise/sdk.py", "TortoiseSDK._hydrate_evidence"): ("query",),
 }
 
 
