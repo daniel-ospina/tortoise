@@ -299,6 +299,9 @@ class _EngineLikeGraph:
       between two reads). The removal is then NOT measurable.
     * ``"unreadable"`` — ``CALL db.indexes()`` raises on every read: the armed
       sweep cannot even tell whether an index is there.
+    * ``"pre-reshaped"`` — the FIRST (gate) read already answers with rows whose
+      ``types`` cell is not a mapping: a catalogue that is present but
+      unparseable (#13330 review P2 — this used to read as "no index here").
 
     ⛔ The generic forms are REJECTED with the engine's own message rather than
     accepted. A fake that accepts any statement mentioning ``embedding`` is how
@@ -309,7 +312,11 @@ class _EngineLikeGraph:
     def __init__(self, *, drop_accepts: str = "vector"):
         self.calls: list[str] = []
         self.drop_accepts = drop_accepts
-        self._rows = [_catalogue_row("Point", "embedding", "VECTOR")]
+        if drop_accepts == "pre-reshaped":
+            self._rows = [("Point", ["embedding"], "not-a-dict", 0, 0, 0,
+                           "NODE", "OPERATIONAL", "")]
+        else:
+            self._rows = [_catalogue_row("Point", "embedding", "VECTOR")]
 
     def _drop_row(self):
         self._rows = [
@@ -326,7 +333,7 @@ class _EngineLikeGraph:
             return _Result(list(self._rows))
         if low.startswith("drop"):
             if "drop vector index" not in low or self.drop_accepts in {
-                    "none", "unreadable"}:
+                    "none", "unreadable", "pre-reshaped"}:
                 raise RuntimeError(
                     "Unable to drop index on :Point(embedding): no such index.")
             if self.drop_accepts == "accept-noop":
@@ -730,3 +737,55 @@ def test_a_row_that_did_not_parse_withholds_the_confirmed_absence(
     assert _retirement_warnings(caplog), (
         "the unconfirmable removal was silent — a reshape this store cannot read "
         "must be reported, not assumed absent")
+
+
+def test_an_ANSWERED_but_unparseable_catalogue_is_not_a_measurement_of_absence(
+        monkeypatch, caplog):
+    """The fourth state's other half (#13330 review P2).
+
+    A catalogue that ANSWERS with rows of which none parse is UNREADABLE, not
+    empty. The gate used to fall through to "no vector index here": no DROP
+    (right) but no line either, so "cannot read it" and "there is none" were
+    indistinguishable on exactly the armed store this issue is about.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="pre-reshaped")
+    proj = _bare(graph, graph="test_13320_answered_unparseable")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert not [d for d in graph.drops if "embedding" in d.lower()], (
+        f"an unparseable catalogue must not authorise a blind DROP: {graph.drops!r}")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, (
+        "an armed store whose catalogue answered but could not be parsed was "
+        "silent — 'cannot read it' and 'there is none' are indistinguishable")
+    assert "could not read the index catalogue" in warnings[0], warnings[0]
+    assert "not one of them parsed" in warnings[0], (
+        f"the line must say the catalogue ANSWERED and could not be parsed: "
+        f"{warnings[0]!r}")
+
+
+def test_an_unparseable_post_drop_read_names_the_right_cause(monkeypatch, caplog):
+    """`NOT CONFIRMED` must not fabricate `the read FAILED` (#13330 review P2).
+
+    A catalogue that answered in an unparseable shape is an engine/catalogue-shape
+    story; a raising read is a connectivity/auth story, and the operator's next
+    action differs. The distinguishing datum (`_vector_index_served_labels`) is
+    already on the object.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="vector-reshaped")
+    proj = _bare(graph, graph="test_13320_cause_wording")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "an unconfirmable removal was silent"
+    line = warnings[0]
+    assert "could not parse" in line, (
+        f"the line must name the catalogue-shape cause: {line!r}")
+    assert "read FAILED" not in line, (
+        f"the read did not fail — it answered unparseably: {line!r}")

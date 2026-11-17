@@ -21654,15 +21654,28 @@ class FalkorProjection(
         # ZERO statements: one read that this method already needs.
         _has_vector_index = False
         _rows = None
+        # #13330 review (P2): the unreadable lane is BOTH "the read raised" and
+        # "the catalogue answered with rows none of which could be parsed". The
+        # second half used to fall through as "this store has no vector index" —
+        # no DROP (correct) but NO line at all, while `#4997/#11642` went on to
+        # report the label as "RETIRED, not missing" over an index that was still
+        # there. An unparseable catalogue is not a measurement of absence.
+        _catalogue_unreadable: str | None = None
         try:
             _rows = (catalogue_rows if catalogue_rows is not None
                      else self.g.query("CALL db.indexes()").result_set)
+            _parsed_rows = 0
             for _row in (_rows or ()):
                 try:
                     if len(_row) < 3:
                         continue
                     _label, _types = _row[0], _row[2]
-                    if str(_label) != "Point" or not isinstance(_types, dict):
+                    if not isinstance(_types, dict):
+                        # The reshaped-catalogue shape: a row that IS a row but
+                        # whose `types` cell is not the mapping this store reads.
+                        continue
+                    _parsed_rows += 1
+                    if str(_label) != "Point":
                         continue
                     # ⛔ THE PROPERTY, not merely the label (#13330 review P2).
                     # This gate decides whether to ISSUE DDL, and a `Point`
@@ -21679,7 +21692,13 @@ class FalkorProjection(
                             break
                 except Exception:  # noqa: BLE001, RUF100 — a malformed row is skipped
                     continue
+            if _rows and not _parsed_rows:
+                _catalogue_unreadable = (
+                    f"the catalogue answered {len(_rows)} row(s) and not one of "
+                    "them parsed as a `CALL db.indexes()` row")
         except Exception as e:  # noqa: BLE001, RUF100 — fail SAFE: do not drop blind
+            _catalogue_unreadable = str(e)
+        if _catalogue_unreadable is not None:
             # ⛔ #13320: an ARMED store whose catalogue cannot be read is the
             # FOURTH state, and it used to be DEBUG-only silence on exactly the
             # store the issue was filed on (the index may be there and can never
@@ -21693,7 +21712,8 @@ class FalkorProjection(
                     "sweep, because a DROP is never issued blind. Arming therefore "
                     "did NOT take effect on this store (LATCHED: reported once per "
                     "store per process), and it retries on the next setup",
-                    getattr(self, "_graph_name", "<unknown graph>"), e)
+                    getattr(self, "_graph_name", "<unknown graph>"),
+                    _catalogue_unreadable)
             _has_vector_index = False
         # ⛔ NO "LEAVING IT IN PLACE" LINE HERE ANY MORE (#11660 review round 7,
         # P2-3). The unarmed case used to fall through to a gate at this point
@@ -21835,9 +21855,23 @@ class FalkorProjection(
                 # "SURVIVED" is a MEASUREMENT, and it is only made when the
                 # post-drop catalogue actually answered.
                 if _still_indexed is None:
+                    # ⛔ #13330 review (P2): `None` has TWO causes and the line
+                    # must not fabricate the wrong one. The read RAISING is a
+                    # connectivity/auth story; a catalogue that ANSWERED in a
+                    # shape nothing could parse is an engine/catalogue-shape story,
+                    # and the operator's next action differs. The distinguishing
+                    # datum is already on the object: `_vector_index_served_labels`
+                    # is a set whenever the inventory completed, and None only when
+                    # the read itself did not.
+                    _why = (
+                        "the post-drop catalogue read FAILED"
+                        if self._vector_index_served_labels is None
+                        else "the post-drop catalogue answered in a shape this "
+                             "store could not parse"
+                    )
                     _verdict = (
-                        "was NOT CONFIRMED removed: the post-drop catalogue read "
-                        "FAILED, so nothing measured whether it is still there")
+                        f"was NOT CONFIRMED removed: {_why}, so nothing measured "
+                        "whether it is still there")
                 else:
                     _verdict = (
                         "SURVIVED an ARMED retirement sweep: the post-drop "
