@@ -1551,16 +1551,17 @@ class _EdgeHandlers:
         # without this a process whose writes are edges registers NO target and
         # `metrics()['cache_write_targets']` reads `{}`, byte-identical to "this
         # process took no live cache write": the same illusion the registry
-        # exists to end. This is the ONE producer both mints call, and they call
-        # it when the MERGE statement RAN and reported a match — the
-        # write-issued-and-landed point, not an attempt. ⚠️ That is NOT a
-        # created-only gate: `created` comes from `MERGE … RETURN count(*) > 0`,
-        # which is also true for an idempotent re-MERGE of an edge that already
-        # existed (`create_edge` says so itself: "there is no created-only
-        # gate"), so a repeat edge write counts here too — deliberately, because
-        # the write really was issued and landed. Replay is excluded below,
-        # before the recorder gate (a projection with no recorder still WROTE
-        # the cache).
+        # exists to end. This is the ONE producer both mints call, after the
+        # MERGE, so it is the point where a write has LANDED rather than an
+        # attempt. ⚠️ Read that precisely: the callers gate on `created`, and
+        # `created` comes from `MERGE … RETURN count(*) > 0` — TRUE for an
+        # idempotent re-MERGE of an edge that already existed (`create_edge`
+        # says it itself: "there is no created-only gate"). So a repeated
+        # `create_edge` is counted once per mint, which is defensible (a write
+        # was issued and landed) but is NOT the stronger "only a genuinely new
+        # row" claim this comment used to make (#12943 review cycle 3, P3).
+        # Replay is excluded below, before the recorder gate (a projection with
+        # no recorder still WROTE the cache).
         # Lazy import: `tortoise.projection` imports THIS module, and this
         # mixin's `self` IS the projection. The helper is total and excludes a
         # replay itself.
