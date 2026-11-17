@@ -653,9 +653,16 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
     # ALTERNATION, so `aboutObject` is read as one member and the literal string
     # never appears at the site. This is the form that under-counted the
     # customer-callable surfaces three times (#7956's erratum, B2.7, #7948).
-    "ranking.py::StateRanker._fetch_object_signals": (
-        'about_types = "|".join(ABOUT_EDGE_TYPES)',
-        '"OPTIONAL MATCH (p)-[a:" + about_types + "]->(o) "',
+    # ⚠️ RE-DERIVED by #12184: this row named `StateRanker._fetch_object_signals`,
+    # whose body is now a one-line delegation to the shared `fetch_entity_signals`.
+    # A row is decided by its OWN SPAN, so the row and this pin moved to the
+    # symbol that now spells the read — keeping the old symbol and pinning the
+    # DELEGATION would have left the census blind to the shared query itself (a
+    # refactor could stop reading the edge behind a still-green pin, which is the
+    # false PASS this table exists to stop).
+    "ranking.py::fetch_entity_signals": (
+        'preds = "|".join(tuple(extra_preds) + tuple(ABOUT_EDGE_TYPES))',
+        '"OPTIONAL MATCH (p)-[a:" + preds + "]->(n) "',
     ),
     "sdk.py::TortoiseSDK._state_related_objects": (
         '"MATCH (n:Point)-[a:" + self._ABOUT_TYPES + "]->(t) "',
@@ -2698,6 +2705,16 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
         "the settle leg sits behind the restore orchestrator AND its settle helper "
         "(`restore_graph` -> `_restore_copy_settled`), one further than the restore "
         "graph itself",
+    ),
+    "ranking.py::fetch_entity_signals": (
+        4,
+        "#12184 moved the read out of `StateRanker._fetch_object_signals` into the "
+        "module-level `fetch_entity_signals` both rankers share (so they cannot "
+        "drift), and the door `tortoise_recall` reaches it through BOTH hops: "
+        "`recall_state` -> `StateRanker.rerank` -> `_fetch_entity_signals` -> "
+        "`fetch_entity_signals`. The extra hop is the shared home itself, not a "
+        "weaker chain: the declaring symbol is one reference further than the "
+        "method that used to spell the query inline",
     ),
 }
 

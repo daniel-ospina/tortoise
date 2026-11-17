@@ -709,9 +709,12 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     it is WRITER AGREEMENT rather than over-rejection. Asserting the old shape
     would pin a divergence the slice exists to remove.
 
-    The `:Event` half is unchanged and still proves the other direction: an Event
-    has no lifecycle (#11825), so a non-persistable status is DROPPED there and
-    the bundle must stay accepted — the arm is not simply "reject every non-str".
+    ⛔ THE `:Event` HALF IS GONE TOO (#13100, whose ruling this integration
+    carries): an `:Event` now refuses ANY `status` declaration — a dict
+    included — so Phase 1 refuses that item as well and there is no "dropped
+    there, accepted here" contrast left to pin. The Event refusal lives in
+    `tests/test_11825_event_terminal_status_refused.py` and
+    `tests/test_13100_planned_occurrences.py`.
     """
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
@@ -720,30 +723,15 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     bundle = {
         "entities": [{"ref": "o1", "type": "object", "name": "Alpha",
                       "status": {"a": 1}},
-                     {"ref": "o2", "type": "object", "name": "Beta"},
-                     # The `:Event` half of the contrast — no lifecycle, so the
-                     # value is dropped there and the bundle stays accepted.
-                     {"ref": "e1", "type": "event", "name": "Happened",
-                      "eventKind": "sessionCaptured", "status": {"a": 1}}],
+                     {"ref": "o2", "type": "object", "name": "Beta"}],
         "connections": [{"from": "o1", "to": "o2", "operator": "IMPL"}],
     }
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("declares status" in m and ":Object" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(bundle)
-    # ZERO mutation: the predecessor object and the Event never land.
+    # ZERO mutation: the predecessor object never lands.
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 0
-    assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 0
-
-    # …and the Event's dropped-value shape alone IS accepted.
-    event_only = {"entities": [
-        {"ref": "o", "type": "object", "name": "Solo"},
-        {"ref": "e1", "type": "event", "name": "OnlyEvent",
-         "eventKind": "sessionCaptured", "status": {"a": 1}},
-    ]}
-    assert sdk._validate_bundle(event_only) == []
-    sdk.ingest(event_only)
-    assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 1
 
 
 @pytest.mark.parametrize("spelling", ["top", "nested"])
@@ -814,12 +802,14 @@ def test_direct_route_event_outdated_flag_rejected_phase1(sdk, spelling):
     assert _count(sdk, "MATCH (n:Event {name:'Launch'}) RETURN count(n)") == 0
 
 
-def test_direct_route_live_event_not_over_rejected(sdk):
-    """#7925 review P1 (Event arm's OTHER edge): only TERMINAL declared values
-    reject. A bundle-local Event declaring `status: 'live'` is not born
-    terminal, so the direct Event<->Object edge is legal and must be written
-    operator-less. Without this pin the Event arm could over-reject every
-    declared status."""
+def test_direct_route_live_event_status_is_refused(sdk):
+    """#13100 reopens #7925's non-terminal allowance on an `:Event`.
+
+    #7925 pinned that a bundle-local Event declaring `status: 'live'` was
+    accepted (only terminal words rejected). The approved model has no Event
+    lifecycle at all — a thing that has not happened yet is a PLAN — so the
+    declaration is refused at Phase 1, and nothing commits.
+    """
     bundle = {
         "entities": [
             {"ref": "evt", "type": "event", "name": "Launch",
@@ -828,9 +818,22 @@ def test_direct_route_live_event_not_over_rejected(sdk):
         ],
         "connections": [{"from": "evt", "to": "o", "operator": "IMPL"}],
     }
-    assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
-    assert res["created"]["connections"] == 1
+    violations = sdk._validate_bundle(bundle)
+    assert violations, "a non-terminal Event status passed Phase 1"
+    assert any("for an :Event" in v["message"] for v in violations)
+    # ZERO mutation — the point of a Phase-1 refusal.
+    assert _count(sdk, "MATCH (n:Event {name:'Launch'}) RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (:Event)-[r:IMPL]->(:Object) RETURN count(r)") == 0
+    assert _operator_count(sdk) == 0
+
+    # …and a status-less Event still reaches the direct route operator-less.
+    ok = {"entities": [
+        {"ref": "evt", "type": "event", "name": "Launch",
+         "eventKind": "sessionCaptured"},
+        {"ref": "o", "type": "object", "name": "Delta"}],
+        "connections": [{"from": "evt", "to": "o", "operator": "IMPL"}]}
+    assert sdk._validate_bundle(ok) == []
+    assert sdk.ingest(ok)["created"]["connections"] == 1
     assert _count(sdk, "MATCH (:Event)-[r:IMPL]->(:Object) RETURN count(r)") == 1
     assert _operator_count(sdk) == 0
 

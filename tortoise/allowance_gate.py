@@ -10,12 +10,24 @@ could not be measured (#9567 D11/D12).
 
 **⛔ THIS MODULE GATES; IT DOES NOT PRICE.** It sets no allowance, no rate, no
 tier boundary, no overage and no retention window. Every allowance value is the
-owner's and is, today, ``TBD-BY-MEASUREMENT`` under the ``#4051`` ruling: **no
-production resolver emits any ``ALLOWANCE_KEYS`` value**, so on every live path
-every dimension below is UNCONFIGURED and the gate is inert. It refuses nothing
-until someone configures a limit — which is the ordering the storage architecture
-requires (*"the meter must be wired into the gate before any allowance is
-configured"*, ``docs/architecture/STORAGE-ARCHITECTURE.md``: §"The byte path").
+owner's, and since ``#13084`` **one dimension is ARMED on every live path**:
+``graph_storage``, at the tier's hot-window number, resolved from the artifact
+(``product/pricing.json``) by ``quota.resolve_org_limits`` — solo 77 MB, pro
+102 MB, team 615 MB. The other two dimensions remain UNCONFIGURED
+(``postgres_storage`` is BLOCKED on a per-org byte meter; ``capture_extraction``
+has no resolved allowance), and ``free``/``anon`` are **deliberately unarmed**
+— a RECORDED DEPARTURE from the artifact, which carries ``0`` for them **by
+decision** (``billing.storage._included_amounts_status``: *"Free/anon are the
+exception: hot capacity 0 is **stated by the decision record**"*;
+``docs/architecture/SEARCH-ARCHITECTURE.md`` §8 tabulates their window target as
+``0``). A ``0`` cannot be armed as a cap: the gate refuses at
+``used >= allowance``, so it would refuse the FIRST byte on a tier that still
+grants a graph — hence ``zero_means_unarmed`` (only an exact ``0`` is the
+unarmed sentinel; a negative is a fault, not an unset amount). An unarmed
+dimension refuses nothing and keeps being metered — the ordering the storage
+architecture requires (*"the meter must be wired into the gate before any
+allowance is configured"*) — ``docs/architecture/STORAGE-ARCHITECTURE.md``,
+§"The byte path".
 
 **⚠️ "INERT" IS ABOUT WHAT IT REFUSES, NOT ABOUT WHAT IT READS (#9567 review
 round 10).** Arming nothing means no dimension can be over its allowance — it does
@@ -103,6 +115,13 @@ loop — it is one control-plane round-trip per gated request, not a dict lookup
   error, or a reading older than the dimension's stated bound) →
   ``QuotaCheckError``. Never a silent pass — the #686 fail-closed posture, and
   never a bare exception escaping as an unmapped 500 (the #4051 lesson).
+* **at an estimate's cap but not past its hard stop** → WARN, and ALLOW the
+  write. A dimension may declare a :class:`CapBand` wider than ``(1.0, 1.0)``,
+  which is what ``graph_storage`` does (warn at 1.0x the cap, refuse at 1.5x):
+  an estimate must never be the sole cause of a hard refusal, so it warns at the
+  cap and refuses only once the reading is past the point where sampling noise
+  could explain the gap. Every exact-reading dimension keeps ``(1.0, 1.0)``,
+  i.e. its behaviour is unchanged.
 
 An UNCONFIGURED dimension (key absent) is UNLIMITED by construction: no invented
 cap, and the dimension keeps being METERED by its own writer — an unset allowance
@@ -206,9 +225,12 @@ _logger = logging.getLogger(__name__)
 __all__ = [
     "ALLOWANCE_GATED_RESOURCES",
     "ALLOWANCE_KEYS",
+    "AT_CAP_WARNING",
     "BLOCKED",
     "DIMENSIONS",
+    "HARD_STOP_MULTIPLE",
     "AllowanceDimension",
+    "CapBand",
     "MeterReading",
     "carry_allowance_keys",
     "carry_resolved_allowances",
@@ -223,6 +245,18 @@ __all__ = [
 #: ``meters``/by configuring the dimension, never by an implicit default cap.
 STALE_AFTER_SECONDS = 24 * 60 * 60
 
+#: The DEADBAND an ESTIMATED reading is held to (#13084): the gate WARNS at the
+#: cap and hard-refuses only at this multiple of it. Declared once here so the
+#: declaration and this module's own docstring cannot disagree; a dimension with
+#: an EXACT reading keeps ``1.0`` (see :class:`CapBand`). 1.5 is chosen because
+#: the graph meter's own reported spread is a few percent, so a reading 50 % past
+#: the cap cannot be explained by sampling noise.
+HARD_STOP_MULTIPLE = 1.5
+
+#: The phrase the at-cap WARNING carries, so a test pins the SIGNAL rather than
+#: the wording of a sentence that will be reworded.
+AT_CAP_WARNING = "allowance at cap"
+
 #: A configured dimension whose meter does NOT exist is BLOCKED, never faked.
 BLOCKED = "blocked"
 
@@ -230,12 +264,20 @@ BLOCKED = "blocked"
 class _Absent:
     """The meter's answer for "there is no row YET" — distinct from ``None``.
 
-    ``None`` means the meter could not produce a figure (a failure); this means
-    the figure is KNOWN to be zero for a cumulative flow nobody has started. The
-    two must not share a value: flattening them is either a fail-open (a broken
-    meter read as zero) or a deadlock (a fresh window refused forever). Only a
-    dimension that declares ``absent_is_zero`` may consume this as a zero; every
-    other dimension still refuses on it.
+    ``None`` means the meter could not produce a figure (a failure); this is the
+    reader's CERTAIN "nothing has been recorded yet" — a successful read that
+    found no row, which is not the same claim as "the figure is zero". The two
+    must not share a value: flattening them is either a fail-open (a broken
+    meter read as zero) or a deadlock (a fresh window refused forever).
+
+    ⛔ WHAT IT MEANS IS THE DIMENSION'S TO DECLARE, and the two declarations are
+    different claims (#13102 F3): for a cumulative FLOW it is a certain zero
+    (nobody has started the window), while for a GAUGE whose row is written by a
+    separate, scheduled job it is a deliberate UNDER-enforcement — the tenant is
+    served while its true residency is unknown, because a gauge cannot promise
+    that an absent row means zero bytes (`graph_storage`, whose declaration says
+    so in as many words). Only a dimension that declares ``absent_is_zero`` may
+    consume this as a zero; every other dimension still refuses on it.
     """
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
@@ -262,6 +304,27 @@ class MeterReading:
 
 
 @dataclass(frozen=True)
+class CapBand:
+    """WHERE an estimated reading may hard-refuse — the deadband (#13084).
+
+    ``warn_at``/``refuse_at`` are MULTIPLES of the dimension's allowance, not
+    absolute figures, so one declaration serves every tier. The default
+    ``(1.0, 1.0)`` reproduces the pre-existing rule exactly (``used >= limit``
+    refuses, nothing warns) for every dimension whose reading is EXACT — this
+    band only changes behaviour where a dimension opts into a wider one.
+
+    A dimension widens it when its reading is an ESTIMATE: an estimate must not
+    be the sole cause of a hard refusal, so it warns at the cap and refuses only
+    once the reading is far enough past it that sampling noise cannot explain
+    the gap. The dimension that does this states its own numbers and the
+    measurement behind them (see ``graph_storage`` below).
+    """
+
+    warn_at: float = 1.0
+    refuse_at: float = 1.0
+
+
+@dataclass(frozen=True)
 class AllowanceDimension:
     """One DECLARED cost dimension, as the allowance gate sees it.
 
@@ -282,20 +345,34 @@ class AllowanceDimension:
     blocked_reason: str | None = None
     resources: frozenset[str] = frozenset({"points", "documents"})
     #: Whether "no ledger row yet" is a real ZERO or NO reading. It differs by
-    #: dimension KIND: a cumulative FLOW for a window that has just begun is
-    #: zero-by-construction (nobody has captured), while a GAUGE's absence means
-    #: the instrument has not reported. Getting this wrong in the flow direction
-    #: is a deadlock: the row is created by the very operation being refused.
+    #: dimension KIND, and getting it wrong in EITHER direction is a defect:
+    #: a cumulative FLOW for a window that has just begun is zero-by-construction
+    #: (nobody has captured), while a GAUGE's absence means nobody has MEASURED.
+    #: Both must be served, for the same reason — the row is created by a
+    #: scheduled writer, never by the operation being refused, so refusing can
+    #: never make the row appear. A GAUGE that declares nothing stays strict
+    #: (refuse), which is what keeps a missing reading a refusal for every
+    #: dimension whose writer is reliably running.
     absent_is_zero: bool = False
+    #: Where an ESTIMATED reading may hard-refuse (see :class:`CapBand`).
+    cap_band: CapBand = CapBand()
+    #: Whether a non-positive allowance means UNARMED rather than "a cap of
+    #: zero". Only a dimension whose artifact records an UNSET amount as ``0``
+    #: may declare this — ``used >= 0`` is true at every reading, so arming a
+    #: zero would refuse the first byte on a tier that still allows the resource.
+    zero_means_unarmed: bool = False
 
     @property
     def blocked(self) -> bool:
         """True when this dimension MUST NOT be enforced, and why is recorded.
 
         ``blocked_reason`` is the whole state: a dimension can carry a working
-        meter and still be BLOCKED (``graph_storage`` is — its meter's own
-        contract forbids capping on the ledger figure). The reason is what the
-        refusal shows, so it cannot be a note beside the state.
+        meter and still be BLOCKED — ``postgres_storage`` is (no per-org byte
+        meter exists, and a per-org split would be an ALLOCATION, not a
+        measurement). ``graph_storage`` was in this state until #13084 and is
+        now ARMED at the tier number, with the estimate's one-directional error
+        handled by its ``cap_band`` rather than by a block. The reason is what
+        the refusal shows, so it cannot be a note beside the state.
         """
         return self.blocked_reason is not None
 
@@ -330,23 +407,44 @@ def _graph_storage_mb(org_id: str) -> MeterReading | None:
     """The org's last graph-storage GAUGE, in MB (#5331 unit 2).
 
     ``get_graph_storage_reading`` never raises: a degraded read is
-    indistinguishable from "never measured" in its return value, and both carry
-    ``graph_storage_measured_at is None``. Both are NO READING here — which is
-    the honest answer for both, because a zero-valued degradation would otherwise
-    compare as 0 MB and pass silently.
+    indistinguishable from "never measured" in its TIMESTAMP, and the gate must
+    not treat them alike. Since #13084 is a CAP INPUT, the reader also publishes
+    ``unmeasured_reason`` and this meter consumes it with DEFAULT-DENY — the same
+    rule ``_extraction_tokens`` applies to its own reader (#13102):
+
+    * ``"absent"`` — the read SUCCEEDED and NO row exists for the window — is
+      the meter's ``ABSENT``, the one state a dimension may consume as a fact
+      rather than refuse (``graph_storage`` declares ``absent_is_zero``).
+    * **every other reason** — ``"unreported"`` (a row with no age), —
+      ``"read_error"``, ``"period_error"``, and any value this gate has never
+      seen — is NO READING and refuses. Folding an unknown reason into
+      "absent" would disarm a configured allowance the day the reader grows a
+      reason.
     """
     from .metering import get_graph_storage_reading
 
     reading = get_graph_storage_reading(org_id)
     measured_at = reading.get("graph_storage_measured_at")
     if not measured_at:
+        # NO AGE = NO READING, unless the reader NAMES the absence itself (the
+        # one state that is an ANSWER rather than a fault — see this function's
+        # docstring). A present row without an age cannot prove freshness, and a
+        # 0 MB figure would compare as "under the cap" and pass silently.
+        if reading.get("unmeasured_reason") == "absent":
+            return ABSENT
         return None
     return MeterReading(
         used=float(reading.get("graph_storage_mb") or 0.0),
         measured_at=str(measured_at),
         estimated=True,
-        note=("measured with GRAPH.MEMORY USAGE (a SAMPLES-based estimate that "
-              "excludes per-graph/Redis overhead)"),
+        # The note travels into the refusal, so it names the direction of the
+        # error as well as its size: the figure is a LOWER BOUND. It also says
+        # what was excluded, because a reader who sees only the number cannot
+        # otherwise know the largest resident component was invisible.
+        note=("measured with GRAPH.MEMORY USAGE, a SAMPLES-based ESTIMATE that "
+              "EXCLUDES per-graph/Redis overhead AND the HNSW vector index "
+              "(~2x low on the total, 8.5x-21.7x low on the index share), so "
+              "the real figure is AT LEAST this one; it is not invoice-grade"),
     )
 
 
@@ -467,23 +565,134 @@ CARRIED_MARKER_KEY = "_allowances_carried"
 DIMENSIONS: tuple[AllowanceDimension, ...] = (
     _dimension(
         "graph_storage", ALLOWANCE_KEYS["graph_storage"],
-        # ⛔ BLOCKED, and NOT because a meter is missing — because OUR OWN
-        # instrument forbids wiring a cap to this figure yet. ``graph_storage``'s
-        # module docstring states it outright: *"Until they are corrected, a cap
-        # MUST NOT be wired to the ledger figure for vector-bearing tenants"* —
-        # the HNSW index share is under-reported by 8.5×–21.7× (≈2× on the total)
-        # and the ledger returns the old wording. A cap wired to it would not fire
-        # for exactly the tenants who grow biggest (fail-open), and a refusal
-        # built on it would present an unmeasurable figure as measured.
+        # ⛔ ARMED (#13084). The allowance IS the tier's hot-window number, and
+        # it is not restated here: the figures live in the artifact
+        # (``product/pricing.json`` -> ``billing.storage.dimensions.graph_storage``,
+        # read through ``pricing.storage_limits``) and reach this gate through
+        # ``quota.resolve_org_limits``, so the price and the cap cannot drift.
+        #
+        # THE DERIVATION (recorded here because this is the line that arms it).
+        # ⚠️ THEIR AUTHORITY, stated where the arming happens: the artifact records
+        # these included amounts as **DERIVED, NOT OWNER-CONFIRMED**
+        # (``billing.storage._included_amounts_status``) — solo's hot window comes
+        # from the owner's 30 %-of-price rule, and pro/team are that rule carried
+        # to another price, NOT a ruling on those tiers (#11758 comment 6807826749:
+        # *"a product choice, not implied by the rates"*). They are defaults of
+        # record, pending. ARMING a reversible write-refusal on them is this
+        # slice's decision (#13082); the numbers themselves are the artifact's to
+        # revise, and a revision lands here with no code change.
+        #
+        # ⚠️ IT IS NOT A DIVISION OF THE 30 % BUDGET BY $74/GB-MONTH — that
+        # shortcut reproduces only solo and is what a reader re-running it
+        # disputes (#13102 F4: $7.50/74 = 101.4, $44.70/74 = 604.1, against the
+        # 102/615 this gate enforces). The cap comes from
+        # ``docs/architecture/SEARCH-ARCHITECTURE.md`` §8, which solves the
+        # window TOGETHER WITH DENSITY because the shared project line
+        # ($85 ÷ tenants) is part of the same budget, and then applies the 75 %
+        # occupancy of provisioned RAM:
+        #
+        #     provisioned MB  p = (0.30·P − $0.125) ÷ ($43.75/1000 + $85/8000)
+        #     hot window        = 0.75 · p
+        #
+        #     solo  $19  → p 102.5 MB → 0.75p = 76.9 → **77 MB**
+        #     pro   $25  → p 135.6 MB → 0.75p = 101.7 → **102 MB**
+        #     team  $149 → p 819.8 MB → 0.75p = 614.8 → **615 MB**
+        #
+        # ($0.125 is the 1 GB record allowance at $0.125/GB-month; $43.75/1000
+        # is RAM per provisioned MB; $85/8000 is the shared project line per
+        # provisioned MB.) The artifact carries 77/102/615 and the ARTIFACT
+        # WINS, because two numbers for one allowance is how a cap and a price
+        # drift apart. (The issue quotes "solo ≈ 78 MB", the same figure at
+        # $73/GB-month.)
         meter=_graph_storage_mb,
         stale_after_seconds=STALE_AFTER_SECONDS,
-        blocked_reason=(
-            "the graph byte meter exists but its own contract forbids capping on "
-            "the ledger figure: the vector-index share is under-reported 8.5x-21.7x "
-            "(~2x on the total) and metering.get_graph_storage_reading returns the "
-            "uncorrected numerics (tortoise/graph_storage.py: 'a cap MUST NOT be "
-            "wired to the ledger figure for vector-bearing tenants'). BLOCKED on "
-            "the corrected ledger figure"),
+        # ⚠️ THE ESTIMATE RULE — the reason this dimension is armable at all, and
+        # the reconciliation of the meter's own prohibition. ``GRAPH.MEMORY
+        # USAGE`` UNDER-reports: it is blind to the HNSW vector index
+        # (8.5x-21.7x on the index share, ~2x on the total —
+        # ``graph_storage.VECTOR_INDEX_EXCLUDED``). That bias has ONE direction,
+        # so a reading is a LOWER BOUND on the tenant's real residency, and
+        # refusing at ``reading >= X`` is a refusal only when the true bytes are
+        # already ``>= X``. **No tenant can be refused while genuinely under the
+        # cap**, which is the property the meter's prohibition was protecting
+        # ("a refusal built on it would present an unmeasurable figure as
+        # measured" — so the refusal says ESTIMATE and says LOWER BOUND, and the
+        # payload carries ``estimated=True``).
+        #
+        # What the direction costs is UNDER-enforcement: a vector-heavy graph can
+        # hold more than the cap before its measured share crosses it. That is a
+        # weaker ceiling, not an outage — and it is disclosed rather than hidden.
+        #
+        # THE BAND: at 1.0x the cap the gate only WARNS (an estimate must never be
+        # the sole cause of a hard refusal); the hard stop is 1.5x — 115.5 MB
+        # solo, 153 MB pro, 922.5 MB team (exact: the gate refuses at
+        # ``used >= allowance * 1.5``). 50 % past the cap cannot be explained by the
+        # meter's own reported spread (a few percent), so that refusal rests on
+        # MAGNITUDE rather than on the estimate's precision. Reads are never
+        # refused: the gated doors are the WRITE doors, the posture Redis
+        # documents for ``noeviction`` ("commands that only read existing data
+        # still work as normal") and the reason eviction is not the answer here —
+        # FalkorDB exposes no per-region eviction, so the only evictable unit is a
+        # whole graph (``DUMP``->``DEL``->``RESTORE``), which stalls everything it
+        # serves. Refusing a new write is reversible; dropping a graph to make
+        # room is not.
+        cap_band=CapBand(warn_at=1.0, refuse_at=HARD_STOP_MULTIPLE),
+        # ⛔ A ZERO INCLUDED AMOUNT IS NOT A CAP OF ZERO — AND IT IS NOT AN UNSET
+        # VALUE EITHER (#13102 F3). The artifact records
+        # ``max_graph_storage_mb: 0`` for free/anon as a STATED amount
+        # (``billing.storage._included_amounts_status``: *"Free/anon are the
+        # exception: hot capacity 0 is stated by the decision record"*, and
+        # ``SEARCH-ARCHITECTURE.md`` §8 tabulates their window target as 0), so
+        # leaving the dimension UNARMED here is a deliberate DEPARTURE from that
+        # recorded 0 — not a data gap, and not "the owner has not set it" (an
+        # earlier version of this comment said exactly that, which its own cited
+        # artifact refutes). The reason is arithmetic: ``used >= 0`` is true at
+        # EVERY reading, so arming it would refuse EVERY gated write, including
+        # the very first byte, on a tier that still grants a graph. An unarmed
+        # amount refuses nothing, and the dimension keeps being metered by its
+        # writer. ``zero_means_unarmed`` covers an EXACT zero only: a negative
+        # figure is a fault and still refuses.
+        zero_means_unarmed=True,
+        # ⛔ "NO ROW YET" IS AN ANSWER, NOT A REFUSAL — and this bit is what
+        # makes arming survivable at all (#13102). The gauge's ONLY production
+        # writer is the backup sweep (``backup_sweep.py`` ->
+        # ``record_graph_storage``), which ``BACKUP_SWEEP_ENABLED`` leaves OFF by
+        # default; the row is keyed by the billing WINDOW, so EVERY paying tenant
+        # loses its reading at each window boundary too. Refusing an absent row
+        # therefore refuses a brand-new paying tenant's first ``POST /v1/points``
+        # — measured, twice: ``hosted-e2e``/``test_05_backup_restore`` and
+        # ``test-slow (b)``'s three ``test_hosted_api.py`` cases, each 500 with
+        # "graph_storage usage has no reading for team … refusing to fail open".
+        # That is a false refusal, and #3981's owner ruling (SETTLED 2026-09-18:
+        # PROCEED AND ALERT, no new user-facing refusal) forbids refusing a paying
+        # org over our own bookkeeping state.
+        #
+        # ⚠️ WHAT IT COSTS, stated rather than discovered later: an absent row is
+        # NOT proof of zero bytes (a gauge cannot promise that), so a tenant whose
+        # sweep has never run is served while its true residency is unknown. The
+        # residual is UNDER-enforcement — the opposite direction from a false
+        # refusal — and it lasts until the gauge first reports. Wiring the meter
+        # so that a reading always exists is #9559 ("land the byte gate, then wire
+        # the meter"); this declaration does not pretend that is done.
+        #
+        # It is why ``_graph_storage_mb`` must distinguish "absent" from every
+        # OTHER reason the reader can report: a row that exists but cannot be
+        # aged, a store that refused the read, and an unresolvable window are
+        # FAULTS and still refuse (``unreported``/``read_error``/``period_error``,
+        # pinned by ``test_a_missing_measured_at_is_no_reading_not_zero`` and
+        # ``test_a_stale_reading_is_refused_rather_than_enforced``).
+        absent_is_zero=True,
+        # ⚠️ DISCLOSED COST OF ARMING (follow-up filed from #13084): an armed
+        # dimension READS its meter on every gated write (`_reading`), so a
+        # paying tenant's points/documents door now performs one extra ledger
+        # read per request — a graph query in registry/self-host mode, a
+        # PostgREST read in Supabase mode. Before this the dimension was BLOCKED
+        # and no read was taken. That is acceptable for correctness (a cap that
+        # does not read its meter is not a cap) but it is a latency cost on the
+        # hot write path; the fix is a short-TTL memo on the gauge read (60 s is
+        # far inside the 24 h staleness bound and the 1.5x deadband), NOT a
+        # silent "unlimited". Same shape as this module's own note about the
+        # resolver read.
     ),
     _dimension(
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],
@@ -753,12 +962,15 @@ def _reading(dim: AllowanceDimension, org_id: str,
                 f"reading ({type(reading).__name__}) — refusing to enforce "
                 f"{dim.limit_key} from it")
     if reading is ABSENT and dim.absent_is_zero:
-        # The per-dimension FLOW semantics: for a cumulative flow, "no ledger row
-        # for this window" is a real ZERO (nobody has done it yet) — not an
-        # unmeasurable figure. Declared on the dimension, consumed HERE, so a
-        # future flow dimension gets the behaviour from its declaration instead of
-        # from a meter-specific branch (and a GAUGE that declares nothing stays
-        # strict, which is what keeps a missing gauge a refusal).
+        # The per-dimension ABSENCE semantics: "no ledger row for this window" is
+        # a fact, not an unmeasurable figure — and the row is created by a
+        # SCHEDULED writer, never by the operation being refused, so refusing can
+        # never make it appear. Declared on the dimension, consumed HERE, so a
+        # future dimension gets the behaviour from its declaration instead of from
+        # a meter-specific branch (and a GAUGE that declares nothing stays strict,
+        # which is what keeps a missing gauge a refusal). It RETURNS rather than
+        # falling through on purpose: a row that does not exist has no AGE, so the
+        # staleness bound below must not be applied to it.
         return MeterReading(used=0.0, measured_at=None, estimated=False,
                             note="no usage metered in this window")
     if reading is ABSENT:
@@ -824,9 +1036,27 @@ def enforce_allowances(
             continue  # ABSENT = unlimited. No invented cap, and the dimension
             #           keeps being metered by its own writer.
         allowance = _limit(limits.get(dim.limit_key), dim, org_id)
-        if allowance is None:
+        if allowance is None or (allowance == 0 and dim.zero_means_unarmed):
+            # ``None`` is the documented unlimited; a ZERO amount on a dimension
+            # that declares ``zero_means_unarmed`` is the artifact's UNSET
+            # sentinel (see ``graph_storage``) and is equally unarmed.
+            # Both still METER: unset is not a reason to stop measuring.
             _reading(dim, org_id, meters, observed_only=True)
             continue
+        if allowance < 0:
+            # ⛔ NEGATIVE IS NOT A SENTINEL (#13102 review, P3). The artifact
+            # spells "unset" as 0, so a negative is a corrupt figure — and
+            # reading ``allowance <= 0`` as unarmed made it fail OPEN (uncapped)
+            # on a paid tier, while the money path refuses the same value. A
+            # non-positive amount is only ever the sentinel when it IS zero.
+            _logger.error(
+                "allowance limit negative (fail-closed): team=%s dimension=%s "
+                "field=%s value=%r", org_id, dim.dimension, dim.limit_key,
+                allowance)
+            raise QuotaCheckError(
+                f"team limits {dim.limit_key} is negative for dimension "
+                f"{dim.dimension!r} ({allowance!r}) — an unset amount is 0, "
+                f"never a negative figure")
         reading = _reading(dim, org_id, meters, observed_only=False)
         if reading is None:  # _reading refuses, so this is belt-and-braces
             raise QuotaCheckError(
@@ -869,17 +1099,64 @@ def enforce_allowances(
                 f"{dim.dimension} usage reading for team {org_id!r} is not a "
                 f"finite number ({used!r}) — refusing to enforce "
                 f"{dim.limit_key} from it")
-        if used >= allowance:
-            note = f" ({reading.note})" if reading.note else ""
+        band = dim.cap_band
+        refuse_at = allowance * band.refuse_at
+        warn_at = allowance * band.warn_at
+        if band.refuse_at != 1.0 and warn_at <= used < refuse_at:
+            # AN ESTIMATE WARNS BEFORE IT REFUSES (see ``CapBand``). The write
+            # still proceeds and reads are untouched: this is the signal that the
+            # measured figure has reached the cap, NOT a refusal formed from a
+            # number whose precision cannot carry one.
             _logger.warning(
-                "allowance exceeded: team=%s dimension=%s used=%s limit=%s",
-                org_id, dim.dimension, used, allowance)
+                "%s (warning only, estimated reading): team=%s "
+                "dimension=%s used=%s cap=%s hard_stop=%s",
+                AT_CAP_WARNING, org_id, dim.dimension, used, allowance,
+                refuse_at)
+        if used >= refuse_at:
+            note = f" ({reading.note})" if reading.note else ""
+            if band.refuse_at == 1.0:
+                head = (f"Team {dim.dimension} allowance reached "
+                        f"({allowance:g} {dim.unit}, used {used:g}). Upgrade "
+                        f"your plan to increase it.")
+            else:
+                # A banded dimension must say BOTH numbers and WHY they differ,
+                # or the tenant cannot tell what to do about a refusal that
+                # fires above the cap they were told about.
+                tier = limits.get("tier")
+                plan = f" on the {tier} plan" if tier else ""
+                head = (f"Team {dim.dimension} allowance reached "
+                        f"({allowance:g} {dim.unit}{plan}, used {used:g}). "
+                        f"Upgrade your plan to increase it, or reduce what you "
+                        f"hold resident. The hard stop is {refuse_at:g} "
+                        f"{dim.unit} measured ({band.refuse_at:g}x the cap) "
+                        f"because this figure is an ESTIMATE that under-reports: "
+                        f"{used:g} {dim.unit} measured is already a LOWER BOUND "
+                        f"on what this account holds resident.")
+            _logger.warning(
+                "allowance exceeded: team=%s dimension=%s used=%s limit=%s "
+                "hard_stop=%s", org_id, dim.dimension, used, allowance,
+                refuse_at)
+            # ⛔ THE PAYLOAD CARRIES THE VALUES THE GATE COMPARED (#13102).
+            # ``quota.py`` documents that every field "must be the ones THIS
+            # gate compared", and a banded dimension compares at the HARD STOP —
+            # ``used >= 115.5`` — while ``int(used)`` floored the reported figure
+            # to 115, i.e. 0.5 MB BELOW the number that fired the refusal, in the
+            # payload a dashboard/billing reader consumes. ``limit`` had the same
+            # defect one step over: it reported the 1.0x CAP (77) while the
+            # threshold compared was the 1.5x stop (115.5), so a machine reader
+            # saw ``{used: 115.5, limit: 77}`` — a tenant "150 % over limit" — and
+            # could recover the real threshold only from the prose. Both fields
+            # now carry what was compared; the CAP is still named in the message
+            # ("77 MB ... hard stop 115.5"), which is where a human reads it.
+            # Integral values keep their int type, so every unbanded dimension's
+            # payload is byte-identical to before.
+            payload_used = int(used) if used.is_integer() else used
+            payload_limit = (int(refuse_at) if float(refuse_at).is_integer()
+                             else refuse_at)
             raise QuotaExceededError(
-                with_limit_contact(
-                    f"Team {dim.dimension} allowance reached "
-                    f"({allowance:g} {dim.unit}, used {used:g}). Upgrade your "
-                    f"plan to increase it.{note}"),
-                resource=dim.dimension, used=int(used), limit=int(allowance),
+                with_limit_contact(f"{head}{note}"),
+                resource=dim.dimension, used=payload_used,
+                limit=payload_limit,
                 # Omitted (None) when the figure is exact, so `quota.py`'s
                 # documented payload shape holds: only an ESTIMATE is labelled.
                 estimated=True if reading.estimated else None,

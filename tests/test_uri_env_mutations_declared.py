@@ -462,6 +462,26 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # arms skip), never to a silently-embedded green, and nothing leaks into a
     # later docker-lane test.
     "test_12360_underscore_or_terms.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # #12184: the entity-row ranker's live half. `test_12184_ranker_entity_signals.py`
+    # is the 8933/12360 shape a third time — a module-level live probe (set to
+    # `_DB_URI`, restore the previous value in a `finally`, pop when it was unset:
+    # 3 sites) plus an autouse per-test fixture that re-points the lane at THIS
+    # module's own graph and restores it (3 more). DELIBERATE_URI is the point: the
+    # claim under test is that entity rows are scored from the `:Subject` signals a
+    # READER derives on a REAL FalkorDB index, so the ranker must be handed that
+    # graph — no pure-function test can observe it. An unreachable lane degrades to
+    # `FALKORDB_AVAILABLE = False` (the live arms `skipif`, they never run
+    # embedded-green), and neither the probe's `finally` nor the fixture's restore
+    # lets the lane leak into a later docker-lane test.
+    "test_12184_ranker_entity_signals.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # ⛔ MERGE NOTE (#13158 vs #13176): `main`'s 5fae3f4f6f landed its OWN
+    # unanchored declaration for this file here, and this branch had already
+    # landed a narrowed one at the tail of this dict under the same KEY — an
+    # auto-merge that keeps BOTH is a duplicate dict key, and the last one wins
+    # SILENTLY, so the guard would have graded one row while the file showed two.
+    # The narrowed row is kept (it anchors every arm at both ends, so it cannot
+    # silence a commented-out mutation) and this copy is dropped rather than
+    # left to shadow it. One file, one row.
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
@@ -1350,6 +1370,27 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
         r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
+    # ⛔ #13140's `test_13098_cypher_inventory.py` landed on `main` (`6652917489`)
+    # with ONE raw URI mutation at `:1036` and no entry here — the same
+    # "module landed without its entry" shape as the #13158 pair above, on the next
+    # module main merged. It is INHERITED by this branch rather than introduced by
+    # it (`git show origin/main:tests/test_uri_env_mutations_declared.py` carries no
+    # such key, and the module is main's), but it reds THIS tree's `test (k)` all the
+    # same, and no open PR owns the row (`#13191` and `#13164` both edit this file for
+    # the `setdefault` and census arms, neither adds this key), so it is declared here
+    # rather than left for a fourth lane to re-derive.
+    #
+    # DELIBERATE_URI, and not a vacuity vector: the module's claim IS the refusal
+    # contract — two EXISTING guards (`--record-dsn \`--graph-uri` `both-omitted`) —
+    # and the setenv supplies the second target EXPLICITLY so each axis is tested with
+    # the other one present. The mutation is the test input, and the assertion is that
+    # the refusal fires BEFORE either target is dialled, so a docker lane that is not
+    # there cannot make this row read as a pass.
+    # ⛔ Arm kept UNANCHORED and literal (the table's convention for a one-site
+    # `monkeypatch.setenv` row): the value is a constant DSN, not a variable, so there
+    # is no name to bind the way the `test_13034` pair binds `DB_URI`/`_OLD_URI`.
+    "test_13098_cypher_inventory.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@127\.0\.0\.1:6379"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
@@ -1762,6 +1803,70 @@ def test_declaration_keys_are_unambiguous():
     assert not moved, (
         "bare-name declaration key(s) whose top-level module no longer exists "
         f"— dead declarations: {moved}")
+
+
+def _duplicate_dict_keys(src: str) -> dict[str, list[str]]:
+    """Keys repeated inside ONE dict literal in *src*, keyed by that dict's name.
+
+    Source-level on purpose: a repeated key is not a style complaint, it is a
+    SILENT shadow — Python keeps the last value and raises nothing, so two rows
+    that read as two rows are one row at read time.
+    """
+    out: dict[str, list[str]] = {}
+    for node in ast.parse(src).body:
+        target = getattr(node, "target", None) or (
+            node.targets[0] if isinstance(node, ast.Assign) and node.targets else None)
+        value = getattr(node, "value", None)
+        if not isinstance(value, ast.Dict) or target is None:
+            continue
+        name = getattr(target, "id", None) or getattr(target, "attr", None)
+        keys = [k.value for k in value.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+        seen: set[str] = set()
+        dupes: list[str] = []
+        for k in keys:
+            if k in seen:
+                dupes.append(k)
+            seen.add(k)
+        dupes = list(dict.fromkeys(dupes))
+        if dupes and name:
+            out[name] = dupes
+    return out
+
+
+def test_the_declaration_table_carries_no_duplicate_key():
+    """A REPEATED key in a declaration dict is silent: Python keeps the last one.
+
+    ⛔ WHY (MEASURED, this is not hypothetical). Merging `origin/main`
+    `745c71c265` into PR #13124 produced exactly this state: `main`'s `#13176`
+    and this branch each added a `test_13034_currency_rule_reads_position.py`
+    entry, in DIFFERENT regions of `DELIBERATE_URI_MUTATIONS`, so git
+    auto-merged both. The file then carried **137 keys for 136 entries**, and
+    `_is_declared` silently graded the LAST one while a reader saw two rows.
+
+    Nothing red-ed, and both halves of the reason are the point:
+
+    * `test_declaration_keys_are_unambiguous` asks a DIFFERENT question — whether
+      one key matches more than one MODULE — so a duplicate key inside one dict
+      is not its business; and
+    * the guard matches against the runtime `dict`, which cannot see the shadowed
+      copy at all. A shadowed row is coverage that reads as present and
+      authorizes nothing, i.e. the vanish-without-a-red shape this whole table
+      exists to prevent.
+
+    So the table is read as SOURCE here, not as the object it becomes.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    dupes = _duplicate_dict_keys(src)
+    assert not dupes, (
+        "duplicate key(s) in a declaration dict — Python keeps the LAST value "
+        "silently, so the earlier row authorizes nothing while still reading as "
+        "coverage. Keep ONE row per file (and say in a comment why the other "
+        "was dropped): "
+        + "; ".join(f"{table} -> {keys}" for table, keys in dupes.items()))
+    # …and the reader is non-vacuous: it must REPORT the exact shape the merge
+    # shipped (three literals after the shadowed one), not merely parse cleanly.
+    assert _duplicate_dict_keys('X = {"a": [], "b": [], "a": []}') == {"X": ["a"]}
 
 
 def test_the_cost_skip_cannot_hide_a_uri_agnostic_leak():
