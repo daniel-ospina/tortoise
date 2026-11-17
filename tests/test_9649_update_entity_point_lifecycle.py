@@ -232,7 +232,13 @@ def test_an_undeclared_word_cannot_ride_a_colliding_hash(env):
     pid = _live(sdk)
     before = _row(sdk, pid)
 
-    with pytest.raises(ValueError, match="Invalid status"):
+    # ⛔ #11824 S0 moved the refusal's TEXT: the Point arm no longer spells its
+    # own `Invalid status …` — it forwards to the ONE lifecycle door, whose
+    # three-part message names the fault and the four accepted words. The
+    # PROPERTY is unchanged (an undeclared word never lands), and the content
+    # read is what makes it true: `_CollidingHash` claims `'garbage'`, so a
+    # hash/eq-answered vocabulary test would still admit it.
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.update_knowledge(pid, status=_CollidingHash("garbage"))
 
     assert _row(sdk, pid) == before, (
@@ -256,18 +262,26 @@ def test_the_legacy_outdated_flag_alone_makes_the_point_dead(env):
 def test_deprecated_is_terminal_even_though_the_map_has_no_key(env):
     """Terminality is the SHARED predicate, not an entry in the transition map.
 
-    ``deprecated`` is terminal in ``live.is_terminal_status`` and has NO key in
-    ``_ALLOWED_TRANSITIONS``, so a guard that re-derived terminality from the map
-    (or from an empty declared-target set) would let this write through. The
-    shared instrument refuses it — which is what makes "is this claim dead?" and
-    "which status may it become?" answer from ONE place rather than two.
+    ``deprecated`` is terminal in ``live.is_terminal_status``, and the map's
+    entry for it declares NO outgoing transition — so a guard that re-derived
+    terminality from "the declared target set is non-empty" would let this write
+    through. The shared instrument refuses it — which is what makes "is this
+    claim dead?" and "which status may it become?" answer from ONE place rather
+    than two.
+
+    ⚠️ #11824 S0 gave `deprecated` a MAP KEY (the word joined the vocabulary, so
+    the table gained its row); before that the arm's non-vacuity came from the
+    key being ABSENT. The property to pin is the EMPTY outgoing set, which is
+    what the row below asserts — an absent key is now impossible for a real
+    terminal word (every member of `live.TERMINAL_EXCLUDED_STATUSES` has one).
     """
     sdk, _ = env
     pid = _live(sdk)
     _force_status(sdk, pid, "deprecated")
     before = _row(sdk, pid)
-    assert "deprecated" not in _ALLOWED_TRANSITIONS, (
-        "this arm is only non-vacuous while the map carries no `deprecated` key")
+    assert _ALLOWED_TRANSITIONS.get("deprecated") == frozenset(), (
+        "this arm is only non-vacuous while `deprecated` declares no outgoing "
+        f"transition: {_ALLOWED_TRANSITIONS.get('deprecated')!r}")
 
     with pytest.raises(ValueError, match="terminal"):
         sdk.update_knowledge(pid, validTo="2030-01-01T00:00:00Z")
@@ -719,18 +733,28 @@ def test_a_draft_point_still_promotes_through_this_door(env):
 # The declared map is consulted for the non-terminal transition question
 # ══════════════════════════════════════════════════════════════════════
 
-@pytest.mark.parametrize("target", ["archived", "outdated", "retracted",
-                                    "superseded"])
+@pytest.mark.parametrize("target", ["draft"])
 def test_an_undeclared_transition_from_live_is_refused(env, target):
-    """``_ALLOWED_TRANSITIONS['live']`` declares exactly retracted/superseded.
+    """``_ALLOWED_TRANSITIONS['live']`` declares exactly deprecated/superseded.
 
-    ``archived`` is *"reserved — no v1 write path"* and ``outdated`` is written
-    only by ``invalidate_point`` / ``supersede_point``; neither is a declared
-    transition from ``live``, so the generic door must not mint them.
-    ``retracted`` / ``superseded`` are declared and stay legal — ⛔ and since
-    #12592 a declared ``superseded`` must ALSO name its successor, because
-    ONTOLOGY §4.3 defines the word as *"replaced: it names the successor"*. The
-    two halves are pinned here: the bare word is refused, the pair is accepted.
+    ⛔ #11824 S0 CHANGED WHICH WORDS REACH THIS DOOR, so the pin moved with it
+    rather than being retired. Three params used to sit here and each is now a
+    DIFFERENT refusal, spelled out below so the delta is on the record:
+
+    * ``retracted`` / ``archived`` are declared SYNONYMS of ``deprecated``, so
+      they are normalised by ``lifecycle_vocabulary`` BEFORE this loop runs and
+      they are now LEGAL transitions out of ``live`` (stored as ``deprecated``);
+    * ``outdated`` is refused by the VOCABULARY door, which runs first — its
+      message names the choice between two words, not a transition, and it is
+      pinned by ``test_11926_derived_invalidation.py`` and the `outdated` rows in
+      ``test_11825_event_terminal_status_refused.py``;
+    * ``draft`` is the remaining word that is a real, undeclared BACKWARD
+      transition from ``live``, so it is what exercises this arm now.
+
+    ``superseded`` is declared and stays legal — ⛔ and since #12592 a declared
+    ``superseded`` must ALSO name its successor, because ONTOLOGY §4.3 defines
+    the word as *"replaced: it names the successor"*. The two halves are pinned
+    here: the bare word is refused, the pair is accepted.
     """
     sdk, _ = env
     pid = _live(sdk)
@@ -755,6 +779,22 @@ def test_an_undeclared_transition_from_live_is_refused(env, target):
     assert target in text and "transition" in text.lower(), (
         f"the refusal must name the target status and the transition: {text!r}")
     assert _row(sdk, pid)["status"] == "live"
+
+    # …the two halves the params above retired, asserted as the model now
+    # states them: a synonym LANDS (as the canonical word)…
+    for _synonym, _canonical in (("retracted", "deprecated"),
+                                 ("archived", "deprecated")):
+        _pid = _live(sdk, f"live -> {_synonym}")
+        sdk.update_knowledge(_pid, status=_synonym)
+        assert _row(sdk, _pid)["status"] == _canonical, (
+            f"{_synonym!r} is a declared synonym of {_canonical!r} since #11824 "
+            f"S0, so a live Point must accept it: {_row(sdk, _pid)!r}")
+    # …and `outdated` is refused EARLIER, by the vocabulary door, because it
+    # names a choice between two lifecycle words and never picks one.
+    _pid = _live(sdk, "live -> outdated")
+    with pytest.raises(ValueError, match=r"was refused"):
+        sdk.update_knowledge(_pid, status="outdated")
+    assert _row(sdk, _pid)["status"] == "live"
 
 
 def test_restating_the_same_status_is_a_no_op_not_a_refusal(env):
@@ -807,8 +847,12 @@ def test_the_generic_door_still_serves_the_other_labels(env):
     every one of them (``missing_ok`` exists for exactly this)."""
     sdk, _ = env
     obj = sdk.create_object("Widget", kind="core:entity")["id"]
+    # ⛔ #11824 S0: `archived` is a declared SYNONYM of `deprecated`, so the
+    # write lands and the store holds the canonical word — the whole point of
+    # moving the pack words onto the position axis is that ONE four-word
+    # vocabulary is minted for every knowledge kind.
     sdk.update_knowledge(obj, status="archived")
-    assert sdk.get_entity(obj)["status"] == "archived"
+    assert sdk.get_entity(obj)["status"] == "deprecated"
 
     subj = sdk.create_subject("team-x")["id"]
     # ⛔ #12592: the bare word is refused on every label now (§4.3), so the
@@ -846,10 +890,19 @@ def test_a_point_addressed_by_its_event_id_is_guarded_too(env):
 
     for props in ({"validTo": "2031-01-01T00:00:00Z"},
                   {"validFrom": "2019-01-01T00:00:00Z"},
-                  {"when": "2031-01-01T00:00:00Z"},
-                  {"status": "live"}):
+                  {"when": "2031-01-01T00:00:00Z"}):
         with pytest.raises(ValueError, match="terminal"):
             sdk.update_knowledge("evt-review-9649", **props)
+    # ⛔ The `status` half of this probe is answered EARLIER now, and that is a
+    # deliberate narrowing rather than a lost pin: since #13100 an `:Event`
+    # carries no lifecycle at all, so the door refuses ANY `status` on this
+    # hybrid at its Event arm, before the address resolution runs. Both refusals
+    # leave the dead claim alone — which is what this test exists for — and the
+    # resolution half is still pinned by the three temporal props above (plus
+    # the `url` arm's own test below). The status-arm claims that used to ride
+    # this hybrid live on the `:Source` arm, the door's other secondary key.
+    with pytest.raises(ValueError, match=":Event"):
+        sdk.update_knowledge("evt-review-9649", status="live")
     assert _row(sdk, old) == before, (
         "the eventId-addressed write must leave the dead claim alone")
 
@@ -936,20 +989,40 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
     never addressed (AX rule 2) and blocking a healthy write.
     """
     sdk, _ = env
-    sdk.create_point("statement", "carries provenance", dedup=False,
-                     status="retracted", eventId="ev-9649-prov")["id"]
+    provenance = sdk.create_point(
+        "statement", "carries provenance", dedup=False,
+        status="retracted", eventId="ev-9649-prov")["id"]
     sdk._get_proj().g.query(
         "CREATE (e:Event {eventId:'ev-9649-prov', name:'session'})")
 
-    # ⛔ A NON-TERMINAL status is what makes this test still possible at all:
-    # since #11825 a TERMINAL status on an `:Event` is refused by that guard
-    # first (measured: `status='archived'` here raises "not writable on an
-    # :Event" before the address resolution is consulted), so `archived` would
-    # pin #11825's rule instead of this one. `live` rides the prop lane #2788
-    # leaves open, and the address read still has to NOT find the retracted
-    # provenance Point — which is the whole claim under test.
-    sdk.update_knowledge("ev-9649-prov", status="live")
-    assert sdk.get_entity("ev-9649-prov")["status"] == "live"
+    # ⛔ The probe is a TEMPORAL field, never `status`, since #13100: a `status`
+    # write on an `:Event` is refused by that rule before this arm is consulted
+    # (the earlier cut of this test said as much for `archived`, which #11825's
+    # guard caught first, and #13100 now catches every word). `validTo` is a
+    # `_TEMPORAL_RESTAMP_PROPS` member, so it still reaches the address
+    # resolution — which is the whole claim under test.
+    #
+    # The two reads below are what keep the assertion non-vacuous: the PRE-FIX
+    # arm (`n:Point {eventId:$id}`, unqualified) DOES match the provenance Point,
+    # and the qualified arm does not match anything — so an unqualified
+    # resolution would have handed the guard a dead claim the caller never
+    # addressed. The refusal of that claim is measured right beside it.
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point {eventId:$id}) RETURN count(n)",
+        params={"id": "ev-9649-prov"}).result_set[0][0] == 1
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Event {eventId:$id}) WHERE n:Point RETURN count(n)",
+        params={"id": "ev-9649-prov"}).result_set[0][0] == 0
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_knowledge(provenance, validTo="2031-01-01T00:00:00Z")
+
+    sdk.update_knowledge("ev-9649-prov", validTo="2031-01-01T00:00:00Z")
+    assert sdk._get_proj().g.query(
+        "MATCH (e:Event {eventId:'ev-9649-prov'}) RETURN e.validTo",
+    ).result_set == [["2031-01-01T00:00:00Z"]], (
+        "the Event the caller addressed must take the write")
+    assert sdk.get_entity(provenance)["status"] == "retracted", (
+        "the provenance Point must be untouched")
 
 
 def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
@@ -963,39 +1036,47 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
     against `label='Event'` — a record no fold can apply (a live write that makes
     `rebuild_all` refuse). Measured at `a35a3973b7`.
 
+    ⛔ The fixture is a `:Point:Source` addressed by its `url`, not a
+    `:Point:Event` addressed by its `eventId`: since #13100 an `:Event` carries no
+    lifecycle at all, so the door refuses ANY `status` on that hybrid before this
+    arm is reached (`test_a_point_addressed_by_its_event_id_is_guarded_too` pins
+    that refusals). `url` is the door's OTHER secondary key, resolved by the same
+    `_lifecycle_ids` read, so every claim here is unchanged: the status arm keys
+    on the RESOLVED address, validates the word, asks the DECLARED transition,
+    drops the key from `props`, and journals against the POINT.
+
     ⛔ TWO NODES since #11825 (#9649 merge review): an `:Event` never carries a
     TERMINAL status (that guard refuses one first, with its own message), and
     every DECLARED transition out of a non-terminal Point status is terminal —
     so the transition refusal reachable on a hybrid is an UNDECLARED
     non-terminal one (`live -> draft`), while the journal half is the prop-lane
-    promotion `draft -> live`. Splitting them keeps both halves of this test's
-    claim pinned instead of pinning #11825's rule by accident.
+    promotion `draft -> live`.
     """
     sdk, events = env
     pid = _live(sdk)
     sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
-        params={"id": pid, "eid": "evt-hybrid-9649"})
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$u",
+        params={"id": pid, "u": "src://hybrid-9649"})
 
     with pytest.raises(ValueError, match="transition"):
-        sdk.update_knowledge("evt-hybrid-9649", status="draft")
-    with pytest.raises(ValueError, match="Invalid status"):
-        sdk.update_knowledge("evt-hybrid-9649", status="garbage")
+        sdk.update_knowledge("src://hybrid-9649", status="draft")
+    with pytest.raises(ValueError, match=r"was refused"):
+        sdk.update_knowledge("src://hybrid-9649", status="garbage")
     assert _row(sdk, pid)["status"] == "live", (
         "a refused hybrid status write must not touch the row")
 
     draft_pid = sdk.create_point(
         "statement", "draft hybrid", dedup=False, status="draft")["id"]
     sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
-        params={"id": draft_pid, "eid": "evt-hybrid-draft-9649"})
-    sdk.update_knowledge("evt-hybrid-draft-9649", status="live")
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$u",
+        params={"id": draft_pid, "u": "src://hybrid-draft-9649"})
+    sdk.update_knowledge("src://hybrid-draft-9649", status="live")
     assert _row(sdk, draft_pid)["status"] == "live"
     recs = _mutations(events, draft_pid)
     assert recs, "the declared transition must be journaled against the POINT id"
     assert all(r.get("label") == "Point" for r in recs), (
         f"a restatus record must name the label the node replays as: {recs}")
-    assert _mutations(events, "evt-hybrid-draft-9649") == [], (
+    assert _mutations(events, "src://hybrid-draft-9649") == [], (
         "nothing may be journalled against the ADDRESS the caller typed")
     # …and the record must actually FOLD: a wrong label is only visible on replay
     # (a live write that makes `rebuild_all` raise `NonFoldedEventsError`).
@@ -1046,7 +1127,7 @@ def test_a_null_status_point_still_validates_and_journals_its_status(env):
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status=NULL", params={"id": pid})
 
-    with pytest.raises(ValueError, match="Invalid status"):
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.update_knowledge(pid, status="garbage")
     assert _row(sdk, pid)["status"] is None, (
         "a refused vocabulary must not store anything")
@@ -1132,12 +1213,26 @@ def test_the_entailed_status_exemption_reads_the_write_row_set(env):
     an unaddressed terminal sibling satisfy "every row holds it", and the write
     then resurrected the sibling — measured on the `deprecated` twin of a
     `:Point:Event` addressed by its eventId.
+
+    ⛔ The fixture is a `:Point:Source` addressed by its `url` since #13100: an
+    `:Event` hybrid refuses EVERY `status`, so this arm (which is a status-only
+    claim) would be unreachable through it. The `url` arm matches just as
+    narrowly as the `eventId` arm while the write binds the whole id row set,
+    which is the shape this test needs — the arm's NAME is incidental, the
+    narrower-than-the-write relation is not.
+
+    ⛔ The TWIN is what the assertion is about, so the contrast is pinned beside
+    it: a hybrid with no unaddressed sibling echoes its own status through the
+    exemption (the #3305 read-modify-write capability) — the refusal above is
+    therefore caused by the twin, not by the `status` key merely being present.
+    A narrowed read would see `{live}` alone, call it entailed, skip the guard
+    and resurrect the twin.
     """
     sdk, _ = env
     pid = _live(sdk, "hybrid with twin")
     sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
-        params={"id": pid, "eid": "evt-twin-9649"})
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$u",
+        params={"id": pid, "u": "src://twin-9649"})
     sdk._get_proj().g.query(
         "CREATE (n:Point {id:$id, content:'twin', status:'deprecated'})",
         params={"id": pid})
@@ -1145,9 +1240,18 @@ def test_the_entailed_status_exemption_reads_the_write_row_set(env):
     assert before == ["deprecated", "live"], before
 
     with pytest.raises(ValueError, match="terminal"):
-        sdk.update_knowledge("evt-twin-9649", status="live")
+        sdk.update_knowledge("src://twin-9649", status="live")
     assert sorted(r[0] for r in _fan(sdk, pid)) == before, (
         "the unaddressed terminal twin must not be resurrected")
+
+    # The contrast: same hybrid, NO twin → every bound row already holds `live`,
+    # which is the entailed echo the exemption exists for.
+    solo = _live(sdk, "hybrid without twin")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Source, n.url=$u",
+        params={"id": solo, "u": "src://solo-9649"})
+    sdk.update_knowledge("src://solo-9649", status="live")
+    assert _row(sdk, solo)["status"] == "live"
 
 
 def test_a_falsy_non_null_id_is_still_guarded(env):
@@ -1189,8 +1293,11 @@ def test_operator_points_keep_their_documented_lifecycle(env):
     a = _live(sdk, "op src")
     b = _live(sdk, "op tgt")
     live_op = sdk.create_operator("IMPL", a, [b])["id"]
+    # ⛔ `retracted` is a declared SYNONYM of `deprecated` since #11824 S0, so
+    # the write LANDS and the store holds the canonical word (a one-way read
+    # delta: nothing may be minted as `retracted`).
     sdk.update_knowledge(live_op, status="retracted")
-    assert _row(sdk, live_op)["status"] == "retracted"
+    assert _row(sdk, live_op)["status"] == "deprecated"
 
     dead_op = sdk.create_operator("NAND", a, [b])["id"]
     sdk._get_proj().g.query(
@@ -1252,33 +1359,47 @@ def test_a_map_less_stored_status_still_defers(env):
 
     sdk.update_knowledge(pid, status="live")
     assert _row(sdk, pid)["status"] == "live"
+    # (`retracted` is a synonym of `deprecated` since #11824 S0 — it lands, and
+    # the store keeps the canonical word.)
     sdk.update_knowledge(pid, status="retracted")
-    assert _row(sdk, pid)["status"] == "retracted"
+    assert _row(sdk, pid)["status"] == "deprecated"
 
 
-def test_two_address_arms_resolving_one_id_journal_one_record(env):
+def test_two_address_arms_resolving_one_id_ask_the_guard_once(env, monkeypatch):
     """Review round 9, P2: the resolved-id list must be DE-DUPLICATED.
 
     A `:Point:Event` whose `id` and `eventId` are the same string is resolved by
-    two arms, so an un-deduplicated list journalled the SAME `restatus` twice for
-    one intent — the class `delete_point`'s own comment names ("a second
-    destruction record for one intent"). Replay is idempotent, so only a count
-    assertion catches it.
+    two arms, so an un-deduplicated list asked the lifecycle guard TWICE for one
+    intent and journalled the SAME `restatus` twice — the class `delete_point`'s
+    own comment names ("a second destruction record for one intent"). Replay is
+    idempotent, so only a count assertion catches it.
+
+    ⛔ The count is taken on the GUARD LOOP since #13100, not on the journal:
+    this hybrid can no longer take ANY `status` (that rule refuses it before the
+    arm that journals — the `draft -> live` promotion this test used was legal
+    only under #11825's interim boundary). A TEMPORAL write still reaches both
+    the resolution and the loop, and `_lifecycle_ids` — the very list the dedupe
+    produces — is what the loop iterates. Drop the `dict.fromkeys` and the guard
+    runs twice.
     """
-    sdk, events = env
-    pid = sdk.create_point(
-        "statement", "one node, two arms", dedup=False, status="draft")["id"]
+    sdk, _ = env
+    pid = sdk.create_point("statement", "one node, two arms", dedup=False)["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$id",
         params={"id": pid})
 
-    # ⛔ `draft -> live`, not `-> retracted`: since #11825 a TERMINAL status on
-    # an `:Event` is refused before this arm (measured), and this test is about
-    # the dedupe, not that rule. The promotion is a declared, non-terminal
-    # transition that still journals exactly one `restatus`.
-    sdk.update_knowledge(pid, status="live")
-    recs = [r for r in _mutations(events, pid) if r.get("op") == "restatus"]
-    assert len(recs) == 1, f"one intent must journal one record: {recs}"
+    seen: list = []
+    real = sdk._assert_lifecycle_guard
+
+    def spy(point_id, **kw):
+        seen.append(point_id)
+        return real(point_id, **kw)
+
+    monkeypatch.setattr(sdk, "_assert_lifecycle_guard", spy)
+    sdk.update_knowledge(pid, validTo="2031-01-01T00:00:00Z")
+    assert seen == [pid], (
+        f"two address arms resolving one id must ask the guard once: {seen}")
+    assert _row(sdk, pid)["validTo"] == "2031-01-01T00:00:00Z"
 
 
 def test_a_write_that_matches_no_row_journals_nothing(env, monkeypatch):
@@ -1560,7 +1681,7 @@ def test_a_hash_overriding_status_key_cannot_store_an_undeclared_word(env):
     sdk, _ = env
     pid = _live(sdk, "a live claim")
 
-    with pytest.raises(ValueError, match="Invalid status"):
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.update_knowledge(pid, **{_KHash("status"): "garbage"})
 
     assert _row(sdk, pid)["status"] == "live", (
@@ -1576,18 +1697,26 @@ def test_a_plain_status_key_still_gets_the_documented_answer(env):
     needs no partner. ``superseded`` stopped being usable as this control in
     #12592: ONTOLOGY §4.3 makes the bare word a refusal, and the declared-but-
     partnerless shape is pinned in
-    ``test_an_undeclared_transition_from_live_is_refused``.
+    ``test_an_undeclared_transition_from_live_is_refused``. Since #11824 S0 the
+    control also asserts the SYNONYM half: ``retracted`` is a spelling of
+    ``deprecated``, so the row lands as ``deprecated``.
     """
     sdk, _ = env
     pid = _live(sdk, "a live claim")
 
     sdk.update_knowledge(pid, status="retracted")
-    assert _row(sdk, pid)["status"] == "retracted", (
-        "a DECLARED transition must still land — the arm is not simply closed")
+    assert _row(sdk, pid)["status"] == "deprecated", (
+        "a DECLARED transition must still land — the arm is not simply closed "
+        "— and a declared synonym is stored as the word it means")
 
     # ...and the plain spelling is then refused on the SAME guarantee the exotic
     # keys were refused on, so the family is one rule and not two.
-    with pytest.raises(ValueError, match="retracted"):
+    # Two instruments can answer this one and BOTH are correct: the dead-claim
+    # guard (the row is `deprecated`, which is terminal) and, if that guard were
+    # disarmed, the declared-transition loop. The point of the control is that
+    # the write is REFUSED, so the assertion names both texts.
+    with pytest.raises(ValueError,
+                       match=r"dead claim|refused the status transition"):
         sdk.update_knowledge(pid, status="live")
 
 
@@ -1635,7 +1764,7 @@ def test_a_rendered_status_key_is_validated_against_the_SUBJECT_vocabulary(env):
     sdk, _ = env
     sid = sdk.create_entity("subject", "Rendered Key Co")["node"]["id"]
 
-    with pytest.raises(ValueError, match="Invalid status"):
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.update_knowledge(sid, **{_KHash("status"): "dead"})
 
     row = sdk._get_proj().g.query(
@@ -1693,3 +1822,59 @@ def test_the_id_less_refusal_prescribes_no_unperformable_route(env):
         f"the re-create route is the one that works and must be named: {text!r}")
     assert "_sanitize_props" in text, (
         f"the message must say WHY no SDK door can stamp the id: {text!r}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #11824 S0 review (P2) — an echo of a LEGACY terminal word is entailed
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("retire", ["retracted", "archived"])
+def test_an_echo_of_a_legacy_terminal_word_is_an_entailed_write(env, retire):
+    """The read-modify-write shape a generic tenant PUT sends over a dead row.
+
+    #11824 S0 put the lifecycle door on this arm, and the door NORMALISES a
+    declared synonym (`retracted` / `archived` -> `deprecated`) while the row
+    still HOLDS the legacy word — `retract_point`'s CAS writes
+    `status='retracted'` (a stated residual of this slice), and `archived` is a
+    pre-#11824 stored word (no backfill, #11824 §1).
+
+    So a caller that fetches the point and PUTs it back with its own status
+    arrived at the declared-transition loop as `retracted` -> `deprecated`: the
+    loop called that a TRANSITION, `_ALLOWED_TRANSITIONS['retracted']` is empty
+    (terminal), and the door refused a write that changes nothing. The
+    entailment test ABOVE the loop had already (correctly) said "not a
+    transition", so the SAME call was judged both ways — and the terminal guard
+    had been disarmed on the strength of that first judgement.
+
+    Mutant that reddens: compare spellings again (`str.__eq__(_stored, _status)`
+    and `_ALLOWED_TRANSITIONS.get(_stored)`) instead of reading both sides
+    through `_lifecycle_meaning`; both params then raise
+    `update_entity refused the status transition … is terminal`.
+
+    ⚠️ The echo rewrites NOTHING: the row keeps the legacy spelling it holds
+    (`retracted` / `archived`), because an entailed call mints no word — the
+    door's canonical spelling governs what may be MINTED, not what an echo of an
+    existing row may rewrite. The row must stay DEAD either way, which this
+    asserts alongside the acceptance.
+    """
+    sdk, _ = env
+    if retire == "retracted":
+        pid = _live(sdk, "a claim retired by the shipped verb")
+        sdk.retract_point(pid)              # the CAS writes 'retracted'
+    else:
+        pid = _live(sdk, "a claim a pre-fix writer archived")
+        _force_status(sdk, pid, "archived")
+    assert _row(sdk, pid)["status"] == retire
+
+    sdk.update_knowledge(pid, status=retire, content="echoed, rewritten")
+
+    after = _row(sdk, pid)
+    assert after["status"] == retire, (
+        "an entailed echo must not rewrite the stored word: " + repr(after))
+    assert sdk.get_point(pid)["content"] == "echoed, rewritten", (
+        "the entailed path must still write the content it carried")
+
+    # …and the point is still DEAD: the echo is not a resurrection.
+    with pytest.raises(ValueError, match=r"terminal|dead"):
+        sdk.update_knowledge(pid, status="live")
+    assert _row(sdk, pid)["status"] == retire

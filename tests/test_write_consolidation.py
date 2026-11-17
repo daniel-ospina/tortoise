@@ -117,7 +117,8 @@ class TestCreateEntity:
         assert "nudges" not in a  # legacy contract: node only
         ev = sdk.create_event("review", "meeting")
         assert ev.get("eventKind") == "meeting"
-        assert ev.get("eventStatus") == "scheduled"
+        # #13100: the ingest marker, not a lifecycle word (`pending` -> `indexed`)
+        assert ev.get("eventStatus") == "pending"
 
     def test_event_preserves_about_edges(self, sdk):
         """CRITICAL (#888 W2): create_entity(type='event') wires about* edges
@@ -192,7 +193,12 @@ class TestUpdate:
 
     def test_update_validates_status(self, sdk):
         p = _make_point(sdk, content="status claim")
-        with pytest.raises(ValueError, match="Invalid status"):
+        # ⛔ #11824 S0: the refusal text is the ONE vocabulary door's three-part
+        # answer (it names the word, the vocabulary and the repair), not the
+        # retired per-door "Invalid status" line. The claim is unchanged — an
+        # unknown word is refused, and refuses by WORD rather than silently
+        # storing.
+        with pytest.raises(ValueError, match="was refused"):
             sdk.update(p["id"], status="bogus")
 
     def test_update_only_promotes_draft_to_live(self, sdk):

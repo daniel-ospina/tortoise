@@ -135,7 +135,6 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
-import contextlib
 import hashlib
 import json
 import random
@@ -154,6 +153,9 @@ N_POINTS = 2000
 SEED = 42
 LIMIT = 100          # nDCG@100 / recall@100 need a 100-deep list
 GRAPH_NAME = "tg13099"
+# The docker memory probe's bound. A wedged daemon must cost a RECORDED
+# `mem["error"]`, never the run — and never a test that calls `seed_graph`.
+PROBE_TIMEOUT_S = 10
 RRF_K = 60           # search_engine.rrf_fusion's default (Cormack et al. 2009)
 BOOTSTRAP_N = 2000
 ALPHA = 0.10         # 90% CI, the #1144 pre-registered level
@@ -313,21 +315,36 @@ def seed_graph(fg_host: str, fg_port: int, points: list[dict]) -> dict:
     from falkordb import FalkorDB
 
     from benchmarks.synthetic_corpus import seed_corpus
-    from tortoise.projection import _bounded_server_socket_kwargs
+    from tortoise.projection import (
+        _bounded_server_socket_kwargs,
+        is_missing_graph_error,
+    )
 
-    # ⛔ BOUNDED, and the bound is spread INLINE (not hoisted) so the
-    # tool-surface client gate sees it on the CALL (#3065/#8118: `falkordb`
-    # defaults `socket_timeout=None` and hands it to redis-py explicitly, so an
-    # unset one parks this measurement in `recv()` forever on a stalled engine
-    # and the hang is indistinguishable from "no results"). Same construction as
-    # `tools/cache_eviction_census.py`.
-    db = FalkorDB(host=fg_host, port=fg_port,
-                  **_bounded_server_socket_kwargs())
+    # #3065/#8118: a measurement tool is not exempt from the read bound. An
+    # unbounded socket is the defect this repo already carries a number for —
+    # a stalled engine parks the caller in `recv()` at 0% CPU with no error,
+    # which a run would then record as "no rows" rather than "no answer".
+    # The bound comes from the product's ONE resolution point, so the two
+    # `TORTOISE_DB_SOCKET_*` knobs reach this client too.
+    db = FalkorDB(host=fg_host, port=fg_port, **_bounded_server_socket_kwargs())
     g = db.select_graph(GRAPH_NAME)
-    # A fresh graph has nothing to delete; either way the seed below is what
-    # the measurement runs on, so a failing DROP is not a reason to abort.
-    with contextlib.suppress(Exception):
+    # A fresh graph has nothing to delete, so an ABSENT graph is not a reason to
+    # abort the seed — and that is the ONLY class excused here. ⛔ NOT
+    # `contextlib.suppress(Exception)`: this client is now BOUNDED (above), so a
+    # stalled engine raises `redis.TimeoutError` at the DROP instead of parking
+    # forever, and a blanket suppress would swallow exactly that, seed over the
+    # PREVIOUS run's points — `GRAPH_NAME` is fixed, not per-run, and
+    # `seed_corpus` MERGEs by id — and then print a verdict for a population
+    # nothing reset. That is the "records `no rows` rather than `no answer`"
+    # failure this bound exists to prevent, so a timeout MUST abort the seed.
+    # `is_missing_graph_error` is the product's own classifier (#2163), so this
+    # stays one definition of "the graph was never there" rather than a second
+    # text match.
+    try:
         g.delete()
+    except Exception as exc:
+        if not is_missing_graph_error(exc):
+            raise
     t0 = time.perf_counter()
     n = seed_corpus(g, points)
     seed_s = time.perf_counter() - t0
@@ -342,13 +359,21 @@ def seed_graph(fg_host: str, fg_port: int, points: list[dict]) -> dict:
     mem = None
     try:
         import subprocess
+        # #3065/#8118, the same class as the client bound above: a docker
+        # daemon that is wedged parks these calls too, and a MEMORY READING is
+        # never a reason to lose a measurement run. `timeout=` turns that into
+        # `TimeoutExpired`, which the `except` below RECORDS (`mem["error"]`)
+        # instead of hanging the tool — and instead of hanging a test that
+        # exercises this function.
         name = subprocess.run(
             ['docker', 'ps', '--filter', f'publish={fg_port}', '--format', '{{.Names}}'],
-            capture_output=True, text=True, check=False).stdout.strip().splitlines()
+            capture_output=True, text=True, check=False,
+            timeout=PROBE_TIMEOUT_S).stdout.strip().splitlines()
         if name:
             out = subprocess.run(
                 ['docker', 'exec', name[0], 'redis-cli', 'INFO', 'memory'],
-                capture_output=True, text=True, check=False).stdout
+                capture_output=True, text=True, check=False,
+                timeout=PROBE_TIMEOUT_S).stdout
             mem = {ln.split(':')[0]: ln.split(':', 1)[1]
                    for ln in out.splitlines()
                    if ln.startswith(('used_memory_human', 'used_memory_dataset',
@@ -490,7 +515,10 @@ class Arms:
 
         from tortoise.projection import _bounded_server_socket_kwargs
 
-        # Bounded and spread INLINE for the same reason as `seed_graph` above.
+        # #3065/#8118 — same bound as `seed_graph` above: the arms read the
+        # graph on the measurement path, so a stalled server must surface as a
+        # bounded read error (recorded as `arm_errors` → `disqualified`), never
+        # as an empty result set that scores 0.0 and reads as a quality loss.
         self.db = FalkorDB(host=fg_host, port=fg_port,
                            **_bounded_server_socket_kwargs())
         self.g = self.db.select_graph(GRAPH_NAME)

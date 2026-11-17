@@ -1816,6 +1816,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # either way — so it is not a pin; the manifest row above is what keeps
              # the file classified.)
              "tools/text_gate_13099.py",
+             # #13098: the same silent-drop class, one artefact over, and the reason it is
+             # worth a third entry for a `.md`: the Cypher census's pins
+             # (`tests/test_13098_cypher_inventory.py`, registered `core`) compare the tool's
+             # own count against the numbers PINNED IN THAT DOCUMENT, so a doc-only edit is
+             # exactly how a count drifts. Measured before these entries:
+             # `select(["tools/cypher_inventory.py"])`, `select(["tools/cypher_diff_harness.py"])`
+             # and `select(["docs/architecture/CYPHER-INVENTORY.md"])` each → `surfaces: []`
+             # with the suite ABSENT — `tools/` is in `NON_PYTHON_PREFIXES`, so the path is
+             # filtered out BEFORE the "not matched -> core" fallback and takes the docs-only
+             # early return. With them: `surfaces: ['core']` and the suite selected. Pinned by
+             # tests/test_ci_selection.py::test_the_cypher_census_tool_and_doc_select_the_census_suite.
+             "tools/cypher_inventory.py",
+             "tools/cypher_diff_harness.py",
+             "docs/architecture/CYPHER-INVENTORY.md",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
@@ -1887,6 +1901,18 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # around it. Pinned by
              # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
              "tools/dod_5090_probe.py",
+             # #13108/#13121 review F4: tools/dense_leg_probe_13108.py owns
+             # tests/test_dense_leg_probe_13108.py (registered `core`), and the
+             # same flat `tools/` swallow applies: a probe-only change filters to
+             # `changed == []`, takes the docs-only early return and runs tier-1
+             # smoke, where that file is NOT registered. That matters here for the
+             # reason it matters for the entry directly above — this instrument's
+             # deliverable is the latency/mechanism table `#13108` reopens
+             # `STORAGE-ARCHITECTURE.md` §14.3 V3 on, so a diff that hard-wires
+             # `over_budget` or drops `percentile`'s `None`-for-empty would merge
+             # with every pin that catches it asleep. Pinned by
+             # tests/test_dense_leg_probe_13108.py::test_a_tool_only_diff_selects_this_pin.
+             "tools/dense_leg_probe_13108.py",
              # #12926: the pre-merge deployment-config check. `tools/` is in
              # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a
              # tool-only diff answers with `surfaces: []` — measured before this entry:

@@ -12,39 +12,56 @@ That is the #9649 defect class on two more labels. #12325 closed
 ``:Point``-hardcoded (``point_id``, ``MATCH (n:Point …)``), so the other two arms
 never reached it.
 
-⛔ WHAT THIS GUARD IS NOT: A VOCABULARY. A closed ``OBJECT_STATUS_VALUES`` was
-drafted, measured, and DROPPED before it shipped (it is not in the tree) —
-ONTOLOGY §4.3 (Object) says *"pack-declared
-kinds validate against their own declared words"*, and `packs/venture/manifest.yaml`
-declares ``active``, ``prospective``, ``invested``, ``written-off``,
-``prioritized``, ``paused``, ``deprioritized``, ``prospect``, ``applied``,
-``awarded``, ``closed`` for its Object kinds, while the connector vocabulary adds
-``open``/``closed``/``active``/``pending``. A shared set refuses all of them, and
-it also reddened ``tests/test_9206_apply_first_lane.py`` (which writes
-``status='active'`` on an Object through this very door). So the guard asks the
-TRANSITION question only — which is the question that stops a resurrection. What
-it stops is narrower and more useful than "an undeclared word was written": any
-word the family's read vocabulary does not treat as DEAD reads as CURRENT, so a
-dead row departing for any of them is the harm. The guard therefore never
-inspects the TARGET word — only the family's dead set.
+⛔ WHAT THIS GUARD IS NOT: A VOCABULARY — AND #11824 S0 IS WHERE THE VOCABULARY
+WENT. A closed ``OBJECT_STATUS_VALUES`` was drafted, measured, and DROPPED before
+it shipped (it is not in the tree): ONTOLOGY §4.3 (Object) said, as it then
+stood, that *"pack-declared kinds validate against their own declared words"*,
+and `packs/venture/manifest.yaml` declares ``active``, ``prospective``,
+``invested``, ``written-off``, ``prioritized``, ``paused``, ``deprioritized``,
+``prospect``, ``applied``, ``awarded``, ``closed`` for its Object kinds, while the
+connector vocabulary adds ``open``/``closed``/``active``/``pending``. One shared
+set refused all of them, and reddened
+``tests/test_9206_apply_first_lane.py`` (which writes ``status='active'`` on an
+Object through this very door). The objection was correct; the ANSWER was not to
+widen ``status`` — and it was certainly not to leave the door unvalidated, which
+is what happened instead, and is #10371's original complaint. #11824 S0 answered
+it by moving a pack's own words onto the POSITION axis: they are now the kind's
+declared PIPELINE STAGES (`packs/venture/manifest.yaml`'s ``pipeline:`` blocks;
+design §3.2 and §4), so the LIFECYCLE axis closes at four words — ``draft``,
+``live``, ``deprecated``, ``superseded`` — for EVERY knowledge kind, and ONE
+closed set is now correct everywhere. ``tortoise/lifecycle_vocabulary.py`` is
+that set's one home, and it is the write doors that consult it, not this guard.
+
+So this guard asks the TRANSITION question only, and the division is deliberate:
+"may this ROW leave a dead state?" is a different question from "is this WORD a
+lifecycle word?", and only the first one stops a resurrection. What it stops is
+narrower and more useful than "an undeclared word was written": any word the
+family's read vocabulary does not treat as DEAD reads as CURRENT, so a dead row
+departing for any of them is the harm. The guard therefore never inspects the
+TARGET word's place in the vocabulary — only the family's dead set.
 
 What this suite pins:
 
 * a terminal Object or Subject refuses a transition that makes it CURRENT;
 * the dead set is the family's own recorded one
   (``commit_ops.OBJECT_TERMINAL_STATUSES`` / ``SUBJECT_TERMINAL_STATUSES``), not a
-  literal. Pack/connector words (``active``, ``prospective``, ``invested``,
-  ``prioritized``, ``paused``, ``open``, ``closed``, ``pending``) are not refused
-  FOR BEING UNDECLARED — the anti-regression for the closed-set mistake. That
-  acceptance is ROW-SCOPED: on a DEAD row those same words ARE refused, because
-  they are not dead either, and leaving a dead state for a current-reading word
-  is the resurrection this guard exists to stop;
-* the #1423 SUBJECT VOCABULARY guard is a DIFFERENT question and survives
-  unchanged: an undeclared word (``dead``, ``retracted``) is refused on a
-  Subject, because that family's read vocabulary is a denylist of KNOWN terminal
-  states and an unknown word reads as CURRENT. A first cut of this change
-  REPLACED that block instead of extending it and silently reopened the hole; the
-  pins below are the regression guard;
+  literal — #11824 S0 narrowed the WRITE door and left these READ sets alone
+  (#2977: the net stays wider than the door, so a stored legacy word still reads
+  as dead);
+* a pack/connector word (``active``, ``prospective``, ``invested``,
+  ``prioritized``, ``paused``, ``open``, ``closed``, ``pending``) is now REFUSED
+  as a ``status`` — the hole this module's first version recorded as #10371's
+  complaint is CLOSED — and the refusal is performable: a POSITION word names
+  ``advance_stage``, anything else names the four lifecycle words. The
+  constructive half is pinned beside it, because refusing a word is only safe if
+  the pack still DECLARES it: every one of those words is a pipeline stage id of
+  a loaded pack;
+* the #1423 SUBJECT VOCABULARY guard survives as the SHARED door: an undeclared
+  word (``dead``, ``banana``) is still refused on a Subject — and, since #11824
+  S0, on an Object too — while ``retracted``, undeclared before that change, is
+  now a DECLARED SYNONYM of ``deprecated`` and stores as that word. A first cut
+  of #10371 REPLACED the #1423 block instead of extending it and silently
+  reopened the hole; the pins below are the regression guard;
 * DEAD -> DEAD stays legal, the per-family delta from Points (§5 declares every
   terminal Point with an empty outgoing set; an Object's dead words are
   bookkeeping, and ``tests/test_11826_object_supersession_instrument.py`` moves
@@ -101,10 +118,111 @@ def _stored(s, node_id) -> dict:
     return {"label": rows[0][0], "status": rows[0][1]}
 
 
+#: #11824 S0: ``archived`` and ``retracted`` are DECLARED SYNONYMS of
+#: ``deprecated`` at the write door, so a row created with ``status='archived'``
+#: STORES ``deprecated`` (silently — AX §1: a synonym supplies no meaning we did
+#: not already have). Every "how dead is this row, and which word does it hold"
+#: assertion below reads the STORED word, never the spelling the caller wrote.
+DEAD_WORD = "deprecated"
+
+#: The STORED word a caller's dead spelling lands as (``lifecycle_vocabulary``'s
+#: synonym table). ``superseded`` is its own word: only the retirement synonyms
+#: collapse onto ``deprecated``.
+_DEAD_SPELLINGS = {
+    "archived": DEAD_WORD,
+    "retracted": DEAD_WORD,
+    "deprecated": DEAD_WORD,
+    "superseded": "superseded",
+}
+
+
+# ── the CREATE door applies the same ONE vocabulary door, and it may not be
+#    disarmed by a second `status`-rendering key (#13143 review, P1) ─────────
+
+class _K(str):
+    """A key that RENDERS as ``status`` while being a different object.
+
+    The renderer union is what the doors read (`live.py`'s two-renderer
+    contract), and the live map write applies ``str(key)`` — so one call can
+    carry TWO keys that both mean ``status``. ``__eq__``/``__hash__`` are
+    delegated to the CONTENT so the dict keeps both entries instead of
+    collapsing them (a plain ``{"status": …, "status": …}`` cannot exist).
+    """
+
+    def __str__(self):
+        return "status"
+
+    def __hash__(self):
+        return hash(str.__str__(self))
+
+    def __eq__(self, other):
+        return str.__eq__(str.__str__(self), other)
+
+
+def test_a_two_status_bag_cannot_smuggle_a_word_past_the_CREATE_door(sdk):
+    """⛔ FAIL-OPEN MEASURED BEFORE THIS PIN (#13143 review, P1).
+
+    The create door exempts an explicit ``None`` — the DELETE sentinel
+    ``_sanitize_props`` documents — from the vocabulary. It read that value
+    FIRST-WINS over the renderer union, so a bag whose first rendered value was
+    ``None`` skipped validation for the WHOLE bag and left the second key's word
+    ungraded AND unrewritten:
+
+        create_object(props={K("zzz"): None, "status": "in_progress"})
+            -> STORED status='in_progress'   (measured, 199c16c164)
+
+    ``in_progress`` is a POSITION word: no read family excludes it, so the row
+    reads as CURRENT — the exact #10371/#11824 defect class this work closes,
+    reachable through the door that installs the vocabulary. The identical bag
+    through ``update_knowledge`` was already refused (CONFLICTING status write),
+    so create and update disagreed about which bags they accept.
+
+    A bag naming ``status`` twice has no knowable landing word, so it is refused
+    — ``_status_write_is_ambiguous``, the same helper and the same rule the write
+    door uses. Deleting the refusal reds this pin.
+    """
+    for t, make in (("object", sdk.create_object), ("subject", sdk.create_subject)):
+        name = f"f1-{t}"
+        with pytest.raises(ValueError, match="CONFLICTING status write"):
+            make(name, props={_K("zzz"): None, "status": "in_progress"})
+        with pytest.raises(ValueError, match="CONFLICTING status write"):
+            make(name + "-junk", props={_K("zzz"): None, "status": "garbage"})
+        # non-vacuity: nothing was minted, so the refusals above did not
+        # half-write a row carrying the word they refused
+        rows = sdk._get_proj().g.query(
+            "MATCH (n {name:$n}) RETURN n.status",
+            params={"n": name}).result_set
+        assert rows == [], f"a refused create must mint nothing: {rows!r}"
+        assert t  # the parametrisation is explicit, not incidental
+
+
+def test_the_delete_sentinel_still_works_on_the_CREATE_door(sdk):
+    """The control the refusal above must NOT eat: ``status=None`` alone.
+
+    A single-key ``None`` is the caller's WHOLE intent — the property delete
+    ``_sanitize_props`` documents, and the #13143 finding-1 shape — so the bag
+    stays a legal create. Without this pin, "refuse every bag with a ``None``"
+    would pass the test above while breaking a documented write.
+    """
+    for make in (sdk.create_object, sdk.create_subject):
+        node = make("f1-delete-sentinel", props={"status": None})
+        node_id = node.get("id") or node["node"]["id"]
+        assert _stored(sdk, node_id).get("status") in (None, ""), (
+            "an explicit `status=None` must not store a word: "
+            + repr(_stored(sdk, node_id)))
+
+
 # ── the dead set is the family's RECORDED one, not a literal in the guard ──
 
 def test_the_guard_uses_the_family_terminal_sets_that_already_exist():
-    """A literal here would be a second declaration of "dead" for these labels."""
+    """A literal here would be a second declaration of "dead" for these labels.
+
+    #11824 S0 narrowed the WRITE vocabulary to four words and left these READ
+    sets alone: ``archived`` / ``retracted`` are still DEAD for a STORED row (a
+    pre-fix writer, a raw Cypher producer, a JSONL replay of either), even though
+    neither is a word the door will mint any more. The read set is the net, the
+    write set is the door, and the net is wider on purpose (#2977).
+    """
     assert "superseded" in OBJECT_TERMINAL_STATUSES
     assert "archived" in OBJECT_TERMINAL_STATUSES
     assert "deprecated" in OBJECT_TERMINAL_STATUSES
@@ -113,7 +231,14 @@ def test_the_guard_uses_the_family_terminal_sets_that_already_exist():
 
 
 def test_completed_and_in_progress_are_not_dead_for_an_object():
-    """A connector work item moves between them; neither is a retirement."""
+    """A connector work item moves between them; neither is a retirement.
+
+    Still true after #11824 S0, and for a sharper reason: they are not lifecycle
+    words at all any more — they are stage ids of
+    ``tortoise.pipeline.CORE_WORK_ITEM_PIPELINE`` (the POSITION axis), and a
+    position is never an ending. A DEAD set that contained one would retire a row
+    that is merely in progress.
+    """
     assert not ({"completed", "in_progress"} & OBJECT_TERMINAL_STATUSES)
 
 
@@ -122,15 +247,18 @@ def test_completed_and_in_progress_are_not_dead_for_an_object():
 @pytest.mark.parametrize("maker,label", [(_object, "Object"), (_subject, "Subject")])
 @pytest.mark.parametrize("dead", ["archived", "superseded", "deprecated"])
 def test_a_terminal_row_is_not_resurrected_by_a_prop_edit(sdk, maker, label, dead):
+    # #11824 S0: the message names the STORED word, which is not the caller's
+    # spelling for a synonym — `archived` is held as `deprecated`.
+    stored = _DEAD_SPELLINGS[dead]
     node = maker(sdk, dead)
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(node, status="live")
     message = str(exc.value)
     # AX rule 2 (#10183): that it refused, on what, and what to do instead.
     assert "update_entity refused the status transition" in message
-    assert f"{dead!r} -> 'live'" in message
+    assert f"{stored!r} -> 'live'" in message
     assert f"on {label} {node!r}" in message
-    assert _stored(sdk, node)["status"] == dead, "a refused write must store nothing"
+    assert _stored(sdk, node)["status"] == stored, "a refused write must store nothing"
 
 
 def test_the_refusal_names_the_family_section_of_the_model(sdk):
@@ -180,7 +308,15 @@ def test_the_named_repair_is_performable(sdk):
         sdk.supersede_knowledge(node, "some-successor")
 
 
-# ── NOT a vocabulary: a pack/connector word is accepted ──
+# ── the vocabulary door (#11824 S0): these words are REFUSED as a `status` ──
+#
+# ⛔ INVERTED. This block used to pin the OPPOSITE — that a pack/connector word
+# was ACCEPTED as an Object's `status`, as the anti-regression for the closed-set
+# mistake. #11824 S0 closed that hole: the lifecycle axis is four words for every
+# knowledge kind, and a pack's own words are its PIPELINE STAGES. The invariant
+# that DOES survive — and is pinned by the constructive test at the end of this
+# block — is that refusing them on the lifecycle axis cost no pack its
+# vocabulary: each is still declared, as a stage id.
 
 PACK_AND_CONNECTOR_WORDS = (
     # `packs/venture/manifest.yaml` Object-kind lifecycles
@@ -190,88 +326,304 @@ PACK_AND_CONNECTOR_WORDS = (
     "open", "pending",
 )
 
+#: The words in the list above that ``lifecycle_vocabulary`` refuses as a
+#: **position** word — it carries a per-word repair naming ``advance_stage``,
+#: because position lives on the stage axis (design §3.2/§4) and each word names a
+#: different place in it.
+POSITION_WORDS = ("active", "paused")
 
-@pytest.mark.parametrize("word", PACK_AND_CONNECTOR_WORDS)
-def test_a_pack_or_connector_word_is_not_refused_on_an_object(sdk, word):
-    """The anti-regression for the closed-set mistake, driven over EVERY word.
+#: Everything else gets the VOCABULARY refusal, whose third part names the four
+#: words. Derived by exclusion from the one list, so the two parametrizations
+#: PARTITION it: no word can be silently dropped from both, and no word is
+#: asserted against a branch it does not take.
+NON_LIFECYCLE_WORDS = tuple(
+    w for w in PACK_AND_CONNECTOR_WORDS if w not in POSITION_WORDS)
 
-    A shared ``OBJECT_STATUS_VALUES`` refused all of these AND reddened
-    ``tests/test_9206_apply_first_lane.py``, which writes ``active`` through this
-    door. §4.3 (Object)'s rule is that a pack-declared kind validates against its
-    OWN declared words. The guard therefore asks only the TRANSITION question, and
-    on a live row that question has no complaint.
 
-    ⛔ ROW-SCOPED, and the scope is the point: on a DEAD row these same words ARE
-    refused, because leaving a dead state for a word the read surfaces call
-    current is exactly the resurrection this guard stops. `active` is not a
-    vocabulary exception; it is an undeclared-word exception, and only that.
+@pytest.mark.parametrize("word", POSITION_WORDS)
+def test_a_position_word_is_refused_as_a_status_with_a_stage_repair(sdk, word):
+    """#11824 S0: a POSITION word is refused, and told where it belongs.
+
+    ``active`` / ``paused`` name a place in the PIPELINE, not a lifecycle state,
+    so the write is refused by the vocabulary door and the refusal is
+    PERFORMABLE (AX rule 2, #10183): it names ``advance_stage``, the door that
+    moves a row between stages, and says what the ``status`` field keeps. The
+    row is untouched — a refused write stores nothing.
     """
     node = _object(sdk, "live")
-    sdk.update_knowledge(node, status=word)
-    assert _stored(sdk, node)["status"] == word
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(node, status=word)
+    message = str(exc.value)
+    assert message.startswith(f"status {word!r} was refused")
+    assert "advance_stage" in message, \
+        "a position word must be told to advance a stage, not to pick another word"
+    assert _stored(sdk, node)["status"] == "live"
+
+
+def test_every_position_word_repair_is_TRUE_of_the_shipped_pipelines():
+    """#13143 review — a repair text must not deny what the shipped packs declare.
+
+    ``_POSITION_WORD_REPAIRS`` is caller-facing ADVICE, and advice that is false
+    costs a round trip. The ``active`` repair used to say the word is *"not a
+    stage name"* while ``packs/venture`` declares ``id: active`` in three
+    pipelines (``manifest.yaml:117,147,212``), so the caller who is shown that
+    refusal is told to stop passing a stage id the shipped catalog resolves. The
+    same shape sat in ``in_progress``, whose text quoted the CORE spelling as if
+    it were the only one (``packs/venture`` declares ``in-progress``).
+
+    The rule is DERIVED from the declarations, never a literal in the test:
+
+    * a word that IS a declared stage id anywhere in the shipped pipelines (or in
+      the CORE work-item default) may not be denied as a stage name;
+    * every literal stage reference a repair QUOTES must be declared by some
+      shipped pipeline — a prescription naming an id nothing declares parks the
+      write as ``unknown-stage``, which is not a repair.
+    """
+    import re
+    from pathlib import Path
+
+    from tortoise.lifecycle_vocabulary import _POSITION_WORD_REPAIRS
+    from tortoise.pack_registry import PackRegistry
+    from tortoise.pipeline import CORE_WORK_ITEM_PIPELINE
+
+    declared = {str(s["id"]) for s in CORE_WORK_ITEM_PIPELINE["stages"]}
+    reg = PackRegistry(Path(__file__).resolve().parent.parent / "packs")
+    reg.load_all()
+    for pack in reg.packs.values():
+        for kind_def in pack.kind_defs.values():
+            pipeline = (kind_def or {}).get("pipeline") or {}
+            for stage in pipeline.get("stages") or ():
+                if stage.get("id"):
+                    declared.add(str(stage["id"]))
+
+    # The premise the first rule rests on: if this ever stops holding, the
+    # denial is harmless and the assertion below would be the false one.
+    assert "active" in declared, (
+        "fixture premise: a shipped pipeline declares the stage id `active` "
+        f"(declared stage ids: {sorted(declared)})")
+
+    for word, text in _POSITION_WORD_REPAIRS.items():
+        if word in declared:
+            assert "not a stage name" not in text, (
+                f"the {word!r} repair DENIES a stage name the shipped pipelines "
+                f"declare (packs declare id={word!r}): {text}")
+        for quoted in re.findall(r"'([A-Za-z_][\w.-]*)'", text):
+            assert quoted in declared, (
+                f"the {word!r} repair prescribes the stage id {quoted!r}, which "
+                "no shipped pipeline declares — that call parks as "
+                f"unknown-stage: {text}")
+
+
+def test_the_outdated_repair_names_BOTH_words_and_the_supersede_route(sdk):
+    """`outdated` is refused because it names a CHOICE, and the choice is named.
+
+    The generic refusal cannot stand in for this one: it already contains the
+    word `outdated` (``_render`` interpolates the refused value) and already
+    names `superseded` (``_ACCEPTED_FORMS`` lists the vocabulary), so a
+    ``match="outdated"`` / ``match="deprecated"`` row stays GREEN if the
+    dedicated arm is deleted — the repair silently degrades to "pass a lifecycle
+    word", which picks neither meaning for the caller. The discriminating text
+    is the ROUTE: ``supersededBy`` (an Object) or ``supersede_point`` (a Point).
+
+    Both doors are pinned: the module question and the write the caller makes.
+    """
+    import re
+
+    from tortoise.lifecycle_vocabulary import read_caller_status
+
+    with pytest.raises(ValueError) as exc:
+        read_caller_status("outdated")
+    assert re.search(r"supersededBy|supersede_point", str(exc.value)), (
+        "the refusal must name the supersede ROUTE, not only the two words — "
+        f"otherwise it cannot be acted on: {exc.value}")
+
+    node = _object(sdk, "live")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(node, status="outdated")
+    message = str(exc.value)
+    assert "deprecated" in message and "superseded" in message, (
+        f"`outdated` must be answered with BOTH words: {message}")
+    assert re.search(r"supersededBy|supersede_point", message), (
+        f"the write refusal must name the supersede route: {message}")
+    assert _stored(sdk, node)["status"] == "live", "a refused write stores nothing"
+
+
+@pytest.mark.parametrize("word", NON_LIFECYCLE_WORDS)
+def test_a_pack_or_connector_word_is_now_refused_as_a_status(sdk, word):
+    """#11824 S0: the pack/connector word is REFUSED, with the vocabulary named.
+
+    This is the inversion of ``test_a_pack_or_connector_word_is_not_refused_on_
+    an_object``: the old pin asserted each of these STORED on a live Object, on
+    the ground that a pack kind validates against its own declared words. That is
+    still true — but a pack's declared words are its pipeline STAGES now, so
+    ``status`` is not the field they belong in.
+
+    ⚠️ Being a stage id is NOT what makes a word safe on this axis: ``open`` and
+    ``pending`` are stage ids of ``venture:actionItem`` / ``venture:tranche`` and
+    are ALSO connector vocabulary (``status_folds.SHARED_CONNECTOR_STATUS_WORDS``)
+    — they are refused here because they are not lifecycle words, full stop.
+    """
+    node = _object(sdk, "live")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(node, status=word)
+    message = str(exc.value)
+    assert message.startswith(f"status {word!r} was refused")
+    assert "not a lifecycle word for :Object" in message
+    assert "draft" in message and "superseded" in message, \
+        "the third part must name the vocabulary the caller may use instead"
+    assert _stored(sdk, node)["status"] == "live", "a refused write stores nothing"
 
 
 @pytest.mark.parametrize("word", PACK_AND_CONNECTOR_WORDS)
-def test_a_pack_word_on_a_DEAD_row_is_refused(sdk, word):
-    """The other half of the row-scope claim, driven over the same words.
+def test_a_pack_word_on_a_DEAD_row_is_refused_by_the_vocabulary_door(sdk, word):
+    """Refused either way — but by the VOCABULARY door since #11824 S0.
 
-    The acceptance above is about a LIVE row. On a DEAD one these words are
-    refused like any other non-dead target — precisely because they are not dead,
-    and a dead row departing for a word the read surfaces call current is the
-    resurrection this guard exists to stop. Pinned separately so the docstring's
-    "ROW-SCOPED" sentence cannot claim coverage the suite does not carry.
+    The old pin asserted the TRANSITION refusal ("update_entity refused the
+    status transition") on an ``'archived'`` row. The vocabulary check now runs
+    FIRST, on any mounted row, so the caller is told the actionable thing —
+    "this is not a lifecycle word" — rather than a transition verdict about a
+    word that was never a candidate. Pinned so a later reordering cannot quietly
+    send a caller down the transition message for a spelling problem.
+
+    The row is asserted DEAD by MEMBERSHIP, not by the literal ``'archived'``:
+    #11824 S0 stores that synonym as ``deprecated``.
     """
     node = _object(sdk, "archived")
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(node, status=word)
-    assert "update_entity refused the status transition" in str(exc.value)
-    assert "'archived'" in str(exc.value)
-    assert _stored(sdk, node)["status"] == "archived"
+    message = str(exc.value)
+    assert message.startswith(f"status {word!r} was refused"), \
+        "the VOCABULARY door refuses first — not this module's transition guard"
+    assert "update_entity refused the status transition" not in message
+    assert _stored(sdk, node)["status"] in OBJECT_TERMINAL_STATUSES, \
+        "a refused write must leave the row as dead as it found it"
 
 
-@pytest.mark.parametrize("word", ["retracted", "dead", "banana"])
+#: Words that are DECLARED, but on the STAGE axis — the constructive half of the
+#: inversion above. Measured: every word in ``PACK_AND_CONNECTOR_WORDS`` is a
+#: ``pipeline.stages[].id`` of a kind in ``packs/`` (``open``/``pending`` via
+#: ``venture:actionItem``/``venture:tranche``), so nothing had to be excluded —
+#: and the assertion is written to REPORT anything that stops being declared
+#: rather than to assume the set is empty.
+
+def _declared_stage_ids() -> set:
+    from pathlib import Path
+
+    from tortoise.pack_registry import PackRegistry
+
+    reg = PackRegistry(Path(__file__).resolve().parent.parent / "packs")
+    reg.load_all()
+    stage_ids: set = set()
+    for pack in reg.packs.values():
+        for kind_def in pack.kind_defs.values():
+            pipeline = (kind_def or {}).get("pipeline") or {}
+            for stage in pipeline.get("stages") or ():
+                if stage.get("id"):
+                    stage_ids.add(stage["id"])
+    return stage_ids
+
+
+def test_every_pack_word_is_still_declared_as_a_pipeline_stage():
+    """The constructive half: refusing a word must not DELETE the declaration.
+
+    #11824 S0 did not retire a pack's vocabulary, it moved which AXIS it belongs
+    to (design §3.2/§4). So the fix for a refused word is visible in the data,
+    not just in a message: the word is still declared, as a stage id, by the kind
+    that owns it. Asserted over the loaded packs rather than a literal list, so a
+    pack that drops a stage (and leaves a caller with a word that is refused on
+    BOTH axes) reds this test instead of silently becoming unwritable.
+    """
+    declared = _declared_stage_ids()
+    missing = sorted(w for w in PACK_AND_CONNECTOR_WORDS if w not in declared)
+    assert not missing, (
+        f"{missing} is refused as a `status` AND is no longer a declared stage "
+        f"id of any kind in packs/ — the caller has no writable home for it"
+    )
+
+
+#: ``retracted`` used to be one of the undeclared words pinned here. #11824 S0
+#: makes it a DECLARED SYNONYM of ``deprecated``, so it splits out below: the
+#: #1423 invariant (an undeclared word is refused on a Subject) is kept, and the
+#: synonym is pinned as what it now is rather than dropped.
+
+
+def test_a_subject_stores_a_declared_synonym_as_deprecated(sdk):
+    """``retracted`` is no longer undeclared on a Subject — it is a synonym.
+
+    #11824 S0's synonym table makes ``retracted`` mean *ended, nothing replaced
+    it*, which is ``deprecated``, so the write succeeds and stores the canonical
+    word — SILENTLY (AX §1: a synonym supplies no meaning we did not already
+    have, so there is nothing to echo back).
+    """
+    node = _subject(sdk, "live")
+    sdk.update_knowledge(node, status="retracted")
+    assert _stored(sdk, node)["status"] == DEAD_WORD
+
+
+@pytest.mark.parametrize("word", ["dead", "banana"])
 def test_a_subject_still_refuses_an_undeclared_word(sdk, word):
     """#1423's guard, which this change must not and does not remove.
 
-    ``retracted`` and ``dead`` are undeclared for a Subject (§4.2). They are not
-    "dead" words this guard knows — an unknown word reads as CURRENT on the read
-    sides, which is why the vocabulary check is the only place it can be caught.
+    ``dead`` and ``banana`` are not lifecycle words for ANY knowledge kind
+    (#11824 S0). An unknown word is not "dead" either, and the Subject read
+    vocabulary is a denylist of KNOWN terminal states, so an unknown word reads
+    as CURRENT — which is why the vocabulary door is the only place it can be
+    caught, and why it now catches it on an Object as well as a Subject.
     A first cut of #10371 dropped this block and these rows went green.
     """
     node = _subject(sdk, "live")
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(node, status=word)
-    assert f"Invalid status {word!r} for a :Subject" in str(exc.value)
+    message = str(exc.value)
+    assert message.startswith(f"status {word!r} was refused")
+    assert "not a lifecycle word for :Subject" in message
     assert _stored(sdk, node)["status"] == "live"
 
 
-def test_an_undeclared_word_is_still_the_other_issue(sdk):
-    """⛔ Pinned so nobody reads this guard as closing the vocabulary hole.
+def test_an_undeclared_word_is_now_refused_the_hole_is_closed(sdk):
+    """⛔ INVERTED by #11824 S0: ``banana`` no longer stores on an Object.
 
-    `banana` still stores on an Object; that is #10371's ORIGINAL complaint and it
-    stays OPEN, because closing it needs per-kind resolution (a pack kind's own
-    words, §4.3 Object), not a shared set. If this test ever fails, someone added
-    a closed set and owes §4.3 an answer.
+    The invariant this test pinned is GONE, deliberately: it asserted that an
+    undeclared word still STORED on an Object, because closing that needed
+    per-kind resolution (a pack kind's own words, §4.3 Object) and a shared set
+    would have refused real ones. That was #10371's ORIGINAL complaint, and it
+    stayed open with this pin guarding the hole.
 
-    The one real Object writer of a legacy word is
-    ``tests/test_11926_derived_invalidation.py`` (``update_knowledge(<Object>,
-    status='outdated')``, read back at its ``status`` assertion);
-    ``tortoise/derived_invalidation.py`` only MENTIONS the word in a comment and
-    never calls this door with it.
+    The route that arrived is not a per-kind STATUS list — it is the STAGE axis,
+    which is where a pack's own words live now, so the lifecycle axis closes at
+    four words for every knowledge kind and the hole is closed. If this test ever
+    fails, an undeclared word is being STORED again.
+
+    What is still true, and is why the closure is safe: the READ sets keep the
+    legacy words (``archived`` / ``retracted`` remain in
+    ``OBJECT_TERMINAL_STATUSES``), so a row holding one from a pre-fix writer
+    still reads as dead (#2977 — the net is wider than the door).
+
+    ⚠️ A caller that wrote a legacy word through this door must move with it:
+    ``tests/test_11926_derived_invalidation.py`` writes
+    ``update_entity(<Object>, status='outdated')``, and ``outdated`` is now
+    REFUSED because it names a CHOICE between ``deprecated`` and ``superseded``.
     """
     node = _object(sdk, "live")
-    sdk.update_knowledge(node, status="banana")
-    assert _stored(sdk, node)["status"] == "banana"
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(node, status="banana")
+    assert "not a lifecycle word for :Object" in str(exc.value)
+    assert _stored(sdk, node)["status"] == "live"
 
 
 # ── SCOPE: an entailed status is not a transition; content stays revisable ──
 
 @pytest.mark.parametrize("maker", [_object, _subject])
 def test_an_entailed_status_beside_a_real_edit_is_accepted(sdk, maker):
-    """The read-modify-write shape a generic tenant PUT actually sends."""
+    """The read-modify-write shape a generic tenant PUT actually sends.
+
+    #11824 S0: the caller still writes ``archived``; the door normalises it to
+    ``deprecated`` on the way in, so the echo is ENTAILED (stored == target) and
+    the content edit is not read as a transition.
+    """
     node = maker(sdk, "archived")
     assert sdk.update_knowledge(node, status="archived", description="a note")
-    assert _stored(sdk, node)["status"] == "archived"
+    assert _stored(sdk, node)["status"] == DEAD_WORD
 
 
 @pytest.mark.parametrize("maker", [_object, _subject])
@@ -279,13 +631,13 @@ def test_a_content_revision_without_a_status_is_untouched(sdk, maker):
     """The block keys on a supplied `status` only — it must not gate content."""
     node = maker(sdk, "archived")
     assert sdk.update_knowledge(node, description="revision only")
-    assert _stored(sdk, node)["status"] == "archived"
+    assert _stored(sdk, node)["status"] == DEAD_WORD
 
 
 # ── DEAD -> DEAD is legal: the per-family delta from Points ──
 
 def test_a_dead_row_may_be_re_filed_between_dead_words(sdk):
-    """``archived -> deprecated`` STAYS LEGAL, and that is the delta from Points.
+    """``superseded -> deprecated`` STAYS LEGAL, the delta from Points.
 
     ⛔ Pinned because it is the opposite of the Point rule and the difference is
     load-bearing. §5 declares every terminal POINT with an empty outgoing set
@@ -296,27 +648,48 @@ def test_a_dead_row_may_be_re_filed_between_dead_words(sdk):
     ``superseded_object_active_edges`` finding while (per `audit.py`'s own
     docstring) NOT clearing the deficit — so nothing there offers archiving as a
     repair, and refusing the move would red that module.
+
+    ⚠️ The origin is ``superseded`` and not ``archived`` (#11824 S0): ``archived``
+    is a SYNONYM stored as ``deprecated``, so an ``archived -> deprecated`` write
+    is now an ENTAILED no-op and would pin nothing. `main`'s own move —
+    ``superseded -> archived`` — is this transition, spelled through the synonym.
     """
-    node = _object(sdk, "archived")
+    node = _object(sdk, "superseded")
     sdk.update_knowledge(node, status="deprecated")
-    assert _stored(sdk, node)["status"] == "deprecated"
+    assert _stored(sdk, node)["status"] == DEAD_WORD
+    sdk.update_knowledge(node, status="archived")   # the same move, as a synonym
+    assert _stored(sdk, node)["status"] == DEAD_WORD
     with pytest.raises(ValueError):
         sdk.update_knowledge(node, status="live")   # ...and it is still dead
 
 
 def test_a_live_row_is_retired_by_a_status_write(sdk):
-    """CURRENT -> DEAD is a retirement, not a resurrection; it stays legal."""
+    """CURRENT -> DEAD is a retirement, not a resurrection; it stays legal.
+
+    #11824 S0: ``archived`` is a DECLARED SYNONYM, so the retirement is STORED as
+    ``deprecated`` — the write is accepted, the spelling is not what lands.
+    """
     node = _object(sdk, "live")
     sdk.update_knowledge(node, status="archived")
-    assert _stored(sdk, node)["status"] == "archived"
+    assert _stored(sdk, node)["status"] == DEAD_WORD
 
 
-def test_an_object_moves_between_non_terminal_states(sdk):
+def test_an_object_moves_between_the_two_non_terminal_lifecycle_words(sdk):
+    """⛔ ``completed`` / ``in_progress`` are NOT status words since #11824 S0.
+
+    They are the POSITION axis (``CORE_WORK_ITEM_PIPELINE``'s stage ids, design
+    §3.2): moving a row between positions is ``advance_stage(...)``, never a
+    ``status`` write, and this door refuses them with that repair named (see the
+    ``POSITION_WORDS`` pins above). What a ``status`` write still moves a row
+    between is the two NON-TERMINAL lifecycle words — a live row can be demoted
+    to ``draft`` and promoted back, which is the read-modify-write capability a
+    terminal-only check must not break.
+    """
     node = _object(sdk, "live")
-    sdk.update_knowledge(node, status="completed")
-    assert _stored(sdk, node)["status"] == "completed"
-    sdk.update_knowledge(node, status="in_progress")
-    assert _stored(sdk, node)["status"] == "in_progress"
+    sdk.update_knowledge(node, status="draft")
+    assert _stored(sdk, node)["status"] == "draft"
+    sdk.update_knowledge(node, status="live")
+    assert _stored(sdk, node)["status"] == "live"
 
 
 # ── the fan-out rule (#7822) applies to the non-Point arms too ──
@@ -602,10 +975,13 @@ def test_only_the_object_hint_offers_a_pack_word(sdk, maker, label,
 
     Pack kinds declare Object words (`packs/venture/manifest.yaml`: `active`,
     `prospective`, `invested`, …), so on an Object "this kind's own current word"
-    is a real alternative to `'live'`. A :Subject's vocabulary is CLOSED
-    (`commit_ops.SUBJECT_STATUS_VALUES` — the #1423 guard below refuses `active`
-    outright), so offering it there prescribes a call that raises. The
-    `status='live'` form is performable for BOTH families and is always offered.
+    is a real alternative to `'live'` — as a PIPELINE STAGE, since #11824 S0
+    moved a pack's words onto the position axis. A :Subject has no such option:
+    its vocabulary is the SAME closed four words as every other kind
+    (`commit_ops.SUBJECT_STATUS_VALUES`; the vocabulary door refuses `active` as
+    a position word, asserted below), so offering it there prescribes a call that
+    raises. The `status='live'` form is performable for BOTH families and is
+    always offered.
     """
     node = _superseded_with_carriers(sdk, maker)
     with pytest.raises(ValueError) as exc:
@@ -740,29 +1116,104 @@ def test_an_archived_row_is_not_resurrected_by_clearing_a_legacy_carrier(sdk):
     A row can reach `archived` from `superseded` (dead -> dead stays legal), so
     the carriers may still be set on it. That does not make it recoverable: §4.3
     separates "replaced" from "retired", and only the former has a withdrawal.
+
+    #11824 S0: `archived` is a DECLARED SYNONYM stored as `deprecated`, so the
+    stored word AND the refusal's origin are both `'deprecated'` here.
     """
     node = _superseded_with_carriers(sdk, _object)
     sdk.update_knowledge(node, status="archived")            # dead -> dead: legal
+    assert _stored(sdk, node)["status"] == DEAD_WORD
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(node, status="live", supersededBy=None,
                           supersededAt=None)
-    assert "'archived' -> 'live'" in str(exc.value)
-    assert _stored(sdk, node)["status"] == "archived"
+    assert f"{DEAD_WORD!r} -> 'live'" in str(exc.value)
+    assert _stored(sdk, node)["status"] == DEAD_WORD
 
 
 # ── no leak onto the Point arm, which owns its own vocabulary and table ──
 
 def test_a_point_with_an_object_word_is_refused_by_the_point_vocabulary(sdk):
-    """`completed` is a legal Object word and NOT a Point word — each family
-    validates against its own set, and the Point arm runs first."""
+    """A POSITION word reaches the Point arm and is refused by the shared door.
+
+    This used to pin a per-family difference — `completed` was a legal Object
+    word and not a Point word. #11824 S0 removed the difference: one four-word
+    set for every knowledge kind, and `completed` is not even an Object word any
+    more (it is a stage id). The invariant worth keeping is that the Point arm
+    still validates FIRST and still refuses, so nothing leaks onto it.
+    """
     pid = sdk.create_point("statement", "pt", dedup=False)["id"]
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(pid, status="completed")
-    assert "Invalid status 'completed'" in str(exc.value)
+    message = str(exc.value)
+    assert "status 'completed' was refused" in message
+    assert "advance_stage" in message, \
+        "a position word must be told to advance a stage"
 
 
 def test_a_point_keeps_its_declared_transitions(sdk):
-    """The sibling arms' guard must not tighten the Point arm it sits beside."""
+    """The sibling arms' guard must not tighten the Point arm it sits beside.
+
+    ⛔ #11824 S0 makes the WRITE `retracted` LAND as `deprecated`: it is a
+    DECLARED SYNONYM (the same ending under another spelling), so the door
+    normalises it and `_ALLOWED_TRANSITIONS`' declared `live -> deprecated` is
+    the transition taken. The table itself is unchanged — `draft -> {live,
+    deprecated, superseded}`, `live -> {deprecated, superseded}`, and every
+    legacy terminal row (`retracted`, `outdated`, `archived`) is `frozenset()` —
+    so nothing leaves a dead Point, which the second half pins.
+    """
     pid = sdk.create_point("statement", "pt-live", dedup=False)["id"]
     sdk.update_knowledge(pid, status="retracted")
-    assert _stored(sdk, pid)["status"] == "retracted"
+    assert _stored(sdk, pid)["status"] == DEAD_WORD
+    with pytest.raises(ValueError):
+        sdk.update_knowledge(pid, status="live")   # terminal: no outgoing edge
+
+
+# ── the MEASUREMENT device: `normalised` and `refused` are different counts ──
+
+def test_the_write_outcome_counter_distinguishes_a_QUESTION_from_a_WRITE():
+    """`STATUS_WRITE_OUTCOMES` is this slice's own measurement, so it is pinned.
+
+    `status_refusal_reason` is documented as *"`read_caller_status` as a
+    QUESTION"* and the ingest bundle validator asks it once per item. Before
+    `count=False` was threaded through it, ONE write was counted TWICE as a
+    normalisation (the question's count plus the write's) — measured at
+    `c14e3830`: `status_refusal_reason(' Live ')` then
+    `read_caller_status(' Live ')` -> `{'normalised': 2}` for a single write.
+    A rejected 200-item bundle could then dominate a counter whose stated
+    purpose is *"is the vocabulary too narrow?"* / *"how many calls arrive in
+    the wrong spelling?"*.
+
+    Mutants that redden: drop `count=False` from `status_refusal_reason` (the
+    question form then moves the counters), unthread `count=` from `_refusal`
+    (a refused QUESTION counts), or collapse the two keys into one label — which
+    is the AX §2 failure the split exists to prevent.
+    """
+    from tortoise import lifecycle_vocabulary as lv
+
+    def _snapshot():
+        return dict(lv.STATUS_WRITE_OUTCOMES)
+
+    before = _snapshot()
+
+    # A QUESTION — on every shape: a re-spelling, a synonym, a refused word, a
+    # non-string. It stores nothing and declines nothing, so it counts nothing.
+    assert lv.status_refusal_reason(" Live ") is None
+    assert lv.status_refusal_reason("archived") is None
+    assert lv.status_refusal_reason("banana")
+    assert lv.status_refusal_reason(1)
+    assert _snapshot() == before, (
+        "the QUESTION form counted an outcome: " + repr(_snapshot()))
+
+    # A WRITE — a re-spelling is `normalised`, and it is not also `refused`.
+    assert lv.read_caller_status("Live") == "live"
+    after_write = _snapshot()
+    assert after_write["normalised"] == before["normalised"] + 1, after_write
+    assert after_write["refused"] == before["refused"], after_write
+
+    # A REFUSED write lands on `refused` only — one label for both would flatten
+    # different failures into one number (AX §2).
+    with pytest.raises(ValueError):
+        lv.read_caller_status("banana")
+    after_refusal = _snapshot()
+    assert after_refusal["refused"] == after_write["refused"] + 1, after_refusal
+    assert after_refusal["normalised"] == after_write["normalised"], after_refusal

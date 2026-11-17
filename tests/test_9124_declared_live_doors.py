@@ -370,6 +370,19 @@ _NO_JOURNAL = {
 #: `MATCH … RETURN` read with no write keyword in it.
 _UNRESOLVED = {
     "_assert_lifecycle_guard",
+    # #13035: the goal-ending guard's STORED half. `_stored_goal_ending_view`
+    # issues ONE statement — `MATCH (n:<label> {id:$id}) OPTIONAL MATCH
+    # (s)-[:CORRECTS]->(n) RETURN n.status, n.goalState, coalesce(...),
+    # collect(s.id)` — with no SET/CREATE/MERGE/DELETE/REMOVE and no write
+    # procedure, and it appends no record: it exists to grade the state a caller's
+    # write LEAVES, one read at most once per write, and it returns a dict. It
+    # belongs HERE rather than in the resolvable register or `_NO_JOURNAL`: the
+    # `{label}` fragment is interpolated, so the enumerator cannot PROVE the
+    # statement read-only — the same shape, and the same home, as
+    # `_stored_value_shapes`. Both doors that nest it (`update_point`,
+    # `_update_entity`) are accounted for by the per-function census, so this row
+    # declares a read and blesses no undeclared write.
+    "_stored_goal_ending_view",
     # #9962: the ONLY handle reach in this function is its redelivery read (the
     # prior-mitigation census: id/content/strength plus
     # `live._terminal_excluded('m.status')` as `is_current`). The unresolvable
@@ -461,7 +474,8 @@ _UNRESOLVED = {
     # — it never calls it, and neither function calls any other writer).
     # That second claim is pinned against the CENSUS's own handle surface —
     # "write OR not-proven-read", because that surface also keys a function whose
-    # mutating call it could not RESOLVE (45 of its 83 entries are that shape),
+    # mutating call it could not RESOLVE (most entries are that shape — do not
+    # copy a count here; `len(_census_writer_names())` is the one authority),
     # so calling it "the list of writing functions" overstates it; the names this
     # file has already proven READ are subtracted — and not against a
     # hand-written list of method names: a check that
@@ -2567,9 +2581,15 @@ def _census_writer_names(surface: dict | None = None,
     ⛔ THE POLARITY IS "WRITE **OR** NOT-PROVEN-READ", NOT "WRITE" (review,
     measured). A surface entry whose every mutating call is `<unresolved>` is a
     function the census could not settle — it is on the surface for the same
-    reason `_UNRESOLVED` exists, and 45 of 83 entries here are that shape. The
-    message this set drives therefore may not say "the census PROVES reaches the
-    write handle": for that majority the census proves nothing at all.
+    reason `_UNRESOLVED` exists, and a majority of the entries here are that
+    shape. The message this set drives therefore may not say "the census PROVES
+    reaches the write handle": for that majority the census proves nothing at
+    all. ⛔ THE COUNTS ARE DELIBERATELY NOT RESTATED: this sentence carried
+    "45 of 83" while the live registers held 92 names and 45 `_UNRESOLVED` rows
+    — a DATED reading printed beside the set that counts it, which is the rot
+    the message at the far end of this file now derives its numbers from
+    instead. Re-measure with `len(_census_writer_names())`; do not copy a number
+    into prose.
 
     What IS subtracted is the file's own positive verdict: a name registered in
     `_PROVEN_READS` has been hand-checked AND mechanically pinned as an
@@ -2619,8 +2639,10 @@ def _calibration_read_offenders(functions, readers=_CALIBRATION_READERS,
     hand-built function instead of asserting against a copy of it.
 
     `writers` is `_census_writer_names()` — "write **OR** not-proven-read", NOT
-    "the names the census proves a write": 45 of its 83 entries are functions
-    the census could not settle, so the offender message this set drives may not
+    "the names the census proves a write": most of its entries are functions the
+    census could not settle (⛔ no count is restated here — the set itself is the
+    authority, and a number printed beside it goes stale silently), so the
+    offender message this set drives may not
     claim the census PROVES a write (see that function's docstring for the full
     polarity, and `test_the_census_writer_set_states_its_own_polarity` for the
     pin). `None` means "ask the census", which is what the real pin does.
@@ -3638,9 +3660,14 @@ def test_the_census_writer_set_states_its_own_polarity():
     """The writers arm is "write OR NOT-PROVEN-READ", and its message says so.
 
     `enumerate_handle_surface` keys a function for ANY mutating call, including
-    one it could not resolve — so 45 of 83 entries are functions the census
-    proves nothing about (33 of them this file's own hand-checked `_UNRESOLVED`
-    READ rows). The arm's message claimed "the census PROVES reaches the write
+    one it could not resolve — so most entries are functions the census proves
+    nothing about, a large share of them this file's own hand-checked
+    `_UNRESOLVED` READ rows. ⛔ No counts are restated here either: this sentence
+    carried "45 of 83 … (33 of them)" while the live registers held 92 names and
+    45 `_UNRESOLVED` rows (43 of them on the surface) — a DATED reading that
+    reads as current, which is the same rot the assertion at the end of this
+    file now derives instead of restating.
+    The arm's message claimed "the census PROVES reaches the write
     handle", which is false for that majority, and a call to a name already
     proven read here (`_PROVEN_READS`) redded a correct row for it.
 
@@ -3730,8 +3757,8 @@ def test_the_offenders_helper_docstring_states_the_real_polarity():
     """NON-VACUITY for the `writers` parameter's own docstring (review P2).
 
     `_census_writer_names`'s polarity was corrected to "write **OR**
-    not-proven-read" (45 of 83 entries are functions the census could not
-    settle), and the offender message was corrected with it — but the parameter
+    not-proven-read" (most entries are functions the census could not settle),
+    and the offender message was corrected with it — but the parameter
     DOCSTRING eleven lines below still said "the set of names the census proves
     write", i.e. the narrower, false thing. No pin covered prose, so the
     overtuned sentence could sit beside the corrected one indefinitely and tell
@@ -3743,8 +3770,10 @@ def test_the_offenders_helper_docstring_states_the_real_polarity():
     assert doc, "`_calibration_read_offenders` lost its docstring"
     assert "proves write" not in doc, (
         "the `writers` docstring claims the census PROVES a write again — the "
-        "real polarity is 'write OR not-proven-read' (45 of 83 entries are "
-        f"unproven), so the parameter's stated contract is false (doc={doc!r})")
+        "real polarity is 'write OR not-proven-read'; the census proves "
+        f"nothing about the {len(_UNRESOLVED)} `_UNRESOLVED` rows, so the "
+        "parameter's stated contract is false "
+        f"(doc={doc!r})")
     assert "not-proven-read" in doc, (
         "the `writers` docstring no longer states the 'write OR "
         "not-proven-read' polarity it receives from `_census_writer_names` "
@@ -4838,7 +4867,13 @@ def _modules_reaching_the_handle():
 #: out of the unproven bucket. MEASURED 2026-10-20 over 59 modules: 307 unresolved
 #: statements in the population — 226 in the unproven bucket, 40 in functions
 #: that already declare a lane (no bucket), 39 in a function that also holds a
-#: provable write, and the 2 proven reads above.
+#: provable write, and the 2 proven reads that existed AT THAT READING. Those
+#: four terms sum to 307 and are that reading, not a live total. The live register
+#: is `_PROVEN_READS` below and its size is deliberately NOT restated here — read
+#: the set. This sentence once said "2 proven reads" while the set held five, then
+#: six: a count in prose next to the set it counts is the same staleness this
+#: comment warns about. (The 307 / 226 / 40 / 39 figures are the 2026-10-20
+#: reading above.)
 #:
 #: ⛔ THE KEY IS WHAT `enumerate_handle_surface` EMITS — scope-qualified, e.g.
 #: `("tortoise/sdk.py", "TortoiseSDK.delete_point")`, NOT `"delete_point"`. A
@@ -4881,6 +4916,26 @@ _PROVEN_READS: set[tuple[str, str]] = {
     # undeclared write (pinned statement extent below).
     ("tortoise/sdk.py", "TortoiseSDK._supersede_entity"),
     ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"),
+    # #13034 (a main red measured on `55ec2c71b1`, run 44025094904 job
+    # `test (k)`): `_hydrate_evidence`'s ONLY handle reach. #13034 replaced the
+    # hand-written `status <> 'retracted'` test with the shared terminal
+    # predicate, so the statement now interpolates `live._terminal_excluded(
+    # 'n.status')` — a CALL inside the f-string, which `_text` cannot unfold, so
+    # the census's over-report polarity counts it as a write. Checked by hand at
+    # this head: `MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS
+    # NOT NULL AND <live-only predicate> RETURN n.id, n.ep_alpha, n.ep_beta` — a
+    # read: no SET/CREATE/MERGE/DELETE/REMOVE, no write procedure, and the
+    # function appends no record. What it fills is the SDK's IN-MEMORY evidence
+    # map (`self._evidence`), never the graph; the graph write it loads priors
+    # FOR is `set_point_baseline`, its own censused door — so this read-side
+    # verdict blesses no undeclared write. ⛔ NOT an `_UNRESOLVED` row: that
+    # inventory satisfies the census test but NOT the flip gate (the arming test
+    # reads this register plus real lanes), so parking it there would leave the
+    # surface permanently "unproven" while looking inventoried. Flattening the
+    # predicate back into a literal is the #2901 defect class the shared
+    # predicate exists to stop, so the CODE is not the thing to change here;
+    # the systemic resolver work is #9387, and this row shrinks when it lands.
+    ("tortoise/sdk.py", "TortoiseSDK._hydrate_evidence"),
 }
 
 #: WHAT WAS PROVEN, not only whose statement was — keyed like `_PROVEN_READS`,
@@ -4911,8 +4966,19 @@ _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     # f-string). The other two are literal statements the resolver flattens into
     # provable READS, so they never enter `writes` and pinning them here would
     # make the extent lie. Measured with the module's own enumerator, not reasoned:
-    # `writes == [(48606, 'query', '<unresolved>')]`, `_is_unresolved_only` True.
+    # `writes == [(50056, 'query', '<unresolved>', 1)]`, `_is_unresolved_only` True.
+    # (Re-measured at #13164: the previous text quoted `[(48606, 'query',
+    # '<unresolved>')]` — a line that had drifted and a 3-tuple where the
+    # enumerator emits 4, the same arity defect e0d8b165b7 fixed for the
+    # `_hydrate_evidence` row below. Comment only: the assertion compares the
+    # VERB tuple, so no gate was ever defeated by it.)
     ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"): ("query",),
+    # ONE, and it is `_hydrate_evidence`'s only handle reach: the baseline-load
+    # read whose f-string interpolates `live._terminal_excluded('n.status')`
+    # (#13034). Measured with the module's own enumerator on this head:
+    # `writes == [(38824, 'query', '<unresolved>', 0)]` (the fourth element is the
+    # control-flow depth), `_is_unresolved_only` True.
+    ("tortoise/sdk.py", "TortoiseSDK._hydrate_evidence"): ("query",),
 }
 
 

@@ -62,7 +62,7 @@ def _index_session(sdk, event_id: str, started_at: str | None, *,
         "agent": agent,
         "keywords": [f"kw-{event_id}"],
         "topics": topics or ["general"],
-        "eventStatus": "completed",
+        "eventStatus": "indexed",
         "classificationLevel": "internal",
     }
     if started_at is not None:

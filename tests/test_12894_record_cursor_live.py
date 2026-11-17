@@ -1643,6 +1643,39 @@ def test_the_armed_door_refuses_a_record_whose_position_is_unproven(
 
 # ── (3a) concurrency: allocation order IS commit order ─────────────────────
 
+def _blocked_lock_waiters(conn, pid: int) -> list[int]:
+    """Which backends are blocking `pid` RIGHT NOW — PostgreSQL's own answer.
+
+    ⛔ THIS IS THE HANDSHAKE (#13043 review P2-5), and it must be PER BACKEND
+    (#13043 review finding 3). The leg used to assert `result.empty()` after a
+    fixed `sleep(1.0)`, which measures "B has had time to block" — and the review
+    MEASURED that it passes with the counter's row lock removed. The replacement
+    was `SELECT count(*) FROM pg_locks WHERE NOT granted`, which is `pg_locks`'s
+    CLUSTER-WIDE view: any waiter anywhere — a peer lane's backend on the shared
+    docker lane, an unrelated relation lock — satisfied it, while the assertion
+    built on it claims the counter's row.
+
+    `pg_blocking_pids(pid)` answers about THIS session only, and PostgreSQL
+    documents that a row-lock wait surfaces here as a wait on the HOLDING
+    TRANSACTION — so the predicate survives the detail that a filter on
+    `relation = 'public.record_cursor'::regclass` would miss.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_blocking_pids(%s)", (pid,))
+        row = cur.fetchone()
+    return [int(p) for p in (row[0] or [])] if row else []
+
+
+def _wait_for_a_blocked_writer(conn, pid: int, timeout: float = 30.0) -> bool:
+    """Poll until `pid` is waiting on a lock held by another backend."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _blocked_lock_waiters(conn, pid):
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def test_two_writers_allocate_in_commit_order(schema, tenant, app):
     """The property a bare `nextval()` cannot give (module docstring: a sequence is
     not transactional and its order is not the commit order).
@@ -1660,10 +1693,17 @@ def test_two_writers_allocate_in_commit_order(schema, tenant, app):
     first = ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
 
     result: queue.Queue = queue.Queue()
+    started = threading.Event()
+    #: B's OWN backend pid, published by the thread before it allocates — the id
+    #: the handshake below asks about. Pre-fix the predicate was a CLUSTER-WIDE
+    #: count, so a peer lane's waiter could satisfy it (#13043 finding 3).
+    pids: list[int] = []
 
     def writer_b() -> None:
         conn = _app_conn()
+        pids.append(conn.get_backend_pid())
         try:
+            started.set()
             block = ra.execute_allocation(conn, statement, org_id=org,
                                           graph_id=graph)
             result.put(("ok", block.first_seq, time.monotonic()))
@@ -1673,11 +1713,24 @@ def test_two_writers_allocate_in_commit_order(schema, tenant, app):
         finally:
             conn.close()
 
+    # ⛔ NON-VACUITY OF THE HANDSHAKE ITSELF: nothing is waiting yet, so the
+    # detector must answer "no" — for THIS backend, which is what the assertion
+    # below is about.
+    assert _blocked_lock_waiters(app, app.get_backend_pid()) == [], (
+        "a lock waiter exists before writer B started — this connection cannot "
+        "be used to observe B's block")
+
     thread = threading.Thread(target=writer_b, daemon=True)
     thread.start()
-    # B must be BLOCKED here: it cannot take the counter's row lock until A
-    # commits. A fixed sleep is a measurement of "B has had time to block".
-    time.sleep(1.0)
+    assert started.wait(timeout=30), "writer B never started"
+    assert pids, "writer B never published its backend pid"
+    # B is BLOCKED: it cannot take the counter's row lock until A commits. This
+    # waits for EVIDENCE about B — `pg_blocking_pids(B)` — not for a duration and
+    # not for a waiter somewhere in the cluster.
+    assert _wait_for_a_blocked_writer(app, pids[0]), (
+        "no backend ever waited on the counter's row lock — the second writer "
+        "was not blocked, so allocation order is not commit order (this is what "
+        "a fixed sleep could not see: with the row lock removed B simply runs)")
     assert result.empty(), (
         "the second writer allocated while the first still held the counter — "
         "allocation order is not commit order")
@@ -1695,6 +1748,43 @@ def test_two_writers_allocate_in_commit_order(schema, tenant, app):
 
 
 # ── (3b) a rollback burns nothing ──────────────────────────────────────────
+
+def test_the_blocked_writer_detector_does_not_fire_without_contention(
+        schema, tenant, app):
+    """NON-VACUITY FOR P2-5's HANDSHAKE: the detector measures a WAIT, not a thread.
+
+    The old leg could not tell "B is blocked" from "B has had a second" — and the
+    review measured that it passed with the counter's row lock REMOVED. A
+    `pg_locks` waiter check cannot: a writer that does not contend leaves nothing
+    ungranted, which is exactly the shape a lock-free allocator produces. Proven
+    here by letting a second writer run to COMPLETION with no contention at all
+    and requiring the detector to stay silent while it does.
+    """
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 0)
+    statement = ra.allocation_statement(org_id=org, graph_id=graph,
+                                        records=[RECORD])
+    # The CALL is load-bearing and its return is not: it advances THIS graph's
+    # counter past 1, which is what makes the free graph's `first_seq == 1`
+    # below prove the counter is per graph rather than global.
+    ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
+    # A DIFFERENT graph: nothing to contend over, so no backends wait.
+    with schema.cursor() as cur:
+        other = f"{graph}-free"
+        cur.execute("INSERT INTO public.graphs (id, org_id, name) VALUES (%s, %s, %s)",
+                    (other, org, other))
+    _seed_and_arm(app, org, other, 0)
+    free = ra.allocation_statement(org_id=org, graph_id=other,
+                                   records=[RECORD])
+    block = ra.execute_allocation(app, free, org_id=org, graph_id=other)
+    # The counter is PER GRAPH, so the free graph's first allocation is 1 — the
+    # point is that it ran to completion with nothing waiting.
+    assert block.first_seq == 1
+    assert _wait_for_a_blocked_writer(app, app.get_backend_pid(),
+                                      timeout=0.5) is False, (
+        "the detector reported a waiter with no contention — it would make "
+        "P2-5's handshake pass on a lock-free allocator")
+
 
 def test_a_rolled_back_allocation_is_reissued_exactly_once(schema, tenant, app):
     """A position is issued inside the caller's transaction, so a rollback returns
@@ -1725,10 +1815,12 @@ def test_a_rolled_back_allocation_is_reissued_exactly_once(schema, tenant, app):
 
 # ── (3c) replay READS the carried ordinal ──────────────────────────────────
 
-def _position_plan(records, *, start_seq: int):
+def _position_plan(records, *, start_seq: int,
+                   carried_positions: bool = False):
     """The journal-position statements of a plan, with the `seq` each binds."""
     plan = rp.replay_plan(records, org_id="o", graph_id="g",
-                          start_seq=start_seq)
+                          start_seq=start_seq,
+                          carried_positions=carried_positions)
     out = []
     for statement in plan:
         if statement.sql.startswith(rp._JOURNAL_INSERT_PREFIX):
@@ -1753,7 +1845,7 @@ def test_replay_reads_a_carried_ordinal():
     disagreement — which is `test_replay_refuses_a_carried_ordinal_that_disagrees`.
     """
     carried = [{**RECORD, "seq": 5}, {**RECORD, "seq": 6}]
-    assert _position_plan(carried, start_seq=5) == [5, 6]
+    assert _position_plan(carried, start_seq=5, carried_positions=True) == [5, 6]
     # A record with no `seq` still enumerates (the JSONL journal's shape — no
     # producer emits one as of this change, because the three intakes now strip
     # or refuse the name. It was MEASURED false before, so this is a consequence
@@ -1775,14 +1867,15 @@ def test_replay_refuses_a_carried_ordinal_that_disagrees():
     for carried_value, start in ((9, 1), (6, 1)):
         with pytest.raises(rp.RecordProjectionError) as raised:
             rp.replay_plan([{**RECORD, "seq": carried_value}], org_id="o",
-                           graph_id="g", start_seq=start)
+                           graph_id="g", start_seq=start,
+                           carried_positions=True)
         message = str(raised.value)
         assert str(carried_value) in message and str(start) in message, (
             f"the refusal does not name both numbers: {message}")
 
     with pytest.raises(rp.RecordProjectionError):
         rp.replay_plan([{**RECORD, "seq": "not-a-number"}], org_id="o",
-                       graph_id="g", start_seq=1)
+                       graph_id="g", start_seq=1, carried_positions=True)
 
     # ⛔ AND A VALUE THAT ONLY *COERCES* TO THE RIGHT-NUMBERED POSITION IS A
     # DISAGREEMENT, NOT A MATCH (#12894 review cycle 4, P2). `int(carried)` used
@@ -1794,7 +1887,7 @@ def test_replay_refuses_a_carried_ordinal_that_disagrees():
     for wrong_type in (5.9, "5", True):
         with pytest.raises(rp.RecordProjectionError) as coercion:
             rp.replay_plan([{**RECORD, "seq": wrong_type}], org_id="o",
-                           graph_id="g", start_seq=5)
+                           graph_id="g", start_seq=5, carried_positions=True)
         assert "not an integer" in str(coercion.value), (
             f"seq={wrong_type!r} was accepted or refused for the wrong reason: "
             f"{coercion.value}")
@@ -1813,7 +1906,8 @@ def test_a_carried_ordinal_is_not_validated_when_no_position_is_written():
     replay(...)`).
     """
     plan = rp.replay_plan([{**RECORD, "seq": 9}], org_id="o", graph_id="g",
-                          position=False, start_seq=1)
+                          position=False, start_seq=1,
+                          carried_positions=True)
     assert plan, (
         "the position=False plan is empty — the record's own mutations vanished "
         "along with the ordinal that was skipped")
@@ -1822,7 +1916,89 @@ def test_a_carried_ordinal_is_not_validated_when_no_position_is_written():
     # scope fix and not a hole: `position=True` refuses the same record.
     with pytest.raises(rp.RecordProjectionError):
         rp.replay_plan([{**RECORD, "seq": 9}], org_id="o", graph_id="g",
-                       start_seq=1)
+                       start_seq=1, carried_positions=True)
+
+
+def test_a_record_sourced_batch_is_the_only_shape_that_READS_the_carried_ordinal():
+    """⛔ WHO OWNS THE ORDINAL IS AN EXPLICIT INPUT, NEVER KEY PRESENCE (#13043 P1-3).
+
+    THE DEFECT THIS CLOSES, reproduced on the pre-fix tree:
+
+        replay_plan([{… "seq": 42}], start_seq=7) -> REFUSED
+
+    A pre-existing journal can hold such a line — the pre-reservation SDK put a
+    caller's `seq=` on the line's top level, and `backfill_copy_turns` copied one
+    off a `:Session`. ONE of them made that record's live write refuse (the door
+    passes `position=True` and the append's `seq` as `start_seq`), AND refused its
+    only repair, because `_refuse_an_enumerated_replay` refuses the enumerated arm
+    on a cut-over graph. There was no in-band fix: the number in the prop is
+    residue that has nothing to do with where the line actually sits.
+
+    Both halves are asserted, and the DEFAULT one is the one that was red:
+
+    (a) journal-sourced (the default) IGNORES the prop — the enumeration stands;
+    (b) record-sourced (`carried_positions=True`) READS it and refuses a
+        disagreement, naming both numbers.
+
+    ⚠️ The two halves are the same record. Only the DELETE-side fact changed
+    (where the batch came from), so a plan that decided this by inspecting the
+    records cannot pass both.
+    """
+    legacy = [{**RECORD, "seq": 42}]
+
+    # (a) THE DEFAULT PATH MUST NOT REFUSE. This is the leg that was RED: on the
+    # pre-fix tree it raised, so a legacy line's live write and its repair both
+    # refused forever.
+    assert _position_plan(legacy, start_seq=7) == [7], (
+        "a journal-sourced batch carrying a leftover `seq` prop was renumbered "
+        "from its POSITION — the prop is residue and must not be read")
+
+    # (b) …and the explicit input still refuses, so (a) is a scope fix rather
+    # than the refusal being deleted.
+    with pytest.raises(rp.RecordProjectionError) as raised:
+        _position_plan(legacy, start_seq=7, carried_positions=True)
+    message = str(raised.value)
+    assert "42" in message and "7" in message, (
+        f"the record-sourced refusal does not name both numbers: {message}")
+
+    # The same batch with the flag ON and an AGREEING carried number is read, not
+    # enumerated — so the flag is not merely "refuse more".
+    agreeing = [{**RECORD, "seq": 7}, {**RECORD, "seq": 8}]
+    assert _position_plan(agreeing, start_seq=7) == [7, 8]
+    assert _position_plan(agreeing, start_seq=7, carried_positions=True) == [7, 8]
+
+
+def test_the_live_door_writes_a_legacy_line_that_carries_a_stray_seq_prop(
+        schema, tenant, app, monkeypatch):
+    """⛔ THE DB-BACKED HALF OF P1-3, THROUGH THE REAL DOOR (#13043).
+
+    The plan-level leg above proves the argument; this one proves the CONSEQUENCE
+    the review named: a pre-existing record whose journal holds a line with a
+    leftover top-level `seq` prop. The append reports the line's REAL position (3
+    here), and the prop says 42 — residue from the pre-reservation SDK's
+    `update_point(pid, seq=…)` or from a `:Session` copy.
+
+    Pre-fix this refused the record's live write (`RecordProjectionError` from
+    `_carried_position`, surfaced by the door as a `write_failed` refusal) — and
+    on a cut-over graph it refused the enumerated replay that is the only repair,
+    so the record was wedged with no in-band fix. The door must write the row at
+    the number the JOURNAL reported and ignore the prop.
+
+    The graph is deliberately NOT cut over: this is the enumerated arm, which is
+    the arm every pre-cutover graph is on, and the arm the legacy line exists on.
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2])
+    _arm_door(monkeypatch, flag=False)
+
+    write = rw.write_live_record({**RECORD, "seq": 42}, durable=True, seq=3,
+                                 tenant=(org, graph))
+    assert write is not None and write.applied, (
+        f"the door refused a journal line because it carried a leftover `seq` "
+        f"prop: {write!r}")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3], (
+        "the position row was not written at the journal's own position — the "
+        "stray prop renumbered it or the row is missing")
 
 
 # ── (3d) the journal line and its row carry the SAME number ────────────────
