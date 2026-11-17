@@ -506,11 +506,23 @@ def build_entity_arm(sample, window, variants, projection, pools=(15,)) -> dict:
     """ARM 6 — ``GraphRanker`` with the ENTITY signal set over the same pool."""
     from tortoise.ranking import GraphRanker
 
+    # ⚠️ #12184 review N1: the WEIGHTS are read off the ranker, never typed in.
+    # This arm used to declare `0.4 / 0.3 / 0.3` while the loop below constructs
+    # `GraphRanker(projection)` — whose defaults are `0.5 / 0.35 / 0.15` — so both
+    # committed artifacts misdescribed the score that produced their movement.
+    # Deriving them from the instance the loop uses is the only version that
+    # cannot drift from the code again.
+    declared = GraphRanker(projection)
+
     out: dict = {
         "applied": True,
         "arm": "entity_rerank",
         "ranker": "GraphRanker(entity_type='object')",
-        "weights": {"similarity": 0.4, "graph_boost": 0.3, "recency": 0.3},
+        "weights": {
+            "similarity": declared.similarity_weight,
+            "graph_boost": declared.graph_boost_weight,
+            "recency": declared.recency_weight,
+        },
         "identity_dimension": (
             "exact normalised-name equality (entity_resolver's fold) sorts "
             "ahead of the score for entity rows only"),

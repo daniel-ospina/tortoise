@@ -926,6 +926,9 @@ class GraphRanker:
         self.recency_half_life_days = recency_half_life_days
         # #1348: use_degree=False isolates the CONFIDENCE contribution (ablation
         # arm — degree term neutralized so the graph_boost is confidence-only).
+        # ⚠️ It applies to EVERY signal family, entity rows included (#12184
+        # review N3): each family's degree term is a degree, so an arm that
+        # skipped the gate for one family would stop isolating belief there.
         self.use_degree = use_degree
         # #10137: set by every `rerank` call — whether the graph signal read
         # actually ANSWERED (see `_fetch_signals`). Read by the caller to label
@@ -1165,7 +1168,19 @@ class GraphRanker:
                 # The ABSENT arm keeps its WEIGHT, not the whole boost (the
                 # #11702 rule): a never-measured entity must not outrank a
                 # measured-symmetric one.
+                #
+                # ⚠️ #12184 review: the #1348 ablation reaches THIS arm too.
+                # `use_degree=False` is the confidence-only arm, and an entity
+                # row scored `connectivity` unconditionally, so the ablation no
+                # longer isolated belief for the rows this change added. The
+                # degree term is neutralized here exactly as it is for points
+                # (same weight, same 0.0-on-absent fallback) — an entity's
+                # degree is its INBOUND CLAIM count, which is still a degree.
                 connectivity = 1.0 - 1.0 / (1.0 + (degree or 0))
+                if not self.use_degree:
+                    if confidence is None:
+                        return 0.0
+                    return round(confidence, 4)
                 if confidence is None:
                     return round(0.5 * connectivity, 4)
                 return round(0.5 * confidence + 0.5 * connectivity, 4)

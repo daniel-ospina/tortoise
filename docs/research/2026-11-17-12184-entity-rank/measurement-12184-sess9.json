@@ -673,9 +673,9 @@
    "identity_dimension": "exact normalised-name equality (entity_resolver's fold) sorts ahead of the score for entity rows only",
    "ranker": "GraphRanker(entity_type='object')",
    "weights": {
-    "graph_boost": 0.3,
-    "recency": 0.3,
-    "similarity": 0.4
+    "graph_boost": 0.35,
+    "recency": 0.15,
+    "similarity": 0.5
    }
   },
   "exact": {

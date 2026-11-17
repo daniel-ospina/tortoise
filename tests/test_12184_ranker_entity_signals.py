@@ -298,14 +298,18 @@ def test_an_uninformative_entity_read_says_so(sdk):
     assert r.signals_informative is False, (
         "…and it answered that the graph has no structure for this row")
 
-    # The anti-inert control: one claim is enough to make the read informative.
+    # ⚠️ This block is the PER-BATCH check, and its comment said the opposite
+    # until #12184's review: `oid` itself still carries no claims, and the
+    # seeded Object is a DIFFERENT row that the pool does not contain — so the
+    # honest label is "the field is per-batch, not per-row". The real positive
+    # control is the block after it (`r3`), which ranks the seeded Object.
     _seed_object_with_claims(sdk, beliefs=(0.9,))
     r2 = GraphRanker(sdk._get_proj())
     r2.rerank([{"id": oid, "name": "an unreferenced object",
                 "scores": {"rrf": 0.5}}], entity_type="object")
-    # `oid` itself still has no claims — so the field is per-BATCH and stays
-    # False only when NO row in it carries structure.
-    assert r2.signals_informative is False
+    assert r2.signals_informative is False, (
+        "the field is per-BATCH: another row being informative must not make "
+        "THIS read informative")
     seeded = [r for r in sdk._get_proj().g.query(
         "MATCH (n:Object) WHERE n.id <> $oid RETURN n.id LIMIT 1",
         params={"oid": oid}).result_set]
@@ -346,6 +350,37 @@ def test_identity_is_not_applied_to_point_rows(monkeypatch):
     assert "identity_match" not in out[0]["graph_ranking"]
 
 
+# ── 4b. The #1348 ablation reaches the entity arm too (review N3) ────────
+
+def test_the_degree_ablation_reaches_entity_rows(monkeypatch):
+    """``use_degree=False`` must neutralize an entity's DEGREE term as well.
+
+    The ablation exists to answer one question — how much of the boost is
+    belief? — and an entity's degree (its INBOUND CLAIM count) is a degree. The
+    entity arm was added after the ablation and scored ``connectivity``
+    unconditionally, so with the ablation ON a row with no belief still got a
+    non-zero boost and the arm no longer isolated belief for the rows this
+    change added. The two rows below differ ONLY in degree, which is what makes
+    the assertion about the degree term and not about confidence.
+    """
+    two_claims = {"confidence": 0.8, "degree": 2, "is_entity": True}
+    no_claims = {"confidence": 0.8, "degree": 0, "is_entity": True}
+
+    on = GraphRanker(projection=None, use_degree=True)
+    off = GraphRanker(projection=None, use_degree=False)
+    # Ablation ON: the degree term moves the boost (2 claims > 0 claims).
+    assert on.graph_boost({"id": "a"}, two_claims) > on.graph_boost(
+        {"id": "b"}, no_claims)
+    # Ablation OFF: degree is neutralized, so the two are equal — and the boost
+    # is exactly the belief term, which is the whole point of the arm.
+    assert off.graph_boost({"id": "a"}, two_claims) == off.graph_boost(
+        {"id": "b"}, no_claims) == pytest.approx(0.8, abs=1e-4)
+    # …and with no belief there is nothing left to weight, exactly as for points.
+    assert off.graph_boost(
+        {"id": "c"}, {"confidence": None, "degree": 3,
+                       "is_entity": True}) == 0.0
+
+
 # ── 5. The end-to-end read reaches the entity family ─────────────────────
 
 def test_graph_order_over_objects_reports_the_entity_family(sdk):
@@ -358,3 +393,36 @@ def test_graph_order_over_objects_reports_the_entity_family(sdk):
     assert hit["graph_ranking"]["graph_boost"] > 0, (
         "three inbound claims must register as structure — the point read "
         "gave this row 0.0")
+
+
+def test_confidence_order_over_objects_uses_the_mean_claim_belief(sdk):
+    """Review N2 — a THIRD product path reaches the entity read, so pin it.
+
+    ``order_by="confidence"`` sorts on
+    ``GraphRanker._fetch_signals(..., entity_type)[id]["confidence"]``
+    (``sdk.py``'s confidence sort). Before #12184 that read answered a POINT
+    signal for an object id — the Object's own (absent) belief, i.e. ``None``
+    for every Object — so every Object fell to the unmeasured tier and kept RRF
+    order. The entity read answers the MEAN CLAIM BELIEF, so an Object whose
+    claims carry beliefs now sorts AHEAD of an Object with none. That is an
+    improvement and it is a product-path change; it is pinned here rather than
+    left undisclosed, and the assertion is on the ORDER, not on an internal.
+    """
+    name = f"conf-order-object-{uuid.uuid4().hex[:8]}"
+    measured = sdk.create_object(name, objectKind="core:other")["id"]
+    bare = sdk.create_object(f"{name} bare", objectKind="core:other")["id"]
+    for i in range(2):
+        pid = sdk.create_point(
+            "statement", f"a confident claim {i} about {name}", status="live")["id"]
+        sdk.set_point_baseline(pid, 9.0, 1.0)      # mean 0.9
+        sdk.create_edge("aboutObject", pid, measured)
+
+    rows = sdk.tortoise_fts_query(name, entity_type="object",
+                                  order_by="confidence", limit=10)
+    ids = [r["id"] for r in rows]
+    assert measured in ids and bare in ids, (
+        f"both seeded Objects must be in the window: {ids}")
+    assert ids.index(measured) < ids.index(bare), (
+        "the row whose CLAIMS carry a measured belief must sort first — if it "
+        "does not, `order_by='confidence'` is still reading the Object's own "
+        "absent belief (the pre-#12184 point read)")

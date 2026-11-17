@@ -38,6 +38,25 @@ slice.
 half of the falsifier. The variant population is the harder control: an identity boost on a WRONG row is
 exactly how a reorder would push a variant's canonical out, and it does not (it goes up).
 
+## Corrections (review round 1, #12184)
+
+Both artifacts originally recorded `weights: {similarity: 0.4, graph_boost: 0.3, recency: 0.3}`, which is
+**not** the score that produced them: `build_entity_arm` constructs `GraphRanker(projection)`, whose defaults
+are **0.5 / 0.35 / 0.15**. The `weights` blocks are corrected in place and the instrument now READS them off
+the ranker instance, so the record cannot drift from the code again. This is not cosmetic — `recency` is a
+live term (the entity read carries `n.createdAt`, which `recency_boost` consumes), so the old block described
+the wrong arithmetic. What the movement above still rests on is the **identity dimension** (an exact
+normalised-name match floors a row's relevance), which is weight-independent; recency's own contribution to
+this population was not isolated and is **not** claimed.
+
+**A third product path reaches the entity read, and it is disclosed here rather than left to be found:**
+`order_by="confidence"` sorts on `GraphRanker._fetch_signals(ids, entity_type)`, so for an Object the sort key
+is now the **mean claim belief** instead of the Object's own (absent) belief. Every belief-less Object used to
+fall to the unmeasured tier and keep RRF order; one whose claims carry beliefs now sorts ahead. That is an
+improvement on this axis, but it is a product-path change outside the two paths the PR body listed, so it is
+called out here and pinned by
+`tests/test_12184_ranker_entity_signals.py::test_confidence_order_over_objects_uses_the_mean_claim_belief`.
+
 ## ⛔ What this measurement does NOT show — read before quoting it
 
 1. **The graph terms are inert here BY CONSTRUCTION.** The eval graph holds one `:Object` per name and no
