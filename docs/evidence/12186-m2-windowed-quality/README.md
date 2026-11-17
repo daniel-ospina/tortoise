@@ -13,11 +13,12 @@ aboutObjects: "#12186, SEARCH-ARCHITECTURE.md §7, SEARCH-ARCHITECTURE.md §9, #
 
 **Verdict: §7's window is NOT SAFE AS SPECIFIED — it must not be armed.**
 On the **text leg** — the one §6.2 keeps in the graph, and the read this run exercised: the
-`db.idx.fulltext` leg plus the structural kind-scan, with the degraded snapshot tier serving some
-queries; the **vector** leg did not run — the
+`db.idx.fulltext` leg plus the structural kind-scan, and the degraded snapshot tier was **reached**
+(the artifact records that the tier RAN, not that it served rows — Finding 6 says what that
+qualifies); the **vector** leg did not run — the
 window's retrieval cost is **the eviction itself, with nothing compensating**: in a run that invalidates
 the degraded snapshot after each demotion, a demoted node is never
-handed back as a candidate at any rank, the caller is never told a store was partial, and on the claim
+handed back as a candidate at any rank **of the depth-50 read**, the caller is never told a store was partial, and on the claim
 population a demoted query returns a **different claim** rather than an empty answer. ⛔ **That zero is
 this configuration's, not a guarantee the shipped path makes**: `tortoise/cache_evictor.py::_delete_nodes`
 issues a bare `DETACH DELETE` and never invalidates `fallback_snapshot`, so today's evictor leaves a

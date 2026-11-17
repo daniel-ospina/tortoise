@@ -1909,8 +1909,18 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
          "artifact.params.seed (the recipe's own seed)"),
         (readme, "plus the structural kind-scan",
          "retrieval.legs_seen.structural (the header must state the LEG SET)"),
-        (readme, "with the degraded snapshot tier serving some",
-         "retrieval.legs_seen.fallback"),
+        # ⛔ The artifact records `legs_seen.fallback = true`, which is "the tier
+        # RAN" — and the record says so itself (Finding 6: "it is not a record of
+        # the tier serving anything"). The header said "serving some queries",
+        # which the artifact cannot support: `legs_seen` is four booleans, the
+        # instrument drops the per-entry `count`, and the `:Object` arms' 3.7-51.0 %
+        # `empty` shows the `count: 0` path firing. A reader judging route 1 would
+        # take a graph-bound tier (built by `MATCH (n:Point)`) as a serving leg the
+        # text-index move does not shift.
+        (readme, "and the degraded snapshot tier was **reached**",
+         "retrieval.legs_seen.fallback (RAN, not served)"),
+        (readme, "at any rank **of the depth-50 read**",
+         "the read the ranking claim is bounded to"),
         # ── round 4 ────────────────────────────────────────────────────────
         (readme, f"`found_deep_of_demoted` is **{demoted}** in every **windowed**",
          "every windowed arm's found_deep_of_demoted"),
