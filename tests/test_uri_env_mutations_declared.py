@@ -1370,6 +1370,27 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
         r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
+    # ⛔ #13140's `test_13098_cypher_inventory.py` landed on `main` (`6652917489`)
+    # with ONE raw URI mutation at `:1036` and no entry here — the same
+    # "module landed without its entry" shape as the #13158 pair above, on the next
+    # module main merged. It is INHERITED by this branch rather than introduced by
+    # it (`git show origin/main:tests/test_uri_env_mutations_declared.py` carries no
+    # such key, and the module is main's), but it reds THIS tree's `test (k)` all the
+    # same, and no open PR owns the row (`#13191` and `#13164` both edit this file for
+    # the `setdefault` and census arms, neither adds this key), so it is declared here
+    # rather than left for a fourth lane to re-derive.
+    #
+    # DELIBERATE_URI, and not a vacuity vector: the module's claim IS the refusal
+    # contract — two EXISTING guards (`--record-dsn \`--graph-uri` `both-omitted`) —
+    # and the setenv supplies the second target EXPLICITLY so each axis is tested with
+    # the other one present. The mutation is the test input, and the assertion is that
+    # the refusal fires BEFORE either target is dialled, so a docker lane that is not
+    # there cannot make this row read as a pass.
+    # ⛔ Arm kept UNANCHORED and literal (the table's convention for a one-site
+    # `monkeypatch.setenv` row): the value is a constant DSN, not a variable, so there
+    # is no name to bind the way the `test_13034` pair binds `DB_URI`/`_OLD_URI`.
+    "test_13098_cypher_inventory.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@127\.0\.0\.1:6379"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
