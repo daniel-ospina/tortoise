@@ -889,9 +889,24 @@ def test_an_UNHASHABLE_stored_status_reaches_the_documented_ValueError(sdk):
     stored value — storable through the public door — raised ``TypeError:
     unhashable type: 'list'`` from inside ``_sanitize_props`` on any write that
     needed the stored half, where the doors promise the documented ``ValueError``.
+
+    ⛔ THE FIXTURE WRITES THE ROW WITH RAW CYPHER (#12869 merge reconciliation).
+    The sentence above ("storable through the public door") stopped being true
+    when `#12869` landed: every SDK door now REFUSES a non-string `status`
+    before it can store one, so `update_knowledge(goal, status=["live"])` raises
+    at the fixture line instead of building the row this test is about. What the
+    test asserts is unchanged and still matters — such a row remains reachable
+    from a raw Cypher producer, a JSONL replay or a pre-fix SDK, which is the
+    route `#12869`'s own suite documents
+    (`test_a_row_that_ALREADY_holds_a_non_scalar_is_REFUSED_not_crashed`).
+    ⚠️ Non-vacuity is unaffected: the assertion still reds as
+    `TypeError: unhashable type: 'list'` if the stored-side hardening is
+    reverted, because the fixture no longer depends on the door it is bypassing.
     """
     goal = _goal(sdk, tag="unhashable")
-    sdk.update_knowledge(goal["id"], status=["live"])   # the shape is storable
+    sdk._get_proj().g.query(
+        "MATCH (n {id:$i}) SET n.status = $s",
+        params={"i": goal["id"], "s": ["live"]})
     with pytest.raises(ValueError) as exc:              # NOT TypeError
         sdk.update_knowledge(goal["id"], goalState="abandoned")
     assert isinstance(exc.value, ValueError)
