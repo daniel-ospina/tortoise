@@ -935,15 +935,13 @@ class TestThePlanPipeline:
         # `#11824`/`#13143` S0 put a synonym fold on the one lifecycle door
         # (`archived` -> `deprecated`: the store gets the CANONICAL word and the
         # caller gets no receipt), so after S0's merge the row holds `deprecated`
-        # while `archived` is still an ENDED word to this PR's own gate. The claim
-        # is that the gate FIRED and named the status it decided on — so the reader
-        # below compares a READING, never a vocabulary, which keeps the assertion
-        # discriminating under BOTH models; deleting it would leave the gate pinned
-        # only by `match="already settled"`, which every status ending shares.
+        # while `archived` is still an ENDED word to this PR's own gate. Reading the
+        # value back keeps the assertion discriminating under BOTH models; deleting
+        # it would leave the gate pinned only by `match="already settled"`, which
+        # every status ending shares.
         assert repr(sdk._get_proj().g.query(
             "MATCH (o:Object {id:$o}) RETURN o.status",
-            params={"o": plan["id"]}).result_set[0][0]) in str(exc.value), (
-            exc.value)
+            params={"o": plan["id"]}).result_set[0][0]) in str(exc.value)
         with pytest.raises(ValueError, match="already settled"):
             PO.settle_plan(sdk, "Retired plan", PO.STAGE_CANCELLED)
         assert sdk._get_proj().g.query(

@@ -272,7 +272,7 @@ no-merge verdict — `dedup_reviewed='reject'` + `dedup_target_id` /
 `dedup_rejected_targets` — and it is **pair-scoped between two NODES**. A
 name-only mention has no node, so only the target-less form (`target_suppressed`)
 is evaluable here; the targeted form is honoured by the merge verb
-(`sdk.py:27869-27899`). Stated rather than approximated.
+(`sdk.py:27924-27944`). Stated rather than approximated.
 
 **Phase 1 applies `target_retired` only.** It binds on an exactly-equal folded
 name+kind *or* on a spelling the survivor's `aliases[]` already records
