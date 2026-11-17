@@ -2067,6 +2067,27 @@ def test_the_manifest_concurrency_bound_stays_under_the_client_pool():
     assert 1 < _LIST_MANIFEST_MAX_INFLIGHT < 100  # still a bound, still a fan-out
 
 
+def test_the_mirrored_botocore_pool_default_is_still_the_real_one():
+    """#13097 review: the MIRROR must not silently drift from botocore itself.
+
+    `_BOTOCORE_DEFAULT_MAX_POOL_CONNECTIONS` is a copy of a number botocore owns,
+    and the test above compares the bound to that copy — so if botocore ever
+    changes its default (or the copy is edited), the guard above keeps passing
+    while the real pool is no longer the one the reasoning was built on. That is
+    a fail-open in the exact direction it exists to prevent: a bound above the
+    real pool makes urllib3 discard the overflow connection on every wave and
+    re-pay TCP+TLS — the latency this change removes.
+
+    `importorskip`: botocore is an optional extra, and the python-ci lane syncs the
+    dev group with no extras, so this must SKIP there rather than error. It is
+    additive to the unconditional constant-level test above, which is what runs
+    on CI; this one runs wherever botocore is installed.
+    """
+    config = pytest.importorskip("botocore.config")
+
+    assert config.Config().max_pool_connections == _BOTOCORE_DEFAULT_MAX_POOL_CONNECTIONS
+
+
 def test_list_backups_propagates_a_storage_failure_rather_than_a_partial_list():
     """#13097: concurrency must not turn an outage into a SHORTER list.
 
@@ -2094,6 +2115,64 @@ def test_list_backups_still_skips_an_unreadable_manifest_inside_the_pool():
 
     assert len(listed) == 6  # the corrupt one is skipped, the rest are complete
     assert bad_id not in {m["backup_id"] for m in listed}
+
+
+class _PerKeyFailureStorage(MemoryStorage):
+    """Fails chosen keys with chosen delays/exception types.
+
+    Exists for the exception-IDENTITY test below: it needs one failing key EARLY
+    in input order that fails SLOWLY and a second, LATER key that fails FAST with
+    a different type, so "which error surfaces" distinguishes input order from
+    completion order.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.plan: dict[str, tuple[float, BaseException]] = {}
+        self._lock = threading.Lock()
+        self.downloads: list[str] = []
+
+    def download(self, key: str) -> bytes:
+        with self._lock:
+            self.downloads.append(key)
+        delay, exc = self.plan.get(key, (0.0, None))
+        if exc is not None:
+            time.sleep(delay)
+            raise exc
+        return super().download(key)
+
+
+def test_list_backups_surfaces_the_first_failure_in_INPUT_order():
+    """#13097: `pool.map`, not `as_completed` — the surfaced error is ORDER-fixed.
+
+    The comment above the pool calls this load-bearing: `map` yields in input
+    order, so which exception reaches the caller is identical to the serial loop
+    this replaced. `as_completed` would make it depend on network timing, i.e. the
+    error an operator sees would change between identical calls.
+
+    The two failing keys are deliberately ANTI-correlated with completion: the
+    EARLY one (input index 1) raises after 200 ms, the LATE one (index 3) after
+    1 ms. So `map` surfaces the earlier key's `RuntimeError`; a `submit` +
+    `as_completed` rewrite surfaces `PermissionError` and reddens here.
+
+    ⚠️ Green on the pre-fix serial code too — like the two paired guards above,
+    this pins a property the rewrite must PRESERVE, not the speed-up itself.
+    `RuntimeError` is chosen so it is outside the skip class; `ValueError`/
+    `KeyError`/the decode errors would be swallowed instead of surfacing.
+    """
+    store = _PerKeyFailureStorage()
+    org_id = "team_ordering"
+    _seed_manifests(store, org_id, 5)
+    keys = [k for k in store.list(f"backups/{org_id}/")
+            if k.endswith("/manifest.json")]
+    assert len(keys) == 5
+    store.plan = {
+        keys[1]: (0.20, RuntimeError("the earlier key wins")),
+        keys[3]: (0.001, PermissionError("AccessDenied")),
+    }
+
+    with pytest.raises(RuntimeError):
+        list_backups(store, org_id)
 
 
 def test_list_backups_skips_a_manifest_that_is_not_a_json_object():
