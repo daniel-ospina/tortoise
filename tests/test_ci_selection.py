@@ -23034,3 +23034,178 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
         "if this file joins `tier1` the `api`/`core` rows stop being load-bearing, and "
         "this pin must be re-derived rather than assumed"
     )
+
+
+def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
+    """#13074 review P1: the census must RUN on the file it converted.
+
+    `tests/test_13034_currency_rule_reads_position.py` was UNLISTED on `main`
+    when #13075 landed it (both rows registered later, by #13144); `core` ALONE
+    missed it. Its cross-cutting guard is a census over `_CENSUS_MODULES`
+    (`:606-611`), which names `tortoise/hosted_api.py` as one of its six
+    consumers — the file #13034 converted — and whose presence arm (`:708-722`,
+    literal at `:714`) asserts `"tortoise/hosted_api.py": "_terminal_excluded"`
+    is still true.
+
+    `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match, and a named
+    match REPLACES the `core` fallback in `select()` (`core` is added only when
+    nothing named matched). MEASURED with the shipped selector against a manifest
+    carrying a **`core`-ONLY row** — the intermediate state THIS BRANCH itself
+    created in `7353be04b9c1` (`fix(ci): register
+    test_13034_currency_rule_reads_position.py`), before `3c380b667fe8` added the
+    `api` row and made it dual. ⛔ NOT "main's state": the `main` this branch
+    forks from carried **zero** rows for the file — `grep -c` over
+    `git show 3d437429e9^:config/ci-surfaces.yml` -> 0, i.e. `main` immediately
+    before #13144 — which is what the docstring above means by "UNLISTED on
+    `main`" and what commit `a36581fd` retired by name — so do not re-read this
+    clause as "main had a `core` row". ⛔ That parenthetical is bound to the
+    pre-#13144 main it was measured at: the SAME `grep -c` against `3d437429e9`
+    reads **6**. (It also reads **6** against `origin/main` at the head this
+    sentence was last re-derived — `745c71c265` — so the count alone does not
+    tell a reader which commit they are looking at; the `3d437429e9` in the
+    clause above is the bound one.) Re-running it against today's `origin/main`
+    does not falsify the clause — it measures a different commit, and #13144 is
+    the one that landed the rows.
+    On that `core`-only manifest: `select(['tortoise/hosted_api.py'],
+    'pull_request', manifest)` -> `surfaces=['api', 'onboarding']`, `full: False`,
+    and this file ABSENT from `test_files`. (⛔ On the manifest WITH the `api` row
+    the same call returns the pin PRESENT, so a reader who re-measures against the
+    committed file gets the opposite answer — which is why the qualifier is
+    load-bearing.)
+    So BOTH census arms slept on the diff class they exist for: a re-spelled
+    `status != 'superseded'` filter, or a deleted `_terminal_excluded` usage in the
+    hosted door, merged green.
+
+    That is the #1349/#2938/#3154 silent-drop class in its harmful direction. It is
+    the same defect `test_record_serve.py` and `test_12941_read_your_writes.py`
+    each record for themselves (`config/ci-surfaces.yml:351` and `:352` — earlier
+    rows in the SAME `surfaces.api` list; ⛔ NOT the two rows adjacent to this
+    one: the registration `main` landed is at `:1109`, 757 lines below `:352`,
+    because `main`'s cut carries its own comment block above the row). The
+    `['api', 'core']`
+    siblings, each at its OWN rows: `test_12941_read_your_writes.py` at `:352` /
+    `:2582`, and `test_11892_health_quota.py` at `:1849` / `:2573` (all
+    re-derived at THIS head, not carried; they have moved twice under this
+    docstring and ⛔ **the two moves have DIFFERENT causes**, so one sentence
+    cannot explain both. First `:1816` / `:2532` / `:2541` -> `:1849` / `:2565` /
+    `:2574`, a uniform `+33` from `main` replacing this branch's own superseded
+    `#13034` block **inside `surfaces.api`** — `api:` spans `:131`..`:2401` at that
+    head, so `:1816` was an `api` row, NOT a `core` one (`−34` at yml `:350`, `+67`
+    at `:1074`; net `+33`). Then `:1849` / `:2565` / `:2574` -> `:1849` / `:2573` /
+    `:2582` via `#13137`'s `+8` at `+2553` in the `core` list plus one line in
+    `durations:` — which is exactly why `:1849` did NOT move and the two `core`
+    rows did. The `api` cites above (`:351`, `:352`) did not move — measured
+    identical at both heads (`test_record_serve.py`, `test_12941_read_your_writes.py`).
+    `:1109` is NOT a cite that survived the first shift: it is the row `main`
+    landed INSIDE that `+67` block (it read `test_agent_signup.py` at the earlier
+    head), and it has not shifted since.)
+    ⛔ NOT "the only hosted-door guard registered
+    single-surface": `main` registered this file on **zero** surfaces when
+    #13075 landed it (both rows were added later, by #13144),
+    and several hosted-door guards legitimately live on `api` alone
+    (`test_hosted_api.py`, `test_billing.py`, `test_commit_endpoint.py`,
+    `test_dr_endpoints.py` — all `['api']`, measured). The defect here is the
+    MISSING row, not the single-surface shape. `tortoise/sdk.py` and
+    `tortoise/mcp_server.py` are `full: True` SHARED_MODULES, which is why the
+    gap hid from a census of the other five consumers.
+
+    `integrity()` is not a substitute: it answers only "is every `tests/**/
+    test_*.py` classified SOMEWHERE", so it reports `[]` with or without the
+    `api` row (measured) — a lost arm leaves no unclassified file and no
+    duplicate row. Asserted on the ROWS and on the SELECTION, both.
+    """
+    pin = "test_13034_currency_rule_reads_position.py"
+    manifest = load_manifest()
+
+    # ── NON-VACUITY FIRST (review F1). `tier1` is unioned into EVERY PR
+    # selection, and a `slow_files` entry is dropped from the fast set for a
+    # second surface's diff (#6234), so either would make the `api`/`core` rows
+    # stop being what selects this file. These run BEFORE the selection asserts
+    # because appending the pin to `slow_files` DROPS it from `test_files` — so
+    # the `api_arm` assert below fires first and reports "the `api` row is what
+    # carries that arm", which is the one diagnosis that is wrong for that
+    # mutation. Measured, both arms.
+    assert pin not in manifest["tier1"], (
+        "if this census joins `tier1` its surface rows stop being load-bearing "
+        "and this pin must be re-derived rather than assumed"
+    )
+    assert pin not in set(manifest["slow_files"]), (
+        f"{pin} is in `slow_files` — a file named by two surfaces is dropped "
+        "from the fast pool and, WHEN THE SECOND SURFACE IS THE MATCHED ONE, "
+        "never re-added to `slow_selected` (#6234) — so it then runs on NEITHER "
+        "leg. (Qualified on purpose: when the matched surface is the one that "
+        "owns it, `slow_selected` DOES carry it and only the fast leg is lost, "
+        "which is why the neither-leg case is the one this comment names — the "
+        "rule is stated whole at the #6234 note above.)"
+    )
+    # …and the three OTHER subtractive keys `select()` applies to `files`:
+    # `-= carve` (`:4808`), `-= uri_requiring_files(manifest)` (`:4832`),
+    # `-= on_demand_files(manifest)` (`:4839`). Each drops the pin from `test_files`
+    # exactly as `slow_files` does, so each would make the `api_arm` assert below
+    # report "the `api` row is what carries that arm" — the one diagnosis that is
+    # wrong for that mutation, which is why the two checks above exist. These three
+    # close the same gap for the rest of the list; all three are measured ABSENT on
+    # this tree before being asserted, so they are registrations to KEEP rather than
+    # conditions this branch newly satisfies.
+    assert pin not in set(manifest.get("carve_out", ())), (
+        f"{pin} is in `carve_out` — `select()` subtracts it at `:4808`, so the "
+        "pin would leave `test_files` on every surface, not just this one"
+    )
+    assert pin not in uri_requiring_files(manifest), (
+        f"{pin} is in `uri_requiring` — `select()` subtracts it at `:4832`. This "
+        "census needs no live URI, so its presence would be a stale registration "
+        "that silently drops the pin from every selection"
+    )
+    assert pin not in on_demand_files(manifest), (
+        f"{pin} is in `on_demand` — `select()` subtracts it at `:4839`, dropping "
+        "it from the fast pool while the `api`/`core` rows still look load-bearing"
+    )
+
+    # The registration itself: `api` is the arm the `hosted_api.py` diff class
+    # needs, `core` is the arm that covers the three `core`-classified CONSUMERS.
+    # ⛔ Both rows were landed on `main` by #13144 (`3d437429e9`) AFTER this
+    # branch first cut them — so this branch carries the GUARD, not the rows
+    # (its own `config/ci-surfaces.yml` delta was dropped as superseded in the
+    # merge). The guard is the half `main` lacks: without it a later edit can
+    # drop an arm and nothing reds. The rows
+    # are the subject because a selection assert alone would pass the day any
+    # second surface also lists the file (the #12645 pin records that lesson).
+    assert pin in manifest["surfaces"]["api"], (
+        "`surfaces.api` must list this census by NAME — without it a "
+        "`tortoise/hosted_api.py`-only diff selects `['api','onboarding']` and "
+        "runs none of the assertions written to hold that file"
+    )
+    assert pin in manifest["surfaces"]["core"], (
+        "`surfaces.core` must keep its row — it is what covers the three "
+        "`core`-classified CONSUMERS of the census, `topic_summarization.py`, "
+        "`derived_invalidation.py` and `consistency.py` (all three `select()` "
+        "-> ['core'], measured). ⛔ `tortoise/live.py` is NOT one of them: it "
+        "is the DEFINITION site the census holds constant (`:159 "
+        "_terminal_excluded`, `:372 is_terminal_status`) and is deliberately "
+        "absent from `_CENSUS_MODULES` — so `core` reaches it as a SOURCE, "
+        "never as a consumer. "
+        "3 core consumers; `mcp_server.py`/`sdk.py` are `full: True`; "
+        "`hosted_api.py` is the `api` row"
+    )
+
+    # The hosted door: `hosted_api.py` is an EXACT `api` match, so `core` must be
+    # REPLACED here — that replacement is the premise of this whole pin.
+    api_arm = _sel(["tortoise/hosted_api.py"])
+    assert api_arm["surfaces"] == ["api", "onboarding"], api_arm["surfaces"]
+    assert pin in api_arm["test_files"], (
+        "a `tortoise/hosted_api.py`-only diff does not run the terminal-currency "
+        "census — the `api` row is what carries that arm, and both census arms "
+        f"(`_CENSUS_MODULES`, `_terminal_excluded`) sleep on it. selected "
+        f"{len(api_arm['test_files'])} files"
+    )
+
+    # …and the `core` arm still reaches a diff no SOURCE_PATTERN claims, so the
+    # fix did not MOVE the hole from the hosted door to the other core sources.
+    core_arm = _sel(["tortoise/live.py"])
+    assert core_arm["surfaces"] == ["core"], core_arm["surfaces"]
+    assert pin in core_arm["test_files"], (
+        "the `core` arm regressed — `tortoise/live.py` is where the shared "
+        "predicate itself is DEFINED (`_terminal_excluded`, `is_terminal_status`) "
+        "and no longer selects the census that holds it constant"
+    )
+

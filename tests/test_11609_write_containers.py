@@ -423,15 +423,24 @@ def test_the_goal_state_cache_writes_through_a_live_sdk_method():
     which #4282 RETIRED — `TortoiseSDK.__getattr__` raises, so every `met`/
     `unmet` judgement died inside the cache write.
 
-    The stub carries ONLY `update_knowledge`, which is the approved replacement.
-    Any call to a name that is not on this object raises, so the assertion
-    reddens the moment the retired spelling comes back.
+    The stub carries `update_knowledge`, which is the approved replacement, plus
+    the `get_entity` read the retirement guard added (round 13) legitimately
+    needs. Any call to a name that is not on this object raises, so the
+    assertion reddens the moment the retired spelling comes back.
+
+    ⛔ `get_entity` answers a LIVE goal: this test is about the WRITE path, and a
+    live goal is what reaches it. The unreadable-goal half (the guard is
+    fail-closed there) is pinned by
+    `test_13035_goal_ending_consistency.py::
+    test_a_goal_whose_status_CANNOT_BE_READ_is_treated_as_RETIRED`.
     """
     from tortoise.goal_judgement import _write_goal_state_cache
 
     written = []
     stub = _stub_sdk(update_knowledge=lambda node_id, **props: written.append(
-        (node_id, props)))
+        (node_id, props)),
+        get_entity=lambda _id: {"id": _id, "status": "live",
+                               "goalState": "active"})
 
     assert _write_goal_state_cache(stub, "goal-1", "met") == "met"
     assert written == [("goal-1", {"goalState": "met"})], written

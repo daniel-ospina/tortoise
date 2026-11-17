@@ -1452,6 +1452,29 @@ _MUTATION_RE = re.compile(
     # The restoration guard's RAW regex already spells it this way.
     r'|os\.environ\["TORTOISE_DB_URI"\]\s*=(?!=)'
     r'|os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'
+    # `setdefault` (#13177): a WRITE whenever the key is absent, which is
+    # exactly the property the ambient-lane hazards key on — a test that
+    # wants the embedded lane spells its unset this way and used to stay
+    # invisible. Measured before this arm: `_MUTATION_RE.search(
+    # 'os.environ.setdefault("TORTOISE_DB_URI", uri)')` returned None, so
+    # the form was censused in NO file and no DELIBERATE_URI_MUTATIONS row
+    # could ever cover it — a declaration can only match a site the census
+    # produces, which is why this is a REGEX fix and not a row.
+    # The `_os` alias is censused by substring, like the assignment arm; the
+    # quote parity (`["\']`) matches the pop/del arms above; and the arm is
+    # URI-KEY SPECIFIC like every other arm — the #12561 property (a NON-URI
+    # `setenv`/`setdefault` is not a URI mutation) is pinned behaviourally in
+    # `test_the_census_sees_the_setdefault_form`. Value-agnostic by design:
+    # `setdefault(key, None)` is a mutation ATTEMPT and has no valid use
+    # here, so it is censused rather than excused.
+    # ⛔ Scope boundary, stated the way this file states the bare-`mp.` one:
+    # this closes the DECLARATION census only. The restoration guard's raw
+    # regex (`_RAW_URI_MUTATION_RE`, #2084) still does not flag a module-scope
+    # or fixture-body `setdefault`, so the #2062 leak class is unchanged for
+    # this spelling — out of scope here on purpose, because requiring a
+    # save/restore PAIR for every `setdefault` changes what that guard
+    # DEMANDS rather than narrowing a census (#13190).
+    r'|os\.environ\.setdefault\(\s*["\']TORTOISE_DB_URI["\']'
     r'|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']]'
 )
 
@@ -1461,6 +1484,11 @@ _MUTATION_RE = re.compile(
 # auto-undoes it at teardown. A RAW mutation at module scope or inside a
 # fixture body has no auto-undo: it leaks into every later test in the same
 # pytest process unless paired with a save-restore (the #2062 class).
+# ⛔ NOT CENSUSED HERE YET: `os.environ.setdefault("TORTOISE_DB_URI", …)` is a
+# raw write of this same shape and has no arm below, so a module-scope or
+# fixture-body `setdefault` is outside the restoration requirement (#13190 —
+# declaration census covers it since #13177; this guard's coverage is the
+# open half). Stated, not implied: an unstated gap reads as coverage.
 _RAW_URI_MUTATION_RE = re.compile(
     r'(?P<assign>(?:os|_os)\.environ\["TORTOISE_DB_URI"\]\s*=(?!=))'
     r'|(?P<pop>(?:os|_os)\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\'])'
@@ -3293,6 +3321,84 @@ def test_declaration_regex_census_surface():
         assert not _MUTATION_RE.search(form), (
             f"_MUTATION_RE intentionally does not census the bare-instance "
             f"call form {form!r} (restoration guard covers it)")
+
+
+def test_the_census_sees_the_setdefault_form():
+    r"""#13177: `os.environ.setdefault("TORTOISE_DB_URI", <uri>)` is a URI
+    WRITE (it assigns when the key is absent) and was censused by NO arm, in
+    ANY file — a fail-open hole in a guard whose contract is "every mutation
+    spelling is classified". Measured on the pre-fix regex:
+
+        _MUTATION_RE.search('os.environ.setdefault("TORTOISE_DB_URI", u)')
+        -> None
+
+    so a test could plant the URI this way and no DELIBERATE_URI_MUTATIONS
+    row could cover it (a declaration matches only the lines the census
+    yields), which is what makes the hole fail OPEN rather than over-report.
+
+    ⛔ Zero-sites caveat, measured rather than assumed: at the arm's landing
+    the census surfaces **0** new sites (602 before and after). FOUR code
+    spellings of the form exist in the tree and NONE is in the scan
+    population: `tests/eval/retrieval/run.py:902` and
+    `tests/eval/retrieval/task0_probe.py:59` are eval RUNNERS, and
+    `_iter_test_module_paths()` enumerates `tests/**/test_*.py` only; while
+    `tortoise/__main__.py:1950` and `tools/longmem_eval/run.py:307` sit
+    outside `tests/` altogether — the separate census #2857 already records
+    at the `_URI_ENV` boundary note below. So the population, not this arm,
+    is why those four were invisible; the arm is what makes a FUTURE
+    `test_*.py` site visible. A pin here is therefore the only thing that can
+    keep the arm: a behavioural assertion cannot, because no scanned module
+    spells the form today.
+
+    ⛔ Half-fix boundary, stated rather than implied: this pins the
+    DECLARATION census. The restoration guard's raw regex
+    (`_RAW_URI_MUTATION_RE`, #2084) still does not flag a module-scope or
+    fixture-body `setdefault` — the #2062 leak class is unchanged for this
+    spelling, tracked separately (#13190) because closing it changes what
+    that guard DEMANDS (a save/restore pair) rather than narrowing a census.
+
+    Same shape as `test_declaration_regex_census_surface` (negative cases
+    included), so removing the arm reds HERE instead of silently reopening
+    the hole.
+    """
+    positives = (
+        'os.environ.setdefault("TORTOISE_DB_URI", db_arg)',
+        "os.environ.setdefault('TORTOISE_DB_URI', db_arg)",
+        'os.environ.setdefault( "TORTOISE_DB_URI", db_arg)',
+        # the `_os` alias — censused by substring, like the assignment arm
+        '_os.environ.setdefault("TORTOISE_DB_URI", db_arg)',
+        # a wrapped call: `\s*` crosses newlines (the #12561 lesson)
+        'os.environ.setdefault(\n    "TORTOISE_DB_URI",\n    db_arg,\n)',
+        # no valid use, still a mutation attempt — censused, not excused
+        'os.environ.setdefault("TORTOISE_DB_URI", None)',
+    )
+    for form in positives:
+        assert _MUTATION_RE.search(form), (
+            f"_MUTATION_RE must census the setdefault form {form!r} — it "
+            "writes the URI when the key is absent (#13177)")
+    # …and the arm is URI-KEY SPECIFIC (#12561). `os.environ.setdefault` on
+    # any other name is not a URI mutation, and censusing it would red every
+    # conftest-shaped module in the tree for a line that never touches the
+    # URI — the over-report direction that gets an arm deleted rather than
+    # narrowed.
+    for non_uri in (
+            'os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")',
+            'os.environ.setdefault("RATE_LIMIT_DISABLED", "1")',
+            'os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")',
+            # a bare-instance / non-environ `setdefault` is not this census's
+            'settings.setdefault("TORTOISE_DB_URI", uri)'):
+        assert not _MUTATION_RE.search(non_uri), (
+            f"_MUTATION_RE must not census the non-URI setdefault form "
+            f"{non_uri!r} — the census is URI-specific (#12561)")
+    # a READ of the URI is still not a mutation, in the setdefault-neighbour
+    # spelling too (the #11083 class: a read counted as a mutation forced a
+    # blanket file declaration to stay green).
+    for read_form in (
+            'assert os.environ.get("TORTOISE_DB_URI") == db_arg',
+            'if "TORTOISE_DB_URI" in os.environ:',
+    ):
+        assert not _MUTATION_RE.search(read_form), (
+            f"_MUTATION_RE must not census the READ form {read_form!r}")
 
 
 def test_declaration_path_rejects_undeclared():

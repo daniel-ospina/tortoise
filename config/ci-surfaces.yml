@@ -1017,6 +1017,7 @@ surfaces:
   # one-surface registration drops this file on one of the two halves' own
   # diffs — the #1349/#3332 silent-drop class the manifest exists for.
   - test_10893_read_stage_attribution.py
+  # #10602: the wait-bound BREACH channel — `wait_bound_breaches` on the health
   # surface, so a `-32009` refusal is observable in-process instead of only in
   # the best-effort analytics sink. Dual-registered for the same reason as its
   # sibling above and as the health guards below: the emit sites and the
@@ -8526,12 +8527,30 @@ surfaces:
   # asks for — every reason in the CLOSED set is reachable, a retirement is
   # terminal and journals, and the derivation stops trending across a definition
   # boundary — plus the negative controls that give them meaning (a live
-  # `goalState` of `met`/`blocked`/`guideline` is never a retirement; a reading
+  # `goalState` of `met`/`blocked` is never a retirement; a reading
   # taken after the boundary leaves its judgement standing). Runs on the docker
   # lane AND under `TORTOISE_TEST_CARVE_OUT=1` (the shared `sdk_factory` fixture
   # is URI-aware), so it needs no `carve_out:` row and no
   # `TEST_NO_REDIRECT_STEMS` entry.
   - test_11926_derived_invalidation.py
+  # #13035: the goal-ending CONSISTENCY rule — `status` and `goalState` may not
+  # disagree about whether a goal has ended, in EITHER direction (design §5 of
+  # `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`). `core` is the only
+  # registration that helps, for the same measured reason the #11822/#11926 rows
+  # above state: the guard lives in `tortoise/sdk.py`, which no `SOURCE_PATTERNS`
+  # row names, while the arm that made the defect visible lives in
+  # `derived_invalidation` — so the files that can break this pair are exactly
+  # the ones the `tortoise/` fallback resolves to THIS surface. The file is the
+  # acceptance, not a case count: the refusal in both directions with both
+  # repairs named, `superseded`'s successor obligation (the `supersededBy`
+  # carrier AND the Point `CORRECTS` edge), the ordinary-verb retirement in ONE
+  # write, the cross-product proof that no writable `(goalState, status)` pair
+  # leaves the invalidation path and the reading rule disagreeing, `guideline`'s
+  # refusal plus an AST sweep showing no code path still expects it, and the
+  # cache's `met`/`unmet`-only rule. Runs on the docker lane AND under
+  # `TORTOISE_TEST_CARVE_OUT=1` (the shared `sdk_factory` fixture is URI-aware),
+  # so it needs no `carve_out:` row and no `TEST_NO_REDIRECT_STEMS` entry.
+  - test_13035_goal_ending_consistency.py
   # #12363: the PUBLISHED artifact's observability — the one reading the repo
   # never took. `tortoise-graph` 0.2.0 (uploaded 2026-08-08) ships a wheel whose
   # first documented command (`tortoise init`) exits 1 on a clean machine with
@@ -9311,6 +9330,20 @@ surfaces:
   # policy module moves.
   - test_csp_plan_doc_consistency.py
   sdk:
+  - test_11609_door_retirement.py  # #11609 lane E: the seven doors retired FORWARD —
+  # every pointer resolves in ONE hop to a LIVE `TOOL_REGISTRY` name (GitHub's own
+  # `DeprecatedToolAliases` states aliases are not transitive, and a pointer at another
+  # retired name is the churn loop the registry's Tier-1 note forbids), the destination
+  # PERFORMS the absorbed operation (measured by substitution — a recorder replaces the
+  # container door and the call must reach it, which a docstring cannot show), and the
+  # 25 doors a RECORDED decision keeps live still hold their reasons in the code. Same
+  # surface as its two siblings, and the file's subject is the `TortoiseSDK` doors it
+  # builds and monkeypatches. ⚠️ Do not read this row as the load-bearing one for a
+  # `tortoise/tool_registry.py` or `tortoise/sdk.py` diff: both are `SHARED_MODULES`, so
+  # `ci_selection.py --changed-files tortoise/tool_registry.py` answers
+  # `{"surfaces": [all eight], "full": true}` — the FULL matrix, not `sdk`. The row is
+  # what `--integrity` requires (a test file with no surface row is `manifest drift`,
+  # exit 1); the selection already covers the file on every diff that could red it.
   - test_11609_read_containers.py
   - test_11858_source_door_markers.py
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
@@ -13708,6 +13741,24 @@ durations:
   test_7846_restore_doc_and_bounds.py: 0.1
   test_7853_confidence_label_propagation.py: 23.9  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 14.8
   test_7856_goal_state.py: 3.4  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 3.2
+  # #13035 new file; The row must EXIST, not merely default: the `core`
+  # registration above puts it in `fast_pool()`, and `--integrity`'s
+  # `duration_coverage_issues` floor is measured against that pool's own size.
+  # The weight is a DELIBERATE local reading, not a junit sweep (this file has
+  # never run on main): one graph per case through the shared `sdk_factory`, and
+  # the only expensive one is the cross-product proof (48 single-write goal
+  # creates in ONE graph, no EP, no judgement). ⛔ NO CASE COUNT IS PINNED, and
+  # none is restated here: it moved every review round (11 at first landing, 23
+  # by round 5, 26 by round 6, 28 after round 8), so any number written here is
+  # stale prose by the next round — a review found exactly that twice. MEASURED
+  # whole file on THIS box (`test_lane.py run --
+  # tests/test_13035_goal_ending_consistency.py -q`): 13-14 s across the heads
+  # that closed rounds 6-8; the earlier ~119 s reading was taken at load ~110.
+  # The weight below is that local reading (14.0, raised from 6.0 which lagged
+  # the real cost by more than half), and `tools/ci_timing.py
+  # --refresh-durations` replaces it from the first push-to-main junit sweep
+  # that includes the file.
+  test_13035_goal_ending_consistency.py: 14.0
   test_7902_write_path_label_widening.py: 8.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 7.4
   test_7925_route_parity.py: 2.3  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 61.0
   test_7951_delete_resurrection.py: 16.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 15.5
