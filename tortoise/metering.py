@@ -3002,46 +3002,83 @@ def get_postgres_residency(org_id: str) -> dict:
     key, O(1) in the database's size. That is the affordability the block on
     ``postgres_storage`` required.
 
-    Returns ``{"stored_bytes": int, "rows": int, "measured_at": ISO|None,
-    "source": str|None}``.
+    ⛔ THREE-NOT-KNOWN STATES, NOT ONE ``None`` — the vocabulary
+    :func:`get_capture_usage` already uses, because flattening them is either a
+    fail-open or a deadlock (``allowance_gate._Absent``'s docstring). Returns
+    ``{"measured", "unmeasured_reason", "stored_bytes", "rows", "measured_at",
+    "source"}``:
 
-    ⛔ NO ROW IS **NO READING**, NEVER A ZERO — the opposite of
-    :func:`get_postgres_bytes_written`'s "no row means nothing was written".
-    Both readings are honest *for their own dimension kind*, and confusing them
-    is the fail-open this file already documents: an org that has never been
-    snapshotted must not compare as 0 bytes and pass a cap. ``measured_at`` is
-    ``None`` in that case, which the gate treats as STALE (a reading that cannot
-    be aged cannot prove freshness).
+    * ``measured=True`` — the snapshot has a row for this org; ``stored_bytes``
+      and the audit's own ``measured_at`` are the reading.
+    * ``unmeasured_reason="absent"`` — **the gauge HAS reported** (the table
+      holds at least one row, so ``postgres_residency_snapshot()`` has run and
+      the audit attributed SOMETHING to somebody) and this org holds nothing.
+      That is a TRUE ZERO, not an unknown: an org whose rows the audit cannot
+      find stores no bytes in its tables.
+    * ``unmeasured_reason="unreported"`` — the table is EMPTY: the gauge has
+      NEVER reported. Reading that as a zero would be a FLEET-WIDE fail-open
+      (every org compares as 0 bytes and passes any cap), so it is no reading.
+    * ``unmeasured_reason="read_error"`` — the control plane failed. Our fault.
 
-    A read FAILURE degrades to the same no-reading shape rather than raising: the
-    gate's own ``_reading`` classifies a ``None`` reading as "no figure" and
-    refuses a configured allowance, so a broken read can never become a pass.
+    ⛔ WHY ``absent`` IS A ZERO AND NOT A REFUSAL — measured, not assumed. The
+    row only exists once the audit finds rows to attribute, and rows only exist
+    once a write is served, so refusing ``absent`` refuses the very write that
+    would create the condition it waits for: a fresh tenant's FIRST write is
+    refused forever. The same deadlock is measured in CI for the sibling gauge
+    (``#13084``/``#13102``: a paid tenant's first ``POST /v1/points`` returned
+    HTTP 500 from the graph meter), which is why the gate has an ``ABSENT``
+    sentinel distinct from ``None`` in the first place.
     """
-    empty: dict = {"stored_bytes": None, "rows": None,
-                   "measured_at": None, "source": None}
+    view: dict = {"measured": False, "unmeasured_reason": None,
+                  "stored_bytes": None, "rows": None,
+                  "measured_at": None, "source": None}
+
+    def _unmeasured(reason: str) -> dict:
+        return {**view, "unmeasured_reason": reason}
+
     if not org_id:
-        return empty
+        # No org to look up is not an "absent" row: nothing was established.
+        return _unmeasured("read_error")
     if not _supabase_mode():
         # The registry/embedded lane has no ``org_postgres_residency`` table:
-        # storage there is the graph's, not Postgres's. No reading, not a zero.
-        return empty
+        # storage there is the graph's, not Postgres's. No gauge ⇒ UNREPORTED,
+        # never a zero (a zero would arm a cap against a figure nobody measures).
+        return _unmeasured("unreported")
     try:
         from tortoise.supabase_control import get_control_plane
-        rows = get_control_plane().query(
+        plane = get_control_plane()
+        rows = plane.query(
             "org_postgres_residency",
             select=["stored_bytes", "rows", "measured_at", "source"],
             filters=[("org_id", "eq", org_id)],
         )
     except Exception as e:
         _logger.warning(
-            "postgres residency read failed (degrading to NO READING): "
+            "postgres residency read failed (NO READING, not a zero): "
             "team=%s error=%s", org_id, e,
         )
-        return empty
+        return _unmeasured("read_error")
     if not rows:
-        return empty
+        # ⛔ An absent ROW is ambiguous until we ask whether the GAUGE has ever
+        # reported, and the two answers are opposite outcomes: "you store
+        # nothing" (serve, as a true zero) vs "nothing has ever been measured
+        # for anyone" (refuse — a zero here would pass every org's cap).
+        try:
+            anywhere = plane.query("org_postgres_residency",
+                                   select=["measured_at"], limit=1)
+        except Exception as e:
+            _logger.warning(
+                "postgres residency gauge-state probe failed (NO READING): "
+                "team=%s error=%s", org_id, e,
+            )
+            return _unmeasured("read_error")
+        # One row per ORG, so this stays O(orgs) at worst and is off the hot
+        # path: only an org with no row of its own pays for it.
+        return _unmeasured("absent" if anywhere else "unreported")
     row = rows[0]
     return {
+        "measured": True,
+        "unmeasured_reason": None,
         "stored_bytes": row.get("stored_bytes"),
         "rows": row.get("rows"),
         "measured_at": row.get("measured_at"),

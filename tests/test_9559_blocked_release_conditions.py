@@ -48,6 +48,7 @@ is the defect it exists to prevent). It is:
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 import tokenize
 from pathlib import Path
@@ -297,7 +298,8 @@ def test_the_residency_meter_is_the_gauge_and_never_the_addend(monkeypatch):
 
     def fake_reader(org_id: str) -> dict:
         calls.append(org_id)
-        return {"stored_bytes": 12_345_678, "rows": 42,
+        return {"measured": True, "unmeasured_reason": None,
+                "stored_bytes": 12_345_678, "rows": 42,
                 "measured_at": "2026-11-17T00:00:00+00:00", "source": "audit"}
 
     monkeypatch.setattr(metering, "get_postgres_residency", fake_reader, raising=True)
@@ -315,52 +317,98 @@ def test_the_residency_meter_is_the_gauge_and_never_the_addend(monkeypatch):
         "residency is a measured figure (the audit's own per-org row bytes), not "
         "an estimate — the note must not claim otherwise")
 
-    # ⛔ NO ROW IS NO READING. Both the "never snapshotted" and the "audit could
-    # not see this org" cases come back as stored_bytes=None, and both must be
-    # None here: a 0.0 would compare as an org under any cap and pass.
+    # ⛔ "NO ROW" IS THREE ANSWERS, and the meter must map them to three DIFFERENT
+    # outcomes — this is the review finding that came out of the owner's own
+    # measurement (#13084/#13102), not from reading the code:
+    #
+    #   absent      -> ABSENT  (the gauge HAS reported; this org stores nothing)
+    #   unreported  -> refuse  (the table is EMPTY: a zero would be fleet-wide)
+    #   read_error  -> refuse  (our fault, still fail-closed)
+    def _unmeasured(reason: str) -> dict:
+        return {"measured": False, "unmeasured_reason": reason,
+                "stored_bytes": None, "rows": None,
+                "measured_at": None, "source": None}
+
     monkeypatch.setattr(
         metering, "get_postgres_residency",
-        lambda org_id: {"stored_bytes": None, "rows": None,
-                        "measured_at": None, "source": None}, raising=True)
-    assert allowance_gate._postgres_stored_bytes("org_never_snapshotted") is None, (
-        "an org with no snapshot row must be NO READING, never 0 bytes — a zero "
-        "would pass every cap and this is the fail-open the block exists to stop")
+        lambda org_id: _unmeasured("absent"), raising=True)
+    assert allowance_gate._postgres_stored_bytes("org_fresh") is allowance_gate.ABSENT, (
+        "an org with NO row while the gauge HAS reported stores nothing: that is "
+        "a TRUE ZERO (ABSENT), not a refusal — the snapshot row is derived from "
+        "rows only a served write can create, so refusing here deadlocks a fresh "
+        "tenant's first write forever (#13084 measured it as HTTP 500)")
+
+    for reason in ("unreported", "read_error", "some_future_reason"):
+        monkeypatch.setattr(
+            metering, "get_postgres_residency",
+            lambda org_id, r=reason: _unmeasured(r), raising=True)
+        try:
+            got = allowance_gate._postgres_stored_bytes("org_x")
+        except allowance_gate.MeterUnavailable:
+            continue
+        raise AssertionError(
+            f"reason {reason!r} must be a NAMED refusal (MeterUnavailable), not "
+            f"{got!r} — 'unreported' read as a zero is a FLEET-WIDE fail-open "
+            "(every org passes any cap), and an unknown reason folded into "
+            "'absent' would silently disarm an allowance the day the reader "
+            "grows one")
 
     # …and a row whose measured_at is missing cannot be aged, so it is NO READING
     # too (the gate treats an unageable reading as stale on a bounded dimension).
     monkeypatch.setattr(
         metering, "get_postgres_residency",
-        lambda org_id: {"stored_bytes": 5, "rows": 1,
+        lambda org_id: {"measured": True, "unmeasured_reason": None,
+                        "stored_bytes": 5, "rows": 1,
                         "measured_at": None, "source": "audit"}, raising=True)
-    assert allowance_gate._postgres_stored_bytes("org_no_timestamp") is None, (
-        "a snapshot with no measured_at cannot prove freshness on a dimension "
-        "with stale_after_seconds, so it must not become a reading")
+    try:
+        allowance_gate._postgres_stored_bytes("org_no_timestamp")
+    except allowance_gate.MeterUnavailable:
+        pass
+    else:
+        raise AssertionError(
+            "a snapshot with no measured_at cannot prove freshness on a "
+            "dimension with stale_after_seconds, so it must not become a reading")
 
 
-def test_the_reader_is_fail_closed_on_every_branch(monkeypatch):
-    """★ `get_postgres_residency` must return NO READING on every failure path.
+def test_the_reader_names_why_it_has_no_figure(monkeypatch):
+    """★ `get_postgres_residency` must NAME the no-figure state, not collapse it.
 
     ⛔ The layer BELOW the meter, and reviewer round 1 measured it as entirely
-    untested: turning the fault branch into `{"stored_bytes": 0, "measured_at":
-    now}` kept the whole suite green. That is the fail-open this dimension's
-    design exists to prevent — a PostgREST fault, an unapplied migration or a
-    broken grant would make EVERY org read 0 bytes and pass any configured cap.
+    untested: turning the fault branch into `{"stored_bytes": 0,
+    "measured_at": now}` kept the whole suite green. That is the fail-open this
+    dimension's design exists to prevent — a PostgREST fault, an unapplied
+    migration or a broken grant would make EVERY org read 0 bytes and pass any
+    configured cap.
 
-    Three branches, one assertion each, and the third is the one that matters:
-    the control plane RAISING must not become a reading.
+    ⛔ AND THE OPPOSITE COLLAPSE IS ALSO A DEFECT (the owner's `#13084`/`#13102`
+    measurement, arrived at from the gate side): returning one `None` for every
+    no-figure state refuses a fresh tenant's FIRST write forever, because the
+    snapshot row is derived from rows that only a served write can create. That
+    is HTTP 500 on `POST /v1/points` for a brand-new paying tenant, measured in
+    CI twice. So the reader distinguishes:
+
+    * ``absent``      — the gauge HAS reported (some org has a row) and this one
+      holds nothing ⇒ a TRUE zero, consumed only by the dimension's declaration;
+    * ``unreported``  — the table is EMPTY ⇒ nothing measured for anyone;
+    * ``read_error``  — our fault.
+
+    Mutation this REDs: fold any two of the three into one another (measured).
     """
-    # 1. No org context (stdio/operator) — nothing to read.
-    assert metering.get_postgres_residency("") == {
-        "stored_bytes": None, "rows": None, "measured_at": None, "source": None}, (
-        "an empty org_id must be NO READING")
+    # 1. No org context (stdio/operator) — nothing to look up.
+    assert metering.get_postgres_residency("")["unmeasured_reason"] == "read_error", (
+        "an empty org_id establishes nothing; it must not be reported as a "
+        "tenant-absent zero")
 
-    # 2. The registry/embedded lane has no residency table — still no reading.
+    # 2. The registry/embedded lane has no residency table — UNREPORTED, not zero:
+    #    a zero there would arm a cap against a figure nobody measures.
     monkeypatch.setattr(metering, "_supabase_mode", lambda: False, raising=True)
-    assert metering.get_postgres_residency("org_registry")["stored_bytes"] is None, (
-        "outside Supabase mode there is no residency table, so the answer must be "
-        "NO READING — a zero would let every org pass a storage cap there")
+    lane = metering.get_postgres_residency("org_registry")
+    assert lane["measured"] is False and lane["unmeasured_reason"] == "unreported", (
+        f"outside Supabase mode there is no residency gauge, so the answer must "
+        f"be UNREPORTED — a zero would let every org pass a storage cap there "
+        f"({lane!r})")
 
-    # 3. The read FAULTS — the branch that a `0` would turn into a global pass.
+    # 3. A read FAULT is read_error (refused), never absent and never a zero.
     monkeypatch.setattr(metering, "_supabase_mode", lambda: True, raising=True)
 
     class _Boom:
@@ -371,9 +419,132 @@ def test_the_reader_is_fail_closed_on_every_branch(monkeypatch):
         "tortoise.supabase_control.get_control_plane", lambda: _Boom(),
         raising=True)
     faulted = metering.get_postgres_residency("org_fault")
-    assert faulted["stored_bytes"] is None and faulted["measured_at"] is None, (
-        "a read FAULT must be NO READING, never a zero: an unreadable snapshot "
-        f"that reads as 0 bytes passes every cap (got {faulted!r})")
+    assert faulted["measured"] is False         and faulted["unmeasured_reason"] == "read_error", (
+        "a read FAULT must be read_error, never 'absent': an unreadable snapshot "
+        f"reported as an absent org would read as 0 bytes and pass every cap "
+        f"(got {faulted!r})")
+
+    # 4. NO ROW FOR THIS ORG, but the gauge has reported → `absent` (a true zero).
+    class _GaugeReported:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def query(self, _table, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs.get("filters"):
+                return []                      # this org has no row
+            return [{"measured_at": "2026-11-17T00:00:00+00:00"}]  # others do
+
+    plane = _GaugeReported()
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: plane, raising=True)
+    absent = metering.get_postgres_residency("org_fresh")
+    assert absent["unmeasured_reason"] == "absent", (
+        f"an org with no row while OTHER orgs have one stores nothing — that is "
+        f"a true zero, not an unknown ({absent!r})")
+    assert len(plane.calls) == 2, (
+        "the absent answer must be ESTABLISHED by asking whether the gauge has "
+        "ever reported (one extra, limit=1 probe), not assumed from an empty "
+        f"result (calls={plane.calls!r})")
+    assert plane.calls[1].get("limit") == 1, (
+        "the gauge-state probe must be bounded — it runs on the write path, so "
+        f"it may not read the whole table ({plane.calls[1]!r})")
+
+    # 5. NO ROW AND the table is EMPTY → `unreported`: nothing measured for
+    #    anyone, which a zero would turn into a fleet-wide fail-open.
+    class _NeverRan:
+        def query(self, _table, **_kwargs):
+            return []
+
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: _NeverRan(),
+        raising=True)
+    never = metering.get_postgres_residency("org_any")
+    assert never["measured"] is False         and never["unmeasured_reason"] == "unreported", (
+        "an EMPTY snapshot table means the refresh has never run, so a zero "
+        "here would be a FLEET-WIDE fail-open — every org comparing as 0 bytes "
+        f"and passing any cap (got {never!r})")
+
+    # 6. A row IS found → measured, with the audit's own stamp.
+    class _HasRow:
+        def query(self, _table, **_kwargs):
+            return [{"stored_bytes": 4096, "rows": 3,
+                     "measured_at": "2026-11-17T00:00:00+00:00",
+                     "source": "audit"}]
+
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: _HasRow(),
+        raising=True)
+    measured = metering.get_postgres_residency("org_has_row")
+    assert measured["measured"] is True and measured["stored_bytes"] == 4096         and measured["measured_at"] == "2026-11-17T00:00:00+00:00", (
+        f"a snapshot row must be returned as a MEASURED reading ({measured!r})")
+
+
+def test_a_fresh_org_is_served_at_zero_instead_of_deadlocking(monkeypatch):
+    """★ THE DEADLOCK, end to end through the GATE (not just the meter).
+
+    A brand-new tenant, a live gauge (other orgs have snapshots), no row of its
+    own, and an allowance configured. The correct outcome is SERVED at 0 bytes —
+    and this is the acceptance the issue's own Objective states ("rather than
+    being inert or 500-ing").
+
+    ⛔ Why serving is correct and not a fail-open: the snapshot row is DERIVED
+    from the org's rows, which only a served write can create. Refusing here
+    refuses the write that would make the row appear — forever. Measured for the
+    sibling gauge in CI (`#13084`/`#13102`): `POST /v1/points` → HTTP 500 for a
+    tenant far under its cap.
+
+    Mutation this REDs: drop ``absent_is_zero=True`` from the dimension (the
+    ABSENT sentinel then degrades to no-reading and the write is refused), or
+    make the meter return ``None`` for ``absent``.
+    """
+    # ⛔ The ARMED copy: the live dimension is BLOCKED, so the gate refuses
+    # before any meter is consulted. This test is about the state that exists
+    # AFTER the block lifts, which is the state the wiring must be right for —
+    # the issue's whole ordering rule ("before any allowance is configured").
+    dim = dataclasses.replace(
+        _dim("postgres_storage"), blocked_reason=None,
+        meter=lambda org_id: allowance_gate.ABSENT)
+    assert dim.absent_is_zero, (
+        "postgres_storage must declare absent_is_zero, or a fresh org's ABSENT "
+        "answer degrades to no-reading and deadlocks its first write")
+
+    reading = allowance_gate._reading(dim, "org_fresh", None, observed_only=False)
+    assert reading is not None and reading.used == 0.0, (
+        "a fresh org with no residency row must read as a TRUE ZERO, not "
+        f"refuse: refusing deadlocks its first write (#13084) ({reading!r})")
+    assert reading.measured_at is None, (
+        "zero-by-absence has no measurement instant — nothing was measured, so "
+        f"inventing a stamp would make the age bound meaningless ({reading!r})")
+
+
+def test_a_never_scheduled_refresh_refuses_instead_of_reading_zero(monkeypatch):
+    """★ The other half: `unreported` must NOT ride in on the same door as `absent`.
+
+    If ``absent_is_zero`` consumed ``unreported`` too, arming a cap on a fleet
+    whose refresh has never run would read EVERY org as 0 bytes — a cap that
+    binds for nobody, i.e. the fail-open in its purest form. The dimension's
+    declaration is only safe BECAUSE the reader separates the two.
+
+    Mutation this REDs: make the reader report ``absent`` when the snapshot table
+    is empty (one-line change, measured).
+    """
+    def _unreported(org_id: str):
+        raise allowance_gate.MeterUnavailable(
+            "the postgres residency gauge has never reported")
+
+    dim = dataclasses.replace(
+        _dim("postgres_storage"), blocked_reason=None, meter=_unreported)
+
+    try:
+        allowance_gate._reading(dim, "org_any", None, observed_only=False)
+    except allowance_gate.QuotaCheckError as exc:
+        assert "no reading" in str(exc) or "could not be measured" in str(exc), (
+            f"the refusal must name a MISSING FIGURE, not a cap breach ({exc})")
+    else:
+        raise AssertionError(
+            "a gauge that has never reported must REFUSE rather than read as 0 "
+            "bytes — a zero there passes every org's cap (fleet-wide fail-open)")
 
 
 def test_a_stale_snapshot_is_refused_rather_than_enforced(monkeypatch):
@@ -395,7 +566,8 @@ def test_a_stale_snapshot_is_refused_rather_than_enforced(monkeypatch):
         "defend")
 
     def old_reader(org_id: str) -> dict:
-        return {"stored_bytes": 1_000, "rows": 1,
+        return {"measured": True, "unmeasured_reason": None,
+                "stored_bytes": 1_000, "rows": 1,
                 "measured_at": "2000-01-01T00:00:00+00:00", "source": "audit"}
 
     # A real call path: a configured allowance on this dimension, with the meter

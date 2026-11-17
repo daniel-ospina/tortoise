@@ -274,14 +274,36 @@ apportioned**: only the measured per-org figure is stored.
 ⛔ **The snapshot has an age, and the gate enforces a bound on it.** The dimension
 declares `stale_after_seconds` (24 h, the same evidence-age bound the graph gauge
 uses). A reading older than that, or one with no `measured_at` to age, is
-**refused** — never enforced. And **no row is NO READING, never a zero**, so an
-org that was never snapshotted cannot pass a cap.
+**refused** — never enforced.
+
+⛔ **"No row" is THREE answers, and the reader names which one it is**
+(`unmeasured_reason`, the vocabulary `get_capture_usage` already uses). Flattening
+them is either a fail-open or a deadlock, so they are separate:
+
+| `unmeasured_reason` | when | what it means | gate outcome |
+|---|---|---|---|
+| — (`measured: true`) | a row exists for the org | the audit's figure, aged by `measured_at` | compared against the cap |
+| `absent` | no row for this org, **but other orgs have rows** | the gauge has reported and this org's rows store nothing — a **true zero** | **served**, as 0 bytes |
+| `unreported` | the snapshot table is **EMPTY** | nothing has been measured for **any** org | **refused** (a named no-reading error) |
+| `read_error` | the control plane failed | our fault | **refused** (named, logged at ERROR) |
+
+Why `absent` is served and not refused — and why that is not a fail-open: the
+snapshot row is **derived from the org's rows**, and rows only exist once a write
+is served. Refusing `absent` refuses the very write that would create the row, so
+a fresh tenant's **first** write would be refused forever. Measured on the sibling
+gauge in CI (`#13084`/`#13102`): a paid tenant's first `POST /v1/points` returned
+**HTTP 500** from exactly that collapse. `absent_is_zero` is declared on the
+dimension so the gate consumes the answer in one place, and it is safe **strictly
+because** the empty table is `unreported` and still refuses — otherwise every org
+would compare as 0 bytes and pass any cap.
 
 ⛔ **Nothing schedules the refresh yet.** That is a deploy decision (no migration
 here declares `pg_cron`; an external caller is an operator's choice), and it is
-disclosed rather than assumed: with no snapshot row the gate refuses a configured
-allowance, so an unscheduled snapshot **over-blocks** instead of billing from a
-guess. Schedule it before arming.
+disclosed rather than assumed: while the table is empty the gate reads
+`unreported` and refuses a configured allowance, so an unscheduled snapshot
+**over-blocks** instead of billing from a guess. One successful refresh is what
+turns "nothing measured anywhere" into "this org stores nothing, served". Schedule
+it — and verify a real org's row exists — before arming.
 
 **What still blocks arming.** Exactly one thing, and it is the owner's: the
 `free`/`anon` included storage amounts are recorded as `DERIVED, NOT

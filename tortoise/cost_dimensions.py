@@ -535,9 +535,15 @@ DIMENSIONS: tuple[Dimension, ...] = (
             "deliberate here — a schedule is a deploy decision (the box has no "
             "``pg_cron`` in any migration, and an external caller is an "
             "operator's choice) — and it is DISCLOSED rather than assumed: "
-            "while no snapshot exists the gate has NO READING and refuses a "
-            "configured allowance, which over-blocks instead of billing from a "
-            "guess."),
+            "while the snapshot table is EMPTY the reader answers "
+            "``unreported`` (nothing measured for ANY org) and the gate refuses "
+            "a configured allowance, which over-blocks instead of billing from a "
+            "guess. One refresh is what separates the two no-row answers: "
+            "``absent`` (the gauge reported, this org stores nothing) is served "
+            "as a true zero, because the snapshot row is derived from rows only "
+            "a SERVED write can create — refusing it would deadlock a fresh "
+            "tenant's first write (#13084/#13102 measured that collapse as "
+            "HTTP 500)."),
         limits=(
             "``live_rows`` is a PLANNER STATISTIC (``n_live_tup``) that can lag "
             "the truth; the exact per-org count comes from the row-growth row.",

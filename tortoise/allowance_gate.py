@@ -415,18 +415,58 @@ def _postgres_stored_bytes(org_id: str) -> MeterReading | None:
 
     The figure comes from ``metering.get_postgres_residency``, which reads the
     per-org snapshot the whole-table audit writes offline — one row by primary
-    key, affordable on a write path. **No row is NO READING**, never a zero: an
-    org that has never been snapshotted must not compare as 0 bytes and pass.
-    ``measured_at`` is the audit's own ``captured_at``, so the dimension's
-    ``stale_after_seconds`` ages the MEASUREMENT, not the row write.
+    key, affordable on a write path. ``measured_at`` is the audit's own
+    ``captured_at``, so the dimension's ``stale_after_seconds`` ages the
+    MEASUREMENT, not the row write.
+
+    ⛔ THREE ANSWERS, NOT TWO (review finding, from the owner's own measurement).
+    The reader names WHY it has no figure (``unmeasured_reason``, the
+    ``get_capture_usage`` vocabulary), and this adapter maps each reason to the
+    outcome that reason actually implies:
+
+    * ``absent`` → :data:`ABSENT`. The gauge HAS reported and the audit attributed
+      nothing to this org, i.e. its rows store no bytes. That is a TRUE ZERO. A
+      ``None`` here would refuse a fresh tenant's FIRST write forever — the row
+      only appears once the audit finds rows, and rows only appear once a write is
+      served. Measured on the sibling gauge: ``#13084``/``#13102``, where a paid
+      tenant's first ``POST /v1/points`` returned HTTP 500 from exactly this
+      collapse. (``absent_is_zero`` is therefore declared on the dimension below.)
+    * ``unreported`` → :class:`MeterUnavailable`. The snapshot table is EMPTY, so
+      nothing has ever been measured for ANYONE. A zero here would be a
+      FLEET-WIDE fail-open — every org comparing as 0 bytes and passing any cap —
+      so it refuses, naming the real cause (nothing schedules the refresh).
+    * ``read_error`` → :class:`MeterUnavailable`. Our side, and still a refusal
+      (fail closed, #686), never a zero.
+    * any OTHER reason → :class:`MeterUnavailable`. ⛔ Unknown reasons are NOT
+      folded into ``absent`` for the reason the capture meter's own comment gives:
+      the day the reader grows a reason, folding it here would silently disarm a
+      configured allowance.
     """
     from .metering import get_postgres_residency
 
     reading = get_postgres_residency(org_id)
+    reason = reading.get("unmeasured_reason")
+    if reading.get("measured") is not True:
+        if reason == "absent":
+            return ABSENT
+        if reason == "unreported":
+            raise MeterUnavailable(
+                "the postgres residency gauge has never reported — the snapshot "
+                "table is empty, so nothing has been measured for ANY org; "
+                "nothing schedules postgres_residency_snapshot(), and a zero "
+                "here would pass every org's cap")
+        raise MeterUnavailable(
+            f"{_describe_fault(reason or 'unmeasured')} (the postgres residency "
+            f"gauge could not be read)")
     stored = reading.get("stored_bytes")
     measured_at = reading.get("measured_at")
     if stored is None or not measured_at:
-        return None
+        # A row that exists but carries no figure, or no stamp to age, is not a
+        # reading: the instrument reported and the report is unusable.
+        raise MeterUnavailable(
+            "the postgres residency snapshot row for this org carries no "
+            f"stored_bytes/measured_at (stored_bytes={stored!r}, "
+            f"measured_at={measured_at!r}), so it cannot be aged or compared")
     return MeterReading(
         used=float(stored),
         measured_at=str(measured_at),
@@ -576,6 +616,16 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
     _dimension(
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],
         meter=_postgres_stored_bytes,
+        # ⛔ A TRUE zero, not "flow" semantics — and declared HERE (on the
+        # dimension) rather than branched in the meter, so the gate consumes it
+        # at one place (``_reading``) like every other dimension. The reader only
+        # says ``absent`` once the GAUGE has reported and this org holds nothing;
+        # a gauge that has never reported is ``unreported`` and still refuses, so
+        # this declaration cannot become a fleet-wide fail-open. Refusing
+        # ``absent`` instead would deadlock a fresh tenant's first write forever:
+        # the snapshot row is derived from rows that only a served write can
+        # create (#13084/#13102 measured the same collapse as HTTP 500).
+        absent_is_zero=True,
         # The residency gauge is a SNAPSHOT: affordable per write, stale by
         # construction. The same evidence-age bound the graph gauge uses, for the
         # same reason — a reading older than this describes rows that may no
@@ -626,11 +676,15 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
             "BLOCKED until the owner confirms those amounts. "
             "⛔ AND ARMING HAS ONE OPERATIONAL PRECONDITION a lane lifting this "
             "block MUST meet first: ``postgres_residency_snapshot()`` has to run "
-            "on a schedule. Nothing calls it yet, and a wired meter with no "
-            "snapshot row is NO READING — so configuring an allowance before the "
-            "refresh is scheduled would refuse EVERY gated write with a "
-            "no-reading error rather than cap anything. Schedule the refresh, "
-            "verify a row exists for a real org, and only then lift this."),
+            "on a schedule. Nothing calls it yet, so the snapshot table is EMPTY, "
+            "and an empty table is read as UNREPORTED (nothing has been measured "
+            "for ANY org) rather than as every org storing zero — a zero there "
+            "would pass every cap. Configuring an allowance before the refresh "
+            "runs would therefore refuse EVERY gated write with a no-reading "
+            "error rather than cap anything. One successful refresh is what "
+            "distinguishes 'this org stores nothing' (served, as a true zero) "
+            "from 'nothing has ever been measured' (refused); schedule it, verify "
+            "a row exists for a real org, and only then lift this."),
         release=(
             "per_org_postgres_attribution",
             "postgres_residency_gauge",

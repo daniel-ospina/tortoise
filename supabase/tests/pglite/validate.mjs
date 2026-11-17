@@ -3215,6 +3215,27 @@ try {
       + `not per-org`);
     process.exit(1);
   }
+  // ⛔ AN ORG WITH NOTHING STORED MUST BE REPRESENTABLE BY ABSENCE — this is what
+  // makes the reader's three answers possible. The gate SERVES an org with no
+  // snapshot row as a true zero (a `absent`) only because "the gauge has
+  // reported and this org holds nothing" is a real state; if the refresh wrote a
+  // row for every org in `organizations` (inventing a zero), that answer would be
+  // indistinguishable from a measured one and the distinction would be a fiction.
+  // Asserted on a third org that exists but has NO journal rows.
+  await db.exec(`INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('9559-gauge-empty', '9559-gauge-empty', 'org_9559_gauge_empty')
+      ON CONFLICT (id) DO NOTHING;`);
+  await db.exec('SELECT * FROM public.postgres_residency_snapshot()');
+  const emptyOrg = await db.query(`SELECT count(*)::int AS n
+      FROM public.org_postgres_residency WHERE org_id = '9559-gauge-empty'`);
+  if (Number(emptyOrg.rows[0].n) !== 0) {
+    console.error(`✗ #9559: an org with no stored rows got a snapshot row `
+      + `(n=${emptyOrg.rows[0].n}) — an INVENTED zero is indistinguishable from a `
+      + `measured one, so the reader could not tell "stores nothing" from `
+      + `"measured as zero"`);
+    process.exit(1);
+  }
+
   // ⛔ THE TENANCY POSTURE IS EXECUTED, NOT DECLARED. Dropping `ENABLE ROW LEVEL
   // SECURITY` or the function's `REVOKE` from the migration both left this
   // harness green (measured) — and on Supabase an `anon`/`authenticated` default
