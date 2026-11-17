@@ -72,9 +72,9 @@ lane is the population a `record_only` move would remove from.
    — same code, same corpus. The drift is run-dependent and has been both larger and far smaller than the
    90,000 B payload delta, so `used_memory` is **not used for any figure** in this record or the audit. Only
    the deterministic rendered-size numbers are quoted.
-4. **Eight shape-groups are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`,
+4. **Nine shape-groups are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`,
    `:Tag`, `:ContextSubscription`, `:CommitRecord`, `:DeliveryReceipt`, `:OnboardingState`/`:OnboardingStep`,
-   and the
+   `:PackManifest`, and the
    `:Batch`/`:PipelineStage`/`:PackInstall`/`:PackSelection` group. The corpus does not create them, so this
    document has no measurement of them — which is a gap in the evidence, not a claim that they are free.
    (`:Tag` is `graph`-verdicted in the audit; it is unexercised **here**, which is a coverage gap, not a
