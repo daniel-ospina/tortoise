@@ -3216,6 +3216,23 @@ class TestNonScalarStatus12869:
                 "the ROUTED Subject-door refusal did not use `_refusal_repr` "
                 "on its name: " + str(ei.value))
             assert "id-repr-boom" not in str(ei.value)
+            # ⛔ WHICH raise, not just SOME raise (#12910 review, P3). Every
+            # assertion above also holds on the OBJECT door's refusal — it
+            # renders the same operand through `_refusal_repr` and writes
+            # nothing — so on its own this arm cannot tell a routing
+            # regression from the routed entry. The two messages differ by one
+            # word and one door label: the Subject arm says "which WORD lands",
+            # the Object door says "which VALUE lands" behind
+            # `create_entity(type='object') ...`. MEASURED on a non-routed
+            # payload (`core:strategy`): the object door's message satisfies
+            # every assertion above, which is how the vacuous version was
+            # caught.
+            assert "which word lands" in str(ei.value), (
+                "the routed create did not reach the SUBJECT arm's raise "
+                "(the object door says 'which value lands'): " + str(ei.value))
+            assert "create_entity(type" not in str(ei.value), (
+                "the routed create raised the OBJECT door's refusal: "
+                + str(ei.value))
             for _lbl in ("Subject", "Object"):
                 assert _carrier_row(sdk, _lbl, "rr-subj-route") is None, (
                     "a refused routed create left a " + _lbl + " row")

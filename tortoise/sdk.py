@@ -31239,7 +31239,7 @@ class TortoiseSDK:
                 # (the writer drops it, #7369) and so do `None` and a `str`.
                 # ⛔ OBJECT ONLY. The `:Event` family already has its own
                 # non-string refusal, in `live.refuse_terminal_event_state`
-                # (`live.py:957`: "`status` is a STRING drawn from
+                # (`live.py:1066`: "`status` is a STRING drawn from
                 # the vocabulary") — measured, `create_event(status=123)` and
                 # `status=['x']` both refuse there TODAY, on `main`. So this arm
                 # must not grow an Event half: that would be a second, divergent
