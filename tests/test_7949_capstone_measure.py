@@ -6751,7 +6751,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         f"{sorted(_honours_stated)} to `_honours`, but the definition is at "
         f"`sdk.py:{_honours_measured[0]}` — re-derive EVERY statement of the hit, not the "
         "one a reviewer pointed at (`02-scope.md:61` was already correct at this head while "
-        "both of these were stale: the half-done move)")
+        "all three of these were stale: the half-done move)")
 
     # ⛔ THE NUMBER'S HEAD-BINDING (#13489 review pass 6 — MEASURED, and this is the arm the
     # pin above CANNOT supply). That clause used to read
