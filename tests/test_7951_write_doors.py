@@ -52,14 +52,20 @@ the two connector webhooks, the indexer backfill, `_cmd_verify`, and the
 their pin is membership plus the exact call count, not a separate behavioural
 test.
 
-⛔ #13331 CHANGED THIS MAP. `EventAPI._emit`, `ConversationMiner._emit_event`
-and `TortoiseSDK._emit_event` no longer hold an `.apply` of their own: the
-append, the record projection and the fold are ONE call
-(`tortoise/live_write.py::write`), classified `chokepoint` below. The two former
-`journal-first-door` / `journal-first-own-envelope` entries were therefore
-**removed, not re-counted** — their sites are gone, and the SDK's fold half is
-still `_apply_and_journal`. The map tracks the fold SITES, so a door that stops
-folding is no longer a door.
+⛔ #13331 CHANGED THIS MAP. `EventAPI._emit` and `ConversationMiner._emit_event`
+no longer hold an `.apply` of their own: the append, the record projection and
+the fold are ONE call (`tortoise/live_write.py::write`), classified `chokepoint`
+below. The two former `journal-first-door` / `journal-first-own-envelope` entries
+were therefore **removed, not re-counted** — their sites are gone. (The SDK's
+`_emit_event` never held one — it has always delegated — and its fold half is
+still `_apply_and_journal`, which stays in the map. Naming it above as a
+"no longer" would be the same overclaim the review rounds in this file's header
+catalogued.) The map tracks the fold SITES, so a door that stops folding is no
+longer a door — which means those two directions are no longer covered HERE,
+and are pinned instead by
+`test_9078_record_written_by_production_path.py::test_only_the_shipped_package_can_satisfy_the_wiring_gate`,
+which asserts `api.py` and `mining.py` both reach the seam through
+`live_write.write(`.
 
 The six remaining doors, and what this lane did with each:
 
@@ -972,13 +978,20 @@ def test_indexer_backfill_with_sdk_reaches_the_journal(sdk_with_journal):
 
 
 def test_mining_emit_is_journal_first():
-    """The miner's door is journal-first — through the ONE chokepoint (#13331).
+    """The miner's door is journal-first — this pins the ORDER, not the routing.
 
     It used to hold its own `api.log.append(record)` + `api.projection.apply(record)`
     pair and this test pinned that pair's ORDER by observation alone. It now
-    hands both to `tortoise/live_write.py::write`, so the order it observes is
-    the chokepoint's, not a convention this door repeats — the stronger claim.
-    FAILS IF that order is swapped (append after fold, or either dropped)."""
+    hands both to `tortoise/live_write.py::write` (#13331), and this test still
+    pins the order it OBSERVES — nothing more. ⛔ It must not claim more: the
+    doubles below are duck-typed, so a miner reverted to its own direct
+    append+apply pair keeps this assertion GREEN (measured, not assumed). The
+    routing is pinned where it can be — by
+    `test_every_apply_call_site_is_classified` in this file (a re-appearing
+    `.apply` in `mining.py` is unclassified, so the map reds) and by
+    `test_9078_record_written_by_production_path.py::test_only_the_shipped_package_can_satisfy_the_wiring_gate`
+    (asserts `live_write.write(` in `mining.py`).
+    FAILS IF the observed order is swapped (append after fold, or either dropped)."""
     from tortoise.mining import ConversationMiner
 
     order: list[str] = []
