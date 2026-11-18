@@ -2526,16 +2526,28 @@ about today rather than by the one that agrees.
 attributed the ≈58 % pricing to **§12.1b** (`"§12.1b, which prices the two refused queryNodes round trips at ≈58 %…"`).
 `git show origin/main:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returns exactly **one** hit — §14.3
 V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that ≈58 % of the unindexed read's
-store time was two REFUSED queryNodes round trips"* — and §12.1b (`:1080–1168`) carries the `16.96 / 13.40 / 4.97 ms`
-pair with **no** round-trip pricing. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which
+store time was two REFUSED queryNodes round trips"* — and §12.1b (*"Where the vectors actually sit"*) carries the
+`16.96 / 13.40 / 4.97 ms` pair with **no** round-trip pricing. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which
 is where it is measured. The correction moves a citation, not a number.
 
 **⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
-as **§12.2**'s. The paragraph is inside **§12.1c** (`### 12.1c ⭐ DECISION (RESOLVED 2026-11-07)` at `:1169`), and
-§12.2 — *the lever is "what gets an embedding"* — begins at `:1250`; the DECIDED block that follows the paragraph is
-§12.1c's too. This entry states the measured location rather than propagating the issue's, because a changelog entry
+as **§12.2**'s. The paragraph is inside **§12.1c** — `### 12.1c ⭐ DECISION (RESOLVED 2026-11-07) — should the vector
+index live in FalkorDB at all?` — and §12.2 is a different section, `### 12.2 ⇒ The lever is "what gets an embedding"`;
+the DECIDED block that follows the paragraph is §12.1c's too. This entry states the measured location rather than propagating the issue's, because a changelog entry
 whose section number sends a reader to an unrelated lever is the one thing it exists to prevent. The issue carries a
 comment recording the correction.
+
+**⚠️ And every location above is cited by heading NAME, not by line number — a review finding, and the fix for its
+root.** Earlier revisions of this entry cited `:1169`, `:1244`, `:1206–1211`, then `:1250` and `:1213–1217`. **Every one
+of those was correct when written, and every one went stale inside this single PR**, because each later commit added
+lines above them: one revision's `:1244` came to point at §12.1d's *"the index earns very little today"* item — a
+LATENCY paragraph, in the entry whose whole purpose is to establish that §12.2 is not the latency section — and another's
+ledger range came to start inside this PR's own new text while stopping a line before the clause it named. ⛔ **The
+citation guards were green through all of it**, because they check line PRESENCE and say so
+(`tests/test_docs_citation_refs.py`: *"This is line PRESENCE, not semantic correctness"*), so a passing guard was never
+evidence here. The rule this repo already records is the fix — *"assertions by NAME — never by line number, and never by
+row ordinal. Both go stale the same way"* (`docs/architecture/S2-DECISION-SEAM.md`) — and it is what this entry now
+does.
 
 **⚠️ And the pre-removal readings are now labelled as such — a review finding, fixed before merge.** The first landed
 version said the app path *"pays"* the `queryNodes` round trips, present tense, and concluded *"both slower than the
@@ -2561,7 +2573,8 @@ than on one of them as it was.
 (provisioned, unevictable RAM for a row the record already holds, §12.1a / §14.3 V1) and on the **size dependence**,
 and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
 sentence immediately below the changed paragraph was itself revised on `main` by `#13435` in the same window (it now
-says *“held for a row the record already has”* and carries the two-population clause, `:1213–1217`), and this
+says *“held for a row the record already has”* and carries the two-population clause — the paragraph opening
+*"What holds at EVERY size is the ledger rather than the latency"*), and this
 rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
 ledger/sequencing conclusion are what this entry claims survived; nothing here re-states the neighbouring sentence as
 though it were unchanged. No decision was reopened, no figure was retired, and nothing here authorises removal — the
