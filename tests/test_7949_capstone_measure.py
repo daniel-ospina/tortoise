@@ -6768,9 +6768,19 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the invariant that would have caught the defect: a number in the `is at`/`measures` slot
     # belongs to THIS head, and another head's value is stated with that head named, OUTSIDE
     # the slot the resolver reads.
-    _honours_slot_on_another_head = re.findall(
-        r"`_honours: dict\[str, frozenset\[str\]\](?: = \{)?` (?:is at|measures) `:\d+` at the "
-        r"(?:MERGE|branch|PRE-PR) head", _d5)
+    # ⛔ THE QUALIFIER IS MATCHED BY POSITION, NOT BY AN ENUMERATION (#13489 review, P2 —
+    # MEASURED). The first cut of this arm listed the capitalised spellings it expected
+    # (`MERGE|branch|PRE-PR`) and was therefore defeated by a LOWER-CASED one: with the D5
+    # sentence rewritten to `… is at `:22247` at the merge head …` every arm stayed GREEN
+    # while the sentence still put another head's line in the slot the resolver reads —
+    # the exact invariant the comment above claims this arm enforces. The qualifier is
+    # whatever FOLLOWS the slot, so it is captured and judged, never predicted.
+    _honours_slots = re.findall(
+        r"`_honours: dict\[str, frozenset\[str\]\](?: = \{)?` (?:is at|measures) `:\d+`"
+        r"(?:\s*(?:at|in)\s+([^,;()]{0,40}))?", _d5)
+    _honours_slot_on_another_head = [
+        _q.strip() for _q in _honours_slots
+        if _q.strip() and _q.strip() not in ("THIS head", "this head", "here")]
     assert not _honours_slot_on_another_head, (
         "05-verify.md D5 puts an `_honours` line number in the `is at`/`measures` slot and "
         f"labels it with a head that is not this tree ({_honours_slot_on_another_head!r}) — a "
@@ -6778,17 +6788,25 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "head (`at the MERGE head `2584a86ec1` the same definition sits at `:20236`), never "
         "in the slot the resolver reads")
     # …and that other head's value is pinned WITH its head, so the re-wording cannot quietly
-    # drop the measurement it was re-worded to keep. `:20236` is the MERGE head's own value
-    # (`git show 2584a86ec1:tortoise/sdk.py | grep -n '_honours: dict'` -> 20236) while at THIS
-    # head `:20236` is an unrelated line — exactly why the number may not be carried across.
+    # drop the value it was re-worded to keep. ⛔ WHAT THIS ARM CAN AND CANNOT SAY (#13489
+    # review, P1 — MEASURED): `:20236` is the value that head's record carries, and it is
+    # QUOTED HISTORY, not a re-measurement — `2584a86ec1` is ABSENT from this box
+    # (`git cat-file -t 2584a86ec1` -> `fatal: Not a valid object name`), so neither this
+    # arm nor a reader can re-open it. An earlier version of this message told the reader to
+    # run `git show 2584a86ec1:tortoise/sdk.py | grep -n '_honours: dict'`, which CANNOT RUN
+    # here, and the D5 clause beside it claimed the object WAS present and the number
+    # "measured rather than inherited" — a checkable sentence that a single `git cat-file -t`
+    # refutes. The arm therefore asserts only what it can: the number is stated WITH that
+    # head and stays outside the slot the resolver reads.
     _honours_merge_head_value = re.findall(
         r"at the MERGE head `2584a86ec1`[^(){]{0,80}`:(\d+)`", _d5)
     assert _honours_merge_head_value == ["20236"], (
         "05-verify.md D5 should state the MERGE head `2584a86ec1`'s own `_honours` line "
-        "(`:20236`, measured with `git show 2584a86ec1:tortoise/sdk.py | grep -n "
-        "'_honours: dict'`) immediately after naming that head, and this reads "
-        f"{_honours_merge_head_value!r} — re-derive it at that head rather than carrying this "
-        "head's number into it")
+        "(`:20236`) immediately after naming that head, and this reads "
+        f"{_honours_merge_head_value!r} — that value is quoted history with its head (the "
+        "object is not in a fresh checkout, so it cannot be re-measured here); if it moves, "
+        "correct it in the same commit that changes the record, not by carrying this head's "
+        "number into it")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3, RE-DERIVED for `#13363`).
     # The sentence cites `hosted_api.py:15225-15302`, and the END of that range is a BLANK
