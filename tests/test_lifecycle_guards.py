@@ -168,13 +168,19 @@ def _operator_edges(sdk) -> int:
 # ── the previously-divergent statuses (divergence #1, exact repros) ─────
 
 def test_status_outdated_could_not_be_re_superseded(sdk):
-    # `outdated` is in POINT_STATUS_VALUES but was NOT in the pre-#2498 tuple.
+    # `outdated` is NOT a write word: `POINT_STATUS_VALUES` has been the FOUR-word
+    # `_LIFECYCLE_STATUS_VALUES` since `#11824` S0 (draft/live/deprecated/superseded),
+    # and `read_caller_status` refuses `outdated` with a repair. What this case drives
+    # is a LEGACY row that still carries the word, and asserts the read path treats it
+    # as terminal (it is in `live.TERMINAL_STATUS_VALUES`).
     with pytest.raises(ValueError, match="already terminal"):
         sdk.supersede_point(_point(sdk, "outdated"), _point(sdk))
 
 
 def test_status_deprecated_could_not_be_re_retracted(sdk):
-    # `deprecated` is legacy write-only but terminal on every read surface.
+    # `deprecated` is a WRITE word since `#11824` S0 (`live.py`'s note records the
+    # reversal: pre-S0 it was read-only terminal) and is terminal on every read
+    # surface, so re-retracting such a row must be refused.
     with pytest.raises(ValueError, match="already terminal"):
         sdk.retract_point(_point(sdk, "deprecated"))
 
