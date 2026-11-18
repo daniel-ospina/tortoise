@@ -47,10 +47,19 @@ directly callable, and the remaining doors are still open (documented, not
 fixed). A non-projection `.apply` must be declared as `not-a-projection`.
 Doors with a
 reversibility-risky reason carry a dedicated pin: the connector `ingest` class,
-the two connector webhooks, the indexer backfill, mining, `_cmd_verify`, and the
+the two connector webhooks, the indexer backfill, `_cmd_verify`, and the
 `_create_entity` deviation. The **replay** sites are carried by the map itself —
 their pin is membership plus the exact call count, not a separate behavioural
 test.
+
+⛔ #13331 CHANGED THIS MAP. `EventAPI._emit`, `ConversationMiner._emit_event`
+and `TortoiseSDK._emit_event` no longer hold an `.apply` of their own: the
+append, the record projection and the fold are ONE call
+(`tortoise/live_write.py::write`), classified `chokepoint` below. The two former
+`journal-first-door` / `journal-first-own-envelope` entries were therefore
+**removed, not re-counted** — their sites are gone, and the SDK's fold half is
+still `_apply_and_journal`. The map tracks the fold SITES, so a door that stops
+folding is no longer a door.
 
 The six remaining doors, and what this lane did with each:
 
@@ -60,7 +69,8 @@ door                    why it cannot route today                    disposition
 ``sdk.py::_doc_write``  it could — the record is built pre-fold     **CLOSED** (journal-first)
 ``indexer`` backfill    production passes ``sdk=``; the ``None``     **DOCUMENTED** (test seam)
                         arm is a test helper's seam
-``mining.py``           it already appends before it folds         **DOCUMENTED** (order-compliant)
+``mining.py``           #13331: it folds through the one chokepoint  **CLOSED** (one chokepoint)
+                        (`live_write.write`), not a bare `.apply`
 ``connectors/github``   ``ingest(proj)`` holds no journal handle     **DOCUMENTED** (no journal handle)
 ``connectors/linear``   same                                        **DOCUMENTED**
 ``connectors/slack``    same                                        **DOCUMENTED**
@@ -132,13 +142,19 @@ _APPLY_VALUE_USES: dict[tuple[str, str], tuple[str, int]] = {
 #: number of calls in that function. `(file, enclosing-qualname)` → (class, n).
 _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # ── JOURNAL-FIRST DOORS — each appends before it folds ───────────────
-    # `EventAPI._emit`: `self.log.append(event)` precedes `projection.apply`.
-    # It is a journal-first door in its OWN right — the contract names it
-    # alongside `_apply_and_journal` — and it does NOT route through that
-    # method (so it is not labelled `chokepoint`).
-    ("tortoise/api.py", "EventAPI._emit"): ("journal-first-door", 1),
-    # `TortoiseSDK._apply_and_journal`: the CHOKEPOINT itself. The append is the
-    # commit point; a failed append returns before the fold.
+    # #13331: the ONE write chokepoint. `tortoise/live_write.py::write` performs
+    # append → record projection → cache fold as one call, in that order, and it
+    # is where `EventAPI._emit`, `ConversationMiner._emit_event` and
+    # `TortoiseSDK._emit_event` now fold WITHOUT holding an `.apply` of their
+    # own — which is why those three no longer appear in this map as fold sites
+    # (the SDK door passes `fold=False` and keeps folding through
+    # `_apply_and_journal` below, and the other two pass their projection in).
+    # The append is the commit point: `write` raises out of a failed append
+    # before the record or the fold is reached.
+    ("tortoise/live_write.py", "write"): ("chokepoint", 1),
+    # `TortoiseSDK._apply_and_journal`: the SDK's OWN chokepoint (the fold half
+    # the SDK door keeps). The append is the commit point; a failed append
+    # returns before the fold.
     ("tortoise/sdk.py", "TortoiseSDK._apply_and_journal"): ("chokepoint", 1),
 
     # ── CLOSED BY THIS LANE: journal-first, then the fold ─────────────────
@@ -178,14 +194,6 @@ _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # (`test_indexer_production_backfill_route_passes_an_sdk`).
     ("tortoise/indexer/github_indexer.py", "GitHubIndexer.backfill_legacy_closed"):
         ("exempt:test-seam", 1),
-
-    # ── EXEMPT: ALREADY JOURNAL-FIRST, ITS OWN ENVELOPE ───────────────────
-    # `ConversationMiner._emit_event` does `api.log.append(record)` BEFORE
-    # `api.projection.apply(record)` — the contract's ORDER holds. It is not
-    # routed through `_emit_event` because its envelope differs (`version`,
-    # nested `event`), and re-shaping it would change the journal line.
-    ("tortoise/mining.py", "ConversationMiner._emit_event"):
-        ("exempt:journal-first-own-envelope", 1),
 
     # ── EXEMPT: NO JOURNAL HANDLE — the connector `ingest` class ──────────
     # (the two WEBHOOK sites below are exempt for a different reason:
