@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-P1-1795013874-p1320166-959b050f",
+  "_sha": "1136e92e2a8b75734cab1dca6d0e5567fc20f0fa",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/P1.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/11609-p1-create-arms"
+    },
+    {
+      "kind": "sha",
+      "value": "1cae640076fc4f4f462f6520a6a0fca031ccc888"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/.worktrees/P1"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "duration_s": 7212,
+  "ended_at": 1795021086,
+  "exit_code": 143,
+  "heartbeat_at": 1795021086,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-P1-1795013874-p1320166-959b050f",
+  "lease_until": 1795028886,
+  "pid": 1320166,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795013874,
+  "state": "FAILED",
+  "tag": "P1",
+  "worktree": "/home/cmux/.worktrees/P1"
+}
