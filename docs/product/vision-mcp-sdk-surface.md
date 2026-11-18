@@ -148,9 +148,9 @@ name answering, which is why the served count RISES while the advertised count f
 Composed at this head with lane B (#4282's WRITE/MUTATE wave, which landed on `main` first), the
 same population reads **46 live + 62 retired shims = 108 served** — measured off the merged
 registry, not added by hand (`tools/bridge_table.py --check` reports 108 registry tools). The
-door-retirement waves move the SPLIT only: seven advertised doors left the surface in
-#13052's wave and two more in #11609 lane P1, and each kept answering on its retired name, so
-the served population is unchanged at 108 while the split goes 48/60 → 46/62.
+door-retirement waves move the SPLIT only: seven advertised doors left the surface in #13052's
+wave and two more in #11609 lane P1, and each kept answering on its retired name, so the
+served population is unchanged at 108 while the split goes 48/60 → 46/62.
 
 The **Retired** row fell **9 → 4** in #4282 **Phase 3.2** (2026-11-04): five of the nine were
 DELETED from the served registry rather than retired into nothing, because the owner's
