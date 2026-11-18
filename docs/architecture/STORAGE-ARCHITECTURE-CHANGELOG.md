@@ -2499,10 +2499,10 @@ that distinction while this changelog still asserted it, and left the sites abov
 **while `#13220` is in flight, nothing may be removed and nothing may stop being written.** No measurement was
 re-read and no figure was retired.
 
-## §12.1c's latency verdict now states all THREE readings of the same unindexed read, and the size dependence carries the conclusion rather than one number (`#13428`, 2026-11-18)
+## §12.1c's latency verdict now states EVERY reading of the same unindexed read — pre-removal and post-removal — and the size dependence carries the conclusion rather than one number (`#13428`, 2026-11-18)
 
-**What was wrong.** §12.1c's comparison paragraph settled the latency question from **one** of the three readings
-the document holds for **the same unindexed `:Object` read**, and that one is the cheapest of the three:
+**What was wrong.** §12.1c's comparison paragraph settled the latency question from **one** of the readings the
+document holds for **the same unindexed `:Object` read**, and that one is the cheapest of them:
 
 | reading | the unindexed `:Object` read | section |
 |---|---|---|
@@ -2545,9 +2545,12 @@ hop"* from that. §14.3 V3's own row says the opposite: *"≈58 % of the unindex
 §5 measure what that read does once the round trips are gone: **34.78 ms → 13.26 ms p50** at 1,000 rows (−62 %) —
 *inside* the ~10–15 ms hop band the paragraph compares against. So a sentence citing the removal's cost as the
 current app-path number would have made the paragraph's own claim ("the readings disagree, so no single number
-decides it") rest on a defect that no longer exists. The three readings are **kept with their dates**, the two
-app-path ones are marked **pre-removal**, the post-removal reading is stated, and the conclusion is unchanged — and
-it now rests on the readings as they are rather than on one of them as it was.
+decides it") rest on a defect that no longer exists. The readings are **kept with their dates**, the two app-path
+ones are marked **pre-removal**, the post-removal reading is stated — **and so is its own size dependence**, because a
+conclusion that rests on the *pre-removal* pair is the same error one level down: the paired artifacts give the
+post-removal read as **13.26 ms → 47.47 ms** from 1,000 to 8,000 rows (−62 % / −28 % against each arm's own pre-removal
+pair), so the SIZE argument now holds on the shipped series as well as on the single-arm `34.45 → 56.88 ms` one. The
+conclusion is unchanged, and it now rests on the readings as they are rather than on one of them as it was.
 
 **What did NOT change.** The argument for option 2 is untouched **by this change**: it rests on the **ledger**
 (provisioned, unevictable RAM for a row the record already holds, §12.1a / §14.3 V1) and on the **size dependence**,

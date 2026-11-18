@@ -1202,10 +1202,11 @@ the app's own path was **16.96 ms p50** in the 2026-09-24 census (§12.1b) and *
 634.50 ms p99** under load, in the 2026-11-17 re-read (`#13108`, §14.3 V3) — both *slower* than the hop. ⚠️ **Those two
 app-path readings are PRE-REMOVAL, and the gap is priced: §14.3 V3 attributes ≈58 % of that read's store time to two
 REFUSED `queryNodes` round trips, which `#13108` removed.** With them gone the paired read drops **34.78 ms → 13.26 ms
-p50** at 1,000 rows (`docs/research/2026-11-17-13108-dense-leg/research-brief.md` §5) — *inside* the hop's band — so today's app-path number does not settle it
-either way. ⇒ **What makes the case for the index is the
-SIZE dependence rather than today's number** (`21.04 ms → 21.48 ms` from 1,000 to 8,000 rows indexed, `34.45 ms →
-56.88 ms` scanned — that re-read's own rows). What holds at EVERY
+p50** at 1,000 rows (`docs/research/2026-11-17-13108-dense-leg/research-brief.md` §5) — *inside* the hop's band — so
+today's app-path number does not settle it either way — while that same paired read still grows to **47.47 ms at 8,000
+rows** (−28 % against its own pre-removal arm, same artifacts). ⇒ **What makes the case for the index is the SIZE
+dependence rather than today's number** (`21.04 ms → 21.48 ms` from 1,000 to 8,000 rows indexed, `34.45 ms → 56.88 ms`
+scanned in that re-read's single-arm rows, and `13.26 ms → 47.47 ms` on its paired post-removal read). What holds at EVERY
 size is the ledger rather than the latency: the graph-side copy is bytes on provisioned, unevictable RAM held for a row
 the record already has — ⚠️ **and the record's vector column arrives EMPTY, so the graph copy is today the only copy of
 that vector for the rows written before the column could be filled — §12.1b's two-population state, not one store
