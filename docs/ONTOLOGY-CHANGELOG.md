@@ -58,8 +58,8 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > **What did NOT change:** every other §3 statement, the §4 metadata rows (which already described
 > `confidence` as the posterior mean — they were right, this sentence disagreed with them), and every
 > stored value. Whether entity declared priors should exist at all is tracked by **no open issue** —
-> the code cites #9063, which closed COMPLETED on 2026-10-20 and is about the calibration gate, not
-> about entity declared priors. Recorded here so silence is not read as a decision.
+> the code cites #9063 (`sdk.py:646`), which *raised* this question, reserved it to the owner, and closed
+> COMPLETED on 2026-10-20 **without deciding it**. Recorded here so silence is not read as a decision.
 >
 > **Residue, named not absorbed:** the audit also measured that an ended node still **votes** when it is an
 > operator *input* (`ep.py:2258` reads `status` + the `outdated` flag only, while the predicate it mirrors
