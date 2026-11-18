@@ -304,7 +304,8 @@ def _split_comment(raw: str) -> str:
         # is a quote and every ` #` sits at `i >= 1`, so
         # `len(raw[:i].rstrip()) - 1` can never be `-1`: the loop below cannot match
         # and falls through to the same `return raw`. Deleting this branch leaves
-        # the file at `2 failed, 14 passed` (measured), so no test CAN pin it. The
+        # the file at `2 failed, 15 passed` (re-measured at `38df4e93a4`: the 2
+        # pre-existing absence reds and nothing else), so no test CAN pin it. The
         # caller is unaffected either way — `_quoted_style` re-runs the same parity
         # scan and reports `malformed` for a value with no close, rather than
         # trusting `endswith`, since a body whose last character is an ESCAPED
@@ -1381,11 +1382,15 @@ def test_an_unlexable_key_is_what_makes_the_fail_open_a_RED(
     `measured`, (D) has nothing to complain about, and a value YAML truncates
     from 14 characters to 2 sails through green.
 
-    Non-vacuity, measured at this head: deleting
-    ``declared |= {(rel, k) for k in AFFILIATION_KEYS if k in parsed}`` leaves
-    this file at ``2 failed, 14 passed`` — the two pre-existing absence reds and
-    NOTHING else — while the arm goes GREEN on the case below. That is why the
-    pin exists rather than a comment.
+    Non-vacuity, measured at `38df4e93a4`: deleting
+    ``declared |= {(rel, k) for k in AFFILIATION_KEYS if k in parsed}`` takes the
+    file from `2 failed, 15 passed` to ``3 failed, 14 passed`` — the two
+    pre-existing absence reds AND this pin, while the arm goes GREEN on the case
+    below. That is why the pin exists rather than a comment. (Before this pin
+    existed, the same deletion left the file at `2 failed, 14 passed` — "the
+    absence reds and NOTHING else". That figure is superseded by this test's own
+    arrival: quoting it here would say the deletion is unnoticed by a pin added
+    precisely to notice it.)
     """
 
     def red(body: str) -> str:

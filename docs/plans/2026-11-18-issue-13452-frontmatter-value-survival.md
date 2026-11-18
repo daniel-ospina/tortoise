@@ -208,18 +208,19 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
    the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
    failure output, not asserted.**
-2. **Fixed tree:** `2 failed, 14 passed` **at this head** — `16 collected`, the 2 failures being the
-   ones named below; the file carries exactly **6** tests this PR added (`comm` on the two files'
-   `^def test_` lines against `origin/main`), and each count is tied to the head that produced it,
-   because tests are appended to this file every round:
+2. **Fixed tree:** `2 failed, 15 passed` **at this head (`38df4e93a4`)** — `17 collected`, the 2
+   failures being the ones named below; the file carries exactly **7** tests this PR added (`comm` on
+   the two files' `^def test_` lines against `origin/main`: 15 vs main's 8), and each count is tied to
+   the head that produced it, because tests are appended to this file every round:
    `8 passed` on `main` (`f6793959a2`), `9 passed` at the rebased `36700a89b7` (the extra pass is
    this branch's OWN first pin, `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` —
    `comm` on the two `^def test_` lists against `origin/main` names exactly that one test, and
    `#13485`'s `test_a_wholly_commented_value_gets_ONE_TRUE_diagnosis` is already inside the `8`, so
    it cannot be the extra pass), `10 passed` once the `''`-parity pin
    landed, `11 passed` once the `"`-backslash pin landed, `12 passed` once the (C)-ordering pin
-   landed, `13 passed` once the never-closing/`malformed` pin landed in `b0940c7a4f`, and
-   `14 passed` once the verdict-split remedy pin landed. The 2 are the
+   landed, `13 passed` once the never-closing/`malformed` pin landed in `b0940c7a4f`,
+   `14 passed` once the verdict-split remedy pin landed, and `15 passed` once the
+   unlexable-key fail-open pin landed in `38df4e93a4`. The 2 are the
    pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the evidence bundles
    `docs/evidence/13038-capstone/README.md` **+** `docs/evidence/13436-write-path-costs/README.md` —
@@ -578,14 +579,16 @@ measured at `ae275460df93` by the fresh-context review and re-measured at `1c956
 this note covers; every later round moves both numbers again):
 
 - *"contains exactly one commit"* — false at this head: `git log --oneline origin/main..HEAD | wc -l`
-  = **27** at `1c956076`, and **28** once this round's docstring commit is added. The sentence was
+  = **27** at `1c956076`, **28** once that round's docstring commit was added, and **30** at
+  `38df4e93a4` (re-measured). The sentence was
   true when the body was written (the PR was rebased onto `main` as a
   single commit); the review rounds then appended the rest. A merger reading "exactly one commit"
-  against a 27-commit branch is being told something false about the diff's SHAPE, which is why this
+  against a 30-commit branch is being told something false about the diff's SHAPE, which is why this
   is recorded rather than left implicit in §7's moving-count rationale.
 - *"`pytest …` → **8 passed, 2 failed**"* — stale for the same reason §7 item 2 gives: tests are
   appended to this file every round. At `ae275460df93` the same command reported **13 passed, 2
-  failed** (`15 collected`) and at `1c956076` it reports **14 passed, 2 failed** (`16 collected`), the
+  failed** (`15 collected`), at `1c956076` **14 passed, 2 failed** (`16 collected`), and at
+  `38df4e93a4` **15 passed, 2 failed** (`17 collected`; re-measured), the
   2 being the pre-existing absence reds named above.
 
 The body is **not** edited — it carries the review attestation the gate reads, and editing it wipes
@@ -639,12 +642,15 @@ behaviour changes), so the tests they describe are untouched. `test_a_never_clos
 claimed *"Nothing else in this file reds"*, falsified by the whole pre-fix-helper replay reddening
 TWO of this PR's pins; `test_a_double_quoted_backslash_escape…` claimed deleting the backslash skip
 *"leaves the rest of this file GREEN"*, and twelve lines above it the same docstring measures the
-sibling reddening alongside. Each now names the mutant and the current figure, re-measured here one
+sibling reddening alongside. Each now names the mutant and the current figure, re-measured one
 mutant at a time with the tree restored between runs:
-`backslash skip deleted` → `4 failed, 12 passed`; `whole pre-fix helper replayed` → `4 failed, 12
-passed` (the 2 pre-existing absence reds plus the 2 pins). The counts moved `11 → 12` because the
-verdict-split round appended a 14th test; a stale count in the very paragraph that tells the reader
-not to trust stale counts is the failure mode §7 item 2 exists for.
+`backslash skip deleted` → `4 failed, 12 passed` at `1c956076` / `4 failed, 13 passed` at
+`38df4e93a4` (re-measured; the pass count moved because a 17th test was appended — the same two
+pins are the two extra failures either way); `whole pre-fix helper replayed` → `4 failed, 12
+passed`, measured at `1c956076` and not re-run at the later head. The counts moved `11 → 12 → 13`
+because the verdict-split and unlexable-key rounds appended a 14th and a 17th test; a stale count in
+the very paragraph that tells the reader not to trust stale counts is the failure mode §7 item 2
+exists for.
 
 **Recorded, not fixed — an affiliation SEQUENCE followed by an indented COMMENT line is a PRE-EXISTING false block whose printed remedy cannot clear it.** Found by the fourth fresh-context review and re-measured here. `aboutObjects:` / `- a, b` / `# note` (the comment on its own indented line, after the items) reds as `MULTI-LINE` with *"…a continuation line opening with `#` is silently swallowed; quote the whole value instead"*, yet `parse_frontmatter` reads the block **INTACT** (`['a, b']`) — and quoting the items (`- "a, b"`) reds with the IDENTICAL message, so the remedy the arm prints is one that cannot clear the red. `_values`' own docstring defines `sequence_multiline` as *"a sequence whose item is continued on a following indented line"*; a trailing comment is not a continuation, so the verdict is mis-classified as well as mis-worded. PRE-EXISTING — `main`'s arm produces the same text for the same file — so this PR neither causes nor clears it, and it is recorded here rather than fixed: clearing it means teaching the sequence scanner to skip a comment-only trailing line instead of marking the item `continued`, which is the same lexer-widening boundary as its siblings. Fails CLOSED, so it cannot ship a defect; §8 R2 used to claim this class was absent and now names it.
 
@@ -690,10 +696,11 @@ Measured at the post-rebase head:
   appended to this file, so cite it by name, not by line);
 - over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s
   truncation case still `broken`;
-- `main` at `f6793959a2` measures `2 failed, 8 passed` on this file; this head measures
-  `2 failed, 14 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
-  and this PR's own **six** pins (`''` parity, mid-body parity, `"` backslash, the (C) ordering,
-  the never-closing `malformed` pin, and the verdict-split remedy pin);
+- `main` at `f6793959a2` measures `2 failed, 8 passed` on this file; this head (`38df4e93a4`)
+  measures `2 failed, 15 passed` — the same 2 pre-existing absence reds, the same paths, plus
+  `#13485`'s test and this PR's own **seven** pins (`''` parity, mid-body parity, `"` backslash, the
+  (C) ordering, the never-closing `malformed` pin, the verdict-split remedy pin, and the
+  unlexable-key fail-open pin);
 - `test_docs_lint_baseline` + `test_docs_lint_gate` + `test_docs_citation_refs` → **106 passed**.
 
 One correction this rebase forced: the pre-existing absence red on the evidence bundles now names
