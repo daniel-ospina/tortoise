@@ -446,6 +446,19 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
         monkeypatch.setattr(TortoiseSDK, "_entity_identity_for",
                             lambda _self, _l, _n, explicit_id=None: "fixed-id",
                             raising=True)
+        # ⛔ The `object` arm resolves its target BEFORE the write (the #3590 adopt
+        # path), so `resolve_or_mint` is a SECOND identity-minting leg — the
+        # docstring's "identity minting" is two entry points, not one. It takes the
+        # live graph, so leaving it unstubbed made this case reach
+        # `entity_identity.py`'s `g.query` with the `g=None` below and raise
+        # `AttributeError: 'NoneType' object has no attribute 'query'` instead of
+        # measuring dispatch. `(None, True)` is the "no carrier, create it" answer,
+        # which is what a door creating a NEW entity is asking; `_create_entity`
+        # stays the measured seam.
+        from tortoise import entity_identity as _entity_identity
+        monkeypatch.setattr(_entity_identity, "resolve_or_mint",
+                            lambda _g, _label, _name, explicit_id=None: (None, True),
+                            raising=True)
         monkeypatch.setattr(TortoiseSDK, "_get_proj",
                             lambda _self: type("P", (), {"g": None})(), raising=True)
         monkeypatch.setattr(TortoiseSDK, "_nudge_candidates",
