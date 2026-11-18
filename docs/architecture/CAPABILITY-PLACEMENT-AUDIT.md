@@ -52,10 +52,10 @@ squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/
 ⚠️ **That is no longer true of EVERY cite below, and the honest fix is to name both heads rather than to
 pick one.** A later pass has re-derived a **named** set of addresses at `main`; they are enumerated in one
 place in this header (the sixteen, below, plus this revision's own group and the eight the `#13124` review
-found outside it) and they open at **`340d500491`**, the `main` this revision was integrated onto — `.py`
+found outside it) and they open at **`f462ad3acb`**, the `main` this revision was integrated onto — `.py`
 lines DID move under it (`#13290` re-derived the `search_engine.py` group), so the head is named here rather
 than inferred, and every entry below was re-opened AT IT. **The rule a reader applies is mechanical, and it
-is exact for the addresses IN that enumeration: an address in it opens at `main` `340d500491`.** ⛔ **There
+is exact for the addresses IN that enumeration: an address in it opens at `main` `f462ad3acb`.** ⛔ **There
 is no rule for an address OUTSIDE it — open the line, never infer its head.** Such an address was *written*
 at the pin `ccb49741b2ec`, and that is where
 the census read it; it is not a promise that the line still carries what the row quotes. `#13083` found
@@ -73,7 +73,7 @@ measurement of the pin's own remainder — a label its own population contradict
 this header assigns to `main` are counted in it. On any later head they
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
-**122 of this document's 214** `file:line` pairs name a different line at `main` `340d500491` — the same
+**122 of this document's 214** `file:line` pairs name a different line at `main` `f462ad3acb` — the same
 head the enumeration above names, so the figure and the list describe one comparison rather than two
 (counted as the
 unique `path.py:NNNN` pairs in this file after resolving **every** written path to the module it names
@@ -111,7 +111,7 @@ elsewhere in this document too. They had been advanced
 by a line delta rather than re-opened: the `search_engine.py` ones (`:3064`, `:4477-4481`, `:6352`) name
 lines that hold something else at **every** recent `main` head — no commit ever carried the FTS call at
 `:3064`, the walk at `:4477` or the operator leg at `:6352` — so the number was drifted forward, not
-read off. All sixteen were re-derived at `main` (`340d500491`) — ⚠️ **so they do NOT open at the pin
+read off. All sixteen were re-derived at `main` (`f462ad3acb`) — ⚠️ **so they do NOT open at the pin
 above** — and each is named here by the cite it became, with its
 file — `search_engine.py` FTS
 `:3098`, walk `:4780-4784`, operator leg `:6667`, subject probe `:7025-7028` (plus its `Event` leg `:7028`, and
@@ -123,7 +123,7 @@ above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
 `cache_projection.py` `:2433`, `:2490`, `:2653-2660`, `:2653-2654`, `:2663-2665`, `:2715`, `:3735` and
 `projection/entities.py` `:5646` — **eight addresses that open at `main` and not at the pin** (measured,
-`git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `340d500491`: the pin's `:3735` is
+`git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `f462ad3acb`: the pin's `:3735` is
 `for prop in sorted(STORED_VECTOR_PROPS):` — the `MERGE (n:…) SET n += $props` this document quotes is the
 pin's `:3732` — and `:3735` carries the `cache_tier` arm at `main`; the pin's `:2715` is
 `if k not in tail_denied})` — the `tail_denied = forbidden | {` this document quotes is the pin's `:2710` —
@@ -152,7 +152,7 @@ UNDECLARED head is resolved by OPENING it, never by inference. If the
 line does not carry what the row quotes, re-derive the cite from the row's own quoted fragment
 (`grep -n '<fragment>' <path>`) rather than moving its head by a guess. That is the enumeration the rule at
 the top of this header sends the reader to.
-⚠️ **The figure counts the file it is written in, so every revision moves it — and it is MEASURED over this file as it now stands, not carried forward**: the form this paragraph replaced quoted `111 of 217`, and `111` reproduces over NO edition of this file — measuring the edition that carried it (`295c26ebc8`) by this header's own rule gives 214 unique pairs, not 111 — so it is recorded as RETIRED, not as history. The figures here are **326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable**, at `main` `340d500491`, re-measured against this file rather than carried forward by arithmetic from an earlier edition. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
+⚠️ **The figure counts the file it is written in, so every revision moves it — and it is MEASURED over this file as it now stands, not carried forward**: the form this paragraph replaced quoted `111 of 217`, and `111` reproduces over NO edition of this file — measuring the edition that carried it (`295c26ebc8`) by this header's own rule gives 214 unique pairs, not 111 — so it is recorded as RETIRED, not as history. The figures here are **326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable**, at `main` `f462ad3acb`, re-measured against this file rather than carried forward by arithmetic from an earlier edition. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of this header) instead of enumerated here.
@@ -185,7 +185,7 @@ nothing else; row 15 gives bare module names beside `hosted_api.py:32965` and on
 five are *at risk* of drifting silently: no symbol will be there to re-find — for them the number IS the
 citation — so an insert above a cited site is undetectable from the row alone. The risk has already begun
 to bite: of the line-numbered cites in these five rows, **ten no longer name the same line at `main`**
-(re-measured at `main` `340d500491`, the head this header's own lists are written at — the TEN stands; the head it was counted at did not, and the `111-of-217` it used to defer to has been retired) — row 15's `hosted_api.py:32965`, whose
+(re-measured at `main` `f462ad3acb`, the head this header's own lists are written at — the TEN stands; the head it was counted at did not, and the `111-of-217` it used to defer to has been retired) — row 15's `hosted_api.py:32965`, whose
 `MERGE (p:PackInstall …)` is at `:33583` there, and 9 of row 18's 16 — while rows 10, 11 and 14 and row
 15's `pack_manifest_store.py:467` still do. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
 Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
@@ -623,7 +623,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 14 | `Point.mentions` (the held-phrase JSON tail prop, `projection/entities.py:1206`) | `sdk.py:27210` (`get_point` — *"Returns dict of all properties"*, the whole-node read); `projection/__init__.py:22118-22120` — a **write-only** fold (the branch is computed in Python at `:22109` from the journal payload, so the `SET` reads no node; `none`); `sdk.py:18841` is **not** a reader of the stored shape — it reads the extractor PAYLOAD dict, `pt` bound at `:18769` | **no** | **`record_only`** ⛔ gated — the two test pins refuse the declaration (§5.1) | nothing walks, filters or indexes it, and it is **not** an embedding input (`sdk.py:15975` composes from `quote`/`content` only) — but the move is blocked |
 
 ⚠️ **Row 13 has now been corrected TWICE, in opposite directions, and the second correction is the one to remember.** Draft one said "no Cypher reader names it" — false. This revision found the OPPOSITE error: the row carried `✅ already shipped`, which reads as "the shape has moved", while in fact the only thing that shipped is a **projection DENY** (`cache_projection.py:2656-2660` is its own comment; the executable deny is `:2663-2665`, and the doors that actually refuse the value are `:2747-2749` (tail) and `:2755` (column) — a `+5` on this family. ⛔ The `cache_projection.py` deltas are NOT uniform, so do not extrapolate one: `+3` above the ~2100 insert (`:2080-2084`), `+5` below it (`:2433`, `:2490`, `:2653`, `:2665`, `:2715`, `:2747-2749`, `:2755`), and `:3735` re-derived on its own (+102). The `+3` block was applied to the `+5` family, which is the error this sentence exists to stop) — a decision NOT to put the value in the record. A deny is not a move: it leaves the byte in the graph, written by the live capture path (§3 row 13's writer column, and the 98 B the instrument measures). ⛔ **A lane reading "already shipped" would have skipped row 13 as done**; the honest state is `record_only` by capability, **unshipped** by mechanism, and the reason is §5.3's, not a missing census item.
-⚠️ **Row 13 has now been corrected THREE times, and the third is a count, not a verdict.** `three WRITERS` was one short: `hosted_api.py:22919` inside `_execute_commit_writes` (`:22731`) at `main` (`:22309`/`:22113` at the pin) writes the same episodic `:Source.summary` **unconditionally** (`s.title=$title, s.summary=$summary, … s.is_episodic=true`), so a lane removing the three named writers would leave it live; and `entities.py:5646`'s parent symbol was `_upsert_source`, which is `_upsert_document` (`:5301` at `main` `340d500491`; `:5282` at the pin `ccb49741b2ec`) — the line opened, the symbol did not, which is exactly the half that survives a drift (the header above). The reader column had the mirror defect: it cited `cache_projection.py:2656-2660`, five comment lines, for a READ that lives at `:2484-2490` (pin `2479-2485` plus this family's `+5`; `:2482-2488` is `+3` and lands on the previous check). Verdict, mechanism and the 98 B are unchanged.
+⚠️ **Row 13 has now been corrected THREE times, and the third is a count, not a verdict.** `three WRITERS` was one short: `hosted_api.py:22919` inside `_execute_commit_writes` (`:22731`) at `main` (`:22309`/`:22113` at the pin) writes the same episodic `:Source.summary` **unconditionally** (`s.title=$title, s.summary=$summary, … s.is_episodic=true`), so a lane removing the three named writers would leave it live; and `entities.py:5646`'s parent symbol was `_upsert_source`, which is `_upsert_document` (`:5301` at `main` `f462ad3acb`; `:5282` at the pin `ccb49741b2ec`) — the line opened, the symbol did not, which is exactly the half that survives a drift (the header above). The reader column had the mirror defect: it cited `cache_projection.py:2656-2660`, five comment lines, for a READ that lives at `:2484-2490` (pin `2479-2485` plus this family's `+5`; `:2482-2488` is `+3` and lands on the previous check). Verdict, mechanism and the 98 B are unchanged.
 
 ⚠️ **Rows 2b–2f and 5b were added by the `#13095` follow-up, and their absence was a real hole rather than a
 formatting one.** The table classified every *label* and left six *property families* in no row at all — the exact

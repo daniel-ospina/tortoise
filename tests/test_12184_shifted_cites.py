@@ -270,6 +270,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         "122 of this document's 214",
         "dedupes the 326 as-written spellings to 214 — 112",
         "326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable",
+        "f462ad3acb",
         "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
