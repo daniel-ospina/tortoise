@@ -121,18 +121,45 @@ every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODU
 * `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **142** files, while the tool
 reports 2,343 / 143. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
-ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
-example — a wrapped English sentence in ten (e.g. `oauth.py:1600`'s “limits match” / “(#329): preserve
-None”) and a wrapped Cypher example in three (`projection/__init__.py:1204`,
-`record_projection.py:4777`, `vector_write.py:495`). Enumerated, not inferred: that TWO-LINE predicate
-over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone finds 175, which is why
+ends on the verb whose next line opens the parenthesis) sit inside a comment or a docstring, so none
+is an executable statement — **ten** end an ENGLISH sentence that happens to use the word “match” or
+“merge” (e.g. `oauth.py`'s “limits match” / “(#329): preserve None”) and **three** end INSIDE a quoted
+Cypher statement that continues on the next line (`projection/__init__.py`, `record_projection.py`,
+`vector_write.py`). ⚠️ That ten/three split is a JUDGEMENT at the margin, not a measurement, and it is
+the one number here a reader cannot re-derive mechanically — it needs TWO margin calls, both in
+English prose whose wrapped continuation quotes a Cypher fragment:
+`embed_writer_register.py`'s “a vector carried by a MAP MERGE” / “(`SET n += $p` …)” AND
+`record_projection.py`'s SECOND cross-line match, “addresses the container with an INLINE property
+MATCH” / “(`(s:Session {id:$sid})`)”. So `record_projection.py` carries two of the 13, and either margin
+call can be argued the other way — which moves the split WITHOUT moving the 13. That is why no split is
+quoted as a fact anywhere else in this document: the
+measured
+part, and the part the argument rests on, is the count and the class — 13 cross-line matches in 10
+files, every one of them non-executable.
+Enumerated, not inferred — and ⛔ **BY COMMAND, never by
+citing `file:line` in this paragraph**: a line number written here rots on the next main-move, and one
+that sat here did exactly that — it was corrected once on `origin/main` and then restored, by a merge,
+to the stale value, where it pointed at a `#:` comment about `TAGGED` carrying no verb at all. That is
+why the three examples above name files and not lines: re-enumerate at your head by keeping only
+whole-text matches whose span contains a newline. That
+predicate over the same 297 files finds exactly 13 in 10 files — the verb-at-end-of-line scan alone
+finds 176 (`\b(MATCH|MERGE)[ \t]*$` per line, CASE-INSENSITIVE: `-io`, not `-o`, which gives 74 — an
+OVER-count either way, since most of those lines are not followed by a `(` at all), which is why
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
 which is why the tool's verb total is an upper bound.
-(A BARE case-sensitive `rg … tortoise/` gives 2,064 — that population includes `tortoise/test_*.py`
-and one `.ts` hook, so it is NOT the 2,061 the same predicate finds over the 297-file set above; `-i`
-without the exclusion gives 2,402. Both figures are stated with their population because that is why
-the number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
+(A BARE case-sensitive `rg` gives 2,064, and `-i` without the exclusion 2,402 — ⛔ both over
+`tortoise/` with **no type filter**, which is not the population this row is about and is why the
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 297
+`.py` files the same two predicates read **2,061** and **2,330**; with `-t py` and the test-module
+exclusion dropped they read **2,063** and **2,333**. The 69-occurrence 2,333→2,402 gap is entirely
+`*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
+`tortoise/pi-hooks/tortoise-capture.test.ts` 14, `tortoise/pi-hooks/store-sync.test.mjs` 3,
+`tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
+`tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and
+the population decides which. The CASE-SENSITIVE bare figure decomposes the same way, which is why it
+is not 2,061: 2,061 over the 297 files + 2 in `tortoise/test_*.py` + 1 in
+`tortoise/pi-hooks/tortoise-capture.ts` = 2,064.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
 the **= 1,569 on a door-call line** are both counts, not differences.⛔ The **residual** row is
@@ -401,14 +428,12 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where THESE numbers were cut:** `#13249`'s branch, merged with `origin/main` **`1d10fb3bf0`**, and
+**Where THESE numbers were cut:** `#13249`'s branch, merged with `origin/main` **`bf3a7b8e77`**, and
 re-derived from that merged tree — not by arithmetic on the markers. (The PINS and the `rg`
-reconciliations below were cut at that merge; **Appendix A was re-derived twice more** — at
-`origin/main` **`54682177bc`** in `04dddf4f`, and again at THIS head in `20961bdd99`, whose
-`_drop_org_acl_users` docstring edit moved `hosted_api.py` by +2 lines and shifted 61 `file:line`
-rows. The appendix is `file:line` rows, so any later edit that moves lines changes them while
-changing no count. A lane reproducing the appendix must use the HEAD the doc ships
-at, not `1d10fb3bf0`.) The branch converts the two
+reconciliations below were cut at that merge, and **Appendix A was re-derived again at this cut** —
+regenerated with `--markdown` and verified byte-identical to a fresh run at this head. The appendix
+is `file:line` rows, so any later edit that moves lines changes them while changing no count: measure
+it by diffing a fresh `--markdown` against the table, never by comparing totals.) The branch converts the two
 `public.graphs` reads in the org purge to `query_all`, and `query_all` is not a `DOORS` entry
 (`tools/cypher_inventory.py:148`), so each conversion REMOVES **one** door call and adds no
 statement site: `ast_door_calls` **1571→1569** and `non_cypher_door_calls` **260→258**, while
@@ -417,13 +442,17 @@ which is also the migration-candidate count). `files_scanned` stays 297 and `fil
 both conversions land in a file that already carries sites. The `rg` reconciliation in §1 is
 re-measured on this tree (1,622 / 2,330 / 1,628 bare / 2,061 / 2,064 bare-case-sensitive / 2,402), Appendix A is regenerated
 with `--markdown`, and `--check` reports **`25 pinned counts match`**.
-⛔ **The re-derivation is not a formality at this head, and this is the case that proves it:** the
-branch's own pre-merge tree measured **1567 / 256**, and `origin/main`'s measured **1571 / 260** —
-**neither is the answer.** `#9559` (`a218f8867b`) ADDED two door calls to the same counter `#13249`
-removes two from, so the merged tree's composition is neither parent's; a lane that carried either
-number forward, or that reused the pre-merge cut this branch had already recorded, would have
-written wrong pins that `--check` would then have accepted. Two different compositions of adds and
-removes reach one total, and only running the tool says which tree you are holding.
+⛔ **The re-derivation is not a formality at this head, and this is the case that proves it:** at the
+merge this paragraph first described, the branch's earlier cut (`b4c6ce8294`) measured **1567 / 256**
+and `origin/main`'s measured **1571 / 260** — **neither was the answer.** `#9559` (`a218f8867b`) ADDED
+two door calls to the same counter `#13249` removes two from, so that merged tree's composition was
+neither parent's; a lane that carried either number forward, or that reused the pre-merge cut this
+branch had already recorded, would have written wrong pins that `--check` would then have accepted.
+⚠️ At the merge this branch FINALLY landed (`243dbdbe6b`) the arithmetic is different, and that is the
+point: its branch parent `ea17bc2fc5` had already absorbed `a218f8867b`'s `+2` through an earlier
+integration and measured **1569 / 258** itself, so there the merged composition IS the branch
+parent's. Which parents a merge is "neither of" moves with every integration — only running the tool
+at the tree you are holding says which case you are in.
 
 The paragraph below is `#9559`'s cut on `main`, kept as the record of it.
 
@@ -458,6 +487,33 @@ and one in `tortoise/postgres_bytes.py`. This change regenerates Appendix A with
 that head (verified byte-identical to a fresh run) and adds
 `tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` so the next
 main-move cannot repeat it — which is step 1 of the procedure above enforced instead of trusted.
+
+⛔ **And neither of those two carriers covers the numbers this file QUOTES, which is the third place
+the same cut can leave stale.** The pins are 25 scalars and the appendix is `file:line` rows; §1's
+`--all-surface` mode-table row (not a pin, deliberately), §1's `rg` cross-check and the prose that explains it
+are neither. Measured at `a218f8867b`, with `--check` printing `25 pinned counts match`: that row
+still said `8,908 / 805` against `8,939 / 810` on THAT tree, §1's bare case-sensitive count was wrong
+in the OTHER direction — it printed `2,060` under the word BARE, where a bare `rg` measures `2,063`
+at that head and `2,060` is the figure for the row's own 297 `.py` files (at this head: `2,064` bare,
+`2,061` over those files — see §1) — and its
+stated CAUSE for the 13-occurrence gap was wrong outright — see §1. Re-derive the quoted prose too,
+not just
+the two carriers that are checked.
+⛔ **This paragraph keeps being dropped by conflict resolutions, which is the second half of its
+point.** It is on `origin/main`, and this branch lost it in the merge at `243dbdbe6b` — whose second
+parent (`origin/main` `bf3a7b8e77`) carries the paragraph and whose result does not — while `--check`
+printed `25 pinned counts match`. It had already been lost once before that, at `8da08e899e`, whose
+first parent `768b5ef5fc` carries it and whose result does not. Every head since inherits the absence,
+because nothing after either merge restored the text. The `origin/main` merge is the one that did the
+rest of the damage: `243dbdbe6b` also took main's §1 corrections (the `record_projection.py` citation
+and the 2,061/2,063 decomposition) AND
+`tests/test_13098_cypher_inventory.py::test_the_published_decomposition_names_the_measured_operands`
+outright — with a fully green suite, because that deleted test was the only thing grading §0's prose.
+(`8da08e899e` is the earlier loss and nothing more: both its parents are branch commits, so it had no
+main-side §1 correction to take, and the test is still PRESENT in its tree.)
+A dropped paragraph or test reds nothing: diff the resolution against the base, do not trust the
+suite. All three restored together at this cut, with every quoted figure re-derived by running the
+tool at THIS head.
 
 <details><summary>the previous cut (kept as history)</summary>
 
