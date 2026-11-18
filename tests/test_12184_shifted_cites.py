@@ -78,7 +78,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:7025-7028`", _SE, 7025, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
     (_AUDIT, "`:7031-7044`", _SE, 7031, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3098", _SE, 3098, "CALL db.idx.fulltext.queryNodes"),
-    (_AUDIT, "search_engine.py:4708-4710", _SE, 4708, "MATCH (n:{label_str})"),
+    (_AUDIT, "| `tortoise/search_engine.py:4708-4710` |", _SE, 4708, "MATCH (n:{label_str})"),
+    # ⚠️ The token above carries its TABLE context on purpose. A bare `search_engine.py:4708-4710` is a
+    # SUBSTRING of §2.1's verdict token (`` `none`: `search_engine.py:4708-4710` ``), so the verdict row
+    # satisfies this one and the TABLE row can be re-pointed alone without reddening anything — measured:
+    # mutate the table to `:4511-4513` with the bare token -> 0 red, with the table-context token -> 1 red.
     (_AUDIT, "search_engine.py:4123", _SE, 4123, "CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit"),
     (_AUDIT, "search_engine.py:3003", _SE, 3003, 'label = "Source" if entity_type == "document"'),
     (_AUDIT, "`:3070`", _SE, 3070, "the fulltext index is on Source._searchText"),
@@ -213,6 +217,35 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
     assert len(_PINS) == 38
+
+
+def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
+    """The sentence that records WHICH addresses were wrong is HISTORY, not a citation.
+
+    `#13290` moved the recorded wrong addresses (`:3064`, `:4477-4481`, `:6352`) by its own line delta
+    (`:3084`, `:4674-4678`, `:6549`) while leaving the clause BENEATH them saying `:3064`, `:4477`,
+    `:6352` — the paragraph contradicted itself, and the history it exists to preserve was rewritten to
+    describe lines that nobody ever cited.
+
+    `_PINS` cannot see this: there is no line to open, because the sentence is ABOUT addresses that were
+    wrong. A token assertion is the only shape available, which is why this is a test and not a row.
+
+    NON-VACUOUS: the delta-shifted form is a shipped state —
+    `git show 337cba88:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | grep -c ':3084'` -> 1 — so both
+    assertions red on that tree.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    assert "(`:3064`, `:4477-4481`, `:6352`)" in text, (
+        "the paragraph that records which addresses were WRONG no longer names `:3064`, `:4477-4481`, "
+        "`:6352` — it is history, so re-deriving it by content is not possible and a delta applied to it "
+        "is the defect it warns about, one level up."
+    )
+    for shifted in (":3084", ":4674-4678", ":6549"):
+        assert shifted not in text, (
+            f"the historical wrong-address list carries `{shifted}`, a line delta applied to an address "
+            "that was never right — the addresses the census actually wrote were `:3064`, `:4477-4481` "
+            "and `:6352`, and the clause beneath them still says so."
+        )
 
 
 def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -> None:
