@@ -20877,6 +20877,21 @@ class FalkorProjection(
         would make the marker trustworthy. Until one of them lands, this is
         what not losing points silently costs.
 
+        ⚠️ **STALE ATTRIBUTION, corrected by measurement rather than reworded
+        (#13436 P7, 2026-11-18):** **both** of those issues are now CLOSED —
+        `#5444` COMPLETED 2026-10-13 (it is what SHIPPED the expensive-but-correct
+        precondition above, not what removes its cost) and `#5482` COMPLETED — and
+        **no open issue carries the removal.** So this cost is UNOWNED today, and
+        the two identifiers above must be read as the history of the choice, never
+        as an owner. Measured at two runs on docker 4.20.6 (`#13436`'s artifact
+        `docs/evidence/13436-write-path-costs/`, the second recording `box.git_head`
+        so the tree it measured is checkable from the artifact): **≈0.18-0.24 us/point
+        marginal across the two runs** (an earlier read 0.26) with a **≈5.3-5.4 ms fixed
+        floor** — the slope BRACKETS the ≈0.2 us figure above (0.18 below it, 0.24
+        above), so the slope reproduces within host variation while the FLOOR is what
+        this box adds; neither is corrected here. ⛔ The removal route is still a write-maintained signal, and it is
+        still nobody's.
+
         ⚠️ THOSE FIGURES ARE THE PRE-#11682, ONE-DISJUNCT SHAPE and the
         per-point constant above no longer describes the shipped statement. The
         single probe now carries one ``typeof`` disjunct per key in

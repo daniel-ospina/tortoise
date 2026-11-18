@@ -1,0 +1,306 @@
+{
+  "arm_set": "P7 \u2014 write-path costs, diagnosis only (no optimisation)",
+  "arms": {
+    "kindgate": {
+      "approved_set": [
+        "dev"
+      ],
+      "arm": "kindgate",
+      "by_shape": [
+        {
+          "expected_gate_reads": 0,
+          "gate_ms_per_request": 0.0,
+          "gate_reads_per_request": 0,
+          "note": "control \u2014 names no pack",
+          "request_ms": {
+            "max_ms": 14.374,
+            "median_ms": 12.922,
+            "min_ms": 11.193,
+            "n": 7
+          },
+          "shape": "point_core"
+        },
+        {
+          "expected_gate_reads": 0,
+          "gate_ms_per_request": 0.0,
+          "gate_reads_per_request": 0,
+          "note": "control \u2014 names no pack",
+          "request_ms": {
+            "max_ms": 13.838,
+            "median_ms": 10.944,
+            "min_ms": 10.244,
+            "n": 7
+          },
+          "shape": "point_bare"
+        },
+        {
+          "expected_gate_reads": 1,
+          "gate_ms_per_request": 16.271,
+          "gate_reads_per_request": 1,
+          "note": "names a pack",
+          "request_ms": {
+            "max_ms": 31.911,
+            "median_ms": 30.519,
+            "min_ms": 27.858,
+            "n": 7
+          },
+          "shape": "point_ns"
+        },
+        {
+          "expected_gate_reads": 1,
+          "gate_ms_per_request": 16.271,
+          "gate_reads_per_request": 1,
+          "note": "names a pack through the props passthrough",
+          "request_ms": {
+            "max_ms": 39.309,
+            "median_ms": 34.648,
+            "min_ms": 31.821,
+            "n": 7
+          },
+          "shape": "point_ns_in_props"
+        },
+        {
+          "expected_gate_reads": 1,
+          "gate_ms_per_request": 16.271,
+          "gate_reads_per_request": 1,
+          "note": "names a pack",
+          "request_ms": {
+            "max_ms": 52.916,
+            "median_ms": 43.116,
+            "min_ms": 38.572,
+            "n": 7
+          },
+          "shape": "object_ns"
+        },
+        {
+          "expected_gate_reads": 2,
+          "gate_ms_per_request": 32.542,
+          "gate_reads_per_request": 2,
+          "note": "SAME pack named twice (positional + props)",
+          "request_ms": {
+            "max_ms": 68.862,
+            "median_ms": 61.325,
+            "min_ms": 53.666,
+            "n": 7
+          },
+          "shape": "point_ns_twice"
+        },
+        {
+          "expected_gate_reads": 2,
+          "gate_ms_per_request": 32.542,
+          "gate_reads_per_request": 2,
+          "note": "SAME pack named twice (camel + snake)",
+          "request_ms": {
+            "max_ms": 72.203,
+            "median_ms": 63.745,
+            "min_ms": 61.201,
+            "n": 7
+          },
+          "shape": "object_ns_twice"
+        }
+      ],
+      "cost": "whole-graph approval scan (#5475 gate), per write that names a pack",
+      "hosted_commit_composition": {
+        "derived_from_shape": "object_ns",
+        "measured_as": "composition of measured parts \u2014 not an HTTP sample",
+        "per_entity_site": "tortoise/sdk.py::_create_entity \u2192 _refuse_unapproved_kinds_in_props",
+        "per_entity_writes": 1,
+        "pre_check_reads": 1,
+        "pre_check_site": "tortoise/hosted_api.py:23946 (deliberately NOT rescanned at :23976)",
+        "rule": "1 pre-check read per request + 1 read per namespaced entity written",
+        "single_entity_commit_total_reads": 2
+      },
+      "points": 5000,
+      "single_gate_read": {
+        "max_ms": 17.391,
+        "median_ms": 16.271,
+        "min_ms": 15.604,
+        "n": 7
+      }
+    },
+    "nudges": {
+      "arm": "nudges",
+      "by_content_length": [
+        {
+          "content_bytes_per_row": 59.84,
+          "content_bytes_returned": 23936,
+          "content_chars_per_row": 59.84,
+          "content_chars_requested": 60,
+          "nudge_call": {
+            "max_ms": 11.759,
+            "median_ms": 9.099,
+            "min_ms": 8.805,
+            "n": 7
+          },
+          "points": 1000,
+          "rows_returned": 400
+        },
+        {
+          "content_bytes_per_row": 299.812,
+          "content_bytes_returned": 119925,
+          "content_chars_per_row": 299.812,
+          "content_chars_requested": 300,
+          "nudge_call": {
+            "max_ms": 13.148,
+            "median_ms": 12.838,
+            "min_ms": 12.555,
+            "n": 7
+          },
+          "points": 1000,
+          "rows_returned": 400
+        },
+        {
+          "content_bytes_per_row": 1199.975,
+          "content_bytes_returned": 479990,
+          "content_chars_per_row": 1199.975,
+          "content_chars_requested": 1200,
+          "nudge_call": {
+            "max_ms": 23.786,
+            "median_ms": 23.354,
+            "min_ms": 23.048,
+            "n": 7
+          },
+          "points": 1000,
+          "rows_returned": 400
+        }
+      ],
+      "by_size": [
+        {
+          "nudge_call": {
+            "max_ms": 24.315,
+            "median_ms": 12.773,
+            "min_ms": 12.325,
+            "n": 7
+          },
+          "nudges_produced": 3,
+          "object_create_ms": {
+            "delta_ms": 12.06,
+            "with_nudge": {
+              "max_ms": 19.749,
+              "median_ms": 18.411,
+              "min_ms": 17.348,
+              "n": 7
+            },
+            "without_nudge": {
+              "max_ms": 7.184,
+              "median_ms": 6.351,
+              "min_ms": 5.587,
+              "n": 7
+            }
+          },
+          "points": 1000,
+          "scan": {
+            "content_bytes_per_row": 299.8,
+            "content_bytes_returned": 119925,
+            "content_chars_returned": 119925,
+            "name_bytes_returned": 5490,
+            "row_cap": 400,
+            "rows_returned": 400
+          }
+        },
+        {
+          "nudge_call": {
+            "max_ms": 12.39,
+            "median_ms": 12.281,
+            "min_ms": 12.077,
+            "n": 7
+          },
+          "nudges_produced": 3,
+          "object_create_ms": {
+            "delta_ms": 11.115,
+            "with_nudge": {
+              "max_ms": 23.539,
+              "median_ms": 16.814,
+              "min_ms": 16.224,
+              "n": 7
+            },
+            "without_nudge": {
+              "max_ms": 7.223,
+              "median_ms": 5.699,
+              "min_ms": 5.409,
+              "n": 7
+            }
+          },
+          "points": 5000,
+          "scan": {
+            "content_bytes_per_row": 299.8,
+            "content_bytes_returned": 119925,
+            "content_chars_returned": 119925,
+            "name_bytes_returned": 5490,
+            "row_cap": 400,
+            "rows_returned": 400
+          }
+        }
+      ],
+      "cost": "400-row :Point scan returning full content"
+    },
+    "schema": {
+      "arm": "schema",
+      "by_size": [
+        {
+          "points": 1000,
+          "probe_ms": {
+            "max_ms": 9.193,
+            "median_ms": 5.437,
+            "min_ms": 5.079,
+            "n": 7
+          },
+          "us_per_point": 5.437,
+          "verdict": true
+        },
+        {
+          "points": 5000,
+          "probe_ms": {
+            "max_ms": 10.748,
+            "median_ms": 8.515,
+            "min_ms": 7.075,
+            "n": 7
+          },
+          "us_per_point": 1.703,
+          "verdict": true
+        },
+        {
+          "points": 20000,
+          "probe_ms": {
+            "max_ms": 11.555,
+            "median_ms": 10.004,
+            "min_ms": 8.979,
+            "n": 7
+          },
+          "us_per_point": 0.5,
+          "verdict": true
+        }
+      ],
+      "cost": "per-construction _schema_is_current() probe"
+    }
+  },
+  "box": {
+    "db_uri_env": "docker://:@127.0.0.1:16402/tortoise_test_matrix",
+    "engine": "graph ver 42006 (4.20.6)",
+    "graphs_measured": [
+      "test_measure13436_version_0_2605048",
+      "test_measure13436_nudge_1000_2605048",
+      "test_measure13436_nudge_5000_2605048",
+      "test_measure13436_nudgec60_1000_2605048",
+      "test_measure13436_nudgec300_1000_2605048",
+      "test_measure13436_nudgec1200_1000_2605048",
+      "test_measure13436_kindgate_5000_2605048",
+      "test_measure13436_schema_1000_2605048",
+      "test_measure13436_schema_5000_2605048",
+      "test_measure13436_schema_20000_2605048"
+    ],
+    "loadavg_at_end": [
+      7.6,
+      6.45,
+      6.15
+    ],
+    "loadavg_at_start": [
+      7.3,
+      6.32,
+      6.11
+    ],
+    "python": "3.12.3"
+  },
+  "issue": 13436,
+  "measured_at": "2026-11-18T02:14:49Z"
+}

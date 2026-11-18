@@ -2526,18 +2526,51 @@ about today rather than by the one that agrees.
 
 **⚠️ One attribution in the finding was corrected before landing, by re-deriving it.** The finding's ready-made patch
 attributed the ≈58 % pricing to **§12.1b** (`"§12.1b, which prices the two refused queryNodes round trips at ≈58 %…"`).
-`git show origin/main:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returns exactly **one** hit — §14.3
-V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that ≈58 % of the unindexed read's
-store time was two REFUSED queryNodes round trips"* — and §12.1b (`:1080–1168`) carries the `16.96 / 13.40 / 4.97 ms`
-pair with **no** round-trip pricing. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which
-is where it is measured. The correction moves a citation, not a number.
+`git show f462ad3acbb4:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returned exactly **one** hit **on that
+pre-PR base** — §14.3 V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that ≈58 % of
+the unindexed read's store time was two REFUSED queryNodes round trips"* — and §12.1b (*"Where the vectors actually
+sit"*) carries the `16.96 / 13.40 / 4.97 ms` pair with **no** round-trip pricing. ⚠️ **It returns TWO at this head:
+§14.3 V3's row, plus the §12.1c sentence `ae54df166d` added to `STORAGE-ARCHITECTURE.md`** — the hit the base
+lacked — which cites that same 58 %: the check was scoped to the base it was made on, and the sentence that quotes it
+is itself a hit — stated here rather than left to look like a command that still answers one. The landed sentence
+therefore attributes the 58 % to the 2026-11-17 re-read, which is where it is measured. The correction moves a
+citation, not a number.
 
 **⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
-as **§12.2**'s. The paragraph is inside **§12.1c** (`### 12.1c ⭐ DECISION (RESOLVED 2026-11-07)` at `:1169`), and
-§12.2 — *the lever is "what gets an embedding"* — begins at `:1250`; the DECIDED block that follows the paragraph is
-§12.1c's too. This entry states the measured location rather than propagating the issue's, because a changelog entry
-whose section number sends a reader to an unrelated lever is the one thing it exists to prevent. The issue carries a
-comment recording the correction.
+as **§12.2**'s. The paragraph is inside **§12.1c** — `### 12.1c ⭐ DECISION (RESOLVED 2026-11-07) — should the vector
+index live in FalkorDB at all?` — and §12.2 is a different section, `### 12.2 ⇒ The lever is "what gets an embedding"`;
+the DECIDED block that follows the paragraph is §12.1c's too. This entry states the measured location rather than
+propagating the issue's, because a changelog entry whose section number sends a reader to an unrelated lever is the
+one thing it exists to prevent. The issue carries a comment recording the correction.
+
+**⚠️ And every location above is cited by heading NAME, not by line number — a review finding, and the fix for its
+root.** Earlier revisions of this entry cited `:1241`, `:1244`, `:1206–1211`, then `:1250` and `:1213–1217` (plus
+§12.1b's `:1080–1168`). ⚠️ **Those cites failed in three different ways, and the cause is the same in all three:**
+`:1241` — the entry's FIRST version — was **correct in the tree it was written in** (its authoring commit `38d711bd5d`,
+built on `6264dc670c`, had §12.2 at exactly `:1241`), and **rotted before it landed**: the branch was then rebuilt on a
+later base (`f462ad3acbb4`, where `#13435` had added three more lines above and §12.2 sat at `:1237`, so this PR's own
+seven insertions put it at `:1244`) — the cite was wrong from the merge onward. `:1244` and `:1206–1211` were **correct in
+their own tree and then rotted** under this PR's own later insertions above them — the first arriving at §12.1d's *"the
+index earns very little today"* item, a LATENCY paragraph, in the entry whose whole purpose is to establish that §12.2
+is not the latency section, and the second ending one line before the clause it named. And `:1169`, `:1250`,
+`:1213–1217` and `:1080–1168` were **correct when written and still resolve in the tree this entry was written against**
+(`36cb300057`: §12.1b `:1080`, §12.1c `:1169`, §12.2 `:1250`) — ⚠️ **but they had rotted on `main` too by the time this
+entry was repaired**, because unrelated PRs added lines above them: at `8cc31bbb9e` the same headings stand at `:1102`,
+`:1191` and `:1272`, and the ledger clause at `:1235`. **That is this entry's own point rather than an exception to it**
+— which is why nothing above is cited by number any more. ⇒ **So the failure is
+not "some cites went stale" as a single event: it is that a line number is a function of every edit ABOVE it** —
+authored against a base that moved, correct-then-rotted under its own PR, or still correct until an unrelated PR on
+`main` added a line, are three outcomes of one cause, and which one a given writer gets is not something that writer can
+see. ⛔ **And NO citation guard ever resolved these
+pointers — which is why they stayed green.** `tests/test_docs_citation_refs.py` owns pointers into `docs/scoping/` and
+`docs/research/` only (its `_TARGET_SCOPE`), so a pointer into `docs/architecture/` is *skipped rather than checked* —
+its own `test_the_guard_ignores_targets_outside_its_declared_scope` asserts exactly that — and its **STATED LIMITS**
+record that a bare `:NN` continuation *"carries no document name, so it cannot be resolved in isolation and is NOT
+checked"*; where it does resolve a pointer it checks line PRESENCE alone (*"This is line PRESENCE, not semantic
+correctness"*). ⇒ **The green was evidence about nothing, not evidence that presence happened to hold** — the stronger
+form of this entry's lesson, and the reason the rule below is the fix rather than a tidier guard. The rule this repo
+already records is the fix — *"assertions by NAME — never by line number, and never by row ordinal. Both go stale the
+same way"* (`docs/architecture/S2-DECISION-SEAM.md`) — and it is what this entry now does.
 
 **⚠️ And the pre-removal readings are now labelled as such — a review finding, fixed before merge.** The first landed
 version said the app path *"pays"* the `queryNodes` round trips, present tense, and concluded *"both slower than the
@@ -2562,9 +2595,13 @@ than on one of them as it was.
 **What did NOT change.** The argument for option 2 is untouched **by this change**: it rests on the **ledger**
 (provisioned, unevictable RAM for a row the record already holds, §12.1a / §14.3 V1) and on the **size dependence**,
 and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
-sentence immediately below the changed paragraph was itself revised on `main` by `#13435` in the same window (it now
-says *“held for a row the record already has”* and carries the two-population clause, `:1213–1217`), and this
-rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
+sentence immediately following the changed ones — same paragraph, not the next one — was itself revised on `main` by
+`#13435` in the same window (it now says *“held for a row the record already has”* and carries the two-population
+clause; its greppable span is *"size is the ledger rather than the latency"* — `grep -c` → **1** in the design
+document, and short enough to paste back out of **this** file, whose own hard wrap breaks the long form — and it
+**continues** the sentence opening *"What holds at EVERY size is the ledger rather than the latency"* — split after
+"EVERY" by the hard wrap, which is why a contiguous span inside it is quoted rather than the opening words), and
+this rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
 ledger/sequencing conclusion are what this entry claims survived; nothing here re-states the neighbouring sentence as
 though it were unchanged. No decision was reopened, no figure was retired, and nothing here authorises removal — the
 record-first sequencing and its release boundary are untouched (§12.1c's DECIDED block, `#11395` comment `6956793300`).

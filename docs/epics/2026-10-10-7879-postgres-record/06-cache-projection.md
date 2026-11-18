@@ -360,7 +360,7 @@ wrong twice here, `#12015` review):
 
 * **The write chokepoint** (Interface C, `#7951`) — this module is the *third*
   step of that path and does not route live writes.
-* **The read path** (`#7970`, deferred by §2.0) and the **residency router**
+* **The read path** (`#7970` — **ARMED** since the §2.0 deferral was rescinded, 2026-11-18; sequenced, not deferred) and the **residency router**
   (`#7953`).
 * **The eight graph-only classes** (§0.5) — dropped (and named), not carried.
 * **Normalising the ~9,700 legacy ids** (`#7955` §1.4, W1b).

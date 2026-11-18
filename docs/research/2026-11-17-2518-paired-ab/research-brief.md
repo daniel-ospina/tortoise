@@ -69,7 +69,7 @@ annotation on a legacy run, not something a re-run would emit: the tool now emit
 itself and records each item's ranked list on **both** sides (with a per-side digest in the artifact), so
 a re-run *measures* the identity (and reports `identity_measured: true`) instead of asserting it. Its
 minimum detectable
-effect is reported as **not estimable** (`nan`, with a `mde_note`) rather than `0` — an all-agree run
+effect is reported as **not estimable** (`null`, with a `mde_note`) rather than `0` — an all-agree run
 carries no information about the difference, and an MDE of 0 beside a null reads as "infinitely powered",
 which is the opposite of what it means.
 
@@ -99,8 +99,9 @@ population digest **only in the new artifact schema** — the two committed arti
    the corpus grew, which is the benign direction and still a different condition.
 2. **The sample is redrawn per run.** `#13118` recorded the population digest differing in *all five* of
    its runs (`2323ddf7…` / `7c08a430…` / `eec5fcf1…` / `81c6ff3d…` / `cd275d71…`) — "a count identity is
-   not a member identity" — and that pairing was impossible because *"pairing needs the sampled population
-   written out (`--population-file`), which this harness does not do"*. **That file is this tool's job.**
+   not a member identity". The reason a paired re-run was impossible is **`#11901`**'s finding, not
+   `#13118`'s: *"pairing needs the sampled population written out (`--population-file`), which this
+   harness does not do"*. **That file is this tool's job.**
 3. **Load moves the dense leg.** `#13108` measured 45 % of eval windows losing the dense leg under load
    (`window_modes {hybrid: 2371, keyword_only: 1973}`), so two runs at load 124 and load 100 are two
    different retrieval systems.
@@ -310,7 +311,7 @@ with no interval and no test attached. ⚠️ The 5 is `seed_lost_from_window` 3
 | **the result is paired, with the test named and its p-value** | **MET** | McNemar exact two-sided per k: **p = 0.0625** (@3), **0.0313** (@5), **0.00024** (@10), **0.00002** (@15); paired bootstrap CI (2,000 resamples, seed 20261117) reported beside each. |
 | **the detectable effect size for the n used is reported beside every k, and no k whose delta is below it is called a winner** | **MET** | MDE @ n=300: **2.08 / 2.28 / 3.35 / 3.84 pp** for k = 3/5/10/15 — the MDE **rises** with k, each figure beside its own exact p. The winner rule is the MDE one applied to every row: k = 10 (+4.33 against 3.35) and k = 15 (+5.67 against 3.84) clear their own MDE; k = 3 (+1.67 < 2.08) and k = 5 (+2.00 < 2.28, p = 0.0313) do **not**, and neither is reported as a win. ⛔ **The MDE is reported, not pre-stated** (`#13267` review 4 F3): π is this run's own discordant share, so the figure cannot exist before both arms are read — only `n` is fixed in advance. The published comparison's independent MDE at p̄=0.865 is **7.82 pp** ⇒ ~733/arm for 5 pp and **~2,037/arm** for 3 pp, DERIVED from the formula — replacing an earlier estimate of ~755/~2,100 (quoted rather than derived, and published nowhere this repo can point to). |
 | **`window_modes` recorded per arm; any contamination named** | **MET** | `keyword_only` 300/300 in both arms (no embedder on this box) ⇒ uniform, no contamination, and **not** reported as a hybrid measurement. `load 13.09 → 12.55` (Δ −0.54) across both arms in one process — the artifact's own `environment` block, not a transcription (`#13267` F3: an earlier revision quoted a trace that appears in NO committed artifact, and the load moves between runs, so a trace is only ever valid for the artifact it came from — the pin in `tests/test_paired_expansion_ab_2518.py` compares this number against the artifact **at every site it is quoted**, `#13267` review 4 F5). ⛔ **No `repeat` determinism result is claimed for these runs** (review 4 F2): the `repeat` arm was compared on the target's **rank**, which is null on both sides for every point-arm item, so the point artifacts carry `repeat_identical: null` and a `repeat_check` block naming the basis (`target_rank`) and the zero items actually compared. The tool now compares ranked-list digests, so a re-run measures the read. |
-| **⛔ no retrieval behaviour changed** | **MET** | `git diff --name-only origin/main...HEAD` touches exactly these paths: `tools/paired_expansion_ab_2518.py`, `tests/test_paired_expansion_ab_2518.py`, `MEMORY.md`, `config/ci-surfaces.yml`, `docs/00_index.md`, and the brief plus its four artifacts under `docs/research/2026-11-17-2518-paired-ab/`. No change to `tortoise/`, no index, no `TOOL_REGISTRY`, no public SDK method; the tool **refuses** when `TORTOISE_ENTITY_KEY_DENSE` is armed. ⛔ The **`git diff --stat` insertion/deletion tally is deliberately not quoted**, and neither is a total file count: both move whenever the evidence itself is committed and whenever `main` is merged in, so a quoted tally is stale on the very next commit while the touched-path set is not — the previous revision of this cell quoted one, and the head already prints a different number. The **path set is the falsifier**, because that is what "no retrieval behaviour changed" means, and it is reproducible with the command at the head of this cell; a tally that cannot be reproduced is not a falsifier. (`#13267` F3, three generations on: a 3-file list the tree does not produce, then a `--stat` tally that went stale on the next commit, now the set itself. ⛔ **`#13267` review 4 F6:** an earlier revision of this sentence asserted a set-level test pin here and no such pin existed — what the suite enforced was only that the cell NAME the reproducing command and avoid the tally vocabulary. The pin now checks the enumerated set against the diff in BOTH directions wherever `origin/main` resolves, reds on any path under `tortoise/`, and skips on the suite job's shallow checkout, which is why the set is also re-read by a reviewer at each head.) |
+| **⛔ no retrieval behaviour changed** | **MET** | `git diff --name-only origin/main...HEAD` touches exactly these paths: `tools/paired_expansion_ab_2518.py`, `tests/test_paired_expansion_ab_2518.py`, and the brief and its artifacts under `docs/research/2026-11-17-2518-paired-ab/`. No change to `tortoise/`, no index, no `TOOL_REGISTRY`, no public SDK method; the tool **refuses** when `TORTOISE_ENTITY_KEY_DENSE` is armed. ⛔ **`#13267` itself landed by SQUASH** (merge commit `f462ad3acb`), which is why the three paths it carried that this branch no longer changes — `MEMORY.md`, `config/ci-surfaces.yml`, `docs/00_index.md` — are named here in prose and not in the enumeration above: their content is in `main`, so the command at the head of this cell does not print them, and a cell that listed them would over-claim the diff it quotes. The enumeration is therefore exactly what that command prints at this head, and it still carries no path under `tortoise/` — which is the falsifier's whole claim. ⛔ The **`git diff --stat` insertion/deletion tally is deliberately not quoted**, and neither is a total file count: both move whenever the evidence itself is committed and whenever `main` is merged in, so a quoted tally is stale on the very next commit while the touched-path set is not — the previous revision of this cell quoted one, and the head already prints a different number. The **path set is the falsifier**, because that is what "no retrieval behaviour changed" means, and it is reproducible with the command at the head of this cell; a tally that cannot be reproduced is not a falsifier. (`#13267` F3, three generations on: a 3-file list the tree does not produce, then a `--stat` tally that went stale on the next commit, now the set itself. ⛔ **`#13267` review 4 F6:** an earlier revision of this sentence asserted a set-level test pin here and no such pin existed — what the suite enforced was only that the cell NAME the reproducing command and avoid the tally vocabulary. The pin now checks the enumerated set against the diff in BOTH directions wherever `origin/main` resolves, reds on any path under `tortoise/`, and skips on the suite job's shallow checkout, which is why the set is also re-read by a reviewer at each head.) |
 
 ---
 
@@ -430,10 +431,42 @@ digests, so its only protection is the range invariants plus the CHURN framing. 
 suite RE-DERIVES every declared one; the committed files declare none, and say so, rather than implying a
 protection they do not have.
 
+⛔ **These three files were RE-SERIALIZED once, mechanically, and it is not a seventh annotation group.**
+Their runs wrote `NaN` tokens into four KINDS of cell (`mde_paired`, `mde_independent`,
+`correlation.rho`, `correlation.se_reduction`) — all four per `k` in the control (16 tokens), but only
+the two correlation cells per `k` in each point artifact (8 each: their `mde_paired` /
+`mde_independent` are finite — `0.0383…` at k=15 in `paired-point-300.json`, `0.0208…` in
+`paired-point-300-short-query.json`, so quoting one figure for both is wrong) — and RFC 8259 does not
+admit `NaN` in its number
+grammar, so the committed evidence could not be loaded by any strict parser at all (node's `JSON.parse`
+rejected the whole file) and the tolerant ones mapped the token to `null` — the same cell an unrecorded
+field occupies (`#13267` review 12, P2). They were re-encoded with the tool's own writer (`_write_json`
+→ `_json_safe`), which maps every non-finite float to `null`; **it changes no other byte, adds no field
+and loses no information** — but the carrier differs by cell, and the earlier wording here said
+otherwise. The MDE's null is carried by the `mde_note` beside it ("NOT ESTIMABLE: no discordant pair was
+observed …"). The `correlation` block's `rho`/`se_reduction` nulls carry **no note**: both keys are
+always written, so key PRESENCE is what separates "recorded, not estimable" from "never recorded", and
+the reason is `outcome_correlation`'s documented one — one or both arms have zero outcome variance
+(measured: every committed correlation null is that case; the point artifacts' off-arm hits are all 0).
+The suite pins that key-presence separation for the control and a point artifact. So the count above
+stays SIX annotation FIELD
+groups: this is a re-encoding of run output, not an annotation of it, and a reader can verify it by
+diffing the three files against the run that produced them.
+
+⚠️ The re-encoding corrected the FILES; the three artifacts' own `provenance.git_head_note` went on
+describing the old bytes — it said the control's populated `mde_note` "sits beside a `nan`
+`mde_paired`" while the cell beside it is `null`, i.e. the one carrier a reader uses to tell WHICH
+null a cell is named a token the file no longer contains (`#13267` review 13 F2). Those three notes
+were corrected BY HAND and are the only part of this change that is not mechanical: they are
+hand-carried, nothing regenerates them (the tool's current writer emits a different, generic note), so
+this is a semantic correction of the evidence's prose, not a re-serialization.
+`test_no_artifact_note_claims_a_token_the_file_no_longer_carries` holds a note that names the token
+to the `null` encoding it became.
+
 The tool records, in the artifact's own `provenance` block, the sha256 of its own bytes and whether those
 bytes were committed (`tool_sha256` / `tool_uncommitted`) — because `git_head` alone does **not** identify
 the producing code (`#13267` F4): these three artifacts record `9b537d875a` while carrying the `mde_note`
-key (the control's populated, beside a `nan` `mde_paired`; the two point artifacts' `""` with a finite
+key (the control's populated, beside a `null` `mde_paired`; the two point artifacts' `""` with a finite
 `mde_paired`), which only `5898385f2e`'s code emits (that fix was uncommitted when the run happened),
 and the earlier generation recorded `44a1b82` while carrying fields first committed in `9b537d8`.
 

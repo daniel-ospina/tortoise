@@ -1415,8 +1415,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'"docker://:pw@127\.0\.0\.1:6379"\s*\)$'],
     # ── test_verbatim_index_cohort_8429.py — DELIBERATE_URI, FIVE literal sites
     # #13290/#8429: the module landed with its five mutation sites untriaged, so
-    # this register reds on them (`test_verbatim_index_cohort_8429.py:129/131/463/
-    # 468/470`, four `^`…`$` patterns covering five lines). The intent is
+    # this register reds on them (`test_verbatim_index_cohort_8429.py:130/132/464/
+    # 469/471`, four `^`…`$` patterns covering five lines). The intent is
     # DELIBERATE_URI — the test PINS ITS OWN SERVER
     # TARGET on purpose, because the defect it measures (a VERBATIM plain-`List`
     # embedding is invisible to the `Point` HNSW index) cannot occur on the
