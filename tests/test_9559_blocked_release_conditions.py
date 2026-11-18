@@ -1759,21 +1759,41 @@ def _strip_sql_comments(sql: str) -> str:
     `note_survived=False`. That is the same false PASS as the row above reached
     through the other door, so the escape is MODELLED here rather than disclosed.
 
-    ⛔ THE DOLLAR-QUOTED CASE IS STILL NOT FAIL-CLOSED, and an earlier cut of this
-    docstring claimed the whole function was. A migration whose sole content is
-    `SELECT $x$ … CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()
-    … $$ … $$ … $x$;` is left INTACT here, so the declaration inside the literal
-    survives the candidate scan in `_defining_migrations`, and `_function_body`
-    then anchors on it and returns the `$$…$$` quoted INSIDE the literal — a body
-    that is never executed. That is fail-OPEN: it can ADD an arm the live function
-    does not have, the opposite of the residual above.
+    ⛔ THE DOLLAR-QUOTED CASE IS STILL NOT FAIL-CLOSED, in TWO ways, and an earlier cut
+    of this docstring claimed the whole function was. Both are tracked as #13425
+    (P2 fail-open) — its live home, because #13393 (which originally carried the
+    first as "item 1") closed on 2026-11-18 with its ordering item fixed and this
+    one unaddressed, so a reader following that pointer reached a closed issue.
 
-    ⛔ NOT FIXED HERE, and deliberately: making `$tag$` regions opaque would also
-    hide the plpgsql bodies this whole window exists to read, because a plpgsql
-    body IS dollar-quoted (#13390). That makes it a design change, not a strip
-    tweak. Open, reproduced on `main`, and recorded as item 1 of #13393 (P2
-    fail-open) — which is why that issue stays OPEN after #13398: the selector
-    order was one of its items, this literal case is not.
+    1. **A `$tag$` region is NOT opaque, and that is deliberate** — a plpgsql body IS
+       dollar-quoted, and its `--`/`/* */` comments are exactly what the body scan
+       has to remove. The price is that a migration whose sole content is
+       `SELECT $x$ … CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()
+       … $$ … $$ … $x$;` is left INTACT, so the declaration inside the literal survives
+       the candidate scan in `_defining_migrations`, and `_function_body` then anchors
+       on it and returns the `$$…$$` quoted INSIDE the literal — a body that is never
+       executed. That is fail-OPEN: it can ADD an arm the live function does not have.
+    2. **A BARE `'` inside a `$tag$` region is still read as a literal OPENER**, so a
+       dollar-quoted region that is not plpgsql — free text carrying an apostrophe,
+       e.g. `SELECT $x$it's$x$` — enters literal state and, with no closing quote,
+       BLINDS THE STRIP TO END OF FILE: every comment below it survives, which is the
+       same fail-open the `E'…'` rule above closes, reached through the other door.
+
+    ⛔ NOT FIXED HERE, and neither fix is a strip tweak. Making `$tag$` regions opaque
+    wholesale would hide the plpgsql bodies this whole window exists to read; refusing
+    to open a literal inside one would let `RAISE NOTICE 'scanning /*'` in a plpgsql
+    body start a block comment that deletes the rest of the body, guard included.
+    Telling a plpgsql body from a dollar-quoted text blob needs a real parser and a
+    design decision, so the direction taken is DISCLOSURE plus a pin: the row
+    `test_a_bare_quote_inside_a_dollar_tag_region_blinds_the_strip` asserts the CURRENT
+    imperfect behaviour and fails loudly if the residual moves. Measured on this head:
+    88 files in `supabase/migrations`, **0** change stripped output and **0** end inside
+    a literal — latent on today's tree, which is why it is P2 and not P1.
+
+    A `"…"` QUOTED IDENTIFIER has no such caveat, and IS modeled below (`""` escapes
+    one `"`): `SELECT "it's" FROM t` is legal PostgreSQL, and without that arm the
+    apostrophe inside the identifier would open a literal and blind the strip the same
+    way. Pinned by `test_a_quoted_IDENTIFIER_is_not_a_literal_and_cannot_blind_the_strip`.
 
     Not modelled, stated so the next reader does not have to guess: `U&'…'`
     unicode-escape strings need NO special case here and must NOT get the `E` rule —
@@ -1781,17 +1801,26 @@ def _strip_sql_comments(sql: str) -> str:
     models, and its `\XXXX` / `\+XXXXXX` escapes are hex-digit escapes that cannot
     move a literal boundary, so its boundaries are already correct and only the escapes
     stay undecoded (measured: 0 `U&'` occurrences in `supabase/migrations`, and
-    `SELECT U&'a''b' -- c` loses its comment as it should). And a `$tag$` region is NOT
-    treated as opaque — comments inside it ARE stripped, because a plpgsql body IS a
-    dollar-quoted region and its `--`/`/* */` comments are the ones the body scan has
-    to remove.
+    `SELECT U&'a''b' -- c` loses its comment as it should).
     """
     out: list[str] = []
     i, n, depth = 0, len(sql), 0
-    in_literal = escape_literal = False
+    in_literal = escape_literal = in_ident = False
     while i < n:
         ch = sql[i]
         pair = sql[i:i + 2]
+        if in_ident:
+            # `"…"` is an IDENTIFIER: `""` escapes one `"`, and a comment marker or
+            # a quote inside it is its own name, not syntax. Postgres admits both.
+            out.append(ch)
+            if ch == '"':
+                if sql[i + 1:i + 2] == '"':
+                    out.append('"')
+                    i += 2
+                    continue
+                in_ident = False
+            i += 1
+            continue
         if in_literal:
             out.append(ch)
             if escape_literal and ch == "\\":
@@ -1820,6 +1849,11 @@ def _strip_sql_comments(sql: str) -> str:
                     out.append(" ")
             else:
                 i += 1
+            continue
+        if ch == '"':
+            in_ident = True
+            out.append(ch)
+            i += 1
             continue
         if ch == "'":
             in_literal = True
@@ -2556,3 +2590,78 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
     assert _strip_sql_comments("SELECT e'\\'' AS q; -- c\n") == "SELECT e'\\'' AS q; \n", (
         "the lowercase `e'…'` spelling must escape its quote too — if only `E'` is "
         "recognised, a body written `e'\''` blinds the strip to end of file again")
+
+
+def test_a_quoted_IDENTIFIER_is_not_a_literal_and_cannot_blind_the_strip():
+    r"""REVIEW FINDING (P2): a `"…"` identifier is not a `'…'` literal.
+
+    PostgreSQL admits an apostrophe and a comment marker inside a QUOTED
+    IDENTIFIER — `SELECT "it's" FROM t` is legal, and `"a""b"` names `a"b`
+    (`""` escapes one `"`). A scan that opens a `'…'` literal without first
+    recognising `"…"` reads the apostrophe in `"it's"` as an OPENER, never finds a
+    closing quote, and goes blind to END OF FILE — so every comment below it
+    survives and a `/* … */` note quoting a guarded body satisfies the guard
+    assertion. Measured before this row's fix: `_strip_sql_comments('SELECT
+    "it\'s" FROM t;\n/* note */\nSELECT 2;\n')` returned the input with the note
+    intact; now the note is removed.
+
+    ⛔ This is pinned in both directions, because the two are one line apart in the
+    scan: an identifier must not be read as a literal (this row), and a literal must
+    not be read as an identifier (the `'…'` rows above, which would redden if the
+    `"` branch were hoisted above the literal branch).
+    """
+    assert _strip_sql_comments('SELECT "it\'s" FROM t;\n/* note */\nSELECT 2;\n') == (
+        'SELECT "it\'s" FROM t;\n \nSELECT 2;\n'), (
+        "the apostrophe inside a quoted identifier opened a literal and blinded the "
+        "strip to end of file — comments below it survived")
+    # `""` escapes one `"`, so the identifier does not end there, and the `--` inside
+    # it is part of the NAME — while the `--` after it is a comment.
+    assert _strip_sql_comments('SELECT "a""b -- c" FROM t; -- gone\n') == (
+        'SELECT "a""b -- c" FROM t; \n'), (
+        "`\"\"` must not close the identifier, and the comment AFTER it must still go")
+    # Non-vacuity: the subject really is in the input, and the pre-fix scan left the
+    # note present — so both assertions above would pass the wrong way if the `"` arm
+    # were dropped again.
+    raw = 'SELECT "it\'s" FROM t;\n/* note */\nSELECT 2;\n'
+    assert "/* note */" in raw
+    assert "/* note */" not in _strip_sql_comments(raw)
+
+
+def test_a_bare_quote_inside_a_dollar_tag_region_blinds_the_strip():
+    r"""KNOWN RESIDUAL, pinned so it cannot move silently — NOT a passing behaviour.
+
+    ⛔ This row asserts the CURRENT, IMPERFECT behaviour on purpose. `$tag$` regions
+    are deliberately NOT opaque here (a plpgsql body IS dollar-quoted and its
+    comments are what the body scan removes — see `_strip_sql_comments`), so a BARE
+    `'` inside a dollar-quoted region that is NOT plpgsql — free text carrying an
+    apostrophe, `SELECT $x$it's$x$` — is still read as a literal OPENER, and with no
+    closing quote the strip goes blind to END OF FILE. That is the same fail-OPEN
+    class the `E'…'` rule closes, reached through a region this strip refuses to
+    treat as opaque.
+
+    Both directions of the obvious "fix" are wrong, which is why it is filed rather
+    than patched here: skipping `$tag$` regions wholesale, or refusing to open a
+    literal inside one, would stop the strip from seeing the plpgsql string literals
+    that legitimately carry `/*` — reintroducing the candidate-hiding defect the
+    whole change exists to close. So the direction chosen is DISCLOSURE plus this
+    pin, and the fix is tracked as its own issue.
+
+    If someone makes `$tag$` opacity work safely, THIS row is the one to change —
+    and its failure is the signal that the residual moved, not a build break.
+    """
+    sql = "SELECT $x$it's$x$;\n/* note */\nSELECT 2;\n"
+    got = _strip_sql_comments(sql)
+    assert "/* note */" in got, (
+        "the residual appears FIXED: a bare quote inside a `$tag$` region no longer "
+        "blinds the strip. That is good news — delete this row and move the pin to a "
+        "positive assertion, after checking the plpgsql case still keeps its literals")
+    assert got == sql, (
+        "the strip changed something below the dollar-quoted region, so the residual's "
+        f"shape is no longer what this row documents: {got!r}")
+    # The contrast that makes the residual legible: the SAME shape with the
+    # apostrophe inside the region removed IS stripped, so the blindness is
+    # attributable to the unclosed quote and not to the `$tag$` text itself.
+    assert _strip_sql_comments("SELECT $x$its$x$;\n/* note */\n") == (
+        "SELECT $x$its$x$;\n \n"), (
+        "the control case did not strip either, so this row cannot attribute the "
+        "blindness to the unclosed quote inside the dollar-quoted region")
