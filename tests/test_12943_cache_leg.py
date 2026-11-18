@@ -1167,6 +1167,17 @@ def test_apply_keeps_the_signature_the_replay_engines_introspect(
     # change, each left `{'embedded:…|tortoise': 1}` behind.
     {"type": "EntityMutated"},                            # no id -> no statement
     {"type": "EventRecorded"},                            # no eventId, no links
+    # Review cycle 6, P3: nine `_skip()` sites this list did not pin, each
+    # measured (per-site mutation) as removable with the suite still green.
+    {"type": "PointAdded", "point": "not-a-dict"},
+    {"type": "PointAdded", "point": {"id": "\x00bad"}},
+    {"type": "OperatorPromoted", "event_id": None},      # no id AND no eventId
+    {"type": "PointSuperseded", "id": "never-created"},   # 0-row re-stamp
+    {"type": "SessionDeleted"},                          # no id
+    {"type": "SourceVersioned"},                         # no identity
+    {"type": "BatchIdStamped"},                          # _NO_PROJECTION_FOLD
+    {"type": "DirectEdgeRepoint"},                       # _APPLY_WARN_ONLY_TYPES
+    {"type": "NotARealEvent"},                           # unknown type
 ])
 def test_the_OTHER_writing_nothing_exits_are_not_counted(
         monkeypatch, tmp_path, event):
@@ -1189,7 +1200,12 @@ def test_the_OTHER_writing_nothing_exits_are_not_counted(
     sdk = _embedded_sdk(tmp_path)
     try:
         reset_cache_write_targets()
-        sdk._get_proj().apply(dict(event, event_id=f"ev-{event['type']}"))
+        # `setdefault`, not an override: a row that needs NO identity at all
+        # (e.g. `OperatorPromoted` with neither id nor eventId) must be able to
+        # say so, or the arm it pins is unreachable from this test.
+        payload = dict(event)
+        payload.setdefault("event_id", f"ev-{event['type']}")
+        sdk._get_proj().apply(payload)
         assert cache_write_targets() == {}, (
             f"{event['type']} wrote nothing but was counted as a landed cache "
             f"write — got {cache_write_targets()!r}")
@@ -1282,5 +1298,58 @@ def test_a_declared_gateway_lane_records_its_target(monkeypatch, tmp_path, door)
         _gateway_run(door, proj, "MATCH (n:GatewayProbe) RETURN count(n)", None)
         assert sum(cache_write_targets().values()) == 1, (
             f"{door}'s read was counted as a write: {cache_write_targets()!r}")
+    finally:
+        sdk.close()
+
+
+def test_hosted_session_delete_records_its_target(monkeypatch, tmp_path):
+    """A raw `DETACH DELETE` lane that CHOOSES its graph must record it.
+
+    `hosted_api.delete_session` removes the session's Points, Events, Source stub
+    and container with four raw statements the fold never sees, in the graph the
+    credential opened. Without the recorder a process whose live traffic is
+    session deletes reads `cache_write_targets == {}` — byte-identical to "this
+    process took no live cache write" — which is the illusion the registry exists
+    to end (#12943 review cycle 6, P2: the call site was unpinned, so it could be
+    deleted with the whole repo still green).
+
+    Driven through the real route handler with the SDK open stubbed, so the lane's
+    own statements run against a real embedded graph. Measured: with the recorder
+    call removed from `delete_session`, this test reds; with only the sibling
+    `_capture_session_impl` call removed, it stays green (that lane also folds,
+    so its target is recorded by the fold hook regardless).
+    """
+    import asyncio
+
+    from tortoise import hosted_api
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    _drop_uri(monkeypatch)
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("CREATE (:Session {id:$sid, harness:'test'})",
+                     params={"sid": "sess-12943"})
+
+        class _StubSDK:
+            def _get_proj(self):
+                return proj
+
+            def _journal_entity_mutation(self, *a, **k):
+                return None
+
+            def _emit_event(self, *a, **k):
+                return None
+
+        async def _stub_offloaded(org):
+            return _StubSDK()
+
+        monkeypatch.setattr(hosted_api, "_data_sdk_offloaded", _stub_offloaded)
+        org = {"org_id": "org12943", "key_id": None, "scopes": []}
+        reset_cache_write_targets()
+        asyncio.run(hosted_api.delete_session("sess-12943", org))
+        assert sum(cache_write_targets().values()) >= 1, (
+            "the session-delete lane wrote the graph and recorded no target: "
+            f"{cache_write_targets()!r}")
     finally:
         sdk.close()

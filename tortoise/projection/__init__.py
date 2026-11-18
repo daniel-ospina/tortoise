@@ -13474,7 +13474,10 @@ class FalkorProjection(
                         detail=_object_supersede_miss_detail(
                             _sup_shape, prefix="graph fold: "),
                     )
-                _skip()
+            # NB: no `_skip()` here — `if folded == 0` above already marked this
+            # call, and a second mark inside the journal-context block reds
+            # nothing when removed (it is the same cell). Measured: review cycle
+            # 6, P3.
             return
         elif t == "ObjectRegistered":
             # #12943: NOT marked — `_upsert_object` returns None (same reason as
