@@ -2569,11 +2569,15 @@ exactly: that vocabulary does NOT include a bare *"stays DEFERRED"*.** `DEFERRED
 `_STATUS_WORDS`/`_STATUS_LOWER` because this document legitimately defers two other things (the stored-vs-derived
 edge question, owner ruling 2026-09-23; and `#9213`'s restore-reason lane), so a `DEFERRED` arm would red on correct
 content — and the class check's arms are per-line, while the retired sentence wrapped. What pins this shape is
-therefore a separate subject-scoped arm, added by this change:
-`::test_the_storage_document_does_not_defer_the_anchored_read_cutover`, which ties `DEFERRED` to *this* cutover in
-both word orders and carries a non-vacuity fixture on the retired sentence. **It reds on the pre-fix text — measured
-at 2 hits on `origin/main` before this branch, and at 2 on this branch's own first commit `f392d513` — and is green
-here, so this shape is now guarded rather than merely absent.**
+therefore TWO arms, added by this change, in the one test
+`::test_the_storage_document_does_not_defer_the_anchored_read_cutover`: a **subject-scoped** arm that ties `DEFERRED`
+to *this* cutover in both word orders, and an **attribution-scoped** arm (`deferred BY §2.0`, `§2.0's deferral`) for
+the shape the third pre-fix site used — §17.3 named the read only by DESCRIPTION (*"the node-naming read that will
+drive this in production is deferred by §2.0"*), so the subject arm provably cannot see it. Both directions are
+fixtures in the test rather than prose: the subject arm is asserted NOT to match that sentence and the attribution arm
+is asserted to, and a bare `§2.0` was refused as a token because §12.2b's lever-5 sentence sits within 80 characters
+of one (also a fixture). **Measured on the pre-fix text (`origin/main` at `f462ad3a`): 3 sites — the subject arm sees 2
+of them, the attribution arm adds the third — and green here, so this shape is now guarded rather than merely absent.**
 `tests/test_extractor_v4_doc_citations.py` and
 `tests/test_extractor_v4_step_list_consistency.py` (38 together with the above — 16 + 2 + 20, measured), and the ten
 doc-cite files that read
