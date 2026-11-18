@@ -6508,6 +6508,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("27618", ("def",
                        "def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:")),
         ), "sdk"),
+        # ⛔ THE CONTENT-REVIEW FILTER AND THE `_list_dedup_candidates` SIGNATURE — D5 states both in
+        # present tense on ONE markdown line, and neither had a reader: the filter is the file's ONLY
+        # `dedup_reviewed IS NULL`, which is what makes the anchor discriminating, and the signature
+        # pair is held at BOTH halves because the paragraph's whole point is that the comment line
+        # above it is NOT the signature. Re-derived by content at the head this row lands on
+        # (`grep -nF 'dedup_reviewed IS NULL' tortoise/sdk.py`), never nudged.
+        ("05-verify.md", "the content-review queue filter that cite named", (
+            ("28067", "dedup_reviewed IS NULL"),
+        ), "sdk"),
+        ("05-verify.md", "under `def _list_dedup_candidates(`", (
+            ("28030", ("def",
+                       'def _list_dedup_candidates(self, candidate_type: str = "content",')),
+            ("28031", "limit: int = 50) -> list[dict]:"),
+        ), "sdk"),
         # ⚠️ BOTH RANGE ENDS ARE NOW HELD: `:4208` by the `("4201", …)` row above (that line
         # carries text) and `:4230` by the exact-closer form above. A range whose END a
         # bare-string anchor cannot discriminate is pinned by comparing the STRIPPED line,
