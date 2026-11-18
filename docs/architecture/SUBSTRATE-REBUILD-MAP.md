@@ -298,12 +298,14 @@ the two files this population had never reached: the KIND and STATUS rules that
 now say which layers carry a `status` family, and name the retired label where
 they say what does NOT (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
 docstring, and `_entity_label`'s record of why the local copy of the canonical
-map had to go). That move is the same kind as the five before it — prose that
+map had to go) — measured at this head as `tortoise/live.py:1237,1247` and
+`tortoise/why.py:200`. That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
-retirement prose in `tortoise/mcp_server.py:4281`, IS a retirement. The eighth
+retirement prose in `tortoise/mcp_server.py:4382`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:33175`, one line in a file this population already reached, whose
+`tortoise/sdk.py:36676,36718`, one line each in a file this population already
+reached, whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
 ``:Document`` node") because the retired label is what a reader arriving from the
