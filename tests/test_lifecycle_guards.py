@@ -171,8 +171,10 @@ def test_status_outdated_could_not_be_re_superseded(sdk):
     # `outdated` is NOT a write word: `POINT_STATUS_VALUES` has been the FOUR-word
     # `_LIFECYCLE_STATUS_VALUES` since `#11824` S0 (draft/live/deprecated/superseded),
     # and `read_caller_status` refuses `outdated` with a repair. What this case drives
-    # is a LEGACY row that still carries the word, and asserts the read path treats it
-    # as terminal (it is in `live.TERMINAL_STATUS_VALUES`).
+    # is a row the write door can no longer create (written directly by `_point`), and
+    # asserts the SHARED terminal predicate — the one `live.is_terminal_status` mirrors
+    # for the read surfaces — treats it as terminal (it is in
+    # `live.TERMINAL_STATUS_VALUES`), so an already-terminal row cannot be re-superseded.
     with pytest.raises(ValueError, match="already terminal"):
         sdk.supersede_point(_point(sdk, "outdated"), _point(sdk))
 
