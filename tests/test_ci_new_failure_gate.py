@@ -1062,7 +1062,7 @@ def test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs():
 
 
 def test_the_docs_point_the_aggregates_needs_citation_at_the_needs_line():
-    """Two docs cite the required aggregate's `needs:` BY LINE; both must land on it.
+    """Docs cite the required aggregate's `needs:` BY LINE; every cite must land on it.
 
     `needs:` here IS the required-check surface (#5215 I5): a lane editing that list
     from a doc's anchor edits whatever line the anchor names. PR #11429 inserted 24
@@ -1071,8 +1071,11 @@ def test_the_docs_point_the_aggregates_needs_citation_at_the_needs_line():
     stayed on `:4951`, which is the `python-ci-gate:` JOB HEADER. Nothing parses that
     row's number, so no check red, and the next reader is landed 24 lines early.
 
-    Both cites are therefore pinned against the workflow itself — and against EACH
-    OTHER, since one re-cut without the other is exactly how this went stale.
+    Every cite is therefore pinned against the workflow itself — one row per
+    (document, WORDING), because a row only inspects the lines ITS OWN phrase matches.
+    A single phrase per document is how #13513's plan doc kept two hand-maintained
+    cites that no pin ever read: it names this line in three different phrases, and
+    only the one carrying `python-ci-gate.needs` was checked.
 
     Non-vacuity (measured at the pre-fix head, #11429 review cycle 5): the index row
     cited `:4951`, whose content is `python-ci-gate:` rather than `needs:` — the
@@ -1100,20 +1103,26 @@ def test_the_docs_point_the_aggregates_needs_citation_at_the_needs_line():
         "the aggregate carries no `needs:` under its header — the required-check "
         "surface this test locates no longer exists in the shape it reads")
 
-    # doc -> a phrase on the SAME line that the cited number is there to support.
-    claims = {
-        "docs/00_index.md": r"python-ci-gate\.needs",
-        "docs/ops/ci-runner-x64.md": r"required aggregate's `needs:`",
-        # #13513: a THIRD doc cites the same `needs:` line, by its own words, and no pin
-        # covered it — so it was ALREADY stale at the previous head (it pointed at
-        # `python-ci.yml:5343`, a comment inside the predicate step, not the `needs:` at
-        # all) and this change would have moved it again. Added here rather than only
-        # re-cut by hand, because a hand-fix is exactly what drifts next time.
-        "docs/plans/2026-09-26-5215-merge-throughput.md": r"python-ci-gate\.needs",
-    }
+    # (doc, a phrase on the SAME line that the cited number is there to support).
+    # ONE ROW PER (DOC, WORDING) — the reader below only inspects the lines its own
+    # phrase matches, so a document that names the same line in two or three different
+    # words needs a row for each. #13513: the plan doc cites this `needs:` line three
+    # times and no pin covered any of them, so it was ALREADY stale at the previous
+    # head (it pointed at `python-ci.yml:5343`, a comment inside the predicate step,
+    # not the `needs:` at all) and this change would have moved it again. Added here
+    # rather than only re-cut by hand, because a hand-fix is exactly what drifts next
+    # time — which is only true for the wordings that have a row.
+    claims: list[tuple[str, str]] = [
+        ("docs/00_index.md", r"python-ci-gate\.needs"),
+        ("docs/ops/ci-runner-x64.md", r"required aggregate's `needs:`"),
+        ("docs/plans/2026-09-26-5215-merge-throughput.md", r"python-ci-gate\.needs"),
+        ("docs/plans/2026-09-26-5215-merge-throughput.md",
+         r"required aggregate's `needs:` is load-bearing"),
+        ("docs/plans/2026-09-26-5215-merge-throughput.md", r"required-ness is the aggregate"),
+    ]
     cite = re.compile(r"python-ci\.yml:(\d+)")
     wrong: list[str] = []
-    for rel, claim in claims.items():
+    for rel, claim in claims:
         lines = (REPO / rel).read_text(encoding="utf-8").splitlines()
         found = [(n, int(m.group(1)))
                  for n, line in enumerate(lines, start=1) if re.search(claim, line)
@@ -1821,13 +1830,25 @@ def test_an_exhausted_verification_budget_names_the_budget_and_fails_closed(tmp_
     assert "VERDICT: CLEAN" not in proc.stdout
 
 
-def test_the_two_bounds_default_to_the_values_this_workflow_declares():
-    """The defaults are the workflow's own numbers, so a missing env cannot loosen them.
+def test_the_workflow_never_declares_a_bound_tighter_than_the_module_fallback():
+    """The workflow's declared bounds are never TIGHTER than the module's fallbacks.
 
-    Read from the module, compared to the workflow: if someone raises the declared
-    per-call bound past the budget (a bound that can never be reached) or drops the
-    defaults far below what the workflow declares, the two doors disagree about what
-    this job's budget IS — and the silent one is the module's.
+    DELIBERATELY not named "the defaults are the workflow's numbers" — they are not,
+    and the difference is load-bearing: the module falls back to
+    ``_DEFAULT_SUBPROCESS_BOUND_S`` / ``_DEFAULT_TOTAL_BUDGET_S``, which are knowingly
+    TIGHTER than the ``NFG_SUBPROCESS_TIMEOUT`` / ``NFG_TOTAL_BUDGET_S`` this workflow
+    declares (a missing env therefore degrades to the module's own numbers — that
+    residual is real and is NOT what this test covers; an env that is present but
+    unreadable is `UNMEASURED`, pinned by
+    `test_an_unreadable_timeout_bound_is_unmeasured_never_defaulted`).
+
+    What is asserted here is the direction that must never invert: the workflow — the
+    door that decides this job's budget in practice — may not declare LESS time than
+    the fallback. A per-call bound declared below the module's own default is tighter
+    than the value #13513 was filed against (300 s, the sweep that timed out), i.e. it
+    reintroduces the defect by configuration, and without this assertion every other
+    pin in this file stays green through it (the cap test only checks
+    `per_call <= budget`).
     """
     import yaml
 
@@ -1838,6 +1859,13 @@ def test_the_two_bounds_default_to_the_values_this_workflow_declares():
                 if (s.get("env") or {}).get("NFG_TOTAL_BUDGET_S") is not None)
     assert module._DEFAULT_SUBPROCESS_BOUND_S <= module._DEFAULT_TOTAL_BUDGET_S, (
         "the module's default per-call bound must fit inside its default total budget")
+    per_call = float(step["env"]["NFG_SUBPROCESS_TIMEOUT"])
+    assert per_call >= module._DEFAULT_SUBPROCESS_BOUND_S, (
+        f"the workflow declares NFG_SUBPROCESS_TIMEOUT={per_call:.0f}s, tighter than "
+        f"the module's own default ({module._DEFAULT_SUBPROCESS_BOUND_S:.0f}s) — that "
+        "is a per-call bound BELOW the 300 s sweep that caused #13513, reintroducing "
+        "it by configuration; raise the declared bound rather than lowering the "
+        "default")
     assert float(step["env"]["NFG_TOTAL_BUDGET_S"]) >= module._DEFAULT_TOTAL_BUDGET_S, (
         "the workflow may not declare LESS budget than the module assumes by default: "
         "a caller that forgot the env would then be given more time than the job's own "
