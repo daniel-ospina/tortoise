@@ -354,7 +354,7 @@ def _row_is_frozen(status, outdated) -> bool:
     # refuse it at intake (`lifecycle_vocabulary.py:279-286`, reached from S0's
     # `_read_caller_status` on both the update and create paths). It is kept readable
     # because rows persist — `lifecycle_vocabulary.py:263-264` records the history
-    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:53859-53861`
+    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:53911-53913`
     # enumerates the routes from the other side (a pre-fix SDK, a raw Cypher producer, a
     # JSONL replay of either) — and this repo deliberately keeps readers wider than its
     # doors (`live.py:100-108`). ⛔ Deliberately NOT citing the individual `sdk.py` call
