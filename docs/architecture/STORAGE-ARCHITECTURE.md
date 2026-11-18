@@ -1146,7 +1146,7 @@ longer a gap to be closed on this engine. The per-label state — each item read
   `embedding_vec vector(384)` and its own HNSW index, added by `20261117000001_record_object_subject_embedding.sql`
   (`#13265`). ⚠️ **Their state is two populations, not one:** rows written **before** that file land carry no vector
   (its header: *"THE COLUMN ARRIVES EMPTY"*, and the journal never carried one for these labels — `_upsert_object`
-  derives it in the graph fold, `#7845`), while **rows written after** it on the live path are filled by
+  derives it in the graph fold, `projection/entities.py::_upsert_object`), while **rows written after** it on the live path are filled by
   `record_writer.derived_embedding_columns` from `name` — and a `record_projection.replay()` passed no `derived=`
   creates NULLs (`tools/record_runner.py::apply_batches` is that fold). ⛔ **Neither label is SERVED yet:**
   `record_vector.LABEL_SERVED` covers `point`, `operator`, `source`, `document`, `event`, and the served set is what
