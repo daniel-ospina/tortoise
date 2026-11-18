@@ -6494,10 +6494,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # opens a different block), which is why the cited line is graded rather than the
         # anchor's uniqueness.
         ("05-verify.md", "their THIS-HEAD values are", (
-            ("27266", "if batch_id:"),
-            ("27378", "dedup_wired = False"),
-            ("27289", ("def", "def _cas_witness(result) -> bool:")),
-            ("27554", ("def",
+            ("27277", "if batch_id:"),
+            ("27389", "dedup_wired = False"),
+            ("27300", ("def", "def _cas_witness(result) -> bool:")),
+            ("27565", ("def",
                        "def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:")),
         ), "sdk"),
         # ⚠️ BOTH RANGE ENDS ARE NOW HELD: `:4208` by the `("4201", …)` row above (that line

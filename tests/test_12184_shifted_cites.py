@@ -255,7 +255,6 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # what stops a third occurrence appearing unannounced.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6939`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24059'): 2,
@@ -270,6 +269,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28014'): 1,
     ('docs/00_index.md', 'sdk.py:28014'): 1,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2755'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21703'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21745'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21868`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22925'): 3,
@@ -488,7 +488,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX}
-    assert len(_PINS) == 50, (
+    assert len(_PINS) == 51, (
         "48 before the `#13345` review added the D-1 dedup filter's two addresses (one per document that "
         "promises to carry the same number). The bound is not a target: a row DELETED to make the suite "
         "pass is the failure mode, so this number moves only when a row is added on purpose — the `:6938` "
