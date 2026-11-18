@@ -11,6 +11,13 @@ from __future__ import annotations
 
 import logging
 
+# #13447/#13456: `derived_embedding` is the one derive-and-encode seam this door
+# now shares with `mining` — main's addition, kept. ⛔ `record_writer` is NOT
+# imported here: this door reaches the record only through
+# `live_write.write`, the chokepoint `test_9078…::test_only_the_shipped_package_
+# can_satisfy_the_wiring_gate` holds it to, so main's second name on this import
+# would be an unused import that re-opens the direct seam call that gate refuses.
+from . import derived_embedding
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
 
@@ -1580,6 +1587,10 @@ class EventAPI:
         refuse_unapproved_kinds_in_payload(
             payload, graph_approval_namespaces(g), spells=spells)
 
+    # ⛔ ONE ENCODE PER WRITE (#13447): the record write and the fold below both
+    # encode this row's text; the decorator binds one memo across the pair, so the
+    # second encode is free (`derived_embedding.one_encode_scope`).
+    @derived_embedding.one_encode_scope
     def _emit(self, type_: str, *record: dict, corrects=None,
               actor: str | None = None, **payload) -> dict:
         # ⛔ THE RECORD PAYLOAD IS POSITIONAL (`*record`), and only

@@ -23,6 +23,12 @@ from datetime import datetime, timezone
 
 from typing import Any
 
+# #13447/#13456: `derived_embedding` is the one derive-and-encode seam this door
+# shares with `api` — main's addition, kept. ⛔ `record_writer` is NOT imported
+# here: this door reaches the record only through `live_write.write` (the
+# chokepoint), so the direct seam name would be unused and would re-open the
+# write path `test_7951_write_doors.py` classifies.
+from . import derived_embedding
 from .api import EventAPI
 from .extractor import (
     MockExtractor,
@@ -970,7 +976,11 @@ class ConversationMiner:
 
         return events
 
+    # ⛔ ONE ENCODE PER WRITE (#13447): the record write and the fold below both
+    # encode this row's text; the decorator binds one memo across the pair, so the
+    # second encode is free (`derived_embedding.one_encode_scope`).
     @staticmethod
+    @derived_embedding.one_encode_scope
     def _emit_event(api: EventAPI, event: dict) -> None:
         """Emit an EventRecorded event to the log + projection."""
         record = {
