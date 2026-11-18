@@ -953,7 +953,9 @@ def test_a_single_quoted_escape_before_a_hash_is_measured_not_broken(tmp_path) -
     branch, so it is fixed where it lives and pinned here.
 
     Non-vacuity: on the pre-fix helper ``_quoted_style`` returns
-    ``('broken', None)`` for this value, so the first assertion fails.
+    ``('broken', None)`` for this value, so the ``style`` assertion below fails
+    (the ``classified`` assertion before it passes — ``_values`` is unchanged by
+    this fix).
     """
     from tortoise.file_indexer import parse_frontmatter
 

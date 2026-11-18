@@ -189,8 +189,9 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
 2. **Fixed tree:** `2 failed, 7 passed` — the 2 are the pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, `docs/evidence/13038-capstone/README.md`),
    unchanged, named, and deliberately not "fixed" here. `git diff --stat` vs `main` = 9 files + 1 plan doc.
-3. **Mutant matrix — 20/20 behave as designed** (`/tmp/matrix_13452.sh`, tree restored byte-identical
-   after each; M13–M18 were added after code review):
+3. **Mutant matrix — 22/22 behave as designed** (M1–M20 by `/tmp/matrix_13452.sh`; M13–M18 were
+   added after code review, and M21/M22 were measured separately in `e488d2adcc`'s scratch run —
+   one mutation at a time, tree restored byte-identical between each):
 
    | # | mutant | expected | observed |
    |---|---|---|---|
@@ -331,10 +332,23 @@ surface.
 ## 9. Review-round residuals — each closed, fixed, or recorded with its reason
 
 THREE head-bound review rounds ran past the recorded attestation (`5fc01193de` → `e488d2adcc`
-→ `7963c4a851` → `9f25dc79c9`). Each found message-level defects and no fail-open; where a
-finding was applied it was measured first, and where it was falsified the record was corrected
-in place rather than restated. What is left is listed here so the next reader inherits the
-measurement instead of repeating it.
+→ `7963c4a851` → `9f25dc79c9`). The first of them is the one that matters: reviewing the attested
+head `5fc01193de`, a fresh-context reviewer found a **FAIL-OPEN in check (D)** — the arm whose
+entire job is "no affiliation value escapes measurement" — not a message defect; it is closed in
+`e488d2adcc` and listed below. The later rounds found message-level defects only. Where a finding
+was applied it was measured first, and where it was falsified the record was corrected in place
+rather than restated. What is left is listed here so the next reader inherits the measurement
+instead of repeating it.
+
+**Already fixed in `e488d2adcc` — a FAIL-OPEN in check (D).** Round 1 reviewed the attested head
+`5fc01193de` and found that (D) could be starved of BOTH sides: `declared` came only from
+`_values`, whose `_KV` lexer accepts one spelling (key at column 0, colon immediately after it),
+while YAML also accepts `aboutObjects :` and `"aboutObjects":`. For either spelling `declared`
+and `measured` were both empty, nothing was compared, and all seven arms reported GREEN over a
+57-of-141-character value — the exact #13452 defect the guard exists to close, reachable with a
+one-keystroke typo. `declared` is now derived from the PARSED block as well (`M21`/`M22` in §8's
+matrix). It is recorded here because this section's job is to hand on the measurement, and a
+fail-open the arms survived is the one residual a reader must not have to rediscover.
 
 **Fixed at this head — a single-quoted `''` escape read as an unbalanced quote.**
 
