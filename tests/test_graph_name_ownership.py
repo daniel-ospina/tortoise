@@ -147,8 +147,14 @@ def test_the_product_family_is_an_ALIAS_of_the_composer_that_strips_it():
     # `("test_", "tortoise_test", "org_", *_TENANT_GRAPH_PREFIXES)` reds the
     # exact form and passed the set form. The source pin above and this assert
     # test DIFFERENT things (declaration form vs value shape); keep both.
-    assert _SWEEP_OWNED_PREFIXES[:2] == ("test_", "tortoise_test")
-    assert _SWEEP_OWNED_PREFIXES[2:] == sdk._TENANT_GRAPH_PREFIXES
+    assert _SWEEP_OWNED_PREFIXES[:2] == ("test_", "tortoise_test"), (
+        "the two non-tenant stems must stay AHEAD of the composed family, or "
+        "the tail assertion below measures the wrong end of the tuple")
+    assert _SWEEP_OWNED_PREFIXES[2:] == sdk._TENANT_GRAPH_PREFIXES, (
+        "the tenant half must be the composer's tuple VERBATIM — a restated, "
+        "duplicated, dropped or spliced-in prefix all land here, and each one "
+        "widens (or narrows) a sweep that performs an irreversible DETACH "
+        "DELETE + GRAPH.DELETE")
 
 
 def test_the_wipe_literal_is_a_subset_of_the_journal_set():
