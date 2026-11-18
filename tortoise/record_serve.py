@@ -2105,7 +2105,12 @@ class ParityDiff:
                              column the projection must not materialise is the
                              state the deny exists to create, and calling it an
                              invention would make the rule forbid its own fix.
-    ``changed``              fields both stores answer, with different values.
+    ``changed``              fields both stores answer, with different values,
+                             decided by `reconciliation._props_relation` (the ONE
+                             comparison home: it applies the stored-form rules —
+                             vectors narrowed to the cache's width, #8615/#9184 —
+                             and reports a pair that agrees only after the
+                             narrowing as `FIELD_FORM`, which this arm ACCEPTS).
                              Non-empty = RED.
     ``explained_missing``    a DECLARED asymmetry at work. Every member comes
                              from one of FOUR declarations, and the member's
@@ -2436,10 +2441,27 @@ def parity_difference(cache_props: Mapping[str, Any],
         invented[field_name] = value
 
     changed: dict[str, Any] = {}
+    # ⛔ ONE COMPARISON RULE, ONE HOME (#13447 review cycle 3, issue 2). This arm used
+    # a bare `!=`, and `#13447` makes an `Object`/`Subject` pair carry `embedding` on
+    # BOTH sides: the record's as the float64 `jsonb` payload (#13220's column), the
+    # cache's as `vecf32($embedding)`. An exact `!=` between a float64 value and its
+    # float32 rounding fires on essentially EVERY real vector, so the served-read
+    # parity instrument would have false-REDded on exactly the vectors this change
+    # makes round-trip — the defect `#8615`/`#9184` already recorded for this pair in
+    # `reconciliation._props_relation` (the truth side is narrowed to the width the
+    # cache stores and the pair is reported as `FIELD_FORM`). Routing the arm through
+    # that function rather than inventing a second stored-form rule here is the same
+    # §12.2a "one rule set" this whole change is about.
+    #
+    # ⚠️ `FIELD_FORM` is an AGREEMENT for this arm — `ParityDiff.changed` is RED when
+    # non-empty, and a pair that agrees after the storage narrowing is what the
+    # instrument exists to accept. The narrowing is one-sided (the CACHE side is never
+    # narrowed), so a genuinely different vector is still a divergence.
+    from .reconciliation import FIELD_DIVERGENT, _props_relation
     for field_name, value in record_props.items():
         if field_name not in cache_props:
             continue
-        if cache_props[field_name] != value:
+        if _props_relation(field_name, record_props, cache_props) == FIELD_DIVERGENT:
             changed[field_name] = {"cache": cache_props[field_name],
                                    "record": value}
 
