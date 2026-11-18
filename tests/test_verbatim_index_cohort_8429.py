@@ -39,6 +39,7 @@ Two lanes:
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import os
 import sys
@@ -536,21 +537,43 @@ def test_the_probe_graph_name_is_one_this_tree_can_reap():
         "the probe's graph must be minted per RUN — a stable spelling is a "
         "shared graph, and `from_uri(ensure_indexes=True)` creates it (#13290)")
 
-    # ⛔ THE VALUE IN USE, not only a fresh call (review pass 2, P3): a FIXED but
-    # mint-SHAPED literal at the CALL SITE satisfies every assertion above and
-    # would still share one graph across lanes — measured, that mutant left the
-    # census `[]` and this test GREEN. `_probe_graph` is what the probe actually
-    # passes to `from_uri`, so asserting on it closes the helper-vs-call-site gap.
-    in_use = globals().get("_probe_graph")
-    assert in_use is not None, (
-        "the probe module never assigned `_probe_graph` — the mint is not wired "
-        "to the call site at all (#13290)")
-    assert in_use.startswith(_SERVER_WIPE_PREFIXES) and \
-        _live_utils._PER_RUN_GRAPH_NAME_RE.match(in_use), (
-        f"the probe RUNS on {in_use!r}, which is not a per-run mint name — a "
-        "fixed spelling is a shared graph no cleanup arm can reap (#13290)")
-    assert in_use != "tortoise_probe_8429", (
-        "the literal this pin replaced is back at the call site (#13290)")
+    # ⛔ THE CALL SITE, not only the helper (review pass 3, P2 — MEASURED): the
+    # assertions above read a FRESH call and the `_probe_graph` global, and
+    # NEITHER is tied to the argument `from_uri` actually receives. MUTANT that
+    # was GREEN against them: replace the call site with
+    # `_probe = _FP.from_uri(_uri, graph_name="tortoise_probe_8429")` — the
+    # literal this change removes — leaving `_probe_graph` untouched. The pin
+    # passed and the census stayed `[]` (it only sees the PRESENCE of
+    # `graph_name=`), i.e. the leak could return with every gate green. So the
+    # call is read statically here: the ONE `from_uri` call in this module must
+    # take `graph_name=` AS the minted name, and that name must come from the
+    # minting helper.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    from_uri_calls = [node for node in ast.walk(tree)
+                      if isinstance(node, ast.Call)
+                      and getattr(node.func, "attr", None) == "from_uri"]
+    assert len(from_uri_calls) == 1, (
+        f"expected ONE `from_uri(` call in this module, found "
+        f"{len(from_uri_calls)} — this pin reads that one site (#13290)")
+    kw = {k.arg: k.value for k in from_uri_calls[0].keywords}
+    assert "graph_name" in kw, (
+        "the probe's `from_uri(` passes no `graph_name=` — the census reds and "
+        "the graph its schema DDL creates belongs to nobody (#13290)")
+    assert isinstance(kw["graph_name"], ast.Name) and \
+        kw["graph_name"].id == "_probe_graph", (
+        "the call site's `graph_name=` is not the MINTED `_probe_graph` — a "
+        "literal there feeds `ensure_indexes`' DDL into ONE graph shared by "
+        "every lane and CI run, and the census still passes because it only "
+        "sees the keyword (#13290)")
+    minted = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id == "_probe_graph"
+                      for t in n.targets)]
+    assert any(isinstance(n.value, ast.Call)
+               and getattr(n.value.func, "id", None) == "_probe_graph_name"
+               for n in minted), (
+        "`_probe_graph` is not assigned from `_probe_graph_name()` — the call "
+        "site is wired to something other than the per-run mint (#13290)")
 
 
 def test_the_live_fixture_teardown_drops_its_own_graph(monkeypatch):

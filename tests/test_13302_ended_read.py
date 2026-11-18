@@ -35,6 +35,7 @@ fake would test nothing. Skips when no store is reachable (the shipped conventio
 """
 from __future__ import annotations
 
+import ast
 import os
 import sys
 import uuid
@@ -47,23 +48,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests import _live_utils  # noqa: E402, RUF100
 
 
+def _probe_graph_name() -> str:
+    """A PER-RUN name for the availability probe's OWN graph (#13302).
+
+    Same policy, and the same shape, as the #13290 probe in
+    ``tests/test_verbatim_index_cohort_8429.py``: ``from_uri`` defaults to
+    ``ensure_indexes=True``, whose schema DDL **CREATES** the graph it names, so
+    an unnamed probe graph names a graph this probe does not own — on the
+    ambient candidate, the SHARED env-URI graph that ``_uri()`` hands to every
+    ``sdk`` fixture below. The fixed ``tortoise_test_13302`` path this file
+    builds its candidates from is not a per-run MINT shape either (5 hex against
+    a floor of 8), so it meets neither cleanup arm
+    (``tests/_embedded.py::_SERVER_WIPE_PREFIXES``,
+    ``tests/_live_utils.py::_PER_RUN_GRAPH_NAME_RE``).
+
+    Pinned by ``test_the_probe_graph_is_named_at_the_call``.
+    """
+    return f"tortoise_test_13302_probe_{uuid.uuid4().hex[:10]}"
+
+
 def _probe(candidates):
     env_uri = os.environ.get("TORTOISE_DB_URI")
-    # ⛔ THE PROBE'S OWN GRAPH IS NAMED, per-run, and reaped by construction.
-    # `from_uri` defaults to `ensure_indexes=True`, whose schema DDL **CREATES**
-    # the graph it names — so an unnamed probe graph names a graph THIS PROBE
-    # DOES NOT OWN: shared with every other test in the session. On the ambient
-    # candidate that is the SHARED env-URI graph (the same handle `_uri()` hands
-    # to every `sdk` fixture below), and the fixed `tortoise_test_13302` path
-    # this file builds its candidates from is not a per-run MINT shape. This is
-    # the #10164 rule (`graph_name=` at the call) applied with a mint, so BOTH
-    # cleanup arms admit it: the `tortoise_test` prefix puts it inside
-    # `_SERVER_WIPE_PREFIXES`, and the 10-hex suffix meets
-    # `_PER_RUN_GRAPH_NAME_RE` so `drop_test_graph` would not refuse it either.
-    # The census this satisfies is `test_derived_names.py::
-    # test_from_uri_sites_resolve_test_prefixed`, which was RED on `main` for
-    # this site (measured at `f462ad3acb`).
-    probe_graph = f"tortoise_test_13302_probe_{uuid.uuid4().hex[:10]}"
+    # ⛔ THE PROBE'S OWN GRAPH IS NAMED, per-run, and reaped by construction
+    # (`_probe_graph_name`). The census this satisfies is
+    # `test_derived_names.py::test_from_uri_sites_resolve_test_prefixed`, which
+    # was RED on `main` for this site (measured at `f462ad3acb`); the whole
+    # rationale — `ensure_indexes` DDL CREATES the named graph, so an unnamed
+    # probe graph is a graph nobody can own — lives on the helper above.
+    probe_graph = _probe_graph_name()
     for uri in candidates:
         if not uri:
             continue
@@ -92,6 +104,59 @@ _AVAILABLE, _WORKING_URI = _probe([
     _live_utils.docker_uri("tortoise_test_13302"),
     _live_utils.legacy_uri("tortoise_test_13302"),
 ])
+
+
+def test_the_probe_graph_is_named_at_the_call():
+    """#13302 — the probe's `from_uri(` PASSES the minted graph name.
+
+    The census (`tests/test_derived_names.py::test_from_uri_sites_resolve_test_prefixed`)
+    only sees the PRESENCE of a `graph_name=` keyword, and the helper's own
+    vocabulary can be right while the call site is wired to something else —
+    measured on the #13290 sibling: pointing its call at the old fixed literal
+    left both the census `[]` and that pin GREEN. So this reads the ONE
+    `from_uri(` call statically and requires it to pass `probe_graph`, itself
+    assigned from the per-run mint. Hermetic — no server, no import side effect.
+    """
+    from tests._embedded import _SERVER_WIPE_PREFIXES
+
+    name = _probe_graph_name()
+    assert name.startswith(_SERVER_WIPE_PREFIXES), (
+        f"{name!r} is outside the session sweep's prefix family "
+        f"{_SERVER_WIPE_PREFIXES} — nothing would ever drop it (#13302)")
+    assert _live_utils._PER_RUN_GRAPH_NAME_RE.match(name), (
+        f"{name!r} is not a per-run MINT shape, so `drop_test_graph` refuses to "
+        "delete it and the graph leaks (#13302)")
+    assert name != _probe_graph_name(), (
+        "the probe's graph must be minted per RUN — a stable spelling is a "
+        "shared graph, and `from_uri(ensure_indexes=True)` creates it (#13302)")
+
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    from_uri_calls = [node for node in ast.walk(tree)
+                      if isinstance(node, ast.Call)
+                      and getattr(node.func, "attr", None) == "from_uri"]
+    assert len(from_uri_calls) == 1, (
+        f"expected ONE `from_uri(` call in this module, found "
+        f"{len(from_uri_calls)} — this pin reads that one site (#13302)")
+    kw = {k.arg: k.value for k in from_uri_calls[0].keywords}
+    assert "graph_name" in kw, (
+        "the probe's `from_uri(` passes no `graph_name=` — the census reds and "
+        "the graph its schema DDL creates belongs to nobody (#13302)")
+    assert isinstance(kw["graph_name"], ast.Name) and \
+        kw["graph_name"].id == "probe_graph", (
+        "the call site's `graph_name=` is not the MINTED `probe_graph` — a "
+        "literal there feeds `ensure_indexes`' DDL into ONE graph shared by "
+        "every lane and CI run, and the census still passes because it only "
+        "sees the keyword (#13302)")
+    minted = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id == "probe_graph"
+                      for t in n.targets)]
+    assert any(isinstance(n.value, ast.Call)
+               and getattr(n.value.func, "id", None) == "_probe_graph_name"
+               for n in minted), (
+        "`probe_graph` is not assigned from `_probe_graph_name()` — the call "
+        "site is wired to something other than the per-run mint (#13302)")
+
 
 _docker_only = pytest.mark.skipif(
     not _AVAILABLE,
