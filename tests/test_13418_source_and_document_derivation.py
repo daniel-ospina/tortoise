@@ -473,6 +473,35 @@ def test_a_versioned_session_source_derives_NOTHING_too(encoder):
     assert "narrative" in out.skipped, out.skipped
 
 
+def test_a_versioned_source_CARRYING_a_vector_still_honours_it(encoder):
+    """The carried-vector arm reaches the transition too — the one arm uncovered.
+
+    The three skip arms are shared with `SourceCreated`, but only two of them have a
+    sibling pin above (no text, session). A version line CAN carry `embedding` — the
+    payload is `ev` splatted, and `_SOURCE_EXTRA_PROPS` declares `embedding` a caller
+    passthrough — and the wrong answer here is worse than on a create: the row
+    already holds text, so deriving over a carried vector would replace the vector
+    the node kept (`#5004`) on the very write that moves the column.
+
+    ⛔ THE PAYLOAD STATES `_searchText`, AND THAT IS LOAD-BEARING: with no derivable
+    text the no-`_searchText` arm answers `{}`/`[]` on its own and this test would
+    stay green with the carried-vector arm removed (the same non-discrimination the
+    `SourceCreated` sibling was hardened against — the `#13473` review's P2).
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceVersioned", "url": "https://example.com/a",
+        "_searchText": "acme pricing 2024 renewal",
+        "contentHash": "h2", "previousContentHash": "h1",
+        "embedding": [0.5] * 384,
+    })
+    assert out.columns == {}, (
+        "the version arm recomputed over the caller's vector — `public.source` "
+        "would then hold a vector the node does not (#5004)")
+    assert encoder.calls == []
+    assert out.skipped == "the record carries a vector", (
+        f"the skip must name the CARRIED vector, not the absent text (got {out.skipped!r})")
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # The scope of the table: every served label has a writer
 # ════════════════════════════════════════════════════════════════════════════
