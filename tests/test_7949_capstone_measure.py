@@ -6796,8 +6796,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # CI checks the repo out at one commit and a shallow/filtered clone need not carry another
     # head's tree — the limit `test_the_legacy_head_really_predates_the_flip` names for its own
     # head, and the reason `test_the_merge_head_honours_line_is_what_that_head_carries` below
-    # SKIPS on a shallow clone and re-measures on a full one, instead of asserting from memory
-    # in either direction.
+    # SKIPS when the orphan is not in this clone (it is carried by NO ref) and re-measures
+    # on a clone that does hold it, instead of asserting from memory in either direction.
     # ⛔ AN EARLIER CUT OF THIS COMMENT SAID THE OPPOSITE AND IS DELETED, not softened: it called
     # `:20236` "QUOTED HISTORY, not a re-measurement" because `2584a86ec1` was said to be ABSENT
     # from this box, quoting `fatal: Not a valid object name` — which `git cat-file -t` refutes
@@ -6810,9 +6810,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     assert _honours_merge_head_value == ["20236"], (
         "05-verify.md D5 should state the MERGE head `2584a86ec1`'s own `_honours` line "
         "(`:20236`) immediately after naming that head, and this reads "
-        f"{_honours_merge_head_value!r} — that figure is that head's own, re-measured there "
-        "with `git show 2584a86ec1:tortoise/sdk.py`; if it moves, correct it in the same "
-        "commit that changes the record, not by carrying this head's number into it")
+        f"{_honours_merge_head_value!r} — that figure is that head's own, recorded "
+        "there at `2584a86ec1` when a clone that still carries that REBASE ORPHAN "
+        "reads `git show 2584a86ec1:tortoise/sdk.py` (`git ls-remote origin` matches "
+        "no ref for it, so a fresh clone cannot re-read it); if it moves, correct it "
+        "in the same commit that changes the record, not by carrying this head's "
+        "number into it")
 
     # ⛔ THE RETRACTED `sdk.py:25127` CLAIM, RE-MEASURED (#13489 review, finding 2 — MEASURED).
     # D5 stated that "this PR re-derived [the content-review filter cite] to `sdk.py:25127`",
@@ -7451,23 +7454,31 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
     ⛔ THE POLARITY (#13489 review, P1). A comment inside the epic-bundle pin called
     `:20236` "QUOTED HISTORY, not a re-measurement", because `2584a86ec1` was said to
     be ABSENT from this box and a `fatal: Not a valid object name` was quoted as the
-    proof. MEASURED: `git cat-file -t 2584a86ec1` -> `commit`, and
-    `git show 2584a86ec1:tortoise/sdk.py` carries the definition on `:20236` — the
-    exact value the pin asserts. Presence is what the probe CONFIRMS; a `fatal` there
-    would be the absence, so the polarity was backwards and the stated limit did not
-    exist. This arm is that measurement, so the figure is checkable by an instrument
-    rather than asserted in prose.
+    proof. The polarity WAS backwards and the stated limit did not exist: on a box that
+    HOLDS the object, `git cat-file -t 2584a86ec1` -> `commit` and
+    `git show 2584a86ec1:tortoise/sdk.py` carries the definition on `:20236`, the exact
+    value the pin asserts. Presence is what the probe CONFIRMS; a `fatal` there would be
+    the absence. This arm is that measurement, so the figure is checkable by an
+    instrument rather than asserted in prose.
 
-    ⛔ WHAT THIS ARM CANNOT DO, stated rather than assumed: CI checks this repo out with
-    a bare `actions/checkout@v4` (`python-ci.yml`, default `fetch-depth: 1`), where
-    another head does not exist by construction. So the read SKIPS on a shallow clone
-    and FAILS on a full clone whose object is unreadable — the same distinction
-    `test_the_legacy_head_really_predates_the_flip` makes for its own head, and the
-    reason the arm above is a prose pin instead of a `git show`.
+    ⛔ WHAT THIS ARM CANNOT DO, and CORRECTED because an earlier cut of this docstring
+    claimed a presence measured on exactly ONE box (#13489 review, P1): `2584a86ec1` is
+    a REBASE ORPHAN — `git ls-remote origin` matches no ref for it — so a FRESH clone
+    does not carry it, and `git cat-file -t` there is a `fatal`. Presence of the object
+    is therefore a property of the CLONE, not of the repository, and neither a `fatal`
+    nor a `commit` is by itself evidence about the figure. The arm distinguishes the two:
+    it reads the line when the object is present (the real check) and SKIPS with a
+    stated reason when it is not, because a `fatal` cannot mean "the sha is wrong" when
+    the same `fatal` is what every clean checkout of this repo returns.
 
-    NON-VACUITY, MEASURED on a full clone: reds if the definition moves off `:20236` at
-    that head (and the value is read there, not here), and reds if that head becomes
-    unreadable in a full clone — the two ways the figure could stop being true.
+    ⛔ AND THE COVERAGE LIMIT IS STATED, not implied: CI checks this repo out with a
+    bare `actions/checkout@v4` (`python-ci.yml`, default `fetch-depth: 1`), where no
+    other head exists by construction, so on CI this arm SKIPS — the figure is
+    re-checkable only on a clone that still carries the orphan. That is WEAKER than the
+    docstring used to claim, and saying so here is the only honest place to say it.
+
+    NON-VACUITY, MEASURED on a box that holds the object: reds if the definition moves
+    off `:20236` at that head (the value is read THERE, not here).
     """
     head = "2584a86ec1"
     try:
@@ -7477,20 +7488,13 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
     except FileNotFoundError:  # no `git` on this host at all
         pytest.skip("`git` is not installed here, so no commit can be read")
     if shown.returncode != 0:
-        shallow = subprocess.run(
-            ["git", "rev-parse", "--is-shallow-repository"],
-            cwd=_REPO, capture_output=True, text=True).stdout.strip()
-        if shallow == "true":
-            pytest.skip(
-                f"{head} (the MERGE head D5 quotes `:20236` for) is not in this "
-                "clone's history — a `fetch-depth: 1` checkout cannot contain "
-                "another head, so the figure is UNCHECKED here, not disproved. "
-                "`git fetch --unshallow origin` re-arms this arm.")
-        pytest.fail(
-            f"{head} is unreadable in a FULL clone, so the head D5 binds `:20236` "
-            "to is wrong rather than merely unreachable — and a skip here would "
-            "leave the figure unchecked forever. "
-            f"git: {shown.stderr.strip()}")
+        pytest.skip(
+            f"{head} (the MERGE head D5 quotes `:20236` for) is not carried by this "
+            "clone, so the figure is UNCHECKED here, not disproved. It is a REBASE "
+            "ORPHAN: `git ls-remote origin` matches no ref for it, so a fresh clone "
+            "and CI's `fetch-depth: 1` checkout both lack it by construction. Re-arm "
+            "on a box that still holds it with `git fetch origin " + head + "`."
+            f" git: {shown.stderr.strip()}")
     hits = [
         _n for _n, _line in enumerate(shown.stdout.splitlines(), 1)
         if "_honours: dict[str, frozenset[str]] = {" in _line]
