@@ -139,6 +139,15 @@ def _declared_gh_names(manifest: Path) -> set[str]:
     return names
 
 
+#: A comment starts at `#` ONLY at line start or after whitespace — the gate's own
+#: `_COMMENT_RE` (`(?:^|\s)#`), reproduced here on purpose. A plainer
+#: `split("#", 1)` truncates the PAYLOAD of a `fly-only:#13209` declaration to
+#: `fly-only:`, so an offender message would print a token no manifest line
+#: contains — two readers of one grammar disagreeing in the one string an
+#: operator is meant to act on (#13370 review, P3).
+_MANIFEST_COMMENT_RE = re.compile(r"(?:^|\s)#")
+
+
 def _manifest_sources(manifest: Path) -> dict[str, str]:
     """`{Fly variable: source token}` for every declaration in the manifest.
 
@@ -147,8 +156,9 @@ def _manifest_sources(manifest: Path) -> dict[str, str]:
     the two differ — keying on the payload would silently skip that row.
     """
     sources: dict[str, str] = {}
-    for line in manifest.read_text().splitlines():
-        parts = line.split("#", 1)[0].split()
+    for raw in manifest.read_text().splitlines():
+        marker = _MANIFEST_COMMENT_RE.search(raw)
+        parts = (raw[: marker.start()] if marker else raw).split()
         if len(parts) == 2:
             sources[parts[0]] = parts[1]
     return sources
@@ -1960,6 +1970,46 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     assert "REGISTRY_STREAM_KEY" not in workflow_refs, (
         "REGISTRY_STREAM_KEY must stay OUT of the GitHub trust boundary (#661)"
     )
+    # ── #13209: the hosted READ-MODE lever, the second decision-backed exception ─
+    # `TORTOISE_RECORD_SERVE` is armed by an operator (`flyctl secrets set`) and
+    # reverted by the same lever (`flyctl secrets unset`) — the runbook's arming
+    # surface, which states the ruling verbatim: "Arming is an OWNER action.
+    # Nothing in the code arms it, and no deploy sets it."
+    #
+    # Pinned by KIND and by DIRECTION, because each wrong route is one plausible
+    # edit away and only one of them reds the gate immediately:
+    #   * `gh-secret:` would make the deploy the managing source (reversing the
+    #     ruling) AND fail closed today — no such GitHub Actions secret exists;
+    #   * `fly-toml-env` would version today's value into `fly.toml [env]`, which
+    #     both re-introduces a deploy-set value and breaks the published revert
+    #     (`fly secrets unset` would return the [env] value, not the shipped
+    #     `off` default);
+    #   * `unmanaged` is the #4126 defect the gate exists to refuse.
+    # So this asserts BOTH halves of "out-of-band": declared `fly-only:`, and
+    # present in NEITHER the deploy payload NOR `fly.toml [env]`. A revert to
+    # `unmanaged` fails HERE, in review, and so does a "helpful" move of the value
+    # into version-controlled env.
+    record_serve = "TORTOISE_RECORD_SERVE"
+    assert declared[record_serve] == "fly-only:#13209", declared[record_serve]
+    assert record_serve not in workflow_refs, (
+        "TORTOISE_RECORD_SERVE must stay OUT of the GitHub trust boundary — arming "
+        "is an operator action and no deploy sets it (#13209)"
+    )
+    # A BELT, not a second surface: `workflow_refs` above is built by this file's
+    # `_referenced_secret_names` and this line calls the GATE's
+    # `workflow_secret_refs`, but both scan with the same `secrets\.([A-Za-z0-9_]+)`
+    # regex, so no mutant reds one without the other (measured: the payload mutant
+    # co-reds the line above). Kept because the two readers live in different
+    # files and a future divergence in EITHER should red HERE — do not read it as
+    # independent evidence of a second surface.
+    assert record_serve not in module.workflow_secret_refs(REAL_WORKFLOW.read_text())
+    assert record_serve not in env_keys, (
+        "TORTOISE_RECORD_SERVE is versioned in fly.toml [env], so it is NOT "
+        "out-of-band any more — REVERT the [env] entry: the `fly-only:` "
+        "declaration IS the recorded decision (#13209), and `fly-toml-env` — the "
+        "route its OVERRIDES marker names and refuses — would re-introduce a "
+        "deploy-set value"
+    )
     assert debt == set(), f"recorded debt remains: {sorted(debt)}"
     assert r.returncode == 0, r.stdout + r.stderr
 
@@ -2136,6 +2186,30 @@ def test_probe_block_and_manifest_gh_secret_names_are_in_lockstep():
 _FLY_ONLY_LINE = "FLY_ONLY_KEY  fly-only:#661\n"
 _FLY_ONLY_MANIFEST = _MANIFEST + _FLY_ONLY_LINE
 _FLY_ONLY_SECRETS = [*_ALL_DECLARED, "FLY_ONLY_KEY"]
+
+
+def test_the_test_side_manifest_reader_keeps_a_fly_only_payload(tmp_path):
+    """`_manifest_sources` must agree with the GATE about where a comment starts.
+
+    A plainer `split("#", 1)` truncates `fly-only:#13209` to `fly-only:`. The
+    CLASSIFICATION survived that (`startswith("fly-only:")` still holds, so the
+    guard passed), and only the string an operator reads diverged — an offender
+    message naming a token no manifest line contains. Two readers of one grammar
+    disagreeing in the one place a human acts on it is worth a pin, because the
+    failure is invisible until someone is already debugging (#13370 review, P3).
+    """
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text(
+        "# a full-line comment\n"
+        "REGISTRY_STREAM_KEY    fly-only:#661\n"
+        "TORTOISE_RECORD_SERVE  fly-only:#13209   # trailing note\n"
+        "SENTRY_DSN             gh-secret:SENTRY_DSN   # error tracking\n"
+    )
+    assert _manifest_sources(manifest) == {
+        "REGISTRY_STREAM_KEY": "fly-only:#661",
+        "TORTOISE_RECORD_SERVE": "fly-only:#13209",
+        "SENTRY_DSN": "gh-secret:SENTRY_DSN",
+    }
 
 
 def _fly_only_manifest(name: str, line: str, base: str = _MANIFEST) -> Path:
@@ -2400,6 +2474,103 @@ def test_the_secrets_matrix_guard_rejects_every_no_home_spelling(monkeypatch):
     )
     monkeypatch.setattr(module, "REAL_RUNBOOK", control)
     test_secrets_matrix_github_column_agrees_with_the_manifest()
+
+
+def _runbook_with_matrix_fly_cell(name: str, cell: str) -> str:
+    """The runbook with `name`'s Secrets Matrix **Fly.io** cell set to `cell`.
+
+    The mirror of `_runbook_with_matrix_github_cell`, for the mutation probe that
+    pins the Fly-column guard. A missing name raises rather than returning an
+    unmutated runbook, which would make the probe vacuous.
+    """
+    lines = REAL_RUNBOOK.read_text().splitlines()
+    for i, line in enumerate(lines):
+        row = _SECRETS_MATRIX_ROW_RE.match(line)
+        if row and row.group(1) == name:
+            lines[i] = (
+                f"| {name} | {cell} | {row.group(3).strip()} | {row.group(4).strip()} |"
+            )
+            return "\n".join(lines)
+    raise AssertionError(f"{name} is not in the Secrets Matrix — the probe is stale")
+
+
+def test_a_fly_only_name_is_not_shown_as_absent_from_the_app():
+    """A `fly-only:` name IS on the app — its Fly.io cell must say so, not `—`.
+
+    The GitHub-column guard above, on the OTHER column. `fly-only:` means "on
+    Fly, managed out of band, deliberately absent from version control": the
+    checker REFUSES such a declaration unless the name really is on the app
+    (`check-fly-secret-drift.py`'s `fly-only:` arm), so a `—` cell states the
+    opposite of the declaration an operator can read in the manifest.
+
+    This is the #13209 review's P2-1, generalized rather than corrected once:
+    `TORTOISE_RECORD_SERVE` read "— (a mode flag, not a credential: no secret to
+    provision)" sixty lines above this PR's own "it is a live Fly secret,
+    declared `fly-only:#13209`" paragraph — the orientation row an operator
+    reads BEFORE the recipes contradicted both the manifest and the gate.
+
+    Positive-marker test, for the same measured reason as the GitHub column: the
+    em dash, ASCII `-`, `n/a`, `none`, an empty cell and a dash with a trailing
+    note all read as "not here", and only `✅` says "on the app" (#8614 review,
+    P2 — a substring test merged every other spelling green).
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    fly_only = {n for n, s in sources.items() if s.startswith("fly-only:")}
+    assert fly_only, "the shipped manifest declares no fly-only: name — the reader is wrong"
+
+    rows = _secrets_matrix_rows()
+    seen = {name for name, *_ in rows}
+    # Non-vacuity: neither the manifest dropping its fly-only members nor the
+    # table dropping their rows may silently disarm this guard.
+    assert fly_only & seen, (
+        "no `fly-only:` name has a Secrets Matrix row, so this guard proves "
+        f"nothing — manifest fly-only names: {sorted(fly_only)}"
+    )
+
+    offenders = [
+        f"{name}: declared {sources[name]!r} (so it IS on the app) but its "
+        f"Fly.io column reads {fly!r}"
+        for name, fly, _fdb, _github in rows
+        if name in fly_only and _GITHUB_HOME_MARKER not in fly
+    ]
+    assert not offenders, (
+        "the Secrets Matrix tells an operator these names are not on the app, "
+        "while the manifest declares them `fly-only:` — which the provenance "
+        "gate only accepts for a name that IS on Fly:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_fly_column_guard_rejects_every_no_home_spelling(monkeypatch):
+    """The Fly-column guard must red on every equivalent "not here" spelling.
+
+    End-to-end against the real guard with that one cell changed, so reverting to
+    an em-dash-only test reds here. The control asserts a real `✅` cell does NOT
+    red, so the guard cannot be satisfied by flagging every row.
+    """
+    module = sys.modules[__name__]
+    for index, cell in enumerate(
+        ("—", "-", "–", "n/a", "N/A", "none", "", "— (a mode flag, no secret)")
+    ):
+        fixture = _fixture(
+            f"runbook-flymatrix-{index}.md",
+            _runbook_with_matrix_fly_cell("TORTOISE_RECORD_SERVE", cell),
+        )
+        monkeypatch.setattr(module, "REAL_RUNBOOK", fixture)
+        try:
+            test_a_fly_only_name_is_not_shown_as_absent_from_the_app()
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"a `fly-only:` row whose Fly.io column reads {cell!r} was not "
+            "caught — the offender still merges green (#13209 review, P2-1)"
+        )
+    # Control: the real shape (`✅`) names the app, not an absence.
+    control = _fixture(
+        "runbook-flymatrix-home.md",
+        _runbook_with_matrix_fly_cell("TORTOISE_RECORD_SERVE", "✅ (armed `prefer`)"),
+    )
+    monkeypatch.setattr(module, "REAL_RUNBOOK", control)
+    test_a_fly_only_name_is_not_shown_as_absent_from_the_app()
 
 
 def _fly_minted_offenders(runbook_text: str, gh_names: set[str]) -> list[str]:
