@@ -1849,6 +1849,13 @@ def test_the_workflow_never_declares_a_bound_tighter_than_the_module_fallback():
     reintroduces the defect by configuration, and without this assertion every other
     pin in this file stays green through it (the cap test only checks
     `per_call <= budget`).
+
+    ⛔ EQUALITY IS REFUSED, not merely "less". The comparison is `>` and not `>=`,
+    because the fallback IS the 300 s literal that timed out on run `44308191683`
+    attempt 2: an env declaring exactly 300 does not "match the fallback", it puts
+    the measured-too-short bound back in the door that actually decides this job's
+    budget. `>=` read that mutant GREEN — `300 >= 300` — and the `600 -> 300` mutant
+    reddened no row anywhere in the tree (mutation-attributed on #13538's review).
     """
     import yaml
 
@@ -1860,12 +1867,14 @@ def test_the_workflow_never_declares_a_bound_tighter_than_the_module_fallback():
     assert module._DEFAULT_SUBPROCESS_BOUND_S <= module._DEFAULT_TOTAL_BUDGET_S, (
         "the module's default per-call bound must fit inside its default total budget")
     per_call = float(step["env"]["NFG_SUBPROCESS_TIMEOUT"])
-    assert per_call >= module._DEFAULT_SUBPROCESS_BOUND_S, (
-        f"the workflow declares NFG_SUBPROCESS_TIMEOUT={per_call:.0f}s, tighter than "
-        f"the module's own default ({module._DEFAULT_SUBPROCESS_BOUND_S:.0f}s) — that "
-        "is a per-call bound BELOW the 300 s sweep that caused #13513, reintroducing "
-        "it by configuration; raise the declared bound rather than lowering the "
-        "default")
+    assert per_call > module._DEFAULT_SUBPROCESS_BOUND_S, (
+        f"the workflow declares NFG_SUBPROCESS_TIMEOUT={per_call:.0f}s, not ABOVE the "
+        f"module's own default ({module._DEFAULT_SUBPROCESS_BOUND_S:.0f}s) — that is "
+        "a per-call bound AT OR BELOW the 300 s sweep that caused #13513, "
+        "reintroducing it by configuration; raise the declared bound rather than "
+        "lowering the default. `>=` is not enough: the fallback IS that 300 s "
+        "literal, so an env declaring exactly it passed `>=` while putting the "
+        "timed-out bound back in the door that decides the budget")
     assert float(step["env"]["NFG_TOTAL_BUDGET_S"]) >= module._DEFAULT_TOTAL_BUDGET_S, (
         "the workflow may not declare LESS budget than the module assumes by default: "
         "a caller that forgot the env would then be given more time than the job's own "
