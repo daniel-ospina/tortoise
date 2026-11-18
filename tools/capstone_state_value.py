@@ -675,6 +675,17 @@ class LocalTarget:
                     read_status_out=status,
                     _truncation_out=trunc,
                     leg_trace=trace,
+                    # #12297's census (`tests/test_rerank_pool.py`) requires every
+                    # caller in `tools/` to either opt out or be on its
+                    # intentional-keep list: this instrument's OUTPUT is the page
+                    # the lever moves (which rows survive `limit`, and whether a
+                    # retired id appears in them), so an armed rerank would move
+                    # the scoreboard with no narrated cause — the same class as
+                    # `docs/evidence/7983-cost-magnitudes/probes/ledger_probe.py`,
+                    # which also opts out. The gate is default-OFF; this keeps the
+                    # measurement stable when it is armed, and names the choice
+                    # instead of inheriting it.
+                    _rerank_candidates=False,
                     **extra,
                 )
                 or []

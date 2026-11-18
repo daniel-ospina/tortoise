@@ -601,6 +601,11 @@ def measure_windows(sdk, names: list[str], concurrency: int, limit: int,
                     _sanitise_query_text(names[i % len(names)]),
                     entity_type="object", limit=limit, include_terminal=True,
                     _record_reads=False, _valid_time_rerank=False,
+                    # #12297's census: this probe's OUTPUT is the page the lever
+                    # moves, so it opts out for the same reason it already opts
+                    # out of `_valid_time_rerank` above — inheriting the rerank
+                    # would re-pick which rows survive `limit`, undisclosed.
+                    _rerank_candidates=False,
                     leg_trace=trace)
             except Exception as e:  # a raised read is a SAMPLED failure
                 local_reasons[f"raised:{type(e).__name__}"] += 1

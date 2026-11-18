@@ -860,7 +860,12 @@ def run(args: argparse.Namespace) -> int:
             # `_fts_rows` opts the entity legs back INTO terminal-inclusive; the
             # Point leg keeps the default. Mirrored exactly, per leg.
             include_terminal=kind in ("object", "subject"),
-            _record_reads=False, _valid_time_rerank=False, leg_trace=trace)
+            _record_reads=False, _valid_time_rerank=False,
+            # #12297's census: this helper mirrors `_fts_rows` EXACTLY, and the
+            # ids it returns ARE the ranking being measured — so the rerank opts
+            # out here for the same reason `_valid_time_rerank` does above.
+            _rerank_candidates=False,
+            leg_trace=trace)
         for entry in trace or []:
             if not isinstance(entry, dict):
                 continue

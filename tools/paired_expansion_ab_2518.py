@@ -800,7 +800,12 @@ def read_arm(sdk, items: list[dict], *, arm: str, expansion: bool,
         rows = sdk.tortoise_fts_query(
             query, entity_type=arm, limit=read_limit,
             include_terminal=True, _record_reads=False,
-            _valid_time_rerank=False, leg_trace=trace,
+            _valid_time_rerank=False,
+            # #12297's census: the arm comparison below IS the order the rerank
+            # would move, so it opts out for the identical reason it opts out of
+            # `_valid_time_rerank` — an armed rerank would re-pick the page under
+            # the measurement and charge the difference to entity_key_expansion.
+            _rerank_candidates=False, leg_trace=trace,
             entity_key_expansion=expansion)
         reads += 1
         ids = [str(r.get("id", "")) for r in (rows or [])]
@@ -1172,7 +1177,8 @@ def run(args: argparse.Namespace) -> int:
         # One warm read so the first measured query is not paying a cold cost.
         sdk.tortoise_fts_query("warm", entity_type="point", limit=1,
                                include_terminal=True, _record_reads=False,
-                               _valid_time_rerank=False)
+                               _valid_time_rerank=False,
+                               _rerank_candidates=False)
         item_ids = [it["item_id"] for it in items]
         arms: dict[str, dict] = {}
         for arm in args.arms:
