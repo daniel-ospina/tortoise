@@ -20604,10 +20604,10 @@ class FalkorProjection(
         **no open issue carries the removal.** So this cost is UNOWNED today, and
         the two identifiers above must be read as the history of the choice, never
         as an owner. Measured at two runs on docker 4.20.6 (`#13436`'s artifact
-        `docs/evidence/13436-write-path-costs/`): **≈0.24 us/point marginal in BOTH
-        runs** with a **≈5.2 ms fixed floor** — the slope reproduces the ≈0.2 us
-        figure above, the FLOOR is what this box adds, so neither is corrected
-        here. ⛔ The removal route is still a write-maintained signal, and it is
+        `docs/evidence/13436-write-path-costs/`, the second taken at the final
+        head): **≈0.24-0.26 us/point marginal in BOTH runs** with a **≈5.4-5.8 ms
+        fixed floor** — the slope reproduces the ≈0.2 us figure above, the FLOOR is
+        what this box adds, so neither is corrected here. ⛔ The removal route is still a write-maintained signal, and it is
         still nobody's.
 
         ⚠️ THOSE FIGURES ARE THE PRE-#11682, ONE-DISJUNCT SHAPE and the
