@@ -7,7 +7,7 @@ created: 2026-11-18
 updated: 2026-11-18
 subjects.team: epistemic-team
 issue: "#13420"
-aboutSubjects: `:Object`/`:Subject` entity fingerprints, derived-entity embedding write path, graph-side vector copies, record (Postgres) vector ownership
+aboutSubjects: "`:Object`/`:Subject` entity fingerprints, derived-entity embedding write path, graph-side vector copies, record (Postgres) vector ownership"
 aboutObjects: STORAGE-ARCHITECTURE.md §2.0/§12.1c/§14.3 V3/§17.1/§17.2, #11395 KEEP ruling and its 2026-11-17 reopen, #13220, #13082, #5004, #13417, #13422
 ---
 
@@ -164,7 +164,7 @@ recorded there):**
 |---|---|---|
 | Columns, generated vector, HNSW index exist for both labels | migration `20261117000001` | **half** — "indexes" yes; "holds" only for **rows written after deploy**, which is not a statement about the pre-existing population (the migration's own header: *"THE COLUMN ARRIVES EMPTY"*), and `STORAGE-ARCHITECTURE.md:1640` says so (*"\"the record holds them\" is a statement about ROWS, not about columns"*) |
 | The live writer fills them | `record_writer.derived_embedding_columns` (`:1755`, called `:2092`) | yes, on the live path only |
-| **The record does not *serve* them** | `record_vector.LABEL_SERVED` (`:164-174`) excludes both; `#13422` | ⛔ **no** — `#13220`'s ordered step 2 (*"the record demonstrably serves it"*) is unmet |
+| **The record does not *serve* them** | `record_vector.LABEL_SERVED` (`:164-174`) excludes both; `#13422` | ⛔ **no** — `#13220`'s ordered step 2 (*"`LABEL_SERVED` extended so the dense leg answers for object/subject/event/source from the record"*) is unmet, and its own sequencing caveat is explicit (*"removing it before the record demonstrably serves it repeats the failure the ruling was written to prevent"*, `#13220` comment `6956834824`) |
 | The graph legs still read the graph copies — a brute-force scan (`:4439-4446`), not an index | `search_engine.py:4439-4446` + `:148` | ⛔ **no** — the copy is the *only* serving copy for these labels today |
 | The **resolution** half is now measured — **the falsifier's recall half only** | `#11901`: the capture prior's `limit=3` returns the exact stored entity **184/300 = 61.3 %** hybrid (55.3 % keyword-only); widening 3→15 reaches **73.0 %**; surface-variant pairs attach **0.0 %** in phase-1 exact-`_norm` at every k. The dense leg helps by class (definite descriptions **down** 76.1 %→62.8 %; identifiers **up** 21.1 %→46.7 %; paths 33.3 %→96.7 %) | **Not an answered falsifier.** The KEEP ruling's falsifier asks for *"the similarity leg on and off … and whether the duplicate-entity rate moves"*; `#11901` measured candidate recall@k in **phase 1 only** (`STORAGE-ARCHITECTURE.md:1650`: *"the phase-2 LLM resolver … is unmeasured here … never the duplicate rate itself"*). ⇒ **the recall half is measured and positive; the duplicate-rate half and the end-to-end capture path are unrun** (§2.6) |
 | `:Event`/`:Source` retiredness is now contradicted between two merged texts | §1.5 | not a condition — a **wording** decision for the owner |
