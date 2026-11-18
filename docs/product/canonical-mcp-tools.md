@@ -364,12 +364,14 @@ name — so the composed surface is:
   ⛔ NOT `config/surface-order.yml`: that file is the ordering / keyword table (its header says
   the lint "must not be satisfiable by editing the rows it checks"), and its `baseline_counts`
   sum to the **advertised 48**, not the served 108, so it cannot total a served population;
-- **94 public SDK methods**, composed the same way, on a surface this wave does not touch:
+- **105 public SDK methods**, composed the same way, on a surface this wave does not touch:
   125 → 120 (#12901 wave 1) → 112 (#11609's READ/QUERY family A, #12951: six containers in,
   fourteen read methods re-privatised) → 111 (lane B: four retired, three delivered) → 110
   (batch 2: six approved in, seven retired out) → **94** (#12901 wave 2: sixteen control-plane
-  doors closed, their bodies kept private). The door-retirement wave retires MCP names only, so
-  it contributes no SDK term — 94 is `origin/main`'s pinned count and this branch inherits it.
+  doors closed, their bodies kept private) → **105** (#11609 P3: the eleven approved names with
+  no `def` implemented). The door-retirement wave retires MCP names only, so
+  it contributes no SDK term; the P3 term is +11 and moves the count UP, which is the one
+  direction this list has otherwise never run.
 
 Every number here is MEASURED off the merged registry, not added by hand — `tools/bridge_table.py`,
 `tools/surface_manifest.py` and `tests/test_tool_risk_tiers.py` read the same three.
@@ -558,7 +560,7 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **94** public
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **105** public
    methods — a number DERIVED from the class, never typed; it moved 147 → 150 at #4282
    phase 2.2 because `link_entities`, `update_knowledge` and `delete_knowledge` were
    approved rows with no `def` yet, 150 → 124 on 2026-10-27 when the surplus methods
@@ -573,8 +575,13 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
    `register_source`, `manage_source_trust`, `index_sources_from_directory`,
    `mine_knowledge_from_session`, `mine_knowledge_from_directory`, `check_connection` — and seven
    retired out, for a net −1), then 110 → 94 when #12901 wave 2 closed the sixteen control-plane
-   doors of the canonical `N1`–`N6` partition (every body kept PRIVATE, so no capability left) —
-   in none of these moves did the declared surface change, so
+   doors of the canonical `N1`–`N6` partition (every body kept PRIVATE, so no capability left),
+   then 94 → 105 when #11609 P3 IMPLEMENTED the eleven approved names that still had no `def`
+   (`create_memory_graph`, `delete_memory_graph`, `create_key`, `list_keys`, `revoke_key`,
+   `add_member`, `list_members`, `remove_member`, `adjust_relationship`, `refresh_confidence`,
+   `write_knowledge_batch`) — the ONE move in this list that runs the other way, because it
+   delivers approved surface instead of removing surplus —
+   in none of the other moves did the declared surface change, so
    the declaration stays at 40 — and
    `docs/product/canonical-sdk-methods.md` agrees; reconcile the per-name mapping when
    that pass starts). Renames there are mechanical for the

@@ -7,14 +7,16 @@ approval record in `docs/product/canonical-mcp-tools.md`, PR 4120). It is
 derivable from code.
 
 WHAT IS NOT IN HERE, AND WHY THAT IS THE POINT
-    **94** public methods are live on `TortoiseSDK` today and 40 are approved, but the two
-    sets only overlap in 28 of the class's methods — 29 approved ROWS resolve, and the row-1
-    `Tortoise(...)` is not one of them: it names the `TortoiseSDK` class rather than a method
-    on it. So **66 of the live methods are off the approved surface**, and those are what
-    Phase 2 of #4282 REMOVES. Phase 2 IMPLEMENTS the remaining **11** methods — the count the
-    gate prints for approved methods it cannot resolve on the live class. Both numbers
-    reconcile with the live count and nothing else: 66 off-surface + 28 overlapping methods =
-    94 live, and 28 + 11 = 39 method rows out of the 40 (`Tortoise(...)` is the 40th). These
+    **105** public methods are live on `TortoiseSDK` today and 40 are approved, and every one
+    of the approved METHOD rows now resolves — **39 of 39**, with the row-1 `Tortoise(...)`
+    as the 40th (it is not a method: it names the `TortoiseSDK` class, which the package now
+    exposes lazily). So the implement set is **EMPTY**, and what remains is the other
+    direction: **66 of the live methods are off the approved surface**, and those are what
+    Phase 2 of #4282 REMOVES. The set Phase 2 IMPLEMENTS is now **0 methods** — #11609 P3
+    built all eleven that were missing, so every approved name has an implementation and the
+    gate's remaining red is surplus removal alone. The two numbers reconcile with the live count and nothing
+    else: 66 off-surface + 39 approved-and-live = 105 live, and 39 method rows + the
+    `Tortoise(...)` entry point = the 40 approved. These
     numbers are MEASURED at this merge (`uv run python tools/sdk_surface_declaration.py
     show`), because five landed waves moved them: **#12901 wave 1** retired five off-surface
     methods that no production code called (live 125 -> 120); #11609's **READ/QUERY** family
@@ -27,7 +29,11 @@ WHAT IS NOT IN HERE, AND WHY THAT IS THE POINT
     control-plane partition (`N1`-`N6`) that are off this list and bound by no MCP tool
     (live 110 -> 94, off-surface 82 -> 66, overlap and implement set unchanged — a departure
     with no replacement NAMED on the surface yet, so every one of them is a REMOVAL in
-    `tortoise/sdk_retired.py`, not a rename). The waves are disjoint by construction: wave 1's
+    `tortoise/sdk_retired.py`, not a rename); and finally **#11609 P3 (#12901's SDK leg)**
+    IMPLEMENTED the eleven approved names that still had no `def` (live 94 -> 105, the
+    overlap 28 -> 39, the implement set 11 -> 0) — the only wave in this list that runs
+    toward the target instead of removing surplus, and the one that completes the approved
+    side. The waves are disjoint by construction: wave 1's
     membership rule excluded
     any name bound by a `tool_registry` entry (live or retired), the names the later waves
     re-key were live MCP doors, and wave 2's rule is the control-plane PARTITION minus the
@@ -57,11 +63,14 @@ THE GATE
     both directions (a name added here that the owner did not approve; an approved name
     dropped from here) and against the live class in both directions (a public method that
     is not on the approved surface; an approved method that does not exist on the SDK).
-    Both gap directions FAIL by design while the migration is open: the honest reading of
-    this declaration today is "40 approved, 94 live, 28 of the approved methods implemented
-    and 66 live-but-unapproved" — never "green". (94 − 40 = 54 is only the DELTA to the
-    target count, which is a different measurement from the set that has to be removed; the
-    removals are the 66.)
+    Both gap directions FAIL by design while the migration is open, and only ONE of them is
+    still open: the honest reading of this declaration today is "40 approved, 105 live, all 39
+    approved METHOD rows implemented, and 66 live-but-unapproved" — never "green", because
+    66 public methods are still off this list. (105 − 40 = 65 is only the DELTA to the target
+    count, which is a different measurement from the set that has to be removed; the removals
+    are the 66.) **The implement direction is empty for the first time** — #11609 P3 built the
+    eleven — so from here the gate's whole red is surplus removal, which is the shape the
+    declaration was written to hold.
 
     Adding or removing a name here is a **surface change** and needs Daniel's approval FIRST
     (`AGENTS.md` → "MCP/SDK Surface Approval"). The gate makes such a change VISIBLE; it

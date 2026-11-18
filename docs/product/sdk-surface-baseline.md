@@ -14,16 +14,16 @@
 | measured | count |
 |---|---|
 | approved methods (the target) | 40 |
-| live public methods on `TortoiseSDK` | 94 |
-| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 29 |
-| approved but not implemented yet | 11 |
+| live public methods on `TortoiseSDK` | 105 |
+| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 40 |
+| approved but not implemented yet | 0 |
 | live and NOT approved (migration backlog) | 66 |
 
 Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
 
 `docs/product/beta-sdk-surface.md` states "only four of the 40 exist in the current SDK".
-That sentence is STALE: 28 exist, plus the constructor. It is recorded here rather than
+That sentence is STALE: 39 exist, plus the constructor. It is recorded here rather than
 edited there, because the approved document is the owner's ruling and this baseline is not
 the place to amend it (#10044).
 
@@ -32,17 +32,7 @@ the place to amend it (#10044).
 The owner approved these; no `def` exists on `TortoiseSDK` under the canonical name.
 Phase 2 implements them.
 
-- `add_member`
-- `adjust_relationship`
-- `create_key`
-- `create_memory_graph`
-- `delete_memory_graph`
-- `list_keys`
-- `list_members`
-- `refresh_confidence`
-- `remove_member`
-- `revoke_key`
-- `write_knowledge_batch`
+*(none)*
 
 ## Live and NOT approved — the migration backlog
 

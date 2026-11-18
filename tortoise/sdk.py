@@ -13890,6 +13890,19 @@ def _refusal_repr(value) -> str:
     return text if type(text) is str else str.__str__(text)
 
 
+#: The graph backends THIS deployment can actually provision at creation.
+#:
+#: Read by ``create_memory_graph`` (approved row 29), which takes ``backend`` at
+#: creation because the surface doc makes the backend immutable once a graph exists
+#: (`docs/product/beta-sdk-surface.md` → "Backend is now fixed at creation", the
+#: reason `set_memory_graph_backend` was deleted rather than kept). The set is stated
+#: HERE, as data, so the refusal names the same values the method accepts;
+#: a backend this SDK cannot provision is refused instead of stored and discovered
+#: later. A single entry today because the data plane is FalkorDB in BOTH modes —
+#: graph registry rows are metadata; the points live in the same engine.
+_GRAPH_BACKENDS: tuple[str, ...] = ("falkordb",)
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -29221,6 +29234,69 @@ class TortoiseSDK:
         return result
 
     # ── Operator action consolidation (epic #888 W2) ──────────────────
+    def adjust_relationship(self, operator_id: str, *,
+                            bias: float | None = None,
+                            precision: float | None = None,
+                            consistency: float | None = None,
+                            directness: float | None = None) -> dict:
+        """Change how much an existing epistemic link contributes — approved row 25.
+
+        Row 25: *"Change an existing epistemic link's strength. **Annotating a link is
+        `update_knowledge` on it**"*. So this door moves the four graded dimensions that
+        SCALE the link's EP weight; it is not the annotation door (``update_knowledge``),
+        and it is not disagreement — that is a NAND (#2315).
+
+        PARTIAL BY READ-MODIFY-WRITE, deliberately. ``annotate_operator`` takes all four
+        terms because the four are AVERAGED, so it cannot express "change one": it would
+        need a value for each. A caller of THIS row passes only the dimension(s) it is
+        adjusting; every term it leaves out is read off the link's current annotation,
+        coalescing to ``ANNOTATION_TERM_NEUTRAL`` (0.5) when the link was never rated —
+        the same default the weight formula itself applies. An unstated term is therefore
+        never silently reset to a value the caller did not choose.
+
+        ⛔ The read-back is GUARDED, because a silent reset is the defect this shape can
+        produce. ``get_point`` returns a TRUTHY dict carrying no node properties when
+        nobody who could see the node was consulted (the #7952 residency marker), so
+        "no ``annotator_bias`` on it" does NOT mean "never annotated". Writing neutral
+        over a real annotation because the store could not be read is exactly the
+        corruption the read-modify-write exists to avoid, so an unreadable node REFUSES
+        instead of defaulting.
+        """
+        from .weights import ANNOTATION_TERM_NEUTRAL as _neutral
+
+        point = self.get_point(operator_id)
+        if not point:
+            raise ValueError(f"Operator {operator_id!r} not found")
+        if not point.get("id"):
+            raise ValueError(
+                f"Operator {operator_id!r} could not be read back, so its current "
+                "annotation is unknown and a partial adjust would overwrite the terms "
+                "the caller did not state. Nothing was written."
+            )
+        current = {
+            "bias": point.get("annotator_bias"),
+            "precision": point.get("annotator_precision"),
+            "consistency": point.get("annotator_consistency"),
+            "directness": point.get("annotator_directness"),
+        }
+        requested = {
+            "bias": bias,
+            "precision": precision,
+            "consistency": consistency,
+            "directness": directness,
+        }
+        for term, value in requested.items():
+            if value is None:
+                existing = current[term]
+                requested[term] = _neutral if existing is None else existing
+        return self.annotate_operator(
+            operator_id,
+            bias=requested["bias"],
+            precision=requested["precision"],
+            consistency=requested["consistency"],
+            directness=requested["directness"],
+        )
+
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
         """Annotate an operator Point with structured epistemic dimensions.
@@ -34644,6 +34720,26 @@ class TortoiseSDK:
                 _find(ref)
                 _union(cowner, ref)
         return {ref: _find(ref) for ref in list(parent)}
+
+    def write_knowledge_batch(self, bundle: dict, granularity: str = "bulk", *,
+                              promotion_policy: str = "gated") -> dict:
+        """Write many interconnected things in ONE call — approved row 13.
+
+        `docs/product/beta-sdk-surface.md` row 13: *"Write many interconnected things
+        in one call — claims, entities, sources and the links between them —
+        atomically."*
+
+        ⛔ A DELEGATION, and that is the design rather than a shortcut. This name is the
+        approved SPELLING of ``ingest`` (epic #888 W4), which already writes points,
+        entities, sources and connections coherently — all nodes first, then the
+        connections between them, which is the shape row 13's "atomically" names. A
+        second implementation here would give the surface two writes for one operation:
+        a caller using the approved name would get different semantics from a caller
+        using the engine's, with nothing red in between. The parameters are forwarded
+        verbatim for the same reason — a re-shaped argument list is that drift with
+        extra steps.
+        """
+        return self.ingest(bundle, granularity, promotion_policy=promotion_policy)
 
     def ingest(self, bundle: dict, granularity: str = "bulk", *,
                promotion_policy: str = "gated") -> dict:
@@ -40277,6 +40373,59 @@ class TortoiseSDK:
             proj, anchors, max_hops=max_hops, rel_filter=rel_filter,
             direction=direction, include_draft=include_draft, stats=stats)
         return list(ops), anchors_out
+
+    def refresh_confidence(self, scope: str = "changed", *,
+                           claims: list[str] | None = None) -> dict:
+        """Recompute confidence after changes — approved row 26, with the scope STATED.
+
+        Row 26 requires the scope to be an ARGUMENT rather than a silent choice:
+        *"Recompute confidence after changes. Two scopes: the changed nodes, or the whole
+        graph — stated as a parameter, not chosen silently."*
+
+          ``scope="changed"`` (the default) — the graph's dirty roots: the claims a
+              write has already marked stale. This is ``compute_confidence()``'s no-arg
+              path, which runs local EP over exactly those roots. ``claims=`` narrows it
+              to a caller-supplied subset.
+          ``scope="graph"`` — every live claim as an anchor, i.e. the whole graph.
+              O(len(claims)) to enumerate and priced accordingly; it is the expensive
+              answer and the only way to reach a belief a dirty flag never touched.
+
+        ⛔ Any other value is REFUSED rather than defaulted. "Recompute something" is not
+        a scope, and guessing one is wrong in both directions: a whole-graph pass is a
+        cost the caller did not ask for, while a changed-nodes pass silently answers a
+        narrower question than the caller asked — and both come back looking like a
+        complete answer.
+
+        Delegates to ``compute_confidence``, whose precedence is documented as
+        ``factors > anchors > no-arg local EP over the dirty roots``; this method selects
+        a branch of that one engine and adds no belief propagation of its own.
+        """
+        if scope == "changed":
+            if claims:
+                return self.compute_confidence(anchors=list(claims))
+            return self.compute_confidence()
+        if scope == "graph":
+            anchors: list[str] = []
+            offset = 0
+            page = 200
+            while True:
+                chunk = self.list_knowledge(kind="claim", limit=page, offset=offset)
+                rows = chunk.get("results") or []
+                anchors.extend(
+                    row["id"] for row in rows if row.get("id")
+                )
+                if not chunk.get("hasMore") or not rows:
+                    break
+                offset += len(rows)
+            if not anchors:
+                return self.compute_confidence()
+            return self.compute_confidence(anchors=anchors)
+        raise ValueError(
+            f"Unknown confidence scope {scope!r}. Row 26 defines exactly two: "
+            "'changed' (the dirty roots) and 'graph' (every live claim). The scope is "
+            "never chosen silently, so an unrecognised one is refused rather than "
+            "defaulted."
+        )
 
     def compute_confidence(self, factors=None, evidence=None,
                            anchors: list[str] | None = None,
@@ -49910,6 +50059,82 @@ class TortoiseSDK:
         )
         return {"graph_id": gid, "name": name, "kind": kind, "namespace": ns}
 
+    def create_memory_graph(self, org_id: str, name: str, *,
+                            backend: str = "falkordb",
+                            kind: str = "custom",
+                            namespace: str | None = None) -> dict:
+        """Provision a memory graph — approved row 29, with `name` and `backend`.
+
+        Row 29: *"Provision a memory graph — one per end-customer, or per agent. Takes
+        `name` and `backend` at creation."*
+
+        Takes ``org_id`` explicitly, matching the row-29..33 siblings already on the
+        surface (``list_memory_graphs``, ``update_memory_graph``,
+        ``restore_memory_graph``): a builder provisions graphs FOR an account it
+        administers, which is a different question from "which account am I" — the
+        question the caller-scoped actor rows (34-39) answer.
+
+        ``backend`` is VALIDATED against ``_GRAPH_BACKENDS`` and then recorded on the
+        reply, because the surface doc makes it immutable once the graph exists (that is
+        why ``set_memory_graph_backend`` was deleted, not kept). ⛔ It is not accepted
+        and ignored: a ``**kwargs`` funnel that takes an argument and does nothing with
+        it is the exact defect the surface doc records for ``operator_action``'s
+        silently-dropped ``credibility``.
+
+        Delegates the registry/control-plane write to ``_graph_create``, which owns the
+        mode split (Supabase mode returns the deterministic id without a registry node;
+        selfhost writes the ``Graph`` node).
+        """
+        if backend not in _GRAPH_BACKENDS:
+            raise ValueError(
+                f"Unsupported memory-graph backend {backend!r}. This deployment can "
+                f"provision {', '.join(repr(b) for b in _GRAPH_BACKENDS)}. The backend is "
+                "fixed at creation (row 29), so one this deployment cannot provision is "
+                "refused here rather than stored and discovered later."
+            )
+        created = self._graph_create(org_id, name, kind=kind, namespace=namespace)
+        return {**created, "backend": backend}
+
+    def delete_memory_graph(self, org_id: str, graph_id: str, *,
+                            purge: bool = False) -> dict:
+        """Destroy a memory graph — approved row 32. Default RECOVERABLE; `purge=True`
+        is refused, and the refusal says where erasure actually happens.
+
+        Row 32: *"Destroy a memory graph. **`purge=True` for irreversible erasure; the
+        default is a recoverable delete**."*
+
+        ``purge=False`` delegates to ``_graph_delete``: a soft tombstone with
+        ``deleted_at`` stamped (which starts the grace window) that
+        ``restore_memory_graph`` can undo. That is row 32's stated default, and the keys
+        bound to the graph die with it.
+
+        ⛔ ``purge=True`` REFUSES, and the refusal NAMES the real path instead of faking
+        one. Irreversible erasure belongs to the purge sweep
+        (``backup_sweep._purge_tombstone``): it needs a storage handle, it honours the
+        grace window, and it tears down the backup families BEFORE stamping ``purged_at``
+        — the prop whose documented meaning is "data physically erased". None of that is
+        reachable from an SDK client, and stamping the tombstone here would publish
+        "erased" over data that still exists — worse than a refusal, because it is
+        unrecoverable in the other direction. Nothing is deleted on this path, so a
+        caller who asked for erasure is never told it happened.
+
+        ⚠️ This makes the ``purge=True`` half of row 32 a KNOWN, REPORTED GAP rather than
+        a silent one; the recoverable half — the documented default — is delivered.
+        """
+        if purge:
+            raise ValueError(
+                "delete_memory_graph(purge=True) is not available from the SDK: "
+                "irreversible erasure runs through the purge sweep (grace window + "
+                "backup teardown), which needs a storage handle an SDK client does not "
+                "hold. NOTHING WAS DELETED. Use delete_memory_graph(purge=False) for the "
+                "recoverable delete and let the sweep purge the tombstone."
+            )
+        return {
+            "graph_id": graph_id,
+            "deleted": self._graph_delete(org_id, graph_id),
+            "purge": False,
+        }
+
     def list_memory_graphs(self, org_id: str) -> list[dict]:
         """List this account's memory graphs (default graph first).
 
@@ -50471,6 +50696,283 @@ class TortoiseSDK:
             if verify_api_key(plaintext, stored_hash):
                 out.append(props)
         return out
+
+    def _tenancy_tenant(self, what: str) -> str:
+        """The caller's OWN account for the actor rows (34-39) — or a refusal.
+
+        ⛔ These six take NO ``org_id`` parameter, and that is a recorded decision rather
+        than an omission. Row 28's ``get_organisation_account`` states the reasoning for
+        the whole tenancy block: *"reading an account by a caller-supplied id is the
+        cross-tenant read row 28 must not allow"*. A customer-facing "who has access" or
+        "list my credentials" call must not be ADDRESSABLE by argument, so the tenant is
+        resolved from the SDK's own seam — ``record_tenant_effective`` (carried > scope >
+        env pair), the same resolution every write uses, so a read and a write in one
+        session cannot disagree about whose account they mean.
+
+        ⛔ WHY THIS RAISES INSTEAD OF RETURNING AN EMPTY LIST: ``[]`` reads as "this
+        account has no members" / "no credentials" — a reassuring answer produced by
+        having asked NOBODY, and one a caller has no way to distinguish from a real
+        empty. A caller that cannot be told whose account to read is told THAT, with the
+        arm-specific remedy appended by ``record_writer`` (the one module allowed to name
+        the env literals, #9192), so the fix is in the message.
+        """
+        from .exceptions import ControlPlaneError
+        from .record_writer import (
+            _refused_tenant_env_note,
+            is_usable_tenant,
+            record_tenant_effective,
+        )
+
+        tenant = record_tenant_effective(self._record_tenant)
+        if not is_usable_tenant(tenant):
+            raise ControlPlaneError(
+                f"{what} needs a BOUND account: this SDK names no tenant, and addressing "
+                "another account's tenancy by a caller-supplied id is the cross-tenant "
+                "door the tenancy rows must not open (#10015). Bind it one of the two "
+                "supported ways: on the hosted REST lane the credential carries the "
+                "tenant on the SDK it opens; elsewhere enter "
+                "record_writer.use_record_tenant(org_id, graph_id)."
+                + _refused_tenant_env_note()
+            )
+        return tenant[0]
+
+    def create_key(self, *, name: str | None = None,
+                   graph_id: str | None = None,
+                   scopes: list[str] | None = None,
+                   expires_at: str | None = None,
+                   created_by: str = "sdk") -> dict:
+        """Mint a credential — approved row 34. The credential CARRIES the tenant.
+
+        Row 34: *"Mint a credential scoped to one memory graph. **The credential carries
+        the tenant** — the client does not pass a graph id."* Note precisely what that
+        forbids: the client that later USES the key never passes a graph id, because the
+        key is already scoped to one. ``graph_id`` here is what the minting builder
+        SCOPES the new key to — omit it and the key is account-wide (the engine's
+        existing ``graph_id=None`` shape, which resolves to the default graph).
+
+        Takes no ``org_id``; the tenant comes from this SDK's own bound account
+        (``_tenancy_tenant``), which refuses by NAMING the mode when nothing is bound.
+
+        Delegates to ``_apikey_create`` — the single mint, so the properties that matter
+        are the ones the rest of the product already relies on: only the SHA-256 hash is
+        stored, the plaintext comes back exactly ONCE, the ``APIKey`` node is bound to
+        the org, and the mint is audited.
+        """
+        org_id = self._tenancy_tenant("create_key")
+        return self._apikey_create(
+            org_id,
+            created_by,
+            graph_id=graph_id,
+            scopes=scopes,
+            name=name,
+            expires_at=expires_at,
+        )
+
+    def list_keys(self, *, graph_id: str | None = None,
+                  include_revoked: bool = False) -> list[dict]:
+        """List this account's credentials — approved row 35.
+
+        Row 35: *"List a memory graph's credentials."* Returns ROWS, never a bare count:
+        the two console diagnostics that used to answer this question
+        (``graph_key_ids``, ``graph_active_key_count``) both fold into this row precisely
+        because a number with no rows behind it cannot be acted on.
+
+        ``graph_id`` narrows to one graph's credentials. A revoked key is an audit
+        tombstone, so it is EXCLUDED by default and included with ``include_revoked=True``
+        — carrying ``revoked_at``, so a caller can tell "revoked" from "never minted".
+
+        ⛔ The plaintext is never listed, because it is never stored: the reply carries
+        ``key_prefix`` (the first 10 characters), which is what identifies a key in the
+        console and what the lookup surfaces match on.
+
+        Takes no ``org_id`` — see ``_tenancy_tenant``.
+        """
+        org_id = self._tenancy_tenant("list_keys")
+        reg = self._get_registry()
+        cypher = "MATCH (k:APIKey {org_id:$tid})"
+        params: dict = {"tid": org_id}
+        if graph_id is not None:
+            cypher += " WHERE k.graph_id = $gid"
+            params["gid"] = graph_id
+        rows = reg.query(
+            cypher + " RETURN k.id, k.key_prefix, k.graph_id, k.name, k.scopes, "
+            "k.created_at, k.created_by, k.expires_at, k.revoked_at",
+            params=params,
+        ).result_set
+        out: list[dict] = []
+        for (key_id, prefix, gid, name, scopes, created_at, created_by,
+             expires_at, revoked_at) in rows:
+            if revoked_at is not None and not include_revoked:
+                continue
+            out.append({
+                "id": key_id,
+                "key_prefix": prefix,
+                "graph_id": gid,
+                "name": name,
+                "scopes": list(scopes) if scopes else [],
+                "created_at": created_at,
+                "created_by": created_by,
+                "expires_at": expires_at,
+                "revoked_at": revoked_at,
+            })
+        return out
+
+    def revoke_key(self, key_id: str) -> dict:
+        """Revoke a credential — approved row 36, including its rotation recipe.
+
+        Row 36: *"Revoke a credential. **Rotation is mint-then-revoke — the new key is
+        live before the old dies**."* The ORDER therefore belongs to the caller
+        (``create_key`` then ``revoke_key``), and this call is idempotent so a retried
+        rotation cannot fail on the second attempt — revoking an already-revoked key
+        returns ``already=True`` rather than raising.
+
+        ⛔ OWNERSHIP IS CHECKED BEFORE THE WRITE, because ``_apikey_revoke`` resolves the
+        owning org FROM THE ROW: by key id alone it would revoke any account's
+        credential. The key must belong to the tenant this SDK is bound to, or the call
+        refuses and writes nothing — an unreachable-by-argument rule is only worth
+        stating if the door that DOES take an id enforces it too.
+
+        Delegates the write to ``_apikey_revoke`` so the ``revoked_at`` stamp and the
+        audit record are the ones the rest of the product already writes.
+        """
+        from .exceptions import ControlPlaneError
+
+        org_id = self._tenancy_tenant("revoke_key")
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.org_id",
+            params={"id": key_id},
+        ).result_set
+        if not rows:
+            # Absence is reported as absence, not as a revoked key: a caller that
+            # mistyped an id must not read a success.
+            return {"revoked": False, "reason": "not found", "key_id": key_id}
+        if rows[0][0] != org_id:
+            raise ControlPlaneError(
+                f"Credential {key_id!r} does not belong to this account, so it was not "
+                "revoked. Nothing was written."
+            )
+        return self._apikey_revoke(key_id)
+
+    def add_member(self, user_id: str, role: str = "member") -> dict:
+        """Grant a person access to the account — approved row 37.
+
+        ``role`` is validated by the delegate (``owner`` / ``admin`` / ``member``), which
+        also enforces the org's ``max_users`` cap and its existence. Those checks live in
+        ONE place on purpose: a second validator here would be a second opinion about
+        who may join an account, and the two would eventually disagree.
+
+        Takes no ``org_id`` — see ``_tenancy_tenant``. Delegates to ``_membership_create``.
+        """
+        org_id = self._tenancy_tenant("add_member")
+        return self._membership_create(org_id, user_id, role)
+
+    def list_members(self) -> list[dict]:
+        """List who has access — approved row 38.
+
+        Answers with active AND invited memberships (an invitee who has not accepted yet
+        has access in every sense the admin who granted it cares about), and reads the
+        mode-appropriate store: the Supabase seam (``org_members``) when that is the
+        control plane, the registry ``Membership`` nodes otherwise — the same split, and
+        the same predicate, as ``list_memory_graphs``.
+
+        Takes no ``org_id`` — see ``_tenancy_tenant``. It REFUSES rather than returning
+        ``[]`` when no tenant is bound, because an empty list reads as "nobody has
+        access", which is the one wrong answer an access listing must never invent.
+        """
+        org_id = self._tenancy_tenant("list_members")
+        from .supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+            org_members,
+        )
+
+        if is_supabase_enabled():
+            return org_members(get_control_plane(), org_id)
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (m:Membership {org_id:$tid}) "
+            "WHERE m.status IN ['active', 'invited'] "
+            "RETURN m.user_id, m.role, m.status, m.invited_email",
+            params={"tid": org_id},
+        ).result_set
+        return [
+            {
+                "user_id": user_id,
+                "role": role,
+                "status": status,
+                "email": invited_email or "",
+            }
+            for (user_id, role, status, invited_email) in rows
+        ]
+
+    def _membership_remove(self, org_id: str, user_id: str) -> bool:
+        """Remove a membership in the mode-appropriate store — row 39's write.
+
+        Mirrors ``_membership_create`` for the write half. Owner memberships are
+        REFUSED: an account with no owner has no one who can mint keys, remove keys, or
+        re-add an owner, so "remove the owner" is a self-lockout rather than an
+        administrative action. Both modes PATCH a status rather than deleting the row
+        (``removed``), so the membership history survives — the same reason a revoked key
+        keeps its ``revoked_at`` — and both match by ``user_id`` OR ``identity`` so an
+        anonymous-agent member is removable like a human one.
+
+        Returns False when no membership matched; raises when the target is the owner.
+        """
+        from .exceptions import ControlPlaneError
+        from .supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+            membership_role,
+            set_membership,
+        )
+
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            role = membership_role(cp, org_id, user_id)
+            if role is None:
+                return False
+            if role == "owner":
+                raise ControlPlaneError(
+                    "The account owner cannot be removed: with no owner there is nobody "
+                    "who can re-add one. Transfer ownership first. Nothing was written."
+                )
+            set_membership(cp, org_id, user_id, status="removed")
+            return True
+        reg = self._get_registry()
+        target = reg.query(
+            "MATCH (m:Membership {org_id:$tid, user_id:$uid}) RETURN m.role",
+            params={"tid": org_id, "uid": user_id},
+        ).result_set
+        if not target:
+            return False
+        if target[0][0] == "owner":
+            raise ControlPlaneError(
+                "The account owner cannot be removed: with no owner there is nobody who "
+                "can re-add one. Transfer ownership first. Nothing was written."
+            )
+        reg.query(
+            "MATCH (m:Membership {org_id:$tid, user_id:$uid}) "
+            "SET m.status='removed'",
+            params={"tid": org_id, "uid": user_id},
+        )
+        return True
+
+    def remove_member(self, user_id: str) -> dict:
+        """Revoke a person's access — approved row 39.
+
+        Takes no ``org_id`` — see ``_tenancy_tenant``. Delegates to
+        ``_membership_remove``, which owns the mode split and the owner safeguard.
+
+        A missing membership is reported as ``removed: False`` rather than raised: the
+        caller's goal (this person has no access) is already true, and turning an
+        idempotent re-run into an error is how a retried removal fails after it worked.
+        """
+        org_id = self._tenancy_tenant("remove_member")
+        return {
+            "user_id": user_id,
+            "removed": self._membership_remove(org_id, user_id),
+        }
 
     def _apikey_create(self, org_id: str, created_by: str,
                       *, graph_id: str | None = None,

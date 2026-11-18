@@ -364,10 +364,33 @@ def _build_placeholder_falkordb():
 # reload that hid redislite the dep-missing placeholder branch (issue #716)
 # could never be reached again.
 globals().pop("FalkorDB", None)
+# Same reason for the entry point below: a reload must re-derive `tortoise.Tortoise`
+# rather than keep a binding cached by a previous execution.
+globals().pop("Tortoise", None)
 
 
 def __getattr__(name: str):
-    """Expose `FalkorDB` lazily (PEP 562) — see the module docstring (#5386)."""
+    """Expose `FalkorDB` and `Tortoise` lazily (PEP 562) — see the module docstring (#5386).
+
+    `Tortoise` is approved row 1 of the SDK surface
+    (`docs/product/beta-sdk-surface.md`): *"Open a connection — the credential determines
+    the account and the memory graph"*. It is the `TortoiseSDK` class under its approved
+    name — `tortoise/__all__.py` records exactly that, noting that the row-1 name "names
+    the `TortoiseSDK` class rather than a method on it", which is why it is the one of
+    the 40 that no class-member check can resolve. Before this, the name the product
+    documents as its entry point was not importable from the package at all.
+
+    ⛔ Deferred, in the SAME `__getattr__` as `FalkorDB` rather than a second one (a
+    module has exactly one), and imported here rather than at module scope: importing
+    `tortoise.sdk` eagerly would drag the whole SDK — and the engine under it — into
+    every `import tortoise`, which is the cost #5386 removed for `FalkorDB` and would
+    be immediately re-added for every caller of the package.
+    """
+    if name == "Tortoise":
+        from tortoise.sdk import TortoiseSDK as Tortoise
+
+        globals()["Tortoise"] = Tortoise
+        return Tortoise
     if name != "FalkorDB":
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     try:

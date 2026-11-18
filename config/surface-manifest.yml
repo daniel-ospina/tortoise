@@ -146,7 +146,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 97fd713ffbca967e14e869fe22b84eea4ba7d07d
+cut_at_commit: 501270a4bfd34d12c7b6638e02f2c712e5676fa0
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -575,29 +575,28 @@ response_fields:
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
 - response: tortoise_search
   field: graph_ranking.identity_match
-  emitted_when: 'order_by="graph" ONLY, and ONLY for an ENTITY row — i.e. entity_type in {object, subject,
-    source, document}; a point/event/operator row emits neither this key nor graph_ranking.signal_family.
-    true when the row''s identity surface equals the query under entity_resolver.normalize_entity_name (NFKC
-    → casefold → drop a leading article → non-word runs to space, the #12047 fold the match ladder itself
-    uses), false otherwise. It is a CATEGORICAL order dimension, not a tuned weight: rows with it true sort
-    ahead of every scored row (#12184, the #2598 draft shape), and it is deliberately BOOLEAN — a second
-    fuzzy similarity constant is a REFUSED row (#11901 §7). The surface compared is `content` as the search
-    row carries it (SearchResult.to_dict has no `name`), and the SDK''s own entity fetch fills that column:
-    from n.name for Object/Subject, and from n.title for source/document — so those two row types are compared
-    on their TITLE. The term is therefore RARE there (the query must equal the whole title) but LIVE, not
-    inert: when it fires, that row sorts ahead of every scored row. `_searchText` — the column the Source
-    fulltext index is declared on — is a DIFFERENT column and is never the surface compared here. Absent from
-    a point/event row by design — a claim has no identity property'
+  emitted_when: 'order_by="graph" ONLY, and ONLY for an ENTITY row — i.e. entity_type in {object, subject, source,
+    document}; a point/event/operator row emits neither this key nor graph_ranking.signal_family. true when the
+    row''s identity surface equals the query under entity_resolver.normalize_entity_name (NFKC → casefold → drop
+    a leading article → non-word runs to space, the #12047 fold the match ladder itself uses), false otherwise.
+    It is a CATEGORICAL order dimension, not a tuned weight: rows with it true sort ahead of every scored row (#12184,
+    the #2598 draft shape), and it is deliberately BOOLEAN — a second fuzzy similarity constant is a REFUSED row
+    (#11901 §7). The surface compared is `content` as the search row carries it (SearchResult.to_dict has no `name`),
+    and the SDK''s own entity fetch fills that column: from n.name for Object/Subject, and from n.title for source/document
+    — so those two row types are compared on their TITLE. The term is therefore RARE there (the query must equal
+    the whole title) but LIVE, not inert: when it fires, that row sorts ahead of every scored row. `_searchText`
+    — the column the Source fulltext index is declared on — is a DIFFERENT column and is never the surface compared
+    here. Absent from a point/event row by design — a claim has no identity property'
   unchanged_when_off: NO — additive key on an existing payload (present only on entity rows). Not flag-gated
 - response: tortoise_search
   field: graph_ranking.signal_family
-  emitted_when: '"entity" on every row of an entity_type in {object, subject, source, document} read — the
-    name of the signal set that produced graph_ranking.graph_boost, so an order built on an entity''s INBOUND
-    CLAIMS (degree = claim count, confidence = mean claim belief) is visible instead of looking like the point
-    family''s own-belief/operator-connectivity score. Absent for entity_type point/event/operator: those keep
-    the point and event families, which are named by the existing payload shape rather than by this key. This
-    is the field the pre-#12184 payload could not express at all — the same constant boost was emitted whichever
-    family had (not) answered'
+  emitted_when: '"entity" on every row of an entity_type in {object, subject, source, document} read — the name
+    of the signal set that produced graph_ranking.graph_boost, so an order built on an entity''s INBOUND CLAIMS
+    (degree = claim count, confidence = mean claim belief) is visible instead of looking like the point family''s
+    own-belief/operator-connectivity score. Absent for entity_type point/event/operator: those keep the point and
+    event families, which are named by the existing payload shape rather than by this key. This is the field the
+    pre-#12184 payload could not express at all — the same constant boost was emitted whichever family had (not)
+    answered'
   unchanged_when_off: NO — additive key on an existing payload (present only on entity rows). Not flag-gated
 - response: tortoise_recall
   field: recall_ranking.draft
@@ -992,26 +991,25 @@ response_fields:
   emitted_when: 'only for a call that passes ended_scope=True (#13302). Those rows are NOT match rows: they describe
     an ENDED record and say how it ended, from the record''s own fields — `status` (the lifecycle word: `deprecated`
     = nothing replaced it, `superseded` = see the successor), the successor as the TWO facts the model actually
-    records (**`successorId`/`allSuccessorIds` from a Point''s CORRECTS edge, and `successorName` from the
-    `supersededBy`/`superseded_by` carrier — that carrier holds a NAME by ONTOLOGY §4.2/§4.3, so it is never
-    served under an `…Id` key and an Object/Subject row has `successorId: null` beside its `successorName`**),
-    `stage` {id, slot, outcome, since} on a record ended on the POSITION axis, `isClosed`/`outdated`, `endedAt` plus
-    the raw `validTo`/`expiredAt`/`supersededAt`/`pipelineStageSince`/`updatedAt` it was resolved from, and
-    `linkedEvents` (the Events wired to the record — empty is the product''s own statement that no occurrence was
-    ever recorded, which with stage.slot == "terminal" IS the "planned and never happened" answer). Selection is
-    the shared currency predicate `live._terminal_expression` in the positive direction, so no status list, slot
-    literal or visibility field is added anywhere.'
-  unchanged_when_off: 'yes — ended_scope defaults to False and the branch returns before any retrieval runs, so with
-    the flag off the read is byte-identical to pre-#13302: same rows, same keys, same order. ⛔ Deliberately NOT exposed
-    on the MCP `tortoise_search` door yet: that is a served-declaration change needing owner approval (surface-guard),
-    and the implementation plan marks read-tool scope parameters (S6) not-gated-yet.'
+    records (**`successorId`/`allSuccessorIds` from a Point''s CORRECTS edge, and `successorName` from the `supersededBy`/`superseded_by`
+    carrier — that carrier holds a NAME by ONTOLOGY §4.2/§4.3, so it is never served under an `…Id` key and an Object/Subject
+    row has `successorId: null` beside its `successorName`**), `stage` {id, slot, outcome, since} on a record ended
+    on the POSITION axis, `isClosed`/`outdated`, `endedAt` plus the raw `validTo`/`expiredAt`/`supersededAt`/`pipelineStageSince`/`updatedAt`
+    it was resolved from, and `linkedEvents` (the Events wired to the record — empty is the product''s own statement
+    that no occurrence was ever recorded, which with stage.slot == "terminal" IS the "planned and never happened"
+    answer). Selection is the shared currency predicate `live._terminal_expression` in the positive direction, so
+    no status list, slot literal or visibility field is added anywhere.'
+  unchanged_when_off: 'yes — ended_scope defaults to False and the branch returns before any retrieval runs, so
+    with the flag off the read is byte-identical to pre-#13302: same rows, same keys, same order. ⛔ Deliberately
+    NOT exposed on the MCP `tortoise_search` door yet: that is a served-declaration change needing owner approval
+    (surface-guard), and the implementation plan marks read-tool scope parameters (S6) not-gated-yet.'
 approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
   tools: 48
-  sdk_public_methods: 94
+  sdk_public_methods: 105
   retired: 60
   keyword_distribution:
     fetch: 10
@@ -1024,9 +1022,26 @@ counts:
     check: 6
     link: 2
     operate: 2
+# RAISED 94 → 105 (SDK methods) on 2026-11-18 by #11609 P3 (#12901's SDK leg) — the
+# eleven approved names that had no `def` were IMPLEMENTED: `create_memory_graph`,
+# `delete_memory_graph`, `add_member`, `list_members`, `remove_member`, `create_key`,
+# `list_keys`, `revoke_key`, `adjust_relationship`, `refresh_confidence`,
+# `write_knowledge_batch`. The tools pin is unchanged at 48.
+#
+# ⛔ This is a RAISE, which the pin exists to make impossible to do silently — so the
+# approval is named rather than implied. Each of the eleven is an INSTRUCTION TO IMPLEMENT,
+# not a new ask: they are rows of the owner's approved 40 (`docs/product/beta-sdk-surface.md`,
+# approved 2026-09-18 principal daniel-ospina pr=4120, re-affirmed 2026-11-09), already
+# declared in `tortoise/__all__.py`, and `tortoise/__all__.py` states the position that
+# "the rest must be built". The growth is therefore the approved list being DELIVERED, and
+# the pin must follow it or it would red the very change the owner asked for.
+#
+# Why the pin is still right to raise rather than remove: it is what catches a TWELFTH
+# public method appearing without a row. The check that 105 is not itself drift is the
+# per-row `approved` flag plus the declaration gate — this pin only bounds growth.
 high_water_counts:
   tools: 48
-  sdk_public_methods: 94
+  sdk_public_methods: 105
 retired:
 - name: tortoise_annotate_operator
   use_instead: tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)
@@ -1333,56 +1348,6 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  # ⛔ PROVENANCE, not a value: `served_from` below is `main`'s cell, written by a re-cut — this
-  # diff does not re-stamp it (see the end of this block). It is recorded here because `main`'s copy
-  # of this file carries NO per-row rationale at all (a re-cut re-emits only `MANIFEST_HEADER`), so
-  # every fact below is one a later lane would otherwise have to re-derive from scratch.
-  #
-  # WHY THE CELL WENT STALE. `#13075` (`a09a0b3840`, "the currency rule reads the position axis")
-  # edited `def tortoise_query` IN PLACE — its diff is three hunks INSIDE the handler, four in the
-  # file, the fourth being the module-level `from tortoise.live import is_terminal_status` import,
-  # so that count is scoped to the handler and no reader should take it as the file's total.
-  # `served_from` is `_code_digest` of that handler's CODE OBJECT, so an edit inside it re-stamps
-  # the cell, and the row went stale: `surface_manifest.py check --provenance-strict` read it as a
-  # FAIL on `main` ITSELF — measured on pristine `main` worktrees at `55ec2c71b1` and at
-  # `3d437429e9` (the re-cut whose only changed file was `config/ci-surfaces.yml`, so it cannot
-  # reach this row): rc=1, the identical `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8`
-  # pair. Re-derive it with that command; never type a digest from memory.
-  #
-  # ⛔ THIS DIFF NO LONGER CARRIES THAT REPAIR. `#13052` (`4a5ffa0a14`) ran a real `cut` — "Derived
-  # files re-cut, never hand-edited" — which wrote the derived value, so `served_from` here is
-  # `main`'s byte-for-byte and this branch's re-stamp applied to an unchanged line: the duplicate
-  # resolved as identical rather than as a competing value, exactly as the round that wrote it
-  # predicted. `config/ci-surfaces.yml` went the same way earlier under #13144 (#13139), which is
-  # why this PR no longer touches that file either.
-  #
-  # ⛔ A LATER `main` LANE RESTATED THIS AND GOT IT WRONG, so its block is folded into this one
-  # instead of being kept twice. `#13000`'s `980f271acc` added eleven lines here saying this row
-  # was "refreshed here to the value the tree derives" and quoting `at 55` tools as "unchanged" —
-  # but that commit changes no `served_from` line at all (the refresh was `#13052`'s `cut`, landed
-  # earlier the same morning), and `#13052` had ALREADY retired seven doors, so 55 was a door count
-  # behind on the day it was written and 48 is what `rows` carries now. Keeping both blocks would
-  # leave this file asserting a count its own `rows` does not have — which is exactly what
-  # `test_no_per_row_comment_quotes_a_stale_surface_count` reds on. The measurement it quoted is
-  # preserved rather than erased: a pristine `main` at `2390101f68` read the same recorded/derived
-  # pair this block already names two paragraphs up, so what is dropped here is the stale COUNT and
-  # the wrong verb, not the fact.
-  #
-  # A full `cut` is deliberately NOT run from a docs branch. It is NOT owner-only — `p_cut.add_
-  # argument("--commit", …)` carries no `required=True` and `build_doc` falls back to
-  # `git rev-parse HEAD`, and `cmd_cut` carries no identity check — but it is gated on the owner's
-  # approval DOCUMENT: `read_approval` reads `docs/product/canonical-mcp-tools.md` and `build_doc`
-  # REFUSES when that file is missing (`_frontmatter` raises `SurfaceEvidenceUnreadable`) or
-  # carries no `approval_status`. The operative reason here is narrower: a re-cut would delete this
-  # block to buy back a cell that is already correct on `main`.
-  #
-  # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the
-  # source and RE-RUN the generator (buf/protoc baselines and the mainstream codegen convention
-  # all state it, and it is the right default) — because this file's provenance is only
-  # re-derivable from the record beside the row: a `cut` deletes every per-row block, so "just
-  # regenerate it" would cost the WHY to re-buy a value the tree already agrees with. The VALUE is
-  # still never hand-derived — it is the digest `check --provenance-strict` compares. A reader
-  # holding the "always regenerate" page should put it down here, not "fix" this row by cutting.
   served_from: tortoise/mcp_server.py:59f8f7e5957d81d8
   served_attributes: 7a717e4e60ce3bfa
   family: memory
@@ -2765,6 +2730,52 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
+- name: sdk:add_member
+  method: add_member
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.add_member.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
+- name: sdk:adjust_relationship
+  method: adjust_relationship
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.adjust_relationship.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:annotate_ask_hits
   method: annotate_ask_hits
   approved: false
@@ -3180,6 +3191,52 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:create_key
+  method: create_key
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.create_key.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
+- name: sdk:create_memory_graph
+  method: create_memory_graph
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.create_memory_graph.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:create_object
   method: create_object
   approved: false
@@ -3334,6 +3391,29 @@ rows:
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
   used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
+- name: sdk:delete_memory_graph
+  method: delete_memory_graph
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.delete_memory_graph.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -3986,6 +4066,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:list_keys
+  method: list_keys
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.list_keys.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:list_knowledge
   method: list_knowledge
   approved: true
@@ -4009,6 +4112,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:list_members
+  method: list_members
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.list_members.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:list_memory_graphs
   method: list_memory_graphs
   approved: true
@@ -4378,6 +4504,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:refresh_confidence
+  method: refresh_confidence
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.refresh_confidence.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:register_source
   method: register_source
   approved: true
@@ -4401,6 +4550,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:remove_member
+  method: remove_member
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.remove_member.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:resolve_id
   method: resolve_id
   approved: false
@@ -4516,6 +4688,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:revoke_key
+  method: revoke_key
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.revoke_key.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:search_knowledge
   method: search_knowledge
   approved: true
@@ -4909,6 +5104,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:write_knowledge_batch
+  method: write_knowledge_batch
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.write_knowledge_batch.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:write_question
   method: write_question
   approved: true
