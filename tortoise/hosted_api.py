@@ -199,6 +199,7 @@ from tortoise.projection import (
     _declares_apply_first_write_lane,
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
+    note_live_write_target,  # #12943: this module's raw-delete lanes are graph-CHOOSING
 )
 from tortoise.quota import (  # #5425 refusal seam; #4051 count-scope split
     TENANT_GRAPH_RESOURCES,
@@ -21369,6 +21370,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             )
             source_removed = bool(
                 _r.result_set and (_r.result_set[0][0] or 0))
+            # #12943 (review cycle 6, P1): the same graph-CHOOSING lane as
+            # `_delete_session_sync` — the `DETACH DELETE src` above is a raw
+            # statement that folds no record. INSIDE the `suppress`, so a
+            # statement that never ran counts nothing.
+            note_live_write_target(proj)
         if source_removed:
             sdk._emit_event("SessionDeleted", id=session_id)
 
@@ -26514,6 +26520,18 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
             "MATCH (s:Session {id:$sid}) DETACH DELETE s",
             params={"sid": session_id},
         )
+        # #12943 (review cycle 6, P1): THIS LANE CHOOSES ITS GRAPH and folds no
+        # record. `proj` comes from `sdk._get_proj()`, and the four
+        # `DETACH DELETE`s above are raw statements the fold never sees, so
+        # without this a process whose live traffic is session deletes reads
+        # `cache_write_targets == {}` — byte-identical to "this process took no
+        # live cache write" — while the deletes land in whatever graph the
+        # credential opened (the `misroute` row of the door matrix). The
+        # helper's stated residual excuses a raw writer because it does not
+        # CHOOSE a graph; this one does, so the residual does not reach it. One
+        # call for the lane, after the last statement: the helper is total and
+        # excludes a replay itself, so it can never deny the deletes above.
+        note_live_write_target(proj)
         # #7951: journal the container removal. `Session` is NOT a canonical
         # entity label, so no `EntityMutated` record can express it —
         # `SessionDeleted` is the dedicated JSONL-only carrier

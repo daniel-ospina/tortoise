@@ -8,7 +8,7 @@ updated: 2026-09-24
 subjects.team: epistemic-team
 issue: "#4333"
 aboutSubjects: Tortoise graph node volume and hosted FalkorDB storage cost
-aboutObjects: STORAGE-ARCHITECTURE.md, D11 hosted FalkorDB, cost_basis, node cap, #4331 overage
+aboutObjects: "STORAGE-ARCHITECTURE.md, D11 hosted FalkorDB, cost_basis, node cap, #4331 overage"
 ---
 
 # Node volume + the true per-node storage cost — the measured picture, against D11
