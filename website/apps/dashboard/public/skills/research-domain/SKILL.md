@@ -62,7 +62,7 @@ sources**, not a narrative: "X is true — because <source>", one claim per line
 **Step 3 — mine.** This is the step that makes the next cycle possible. For each
 claim:
 
-1. `tortoise_create_point(kind="statement", content=<the claim>,
+1. `tortoise_create_entity(type="point", name=<the claim>,
    extractedFrom=<source url>, props={"sourceKind": "T1"})` — file the claim
    with its provenance. Tiers are the SourceKind taxonomy in
    `how-to-use-tortoise`: T0 direct observation … T4 speculative. A claim with

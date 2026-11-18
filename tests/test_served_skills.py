@@ -85,6 +85,14 @@ KNOWN_STALE_TOOL_NAMES = {
         "tortoise_review_connections",   # → tortoise_review_link_candidates(kind="connections")
     },
     "how-to-use-tortoise": {
+        # #11609's CREATE-ARMS wave retired `tortoise_create_point` into
+        # `tortoise_create_entity(type="point", ...)`. These three mirrors are the
+        # upstream-pinned ones (`config/served-skills-upstream.yml`), so the name is
+        # RATCHETED here rather than re-pointed: editing them here is exactly what
+        # `served_skills_parity.py --check-upstream` exists to catch and what the next
+        # `--sync` would revert. `research-domain` and `tortoise-onboarding` ARE authored
+        # here and were re-pointed in the same change.
+        "tortoise_create_point",    # → tortoise_create_entity(type="point", ...)
         "tortoise_fts_query",      # an SDK method name, never a tool
         # #4282 → tortoise_graph_overview(section="structure") — see the note above.
         "tortoise_summarize_structure",
@@ -134,8 +142,14 @@ KNOWN_STALE_TOOL_NAMES = {
     "tortoise-decide": {
         "tortoise_compute_confidence",  # → tortoise_check_confidence(recompute=True, ...)
         "tortoise_recall",              # → tortoise_check_confidence(recall=True, ...)
+        # → tortoise_create_entity(type="point", ...); see the note at the top.
+        "tortoise_create_point",
     },
-    "tortoise-file-finding": {"tortoise_list_sources"},
+    "tortoise-file-finding": {
+        # → tortoise_create_entity(type="point", ...); see the note above.
+        "tortoise_create_point",
+        "tortoise_list_sources",
+    },
     # #4282: `tortoise/onboarding/SKILL.md` is the ONE served skill authored in THIS repo
     # (not the external mirror), so its `check_structure`/`overview` references were
     # re-pointed at the container in the same change. This entry is unchanged by that
