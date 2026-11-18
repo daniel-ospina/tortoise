@@ -3323,8 +3323,9 @@ def test_the_claim_ceiling_pair_and_both_found_deep_series_are_bound(artifact):
 #: EVERY flag that changes WHICH rows a read returns — the whole of the mirror
 #: contract, not a subset of it. `include_terminal` is the one that is DERIVED
 #: per leg rather than a fixed literal, so it is compared as a normalised
-#: expression: same operator, same constants, with only the parameter NAME
-#: abstracted (`kind` at the mirror, `entity_type` at the reference). Listing it
+#: expression: same operator, same comparator names, with only the CONDITION'S
+#: SUBJECT — the leg selector, `kind` at the mirror and `entity_type` at the
+#: reference — abstracted. Listing it
 #: here is deliberate: an earlier draft left it out of `_LEVER_FLAGS` and said in
 #: a comment that the caller "compared it separately", which the caller did not
 #: do — dropping `include_terminal=` from the mirror reddens nothing, and the
@@ -3334,16 +3335,24 @@ _LEVER_FLAGS = ("_record_reads", "_valid_time_rerank", "_rerank_candidates",
 
 
 def _expr_form(node: ast.expr) -> tuple[str, str]:
-    """A derived flag's shape, with every variable name abstracted to `<arg>`.
+    """A derived flag's shape, with only its leg selector abstracted to `<arg>`.
 
     The two sites name their own parameter differently, and that name carries no
-    meaning; the operator and the compared constants do, so those are kept. A
-    legitimate respelling of the condition on BOTH sides stays green; a change to
-    one side alone reds.
+    meaning, so it is the one thing normalised away. Everything else — the
+    operator, and the NAMES of the compared constants — is kept, because two
+    conditions that read `kind in A` and `entity_type in B` are NOT the same
+    condition: abstracting every `Name` made them compare equal (measured), which
+    is the mirror break this pin exists to catch. A legitimate respelling of the
+    selector on BOTH sides stays green; a change to one side alone reds.
     """
+    subject = (node.left.id
+               if isinstance(node, ast.Compare)
+               and isinstance(node.left, ast.Name) else None)
 
     class _Abstract(ast.NodeTransformer):
         def visit_Name(self, inner: ast.Name) -> ast.Name:
+            if inner.id != subject:
+                return inner
             return ast.copy_location(ast.Name(id="<arg>", ctx=inner.ctx), inner)
 
     tree = ast.parse(ast.unparse(node), mode="eval")
