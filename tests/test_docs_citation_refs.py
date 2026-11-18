@@ -561,5 +561,52 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "or is asked to repair `main`'s drift inside a docs PR "
         "(#13489 review, P0)")
 
+
+def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
+    """⛔ The doc said it re-pointed that row to `sdk.py:19485`. The row reads `:21496`.
+
+    `05-verify.md` stated, as the row's re-point at the head being merged, a pair the
+    tree refutes at BOTH ends: neither `sdk.py:19449` nor `sdk.py:19485` occurs in
+    `docs/00_index.md` at this head or on `main`, while the diff's actual re-point is
+    `sdk.py:21474` -> `:21496` (2-dot and 3-dot `--numstat` both `3 3`). It survived
+    several review rounds for the same reason the census green did: the D5 arms in
+    `test_7949_capstone_measure.py` scope to D5's OWN line, and this claim is in the
+    file-table section, so nothing read it.
+
+    The arm is deliberately GIT-FREE (no other leg in the suite shells out): a
+    re-point's NEW side must resolve in the file at the head being merged, and its OLD
+    side must NOT — which is exactly what "re-pointed" means, and it is checkable
+    from the working tree alone.
+
+    NON-VACUITY, MEASURED: on the pre-fix document the regex does not match at all
+    (it stated ``re-pointing that row's `sdk.py:19449` → `:19485` at the merge head``,
+    with no `cite from`), so `assert m` reds; and had it matched, the new side
+    `19485` is absent from `docs/00_index.md` (`grep -c 'sdk.py:19485'` -> 0), so the
+    second leg reds too.
+    """
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    m = re.search(
+        r"re-pointing that row's `sdk\.py` cite from \*\*`:(\d+)`\*\*.*?"
+        r"to \*\*`:(\d+)`\*\*",
+        doc, re.S)
+    assert m, (
+        "05-verify.md no longer states the index row's re-point as "
+        "`from **`:OLD`** ... to **`:NEW`**`. State it with both ends named, so this "
+        "arm can check the pair against the file the re-point lands in "
+        "(#13489 review, cycle 5)")
+    old, new = m.groups()
+    index = (DOCS / "00_index.md").read_text(encoding="utf-8")
+    assert f"sdk.py:{new}" in index, (
+        f"05-verify.md says the row's cite is re-pointed to `sdk.py:{new}`; "
+        f"`docs/00_index.md` does not carry that cite at this head, so the document "
+        "names a line the file it describes does not point at "
+        "(#13489 review, cycle 5)")
+    assert f"sdk.py:{old}" not in index, (
+        f"05-verify.md calls `sdk.py:{old}` the PRE-re-point value, but "
+        f"`docs/00_index.md` still carries it — either the re-point did not happen "
+        "or the pair is stale (#13489 review, cycle 5)")
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-q"])
