@@ -168,6 +168,15 @@ class _FakeGraph:
         return _Result([(self.ID, 0.25)])
 
 
+#: The coverage DENOMINATOR these pins supply: "the graph serves no vector-bearing
+#: node for this label", so the record's count always verifies it. `#13610` gates
+#: EVERY served label on `record_vector.coverage`, and a resolution reading (one that
+#: cannot verify) DECLINES to the graph before any record statement is issued — which
+#: would make this file measure nothing. `0` is the honest answer here: the fake
+#: record door below is the only store these tests populate.
+_NO_GRAPH_VECTORS = lambda _label: 0  # noqa: E731 — a value, not a helper
+
+
 class _Result:
     def __init__(self, result_set):
         self.result_set = result_set
@@ -190,6 +199,31 @@ def armed(monkeypatch):
     monkeypatch.setenv(rw.RECORD_SINGLE_TENANT_ENV, "1")
     monkeypatch.setattr(rw, "record_tenant", lambda: None, raising=False)
     return ("org_11691", "graph_11691")
+
+
+def _verify_coverage(monkeypatch) -> None:
+    """Prime `#13610`'s coverage count: the record holds as many vectors as the graph.
+
+    ⛔ WITHOUT THIS THE RECORD LEG NEVER RUNS, and this file would measure nothing.
+    `#13610` gates every served label on `record_vector.coverage`, which takes a COUNT
+    on the record; the fake door below models a Postgres statement bounded by
+    `statement_timeout` and refuses every other statement, so that count is
+    unmeasurable -> UNVERIFIED -> the leg declines to the graph and no record statement
+    is ever issued (measured: `applied_ms is None`, the graph handed the whole budget).
+
+    The count is stubbed rather than cached because a cached verdict is keyed by
+    (dsn, org, graph, label) and would leak between tests; the count is the single
+    input these pins are not about.
+    """
+    # ⛔ RESET FIRST: the verdict cache and the frozen-mirror memory are process
+    # globals keyed by (dsn, org, graph, label), so a preceding test's UNVERIFIED
+    # verdict for the same tenant would be served instead of this one — and an
+    # unverified verdict with a frozen mirror raises rather than declines, which is
+    # how these pins read `applied_ms is None` for a reason that has nothing to do
+    # with the budget.
+    record_vector.reset_coverage_cache()
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: 0, raising=True)
 
 
 def _wire_record_door(monkeypatch, state: dict) -> None:
@@ -222,7 +256,7 @@ def test_the_record_leg_is_bound_by_the_reads_own_budget(monkeypatch, armed):
     state: dict = {"statements": []}
     _wire_record_door(monkeypatch, state)
 
-    searcher = record_vector.searcher(carried=armed, timeout_ms=BUDGET_MS)
+    searcher = record_vector.searcher(carried=armed, graph_population=_NO_GRAPH_VECTORS, timeout_ms=BUDGET_MS)
     assert searcher is not None, "the leg must be armed for this pin to mean anything"
 
     graph = _FakeGraph()
@@ -266,30 +300,30 @@ def test_the_record_leg_is_bound_by_the_reads_own_budget(monkeypatch, armed):
         "the leg answered; a `timeout` entry would discard a result it had")
 
 
-def test_the_fused_read_keeps_the_graphs_answer_inside_its_own_budget(monkeypatch, armed):
-    """The COLLECTOR's clock, not just the statement's (PR #13133 review P1).
+def test_a_fused_read_on_a_contracted_tenant_does_not_wait_for_a_slow_record_leg(
+        monkeypatch, armed):
+    """The COLLECTOR's clock, on the posture `#13610` created (PR #13133 P1).
 
-    `#11691`'s acceptance has two halves: (a) the leg is bound by
-    ``min(door, read budget)``, and (b) *a slow record yields a NAMED
-    `scan_fallback` to the graph INSIDE the read's budget*. The direct
-    `run_vector_query` call above proves (a) and the naming, and cannot see (b):
-    it has no deadline, so a leg that is cancelled AT the read's budget still
-    answers there.
-
-    The path that ships is `degradation_chain`, and its collector takes only
-    futures that are ALREADY done when its deadline expires — otherwise the
-    strategy is recorded ``reason="timeout"`` and its rows are DISCARDED. Since
-    the record leg's timer starts at the statement (after the borrow, the connect
-    and the `set_config` round trips), a leg on the whole budget is cancelled too
-    late for the graph branch to answer.
+    `#11691`'s acceptance was (a) the leg is bound by ``min(door, read budget)``
+    and (b) *a slow record yields a NAMED graph fallback inside the read's
+    budget*. ⛔ `#13610` RETIRED (b) FOR A CONTRACTED TENANT, deliberately: once
+    the record's coverage is verified the graph copy has been frozen since the
+    contract, so serving it would hand over a SMALLER cohort as the answer
+    (`#5090` Q2, `record_vector.RecordVectorWithoutFallback`). What must survive,
+    and is what this pin now measures, is the COLLECTOR's clock: the fused read
+    must not wait for a slow record leg, must not consult the graph, and must
+    report that it could not look rather than answer with a cohort it no longer
+    maintains.
 
     RED if `record_vector.record_statement_ms` stops dividing: the leg sleeps the
-    read's whole budget, the collector times out first, and both the rows and the
-    `scan_fallback` entry go with it — the state the issue was filed about.
+    read's whole budget, the collector's deadline expires first, and the entry is
+    recorded ``reason="timeout"`` with the rows discarded — an unattributed
+    failure instead of the named one.
     """
     state: dict = {"statements": []}
     _wire_record_door(monkeypatch, state)
-    searcher = record_vector.searcher(carried=armed, timeout_ms=BUDGET_MS)
+    _verify_coverage(monkeypatch)
+    searcher = record_vector.searcher(carried=armed, graph_population=_NO_GRAPH_VECTORS, timeout_ms=BUDGET_MS)
     assert searcher is not None, "the leg must be armed for this pin to mean anything"
 
     graph = _FakeGraph()
@@ -302,17 +336,33 @@ def test_the_fused_read_keeps_the_graphs_answer_inside_its_own_budget(monkeypatc
         leg_trace=trace, pg_vector=searcher)
     elapsed_ms = (time.monotonic() - started) * 1000.0
 
-    assert [pid for pid, _score in fused.get("vector", [])] == [graph.ID], (
-        f"the fused read lost the graph's answer to the record leg's "
-        f"cancellation: {fused}. A leg cancelled at the read's own deadline "
-        f"leaves the collector nothing — that is the defect, not a slow test.")
+    assert fused.get("vector", []) == [], (
+        f"a contracted tenant answered from the graph after its record leg was "
+        f"slow: {fused}. The graph copy has not been maintained since the "
+        f"contract, so that answer is a SMALLER cohort presented as the corpus "
+        f"(#5090 Q2) — the leg must report that it could not look instead")
+    assert graph.query_calls == [], (
+        f"the graph branches were consulted on a CONTRACTED tenant after the "
+        f"record leg failed ({graph.query_calls}): `RecordVectorWithoutFallback` "
+        f"exists so this fallback cannot happen")
     vector_entries = [e for e in trace if e.get("leg") == "vector"]
-    assert vector_entries, f"the fused read recorded no vector leg at all: {trace}"
+    assert vector_entries, f"the read recorded no vector leg at all: {trace}"
+    assert all(e.get("degraded") is True for e in vector_entries), (
+        f"a contracted tenant that could not answer must declare itself degraded, "
+        f"got {vector_entries}")
+    assert all(e.get("reason") == "query_failed" for e in vector_entries), (
+        f"the failure must be NAMED (`query_failed`), not left as a bare "
+        f"`timeout` or `ok`: got {[e.get('reason') for e in vector_entries]}")
+    # ⛔ AND NOT `scan_fallback`: the graph was never asked, so naming it would be
+    # the trace claiming a fallback that did not happen. The mechanism stays whatever
+    # the record leg itself reported — the `degraded`/`query_failed` pair above is
+    # what tells the operator this read could not look.
     mechanisms = [e.get(search_engine.VECTOR_MECHANISM_KEY) for e in vector_entries]
-    assert MECHANISM_SCAN_FALLBACK in mechanisms, (
-        f"the fused read must NAME the fallback it took (#4999), got {mechanisms}")
+    assert MECHANISM_SCAN_FALLBACK not in mechanisms, (
+        f"the fused read recorded the graph's fallback mechanism on a contracted "
+        f"tenant where the graph was never consulted: {mechanisms}")
     assert all(e.get("reason") != "timeout" for e in vector_entries), (
-        f"the leg answered, so a `timeout` entry discards a result it had: {trace}")
+        f"the failure must be the NAMED one, not a bare `timeout`: {trace}")
     # ⛔ THE DISCRIMINATOR IS ARITHMETIC, not the wall clock: with the budget
     # divided, at most TWO statements (the kNN read, and the shortfall `count(*)`
     # on the short path) fit STRICTLY INSIDE the read, which is what leaves the
@@ -340,7 +390,8 @@ def test_the_same_leg_unbounded_costs_the_door_bound(monkeypatch, armed):
     """
     state: dict = {"statements": []}
     _wire_record_door(monkeypatch, state)
-    searcher = record_vector.searcher(carried=armed)
+    _verify_coverage(monkeypatch)
+    searcher = record_vector.searcher(carried=armed, graph_population=_NO_GRAPH_VECTORS)
     assert searcher is not None
 
     with pytest.raises(record_vector.RecordVectorError):
@@ -369,16 +420,23 @@ def test_the_graph_branch_is_handed_what_is_left_of_the_read(monkeypatch, armed)
     floor is dropped from :func:`search_engine.remaining_read_ms`: the third pin
     below reads ``0`` for an exhausted read.
     """
-    state: dict = {"statements": []}
-    _wire_record_door(monkeypatch, state)
-    searcher = record_vector.searcher(carried=armed, timeout_ms=BUDGET_MS)
-    assert searcher is not None, "the leg must be armed for this pin to mean anything"
+    # ⛔ DRIVEN BY A LEG, NOT BY THE DOOR, since `#13610`. The record door can no
+    # longer spend this read's budget and then hand the graph the remainder: a
+    # CONTRACTED tenant has no graph fallback by design, and an UNVERIFIED one
+    # declines before any statement runs. What this pin is about is
+    # `run_vector_query`'s REMAINDER arithmetic, which is indifferent to which leg
+    # spent the time — so the time is spent by a leg that raises the same class the
+    # door's cancellation raises.
+    def _slow_leg(entity_type, query_vec, limit, excluded_statuses=None):
+        time.sleep(LEG_STATEMENT_MS / 1000.0)
+        raise record_vector.RecordVectorError("cancelled at the read's share")
 
+    state: dict = {"statements": []}
     graph = _FakeGraph()
     trace: list[dict] = []
     hits = run_vector_query(
         graph, [0.5] * 384, limit=5, timeout_ms=BUDGET_MS,
-        is_embedded=True, leg_trace=trace, pg_vector=searcher)
+        is_embedded=True, leg_trace=trace, pg_vector=_slow_leg)
 
     assert graph.query_calls, "the graph branch was never consulted — nothing to pin"
     handed = [call[2]["timeout"] for call in graph.query_calls]
@@ -515,7 +573,7 @@ def test_the_searcher_keeps_its_four_argument_shape(armed):
     a caller who omitted a fifth argument would be silently back on the door's
     15 s bound. So the shape is pinned, not merely described.
     """
-    searcher = record_vector.searcher(carried=armed, timeout_ms=BUDGET_MS)
+    searcher = record_vector.searcher(carried=armed, graph_population=_NO_GRAPH_VECTORS, timeout_ms=BUDGET_MS)
     assert searcher is not None
     params = list(inspect.signature(searcher).parameters)
     assert params == ["entity_type", "query_vec", "limit", "excluded_statuses"], (

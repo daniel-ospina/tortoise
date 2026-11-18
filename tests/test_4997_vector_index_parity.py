@@ -356,6 +356,18 @@ def _arm_the_record_leg(monkeypatch):
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
     monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "1")
+    # ⛔ AND A RECORD TENANT, which `#13610` made the third condition. Being armed
+    # stopped meaning "the record answers" the day the arm became the default: the
+    # record still has no backfill, so the gated READ declines every served label
+    # to the GRAPH until `record_vector.coverage` proves the record holds them. On a
+    # request that resolves no tenant the graph IS the answering leg, so it keeps its
+    # index — `vector_index_retired()` asks `record_vector.record_tenant_available()`
+    # for exactly that reason, and the pins below are about the ARM-AND-A-TENANT
+    # posture. The declaration is the documented single-tenant operator posture
+    # (`record_writer.single_tenant_declared`, #9192), not a test-only seam.
+    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "test-org")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "test_4997_bare")
 
 
 def test_the_retirement_is_NOT_authorised_while_the_record_leg_is_off(monkeypatch):
@@ -374,7 +386,10 @@ def test_the_retirement_is_NOT_authorised_while_the_record_leg_is_off(monkeypatc
     here is the DROP.
     """
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
-    monkeypatch.delenv("TORTOISE_RECORD_VECTOR_LEG", raising=False)
+    # ⛔ EXPLICIT ROLLBACK, not "unset" — `#13610` made the arm's DEFAULT on, so an
+    # unset switch is the ARMED posture now. The store this pin is about is written
+    # `TORTOISE_RECORD_VECTOR_LEG=0`.
+    monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "0")
     graph = _bare([_vector_row("Point")])
     graph._ensure_indexes()
 
@@ -402,7 +417,10 @@ def test_a_FRESH_store_with_no_replacement_still_GETS_its_ANN_index(monkeypatch)
     gate unconditional-create).
     """
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
-    monkeypatch.delenv("TORTOISE_RECORD_VECTOR_LEG", raising=False)
+    # ⛔ EXPLICIT ROLLBACK, not "unset" — `#13610` made the arm's DEFAULT on, so an
+    # unset switch is the ARMED posture now. The store this pin is about is written
+    # `TORTOISE_RECORD_VECTOR_LEG=0`.
+    monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "0")
     unarmed = _bare([])
     unarmed._ensure_indexes()
     assert any(

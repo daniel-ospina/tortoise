@@ -435,15 +435,21 @@ def test_an_unmeasurable_graph_count_never_verifies_coverage(monkeypatch):
 
 
 def test_a_post_contract_drop_does_not_silently_flip_the_read_back(monkeypatch):
-    """The contract is ONE-WAY, and a later short count is REPORTED, not obeyed.
+    """The contract is ONE-WAY: a later count cannot flip the read back.
 
     Post-contract the graph copy is frozen, so flipping the read back to it would
     return a smaller cohort while looking like a healthy read. A graph that gains a
     vector-bearing node after the contract (`record-restore`'s fill, a backup
-    restore) therefore cannot move the verdict — the disagreement is logged once
-    and the record keeps the read. The repair is the graph-side sweep
-    (`graph-scripts/backfill_embeddings.py`) or the next boot's re-verify, both of
-    which are named in the warning.
+    restore) therefore cannot move the verdict.
+
+    ⛔ AND IT IS NOT RE-MEASURED, WHICH IS A STATED RESIDUAL (§ "Honest gaps" of the
+    PR): `coverage()` returns a verified verdict before it takes a count, so the
+    divergence is undetected until the process restarts. An earlier cut of this
+    change carried a `warning()` for the gain case, and it was UNREACHABLE — the
+    early return always came first — so it was deleted rather than left as an alarm
+    an operator could trust (`#11660` round 6's "a false True muted the alarm",
+    of which an unreachable warning is the same shape). What the pin asserts is the
+    behaviour that actually ships: sticky verdict, NO count on the second call.
     """
     monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
@@ -453,13 +459,21 @@ def test_a_post_contract_drop_does_not_silently_flip_the_read_back(monkeypatch):
                         lambda *a, **k: 5, raising=True)
     assert record_vector.coverage("object", scope, graph_vectors=5).verified
 
-    # The graph gains a node with a vector; the record has not caught up.
-    monkeypatch.setattr(record_vector, "_record_vector_count",
-                        lambda *a, **k: 5, raising=True)
+    # The graph gains nodes (9 vector-bearing) and the record has not caught up.
+    calls: list[int] = []
+
+    def _count(*a, **k):
+        calls.append(1)
+        return 5
+
+    monkeypatch.setattr(record_vector, "_record_vector_count", _count, raising=True)
     after = record_vector.coverage("object", scope, graph_vectors=9)
     assert after.verified is True, (
         "a post-contract short count flipped the read back to a FROZEN graph copy "
         "— the rows written since the contract exist only in the record")
+    assert calls == [], (
+        "a verified verdict was re-measured; the contract is one-way and the count "
+        "costs a record round trip on the read path")
 
 
 def test_a_verified_verdict_survives_its_ttl_but_an_unverified_one_does_not(
@@ -485,6 +499,115 @@ def test_a_verified_verdict_survives_its_ttl_but_an_unverified_one_does_not(
     assert record_vector.coverage_verified("object", scope) is True, (
         "the verified verdict expired — a later failed count would demote the read "
         "to a frozen graph copy")
+
+
+# ── 4b. the cost model: the counts are taken on a MISS, and only then ─────
+
+
+def test_a_cached_verdict_takes_no_count_at_all(monkeypatch):
+    """The gate must be priced as ONE aggregate per TTL, not one PER READ.
+
+    ⛔ The shape this pins out is the one that shipped in the first cut and that two
+    reviewers measured: `graph_population` invoked at the CALL SITE, before
+    `coverage()` could consult its cache — so a full-label graph aggregate
+    (`MATCH (n:Object) WHERE n.embedding IS NOT NULL RETURN count(n)`) ran on EVERY
+    dense goals/people read, forever, including after the contract when the answer
+    could not change. Against this repo's own measurement of that scan (34 ms p50 at
+    rest, 133 ms under load) inside a 500 ms read budget, that is the #13108 cost
+    class, re-introduced by the gate that was supposed to be cheap.
+
+    Both directions are pinned, because either one alone can pass vacuously: the
+    VERIFIED case (no count, ever — the sticky verdict) and the UNVERIFIED case (one
+    count per TTL, not per read).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    record_vector.reset_coverage_cache()
+    scope = record_vector._Scope(*_SCOPE)
+
+    populations: list[str] = []
+    record_counts: list[int] = []
+
+    def _population(label):
+        populations.append(label)
+        return 3
+
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: record_counts.append(1) or 3, raising=True)
+    first = record_vector.coverage("object", scope, graph_population=_population)
+    assert first.verified is True
+    assert len(populations) == 1 and len(record_counts) == 1, (
+        "the first (MISSING) verdict did not take exactly one count each")
+
+    for _ in range(4):
+        assert record_vector.coverage(
+            "object", scope, graph_population=_population).verified is True
+    assert len(populations) == 1, (
+        f"the graph's full-label aggregate ran {len(populations)} times for 5 dense "
+        f"reads — the supplier is being asked BEFORE the cache is consulted")
+    assert len(record_counts) == 1, (
+        f"the record's aggregate ran {len(record_counts)} times for 5 dense reads")
+
+    # UNVERIFIED: one measurement per TTL, not one per read. Otherwise the state
+    # every deployment starts in pays a record round trip on every read.
+    record_vector.reset_coverage_cache()
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: record_counts.append(1) or 1, raising=True)
+    record_counts.clear()
+    for _ in range(5):
+        assert record_vector.coverage(
+            "object", scope, graph_population=_population).verified is False
+    assert len(record_counts) == 1, (
+        f"an UNVERIFIED verdict was re-measured {len(record_counts)} times in 5 "
+        f"reads: the TTL is not bounding anything, and this is the state every "
+        f"deployment is in until it has backfilled")
+
+
+def test_every_label_the_record_serves_is_gated():
+    """`#13610`'s read gate is EVERY served label, and the narrow cut was wrong.
+
+    The two-label set ({object, subject}) was justified as "only these are derived
+    in BOTH stores". The tree says otherwise (`_upsert_event` / `_upsert_document`
+    DERIVE their graph vector exactly as the two folds do), and the justification is
+    not what decides the gate anyway: since the arm became the DEFAULT the record is
+    the first dense source for all seven labels, and the record is a fold with NO
+    backfill — so `point` (the primary retrieval label), `operator`, `event` and
+    `document` would be answered from a possibly-short record with the trace reading
+    `mechanism=pgvector, reason=ok, degraded=False`. That is `#5090` Q2 on the
+    default posture.
+
+    Gating costs a count and DECLINES the label to the graph while the count is
+    short, and the graph is complete precisely because the mirror is still written —
+    so the wide set is the safe direction and the narrow one is the silent one.
+    """
+    assert set(record_vector.COVERAGE_GATED_LABELS) == set(record_vector.LABEL_SERVED), (
+        "a label the record serves is not gated, so it is answered from the record "
+        "with no coverage proof: "
+        f"{sorted(set(record_vector.LABEL_SERVED) - set(record_vector.COVERAGE_GATED_LABELS))}")
+    for label in ("point", "operator", "event", "document", "source"):
+        assert label in record_vector.COVERAGE_GATED_LABELS
+
+
+def test_the_two_denominators_are_stated_as_a_comparison_and_not_a_membership_proof():
+    """What `Coverage` claims, so a reader does not read a count as a set proof.
+
+    `record_vectors >= graph_vectors` compares SIZES: it cannot see a
+    cardinality-preserving mismatch (a graph node whose record row is missing, offset
+    by a record row whose graph node is gone). #13610's step 2 is a COVERAGE claim and
+    this is the bound on what it proves — recorded here because a docstring that said
+    "the two populations are equal" would be false, and the next reader would build
+    on it.
+    """
+    doc = (record_vector.Coverage.__doc__ or "").lower()
+    assert "membership proof" in doc, (
+        "the Coverage docstring must state the count/membership boundary explicitly: "
+        "a reader who takes `record_vectors >= graph_vectors` as a set proof builds "
+        "on something it does not establish")
+    assert "residual" in doc, (
+        "the divergent-membership shapes must be recorded as residuals, not left for "
+        "the next lane to rediscover")
+    assert "name" in doc and "id" in doc, (
+        "the graph-key/record-key asymmetry (id vs name) is the residual that makes "
+        "coverage unreachable for a duplicate-name label — it belongs in the docstring")
 
 
 # ── 5. the folds: no encode, no write ────────────────────────────────────

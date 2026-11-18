@@ -237,10 +237,11 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 }
 
 
-#: The arming surface for the CUTOVER, default OFF.
+#: The arming surface for the CUTOVER, **default ON since `#13610`** (an explicit
+#: falsy value is the ROLLBACK — see :data:`ARMING_DEFAULT`).
 #:
-#: ⛔ WHY THIS EXISTS, and it is a measured gap rather than caution (#11660
-#: review round 3, P1). The record is a journal fold with NO backfill, so it
+#: ⛔ WHY IT IS STILL A SWITCH, and the hazard below is a measured gap rather than
+#: caution (#11660 review round 3, P1). The record is a journal fold with NO backfill, so it
 #: holds a vector only for content written AFTER the move is deployed. A
 #: cutover that made the record the dense leg's only source would therefore DROP
 #: every pre-existing point out of the dense pool — silently, with the trace
@@ -257,16 +258,22 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 #: `TORTOISE_EMBED_GATE` and `record_serve.SERVE_MODE` take, and for the same
 #: reason: a correctness change to the read path is measured before it is trusted.
 #:
-#: ⚠️ Left off, NOTHING regresses: the graph branches answer exactly as they did
-#: before this change (they are the fallback they always were), AND the in-graph
-#: vector index is not retired either — an unarmed store keeps an index it has
-#: and still gains one it lacks, which is `main`'s posture (#11660 review round
+#: ⚠️ Rolled BACK, nothing regresses: the graph branches answer exactly as they
+#: did before this change (they are the fallback they always were), AND the
+#: in-graph vector index is not retired either — an unarmed store keeps an index it
+#: has and still gains one it lacks, which is `main`'s posture (#11660 review round
 #: 7, P2-2: the arm gate governs the CREATE as well as the DROP, so a store can
-#: never be left with neither). What arming changes is that the index leaves
-#: once the record answers the dense read. Getting the existing corpus into the
-#: record is the thing to price before arming, and it is the second reason this
-#: is a switch rather than a default: a store that arms it needs the record
-#: backfilled FIRST, not after.
+#: never be left with neither).
+#:
+#: ⛔ WHAT THE DEFAULT FLIP DOES **NOT** CLAIM (and an earlier cut of this change
+#: got wrong in its own prose): being armed is not the same as the record ANSWERING.
+#: The record still has no backfill, so `point`/`source`/`event` are served from it
+#: only for rows written after the move — which is why the READ is gated per label
+#: on :func:`coverage` (`COVERAGE_GATED_LABELS` is every served label, not two) and
+#: why the in-graph index is not retired on the strength of the arm alone
+#: (:func:`tortoise.projection.vector_index_retired` asks for a record TENANT too).
+#: Getting the existing corpus into the record remains the thing to do, and it is
+#: what the coverage count is measured on.
 ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 
 #: Is the arm ON when :data:`ARMING_ENV` is not set at all? **YES, since #13610.**
@@ -512,6 +519,25 @@ class Coverage:
     verified the graph copy is frozen and the record's count only grows, so the
     verdict stays true.
 
+    ⛔ WHAT IT IS NOT: a MEMBERSHIP proof. The two numbers are SIZES, and the
+    comparison is a coverage CLAIM of the size kind — deliberately, because the
+    alternative is shipping every id across the wire on a path that runs inside a
+    dense read. Two residual shapes follow, and they are stated rather than hidden:
+
+    * a cardinality-preserving mismatch (a graph node whose record row is missing,
+      offset by a record row whose graph node is gone) verifies;
+    * the two keys are not identical — the graph MERGEs on `id`, the record keys on
+      `name` (`chk_object_node_key_is_contract_key`) — so two nodes sharing a name
+      can hold the coverage verdict below what the record can ever reach, in which
+      case the deployment double-stores for ever with no defect to point at.
+
+    Neither is introduced by this gate (they are properties of comparing two stores
+    by size) and closing either is a repair sweep or an identity-aware comparison,
+    filed from this change rather than pretended away. What the count DOES prove is
+    the thing the retirement needs: the record holds at least as many vectors as the
+    graph can serve, so retiring the graph's copy loses no row that the record has
+    not got.
+
     ⚠️ ``reason`` is the one-line account for the trace/log, never a substitute
     for the counts.
     """
@@ -532,24 +558,48 @@ class Coverage:
         }
 
 
-#: The labels this gate decides for: the two the graph DERIVES (#7845/#13220) and
-#: the two `#11395` `6956793300` authorises retiring from the graph.
+#: The labels this gate decides for: EVERY label the record serves.
 #:
-#: ⛔ NOT every label in :data:`LABEL_SERVED`. `point`/`operator` are RECORD TRUTH
-#: (`#5004`: a Point's vector is stamped on the journal and is never derived), so
-#: their graph copy is not a mirror of anything and the cutover has nothing to
-#: verify — `source`/`document`/`event` carry a caller-supplied or journal-carried
-#: vector for the same reason. Only ``object``/``subject`` are derived in BOTH
-#: stores, which is the defect this gate exists to close.
-COVERAGE_GATED_LABELS: frozenset[str] = frozenset({"object", "subject"})
+#: ⛔ IT IS NOT {object, subject}, and the earlier two-label cut was wrong for the
+#: reason the gate exists. The gate is not `#7845`-specific: since the arm became
+#: the DEFAULT (#13610) the record is the dense leg's first source for every label
+#: in :data:`LABEL_SERVED`, and the record is a journal fold with **no backfill**
+#: (`ARMING_ENV`'s hazard, `#11660` P1). So the question "which labels can be
+#: served short?" has one answer — all seven — and gating only the two the graph
+#: DERIVES would leave `point` (the primary retrieval label), `operator`, `event`
+#: and `document` answered from a possibly-short record with the trace reporting
+#: ``mechanism=pgvector, reason=ok, degraded=False``. That is `#5090` Q2 verbatim.
+#:
+#: The old justification ("only object/subject are derived in BOTH stores") is
+#: also false on the tree: `_upsert_event` and `_upsert_document` derive their
+#: graph vector with `derived_embedding.encode` exactly as the two folds do
+#: (measured: `projection/entities.py:5524`, `:5905`). Gating a label costs it a
+#: count and DECLINES it to the graph while the count is short — the graph branch
+#: is complete precisely because :func:`mirror_required` keeps writing it — so the
+#: wide set is the safe direction, and the narrow one is the silent one.
+#:
+#: The WRITE half is narrower, and deliberately: only `_upsert_subject` /
+#: `_upsert_object` consult :func:`mirror_required` today, so the other five keep
+#: their graph vector even after their coverage verifies. That is option 2's
+#: transitional double-storage, not a gap in the proof: the round trip here is
+#: "the read stops trusting the graph last", never "the write stops first".
+COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 
-#: How long one tenant's coverage verdict is trusted. The check is TWO aggregates
-#: (`count(*)` on the record, `count(n)` on the graph), and it runs on every dense
-#: read for a gated label, so it must be cached — the same shape and the same
-#: reason as :data:`READINESS_TTL_SECONDS`. 30 s bounds how long a record that has
-#: just fallen behind can still be served as if it were whole, and the direction of
-#: a stale POSITIVE verdict is the one that matters (a stale negative just keeps
-#: the graph branch, which is always correct while it is maintained).
+#: How long one tenant's UNVERIFIED coverage verdict is trusted (seconds).
+#:
+#: Both verdicts are cached, and they are cached differently on purpose:
+#:
+#: * an UNVERIFIED verdict expires after this window, so a deployment that has just
+#:   backfilled starts being served from the record within 30 s of catching up —
+#:   and until then the graph branch answers, which is CORRECT (the mirror is still
+#:   written). A stale negative costs latency, never a row;
+#: * a VERIFIED verdict NEVER expires (see :func:`_cached_coverage`): the contract
+#:   is one-way, and re-taking it would let a transient read error hand the next
+#:   read a FROZEN graph copy as if it were whole.
+#:
+#: ⛔ The window bounds the CACHE, never the measurement: the two aggregates are
+#: taken on a MISS only, and the graph side's count is the caller's supplier asked
+#: at that moment — a dense read on a cached verdict takes no count at all.
 COVERAGE_TTL_SECONDS = 30.0
 
 #: `(dsn fingerprint, org, graph, label) -> (checked_at, Coverage)`.
@@ -557,9 +607,14 @@ _COVERAGE: dict[tuple[str, str, str, str], tuple[float, Coverage]] = {}
 _COVERAGE_LOCK = threading.Lock()
 
 
+
 def reset_coverage_cache() -> None:
     """Forget every coverage verdict — for tests, and for an operator who has
-    just finished a backfill and does not want to wait out the TTL."""
+    just finished a backfill and does not want to wait out the TTL.
+
+    ⚠️ A VERIFIED verdict is the one entry a restart cannot rebuild cheaply — the
+    process re-takes it on the first read, which is the correct recovery: the count
+    is measured again and answered on its own evidence, never remembered."""
     with _COVERAGE_LOCK:
         _COVERAGE.clear()
 
@@ -603,17 +658,27 @@ def _cached_coverage(label: str, scope: _Scope,
     return verdict
 
 
-def coverage(label: str, scope: _Scope, *, graph_vectors: int | None,
+def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
+             graph_population: Callable[[str], int | None] | None = None,
              record_dsn: str | None = None,
              timeout_ms: int | None = None,
              now: float | None = None) -> Coverage:
     """Take (or reuse) this tenant's coverage verdict for ``label`` (#13610).
 
-    ``graph_vectors`` is the caller's own measurement — the number of nodes of the
-    label that carry an `embedding` ON THIS GRAPH (the graph is the tenant's, so
-    no further scoping is needed) — because only the caller holds a graph handle.
-    ``None`` (unmeasurable) is NOT a verdict: the answer is unverified, which keeps
-    the graph branch and the graph write.
+    ``graph_population`` is the caller's own SUPPLIER — a callable answering the
+    number of nodes of ``label`` that carry an `embedding` ON THIS GRAPH (the graph
+    is the tenant's, so no further scoping is needed), because only the caller
+    holds a graph handle — and it is asked **on a cache MISS only**. ⛔ That
+    placement is the whole cost model: called from the read path BEFORE this
+    function, the supplier's `MATCH (n:{label}) … count(n)` is a full-label
+    aggregate on EVERY dense read, which is the #13108 cost class and would be
+    paid even after the contract, when the answer cannot change (#13610 review:
+    measured 3 reads -> 3 graph counts with `coverage` called afterwards). Handed
+    in as a callable, a read on a cached verdict takes NO count at all.
+
+    ``graph_vectors`` is the same measurement supplied already taken; either form
+    is accepted, and ``None`` from both (unmeasurable) is NOT a verdict: the answer
+    is unverified, which keeps the graph branch and the graph write.
 
     One statement: the record's vector-bearing rows for the label, over the whole
     table (no status fold, no `kind_filter`) so it is comparable with the graph's
@@ -626,8 +691,14 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None,
     `tests/test_13220_record_label_embeddings.py`).
     """
     cached = _cached_coverage(label, scope, record_dsn)
-    if cached is not None and cached.verified:
+    if cached is not None:
+        # BOTH verdicts are served from the cache while it is valid (a verified one
+        # forever — see `_cached_coverage`). Serving only the verified one made the
+        # unverified state pay the record's aggregate on EVERY read, which is the
+        # state every deployment starts in.
         return cached
+    if graph_population is not None:
+        graph_vectors = _safe_population(graph_population, label)
     if graph_vectors is None:
         verdict = Coverage(label=label, verified=False, record_vectors=None,
                            graph_vectors=None,
@@ -648,28 +719,19 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None,
                         f"{label}, the graph serves {graph_vectors}"))
     key = _coverage_key(label, scope, record_dsn)
     if key is not None:
-        if cached is not None and cached.verified and not verdict.verified:
-            # ⛔ A POST-CONTRACT DROP IS LOUD, and the verdict does not move.
-            # Reaching here means the graph gained a vector-bearing node after the
-            # contract (a backup restore, a `record-restore` fill, or a rollback
-            # toggle flipped in a peer process). Falling back would be worse than
-            # the problem: the graph has been frozen since the contract, so its
-            # answer is a SMALLER cohort and the rows written since exist only in
-            # the record. So the contract stands, and the disagreement is
-            # REPORTED — it is the operator's to repair (the graph-side
-            # `graph-scripts/backfill_embeddings.py` sweep, or a re-verify on the
-            # next boot), never a silent flip.
-            logging.getLogger(LOG_NAME).warning(
-                "record dense leg: the coverage contract for `%s` was verified "
-                "and the graph has since gained %s vector-bearing node(s) "
-                "(record %s). Keeping the record as the dense source: the graph "
-                "copy has not been maintained since the contract, so serving it "
-                "would return a SMALLER cohort (#5090 Q2). Repopulate the graph "
-                "with `graph-scripts/backfill_embeddings.py`, or restart to "
-                "re-verify.",
-                label, (verdict.graph_vectors or 0) - (cached.graph_vectors or 0),
-                verdict.record_vectors)
-            return cached
+        # ⛔ A VERIFIED VERDICT IS STICKY, AND THAT IS A STATED RESIDUAL, not an
+        # oversight: `_cached_coverage` returns it and this function never
+        # re-measures, so a graph that GAINS vector-bearing nodes after the
+        # contract (a backup restore, a `record-restore` fill, a peer process
+        # rolling back) is not detected in this process, and the contract stands.
+        # That direction is deliberately the harmless one — the record holds the
+        # vectors and only grows — whereas expiring the verdict would let one
+        # transient read error hand the next read a FROZEN graph copy as if it were
+        # whole (`#5090` Q2). An earlier cut of this change carried a `warning()`
+        # for the gain case; it was UNREACHABLE (the `verified` early return above
+        # already returned), so it was removed rather than left as an alarm an
+        # operator could trust. A deployment that has restored its graph re-verifies
+        # by restarting, or by `reset_coverage_cache()` in-process.
         with _COVERAGE_LOCK:
             _COVERAGE[key] = (time.monotonic() if now is None else now, verdict)
     return verdict
@@ -714,6 +776,23 @@ def _record_vector_count(label: str, scope: _Scope, *,
     finally:
         with contextlib.suppress(Exception):
             conn.close()
+
+
+def record_tenant_available(carried: tuple[str, str] | None = None) -> bool:
+    """Does a record TENANT resolve for this request? (#13610)
+
+    The third condition of :func:`tortoise.projection.vector_index_retired`, and the
+    one the default flip made necessary: the arm can no longer stand in for it. A
+    store whose dense read resolves no tenant serves every label from the GRAPH
+    (:func:`searcher` refuses without a scope, and :func:`coverage` cannot be taken),
+    so the graph's in-index is the one that must stay.
+
+    ⚠️ Ambient-only by design, and that is the CONSERVATIVE answer here: a request
+    that carries its tenant by value (the hosted lane) says ``False``, so the index is
+    kept rather than dropped — the cost is a stale index, the alternative is an
+    index-less leg on the store that is answering.
+    """
+    return _resolve_scope(carried) is not None
 
 
 def coverage_verified(label: str, scope: _Scope | None = None,
@@ -874,8 +953,12 @@ _FOLDED_STATUS = "\x00folded"
 #: named, bounded, pre-existing ordering gap owned on `#9974`. ⚠️ That gap is
 #: NOT introduced here and is not this leg's to close — closing it in `record_vector`
 #: would be the second declaration the rule forbids — but a reader must not infer a
-#: guarantee this change did not make. Today nothing ships it: `cutover_armed()` is
-#: OFF, so the graph answers. See the comment relayed to `#9974`.
+#: guarantee this change did not make. ⚠️ `#13610` MOVED THIS: the arm defaults ON and
+#: the coverage gate retires the graph per label, so once a label's count verifies the
+#: record's fold answer — including this ordering gap — is what ships for that label.
+#: The gap is therefore REACHABLE on the default path now, which is why it is stated
+#: here and on `#9974` rather than described as dormant. See the comment relayed to
+#: `#9974`.
 _STATUS_COLUMN: dict[str, tuple[str, bool]] = {
     "point": ("status", True),
     "operator": ("status", True),
@@ -1311,7 +1394,7 @@ def _recency_sql(columns: tuple[str | None, str | None], alias: str = "t") -> st
 
 
 def cutover_armed() -> bool:
-    """Is the dense leg's CUTOVER armed? Default NO — see :data:`ARMING_ENV`.
+    """Is the dense leg's CUTOVER armed? **Default YES** — see :data:`ARMING_ENV`.
 
     ⛔ PUBLIC, and a separate question from :func:`armed`, because one consumer
     outside this module must ask it: `projection.vector_index_retired()` gates
@@ -1936,11 +2019,21 @@ def searcher(
         #     so the leg reports it could not look instead.
         contracted = False
         if entity_type in COVERAGE_GATED_LABELS:
-            graph_vectors = (None if graph_population is None
-                             else _safe_population(graph_population, entity_type))
-            verdict = coverage(entity_type, scope, graph_vectors=graph_vectors,
+            verdict = coverage(entity_type, scope,
+                               graph_population=graph_population,
                                record_dsn=record_dsn, timeout_ms=timeout_ms)
             if not verdict.verified:
+                # ⛔ THIS IS THE ONE STATED RESIDUAL OF OPTION 2. "Unverified"
+                # means the graph is still a complete copy, because the mirror is
+                # written while the count is short — WITHIN THIS PROCESS. A restart
+                # between the contract and the first write that resumes the mirror
+                # leaves a window where the verdict is unmeasured AND the graph copy
+                # is frozen at the contract, and this branch declines to it: the
+                # answer is the cohort as it stood at the restart. Closing that needs
+                # the contract PERSISTED (a per-tenant row the write path can read);
+                # it is a schema decision filed from this change, not folded into it,
+                # and the window is bounded by the first write (`mirror_required`
+                # answers True while unverified, so the mirror resumes immediately).
                 logging.getLogger(LOG_NAME).debug(
                     "record dense leg: `%s` coverage unverified (%s) — the "
                     "graph branch answers, which is a complete copy because "

@@ -764,7 +764,9 @@ _VECTOR_INDEX_DROP_FAILED_LOCK = threading.Lock()
 #:   * record NOT ARMED (no DSN, or no cutover, or neither) — nothing serves the
 #:     dense leg from Postgres, the graph has no vector index, and every served
 #:     label REALLY DOES full-scan. That is `#4997`'s defect, unchanged, and it
-#:     keeps its WARNING. The cutover defaults OFF, so this is the DEFAULT lane.
+#:     keeps its WARNING. The cutover defaults ON since `#13610`, but a store with
+#:     a DSN and no resolvable record TENANT is still this lane, which is why the
+#:     retirement asks for a tenant and not only for the arm.
 #:
 #: ⛔ AND IT IS A ROLLBACK SWITCH, WHICH IS TWO HALVES (`#11660` review F9). The
 #: flag is read in TWO places and a rollback needs both: the log LEVEL above, and
@@ -814,8 +816,10 @@ def vector_index_retired() -> bool:
     ⛔ A RECORD DSN IS NOT THAT ANSWER, and treating it as one muted the very
     alarm this function exists to keep honest (#11660 review round 6, P1-3).
     Round 3 made the dense leg's cutover a SECOND, stronger condition —
-    :data:`tortoise.record_vector.ARMING_ENV`, default OFF — so a hosted store
-    with a DSN and no arming is the *default* posture, and on it:
+    :data:`tortoise.record_vector.ARMING_ENV`, **default ON since `#13610`**, with an
+    explicit falsy as the ROLLBACK — so a hosted store with a DSN but no resolvable
+    record TENANT is the posture this clause is about (the arm alone no longer names
+    it), and on it:
 
       * the in-graph index is dropped (the drop is gated on the constant, which
         is the deliberate part), and
@@ -830,6 +834,20 @@ def vector_index_retired() -> bool:
     in ``record_writer`` (the arming SURFACE, and it raises on a malformed
     value) and the cutover in ``record_vector`` (the arming DECISION). Lazy
     imports both, for the cycle.
+
+    ⛔ AND A THIRD ONE, because `#13610` moved the cutover's default to ON: being
+    ARMED is not the same as the record ANSWERING. The record still has no backfill,
+    so the arm answers every served label from the record only once
+    `record_vector.coverage` has PROVEN the record holds that label's vectors — until
+    then the gated READ declines and the GRAPH is the answering leg. Retiring the
+    graph's index in that state would take the index off the leg that is actually
+    serving, which is `#4997`'s defect with its alarm downgraded — exactly the round-6
+    P1-3 failure this function was written to prevent, reached a different way. So the
+    retirement also requires a record TENANT on this request (`_resolve_scope`): a DSN
+    plus an unset switch is not a store where the record serves the read. On a
+    process that resolves no tenant (a CLI/rebuild box, a request with none bound) the
+    index is KEPT and the warning level stays — the rollback posture, which is the
+    safe direction.
     """
     if not VECTOR_INDEX_RETIRED:
         return False
@@ -847,12 +865,20 @@ def vector_index_retired() -> bool:
     except Exception:  # noqa: BLE001, RUF100 — a malformed DSN is "unarmed"
         return False
     try:
-        from ..record_vector import cutover_armed
+        from ..record_vector import cutover_armed, record_tenant_available
     except Exception:  # noqa: BLE001, RUF100 — see above: "unarmed"
         return False
     try:
-        return bool(cutover_armed())
+        if not cutover_armed():
+            return False
     except Exception:  # noqa: BLE001, RUF100 — a broken predicate is not an "armed"
+        return False
+    # The third condition: the record ANSWERS the dense read for this request. A
+    # store that is merely armed still gets its non-gated labels — and its gated
+    # ones, until coverage verifies — from the graph, so the graph keeps its index.
+    try:
+        return bool(record_tenant_available())
+    except Exception:  # noqa: BLE001, RUF100 — no tenant means the graph answers
         return False
 
 
@@ -20293,8 +20319,19 @@ class FalkorProjection(
         leave a store permanently unverified. Terminal nodes carry vectors too, in
         both stores.
         """
-        from ..security import entity_label
+        from ..security import ENTITY_TYPE_LABELS, entity_label
 
+        # ⛔ VALIDATED HERE, not merely upstream. `entity_label` capitalises rather
+        # than validating ("deliberately NOT validated here … an unknown str ->
+        # <Capitalized>", `security.py`), so a caller-supplied string would be
+        # spliced into `MATCH (n:{label})`. `None` is already the contract for
+        # "unmeasurable", so a miss is answered without a statement.
+        if entity_type not in ENTITY_TYPE_LABELS:
+            logging.getLogger(__name__).debug(
+                "#13610: `%s` is not a known entity type — the graph's vector "
+                "count is unmeasurable, so coverage stays unverified",
+                entity_type)
+            return None
         try:
             label = entity_label(entity_type)
             rows = self.g.query(

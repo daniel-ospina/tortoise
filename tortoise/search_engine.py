@@ -4018,9 +4018,11 @@ def run_vector_query(
     #             dense leg is armed, with `#689`'s terminal cage applied from the
     #             record's own fold. A label that IS served but declines THIS read
     #             (the folded arm's bind bound) takes the `raise` arm below
-    #             instead, so the fallback is named. The graph still answers while
-    #             `record_vector.cutover_armed()` is OFF, which is the default, so
-    #             the graph leg is what ships today.
+    #             instead, so the fallback is named. The graph answers while the
+    #             label's coverage is unverified — which is the state of every
+    #             deployment that has not backfilled, and is the DEFAULT state since
+    #             `#13610` even though the arm itself now defaults ON — so the graph
+    #             leg is what ships until `record_vector.coverage` proves the record.
     #   * rows  -> record `pgvector` and return through the SAME ordering pass
     #             the graph branches use, so the ranking cannot drift between
     #             the two by construction (`#6214`/`#10121`).
