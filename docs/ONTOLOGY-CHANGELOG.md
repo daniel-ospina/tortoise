@@ -66,7 +66,8 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >   `deprecated`** (the owner's ruling of 2026-11-16, relayed on #11824 as comment `6925010125`): accepted on write, stored as `deprecated`.
 >   `retracted`, `outdated` and `archived` are **no longer lifecycle words** and survive only as read
 >   deltas over stored rows (#12855); the model grants `retracted` no write-side synonym, and §4.2's
->   Subject guard refuses it.
+>   Subject guard is stated as refusing it — **that stated refusal is false of the shipped guard, and it
+>   is named as a residue below rather than repeated here as fact.**
 > - **§4.3 Object** additionally records that **`in_progress` and `completed` are positions, not
 >   lifecycle words** — they become stages of the kind's declared pipeline (`pipelineStageId`, #2792) —
 >   and that a pack's declared words become its pipeline stages rather than a wider status list.
@@ -80,11 +81,19 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >   where it went, following this file's convention of correcting an approved clause with a dated note
 >   rather than rewriting it.
 >
-> **Two residues this edit leaves, named so the owner sees them rather than inheriting them silently:**
+> **Three residues this edit leaves, named so the owner sees them rather than inheriting them silently:**
 > §5's *Point Status Vocabulary* table and a §10.5 decision row (`docs/ONTOLOGY.md:1527`) still present the retired six words as the
 > model vocabulary. They fall outside the six approved hunks, and the CRITICAL RULE at
 > `docs/ONTOLOGY.md:41` forbids editing them without the owner's approval of that exact text — the
 > corrective text is proposed on #11824 and applies only once it is approved.
+>
+> The third is a **model-versus-code disagreement inside §4.2's row**, which says *"`retracted` is not
+> among the §4.2 declared verbs and the write guard REFUSES it"*. The shipped guard does the opposite and
+> treats `retracted` exactly as it treats `archived`: `lifecycle_vocabulary.LIFECYCLE_STATUS_SYNONYMS`
+> maps both to `deprecated` for every kind (measured at this head —
+> `read_caller_status('retracted', kind=':Subject')` returns `deprecated`). That row is owner-approved
+> text inside the approved hunks, so it is not this edit's to rewrite; the correction belongs with the
+> other two, on #11824, under the same exact-text gate.
 >
 > **What did NOT change:** the §4 field tables other than those five rows; every `Impl` status; the
 > valid-time rules (§4.7); the pack-declaration mechanics; and every stored value. Nothing is migrated
