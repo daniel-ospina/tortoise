@@ -1047,11 +1047,13 @@ def test_a_single_quoted_escape_before_a_hash_is_measured_not_broken(tmp_path) -
     Non-vacuity: on the pre-fix helper ``_quoted_style`` returns
     ``('broken', None)`` for this value, so the ``style`` assertion below fails
     (the ``classified`` assertion before it passes: this branch edited
-    ``_values``' COMMENTS only — its classification path is untouched, so that
+    ``_values``' TEXT only — two prose blocks, a DOCSTRING hunk and a ``#``-comment
+    hunk, with behaviour identical and the classification path untouched, so that
     assertion does not depend on the fix. ⛔ It read "``_values`` is unchanged by
-    this fix" until review round 5, which the diff refutes: the branch rewrites
-    two comment blocks inside ``_values`` (``@@ -166`` and ``@@ -201``), behaviour
-    identical, so the TRUE claim is about the PATH, not the function's text).
+    this fix" until review round 5, which the diff refutes; round 6 then caught the
+    first repair calling BOTH hunks "comments" when ``@@ -166`` is inside the
+    docstring that opens at ``:158`` — so the claim is about the PATH, and the two
+    hunks are text, not both comments).
 
     This value pins the close-POSITION half of the fix. The parity half — the
     ``''`` skip in ``_closing_quote`` — is NOT exercised by it: here the escape

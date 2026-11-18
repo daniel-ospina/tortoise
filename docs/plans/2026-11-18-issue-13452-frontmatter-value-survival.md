@@ -195,7 +195,7 @@ rationale drift, or the 2 pre-existing absence reds.
 |---|---|---|---|
 | `tortoise.file_indexer.parse_frontmatter` | python consumer | `tests/test_file_indexer.py` (unchanged) | the read path this fix depends on; **not modified** |
 | `tortoise/docs_miner.py:352` | importer | `tests/test_file_indexer.py` | consumes the same parse; unaffected by quoting data |
-| `tests/test_doc_affiliation_frontmatter.py` (`test_research_doc_frontmatter_parses_as_yaml`) | the arm itself | `config/ci-surfaces.yml:3728` (`core`) + `:10678` (`tier1`) | dual-registered, so it runs for a docs-only diff AND for the full suite. ⛔ The two SURFACE labels here were inverted until review round 4: the line NUMBERS had been corrected while the labels carried forward from the pre-correction citations. Verified by enclosing key, not by eye — `:3728` sits in the `core:` sub-block (2632 ≤ 3728 < `ep:` at 8976) and `:10678` sits in the top-level `tier1:` list (10656 ≤ 10678 < `slow_files:` at 11248), which is the direction the line's own comment states: *"a docs-only diff runs `tier1` only; dual-registered with `core`"* |
+| `tests/test_doc_affiliation_frontmatter.py` (`test_research_doc_frontmatter_parses_as_yaml`) | the arm itself | `config/ci-surfaces.yml`: the `core:` row at `:3728` + the `tier1:` row carrying the `#8738 review P2` marker at **`:10690`** (`:10678` before the `origin/main` merge) | dual-registered, so it runs for a docs-only diff AND for the full suite. ⛔ The two SURFACE labels here were inverted until review round 4: the line NUMBERS had been corrected while the labels carried forward from the pre-correction citations. Verified by enclosing key, not by eye — `:3728` sits in the `core:` sub-block (2632 ≤ 3728 < `ep:` at 8976) and `:10690` sits in the top-level `tier1:` list (10656 ≤ 10690 < `slow_files:` at 11248), which is the direction the line's own comment states: *"a docs-only diff runs `tier1` only; dual-registered with `core`"*. ⛔ **`:10678` → `:10690` is the `origin/main` merge's own doing** (`#13486` inserted 12 lines above it in this file; `grep -n '^- test_doc_affiliation_frontmatter.py' config/ci-surfaces.yml` re-derives it), which is why the row now also names the marker — a bare line number here had already been "corrected" twice and rot is the reason |
 | `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at this head) | data | the arm's `docs/research/**/*.md` glob | the population the assertion iterates |
 | `scripts/check-doc-affiliation.cjs` | commit-time advisory | not CI-wired | **not touched**; deferred per §2 alternative E |
 
@@ -238,11 +238,16 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    `git diff --stat` vs `main` = **2 files** (this plan doc + the test file) — the `9 files + 1 plan
    doc` this line used to carry was #13476's tree, measured at THAT head, and was false here.
    ⛔ **SUPERSEDED for the absence reds by the `origin/main` merge (`130e20fdaf`, two commits after
-   `f6793959a2`).** That merge brought in `#13471`/`#13486`, which added the missing frontmatter to
-   ALL THREE paths named above — `git diff f6793959a2..130e20fdaf --stat -- <those 3 docs>` = **3 files,
-   40 insertions** — so at the merge head the same command measures **`18 passed, 0 failed`**
-   (measured, not inferred). Every `2 failed, N passed` figure in this doc stays true for the head it
-   names; what no longer holds is the PRESENT TENSE — "the 2 ARE the pre-existing absence reds".
+   `f6793959a2`).** That merge brought in `#13471` and `#13486`; the frontmatter that clears these
+   reds is **`#13486`'s** — `git show --numstat 0186df593423 -- <those 3 docs>` = 11 + 11 + 11 = 33
+   lines. `#13471` touched only `docs/evidence/13038-capstone/README.md`, and its 7 lines are a prose
+   `⚠️` note in that file's BODY, no frontmatter (`git show --numstat 130e20fdaf -- <those 3 docs>` =
+   7/0, one file). So the `40 insertions` the whole merge contributes are **33 + 7**, which is exactly
+   why the total was right while a bare `#13471`/`#13486` attribution is not — corrected after review
+   round 6 caught it naming `#13471` for frontmatter it never added. At the merge head the same
+   command measures **`18 passed, 0 failed`** (measured, not inferred). Every
+   `2 failed, N passed` figure in this doc stays true for the head it names; what no longer holds is
+   the PRESENT TENSE — "the 2 ARE the pre-existing absence reds".
 3. **Mutant matrix — 22/22 behave as designed** (M1–M20 by `/tmp/matrix_13452.sh`; M13–M18 were
    added after code review, and M21/M22 were measured separately in `e488d2adcc`'s scratch run —
    one mutation at a time, tree restored byte-identical between each):
@@ -795,8 +800,21 @@ TWO bundles, because `#13436` landed `docs/evidence/13436-write-path-costs/READM
 frontmatter after this plan was written. §7 and the out-of-scope list above record both; the defect
 is `main`'s, not this PR's.
 
-**The `origin/main` merge at `130e20fdaf` then removed that red entirely** (`#13471`/`#13486` added
-the frontmatter to all three paths), so the file measures **`18 passed`** at the merge head and §7
-item 2 carries the measurement. Recorded here because this section's last word on the subject was
-"the defect is `main`'s" — true when written, resolved upstream since, and a reader at the merge head
-must not go hunting for a red that is gone.
+**The `origin/main` merge at `130e20fdaf` then removed that red entirely** — the frontmatter is
+**`#13486`'s** (33 lines across the three paths); `#13471`'s 7 lines there are a prose note in one
+file's body, no frontmatter (`git show --numstat` on each commit, named in §7 item 2) — so the file
+measures **`18 passed`** at the merge head and §7 item 2 carries the measurement. Recorded here
+because this section's last word on the subject was "the defect is `main`'s" — true when written,
+resolved upstream since, and a reader at the merge head must not go hunting for a red that is gone.
+
+⛔ **One correction to that same merge commit's MESSAGE (`9f12429a528`), which cannot be amended
+because it is already pushed.** Its closing paragraph says *"`config/ci-surfaces.yml` is unchanged …
+already dual-registered at `:3728` (`core`) and `:10678` (`tier1`)"*, and both halves are wrong at the
+head it certifies: the merge itself brought `#13486`'s **12 lines** into that file
+(`git diff --stat 65523b28f3a0..9f12429a528 -- config/ci-surfaces.yml`), and that insertion moved the
+`tier1` row **`10678` → `10690`** (so `:10678` is now `test_12295_fold_blocking_measurement.py`). What
+the message MEANT — this lane added no registration — is true and is what the row records; the fix is
+to stop citing the row by a bare line number, which §6 now does
+(`grep -n -- '- test_doc_affiliation_frontmatter.py' config/ci-surfaces.yml` re-derives it). Recorded
+here rather than silently left, because a commit message is the one artifact on this branch no later
+commit can mend.
