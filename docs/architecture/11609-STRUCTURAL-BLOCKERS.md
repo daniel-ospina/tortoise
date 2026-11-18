@@ -232,8 +232,10 @@ per-file counts are deliberately **not** quoted: editing this document changes t
 exactly how an earlier revision's numbers went stale between two heads.)
 
 No **product** module instantiates it. The **tests** do, deliberately —
-`tests/test_tool_registry.py:818` and this file's own adapter probes
-(`tests/test_11609_structural_blockers.py:978`, `:1016`). The product has a comment and the
+`tests/test_tool_registry.py:818` and this file's own adapter probes,
+`test_register_all_would_derive_the_route_from_the_row` and
+`test_two_distinct_rows_on_one_path_double_register` (cited by NAME: a line number ROTS —
+this passage has now outlived two sets of them). The product has a comment and the
 class definition, and nothing else. And `tortoise/hosted_api.py` does not import
 `TOOL_REGISTRY` for routes at all (its only registry import is `capability_catalog`, an
 unrelated indexer table). The **served** routes are hand-written decorators that call the

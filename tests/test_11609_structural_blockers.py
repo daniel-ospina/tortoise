@@ -188,17 +188,25 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
 
     Matched: the bare name, a `from … import FastAPIRouterAdapter as X` alias, an
     `import … tool_registry as tr` / `import tortoise.tool_registry` attribute chain,
-    `from … import tool_registry as tr`, `getattr(mod, "FastAPIRouterAdapter")`, and — via one
-    rebinding pass to a fixpoint — `A = FastAPIRouterAdapter; A(app)` and
-    `mod = tool_registry; mod.FastAPIRouterAdapter(app)`. The class DEFINITION in the module
-    that defines it is a binding too, because that module is the one place a bare-name wiring
-    is expected.
+    `from … import tool_registry as tr`, `getattr(mod, "FastAPIRouterAdapter")`,
+    `A = FastAPIRouterAdapter; A(app)`, `mod = tool_registry; mod.FastAPIRouterAdapter(app)`,
+    a rebinding THROUGH a module attribute (`RTA = tr.FastAPIRouterAdapter; RTA(app)`), and a
+    default-argument binding (`def build(app, cls=FastAPIRouterAdapter): cls(app)`). The class
+    DEFINITION in the module that defines it is a binding too, because that module is the one
+    place a bare-name wiring is expected.
+
+    Rebindings are applied in SOURCE ORDER (in Python's own sense), and a reassignment that
+    does NOT resolve to the class/module DROPS the name — `A = FastAPIRouterAdapter` …
+    `A = object` … `A()` is not an instantiation of the adapter. Without the drop the reading
+    inherited the opposite defect from the literal it replaced: a FALSE BLOCK, reding the pin
+    with "REST routes ARE registry-derived again" for code that derives nothing.
 
     DELIBERATELY not matched, stated rather than hidden: an instantiation reached through a
     dict or a dynamic import the AST cannot resolve (`registry["FastAPIRouterAdapter"](…)`,
-    `importlib.import_module(...)`, `__import__`), a `functools.partial` of it, and an
-    instantiation of a SUBCLASS. A regex cannot see those either, and at least the AST cannot
-    be fooled by prose.
+    `importlib.import_module(...)`, `__import__`), a `functools.partial` of it, an
+    instantiation of a SUBCLASS, and a `from … import *` (lint-blocked in this tree: `F403`
+    is not ignored). A regex cannot see those either, and at least the AST cannot be fooled
+    by prose.
     """
     tree = ast.parse(source)
     local_names: set[str] = set()
@@ -206,6 +214,19 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
 
     def _is_module_name(dotted: str) -> bool:
         return dotted.rsplit(".", 1)[-1] == _ADAPTER_MODULE
+
+    def _resolves_to_class(dotted: str | None) -> bool:
+        if dotted is None:
+            return False
+        if dotted in local_names:
+            return True
+        head, _, tail = dotted.rpartition(".")
+        if tail != _ADAPTER_CLASS:
+            return False
+        return head in module_names or _is_module_name(head)
+
+    def _resolves_to_module(dotted: str | None) -> bool:
+        return dotted is not None and (dotted in module_names or _is_module_name(dotted))
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == _ADAPTER_CLASS:
@@ -229,34 +250,47 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
                 if _is_module_name(alias.name):
                     module_names.add(alias.asname or alias.name.split(".", 1)[0])
 
-    # Rebindings, resolved to a fixpoint: `A = FastAPIRouterAdapter; A(app)` and
-    # `mod = tool_registry; mod.FastAPIRouterAdapter(app)` are exactly what an AST CAN see,
-    # so calling them "unresolvable" would have been a false disclosure.
-    changed = True
-    while changed:
-        changed = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                targets, value = node.targets, node.value
-            elif isinstance(node, ast.AnnAssign):
-                targets, value = [node.target], node.value
-            else:
-                continue
-            if value is None:
-                continue
-            bound_value = _dotted(value)
-            if bound_value is None:
-                continue
+    # Rebindings, in SOURCE ORDER. Two ordered passes so a chain declared below its use
+    # (`A = B` before `B = FastAPIRouterAdapter`) still resolves, while staying deterministic:
+    # an unordered fixpoint would oscillate the moment a later shadow undoes an earlier add.
+    assignments = sorted(
+        (node for node in ast.walk(tree)
+         if isinstance(node, (ast.Assign, ast.AnnAssign))),
+        key=lambda node: (node.lineno, node.col_offset),
+    )
+    for _ in range(2):
+        for node in assignments:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            bound_value = _dotted(node.value) if node.value is not None else None
             for target in targets:
                 if not isinstance(target, ast.Name):
                     continue
-                if bound_value in local_names and target.id not in local_names:
+                if _resolves_to_class(bound_value):
                     local_names.add(target.id)
-                    changed = True
-                elif (bound_value in module_names or _is_module_name(bound_value)) \
-                        and target.id not in module_names:
+                    module_names.discard(target.id)
+                elif _resolves_to_module(bound_value):
                     module_names.add(target.id)
-                    changed = True
+                    local_names.discard(target.id)
+                else:
+                    # a reassignment that resolves to neither DROPS the name (see docstring).
+                    local_names.discard(target.id)
+                    module_names.discard(target.id)
+
+    # Default-argument bindings: `def build(app, cls=FastAPIRouterAdapter): cls(app)` is a
+    # statically readable instantiation, not a dynamic one.
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        positional = list(node.args.posonlyargs) + list(node.args.args)
+        if node.args.defaults:
+            for param, default in zip(positional[-len(node.args.defaults):],
+                                      node.args.defaults, strict=False):
+                if _resolves_to_class(_dotted(default)):
+                    local_names.add(param.arg)
+        for param, default in zip(node.args.kwonlyargs, node.args.kw_defaults,
+                                  strict=False):
+            if default is not None and _resolves_to_class(_dotted(default)):
+                local_names.add(param.arg)
 
     sites: list[int] = []
     for node in ast.walk(tree):
@@ -814,6 +848,36 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "app = mod.FastAPIRouterAdapter(app)\n"
     ), "a rebound module alias (`mod = tool_registry; mod.FastAPIRouterAdapter(app)`) is " \
        "not resolved"
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "RTA = tr.FastAPIRouterAdapter\n"
+        "app = RTA(app)\n"
+    ), "a rebinding THROUGH a module attribute (`RTA = tr.FastAPIRouterAdapter`) is not resolved"
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "def build(app, cls=FastAPIRouterAdapter):\n"
+        "    return cls(app)\n"
+    ), "a default-argument binding (`def build(app, cls=FastAPIRouterAdapter)`) is statically " \
+       "readable and is not resolved"
+
+    # the OTHER direction: a name rebound or shadowed to something that is NOT the adapter is
+    # not an instantiation, or the pin reds with a false claim about the product.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A = object\n"
+        "A()\n"
+    ) == [], "a name rebound away from the adapter still reads as an instantiation"
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "del A\n"
+        "A = dict\n"
+        "A(x=1)\n"
+    ) == [], "a name deleted then rebound to `dict` still reads as an instantiation"
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "FastAPIRouterAdapter = _fake_router_class()\n"
+        "FastAPIRouterAdapter(tr)\n"
+    ) == [], "a function-local shadow over the module import reads as an instantiation"
     # the class DEFINED in the module that defines it, wired by bare name: the one module the
     # helper's own docstring names as the legitimate wiring site.
     assert _adapter_instantiation_sites(
