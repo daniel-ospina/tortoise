@@ -72,7 +72,7 @@ DECISIONS the owner has taken rather than prerequisites** — the vector move (�
 anchored-read cutover (*armed*, the deferral rescinded 2026-11-18). None of the three is a prerequisite here, and the
 reason differs per row:
 
-| candidate prerequisite | the decision it meets | verdict |
+| candidate prerequisite | the decision it meets / would reverse | verdict |
 |---|---|---|
 | **"serve reads from Postgres / cut over the read path"** | **§2.0 as it stands: the cutover is ARMED.** `TORTOISE_RECORD_SERVE` selects `off` / `prefer` / `record` on the ordinary point read, `prefer` is armed in production and is the mode that measures the migration. ⚠️ **The deferral this row used to quote was rescinded by the owner on 2026-11-18** (`#7970` comment [`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268)), because the constraint it protected — *not forcing the ordinary read path to parse both stores* — is satisfied by the built cutover itself. | **A decision the owner has taken, and a capability already in the tree** — `#7970` is CLOSED COMPLETED (2026-10-25). It stays **off this epic's critical path** (N1), which is a SEQUENCING statement and no longer a deferral. |
 | **"put embeddings in pgvector"** | §12.1c **ADOPTS it** (decided 2026-11-07: *"the vector index does NOT live in FalkorDB"*) — so there is no contradiction left; what remains is **sequencing**, not a reversed decision. | **A decision, not a prerequisite — and now DECIDED, in favour.** It is off this epic's critical path (N2), and embeddings are already durable without it (item A5). |
