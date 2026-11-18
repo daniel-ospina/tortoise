@@ -1830,6 +1830,27 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              "tools/cypher_inventory.py",
              "tools/cypher_diff_harness.py",
              "docs/architecture/CYPHER-INVENTORY.md",
+             # #13436 P7 (PR #13445) review P1: the write-path-cost instrument and its
+             # evidence directory are subjects of `tests/test_measure_13436_write_costs.py`
+             # (`core`-registered), and every one of its pins reads one of them — the
+             # tool's `_content` / `_reads_of` / composition derivation, and BOTH
+             # committed artifacts. Same silent-drop class, MEASURED before these
+             # entries at the reviewed head:
+             #   select(["tools/measure_13436_write_costs.py"])              -> surfaces=[], pin ABSENT
+             #   select(["docs/evidence/13436-write-path-costs/…json"])      -> surfaces=[], pin ABSENT
+             # i.e. the diff that mutates the instrument, or the artifact a published
+             # number lives in, ran NO pin — `tools/` is in `NON_PYTHON_PREFIXES` and a
+             # `docs/` path takes the docs-only early return, so neither reaches the
+             # `core` fallback. (`--integrity` does NOT read CORE_ALSO — measured `[]`
+             # either way — so it stays green over this, which is why the entries need
+             # their own pin.) With them: `surfaces: ['core']` and the pin selected.
+             # Pinned by
+             # tests/test_ci_selection.py::test_the_write_path_cost_instrument_and_its_evidence_select_the_pin.
+             "tools/measure_13436_write_costs.py",
+             # the DIRECTORY, not one file: the artifacts, the README beside them and any
+             # run file added beside those are all subjects (`select()` matches with
+             # `startswith`), and naming one file is how the next run's artifact escapes.
+             "docs/evidence/13436-write-path-costs/",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
