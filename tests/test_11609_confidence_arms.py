@@ -190,10 +190,14 @@ class TestOneArmPerCall:
     @pytest.mark.parametrize("kwargs", [
         {"recompute": True, "claim_id": "c1"},
         {"recall": True, "topic": "t"},
+        {"recompute": True, "recall": True},
     ])
     def test_the_door_refuses_two_arms_as_a_structured_error(self, kwargs):
         out = ms.tortoise_check_confidence(**kwargs)
         assert out["code"] == ms.ERR_INVALID, out
+        if kwargs.get("recompute") and kwargs.get("recall"):
+            assert "ONE arm per call" in out["error"], out
+            return
         arm = "recompute" if kwargs.get("recompute") else "recall"
         assert f"{arm}=True cannot be combined" in out["error"], out
 
@@ -210,6 +214,100 @@ class TestOneArmPerCall:
         sdk2, calls2 = _sdk_stub(monkeypatch, "session_context", {"session": "s"})
         assert sdk2.check_confidence(session=True, calibrate=True) == {"session": "s"}
         assert len(calls2) == 1, calls2
+
+
+class TestTheArmArgumentsNameTheirArm:
+    """⛔ AN ARM-ONLY ARGUMENT NAMES ITS ARM, AND IS REFUSED WITHOUT IT.
+
+    Measured on the pre-fix head: `check_confidence(query="what is true now")`,
+    `check_confidence(factors=[{"id": "f1"}])` and
+    `check_confidence(min_confidence=0.9)` each answered `calibrate_summary()` with the
+    argument dropped and NO error. The retired pointer is
+    `check_confidence(recall=True, query=..., min_confidence=...)`, so a caller that
+    copies the arguments and loses the flag receives the graph-wide calibration audit
+    and reads it as a successful migration — the exact answers-one-drops-the-other
+    shape `TestOneArmPerCall` refuses everywhere else. Each case below is a silent
+    success on the pre-fix code and a refusal here.
+    """
+
+    @pytest.mark.parametrize("kwargs,arm,arg", [
+        ({"query": "what is true now"}, "recall", "query"),
+        ({"min_confidence": 0.9}, "recall", "min_confidence"),
+        ({"mode": "gaps"}, "recall", "mode"),
+        ({"include_superseded": True}, "recall", "include_superseded"),
+        ({"factors": [{"id": "f1"}]}, "recompute", "factors"),
+        ({"evidence": [{"id": "e1"}]}, "recompute", "evidence"),
+        ({"anchors": ["p1"]}, "recompute", "anchors"),
+        ({"max_hops": 3}, "recompute", "max_hops"),
+        ({"rel_filter": "IMPL"}, "recompute", "rel_filter"),
+        ({"direction": "incoming"}, "recompute", "direction"),
+    ])
+    def test_the_sdk_refuses_an_arm_argument_without_the_arm(
+            self, kwargs, arm, arg, monkeypatch):
+        sdk, calls = _sdk_stub(monkeypatch, "calibrate_summary", {"calibration": 1})
+        with pytest.raises(ValueError) as exc:
+            sdk.check_confidence(**kwargs)
+        assert arg in str(exc.value), str(exc.value)
+        assert f"{arm}=True" in str(exc.value), str(exc.value)
+        assert calls == [], (
+            "a call that names an arm's argument but not the arm still ran the "
+            "default arm — the argument was dropped with no error")
+
+    @pytest.mark.parametrize("kwargs,arm,arg", [
+        ({"query": "what is true now"}, "recall", "query"),
+        ({"min_confidence": 0.9}, "recall", "min_confidence"),
+        ({"seed": "s1"}, "recall", "seed"),
+        ({"max_nodes": 5}, "recall", "max_nodes"),
+        ({"factors": [{"id": "f1"}]}, "recompute", "factors"),
+        ({"anchors": ["p1"]}, "recompute", "anchors"),
+        ({"max_hops": 3}, "recompute", "max_hops"),
+    ])
+    def test_the_door_refuses_an_arm_argument_without_the_arm(
+            self, kwargs, arm, arg, door):
+        calls = door("calibrate_summary", {"calibration": 1})
+        out = ms.tortoise_check_confidence(**kwargs)
+        assert out["code"] == ms.ERR_INVALID, out
+        assert arg in out["error"], out
+        assert f"{arm}=True" in out["error"], out
+        assert calls == [], out
+
+    def test_a_call_naming_arguments_from_BOTH_arms_names_both_in_one_refusal(
+            self, door):
+        """One round trip, not two: the refusal lists both sets."""
+        calls = door("calibrate_summary", {"calibration": 1})
+        out = ms.tortoise_check_confidence(query="q", factors=[])
+        assert out["code"] == ms.ERR_INVALID, out
+        assert "recompute arm: " in out["error"], out
+        assert "recall arm: " in out["error"], out
+        assert calls == [], out
+
+    def test_a_shared_parameter_names_no_arm(self, monkeypatch):
+        """`limit` and `require_calibration` belong to a LEGACY arm too, so supplying
+        them must NOT be read as naming one (the `topic` arm's 50 depends on it)."""
+        sdk, calls = _sdk_stub(monkeypatch, "belief_timeline", [])
+        sdk.check_confidence(topic="t", limit=7, require_calibration=False)
+        assert calls[0][1]["limit"] == 7, calls
+        sdk2, calls2 = _sdk_stub(monkeypatch, "calibrate_summary", {})
+        sdk2.check_confidence(limit=7)
+        assert len(calls2) == 1, calls2
+
+    def test_the_door_forwards_no_limit_to_the_recall_arm_so_the_preset_holds(
+            self, monkeypatch):
+        """The door must forward `limit=None`, not a resolved 10 or 50: `tortoise_recall`
+        owns a PER-MODE default (10 for `state`, 20 for `gaps`), so resolving it at the
+        door would flatten the modes to one number. `mode` IS resolved (None -> the
+        door's documented `state`), because the arm-name refusal needs `None` to mean
+        "not supplied"."""
+        calls: list[tuple] = []
+
+        def _fn(query=None, **kwargs):
+            calls.append((query, kwargs))
+            return {"mode": "state", "results": []}
+
+        monkeypatch.setattr(ms, "tortoise_recall", _fn, raising=True)
+        ms.tortoise_check_confidence(recall=True, query="q")
+        assert calls[0][1]["limit"] is None, calls[0][1]
+        assert calls[0][1]["mode"] == "state", calls[0][1]
 
 
 class TestTheAbsorbedDoorStillAnswers:

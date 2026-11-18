@@ -30387,18 +30387,18 @@ class TortoiseSDK:
                          factors: Any = None,
                          evidence: Any = None,
                          anchors: list[str] | None = None,
-                         max_hops: int | None = 1,
-                         rel_filter: str = "IMPL|NAND",
-                         direction: str = "both",
+                         max_hops: int | None = None,
+                         rel_filter: str | None = None,
+                         direction: str | None = None,
                          recency_decay: float | None = None,
                          # ── RECALL arm (#11609) — absorbs `tortoise_recall`'s
                          # `state`/`custom` intent (see ``mode`` below).
                          recall: bool = False,
-                         mode: str = "state",
+                         mode: str | None = None,
                          query: str | None = None,
                          kind: str | None = None,
-                         include_superseded: bool = False,
-                         min_confidence: float = 0.0,
+                         include_superseded: bool | None = None,
+                         min_confidence: float | None = None,
                          relevance_exp: float | None = None,
                          confidence_exp: float | None = None,
                          centrality_weight: float | None = None) -> Any:
@@ -30476,13 +30476,49 @@ class TortoiseSDK:
                 f"{', '.join(legacy)}. {armed[0]}=True selects its own arm — a "
                 "call naming both would answer one of them and drop the other "
                 "with no error. Send them as separate calls.")
+        if not armed:
+            # ⛔ An arm-only argument NAMES its arm. Every arm-only parameter is
+            # `None`-defaulted so "supplied" is knowable; without this refusal a
+            # caller who copied `query=`/`factors=`/`min_confidence=` off the
+            # retired door's pointer but dropped the arm flag would receive the
+            # graph-wide calibration audit and read it as a successful migration.
+            recompute_named = sorted(n for n, v in {
+                "factors": factors, "evidence": evidence, "anchors": anchors,
+                "max_hops": max_hops, "rel_filter": rel_filter,
+                "direction": direction, "recency_decay": recency_decay,
+            }.items() if v is not None)
+            recall_named = sorted(n for n, v in {
+                "mode": mode, "query": query, "kind": kind,
+                "include_superseded": include_superseded,
+                "min_confidence": min_confidence,
+                "relevance_exp": relevance_exp,
+                "confidence_exp": confidence_exp,
+                "centrality_weight": centrality_weight,
+            }.items() if v is not None)
+            if recompute_named or recall_named:
+                parts, add = [], []
+                if recompute_named:
+                    parts.append(f"recompute arm: {', '.join(recompute_named)}")
+                    add.append("recompute=True")
+                if recall_named:
+                    parts.append(f"recall arm: {', '.join(recall_named)}")
+                    add.append("recall=True")
+                raise ValueError(
+                    "check_confidence: this call names arm-specific "
+                    f"argument(s) belonging to the {'; '.join(parts)} — but "
+                    "names NO arm. Without the arm it answers the graph-wide "
+                    "calibration audit and these arguments are DROPPED with no "
+                    f"error. Add {' and/or '.join(add)}, or drop the arguments.")
         if recompute:
             return self.compute_confidence(
-                factors, evidence, anchors=anchors, max_hops=max_hops,
-                rel_filter=rel_filter, direction=direction,
+                factors, evidence, anchors=anchors,
+                max_hops=1 if max_hops is None else max_hops,
+                rel_filter="IMPL|NAND" if rel_filter is None else rel_filter,
+                direction="both" if direction is None else direction,
                 require_calibration=require_calibration,
                 recency_decay=recency_decay)
         if recall:
+            mode = "state" if mode is None else mode
             if mode not in ("state", "custom"):
                 raise ValueError(
                     f"check_confidence(recall=True) has no {mode!r} arm — it "
@@ -30498,8 +30534,10 @@ class TortoiseSDK:
             return self.recall_state(
                 query, kind=kind,
                 limit=10 if limit is None else limit,
-                include_superseded=include_superseded,
-                min_confidence=min_confidence,
+                include_superseded=(False if include_superseded is None
+                                   else include_superseded),
+                min_confidence=(0.0 if min_confidence is None
+                                else min_confidence),
                 relevance_exp=(1.0 if relevance_exp is None else relevance_exp),
                 confidence_exp=(1.0 if confidence_exp is None else confidence_exp),
                 centrality_weight=(0.10 if centrality_weight is None

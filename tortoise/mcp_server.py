@@ -8072,15 +8072,15 @@ def tortoise_check_confidence(claim_id: str | None = None,
                               factors: Any = None,
                               evidence: Any = None,
                               anchors: Any = None,
-                              max_hops: int | None = 1,
-                              rel_filter: str = "IMPL|NAND",
-                              direction: str = "both",
+                              max_hops: int | None = None,
+                              rel_filter: str | None = None,
+                              direction: str | None = None,
                               recall: bool = False,
-                              mode: str = "state",
+                              mode: str | None = None,
                               query: str | None = None,
                               kind: str | None = None,
-                              include_superseded: bool = False,
-                              min_confidence: float = 0.0,
+                              include_superseded: bool | None = None,
+                              min_confidence: float | None = None,
                               relevance_exp: float | None = None,
                               confidence_exp: float | None = None,
                               centrality_weight: float | None = None,
@@ -8116,9 +8116,35 @@ def tortoise_check_confidence(claim_id: str | None = None,
     answered partly. The legacy precedence among the four OLD selectors is
     untouched.
 
+    ⛔ AND THE ARM'S OWN ARGUMENTS ARE REFUSED WITHOUT THE ARM. Every parameter
+    the two arms added is `None`-defaulted — "not supplied" and "supplied" are
+    different states, which is what makes the check possible at all. A call
+    naming `query=` / `factors=` / `min_confidence=` … but NOT `recall=True` /
+    `recompute=True` would otherwise answer the graph-wide calibration audit and
+    drop the caller's argument with no error — the answers-one-drops-the-other
+    shape this door refuses everywhere else. The refusal names the arm.
+
     `limit` is resolved per arm, never by one shared default: the `topic` arm
     keeps 50, the recall arm keeps the recalled door's own per-mode defaults.
     """
+    # ⛔ THE ARM-ONLY ARGUMENT SETS. `None` means NOT SUPPLIED — every one of these
+    # is `None`-defaulted ON PURPOSE (see the docstring): a non-None default would
+    # make "supplied" unknowable and the silent drop below un-refusable. The
+    # shared parameters (`limit`, `require_calibration`) are deliberately NOT here:
+    # they belong to a legacy arm too, so supplying them names no arm.
+    _recompute_only = {
+        "factors": factors, "evidence": evidence, "anchors": anchors,
+        "max_hops": max_hops, "rel_filter": rel_filter, "direction": direction,
+    }
+    _recall_only = {
+        "mode": mode, "query": query, "kind": kind,
+        "include_superseded": include_superseded,
+        "min_confidence": min_confidence,
+        "relevance_exp": relevance_exp, "confidence_exp": confidence_exp,
+        "centrality_weight": centrality_weight, "seed": seed, "depth": depth,
+        "completeness": completeness, "min_load": min_load,
+        "max_support": max_support, "max_nodes": max_nodes,
+    }
     armed = [name for name, on in (("recompute", recompute),
                                    ("recall", recall)) if on]
     if len(armed) > 1:
@@ -8141,19 +8167,50 @@ def tortoise_check_confidence(claim_id: str | None = None,
                       "and drop the other with no error. Send them as separate "
                       "calls."),
             "code": ERR_INVALID})
+    if not armed:
+        # Neither arm named: an arm-only argument is an ERROR, not a no-op. Both
+        # sets are reported together (never just the first) so a caller that
+        # named arguments from both arms gets the whole list in one round trip.
+        recompute_named = sorted(n for n, v in _recompute_only.items()
+                                 if v is not None)
+        recall_named = sorted(n for n, v in _recall_only.items() if v is not None)
+        if recompute_named or recall_named:
+            parts = []
+            add = []
+            if recompute_named:
+                parts.append(f"recompute arm: {', '.join(recompute_named)}")
+                add.append("recompute=True")
+            if recall_named:
+                parts.append(f"recall arm: {', '.join(recall_named)}")
+                add.append("recall=True")
+            return _SafeError({
+                "error": ("check_confidence: this call names arm-specific "
+                          f"argument(s) belonging to the {'; '.join(parts)} — "
+                          "but names NO arm. Without the arm it answers the "
+                          "graph-wide calibration audit and these arguments are "
+                          "DROPPED with no error. Add "
+                          f"{' and/or '.join(add)}, or drop the arguments."),
+                "code": ERR_INVALID})
     if recompute:
         # `tortoise_compute_confidence`'s own default is True (fail-closed, #344);
         # `None` here means NOT SUPPLIED rather than False, so it resolves to it.
+        # The other `None`-defaulted arm arguments resolve to that door's own
+        # defaults here and only here, which is why the signature can keep
+        # "not supplied" distinguishable at all.
         return tortoise_compute_confidence(
-            factors, evidence, anchors=anchors, max_hops=max_hops,
-            rel_filter=rel_filter, direction=direction,
+            factors, evidence, anchors=anchors,
+            max_hops=1 if max_hops is None else max_hops,
+            rel_filter="IMPL|NAND" if rel_filter is None else rel_filter,
+            direction="both" if direction is None else direction,
             require_calibration=(True if require_calibration is None
                                  else require_calibration))
     if recall:
         return tortoise_recall(
-            query, mode=mode, kind=kind, limit=limit,
-            include_superseded=include_superseded,
-            min_confidence=min_confidence,
+            query,
+            mode="state" if mode is None else mode, kind=kind, limit=limit,
+            include_superseded=(False if include_superseded is None
+                               else include_superseded),
+            min_confidence=(0.0 if min_confidence is None else min_confidence),
             relevance_exp=relevance_exp, confidence_exp=confidence_exp,
             centrality_weight=centrality_weight,
             seed=seed, depth=depth, completeness=completeness,

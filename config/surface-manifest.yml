@@ -1357,12 +1357,14 @@ rows:
   # reach this row): rc=1, the identical `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8`
   # pair. Re-derive it with that command; never type a digest from memory.
   #
-  # ⛔ THIS DIFF NO LONGER CARRIES THAT REPAIR. `#13052` (`4a5ffa0a14`) ran a real `cut` — "Derived
-  # files re-cut, never hand-edited" — which wrote the derived value, so `served_from` here is
-  # `main`'s byte-for-byte and this branch's re-stamp applied to an unchanged line: the duplicate
-  # resolved as identical rather than as a competing value, exactly as the round that wrote it
-  # predicted. `config/ci-surfaces.yml` went the same way earlier under #13144 (#13139), which is
-  # why this PR no longer touches that file either.
+  # ⛔ THIS ROW WAS RE-CUT, NOT HAND-HELD, IN #11609 P2 — and that is why the block survived the
+  # cut instead of being lost with it. The confidence-arms batch GREW `tortoise_check_confidence`
+  # (the RECOMPUTE/RECALL arms, then the refusal that an arm-only argument names its arm), so the
+  # handler's code object changed and `served_from`/`served_attributes` genuinely moved: the
+  # `cut` below wrote the derived pair, exactly as "Derived files re-cut, never hand-edited" says
+  # to. What that cut also does — silently, by design — is delete this block along with every
+  # other per-row one, which is the ONLY thing this block exists to warn about. It is restored by
+  # hand because `cut` re-emits `MANIFEST_HEADER` alone; the cell above is the cut's, never typed.
   #
   # ⛔ A LATER `main` LANE RESTATED THIS AND GOT IT WRONG, so its block is folded into this one
   # instead of being kept twice. `#13000`'s `980f271acc` added eleven lines here saying this row
@@ -1800,8 +1802,8 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_check_confidence
-  served_from: tortoise/mcp_server.py:467c0366f294e048
-  served_attributes: 69e689193848f010
+  served_from: tortoise/mcp_server.py:611ff69d069c7759
+  served_attributes: e3f8f18328387d37
   family: memory
   family_rank: 1
   served: http
