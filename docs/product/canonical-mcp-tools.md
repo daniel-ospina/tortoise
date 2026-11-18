@@ -230,10 +230,12 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > head**, so 72 was the figure there until #11609 batch 1 moved the live surface 72 → 68;
 > **#11609 lane B's six WRITE/MUTATE containers then took it 68 → 60**, **#12948's
 > SOURCES/MINE/SESSION containers then took it 60 → 59**, **#12951's
-> READ/QUERY containers took the live surface 59 → 55**, and **#11609's door-retirement wave
+> READ/QUERY containers took the live surface 59 → 55**, **#11609's door-retirement wave
 > (#4282 Phase 2, the seven doors whose containers the three waves above had already
-> advertised) took the live surface 55 → 48 — which is the live advertised count at this
-> head** (`uv run python tools/surface_manifest.py check` is the live count).
+> advertised) took the live surface 55 → 48**, and **#11609 lane P1 took the live surface 48 → 46
+> by building the POINT and DIARY arms on `create_entity` and retiring
+> `tortoise_create_point` / `tortoise_diary_write` into them — which is the live advertised
+> count at this head** (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
 > `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
@@ -347,23 +349,50 @@ tools with 30 retired-forward entries — every one of the seven still ANSWERS
 on its retired name (#3883), which is why the advertised count falls while the served count does
 not, and **none of them is archived** — a name with a destination keeps its shim.
 
+**Amended 2026-11-18** (execution record, #11609 lane P1 — the POINT/DIARY door retirement):
+`tortoise_create_point` and `tortoise_diary_write` retired FORWARD into `tortoise_create_entity`'s
+newly built `type="point"` / `type="diary"` arms, which is what makes the two `PROTECTED` reasons
+(*"create_entity has no point arm"* / *"…no diary arm"*) false in the same batch the doors leave
+that table. The frozen baseline is re-cut in the same PR for `tortoise_create_entity`, because
+**the container had to absorb more than the node write**: the retired door's handler carried the
+server-side onboarding completion signal (`_maybe_onboarding_auto_complete`), and leaving it behind
+would have made "file your first memory" stop flipping the dashboard to Connected for every harness
+that follows the advertised call — #394's lesson (`create_document`'s `_linkSource` half was lost in
+its move). The `type="diary"` arm records NO onboarding step, exactly as `tortoise_diary_write` did
+not: a retirement may not widen an observation as a side effect. The door's `#329` tag cap/value
+validation and its R1 `point_create` abuse event moved with it too. Its description also had to stop
+naming the doors it absorbs, because a live description naming a retired tool hands a tool-grant
+client a call absent from its own `tools/list`.
+**No CAPABILITY is removed; two advertised NAMES retire forward**, which is the change class this
+record exists to state plainly: `tortoise_create_point` and `tortoise_diary_write` leave `tools/list`
+(**48 → 46 advertised**) and keep answering on their retired names through the #3883 shims
+(**60 → 62 retired-forward**), so the SERVED population does not move — **108 rows (46 live + 62
+shims)** — and no parameter, schema or SDK method changes: `create_point`/`diary_write` stay on the
+SDK surface as the methods the arms relay to. The digest moves with the handler body and the
+description. status: unchanged (the surface remains the approved one) · principal:
+daniel-ospina · PR #13556 · date: 2026-11-18.
+
 **Composed at this head — ALL THREE waves.** The records above describe waves that are now on the
 SAME tree, so they COMPOSE rather than replace one another, and no single wave's number is the
 answer (each was measured on its own base). They retire DISJOINT door sets — the READ/QUERY
 wave's nine, the WRITE/MUTATE wave's fourteen and the SOURCES/MINE/SESSION wave's seven share no
 name — so the composed surface is:
 
-- the surface is now **48 advertised tools** with **60** retired-forward entries: the three
-  container waves and the door-retirement wave compose on ONE tree — each wave was measured on
-  its own base, so
+- the surface is now **46 advertised tools** with **62** retired-forward entries: the three
+  container waves and the TWO door-retirement waves compose on ONE tree — each wave was measured
+  on its own base, so
   (68 − 9 + 5 − 14 + 6 − 7 + 6 = 55, then the door wave's −7 with no container row arriving =
-  48, and 23 + 9 + 14 + 7 + 7 = 60) over a SERVED population of
-  **108** rows (48 live + 60 shims) — the registry total `tools/bridge_table.py --check` reports
+  48, then #11609 lane P1's −2 = 46 — `create_point` and `diary_write` retire forward into
+  `create_entity`'s newly built `type="point"` / `type="diary"` ARMS, again with no container row
+  arriving — and 23 + 9 + 14 + 7 + 7 + 2 = 62) over a SERVED population of
+  **108** rows (46 live + 62 shims) — the registry total `tools/bridge_table.py --check` reports
   as `current (108 registry tools)` and `tools/mcp_rename_table.py` prints as
-  `served tools: 108` — and `surface_manifest.py check` re-derives the 48/60 split.
+  `served tools: 108` — and `surface_manifest.py check` re-derives the 46/62 split.
+  ⛔ The SERVED total therefore does NOT move: a forwarded name is still served, so the two
+  door-retirement waves trade live slots for shims one for one (48 + 60 = 46 + 62 = 108).
   ⛔ NOT `config/surface-order.yml`: that file is the ordering / keyword table (its header says
   the lint "must not be satisfiable by editing the rows it checks"), and its `baseline_counts`
-  sum to the **advertised 48**, not the served 108, so it cannot total a served population;
+  sum to the **advertised 46**, not the served 108, so it cannot total a served population;
 - **105 public SDK methods**, composed the same way, on a surface this wave does not touch:
   125 → 120 (#12901 wave 1) → 112 (#11609's READ/QUERY family A, #12951: six containers in,
   fourteen read methods re-privatised) → 111 (lane B: four retired, three delivered) → 110
@@ -380,7 +409,7 @@ Three consequences for readers of the paragraph below, which is left as written 
 the 2026-10-27 ruling, not the current state:
 
 1. The count there (**18**) and its `18 of 18 verified` are that day's measurement. The population is
-   **60** now (the composition this document works out below), and it is still 60 of 60 verified —
+   **62** now (the composition this document works out below), and it is still 62 of 62 verified —
    every pointer names a call that resolves.
 2. `tortoise_health` no longer redirects to `tortoise_overview`: that name is itself retired, and
    `RETIRED_USE_INSTEAD` resolves ONE hop (aliases are not transitive — the same limit GitHub's own

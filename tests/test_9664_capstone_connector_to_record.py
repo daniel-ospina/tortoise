@@ -72,7 +72,12 @@ RECORD_DB_ENV = "TEST_RECORD_DB_URI"
 #: absent from `tools/list` and a connector's tool grant cannot contain it. The
 #: served skill already says so (`tortoise/onboarding/SKILL.md`, the
 #: ADVERTISED-form sentence).
-JOURNEY_TOOLS = ("tortoise_graph_overview", "tortoise_create_point",
+#: ⛔ THE FILE STEP NAMES THE ADVERTISED ARM, not the door it absorbed (#11609 lane
+#: P1). `tortoise_create_point` was retired forward into
+#: `tortoise_create_entity(type="point", …)`, so on this head it is served only by
+#: the shim on `get_tool` — the exact state `tortoise_health` was already in when
+#: this tuple was first written, and the reason it is absent from the same line.
+JOURNEY_TOOLS = ("tortoise_graph_overview", "tortoise_create_entity",
                  "tortoise_query", "tortoise_list_graphs", "tortoise_get_entity")
 
 
@@ -619,8 +624,8 @@ def test_one_onboarding_call_reaches_the_record_and_its_id_reads_back(
     """The journey's first memory, end to end: connector → graph → RECORD → id.
 
     Driven exactly as the served first job instructs: verify with the ADVERTISED
-    health section, file the first memory with `tortoise_create_point`, then read
-    it back by the id the client was handed. The record half is asserted on ROWS
+    health section, file the first memory with `tortoise_create_entity(type="point")`,
+    then read it back by the id the client was handed. The record half is asserted on ROWS
     under the REQUEST's tenant, because the acceptance sentence for the whole
     epic is *"a user's Points … exist in Postgres"* and nothing else answers it.
 
@@ -659,14 +664,22 @@ def test_one_onboarding_call_reaches_the_record_and_its_id_reads_back(
         before = dict(monitoring.record_write_failure_counts())
         content = (f"#9664 capstone: this Point came through the connector "
                    f"({uuid.uuid4().hex[:8]})")
-        response, body = _call(client, "tortoise_create_point",
-                               {"kind": "statement", "content": content})
+        # The ADVERTISED call, in the shape the retirement pointer gives it: the
+        # claim's content is `name`, and the kind rides inside `props` (the
+        # container has no per-kind parameter). A repeat folds by content, exactly
+        # as the retired door did.
+        response, body = _call(
+            client, "tortoise_create_entity",
+            {"type": "point", "name": content,
+             "props": {"pointKind": "statement"}})
         after = dict(monitoring.record_write_failure_counts())
         assert response.status_code == 200, response.text[:600]
         _assert_call_succeeded(body, "filing the first memory")
 
         payload = _tool_payload(body)
-        point_id = payload.get("id")
+        # The container's envelope is `{node, nudges}` — the node is where the id
+        # lives on this door (the retired door returned the flat point).
+        point_id = (payload.get("node") or {}).get("id")
         assert point_id, f"the tool returned no reusable identifier: {payload!r}"
 
         lost = {key: after.get(key, 0) - before.get(key, 0)

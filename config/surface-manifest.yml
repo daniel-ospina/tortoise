@@ -146,7 +146,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 501270a4bfd34d12c7b6638e02f2c712e5676fa0
+cut_at_commit: 4ec1eb80fc6c53024660316a5f08a64c72098928
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1008,12 +1008,12 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 48
+  tools: 46
   sdk_public_methods: 105
-  retired: 60
+  retired: 62
   keyword_distribution:
     fetch: 10
-    create: 10
+    create: 8
     update: 5
     delete: 4
     list: 4
@@ -1022,23 +1022,6 @@ counts:
     check: 6
     link: 2
     operate: 2
-# RAISED 94 → 105 (SDK methods) on 2026-11-18 by #11609 P3 (#12901's SDK leg) — the
-# eleven approved names that had no `def` were IMPLEMENTED: `create_memory_graph`,
-# `delete_memory_graph`, `add_member`, `list_members`, `remove_member`, `create_key`,
-# `list_keys`, `revoke_key`, `adjust_relationship`, `refresh_confidence`,
-# `write_knowledge_batch`. The tools pin is unchanged at 48.
-#
-# ⛔ This is a RAISE, which the pin exists to make impossible to do silently — so the
-# approval is named rather than implied. Each of the eleven is an INSTRUCTION TO IMPLEMENT,
-# not a new ask: they are rows of the owner's approved 40 (`docs/product/beta-sdk-surface.md`,
-# approved 2026-09-18 principal daniel-ospina pr=4120, re-affirmed 2026-11-09), already
-# declared in `tortoise/__all__.py`, and `tortoise/__all__.py` states the position that
-# "the rest must be built". The growth is therefore the approved list being DELIVERED, and
-# the pin must follow it or it would red the very change the owner asked for.
-#
-# Why the pin is still right to raise rather than remove: it is what catches a TWELFTH
-# public method appearing without a row. The check that 105 is not itself drift is the
-# per-row `approved` flag plus the declaration gate — this pin only bounds growth.
 high_water_counts:
   tools: 48
   sdk_public_methods: 105
@@ -1083,6 +1066,12 @@ retired:
   sdk_method: create_object
   http_policy: true
   approval: null
+- name: tortoise_create_point
+  use_instead: 'tortoise_create_entity(type="point", name=<content>, props={"pointKind": ..., ...})  (a repeat folds
+    by content, as this door did)'
+  sdk_method: create_point
+  http_policy: true
+  approval: null
 - name: tortoise_create_source
   use_instead: tortoise_register_source(url, sourceKind, tier=...)
   sdk_method: create_source
@@ -1091,6 +1080,12 @@ retired:
 - name: tortoise_create_subject
   use_instead: 'tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})'
   sdk_method: create_subject
+  http_policy: true
+  approval: null
+- name: tortoise_diary_write
+  use_instead: 'tortoise_create_entity(type="diary", name=<entry>, props={"authoredBy": ..., "topic": ..., "wing":
+    ...})'
+  sdk_method: diary_write
   http_policy: true
   approval: null
 - name: tortoise_dream
@@ -1526,42 +1521,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:a8ac1e8d58e702a6
-  served_attributes: 0bdf08286d48f29c
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: create_point
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default) folds onto an
-    existing Point when the content matches, but that is not unconditional: dedup=False mints a second Point, and
-    a props payload can take the node out of the fold''s own predicate. The idempotency hint below is per OPERATION;
-    whether a given call converges depends on its arguments, and a refused call reports the per-call verdict on
-    its own error payload. Declaring extractedFrom materializes that :Source and links it (#8171); a fresh write
-    with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}] — advisory only,
-    never a block). validTo accepts an ISO-8601 instant (representational variance such as ''2024-3-1'' or ''2024/03/01''
-    is normalised silently), or a DECLARED no-date value — ''unknown'', TBD, TBA, TBC, N/A, NA, -, --, an em dash,
-    or ''?'' — which is stored as the canonical un-datable end (no end plus validToPrecision=''unknown'', reading
-    end_state=''unknown'') and echoed back as valid_to_shaped; None or omitted means the end is OPEN. An impossible
-    calendar day, a month outside 01-12, an epoch passed as a string, or prose with no recoverable date is REFUSED,
-    naming the fault and the accepted forms (#9202).'
-  dependency: declares TortoiseSDK.create_point (resolves)
-  lifecycle: active
-  used_by: agents, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: called by agents
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_calibrate_summary
   served_from: tortoise/mcp_server.py:9016811f802f1d77
   served_attributes: d1d847feeecfe0de
@@ -1879,7 +1838,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_get_entity
 - name: tortoise_create_entity
-  served_from: tortoise/mcp_server.py:2ad91f43163a0f76
+  served_from: tortoise/mcp_server.py:f3d0225938bb18bd
   served_attributes: 93b456ed38374aa3
   family: graph
   family_rank: 2
@@ -1890,11 +1849,14 @@ rows:
   keyword_rank: 2
   cluster: create
   canonical: true
-  job: 'Create an entity — type: subject|object|event|document. Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/aboutDocument
-    props. Returns {node, nudges, advisories?} — nudges suggest IMPL/NAND/mitigate connections to related Points;
-    advisories notes a write that declared no source and no provenance (advisory only, never a block). For type=''document'',
-    declaring extractedFrom materializes the :Source (#8171); on subject/object/event it is inert and an extracted_from_inert
-    advisory is returned.'
+  job: 'Create an entity — type: subject|object|event|document|point|diary. Event entities wire about* edges from
+    aboutSubject/aboutObject/aboutPoint/aboutDocument props. Returns {node, nudges, advisories?} — nudges suggest
+    IMPL/NAND/mitigate connections to related Points; advisories notes a write that declared no source and no provenance
+    (advisory only, never a block). For type=''document'', declaring extractedFrom materializes the :Source (#8171);
+    on subject/object/event it is inert and an extracted_from_inert advisory is returned. type=''point'' writes
+    a belief: `name` is the claim''s content and props={"pointKind": ...} is the kind (default ''statement''); dedup
+    defaults to True, so a repeat folds into the existing point by content. type=''diary'' writes a journal entry
+    pinned to kind ''diary'': `name` is the entry and props carries authoredBy (required), topic and wing.'
   dependency: declares TortoiseSDK.create_entity (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2469,31 +2431,6 @@ rows:
     today and the payload says so. agent_sessions is ON by default (an optional off-switch, #1927): disable stops
     recording; enable there reports already-on rather than changing a recorded default.'
   dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_diary_write
-  served_from: tortoise/mcp_server.py:bea2c90da23a5f5f
-  served_attributes: 4a3d03fdedc491ac
-  family: journal
-  family_rank: 7
-  served: http
-  sdk_method: diary_write
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: Write an agent diary entry (AAAK format suggested). Creates a Point with pointKind=diary, authoredBy=agent.
-  dependency: declares TortoiseSDK.diary_write (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -3296,11 +3233,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_point.
-  dependency: 'reached by 1 registered tool(s): tortoise_create_point'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_point (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3413,7 +3350,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete_memory_graph.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -3480,11 +3417,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.diary_write.
-  dependency: 'reached by 1 registered tool(s): tortoise_diary_write'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_diary_write (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4565,7 +4502,7 @@ rows:
   job: Public SDK method TortoiseSDK.remove_member.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4703,7 +4640,7 @@ rows:
   job: Public SDK method TortoiseSDK.revoke_key.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
