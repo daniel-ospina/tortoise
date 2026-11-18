@@ -1117,15 +1117,17 @@ def test_a_double_quoted_backslash_escape_before_a_comment_is_measured(
     a NEW branch. When it goes, this test is NOT the only one that reds:
     ``test_a_never_closing_quoted_scalar_is_malformed_not_escaped`` also asserts
     ``_closing_quote('"a\\"') == -1``, and that is exactly what the same skip
-    produces, so it reds alongside this one (re-measured at ``23cfffc260``:
-    ``4 failed, 11 passed`` — the 2 pre-existing absence reds plus those 2).
+    produces, so it reds alongside this one (re-measured at ``1c956076``:
+    ``4 failed, 12 passed`` — the 2 pre-existing absence reds plus those 2).
 
     Non-vacuity: deleting the two-line backslash skip in ``_closing_quote``
-    leaves the rest of this file GREEN while ``_quoted_style`` returns
-    ``('malformed', None)`` here, so the ``style`` assertion below is the FIRST of
-    two things that notice, not the only one. (No file-wide pass count is quoted: §7 item 2 carries it, and a
-    count printed here goes stale the moment another test is appended to this
-    file — which has already happened twice.)
+    makes ``_quoted_style`` return ``('malformed', None)`` here, so the ``style``
+    assertion below is the FIRST of two things that notice, not the only one —
+    ``test_a_never_closing_quoted_scalar_is_malformed_not_escaped`` reds
+    alongside it, which the paragraph above already measures. (The PAIR count
+    above is tied to the head that measured it; §7 item 2 carries the file-wide
+    baseline, and any count printed here goes stale the moment another test is
+    appended to this file — which has already happened twice.)
     """
     from tortoise.file_indexer import parse_frontmatter
 
@@ -1221,11 +1223,19 @@ def test_a_never_closing_quoted_scalar_is_malformed_not_escaped() -> None:
     scalar, found unexpected end of stream*. So the verdict is `malformed` — the
     same one the helper already gave the plainly truncated shape.
 
-    Non-vacuity: on the pre-fix helper the FIRST entry below fails —
-    ``_quoted_style`` returned ``('escaped', None)`` for it — while the other two
-    returned ``('broken', None)`` and ``('malformed', None)``. Nothing else in this
-    file reds: the truncation pins assert ``broken`` for shapes that DO close at an
-    inner quote (``_closing_quote`` finds them, so this branch never sees them).
+    Non-vacuity: replaying the WHOLE pre-fix helper — ``value.endswith(q)``
+    alone, *and* ``_split_comment``'s ``raw[:i].rstrip().endswith(q)`` predicate
+    in place of the ``_closing_quote`` gate — the FIRST entry below fails:
+    ``_quoted_style`` returned ``('escaped', None)`` for it, while the other two
+    returned ``('broken', None)`` and ``('malformed', None)``. Exactly ONE other
+    pin reds on that replay, and it is named because this file must not claim
+    otherwise: ``test_a_single_quoted_escape_before_a_hash_is_measured_not_broken``
+    (``('broken', None)``; its own docstring owns that measurement, and the pair
+    reproduces as ``4 failed, 12 passed`` measured at ``1c956076``, with the 2
+    pre-existing absence reds).
+    The truncation pins stay GREEN under it: those shapes DO close at an inner
+    quote, so ``_closing_quote`` finds the close and the wholeness test never
+    changes their verdict.
     """
     from tortoise.file_indexer import parse_frontmatter
 

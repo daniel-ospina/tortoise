@@ -445,7 +445,7 @@ NEW branch — and nothing else in the file reds when it goes: measured with the
 pre-existing absence reds, nothing else noticing — while this shape regressed. Pinned now by
 `test_a_double_quoted_backslash_escape_before_a_comment_is_measured`; with the pin in place the same
 mutant reds this test **and** `test_a_never_closing_quoted_scalar_is_malformed_not_escaped`
-(re-measured at `23cfffc260`: `4 failed, 11 passed` — the 2 pre-existing absence reds plus those 2),
+(re-measured at `1c956076`: `4 failed, 12 passed` — the 2 pre-existing absence reds plus those 2),
 because that later pin also asserts `_closing_quote('"a\\"') == -1`, which is exactly what the
 backslash skip produces. So this test is **not** the sole custodian of the branch — an earlier
 revision said "this test alone", and the fifth pin falsified it — and no file-wide count is
@@ -552,6 +552,24 @@ substance — 8 of 8 flagged, every length pair exact — reproduces unchanged. 
 edited: it carries the review attestation the gate reads, and an unrelated edit wipes that proof
 (the rule is in `AGENTS.md`). The corrected figure is recorded here instead.
 
+**Recorded, not fixed — THIS PR's OWN body carries two stale present-tense figures.** Both were
+measured at `ae275460df93` by the fresh-context review and re-measured at `1c956076` (the last head
+this note covers; every later round moves both numbers again):
+
+- *"contains exactly one commit"* — false at this head: `git log --oneline origin/main..HEAD | wc -l`
+  = **27** at `1c956076`, and **28** once this round's docstring commit is added. The sentence was
+  true when the body was written (the PR was rebased onto `main` as a
+  single commit); the review rounds then appended the rest. A merger reading "exactly one commit"
+  against a 27-commit branch is being told something false about the diff's SHAPE, which is why this
+  is recorded rather than left implicit in §7's moving-count rationale.
+- *"`pytest …` → **8 passed, 2 failed**"* — stale for the same reason §7 item 2 gives: tests are
+  appended to this file every round. At `ae275460df93` the same command reported **13 passed, 2
+  failed** (`15 collected`) and at `1c956076` it reports **14 passed, 2 failed** (`16 collected`), the
+  2 being the pre-existing absence reds named above.
+
+The body is **not** edited — it carries the review attestation the gate reads, and editing it wipes
+that proof (`AGENTS.md`; the same rule that left #13476's `470` figure in place above).
+
 **Recorded, not fixed — a comment with NO space after the close is a PRE-EXISTING false block.**
 Found by the fresh-context review at `23cfffc260` and re-measured there. `aboutObjects: "x"# note`
 is loadable YAML — `yaml.safe_load` returns `"x"`, and `parse_frontmatter` agrees — but the arm
@@ -593,6 +611,19 @@ Not fixed here for the same scoping reason as its siblings, and it is the one me
 whose honest remedy is already modelled by the arm: `_values` has a `scalar_multiline` verdict for
 PLAIN folding, and clearing this means teaching it to emit that for a quoted value with no close on
 its line — a lexer change, out of this issue's scope. It fails CLOSED, so it cannot ship a defect.
+
+**Fixed at this head — the two docstrings that contradicted their own measurements.** Found by a
+fresh-context review at `ae275460df93` and still live at `1c956076`; both are PURE prose (no helper
+behaviour changes), so the tests they describe are untouched. `test_a_never_closing_quoted_scalar`
+claimed *"Nothing else in this file reds"*, falsified by the whole pre-fix-helper replay reddening
+TWO of this PR's pins; `test_a_double_quoted_backslash_escape…` claimed deleting the backslash skip
+*"leaves the rest of this file GREEN"*, and twelve lines above it the same docstring measures the
+sibling reddening alongside. Each now names the mutant and the current figure, re-measured here one
+mutant at a time with the tree restored between runs:
+`backslash skip deleted` → `4 failed, 12 passed`; `whole pre-fix helper replayed` → `4 failed, 12
+passed` (the 2 pre-existing absence reds plus the 2 pins). The counts moved `11 → 12` because the
+verdict-split round appended a 14th test; a stale count in the very paragraph that tells the reader
+not to trust stale counts is the failure mode §7 item 2 exists for.
 
 ## 10. Rebase onto `main` — the conflict, and why the resolution is additive
 
