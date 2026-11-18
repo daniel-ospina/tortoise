@@ -484,9 +484,12 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
     # could be deleted with the suite green — the property was asserted in prose
     # and nowhere in code. A SECOND sweep on the same store must produce no
     # second line; only the LINE is latched, so the sweep still runs — its DROPs
-    # are still re-attempted and its measure+report block still runs (both
-    # asserted below, because "still runs" is the half that keeps a store
-    # repaired between sweeps able to announce the repair).
+    # are still re-attempted and its inventory still MEASURES the catalogue (both
+    # asserted below, because "still runs" is the half that keeps a store repaired
+    # between sweeps able to announce the repair; the REPORT half of that block is
+    # pinned at file level by
+    # `test_an_UNCONFIRMED_sweep_does_not_swallow_the_CONFIRMED_survivor`, which
+    # reds when a latch is placed between the inventory and the report).
     #
     # ⛔ SCOPED TO THE RETIREMENT'S OWN DROPs, and the reads assertion is GONE
     # (#13376 review, finding 1 — the earlier cut could not fail). Both counters
@@ -499,10 +502,14 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
     #     for itself (:21749). Either way the read count is the sweep's, not the
     #     retirement's, so an unfiltered count grows with the retirement latched
     #     (this fixture takes the full-sweep lane: measured 2 reads per sweep).
-    #   * `_ensure_indexes_declared` issues its own two
-    #     `DROP INDEX ON :Point(is_operator…)` statements (:21278), so an
-    #     unfiltered drop count grows too. This file already records exactly that
-    #     hazard for these two statements at :808-809.
+    #   * `_ensure_indexes_declared` issues its own two `DROP INDEX ON
+    #     :Point(is_operator)` / `:Point(is_operator, lastDreamedAt)` statements
+    #     (:21276-21277), so an unfiltered drop count grows too. This file already
+    #     records exactly that hazard for these two statements — the ⛔ "Scoped to
+    #     the retirement's candidates" note in
+    #     `test_a_foreign_Point_vector_index_neither_arms_the_sweep_nor_is_reported`.
+    #     ⛔ Cited by CONTENT, not by line: both earlier cuts of this comment
+    #     carried a LINE number for it that this same edit had already moved.
     # Measured (mutant M3b): latch the whole block — `if not
     # self._retirement_failure_is_news("armed-block"): return` before the DROP
     # loop — and the unfiltered version stayed GREEN (`1 passed`) over a sweep
@@ -538,10 +545,10 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
     # emits) never runs on the second sweep, so a store repaired between sweeps
     # still could not announce it. The inventory is what re-populates
     # `_vector_index_props` (:20071 is its per-call reset), and `_bare()` hands the
-    # second sweep a FRESH projection whose fields are all `None` — so a non-None
-    # value here is positive evidence the second sweep MEASURED, not merely that
-    # it issued DDL. Measured: `{'Point': frozenset({'embedding'})}` unmutated,
-    # `None` under that mutant.
+    # second sweep a FRESH projection whose `_vector_index_props` is `None` — so a
+    # non-`None` value here is positive evidence the second sweep MEASURED, not
+    # merely that it issued DDL. Measured: `{'Point': frozenset({'embedding'})}`
+    # unmutated, `None` under that mutant.
     assert second._vector_index_props is not None, (
         "the second sweep issued its DROPs but never re-measured the catalogue "
         "— the latch must silence the LINE only, and the measure+report block "
