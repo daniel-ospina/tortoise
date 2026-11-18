@@ -3186,6 +3186,17 @@ surfaces:
   # scenario-or-instrument-only diff takes the tier-1 early return and would run this ZERO
   # times — the one change class that can silently make the instrument ask the wrong question.
   - test_capstone_state_value_13038.py
+  # #13302 review F1: the ended-scope read's own live-store pins (a withdrawn claim
+  # is discoverable without its id, a cancelled plan without its name, the ending
+  # the record carries, `kind` narrowing, and the closed refusal list). `core`
+  # because BOTH subjects — `tortoise/ended.py` and `tortoise/live.py` (the shared
+  # currency predicate whose change redefines what "ended" means) — classify as
+  # `core` with no SOURCE_PATTERN row of their own; before this row the suite ran
+  # only as an accident of the diff, because `tortoise/sdk.py` selects the full
+  # matrix (`select(['tortoise/ended.py'])` selected 898/902 `core` files and NOT
+  # this one — measured, #13416). Docker lane (`tests/_live_utils.py` skips when no
+  # store is reachable) — so NOT dual-registered with the hermetic `tier1`.
+  - test_13302_ended_read.py
   # #5612: concurrent journal appends are serialised and the recovery read
   # salvages a damaged mid-file line. `tortoise/log.py` matches no
   # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
@@ -5792,8 +5803,9 @@ surfaces:
   # `TORTOISE_TEST_CARVE_OUT=1`, the same lane as its sibling above.
   - test_mention_write_11239.py
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
-  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — a bare List node is not in the HNSW index at all (#8429), so the write seam keeps it the typed shape; the READ boundary now normalises a right-width List (#8316), so only a wrong-width or NON-NUMERIC value still aborts the MATCH (#8430) (embedded_only + carve_out)
-  - test_update_point_derived_embedding_4520.py  # #4520 residual: `update_point(content=…)`'s DERIVED embedding must go through the clear-then-set seam, not the bare `+=` merge (a bare List node is not in the HNSW index — #8429 — and a small-Δ `vecf32` overwrite is silently discarded on the embedded engine); the caller-supplied branch stays verbatim (PR #3018), and the read boundary normalises a right-width List (#8316) — embedded_only + carve_out
+  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — a bare List node is not in the HNSW index at all (#8429), so the write seam keeps it the typed shape; the READ boundary normalises a right-width List (#8316) and DROPS a stored value it cannot consume — a wrong width, a NON-NUMERIC value — instead of aborting the MATCH (#8430) (embedded_only + carve_out)
+  - test_update_point_derived_embedding_4520.py  # #4520 residual: `update_point(content=…)`'s DERIVED embedding must go through the clear-then-set seam, not the bare `+=` merge (a bare List node is not in the HNSW index — #8429 — and a small-Δ `vecf32` overwrite is silently discarded on the embedded engine); the caller-supplied branch stays verbatim (PR #3018), and the read boundary normalises a right-width List (#8316) and drops a value it cannot consume instead of aborting the MATCH (#8430) — embedded_only + carve_out
+  - test_embedding_boundary_8419_8430.py  # #8430 + #8419: the embedding BOUNDARY — what we compose and what the read can read. #8430: a wrong-width or NON-NUMERIC stored List is DROPPED by the read seam instead of aborting the whole dense MATCH (one bad node must cost only its own row; the wrong-width TYPED residual is pinned, not fixed — size() raises on a Vectorf32 on both engines). #8419: `_upsert_document` embeds the `_searchText` surface the node HOLDS, never the retired `content` prop (embedded_only + carve_out)
   - test_verbatim_embedding_read_8316.py  # #8316: a caller-supplied embedding stays VERBATIM (PR #3018) but the dense READ must normalise the plain-List shape at its own boundary — one verbatim node otherwise aborts the whole MATCH and degrades every node to FTS-only recall (embedded_only + carve_out)
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
@@ -7504,6 +7516,12 @@ surfaces:
   - test_run_protocol.py
   - test_sdk_adapter_cap.py
   - test_search_engine.py
+  - test_verbatim_index_cohort_8429.py  # #8429: a VERBATIM (plain-List) embedding is invisible to the
+  # HNSW index leg — the index holds Vectorf32 only, so the node is not in the cohort and the leg used to
+  # record a healthy `ok`/count 0. Two hermetic mechanism pins (a zero-row index answer falls through to the
+  # scan and says so; a NON-empty one does not scan) plus two live pins that need a real HNSW index and skip
+  # loudly without one: the cohort gap closes, and the declared residual (a non-empty index answer still hides
+  # a verbatim node) stays visible.
   # #11702 (#2206's successor): the belief-presence contract on this surface's own five files —
   # `search_engine.py`'s ep_state/presence predicate, `why.py`'s `ep` block (the block /v1/context, the
   # volunteer reflex and the webhook serve), `volunteer.py`'s `_eligible` absent-mean gate (a belief-less
@@ -7569,6 +7587,19 @@ surfaces:
   # (the inventory read), which fall to the `core` fallback — same rationale as
   # test_4999_vector_mechanism.py above.
   - test_4997_vector_index_parity.py
+  # #13320: an ARMED store (record DSN + `TORTOISE_RECORD_VECTOR_LEG`) must
+  # REMOVE the in-graph `Point.embedding` VECTOR index, and must not be silent
+  # when it cannot. The retirement shipped two `DROP INDEX` forms the engine
+  # refuses (`no such index`, even while `CALL db.indexes()` reports the index)
+  # and logged the refusals at DEBUG only, so a production box kept paying for
+  # the index with nothing in its log. Pins
+  # `tortoise/index_catalogue.py::vector_index_drop_statement` (the ONE rendering,
+  # shared with `graph_key_restore`) plus `tortoise/projection/`'s sweep — both
+  # unpatterned modules that fall to the `core` fallback, same rationale as
+  # test_4997_vector_index_parity.py above. DB-free except the live falsifier
+  # (`test_an_armed_setup_REMOVES_a_real_in_graph_vector_index`), which module-
+  # skips without `TORTOISE_DB_URI` and runs in the docker legs.
+  - test_13320_vector_index_retirement_drops.py
   # #5404: the entity_type -> Cypher-label guard must be ENFORCED, not merely
   # declared — `tortoise/security.py::validate_entity_type` was inert while the
   # legs interpolated a caller-controlled string into a Cypher LABEL. Pins the
@@ -8854,6 +8885,40 @@ surfaces:
   # class is not a docs-only diff.
   - test_published_artifact_canary.py
   - test_embedded_choke_point.py
+  # #12184: the evidence cites THIS branch's own inserts moved (`search_engine.py`'s
+  # `run_fts_query` `_searchText` docstring is +3 at `:2842`, `cache_projection.py`'s
+  # comment rewrite is +2 at `:2128`). The pin is CONTENT-anchored — each row names
+  # the document, the cite token it must still carry, the target file, the line the
+  # document names, and a verbatim fragment that line must contain — because the
+  # defect it was written for was a FALSE CORRECTION (a `:4549` cite re-pointed to
+  # `:4552` by applying the `+3` twice; `:4552` is the `#7704` note under the loop),
+  # and no delta, marker or offset can prove a number right. `core` is the home
+  # for the CODE half (a `tortoise/search_engine.py` diff is a shared-module FULL
+  # selection). ⛔ AND `core` ALONE IS NOT ENOUGH — the tier1 row below is the
+  # LOAD-BEARING one: the rotated evidence lives in `docs/`, which is in
+  # NON_PYTHON_PREFIXES and matches no SOURCE_PATTERNS entry, so a docs-only diff
+  # takes the tier1-only early return and selects NO surface (measured:
+  # `--changed-files docs/architecture/SUBSTRATE-REBUILD-MAP.md` ->
+  # `surfaces: []`, this file ABSENT from `test_files`). The comment here used to
+  # claim the opposite ("a docs-only diff selects `core` by the tier-1 early
+  # return"), which is exactly the false mechanism claim that let a docs-only cite
+  # re-point merge green — the #4309/#11739/#11810 silent-drop class. Hermetic: six
+  # files read with `Path.read_text` (two calls per row), no DB, no graph, no
+  # network, no subprocess — dual-registered with `tier1`.
+  - test_12184_shifted_cites.py
+  # #12855: the stored-rows rewrite — `tools/rewrite_object_status.py` plus its
+  # suite, which drives the SDK's journaled update path and the `assembly` filter
+  # pin. ⛔ THE `tools/` HALF IS NOT CLOSED BY THIS ROW: `tools/` is a flat
+  # `NON_PYTHON_PREFIXES` entry, so a tool-only diff takes the docs-only early
+  # return and NO surface is selected — measured before the fix:
+  # `--changed-files tools/rewrite_object_status.py` → `surfaces: []`, suite
+  # absent. What closes it is the `CORE_ALSO` entry in `tools/ci_selection.py`
+  # (the same hole the purge tool has); after it, that diff selects `core` and
+  # this row is what carries the suite. DUAL-REGISTERED `core` + `sdk` because the
+  # suite also pins `tortoise/assembly.py`, whose diff takes the `core` fallback,
+  # while a `tortoise/retrieval.py`-class diff selects `sdk` and a named-surface
+  # match REPLACES the `core` fallback — one row would sleep through the other.
+  - test_12855_outdated_rewrite.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -9068,6 +9133,16 @@ surfaces:
   - test_subgraph_render.py  # #3011: frozen serializer — block order, provenance, confidence, word budget (hermetic)
   - test_recall_state.py
   - test_belief_order_10137.py  # #10137: the belief layer's contribution to a QUERY's order — ep.informed_order is consulted only where the order read the posterior
+  # #12184: the ranker's PER-LABEL dispatch — every label in VALID_ENTITY_TYPES has an explicit
+  # signal family, an entity row is measured by its INBOUND claims (degree + their mean belief) and
+  # never by a point's own posterior/operator edges, and a label with no signal set REFUSES instead
+  # of silently scoring with another row type's signals. Selects `ep` because the change is in
+  # `tortoise/ranking.py` (a named-surface match replaces the `core` fallback, #2938/#7951).
+  - test_12184_ranker_entity_signals.py
+  # #12184 R4 routing pin (review FINDING 2): `StateRanker` dispatches EVERY
+  # entity label to the entity read — no graph, no Docker, so the mutant
+  # (`if et != "object": family = "point"`) cannot hide behind a skip.
+  - test_12184_state_ranker_routing.py
   # #11702: the ABSENCE/PRESENCE contract — an absent belief is `null` + ep_state "absent", never the
   # neutral 0.5, and it never orders against a measured one. Dual-registered with `core` because the
   # surfaces it pins split across two SOURCE_PATTERNS: `tortoise/ranking.py` and `tortoise/analyze.py`
@@ -10084,6 +10159,7 @@ surfaces:
   # cheap. Pinned by
   # `tests/test_ci_selection.py::test_the_2684_census_is_selected_on_every_surface_that_moves_it`.
   - eval/write_path/test_value_span_census_2684.py
+  - test_12855_outdated_rewrite.py  # #12855: dual-registered with `core` (see the `core` row) — an `sdk`-selecting diff (e.g. `tortoise/retrieval.py`) REPLACES the `core` fallback, so the suite needs its own `sdk` row
   classify:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
@@ -11073,6 +11149,42 @@ tier1:
 # no DB, no graph, no docker, no network, no model call — two committed
 # JSON/markdown reads plus the in-memory corpus.
 - test_text_gate_13099.py
+# #12184: the shifted-evidence-cite pin (`core` above). Every document it guards is
+# under `docs/` — `CAPABILITY-PLACEMENT-AUDIT.md`, `SUBSTRATE-REBUILD-MAP.md`, the
+# #12298 M3 recall brief and the #13083 census README — and `docs/` is in
+# NON_PYTHON_PREFIXES while none of them matches a SOURCE_PATTERNS entry, so a
+# docs-only diff takes the early return and selects NO surface: measured at this
+# head, `--changed-files docs/architecture/SUBSTRATE-REBUILD-MAP.md` ->
+# `surfaces: []` and this file ABSENT from `test_files`, while the sibling
+# `test_substrate_map.py` (dual-registered for the same map) WAS selected. Without
+# this row the pin runs zero times on the only edit class that can re-point a
+# citation — the #12184 defect itself WAS a docs-only re-point (`:4549` -> `:4552`,
+# the branch's `+3` applied twice), so the `core`-only registration it shipped with
+# missed the exact change it was written for. Hermetic: no DB, no graph, no
+# network, no model call — six committed-file reads and nothing else. ⛔ The
+# `tier1` size figures in `tests/test_ci_selection.py`'s sibling docstring are
+# MEASUREMENTS that move with this row; re-derive them, never read them as fixed.
+- test_12184_shifted_cites.py
+# #13352 review finding (P2, no-op gate / inert enforcer): THIS FILE IS THE ONE
+# THING THAT MEASURES whether `postgres_residency_snapshot()` still carries its
+# fail-closed arm, and on the only diff class that can remove that arm it did not
+# RUN. `api` + `core` register it (above), but `supabase/` is a flat
+# NON_PYTHON_PREFIXES entry: a migration-only diff filters to `changed == []` and
+# takes `select()`'s docs-only early return, which emits tier1 ONLY — measured at
+# this head, `_sel(['supabase/migrations/20261117000003_…zero_vanished.sql'])` ->
+# `surfaces: []`, suite ABSENT (the same measurement on the CURRENT migrations, so
+# it is the shape, not a future one). The jobs that DO run on a migration diff
+# (`migration-unique-prefix`, `schema-drill`, `migration-append-only`) execute
+# SQL through PGlite, which reaches the GUARD but not the `RAISE WARNING` arm or
+# the `v_written + v_zeroed` accounting — this file's own docstring says so — and
+# reviewer round 9 measured that deleting the whole warning arm left the suite
+# green. Without this row a corrective migration that keeps the guard and drops
+# the warning merges GREEN on every leg: the false PASS this suite exists to
+# close, reachable through the front door. Hermetic and fast (source scans over
+# `supabase/migrations`, no DB, no graph, no network — a few seconds), so it
+# rides the URI-less tier1 legs. Pinned by
+# tests/test_ci_selection.py::test_the_residency_gate_runs_on_a_migration_only_diff
+- test_9559_blocked_release_conditions.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 slow_files:
@@ -11494,6 +11606,15 @@ carve_out:
 # registration it would collect and SKIP every case via the marker hook, a
 # permanently green and permanently unexecuted gate on main (the #4047 shape).
 - test_verbatim_embedding_read_8316.py
+# #8430 / #8419: the module-level `embedded_only` guard for the embedding BOUNDARY.
+# #8430 asserts a real embedded store's stored plain-`List` shapes (a wrong width,
+# a non-numeric value) are DROPPED by the read seam rather than aborting the whole
+# dense MATCH; #8419 drives `_upsert_document` against a real embedded store and
+# asserts the encoder receives the `_searchText` surface. A URI-set lane would
+# redirect the construction onto the server and certify nothing — and without this
+# registration it would collect and SKIP every case via the marker hook, a
+# permanently green and permanently unexecuted gate on main (the #4047 shape).
+- test_embedding_boundary_8419_8430.py
 # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
 # without this registration every URI-set lane collects the file and SKIPS that
 # case via the marker hook — the SDK guard would be a permanently green and
@@ -11722,6 +11843,7 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
+  test_12184_shifted_cites.py: 2.0  # new in #12184 (PR #13124) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading, so the flat `DEFAULT_FAST_WEIGHT` would be an unread default rather than a measurement. The 2.0 is a DELIBERATE UPPER BOUND, not a reading: 4 cases reading six files with `Path.read_text` measured 4.33 s wall locally on a loaded box, most of it the repo conftest import/teardown — re-derive with `--junitxml` before quoting it as a timing.
   test_13110_goalstate_doors.py: 2.0  # new in #13110 (PR #13116) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`api`/`sdk` registrations above put the file in `fast_pool()`, and `--integrity` stays green either way — the coverage check is a 0.90 RATIO with ~70 files of headroom — so only this row records the weight. The first cut of this PR registered the file on all three surfaces and shipped NO row; the #13116 round-5 review is what caught it, which is why the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD` (the entry-rule pin cannot see a file nobody listed). `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local timing and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin. What the weight covers: the two public doors and the one vocabulary behind them — `POST /v1/objects` and `POST /v1/points` accepting a member of the closed seven-word set and reading it back, refusing an unknown word with a `422` that carries the SDK's own sentence (naming the full set) and writing NOTHING, refusing a lifecycle word (`draft`/`live`/`retracted`) with the "goalState is not your lifecycle" clause, and the same arms through the MCP tools `tortoise_create_{object,entity,point}`; the served schemas ADVERTISING the parameter (both REST models and the three derived MCP schemas); the positional `props` bag still binding as the third argument; the SDK guard being the only home of the vocabulary (the REST refusal is that same sentence, not a second copy of the set); and the two no-clobber properties — a re-create that does not name the field preserves a stored one, and NO create channel can erase it (the `create_point` dedup fold's `update_point(**props)` DELETES a `None`, so the pop that guards it is pinned here). ⚠️ NOT uniformly hermetic, and this row says which half is which, measured from the fixture rather than assumed: the REST cases write to a REAL graph and assert on what was STORED (`_stored` -> `sdk.get_entity`, `_objects_named` -> `MATCH (o:Object …) RETURN count(o)`), not on call receipts — through the shared `tests._http_fixtures.patched_tortoise_sdk` fixture, which is EMBEDDED under `tmp_path` when no `TORTOISE_DB_URI` is ambient and, when one IS ambient (every CI shard and `tools/test_lane.py` export one), gives the construction that server's session+path HASHED graph. The SDK/MCP cases open their own per-test engine (`TortoiseSDK(str(tmp_path / …))`). So: no network, no model call, no `gh` on either lane, and no docker on the URI-less lane — the URI-set lane lands on the server it was given, which on the docker lane is that server.
   test_13108_dense_leg_index_skip.py: 2.0  # new in #13108/#13121 (the fix commit `a2fe16beb8`) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet, so this row takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` cannot police one missing row. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no CASE COUNT are quoted (`tools/ci_selection.py --integrity` is the authority). What the weight covers, hermetic (no DB, no graph, no embedder): the four things that must stay true once the read consults the measured inventory — an absent label SKIPS both index attempts and is still recorded `scan_fallback` (`#4999`'s "an index was expected and was not used"), an indexed label still attempts and uses the index, `None` (not measured) attempts as before so a guess never demotes every read to a scan, and `#2952`/DoD row 3 still DECLARES a genuine fallback — plus rows/shape unchanged, the embedded lane unaffected, and `degradation_chain` forwarding the inventory only when supplied.
   test_dense_leg_probe_13108.py: 2.0  # new in #13108/#13121 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this row takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, `--integrity`'s 0.90 coverage ratio stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no CASE COUNT are quoted here on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority). What the weight covers, hermetic on both sides (no graph, no store, no model call, no process spawn): the numbers `#13108` reopens `STORAGE-ARCHITECTURE.md` §14.3 V3 on — `percentile`'s nearest rank and its `None`-for-an-empty-sample (never `0.0`), `summarise`'s inclusive 500 ms `over_budget` boundary, the per-arm `None` latency cells, and the mechanism/reason distributions; plus the instrument's OWN honesty: `measure` REFUSES an arm that lost a read (a worker that raised, a worker that died without raising, and a mechanism outside the engine's closed vocabulary all answer a refusal rather than a short arm), the three-valued `probe_index_attempt` outcome that never folds an aborted signature into a double refusal, `seed`'s carried `harvest_stats`, the `#5128` interpreter preamble, and the selection that makes these pins run at all (`CORE_ALSO` + a tools-only diff).
@@ -12890,6 +13012,11 @@ durations:
   test_onboarding_email_http.py: 0.7  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.1
   test_projection_version_gate.py: 1.4  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.2
   test_search_engine.py: 0.9  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
+  test_verbatim_index_cohort_8429.py: 2.0  # the row must EXIST, not merely default (`tools/ci_selection.py --integrity` reds `manifest drift` without it): the two MECHANISM
+  # pins are hermetic (a graph double, no server); the two COHORT pins construct a live
+  # FalkorDB SDK and skip loudly where the URI gate is unset, so on a URI-less lane the
+  # file costs the import + the probe. The figure is the skip-lane reading, not a claim
+  # about the docker leg — `tools/ci_timing.py --refresh-durations` replaces it from junit.
   test_session_capture_e2e.py: 5.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 8.9
   test_stop_writes.py: 0.8  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.4
   test_subscriptions.py: 0.8  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.7
@@ -14045,6 +14172,7 @@ durations:
   test_9350_capture_provenance_journalled.py: 9.7  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 17.6
   test_9548_record_arming_health.py: 0.1
   test_12943_cache_leg.py: 5.1  # needs a graph (P4 refuses URI-less, so NOT DB-free); no Postgres except two skip-if-absent convergence legs
+  test_12855_outdated_rewrite.py: 17.0  # needs a graph (P4 refuses URI-less, so NOT DB-free); measured 2026-11-17 locally
   test_9555_narrative_carrier.py: 2.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 3.4
   test_backfill_references_5141.py: 0.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.2
   test_bm25_lexical_8488.py: 13.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 9.8

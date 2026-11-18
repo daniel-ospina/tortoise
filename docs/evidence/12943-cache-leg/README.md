@@ -307,3 +307,99 @@ echo to the graph's property names and reports the pair every time. Captured:
 comparison surface should be for a record column that is a *spelling* of the
 graph's representation — its own root, its own decision, and deliberately not
 folded into a change about store SELECTION.
+
+---
+
+## The reopening, measured PER DOOR (2026-11-17)
+
+\#12950 fixed a DOOR. The reopening's evidence was door-specific (REST reaches the
+cache, the in-process writer does not), so the question was re-asked per door with
+`door_matrix.py`, and answered in every graph the write could have landed in —
+because a "0 in `org_<org>_<gid>`" is only evidence of a lost write if the write
+is not in some OTHER graph of the same server. That is how the first two readings
+of this issue went wrong.
+
+One node per door, run-unique throwaway tenant, a real Postgres record (the
+record's own migration list, the APPLICATION role) and a real shared FalkorDB.
+`--reconcile` adds the product's own instrument on BOTH candidate cache graphs.
+Capture: `door-matrix-shared-cache.json`.
+
+| door | record `object` / `journal_event` | cache `org_<org>_<gid>` | cache `org_<org>` | `cache_leg_failures` | `record-reconcile` canonical / actual |
+|---|---|---|---|---|---|
+| `sdk` — `_make_sdk(graph_name=…)` + bind | 1 / 1 | **1 Object** | absent | `{}` | `clean` / `clean` |
+| `_data_sdk` — GRAPH-BOUND credential | 1 / 1 | **1 Object** | absent | `{}` | `clean` / `clean` |
+| `_data_sdk` — ORG-WIDE credential | 1 / 1 | **absent** | **1 Object** | `{}` | **`divergent` (missing_in_cache=1, exit 3)** / `clean` |
+| `POST /v1/objects` (real app) | 1 / 1 | **1 Object** | absent | `{}` | `clean` / `clean` |
+| MCP `tortoise_create_entity` (tool body) | 1 / 1 | **1 Object** | absent | `{}` | `clean` / `clean` |
+| script: `_make_sdk(namespace=org)` + bind custom gid | 1 / 1 | **absent** | **1 Object** | `{}` | **`divergent`** / `clean` |
+| misroute: SDK for `g_A`, tenant `g_B` | 1 / 1 | absent | absent (3rd graph) | **`{"tenant_graph_mismatch": 1}`** | **`divergent`** / `clean` |
+
+`record-reconcile` on the `_data_sdk` row, verbatim:
+
+```json
+{"verdict": "clean", "checked": 1, "divergent": 0, "missing_in_cache": 0,
+ "extra_in_cache": 0, "field_mismatches": 0, "exit": 0}
+```
+
+…and the same tenant written through the ORG-WIDE credential, on the graph the
+record's tenant names:
+
+```json
+{"verdict": "divergent", "checked": 1, "divergent": 1, "missing_in_cache": 1,
+ "extra_in_cache": 0, "field_mismatches": 0, "exit": 3}
+```
+
+…and on the graph the write ACTUALLY used (`org_<org>`, the one nothing told the
+operator):
+
+```json
+{"verdict": "clean", "checked": 1, "divergent": 0, "missing_in_cache": 0,
+ "extra_in_cache": 0, "field_mismatches": 0, "exit": 0}
+```
+
+## What that says
+
+**The `_data_sdk` row MOVES.** On a coherent deployment (both stores configured,
+graph-bound credential) the in-process door writes both stores and reconciles
+clean, so the reopened symptom is NOT a property of the door. The class is:
+
+> **A record TENANT and a cache GRAPH are two answers, chosen by two different
+> things — and nothing compared them.** The tenant comes from the credential's
+> `graph_id` / `default_graph_id`; the graph comes from the credential's
+> `graph_namespace` (graph-bound) or the org-level open (org-wide). For a custom
+> graph they are the same only on the graph-bound path.
+
+Both misrouting rows are *successful* writes into a graph the tenant's own name
+does not point at. Nothing fails, nothing raises, and `record-reconcile` reports
+the whole tenant missing — while `record_writes_applied` and every counter read
+healthy. #12950's `cache_not_shared` cannot see either: it grades a
+construction-level configuration split, and its own docstring names the residual
+("a truthy `cache_uri` is PRESENCE, not LOCALITY").
+
+**The public doors are coherent.** REST, MCP and both `_data_sdk` branches of the
+hosted app take the graph and the tenant from ONE credential, so they cannot
+drift there — the second finding is what happens when they are taken from two
+places (a maintenance script, a lane, any future door).
+
+## External grounding (rung 3 — see the note below)
+
+The canonical answer to "truth and derived copy must agree" is the **transactional
+outbox**: write the message/derived state in the SAME transaction as the truth,
+and let a separate **message relay** publish it (microservices.io:
+`patterns/data/transactional-outbox.html`, `patterns/data/transaction-log-tailing.html`).
+Two properties of that pattern map onto this measurement:
+
+* the relay must have ONE target, derived from the truth it is replaying — our
+  fold derives its target from the CREDENTIAL instead, which is the finding above;
+* the relay's own lag/divergence is what you instrument, not the writer's success
+  (`record_writes_applied` is identical on both arms of this table — that is why
+  nothing downstream could tell them apart).
+
+⛔ **Rung note, as the brief requires:** rung 1
+(`mcp__seo-intelligence__perplexity_search`) is UNAVAILABLE on this box —
+`Unknown MCP server 'seo-intelligence'`. Rung 2 (`web_search`, model `sonar`
+passed explicitly) is ALSO unavailable: `PERPLEXITY_API_KEY not set` (and
+`AGENT_INFRA_PATH` is empty, so there is no `.env` for the harness to find). The
+external reading above is therefore rung 3 — `web_fetch` on primary sources
+(Chris Richardson's pattern catalogue), quoted rather than paraphrased where it
+matters.

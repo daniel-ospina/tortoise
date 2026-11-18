@@ -719,9 +719,12 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: of DEFAULTS (`eventKind` `''`, `subject`/`object` `''`, `startedAt` `''`,
 #: `participants` `[]`, `classificationLevel` `'internal'`, `format` `'jsonl'`,
 #: and `id`) and writes all of it unconditionally with `e += $props`, so a
-#: record-sourced `:Event` loses every one of them the record row does not carry
-#: (seven, for an event whose optional columns are NULL) — including the
-#: ONTOLOGY §4.5-REQUIRED `eventKind` when a producer omits it. Also undeclared:
+#: record-sourced `:Event` loses every one of them the record row does not carry —
+#: PER COLUMN, so the count follows the row: seven for an event whose optional
+#: columns are NULL apart from `event_kind`, EIGHT when `event_kind` is NULL too
+#: (including the ONTOLOGY §4.5-REQUIRED `eventKind` when a producer omits it),
+#: and none for a row that carries them all (#13392 review cycle 2: the count was
+#: stated without its shape). Also undeclared:
 #: the other `:Source` create clauses (`_materialize_connector_source`,
 #: `_upsert_document`, `_mint_source_stub`) and the `_stub` adoption marker the
 #: fold clears. Filed as #9721, as its own change, for two shapes this table cannot
@@ -2125,9 +2128,11 @@ def _scalar(value: Any) -> Any:
 #: words) — in a word-delimited script not a CHOSEN transcript slice, though a space-less (CJK) run arrives
 #: as ONE member verbatim (the residual in `sdk._session_source_metadata`) — and it survives; every
 #: non-episodic Source keeps both columns untouched — a document's `summary` is its own metadata and its
-#: `_searchText` is the shared title+summary+topics rule, so a guard that fired on every Source would
-#: un-index every document in the cache. The drop is a **projection** decision: the row is not mutated, so
-#: the record stays the authority for the value.
+#: `_searchText` is filled PER DOOR, never by one rule: a source writer passes `sdk._source_search_text` (the
+#: `title` when present, else the topic lexicon, else the `summary`), while the document fold concatenates
+#: title + summary + topics (`projection.entities._build_search_text`, #125) — so a guard that fired on
+#: every Source would un-index every document in the cache. The drop is a **projection** decision: the row is
+#: not mutated, so the record stays the authority for the value.
 #:
 #: ⚠️ THE THIRD COST, and it is an OBSERVATION instrument, where a permanent
 #: non-clean reads as noise: `python -m tortoise record-reconcile` builds its

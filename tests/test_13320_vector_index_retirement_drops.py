@@ -1,0 +1,1243 @@
+"""#13320 — an ARMED store must actually REMOVE the in-graph Point vector index.
+
+THE DEFECT (issue #13320; reproduced on production 2026-11-17 and again here on
+``falkordb-server:v4.20.6``, graph module 42006). On a deployment whose
+replacement is armed — a record DSN **and** ``TORTOISE_RECORD_VECTOR_LEG=1``, so
+``projection.vector_index_retired()`` is ``True`` — constructing a projection for
+a graph that HOLDS the in-graph ``Point.embedding`` HNSW index did not drop it:
+
+* the catalogue was read and the index WAS seen (so the gate is not the defect),
+* both statements the retirement issued — ``DROP INDEX ON :Point(embedding)`` and
+  ``DROP INDEX FOR (p:Point) ON (p.embedding)`` — were rejected by the engine
+  (``Unable to drop index on :Point(embedding): no such index.``), because a
+  VECTOR index is not reachable through the generic drop, and
+* each rejection was logged at DEBUG ONLY, so on a box logging at INFO the whole
+  sweep was silent: ``before: present=True``, ``after: present=True``, no line.
+
+The statement that DOES drop it — ``DROP VECTOR INDEX FOR (p:Point) ON
+(p.embedding)`` — was already measured and written down in
+``tortoise/graph_key_restore.py`` (``VectorIndexDefinition.drop_cypher``) for the
+RESTORE path, with the very same error text quoted. The retirement path derived
+its own list instead. Both now render it from ONE place
+(``index_catalogue.vector_index_drop_statement``), so the next site cannot
+re-derive the guess.
+
+WHAT IS PINNED HERE
+
+1. ``test_an_armed_setup_REMOVES_a_real_in_graph_vector_index`` — the LIVE
+   falsifier the issue asks for: a real VECTOR index on a real engine, armed, the
+   setup path invoked ⇒ the index is GONE from ``CALL db.indexes()``, and a line
+   names what removed it.
+   ⛔ RED-FIRST, stated exactly: on the parent commit (``54682177bcff``) this file
+   does not even IMPORT — ``vector_index_drop_statement`` does not exist yet — so
+   that is the first red. With the import stubbed to the shipped generic forms,
+   the LIVE pin reds on the survived-index assertion (verified: the armed sweep
+   left ``{'embedding': ['VECTOR']}`` in the catalogue) and the two DB-free pins
+   red too. The behavioural red is the one that matters; the import red is what a
+   reader would see first.
+2. ``test_the_retirement_drops_with_the_VECTOR_form`` — DB-free, so CI without a
+   live engine still reds if the form regresses to the generic one. The fake
+   engine answers the generic DROPs the way the real one does (``no such
+   index``), so a fake that merely says "something dropped" cannot pass.
+3. ``test_a_vector_index_that_SURVIVES_is_not_silent`` — the second half of the
+   defect: an index that survives the sweep must produce a WARNING naming it, and
+   must NOT produce the "dropped" INFO. Silence is how #13320 shipped.
+4. ``test_an_engine_that_ACCEPTS_the_drop_and_keeps_the_index_is_a_false_PASS``,
+   ``test_a_RESHAPED_post_drop_catalogue_does_not_claim_a_removal`` and
+   ``test_an_UNREADABLE_catalogue_on_an_armed_store_is_loud`` — the three ways the
+   REPORT (not the sweep) can lie, each added because the #13330 review showed the
+   first draft got them wrong: "dropped, confirmed absent" read off a half that
+   also covers an unparseable catalogue; an accepted-then-surviving index printed
+   as ``Statements tried: none``; and an armed store whose catalogue read fails
+   was DEBUG-only silence — the issue's own complaint, one arm over.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import re
+import uuid
+from types import SimpleNamespace
+from urllib.parse import urlparse
+
+import pytest
+import redis
+
+from tests import _live_utils
+from tortoise.embeddings import EMBEDDING_DIM
+from tortoise.index_catalogue import vector_index_drop_statement
+from tortoise.projection import (
+    FalkorProjection,
+    _reset_vector_gap_warnings,
+    vector_index_retired,
+)
+
+#: The arming surface (a record DSN) and the arming DECISION — BOTH, or
+#: ``vector_index_retired()`` is False and this file would be testing the
+#: unarmed posture (see that function's docstring).
+RECORD_DSN_ENV = "TORTOISE_RECORD_DSN"
+ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
+_RECORD_DSN = "postgresql://localhost/record"
+
+_SUPPORTED_SCHEMES = ("docker", "redis", "rediss")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_warning_latches():
+    """Clear the process-global latches around EVERY test here.
+
+    Every register here never expires, so without this a second in-process run of
+    the survivor pin would find its bucket already latched and red spuriously — a
+    pin that only passes on the first run is not a pin. The KEY SHAPES DIFFER and
+    are stated rather than generalised (#13330 review P3): the #4997/#11087
+    registers are keyed per ``(endpoint, graph)``, and
+    ``_VECTOR_INDEX_DROP_FAILED_WARNED`` (#13320) per
+    ``(endpoint, graph, KIND)`` — one bucket per kind, because a transient read
+    failure must never spend the permanent survivor verdict's budget. This is the
+    same hook ``tests/test_4997_vector_index_parity.py`` uses (#13330 review).
+    """
+    _reset_vector_gap_warnings()
+    yield
+    _reset_vector_gap_warnings()
+
+
+# ── the live lane ───────────────────────────────────────────────────────────
+
+def _live_target():
+    """``(host, port, username, password, ssl)`` for the live FalkorDB, or None.
+
+    Read at CALL time: the conftest recomposes ``TORTOISE_DB_URI`` per test (a
+    unique graph name), so the connection must follow the env it is given.
+    """
+    uri = os.environ.get("TORTOISE_DB_URI") or ""
+    parsed = urlparse(uri)
+    if parsed.scheme not in _SUPPORTED_SCHEMES or not parsed.hostname:
+        return None
+    from tortoise.config import parse_uri_userinfo
+
+    username, password = parse_uri_userinfo(uri)
+    return (
+        parsed.hostname,
+        parsed.port or _live_utils.docker_port(),
+        username,
+        password,
+        parsed.scheme == "rediss",
+    )
+
+
+_LIVE_ONLY = pytest.mark.skipif(
+    _live_target() is None, reason=_live_utils.LIVE_URI_SKIP_REASON)
+
+
+def _raw_client():
+    target = _live_target()
+    assert target is not None, "the live lane was not skipped but has no URI"
+    host, port, username, password, ssl = target
+    return redis.Redis(
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        ssl=ssl,
+        decode_responses=True,
+        socket_timeout=30.0,
+        socket_connect_timeout=10.0,
+    )
+
+
+def _rows(client, graph: str, cypher: str):
+    """The result rows of a ``GRAPH.QUERY`` reply (``[header, rows, stats]``)."""
+    out = client.execute_command("GRAPH.QUERY", graph, cypher)
+    return out[1] if isinstance(out, (list, tuple)) and len(out) > 1 else []
+
+
+def _type_tokens(cell) -> set[str]:
+    """The index-TYPE tokens of a ``db.indexes()`` row's ``types`` cell.
+
+    ⛔ The raw client hands this cell over as a STRING
+    (``"{embedding: [VECTOR]}"``), not a dict, so it is TOKENISED — never
+    substring-tested — the rule ``tortoise/index_catalogue.py`` states for the
+    same column's property names.
+    """
+    if isinstance(cell, dict):
+        return {
+            str(token).upper()
+            for types in cell.values()
+            for token in (types or ())
+        }
+    return {token.upper() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(cell))}
+
+
+def _vector_index_present(client, graph: str) -> bool:
+    """Is there a VECTOR index on ``Point.embedding`` in this graph's catalogue?"""
+    for row in _rows(client, graph, "CALL db.indexes()"):
+        if len(row) < 3 or str(row[0]) != "Point":
+            continue
+        if "VECTOR" in _type_tokens(row[2]):
+            return True
+    return False
+
+
+def _seed_vector_index(client, graph: str) -> None:
+    """Create the in-graph index the way the store does: procedure, then Cypher.
+
+    Mirrors ``_create_vector_index_api``: the procedure is not registered on the
+    pinned server image, so the Cypher-native form is the live path — the same
+    the products's own creation code takes there.
+    """
+    try:
+        _rows(client, graph,
+              "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+              f"{EMBEDDING_DIM}, 'HNSW')")
+        return
+    except Exception:
+        # The procedure is NOT registered on the pinned server image — the
+        # Cypher-native form below is the measured path there, and the same one
+        # the product's own creation code takes.
+        pass
+    _rows(client, graph,
+          "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
+          f"OPTIONS {{dimension: {EMBEDDING_DIM}, similarityFunction: 'cosine'}}")
+
+
+@_LIVE_ONLY
+def test_an_armed_setup_REMOVES_a_real_in_graph_vector_index(monkeypatch, caplog):
+    """THE FALSIFIER (#13320 acceptance): armed + index present ⇒ index absent.
+
+    Written to FAIL on the shipped code, and it does: the sweep issued two DROPs
+    the engine rejects and reported nothing above DEBUG, so the catalogue still
+    answered ``Point … {'embedding': ['VECTOR']}`` after the projection was
+    constructed — the exact post-state the production transcript recorded.
+
+    Falsifiable both ways: dropping the retirement gate's arming check would make
+    an UNARMED store lose its index, which the sibling pins in
+    ``tests/test_4997_vector_index_parity.py`` own; a sweep that issues the
+    generic DROP forms leaves this one red on the ``VECTOR still present``
+    assertion.
+    """
+    client = _raw_client()
+    graph = f"test_13320_{uuid.uuid4().hex[:10]}"
+    proj = None
+    try:
+        # The fixture's PRECONDITION, asserted rather than assumed: a seed that
+        # silently created no index would make this pin vacuous.
+        _rows(client, graph, "CREATE (:Point {id:'p1', pointKind:'entity'})")
+        _seed_vector_index(client, graph)
+        assert _vector_index_present(client, graph), (
+            "the fixture did not seed a VECTOR index — this pin would be vacuous")
+
+        monkeypatch.setenv(RECORD_DSN_ENV, _RECORD_DSN)
+        monkeypatch.setenv(ARMING_ENV, "1")
+        assert vector_index_retired() is True, (
+            "the store is not armed, so this pin is not testing the retirement")
+
+        with caplog.at_level(logging.INFO):
+            # The production path verbatim: constructing the projection runs
+            # `_ensure_indexes()` (`Projection.__init__`), which is where the
+            # retirement lives.
+            proj = FalkorProjection.from_uri(
+                os.environ["TORTOISE_DB_URI"], graph_name=graph)
+
+        assert not _vector_index_present(client, graph), (
+            "#13320: an ARMED store kept its in-graph Point.embedding VECTOR "
+            "index — the retirement issued a statement the engine rejects and "
+            "logged it only at DEBUG, so the deployment pays for the index AND "
+            "the pgvector copy while reporting the switch as on. The DROP that "
+            "works is "
+            f"{vector_index_drop_statement('Point', 'embedding')!r}; the "
+            "catalogue after the sweep still reports: "
+            f"{_rows(client, graph, 'CALL db.indexes()')}")
+
+        dropped = [
+            r.getMessage() for r in caplog.records
+            if r.levelno >= logging.INFO
+            and "dropped the in-graph" in r.getMessage()
+        ]
+        assert dropped, (
+            "the retirement removed the index without a line saying so — the "
+            "operator has no artifact for what the sweep did "
+            f"(INFO lines seen: {[r.getMessage()[:90] for r in caplog.records]})")
+        assert vector_index_drop_statement("Point", "embedding") in dropped[0], (
+            "the line that names the retirement must name the statement that "
+            f"did it; got {dropped[0]!r}")
+    finally:
+        if proj is not None:
+            try:  # noqa: SIM105
+                proj.close()
+            except Exception:
+                pass
+        for cypher in ("MATCH (n) DETACH DELETE n", None):
+            try:
+                if cypher is None:
+                    client.execute_command("GRAPH.DELETE", graph)
+                else:
+                    _rows(client, graph, cypher)
+            except Exception:
+                pass
+
+
+# ── DB-free pins: the FORM, and the silence ─────────────────────────────────
+
+def _catalogue_row(label: str, prop: str, kind: str):
+    """A 9-column ``CALL db.indexes()`` row, the shape the inventory walks."""
+    return (label, [prop], {prop: [kind]}, 0, 0, 0, "NODE", "OPERATIONAL", "")
+
+
+class _Result:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _EngineLikeGraph:
+    """A fake engine that answers the DROP forms the REAL engine answers.
+
+    ``mode``:
+
+    * ``"vector"`` — only ``DROP VECTOR INDEX`` drops the index (the measured
+      engine).
+    * ``"none"`` — nothing drops it; every DROP is REFUSED (the survivor lane).
+    * ``"accept-noop"`` — the engine ACCEPTS ``DROP VECTOR INDEX`` and keeps the
+      index: the false PASS the report must not call a removal.
+    * ``"vector-reshaped"`` — the drop works, and the POST-drop catalogue comes
+      back in a shape this store cannot parse (the engine changed its row shape
+      between two reads). The removal is then NOT measurable.
+    * ``"unreadable"`` — ``CALL db.indexes()`` raises on every read: the armed
+      sweep cannot even tell whether an index is there.
+    * ``"pre-reshaped"`` — the FIRST (gate) read already answers with rows whose
+      ``types`` cell is not a mapping: a catalogue that is present but
+      unparseable (#13330 review P2 — this used to read as "no index here").
+    * ``"foreign-prop"`` — the catalogue holds TWO ``Point`` VECTOR indexes, on
+      ``embedding`` and on ``other_prop``, and the DROP removes only the property
+      the statement names. This is the lane where a LABEL-grained verdict reports
+      a successful removal as a survivor (#13330 review P3).
+
+    ⛔ The generic forms are REJECTED with the engine's own message rather than
+    accepted. A fake that accepts any statement mentioning ``embedding`` is how
+    #13320 shipped: the pin asserted "a DROP was issued", which was true and
+    useless.
+    """
+
+    def __init__(self, *, drop_accepts: str = "vector"):
+        self.calls: list[str] = []
+        self.drop_accepts = drop_accepts
+        if drop_accepts == "pre-reshaped":
+            self._rows = [("Point", ["embedding"], "not-a-dict", 0, 0, 0,
+                           "NODE", "OPERATIONAL", "")]
+        else:
+            self._rows = [_catalogue_row("Point", "embedding", "VECTOR")]
+            if drop_accepts == "foreign-prop":
+                self._rows.append(_catalogue_row("Point", "other_prop", "VECTOR"))
+
+    def _drop_row(self):
+        self._rows = [
+            r for r in self._rows
+            if not (str(r[0]) == "Point" and "VECTOR" in str(r[2]).upper())
+        ]
+
+    def query(self, cypher, params=None, timeout=None):
+        self.calls.append(cypher)
+        low = cypher.lower()
+        if "db.indexes()" in low:
+            if self.drop_accepts == "unreadable":
+                raise RuntimeError("CALL db.indexes() unavailable")
+            return _Result(list(self._rows))
+        if low.startswith("drop"):
+            if "drop vector index" not in low or self.drop_accepts in {
+                    "none", "unreadable", "pre-reshaped"}:
+                raise RuntimeError(
+                    "Unable to drop index on :Point(embedding): no such index.")
+            if self.drop_accepts == "accept-noop":
+                return _Result([])          # accepted — and the index stays
+            if self.drop_accepts == "vector-reshaped":
+                # The row survives in a shape this store cannot parse: dict-less
+                # `types` cell, i.e. "returned but not interpretable".
+                self._rows = [("Point", ["embedding"], "not-a-dict", 0, 0, 0,
+                               "NODE", "OPERATIONAL", "")]
+                return _Result([])
+            if self.drop_accepts == "foreign-prop":
+                # The engine drops the ONE property the statement names — a
+                # VECTOR index on another property is none of its business.
+                _named = re.search(r"ON \(\w+\.(\w+)\)", cypher, re.I)
+                _prop = _named.group(1) if _named else "embedding"
+                self._rows = [
+                    r for r in self._rows
+                    if not (str(r[0]) == "Point" and _prop in r[2])
+                ]
+                return _Result([])
+            self._drop_row()
+            return _Result([])
+        return _Result([])
+
+    @property
+    def drops(self) -> list[str]:
+        return [c for c in self.calls if c.lower().startswith("drop")]
+
+
+def _bare(graph_obj, *, graph: str = "test_13320_bare") -> FalkorProjection:
+    """A projection over a fake engine — no connection, no health probe.
+
+    ``.db`` carries a PRODUCTION-shaped pool so ``_stable_endpoint()`` resolves a
+    store identity and the #11087/#13320 latches key on something stable.
+    """
+    proj = object.__new__(FalkorProjection)
+    proj._is_embedded = False
+    proj._graph_name = graph
+    proj._skip_guard = True
+    proj._host = "test-host"
+    proj.db = SimpleNamespace(connection=SimpleNamespace(
+        connection_pool=SimpleNamespace(
+            connection_kwargs={"host": "test-host", "port": 6379})))
+    proj._falkordb_version = (4, 20, 6)
+    proj._vector_index_api = None
+    proj._vector_indexed_labels = None
+    proj._vector_indexed_labels_for_reads = None
+    proj._vector_index_served_labels = None
+    proj._vector_index_props = None
+    proj._index_catalogue_rows = None
+    proj.g = graph_obj
+    return proj
+
+
+def _arm(monkeypatch):
+    monkeypatch.setenv(RECORD_DSN_ENV, _RECORD_DSN)
+    monkeypatch.setenv(ARMING_ENV, "1")
+
+
+def test_the_retirement_drops_with_the_VECTOR_form(monkeypatch):
+    """The DROP the sweep issues is the form the engine actually honours (#13320).
+
+    DB-free, because the form is where the defect was and CI must catch its
+    regression without a live engine. The fake rejects the generic forms exactly
+    as graph module 42006 does, so an implementation that issues them cannot
+    satisfy this pin (its index survives, and the assertion below reports it).
+    """
+    _arm(monkeypatch)
+    assert vector_index_retired() is True
+
+    graph = _EngineLikeGraph(drop_accepts="vector")
+    proj = _bare(graph)
+    proj._ensure_indexes()
+
+    expected = vector_index_drop_statement("Point", "embedding")
+    assert expected in graph.drops, (
+        f"the retirement never issued {expected!r} — it issued {graph.drops!r}")
+    assert not any("VECTOR" in str(r[2]).upper() for r in graph._rows), (
+        "the store still reports the VECTOR index after the sweep")
+    assert proj._vector_index_api is None
+    assert proj._vector_indexed_labels == set(), (
+        "the post-drop measurement still reports the retired index as present")
+
+
+def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
+    """Second half of #13320: an index that survives must SAY SO (#13320).
+
+    The shipped sweep failed both DROP statements and logged each at DEBUG, so a
+    production box at INFO recorded nothing at all — the "silently switched
+    backend" shape this repo has a rule about. A survivor now produces a WARNING
+    that names the index, and must NOT produce the "dropped" INFO: a line that
+    claims a removal that did not happen is worse than the silence.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="none")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+
+    assert graph.drops, (
+        "no DROP was even attempted — the gate, not the drop, is being tested")
+
+    warnings = [
+        r.getMessage() for r in caplog.records
+        if r.levelno >= logging.WARNING and "#13320" in r.getMessage()
+    ]
+    assert warnings, (
+        "a VECTOR index survived an ARMED retirement sweep with no line above "
+        f"DEBUG — the box believes the switch is on and nothing changed "
+        f"(records: {[(r.levelname, r.getMessage()[:70]) for r in caplog.records]})")
+    joined = " ".join(warnings)
+    assert "Point.embedding" in joined, (
+        f"the survivor warning must name the index it left in place: {joined!r}")
+    assert "no such index" in joined, (
+        f"the survivor warning must carry the engine's own refusal: {joined!r}")
+    assert not any("dropped the in-graph" in r.getMessage() for r in caplog.records), (
+        "the sweep claimed a drop that did not happen — that is the false PASS "
+        "#13320 was filed on")
+    # ⛔ THE MEASURED HALF OF THE COST CLAIM (#13330 review P3). `_cost_clause` has
+    # two directions: the survivor arm KEEPS "the store keeps paying … so arming
+    # did NOT take effect" (measured here), and the unconfirmed arms drop it
+    # (pinned by `test_a_row_that_did_not_parse_withholds_the_confirmed_absence`).
+    # Without this line the \"always the non-asserting clause\" mutation reddens
+    # nothing, so the operator's one measured statement about a survivor could be
+    # deleted with the suite green.
+    assert ("keeps paying for the in-graph index AND the pgvector copy, so "
+            "arming did NOT take effect") in joined, (
+        "the SURVIVOR line must keep the measured cost/arming claim — it is the "
+        f"one arm where that statement was measured: {joined!r}")
+
+    # ⛔ THE LATCH IS THE WHOLE PER-REQUEST PROPERTY (#13330 review P2, round 4).
+    # This method runs on the hosted PER-REQUEST path
+    # (`_data_sdk_offloaded(..., attach_projection=True)` builds a projection per
+    # request) and an unable-to-retire store is a PERMANENT state, so an
+    # unlatched survivor WARNING is a per-request log storm. Until here the pin
+    # drove ONE setup, so `if self._retirement_failure_is_news("index-survived")`
+    # could be deleted with the suite green — the property was asserted in prose
+    # and nowhere in code. A SECOND sweep on the same store must produce no
+    # second line; only the LINE is latched, so the sweep still runs — its DROPs
+    # are still re-attempted and its inventory still MEASURES the catalogue (both
+    # asserted below, because "still runs" is the half that keeps a store repaired
+    # between sweeps able to announce the repair; the REPORT half of that block is
+    # pinned at file level by
+    # `test_an_UNCONFIRMED_sweep_does_not_swallow_the_CONFIRMED_survivor`, which
+    # reds when a latch is placed between the inventory and the report).
+    #
+    # ⛔ SCOPED TO THE RETIREMENT'S OWN DROPs, and the reads assertion is GONE
+    # (#13376 review, finding 1 — the earlier cut could not fail). Both counters
+    # the first version used are sweep-wide, not retirement-wide, and both move
+    # on a sweep that latched the WHOLE measure+report block:
+    #   * `_schema_is_current` issues its OWN `CALL db.indexes()` on every sweep
+    #     (:20638), regardless of what the retirement does — and on the `#4465`
+    #     fast path the retirement is then handed those rows through
+    #     `_index_catalogue_rows` (:21229), while on the full-sweep lane it reads
+    #     for itself (:21749). Either way the read count is the sweep's, not the
+    #     retirement's, so an unfiltered count grows with the retirement latched
+    #     (this fixture takes the full-sweep lane: measured 2 reads per sweep).
+    #   * `_ensure_indexes_declared` issues its own two `DROP INDEX ON
+    #     :Point(is_operator)` / `:Point(is_operator, lastDreamedAt)` statements
+    #     (:21275-21276), so an unfiltered drop count grows too. This file already
+    #     records exactly that hazard for these two statements — the ⛔ "Scoped to
+    #     the retirement's candidates" note in
+    #     `test_a_foreign_Point_vector_index_neither_arms_the_sweep_nor_is_reported`.
+    #     ⛔ Cited by CONTENT, not by line: both earlier cuts of this comment
+    #     carried a LINE number for it that this same edit had already moved.
+    # Measured (mutant M3b): latch the whole block — `if not
+    # self._retirement_failure_is_news("armed-block"): return` before the DROP
+    # loop — and the unfiltered version stayed GREEN (`1 passed`) over a sweep
+    # that measured nothing at all.
+    #
+    # What CAN be attributed is the retirement's own statement: only its three
+    # candidates name the `Point.embedding` index (measured: no other statement in
+    # a sweep carries that substring, and all three candidates do). And because
+    # the DROP loop is GATED on the parsed catalogue (`if _has_vector_index:`,
+    # :21826), a re-attempted retirement DROP is positive evidence that the second
+    # sweep re-read the catalogue and re-entered the block.
+    retirement_drops = [d for d in graph.drops if "embedding" in d.lower()]
+    assert retirement_drops, (
+        "the FIRST sweep attempted no retirement DROP — the gate, not the "
+        f"latch, is being tested (drops: {graph.drops})")
+    second = _bare(graph)
+    with caplog.at_level(logging.DEBUG):
+        second._ensure_indexes()
+
+    retirement_drops_after_second = [
+        d for d in graph.drops if "embedding" in d.lower()]
+    assert len(retirement_drops_after_second) > len(retirement_drops), (
+        "the second sweep did not re-attempt the RETIREMENT's own DROP: the "
+        "latch must silence the LINE only, so the sweep must still run and a "
+        "store repaired between sweeps must still be able to announce the "
+        f"repair (retirement drops: {len(retirement_drops)} -> "
+        f"{len(retirement_drops_after_second)}; all drops: {graph.drops})")
+    # ⛔ THE DROP LOOP IS NOT THE MEASURE+REPORT (#13419 review of `bb247aa008`,
+    # finding 1 — a `#13376` round-2 citation here named a review of the OTHER PR
+    # that returned NO ISSUES FOUND, so it sent a reader to a clean verdict).
+    # Measured: a latch applied AFTER the drop loop — `if not
+    # self._retirement_failure_is_news("armed-post-drop"): return` right before
+    # `_ambiguous_write` (:21872) — leaves the DROP assertion above GREEN while
+    # `_record_vector_index_inventory` (and the value-latched #4997 pair report it
+    # emits) never runs on the second sweep, so a store repaired between sweeps
+    # still could not announce it. The inventory is what re-populates
+    # `_vector_index_props` (:20071 is its per-call reset), and `_bare()` hands the
+    # second sweep a FRESH projection whose `_vector_index_props` is `None` — so a
+    # non-`None` value here is positive evidence the second sweep MEASURED, not
+    # merely that it issued DDL. Measured: `{'Point': frozenset({'embedding'})}`
+    # unmutated, `None` under that mutant.
+    assert second._vector_index_props is not None, (
+        "the second sweep issued its DROPs but never re-measured the catalogue "
+        "— the latch must silence the LINE only, and the measure+report block "
+        "is the half that lets a repaired store stop being reported as broken "
+        f"(`_vector_index_props` is {second._vector_index_props!r} on the "
+        "second sweep's fresh projection)")
+    assert len(_retirement_warnings(caplog)) == 1, (
+        "the survivor line is not latched: two sweeps on one store produced "
+        f"{len(_retirement_warnings(caplog))} #13320 WARNINGs. On the hosted "
+        "PER-REQUEST path that is one warning per request for the life of the "
+        "deployment (R3, the reason `_retirement_failure_is_news` exists)")
+
+
+class _RefusedWithUnparsedNeighbour(_EngineLikeGraph):
+    """Every DROP refused with the engine's own `no such index`, and the GATE read
+    carries one row the store cannot interpret beside the target.
+
+    Nothing is written, so the inventory reuses the gate's rows; the unparsed
+    neighbour withholds the property half. The sweep still MEASURED the index
+    present — that is what armed it — so the line must be SURVIVED.
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="none")
+        self._rows = [
+            _catalogue_row("Point", "embedding", "VECTOR"),
+            ("Object", ["name"], "a reshaped cell", 0, 0, 0, "NODE",
+             "OPERATIONAL", ""),
+        ]
+
+
+def _retirement_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records
+        if r.levelno >= logging.WARNING and "#13320" in r.getMessage()
+    ]
+
+
+def test_an_engine_that_ACCEPTS_the_drop_and_keeps_the_index_is_a_false_PASS(
+        monkeypatch, caplog):
+    """A `g.query()` that raised nothing is NOT evidence the index went (#13320).
+
+    This is the false PASS the report exists to prevent, and the first draft of
+    this fix got its wording wrong twice (#13330 review P2 x2): it called the
+    store a SURVIVOR by measurement it had not taken, and it printed
+    ``Statements tried: none`` because only REFUSED candidates were recorded —
+    which reads as "nothing was attempted" at exactly the moment an accepted
+    statement is the whole story.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="accept-noop")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert not any("dropped the in-graph" in r.getMessage() for r in caplog.records), (
+        "the engine ACCEPTED the statement and kept the index, and the sweep "
+        "reported a drop anyway")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "a false PASS was reported silently"
+    line = warnings[0]
+    assert "SURVIVED" in line and "FALSE PASS" in line, (
+        f"the line must say the index SURVIVED a measurement and why: {line!r}")
+    # ⛔ A WRITE WAS ATTEMPTED, so the rows in hand ARE the post-drop ones
+    # (#13330 post-merge review, P3): the other half of `_read_noun`'s selection.
+    # Without this, dropping the `if _attempted` branch sends this lane back to
+    # describing a pre-drop read that did not produce the rows it used.
+    assert "the post-drop catalogue" in line, (
+        f"an accepted DROP is described by the wrong read: {line!r}")
+    assert "read before the sweep" not in line, (
+        f"a write WAS attempted, so the rows are post-drop: {line!r}")
+    assert "none refused" in line, (
+        "the line must distinguish 'nothing was refused' from 'nothing was "
+        f"attempted'; got {line!r}")
+
+
+def test_a_RESHAPED_post_drop_catalogue_does_not_claim_a_removal(monkeypatch, caplog):
+    """An unparseable catalogue is NOT "measured, nothing indexed" (#13320).
+
+    ``_vector_indexed_labels`` documents a ``set()`` that also covers a response
+    which came back in a shape nothing could parse. Reading the CONFIRMED-ABSENT
+    verdict off that half is how a report prints "confirmed absent from the
+    post-drop catalogue" over an index that is still there — so this pin drives
+    exactly that shape and requires the unconfirmed arm instead. The behavioural
+    half (``_vector_indexed_labels_for_reads``, #13108) is what the verdict reads.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="vector-reshaped")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert "confirmed absent from the post-drop catalogue" not in caplog.text, (
+        "the sweep claimed a CONFIRMED removal from a catalogue it could not parse")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "an unmeasurable removal was reported silently"
+    assert "NOT CONFIRMED" in warnings[0], (
+        f"the line must say the removal is unconfirmed: {warnings[0]!r}")
+
+
+def test_an_UNREADABLE_catalogue_on_an_armed_store_is_loud(monkeypatch, caplog):
+    """The fourth state: armed, and the catalogue cannot be read at all (#13320).
+
+    The fail-SAFE half (never drop blind) is right and unchanged. The SILENT half
+    was not: the read failure was ``_log.debug``, so on an armed store an
+    operator at INFO could not tell "nothing to drop" from "cannot even look" —
+    the issue's own complaint, one arm over. Latched, because this method runs on
+    the hosted per-request path and the store's state is permanent.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="unreadable")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert not [d for d in graph.drops if "embedding" in d.lower()], (
+        "an unreadable catalogue must never authorise a DROP of the vector "
+        f"index; the sweep issued {graph.drops!r} (the `is_operator` purges the "
+        "full sweep always issues are unrelated and are not what this pins)")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "an armed store whose catalogue could not be read was silent"
+    assert "could not read the index catalogue" in warnings[0], warnings[0]
+
+    # …and it is LATCHED per store: a second sweep in this process says it once.
+    with caplog.at_level(logging.INFO):
+        _bare(graph)._ensure_indexes()
+    assert len(_retirement_warnings(caplog)) == 1, (
+        "the unable-to-retire line is not latched — on the hosted PER-REQUEST "
+        "path that is a per-request warning for the life of the deployment")
+
+
+# ── #13330 rebase lane: the three findings the peer fix left open ────────────
+#
+# The pins above came from the first review of `898c5dde`; these three answer a
+# second review at `b6bfde2ad7`, and each goes RED on the code that review read.
+
+
+class _PostDropReadFailsOnce(_EngineLikeGraph):
+    """Every DROP refused, and the FIRST post-drop catalogue read fails.
+
+    Sequences the two states one latch must tell apart: a sweep whose outcome
+    could not be MEASURED, then the next sweep's CONFIRMED survivor on the same
+    store.
+
+    ⛔ Armed by the RETIREMENT DROP, not by a call count: a setup issues several
+    `CALL db.indexes()` reads before the sweep (`_schema_is_current` probes the
+    catalogue too), so counting reads fails the GATE read instead — a different
+    lane that bails before any DROP and proves nothing.
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="none")
+        self._drop_seen = False
+        self._failed = False
+
+    def query(self, cypher, params=None, timeout=None):
+        low = cypher.lower()
+        if low.startswith("drop") and "embedding" in low:
+            self._drop_seen = True
+        if low.startswith("drop") and "vector index" in low:
+            # ⛔ AMBIGUOUS, not the engine's `no such index` (#13330 review 5):
+            # a definitive refusal proves nothing was written, so the sweep
+            # legitimately reuses the pre-drop rows and this lane never re-reads
+            # — the confirmation read this fixture exists to fail would not
+            # happen. A transport failure may have applied the DDL, so it does.
+            self.calls.append(cypher)
+            raise RuntimeError("connection reset by peer")
+        if "db.indexes()" in low and self._drop_seen and not self._failed:
+            self._failed = True
+            self.calls.append(cypher)
+            raise RuntimeError("catalogue read timed out")
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+class _DropAppliesThenRaises(_EngineLikeGraph):
+    """The server EXECUTES the vector DROP and the connection then fails.
+
+    A transport failure after the DDL ran: the statement raises, so
+    `_dropped_with` stays unset — the case where "nothing returned" is not
+    "nothing happened".
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="none")
+
+    def query(self, cypher, params=None, timeout=None):
+        low = cypher.lower()
+        if low.startswith("drop") and "drop vector index" in low:
+            self.calls.append(cypher)
+            self._drop_row()  # the engine DID drop it
+            raise RuntimeError("connection reset by peer after the DDL ran")
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+class _MixedParsePostDrop(_EngineLikeGraph):
+    """The drop works; the post-drop catalogue holds one parseable row and one
+    the store cannot interpret.
+
+    The first cut counted `parsed_rows` only, so `parsed_rows >= 1` put this in
+    the MEASURED lane even though the row that could have been the `Point` index
+    was the unreadable one — a false PASS in the one place this change exists to
+    remove.
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="vector")
+
+    def _drop_row(self):
+        self._rows = [
+            _catalogue_row("Object", "embedding", "VECTOR"),
+            ("Point", ["embedding"], "a reshaped cell", 0, 0, 0, "NODE",
+             "OPERATIONAL", ""),
+        ]
+
+
+class _PostDropEntryStringy(_EngineLikeGraph):
+    """The post-drop catalogue reports the SAME index with a stringified cell.
+
+    `{"embedding": "VECTOR"}` — the shape `index_catalogue` warns an engine may
+    emit — is a `types` MAPPING, so the row counted as fully parsed while its
+    entry contributed nothing: `_vector_index_props` came out as `{}` and the
+    report printed `confirmed absent` over a row that says VECTOR (#13330
+    review 3, P1). An uninterpretable ENTRY is an unparsed row.
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="vector")
+
+    def _drop_row(self):
+        self._rows = [("Point", ["embedding"], {"embedding": "VECTOR"},
+                       0, 0, 0, "NODE", "OPERATIONAL", "")]
+
+
+class _PartiallyUnreadableGate(_EngineLikeGraph):
+    """The GATE read holds one parseable row (a foreign label) and one it cannot
+    interpret.
+
+    Nothing arms, nothing is dropped (correct), and `_vector_index_props` is
+    withheld — which used to reach no reader at all, because the report block
+    required the index to have been FOUND (#13330 review 3, P1).
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="vector")
+        self._rows = [
+            _catalogue_row("Object", "embedding", "VECTOR"),
+            ("Point", ["embedding"], "a reshaped cell", 0, 0, 0, "NODE",
+             "OPERATIONAL", ""),
+        ]
+
+
+def test_an_UNCONFIRMED_sweep_does_not_swallow_the_CONFIRMED_survivor(
+        monkeypatch, caplog):
+    """A NOT-MEASURED sweep must not consume the latch for a MEASURED one.
+
+    The latch was a single key per store, added before the outcome was known, so
+    a sweep that could not read the catalogue silenced the CONFIRMED survivor
+    that followed it — on the same store, for the life of the process. That is
+    the "a survivor is never silent" half of this work failing on a two-sweep
+    sequence (review P1). Distinct KINDS, each reported once, is the fix.
+    """
+    _arm(monkeypatch)
+    graph = _PostDropReadFailsOnce()
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+        unconfirmed = _retirement_warnings(caplog)
+        caplog.clear()
+        proj._ensure_indexes()
+        confirmed = _retirement_warnings(caplog)
+
+    assert unconfirmed, (
+        "a sweep whose post-drop catalogue read FAILED said nothing — the "
+        "operator cannot tell it apart from a clean store")
+    assert "NOT CONFIRMED removed" in " ".join(unconfirmed), (
+        f"the not-measured lane must say so: {unconfirmed!r}")
+    assert "SURVIVED" not in " ".join(unconfirmed), (
+        "the line claims the index SURVIVED while also saying nothing measured "
+        f"it: {unconfirmed!r}")
+
+    assert confirmed, (
+        "the CONFIRMED survivor that followed an UNCONFIRMED sweep was silent — "
+        "the unmeasured sweep spent the latch, so the store that really does keep "
+        f"its index is never reported (records: "
+        f"{[(r.levelname, r.getMessage()[:60]) for r in caplog.records]})")
+    assert "SURVIVED" in " ".join(confirmed), (
+        f"the measured survivor line must say SURVIVED: {confirmed!r}")
+
+
+def test_a_foreign_Point_vector_index_neither_arms_the_sweep_nor_is_reported(
+        monkeypatch, caplog):
+    """The retirement targets `Point.embedding`, so the gate must ask for it.
+
+    A label-grained gate armed on ANY `Point` VECTOR index: a store whose vector
+    index sits on a different property got three refused DDLs on every setup —
+    the #4465 repeated-bootstrap defect — and then a warning naming a
+    `Point.embedding` index that never existed.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="vector")
+    graph._rows = [_catalogue_row("Point", "some_other_prop", "VECTOR")]
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+
+    # ⛔ Scoped to the retirement's candidates: the schema sync issues its own
+    # DROP/`CREATE` for `is_operator`, so `graph.drops` is not the sweep's alone.
+    retirement_drops = [d for d in graph.drops if "embedding" in d.lower()]
+    assert retirement_drops == [], (
+        "the gate armed on a VECTOR index over a DIFFERENT property and issued "
+        f"{retirement_drops!r} — refused DDL on the setup path of a healthy store")
+    assert not _retirement_warnings(caplog), (
+        "a store with no `Point.embedding` index was reported as a survivor: "
+        f"{_retirement_warnings(caplog)}")
+
+
+def test_a_DROP_that_RAISES_after_applying_is_MEASURED_not_assumed(
+        monkeypatch, caplog):
+    """A DROP that raised may still have run — so its rows are not reusable.
+
+    `_dropped_with` is set only by a statement that RETURNED. Reading "no
+    statement returned" as "nothing wrote" handed the inventory the PRE-drop
+    rows (#5434's stale-row rule), so a real removal was reported as `every
+    candidate DROP was refused`.
+    """
+    _arm(monkeypatch)
+    graph = _DropAppliesThenRaises()
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+
+    assert proj._vector_index_props == {}, (
+        "the sweep published a catalogue read from BEFORE a DROP that may have "
+        f"applied — the measurement is stale: {proj._vector_index_props!r}")
+    assert not _retirement_warnings(caplog), (
+        "the index WAS removed, but the sweep reported a survivor on stale "
+        f"rows: {_retirement_warnings(caplog)}")
+    # ⛔ #13330 review P3: `_wrote_index` is an ATTEMPT here, so this arm is
+    # reachable with NO statement having RETURNED. The line's whole purpose is
+    # that an operator need not reconstruct what happened, so it must not print
+    # `with None` — and it must name the state it is actually in.
+    dropped = [r.getMessage() for r in caplog.records
+               if r.levelno == logging.INFO
+               and "dropped the in-graph" in r.getMessage()]
+    assert dropped, (
+        "the removal this lane measured was not reported — the operator has no "
+        "artifact for what the sweep did")
+    assert "with None" not in dropped[0], (
+        f"the removal line credits the drop to `None`: {dropped[0]!r}")
+    assert "raised after the DDL had run" in dropped[0], (
+        "the line must say the statement never RETURNED while the DDL applied — "
+        f"that is exactly what this lane measures: {dropped[0]!r}")
+
+
+def test_a_successful_removal_beside_a_FOREIGN_vector_index_is_not_a_survivor(
+        monkeypatch, caplog):
+    """The verdict is a claim about `Point.embedding`, not about `Point`.
+
+    #13330 review P3: only the GATE half of the property grain was pinned. A
+    verdict that treats ANY `Point` VECTOR index as the embedding one passes
+    every other pin — and then a store whose `Point.embedding` index was
+    successfully removed, while a second `Point` VECTOR index sits on another
+    property, is reported as a SURVIVOR: the operator is told arming did not take
+    effect about the sweep that did exactly its job.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="foreign-prop")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+
+    # The premise, asserted rather than assumed: only `embedding` went.
+    remaining = [str(r[2]) for r in graph._rows if str(r[0]) == "Point"]
+    assert remaining and all("embedding" not in cell for cell in remaining), (
+        "this pin needs the sweep to have removed `Point.embedding` and left the "
+        f"foreign VECTOR index alone; catalogue now: {remaining!r}")
+    assert any("other_prop" in cell for cell in remaining), (
+        "the foreign index vanished from the fake, so nothing is left that a "
+        f"label-grained verdict could mistake for the embedding one: {remaining!r}")
+
+    assert not _retirement_warnings(caplog), (
+        "a successful removal beside a FOREIGN `Point` VECTOR index was reported "
+        f"as a survivor: {_retirement_warnings(caplog)}")
+    assert "confirmed absent from the post-drop catalogue" in caplog.text, (
+        "the removal was not reported as MEASURED — the verdict read the label "
+        "instead of the property")
+
+
+def test_a_row_that_did_not_parse_withholds_the_confirmed_absence(
+        monkeypatch, caplog):
+    """`parsed_rows >= 1` is not enough to claim the index is gone.
+
+    With one parseable row beside one the store cannot interpret, the old lane
+    said "confirmed absent from the post-drop catalogue" — over a catalogue whose
+    UNREADABLE row may be the `Point` index. Fail-closed: UNCONFIRMED.
+    """
+    _arm(monkeypatch)
+    graph = _MixedParsePostDrop()
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+
+    infos = [r.getMessage() for r in caplog.records
+             if r.levelno == logging.INFO and "confirmed absent" in r.getMessage()]
+    assert not infos, (
+        "the sweep claimed a CONFIRMED removal from a catalogue holding a row it "
+        f"could not parse: {infos}")
+    assert _retirement_warnings(caplog), (
+        "the unconfirmable removal was silent — a reshape this store cannot read "
+        "must be reported, not assumed absent")
+    # ⛔ #13330 review P3: the sweep may well have DROPPED the index here, so the
+    # line must not assert an arming outcome nothing measured.
+    joined = " ".join(_retirement_warnings(caplog))
+    assert "did NOT take effect" not in joined, (
+        "this sweep may have removed the index; whether arming took effect is NOT "
+        f"measured here and must not be asserted: {joined!r}")
+    assert "NOT measured by this sweep" in joined, (
+        f"the line must say what it does not know: {joined!r}")
+
+
+def test_an_ANSWERED_but_unparseable_catalogue_is_not_a_measurement_of_absence(
+        monkeypatch, caplog):
+    """The fourth state's other half (#13330 review P2).
+
+    A catalogue that ANSWERS with rows of which none parse is UNREADABLE, not
+    empty. The gate used to fall through to "no vector index here": no DROP
+    (right) but no line either, so "cannot read it" and "there is none" were
+    indistinguishable on exactly the armed store this issue is about.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="pre-reshaped")
+    proj = _bare(graph, graph="test_13320_answered_unparseable")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert not [d for d in graph.drops if "embedding" in d.lower()], (
+        f"an unparseable catalogue must not authorise a blind DROP: {graph.drops!r}")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, (
+        "an armed store whose catalogue answered but could not be parsed was "
+        "silent — 'cannot read it' and 'there is none' are indistinguishable")
+    # ⛔ ONE line (#13330 review 7): the PARTIALLY-readable arm must not also fire
+    # here and claim "some rows were readable" when none were.
+    assert len(warnings) == 1, (
+        f"one unreadable catalogue produced {len(warnings)} #13320 lines: {warnings}")
+    assert "could not be fully parsed" not in warnings[0], (
+        f"the line misdescribes the cause as a partial read: {warnings[0]!r}")
+    assert "could not read the index catalogue" in warnings[0], warnings[0]
+    assert "not one of them parsed" in warnings[0], (
+        f"the line must say the catalogue ANSWERED and could not be parsed: "
+        f"{warnings[0]!r}")
+
+
+def test_an_unparseable_post_drop_read_names_the_right_cause(monkeypatch, caplog):
+    """`NOT CONFIRMED` must not fabricate `the read FAILED` (#13330 review P2).
+
+    A catalogue that answered in an unparseable shape is an engine/catalogue-shape
+    story; a raising read is a connectivity/auth story, and the operator's next
+    action differs. The distinguishing datum (`_vector_index_served_labels`) is
+    already on the object.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="vector-reshaped")
+    proj = _bare(graph, graph="test_13320_cause_wording")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "an unconfirmable removal was silent"
+    line = warnings[0]
+    assert "could not parse" in line, (
+        f"the line must name the catalogue-shape cause: {line!r}")
+    assert "read FAILED" not in line, (
+        f"the read did not fail — it answered unparseably: {line!r}")
+
+
+def test_a_lane_that_cannot_measure_clears_the_previous_verdict():
+    """A measurement describes THIS read, not the last one (#13330 review).
+
+    `_record_vector_index_inventory` returns early on an embedded store and on a
+    <4.x engine. Without clearing first, the property-level verdict keeps the
+    PREVIOUS setup's answer, and a stale "absent" is exactly what lets the
+    retirement sweep report a removal it did not measure — the one claim this
+    change exists to make honest. Found by mutation-testing this work's own
+    commits: the clear was unpinned and the mutant survived, so the pin is here
+    rather than the defensiveness shipped unproven.
+    """
+    proj = _bare(_EngineLikeGraph())
+    proj._vector_index_props = {"Point": frozenset({"embedding"})}
+    proj._is_embedded = True
+    proj._record_vector_index_inventory()
+    assert proj._vector_index_props is None, (
+        "an embedded store skipped the measurement and kept a PREVIOUS verdict: "
+        f"{proj._vector_index_props!r}")
+
+    proj = _bare(_EngineLikeGraph())
+    proj._vector_index_props = {"Point": frozenset({"embedding"})}
+    proj._falkordb_version = (3, 99, 0)
+    proj._record_vector_index_inventory()
+    assert proj._vector_index_props is None, (
+        "a <4.x engine skipped the measurement and kept a PREVIOUS verdict: "
+        f"{proj._vector_index_props!r}")
+
+
+def test_a_stringified_types_ENTRY_is_not_a_measurement_of_absence(
+        monkeypatch, caplog):
+    """An uninterpretable ENTRY is an unparsed row (#13330 review 3, P1).
+
+    `{"embedding": "VECTOR"}` is a `types` mapping, so the row counted as parsed
+    while its entry was skipped silently: `_vector_index_props` published `{}` and
+    the report printed `confirmed absent` over a catalogue row that says VECTOR.
+    The third shape of the same false PASS — after a non-dict cell and after
+    "rows returned, none parsed".
+    """
+    _arm(monkeypatch)
+    graph = _PostDropEntryStringy()
+    proj = _bare(graph, graph="test_13320_stringy_entry")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    infos = [r.getMessage() for r in caplog.records
+             if r.levelno == logging.INFO and "confirmed absent" in r.getMessage()]
+    assert not infos, (
+        "the sweep claimed a CONFIRMED removal over a catalogue row reporting "
+        f"the index with a stringified cell: {infos}")
+    assert _retirement_warnings(caplog), (
+        "an unmeasurable removal was silent: the entry did not parse, so the "
+        "index's state is NOT MEASURED")
+
+
+def test_a_PARTIALLY_unreadable_catalogue_speaks(monkeypatch, caplog):
+    """Nothing armed, nothing dropped — and the sweep must still SAY it could not verify.
+
+    The inventory deliberately withholds `_vector_index_props` when ANY row fails
+    to parse (fail-closed), but the report block required `_has_vector_index`, so
+    the withheld verdict reached no reader (#13330 review 3, P1).
+    """
+    _arm(monkeypatch)
+    graph = _PartiallyUnreadableGate()
+    proj = _bare(graph, graph="test_13320_partial")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    assert proj._vector_index_props is None, (
+        "the fixture must withhold the property half (a row did not parse): "
+        f"{proj._vector_index_props!r}")
+    assert not [d for d in graph.drops if "embedding" in d.lower()], (
+        f"nothing may be dropped blind: {graph.drops!r}")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, (
+        "a partially unreadable catalogue left the retirement UNVERIFIED and "
+        "silent — the withheld verdict reached no reader")
+    assert "could not be fully parsed" in warnings[0], warnings[0]
+    assert "did NOT take effect" not in warnings[0], warnings[0]
+
+
+class _NoneCatalogue(_EngineLikeGraph):
+    """`CALL db.indexes()` answers with NO row list (`result_set is None`).
+
+    A pinned, supported input shape (`_record_vector_index_inventory` documents it
+    as NOT MEASURED; `tests/test_4997_vector_index_parity.py`'s
+    `_NoneCatalogueGraph` drives it). The gate read used to treat it as "no vector
+    index here", so an armed store got no DROP — correct — and no line above a
+    DEBUG nobody reads: the silence #13320 was filed on, one input shape over.
+    """
+
+    def query(self, cypher, params=None, timeout=None):
+        if "db.indexes()" in cypher.lower():
+            self.calls.append(cypher)
+            return _Result(None)
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+def test_an_ANSWERED_None_catalogue_is_not_read_as_no_index(monkeypatch, caplog):
+    """An empty RESPONSE is not an empty CATALOGUE (#13330 review P2)."""
+    _arm(monkeypatch)
+    graph = _NoneCatalogue()
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+
+    assert not [d for d in graph.drops if "embedding" in d.lower()], (
+        "a DROP was issued blind against a catalogue that answered nothing")
+    warnings = _retirement_warnings(caplog)
+    assert warnings, (
+        "an ARMED store whose catalogue answered with no row list was silent above "
+        "DEBUG — 'cannot read it' and 'there is none' are indistinguishable "
+        f"(records: {[(r.levelname, r.getMessage()[:70]) for r in caplog.records]})")
+    joined = " ".join(warnings)
+    assert "could not read the index catalogue" in joined, (
+        f"the unreadable arm must report it: {joined!r}")
+    assert "NO row list" in joined, f"the line must name the shape it saw: {joined!r}"
+    assert "cannot say whether arming took effect" in joined, (
+        f"the unreadable arm must not claim an outcome it cannot measure: {joined!r}")
+
+
+def test_a_DEFINITIVE_refusal_does_not_cost_an_extra_catalogue_read(
+        monkeypatch, caplog):
+    """An engine's `no such index` proves nothing was written (#13330 review 5, P2).
+
+    Counting a definitive refusal as a possible write made the permanent SURVIVOR
+    store — the state that warns on every setup of the hosted per-request path —
+    pay an extra catalogue read for DROPs the engine had already told it could not
+    have written. An AMBIGUOUS failure (a transport error after the server may
+    have executed the DDL) must still force the confirmation read; this pin holds
+    both directions.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="none")
+    proj = _bare(graph, graph="test_13320_refusal_cost")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    reads = [c for c in graph.calls if "db.indexes()" in c.lower()]
+    assert len(reads) == 2, (
+        "the survivor store paid an extra catalogue read for DROPs the engine "
+        f"definitively refused: {len(reads)} reads, calls={graph.calls!r}")
+
+    # …and the AMBIGUOUS failure still re-reads (the lane the rule exists for).
+    caplog.clear()
+    ambiguous = _EngineLikeGraph(drop_accepts="none")
+
+    class _Transport:
+        def __init__(self, inner):
+            self._inner = inner
+            self.calls = inner.calls
+
+        def query(self, cypher, params=None, timeout=None):
+            if cypher.lower().startswith("drop") and "vector index" in cypher.lower():
+                self.calls.append(cypher)
+                raise RuntimeError("connection reset by peer")
+            return self._inner.query(cypher, params=params, timeout=timeout)
+
+    t = _Transport(ambiguous)
+    _bare(t, graph="test_13320_refusal_cost_ambiguous")._ensure_indexes()
+    reads2 = [c for c in t.calls if "db.indexes()" in c.lower()]
+    assert len(reads2) == 3, (
+        "an AMBIGUOUS drop failure must still force the confirmation read: "
+        f"{len(reads2)} reads, calls={t.calls!r}")
+
+
+def test_a_REUSED_pre_drop_read_is_reported_as_the_MEASUREMENT_it_is(
+        monkeypatch, caplog):
+    """No write ⇒ the gate's reading stands; do not call it "nothing measured" (#13330 review 7).
+
+    When every candidate DROP is DEFINITIVELY refused, the inventory reuses the
+    gate's pre-drop rows — there is no post-drop read. If an unrelated row in that
+    reuse failed to parse, `_vector_index_props` is withheld and the sweep
+    reported "was NOT CONFIRMED removed: the post-drop catalogue answered in a
+    shape this store could not parse" — naming a read that never happened, and
+    demoting the SURVIVED measurement it DID take (that measurement is why the
+    gate fired at all).
+    """
+    _arm(monkeypatch)
+    graph = _RefusedWithUnparsedNeighbour()
+    proj = _bare(graph, graph="test_13320_reused_rows")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "the survivor was silent"
+    line = warnings[0]
+    assert "SURVIVED" in line, (
+        f"a measured survivor was reported as unmeasured: {line!r}")
+    assert "post-drop" not in line, (
+        f"there was no post-drop read — the rows were the gate's: {line!r}")
+    # ⛔ AND THE DISCLOSURE ITSELF IS PINNED, not only the absence of the wrong
+    # word (#13330 post-merge review, P3): without these two the whole
+    # `_read_noun` selection can be flattened to a bare "the catalogue" and the
+    # claim this pin exists for — that the line names the evidence it rests on —
+    # silently disappears while the test stays green.
+    assert "read before the sweep" in line, (
+        f"the line no longer names WHICH read it refers to: {line!r}")
+    assert "no DROP reported itself applied" in line, (
+        f"the line asserts an outcome instead of the observation: {line!r}")

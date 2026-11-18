@@ -1,7 +1,7 @@
 // PGlite harness — validate Supabase control-plane migrations + SQL assertion
 // suites WITHOUT Docker (issue #770). Supabase-local bootstrap (roles,
 // default privileges, auth schema with auth.uid()/auth.jwt() GUC shims),
-// applies EVERY migration in supabase/migrations (filename order), then runs ALL assertion suites
+// applies EVERY migration in supabase/migrations (version order), then runs ALL assertion suites
 // (0006–0009 from #769, 0010 from #770, 2026 token suites, 20260827000001 blog CMS) with ON_ERROR_STOP semantics.
 //
 // Run:   npm install   (once, in this directory)
@@ -178,14 +178,31 @@ await db.exec(`
 // Real deployments hit the same path; the end state is the single 4-arg
 // function. Drop the stale 3-arg overload before applying so the harness
 // mirrors that end state exactly.
-// ENUMERATED FROM DISK, filename order — Supabase's own migration order.
+// ENUMERATED FROM DISK, in the APPLIER'S order — the VERSION substring compared
+// as a string. (A name that does not match `^([0-9]+)_` falls back to the whole
+// filename below, which is unreachable for an APPLIED migration: the CLI skips
+// those, so they never hold a definition — the fallback only keeps the sort total.)
+// `supabase db push` re-sorts local paths
+// by the version before applying (`sortMigrationPathsByVersion` in
+// `apps/cli/src/command-internal/migration-history.ts`, v2.122.1), so the replay
+// below should use its key. The two orders agree UNLESS one version is a proper
+// PREFIX of another (`2026111700_…` vs `20261117000003_…`: `'0'` < `'_'` sorts
+// the older name last by filename, while the version compare puts the longer one
+// last) — unequal WIDTH alone is not enough, and this tree has 72 fourteen-digit
+// and 16 four-digit prefixes yet no prefix pair, so both orders are identical
+// here today: this is a guard against a permitted shape, not a repair of today's
+// replay. (`check-migration-append-only` accepts ANY digit count, so the shape
+// is reachable by a future correction.)
 // A hand-pinned array is what silently drifted: at #3543 it listed 31 of the
 // 38 migrations on disk, so 20260817000001 / 20260829000001 / 20260830000001 /
 // 20260907000001 / 2026090900000{1,2,3} were never applied by the harness,
 // and a migration added later would be silently uncovered again. Enumerating
 // the directory makes "every migration on disk is applied" a structural
 // property — a new migration cannot ship uncovered.
-const files = readdirSync(MIG_DIR).filter((f) => f.endsWith('.sql')).sort();
+const versionOf = (f) => (f.match(/^([0-9]+)_/) || [, f])[1];
+const files = readdirSync(MIG_DIR)
+  .filter((f) => f.endsWith('.sql'))
+  .sort((a, b) => (versionOf(a) < versionOf(b) ? -1 : versionOf(a) > versionOf(b) ? 1 : 0));
 
 // ── Extensions PGlite does not ship ─────────────────────────────────────────
 // ⛔ A MIGRATION THAT NEEDS ONE CANNOT BE APPLIED HERE, AND SAYING SO IS THE
@@ -3363,12 +3380,18 @@ try {
   // ⛔ THE PRE-STATE MUST BE A DISTINCT INSTANT, or the `measured_at` assertion
   // below cannot vary. MEASURED (this lane): with the row left at the previous
   // refresh's stamp, DELETING `measured_at = v_at` from the zeroing `UPDATE` left
-  // the suite GREEN — both refreshes land inside the SAME millisecond and
-  // `Date.parse` compares at ms resolution, so the carried-over stamp equalled
-  // this refresh's `captured_at` by coincidence and the assertion could never
-  // fire. Pinning the pre-state two hours back makes a carried-over stamp
-  // detectable at ANY clock resolution, and it is the truthful description of the
-  // state being fixed: the org's figure is as old as its last real measurement.
+  // the suite GREEN — the carried-over stamp equalled this refresh's
+  // `captured_at` by coincidence and the assertion could never fire. ⛔ And the
+  // coincidence is COARSER than it looks: `Date.parse` on the `Date` objects
+  // pglite returns coerces through `toString`, which drops milliseconds, so these
+  // comparisons resolve at ONE SECOND, not one millisecond (MEASURED:
+  // `Date.parse(d)` 1794951920000 against `d.getTime()` 1794951920912 — the
+  // truncation discards up to 999 ms, so two stamps INSIDE THE SAME SECOND
+  // compare EQUAL, and the pair quoted here happens to be 912 ms apart). Pinning
+  // the pre-state two hours back makes a carried-over stamp detectable at ANY
+  // clock resolution — at second resolution two refreshes inside the same second
+  // are simply indistinguishable — and it is the truthful description of the state
+  // being fixed: the org's figure is as old as its last real measurement.
   await db.exec(`UPDATE public.org_postgres_residency
      SET measured_at = pg_catalog.now() - interval '2 hours'
      WHERE org_id = '9559-gauge-b'`);

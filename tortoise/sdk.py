@@ -302,6 +302,15 @@ try:
 except Exception:  # observability never denies a usable graph
     _note_local_cache = None
 
+# #12943 (reopened): the TENANT/CACHE-GRAPH grading half, imported under the same
+# guard and for the same reason (`_bind_record_tenant` is on the hosted write
+# path, and a broken observability seam must not refuse a request that could be
+# served).
+try:
+    from .cache_leg import note_tenant_graph as _note_tenant_graph
+except Exception:  # observability never denies a usable graph
+    _note_tenant_graph = None
+
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
 register_kind("checkpoint-item")
@@ -12357,6 +12366,23 @@ def canonical_org_graph_name(tenant: str) -> str:
     return f"org_{bare_tenant_id(tenant)}"
 
 
+def _uri_graph_name(db_uri: str | None) -> str | None:
+    """The URI's own graph name, or ``None`` for an embedded construction.
+
+    The `urlparse(...).path.lstrip("/") or "tortoise"` step had THREE verbatim
+    copies in this module (`_get_proj`, `_graph_census`'s read, and
+    `_cache_graph_name`) — and `_derive_graph_name`'s own docstring exists
+    because a caller that names a graph outside a projection must derive it
+    IDENTICALLY. A drift in this step makes a caller compare against a name the
+    projection never opens (a false mismatch, or a missed one), so it is one
+    function now, used by all three.
+    """
+    if db_uri is None:
+        return None
+    from urllib.parse import urlparse
+    return urlparse(db_uri).path.lstrip("/") or "tortoise"
+
+
 def _derive_graph_name(*, namespace: str | None,
                        graph_name: str | None,
                        uri_graph: str | None = None) -> str:
@@ -15174,10 +15200,7 @@ class TortoiseSDK:
             # Resolve the URI's own graph name first (used as the fallback
             # when no namespace is set — preserves the conftest per-session
             # test graph, #221).
-            uri_graph: str | None = None
-            if self._db_uri is not None:
-                from urllib.parse import urlparse
-                uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
+            uri_graph = _uri_graph_name(self._db_uri)
 
             graph_name = _derive_graph_name(
                 namespace=self._namespace, graph_name=self._graph_name,
@@ -16187,6 +16210,34 @@ class TortoiseSDK:
                 f"(got {org_id!r}, {graph_id!r})"
             )
         self._record_tenant = (org_id, graph_id)
+        # #12943 (reopened): the tenant and the CACHE graph are two answers, and
+        # until this line nothing compared them. The hosted REST lane takes both
+        # from one credential, so they cannot drift THERE — but this method is
+        # also the seam any other lane binds through (a script, a maintenance
+        # job, a future door), and a tenant that names a graph this SDK does not
+        # fold into files the record row under one graph and the cache node in
+        # another: the write lands, `record-reconcile` reports the whole tenant
+        # missing, and every counter reads healthy (the measured shape of the
+        # issue's 8 objects / 0 nodes). Graded HERE, at the binding, because
+        # this is the moment both values exist — see
+        # `tortoise.cache_leg.tenant_graph_reason` for the three shapes it
+        # deliberately does NOT grade and why silence is the right answer there.
+        # Cheap: a name derivation that opens nothing (no projection, no
+        # socket) plus one regex on the name.
+        if _note_tenant_graph is not None:
+            _note_tenant_graph(cache_graph=self._cache_graph_name(),
+                               org_id=org_id, graph_id=graph_id)
+
+    def _cache_graph_name(self) -> str:
+        """The cache graph this SDK WILL fold into — derived, never opened.
+
+        The projection's own derivation (`_derive_graph_name`), so a caller can
+        name the graph without paying a connect, a version probe or an index
+        check. Used by `_bind_record_tenant`'s tenant/cache grading (#12943).
+        """
+        return _derive_graph_name(namespace=self._namespace,
+                                  graph_name=self._graph_name,
+                                  uri_graph=_uri_graph_name(self._db_uri))
 
     def _record_write_failure(self, reason: str, exc: BaseException) -> None:
         """Count and report one armed record write that did not happen (#9188).
@@ -23186,10 +23237,10 @@ class TortoiseSDK:
         # silently MISSING from the index-served Point dense leg (#8429) — the
         # write seam exists so a server-owned vector is always the typed,
         # indexable shape. (#8316 has since normalised a right-width `List` at
-        # the READ boundary, so the "expected Null or Vectorf32 but was List"
-        # abort this comment used to cite no longer happens for the right-width
-        # case; a wrong-width or non-numeric value still aborts the MATCH —
-        # #8430.) That is the #4521 class on the LIVE path
+        # the READ boundary, and #8430 drops a stored value the read cannot
+        # consume — a wrong width or a non-numeric value — instead of aborting
+        # the whole MATCH; a wrong-width TYPED row is its declared residual.)
+        # That is the #4521 class on the LIVE path
         # (#4521 / PR #7740 fixed only the replay's `_revise_point`). The
         # derived vector is SERVER-owned, so it is cast and CLEARED first,
         # exactly like `_revise_point`: `vecf32()` alone is not enough,
@@ -44539,6 +44590,16 @@ class TortoiseSDK:
         # ``exclude_status``. Default None = byte-identical to pre-#4509.
         exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
+        # #13302: the ENDED SCOPE — the read whose QUESTION is "what ended, and
+        # how?". Default False = byte-identical (every existing caller keeps the
+        # current-picture read it has). When True the population is the OTHER
+        # half of the one determinant (design §6): the records
+        # ``live._terminal_expression`` treats as ended, served with the ending
+        # the record itself carries (its lifecycle word, the successor it names,
+        # its terminal stage + outcome) and the time it ended. See
+        # ``tortoise/ended.py`` — no new state, no visibility field, no second
+        # vocabulary, and no per-call guess about which knob a surface accepts.
+        ended_scope: bool = False,
         _elevated_timeout_ms: int | None = None,
         # #7953 (§17.3): PRIVATE — the residency COORDINATE a NODE-naming read
         # asked about, as ``label:key`` (``cache_projection.declared_key``).
@@ -44702,6 +44763,46 @@ class TortoiseSDK:
         True to surface them (audit/history queries); a prior/resolution leg
         that must still SEE a terminal node (link-before-create, anchor
         resolution) opts in here too.
+
+        ended_scope (#13302): the OTHER question — default False, and the whole
+        current-picture read above is unchanged. `include_terminal` answers "the
+        same read, without the currency filter", which still needs a query that
+        MATCHES; this answers "what has ENDED", which is a question about STATE
+        and cannot be asked of a text match at all (a customer's
+        "has anything we relied on been withdrawn?" shares no word with
+        "the beach club confirmed our booking"). When True the population is the
+        records `live._terminal_expression` treats as ended — the SAME shared
+        predictor every read filters on, taken in the positive direction, so no
+        status set, slot literal or per-family deny-list lives here — served
+        newest ending first, each row carrying the ending the record itself
+        holds: its lifecycle `status` (``deprecated`` = nothing replaced it,
+        ``superseded`` = see `successorId`), the `stage` block (`slot` +
+        `outcome`) for a record ended on the POSITION axis, and `endedAt`.
+        `linkedEvents` carries the events wired to the record, which is what
+        makes "planned and never happened" answerable without knowing a kind's
+        stage names: a plan is ``stage.slot == "terminal"`` with an empty
+        `linkedEvents`.
+        ⛔ A `query` beside it is REFUSED, not ignored: a state enumeration that
+        silently dropped the caller's words would serve a whole population as if
+        it were their answer. The refusal is a CLOSED LIST, and it names EVERY
+        retrieval keyword the normal path uses to shrink, expand, re-rank,
+        re-weight, time-scope or enrich the row set: `query`, `threshold`,
+        `min_confidence`, `order_by`, `relationship_filter`, `traversal_path`,
+        `claim_class`, `exclude_status`, `exclude_turn_echo_session`, `graph_ranker`,
+        `structural_kind`, `structural_hops`, `pool_size`, `fusion_weights`,
+        `fusion_k`, `recency_field`, `recency_boost`, `query_date`, `time_aware`,
+        `keep_numeric`, `search_keys_prf`, `entity_key_expansion` and `w4_enrich`
+        (`exclude_turn_echo_session` would have returned rows the caller asked to
+        exclude, in silence — the failure the sentence above cites). A new
+        retrieval keyword must be classified in that list, because the list IS the
+        contract. `include_terminal` is the one keyword accepted beside it and it
+        is a NO-OP here rather than a drop: the ended population is already the
+        terminal one, so that flag can neither add nor remove a row. `entity_type`
+        (point/object/subject — the kinds with a lifecycle), `kind` and `limit`
+        scope and bound it.
+        `ended_scope` is not a visibility field on the record and adds no word
+        to the model: it is design §6's "option on the call", and the default
+        keeps every existing surface answering exactly what it answered before.
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -44953,6 +45054,77 @@ class TortoiseSDK:
                 f"'operator'), or omit claim_class — ignoring it here would "
                 f"return the rows the caller asked to exclude."
             )
+        # #13302: an ENDED-SCOPE read is the STATE population, not a match set, so
+        # every retrieval knob beside it is REFUSED rather than dropped. A silent
+        # drop is the defect class this file names repeatedly ("a keyword the
+        # chosen arm cannot RECORD is refused, never dropped"): a caller who
+        # passed a query and got the whole ended population back would read a
+        # state enumeration as an answer to their question, and a caller who
+        # passed ``min_confidence`` and got rows below it would never learn the
+        # floor was not applied. ``limit`` (the page bound), ``entity_type`` and
+        # ``kind`` (the population's scope) DO apply and stay served.
+        #
+        # ⛔ THE REFUSED SET IS CLOSED AND EVERY MEMBER IS NAMED BELOW. A knob that
+        # is not named here is NOT reached by this arm either, so it may only be
+        # admitted when dropping it cannot change which rows a caller receives. A
+        # knob the normal path uses to SHRINK, EXPAND, RE-RANK, RE-WEIGHT, TIME-SCOPE
+        # or ENRICH the row set is refused: silently dropping it serves a state
+        # population as if the caller's scope had been applied, which is the
+        # failure the comment above cites for ``query``. That is why the whole
+        # retrieval vocabulary is here and not just the eight filters first
+        # listed (#13416 review F4: ``structural_hops``/``structural_kind``/
+        # ``graph_ranker``/``pool_size``/``fusion_*``/``recency_*``/``query_date``/
+        # ``time_aware``/``keep_numeric``/``search_keys_prf``/
+        # ``entity_key_expansion``/``w4_enrich`` were dropped in silence).
+        # ⛔ ``include_terminal`` is deliberately NOT refused and is the ONE
+        # exception, by construction rather than by omission: the ended population
+        # is already the terminal one, so the flag can neither add nor remove a
+        # row here — refusing it would refuse a caller for asking for what they
+        # are getting. ``limit``, ``entity_type`` and ``kind`` scope and bound the
+        # read and stay served; the sink/plumbing keywords (``leg_trace``,
+        # ``read_status_out``, ``_truncation_out``, ``_elevated_timeout_ms``) are
+        # how the caller receives or times the answer, not what it contains.
+        if ended_scope:
+            _refused_ended = sorted(
+                name for name, _supplied in (
+                    ("query", query is not None),
+                    ("threshold", threshold not in (0.0, 0)),
+                    ("min_confidence", min_confidence not in (0.0, 0)),
+                    ("order_by", order_by != "relevance"),
+                    ("relationship_filter", relationship_filter is not None),
+                    ("traversal_path", traversal_path is not None),
+                    ("claim_class", claim_class is not None),
+                    ("exclude_status", bool(exclude_status)),
+                    ("exclude_turn_echo_session",
+                     exclude_turn_echo_session is not None),
+                    ("graph_ranker", graph_ranker is not None),
+                    ("structural_kind", structural_kind is not None),
+                    ("structural_hops", structural_hops not in (0, None)),
+                    ("pool_size", pool_size is not None),
+                    ("fusion_weights", fusion_weights is not None),
+                    ("fusion_k", fusion_k != 60),
+                    ("recency_field", recency_field is not None),
+                    ("recency_boost", recency_boost not in (0.0, 0)),
+                    ("query_date", query_date is not None),
+                    ("time_aware", bool(time_aware)),
+                    ("keep_numeric", bool(keep_numeric)),
+                    ("search_keys_prf", bool(search_keys_prf)),
+                    ("entity_key_expansion", bool(entity_key_expansion)),
+                    ("w4_enrich", w4_enrich is not True),
+                ) if _supplied
+            )
+            if _refused_ended:
+                raise ValueError(
+                    f"ended_scope is a STATE enumeration, not a relevance read, "
+                    f"so it cannot apply {', '.join(_refused_ended)}. It answers "
+                    f"\"what ended, and how\" from the records' own state: omit "
+                    f"{', '.join(_refused_ended)} and read the returned rows' "
+                    f"`status` / `successorId` / `stage` (with its `slot` and "
+                    f"`outcome`) / `endedAt`. Narrow the population with "
+                    f"entity_type= and kind=, and bound the page with limit=; "
+                    f"for a relevance read of what is still CURRENT, drop "
+                    f"ended_scope and search as before."
+                )
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
             annotate_ep_batch, get_relationships_bounded,
@@ -45306,6 +45478,35 @@ class TortoiseSDK:
         # #11679: the KIND FILTER below feeds `n.{kind_field} IN [...]`, so it
         # takes the read-filter set (descendants, never ancestors).
         expanded_kinds = self._read_filter_kinds(kind) if kind else None
+
+        # ── #13302: the ENDED SCOPE is served HERE ────────────────────────────
+        # Placed after the projection is obtained and its reachability proven
+        # (so `_with_read_status` records a status the store actually answered
+        # for), and after `label`/`kind_field`/`expanded_kinds` are resolved (so
+        # the enumeration reads each family by its OWN carriers and honours the
+        # same kind EXPANSION every other read filter uses). It returns before
+        # the retrieval machinery: this is a state enumeration, and running the
+        # legs first would either waste them or — worse — let a degraded FTS
+        # fallback fill an answer to a question that was never about words.
+        if ended_scope:
+            from .ended import enumerate_ended
+
+            # ONE row beyond the page, so the TRUNCATION marker is PROVEN rather
+            # than guessed: a population wider than ``limit`` is the only way a
+            # caller learns rows were cut, and asking for the extra row costs one
+            # slot in a bounded scan. Without it the marker would have to report a
+            # full page as complete (the #8447 defect) or an unfilled one as cut.
+            _fatter = enumerate_ended(
+                graph, entity_type=entity_type, kind=kind,
+                kinds=expanded_kinds, limit=limit + 1)
+            _ended_rows = _fatter[:limit]
+            # ``candidates`` is what this read could SEE and it may be BOUNDED
+            # (exactly the hosted ``GET /v1/points`` ``limit+1`` probe shape), which
+            # is why ``exact`` is the separate input: 3 here means "more than
+            # limit", never "exactly 3".
+            _trunc["candidates"] = len(_fatter)
+            _trunc["exact"] = len(_fatter) <= limit
+            return _with_read_status(_ended_rows)
 
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the
@@ -59192,6 +59393,23 @@ class TortoiseSDK:
         how the internal-reader tests pin those arms, and their contract says
         the interception must work `regardless of how it is spelled`.
 
+        ⛔ **ON AN ARMED DEPLOYMENT, ``{}`` IS NOT REACHABLE FROM THIS DOOR FOR A
+        NAMED ID — EVERY ABSENT *NAME* ANSWERS THE TRUTHY ``not-hot`` SHAPE.**
+        (The one exception is the EMPTY key, which names nothing and therefore
+        answers ``{}`` — in the ARMED modes, where the short-circuit below runs.
+        ``off`` never reaches it: that mode delegates to the accessor unchanged,
+        byte for byte, which is what ``off`` means and why an empty key there
+        behaves exactly as it did before #13093.)
+        The coverage rule (`record_serve.entity_coverage_complete`) is `False`
+        while ``Event``/``Source`` lack measured parity (#9721) AND a Source
+        cannot be addressed by a bare ``id`` at all
+        (``record_serve.ENTITY_UNION_ADDRESS_RESIDUALS``), so the falsy arm above
+        is unreachable for a named id and a caller MUST read the ``residency``
+        field rather than the truthiness of the answer. That is why the ten
+        internal readers pass `cache_only=True` instead of testing truthiness, and
+        it is the one migration an external caller of this door owes: `if out:`
+        no longer distinguishes found from absent while the record seam is armed.
+
         ``off`` — the default — is byte-identical to the pre-#13093 call: one
         cache query through the accessor, no record consult, no added key, and
         no residency marker (this door does not read the ``partial``
@@ -59207,9 +59425,26 @@ class TortoiseSDK:
         store a write has not finished projecting. Serving it would also hand
         them a TRUTHY ``{"residency": …}`` where they test ``or MISSING`` / ``or
         {}`` and read it as a found node. This is the same internal-vs-caller
-        split ``get_point``'s opt-in ``served_out`` sink makes; here it is a
-        method split because a bare ``get_entity`` caller carries no parameter by
-        which a mid-write one could be told apart.
+        split ``get_point``'s opt-in ``served_out`` sink makes; here it is the
+        ``cache_only=True`` keyword, declared AT THE CALL SITE rather than by a
+        second method name — the internal-reader arms are pinned by intercepting
+        this method BY NAME, and their contract says that interception must hold
+        regardless of how the call is spelled (``test_11926_derived_invalidation``).
+        ⚠️ The flag is a DEFAULT, not a structural guarantee: a new internal caller
+        that forgets it gets the seam — a bounded record round trip on the caller's
+        thread, and then, mid-write, EITHER a raise (record unavailable, or no
+        tenant to scope the read — ⛔ both of those raise in ``record`` mode ONLY:
+        in ``prefer`` they are named, counted fallbacks) OR a projection miss. The
+        miss is the arm that bites in EITHER mode: in ``prefer`` it hands back the
+        cache's answer (this marker only when the cache misses too), while in
+        ``record`` there is no cache branch at all — the answer is ``props is
+        None`` from the record itself, and
+        :func:`record_serve.entity_absent_wire` mints the TRUTHY
+        ``{"residency": "not-hot"}`` this docstring warns about two paragraphs up,
+        where an ``or MISSING`` test reads it as a found node (absence IS
+        established there — ``served_from == "record"`` — and what keeps the falsy
+        ``{}`` arm unreachable is the entity union's incomplete coverage, not the
+        mode).
         """
         if cache_only:
             return self._get_entity(id_val)
@@ -59253,6 +59488,22 @@ class TortoiseSDK:
             # The pre-#13093 shape, byte for byte: one cache query, no consult,
             # no attribution, no marker.
             return self._get_entity(id_val)
+
+        # ⛔ AN EMPTY KEY NAMES NO NODE, SO NO STORE IS CONSULTED — not the
+        # record and NOT THE CACHE. This has to short-circuit here, BEFORE the
+        # tenant resolution and the record round trip: the record's reader
+        # refuses an empty key as STRUCTURAL (`read_node`), so an armed
+        # `get_entity("")` would go from `{}` to an exception while `off` stayed
+        # absent — the same id answering two ways depending on a deployment flag.
+        # And it answers `{}` ITSELF rather than delegating to `_get_entity`:
+        # that would build a graph handle, which `record` mode exists to avoid
+        # (the laziness the point door pins with `handle_opens == 0`). ⚠️ The
+        # CACHE's own view of an empty key is not something this door should be
+        # deciding: no fold WRITES such a node (`projection._writable_id` refuses
+        # it), so it is a state only a raw write can create — and `record` mode
+        # must not go looking in the store it exists to replace.
+        if not id_val:
+            return {}
 
         # ⛔ ONE COORDINATE SPELLING (#13322 review observation 3).
         # `record_serve.serve_entity` builds `union:<labels>:<id>`; a second
@@ -59834,10 +60085,7 @@ class TortoiseSDK:
         """
         from .record_writer import is_usable_tenant, record_tenant_effective
 
-        uri_graph: str | None = None
-        if self._db_uri is not None:
-            from urllib.parse import urlparse
-            uri_graph = urlparse(self._db_uri).path.lstrip("/") or "tortoise"
+        uri_graph = _uri_graph_name(self._db_uri)
         graph_name = _derive_graph_name(
             namespace=self._namespace, graph_name=self._graph_name,
             uri_graph=uri_graph)

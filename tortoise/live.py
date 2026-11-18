@@ -69,10 +69,10 @@ import json
 # cannot import the full vocabulary (``POINT_STATUS_VALUES``, canonical in
 # ``tortoise/sdk.py``) at import time. The partition below is therefore held
 # to that vocabulary by ``tests/test_terminal_status_vocabulary.py``, which
-# DERIVES the expected terminal set as
-# ``POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES`` and asserts equality —
-# so adding a status to the vocabulary without classifying it here REDs that
-# test instead of silently defaulting to "current" on every read surface.
+# proves every WRITE word is current-or-hidden and that no ending a writer may
+# set is served as current (#11824 S0 split the two sets — design §8); the READ
+# set's absolute width is a literal pin in ``tests/test_lifecycle_guards.py``.
+# An unclassified status REDs ``tests/test_terminal_status_vocabulary.py`` (not the pin above).
 # (A parity test, not import-time coercion, is the guard: the alternative —
 # declaring POINT_STATUS_VALUES here — would need sdk.py to stop declaring it,
 # and a circular import makes the reverse direction impossible.)
@@ -91,20 +91,20 @@ DRAFT_STATUS = "draft"
 #: is CURRENT (draft is not-yet-published, not dead).
 CURRENT_POINT_STATUS_VALUES = frozenset({DRAFT_STATUS, "live"})
 
-#: The vocabulary's terminal members (ontology §5: retracted/superseded are
-#: terminal; ``outdated`` is the legacy supersede/invalidate status;
-#: ``archived`` is reserved — no v1 write path).
+#: The READ-side terminal members (ontology §5). ⚠️ The READER's set, not the
+#: writer's: `#11824` S0 narrowed the write vocabulary to four words and nothing
+#: is backfilled, so a reader must still hide these (design §8).
 TERMINAL_STATUS_VALUES = frozenset(
     {"retracted", "superseded", "outdated", "archived"})
 
-#: ``deprecated`` is deliberately NOT in ``POINT_STATUS_VALUES``: no SDK/API
-#: write path emits it (only direct graph writes / legacy assessment paths
-#: ever did — see tests/test_lifecycle_guards.py, which asserts its absence),
-#: so it is not a legal create-time status. It IS present in legacy graphs and
-#: must never be served as current, so it joins the EXCLUSION set below but
-#: not ``TERMINAL_STATUS_VALUES``. #2901 inverse-shape ruling: the vocabulary
-#: is right (no writer) and the recall_state test that sets ``n.status =
-#: 'deprecated'`` directly is a legitimate simulation of legacy graph data.
+#: ``deprecated`` is here because it must be HIDDEN, not because it is
+#: unwritable: `#11824` S0 made it a WRITE word too (``lifecycle_vocabulary``),
+#: and ``tests/test_lifecycle_guards.py:85-97`` records that reversal — the
+#: pre-S0 note here claimed the opposite. ``superseded`` NAMES ITS SUCCESSOR,
+#: so a row where nothing replaced the statement needs ``deprecated`` to say
+#: "this ended and nothing was put in its place". #2901 inverse-shape ruling
+#: stands: the EXCLUSION set below, not ``TERMINAL_STATUS_VALUES`` — the
+#: recall_state test setting ``n.status = 'deprecated'`` is legacy data.
 LEGACY_NON_CURRENT_STATUS_VALUES = frozenset({"deprecated"})
 
 #: Every status a read surface (FTS/vector/structural, EP factor extraction,
