@@ -170,8 +170,14 @@ class LiveWrite:
     append is the truth store's failure, not a record refusal), so a caller
     never receives an outcome that claims a write whose line is missing.
 
-    ``record`` is ``None`` only when the record was UNARMED (no DSN) — the ONE
-    case `write_live_record` returns ``None`` for. A DECLINE is a ``RecordWrite``
+    ``record`` is ``None`` on TWO arms, and they are NOT the same fact (#13345
+    review P3-1): the UNARMED deployment (no DSN) — the one case
+    `write_live_record` returns ``None`` for — and the ``projection_raised``
+    arm, where the seam never ANSWERED at all (it raised, or could not be
+    imported), so whether this deployment is armed is UNMEASURED there and
+    :attr:`LiveWrite.armed` answers ``None``. ⛔ Never infer "unarmed" from
+    ``record is None``: read :attr:`armed` for that distinction, which is the
+    three-state question. A DECLINE is a ``RecordWrite``
     like any other armed answer (#8447): the scratch-buffer decline
     (``no_durable_journal``) is ``applied=False`` carrying that token as its
     ``refusal``, and it is NOT an unprojected disagreement — see ``unprojected``.
@@ -268,6 +274,17 @@ def write(event: Mapping[str, Any], *,
 
     ``fold=False`` lets the SDK's door keep its own fold decision while still
     getting the append→record ordering and the named outcome from here.
+
+    ⚠️ ``tenant`` is consumed ONLY by the DEFAULT project — the ``project is
+    None`` arm, where this module builds `record_writer.write_live_record` and
+    hands the pair to it (#13345 review P3-2). A door that supplies its OWN
+    ``project=`` must carry the tenant THROUGH that callable; a ``tenant=``
+    passed alongside it is IGNORED, so passing one there reads as load-bearing
+    while doing nothing. The SDK door is the live example: it passes
+    ``project=self._write_record_projection``, and that callable reads
+    ``self._record_tenant`` itself — the tenant reaches the seam by value from
+    there, not from a ``tenant=`` on this call (#9192's class if a future door
+    got that wrong: unscoped rows, filed silently).
 
     ⛔ A FAILED APPEND PROPAGATES. The callers already turn it into their own
     accounting (`_emit_event` counts `tortoise_journal_write_failures_total`

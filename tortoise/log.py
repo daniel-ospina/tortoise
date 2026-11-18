@@ -2106,8 +2106,13 @@ class EventLog:
         A PEER that appends DURING the count makes the returned number stale by
         however much the peer wrote — a LOWER bound on the state at the instant
         the count started, exactly as ``position()`` documents for the same
-        window (it has no ``None`` to give either). Nothing is cached from such
-        a count, so the next call recounts rather than inheriting it.
+        window (it has no ``None`` to give either). Nothing CROSS-PROCESS is
+        written by such a count: no sidecar and no lock-state stamp, so a peer
+        cannot inherit it. The INSTANCE memo IS refreshed on the way out
+        (``_records_before`` installs ``_position_memo`` unconditionally,
+        #13345 review P3-3), so a later call on this same instance may answer
+        from it — but only on an exact ``(size, mtime_ns)`` match, which is what
+        keeps that from hiding a peer append.
         """
         try:
             st = os.stat(self.path)

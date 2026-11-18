@@ -16062,7 +16062,12 @@ class TortoiseSDK:
             # it is threaded to the record so layer 1 stops being empty on live
             # writes. `None` (an in-memory log) means there is nothing to number.
             live_write.write(
-                event, log=log, tenant=self._record_tenant, fold=False,
+                # ⛔ NO `tenant=` HERE (#13345 review P3-2): it is consumed only by
+                # `live_write`'s DEFAULT project, and this door supplies its own
+                # (`_write_record_projection`), which reads `self._record_tenant`
+                # itself and hands it to `write_live_record` by value. Passing it
+                # here was inert and read as load-bearing.
+                event, log=log, fold=False,
                 record_sink=record_sink,
                 project=self._write_record_projection,
                 scope_label="sdk._emit_event")
