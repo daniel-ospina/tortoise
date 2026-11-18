@@ -160,38 +160,44 @@ def test_a_refused_rebuild_pays_NO_model_call(encoder):
     assert proj.query("MATCH (n) RETURN count(n)").result_set[0][0] == 0
 
 
-def test_a_second_restore_of_the_same_view_is_byte_identical(encoder, monkeypatch):
-    """§2.0's determinism, on the restore path: same view ⇒ same graph.
+def test_a_second_restore_of_the_same_view_is_byte_identical(encoder):
+    """§2.0's determinism, on the restore path: same view ⇒ same graph, every time.
 
-    This is what makes `bounded=False` on the rebuild load-bearing rather than
-    stylistic: a restore that declined an encode inside a wait budget would make
-    the output a function of wall-clock timing, so two restores of ONE record could
-    differ (#13447's seam asks unbounded there on purpose).
+    ⛔ WHAT THIS TEST CAN AND CANNOT WITNESS (#13447 review cycle 3, issue 5), stated
+    because an earlier cut of this docstring claimed a witness it did not have. It
+    claimed that `bounded=False` on the rebuild was *"load-bearing rather than
+    stylistic"* here because a declined encode would make the output a function of
+    wall-clock timing. That claim is FALSE on this path, and it was measured twice
+    over:
 
-    ⛔ THE DECLINE IS INJECTED FOR THE SECOND RESTORE, and that is the whole
-    difference between a witness and a claim (#13447 review cycle 3, issue 5). The
-    `encoder` fixture patches `await_write_ready_reason` to answer `None`, so an
-    earlier cut of this test passed even with `derive_row` mutated to `bounded=True`
-    — there was no decline to observe, and the assertion could not vary under the
-    edit it names. A declining bound now makes the mutation visible: correct code
-    never consults it (`bounded=False`), and a bounded rebuild would land `o-null`
-    vectorless on the second pass, so `first != second`.
+      * the `encoder` fixture patched `await_write_ready_reason` to answer `None`, so
+        there was no decline to observe;
+      * and injecting one does not fix it either — `rebuild_from_record` runs inside
+        `projection._replay_write_scope()`, so `encode_for_row`'s
+        `if bounded and not _in_replay_scope()` short-circuits and NEVER consults the
+        bound. A `derive_row(…, bounded=True)` mutation therefore changes nothing on
+        the engine (verified: GREEN before this rewrite).
+
+    So the `bounded=False` witness lives where the bound is reachable, and it already
+    exists: `test_13447_derived_embedding_seam.py::
+    test_the_rebuild_does_not_ask_the_write_bound` drives `fill_missing_row_vectors`
+    directly, outside any window, and asserts `consulted == []`. What THIS test adds is
+    the property the engine can actually hold — **restore purity**: the second restore
+    re-derives from the view alone. A memo that outlived one write (the module-level
+    dict the DB-free counter-test forbids) would serve the second derivation from the
+    first and pay ZERO model calls, which the call-count assertion below catches.
     """
     proj = _projection()
     view = _view()
     proj.rebuild_from_record(view, confirm_destructive=True)
     first = {key: _props(proj, "Object", key)
              for key in ("o-stored", "o-null")}
-
-    import tortoise.embeddings as emb
-    monkeypatch.setattr(emb.EmbeddingModel, "await_write_ready_reason",
-                        classmethod(lambda cls, budget: "budget_expired"))
-
+    assert encoder == ["Beta Ltd"], encoder
     proj.rebuild_from_record(view, confirm_destructive=True)
     second = {key: _props(proj, "Object", key)
               for key in ("o-stored", "o-null")}
-    assert second["o-null"].get("embedding") is not None, (
-        "the second restore DECLINED an encode under a wait budget — the rebuild "
-        "must ask unbounded (`bounded=False`), or two restores of one record "
-        "differ as a function of wall-clock timing (§2.0)")
     assert first == second
+    assert encoder == ["Beta Ltd", "Beta Ltd"], (
+        f"the second restore did not pay its own derivation ({encoder}) — a memo "
+        f"outlived one write, so a restore is no longer a pure function of the view "
+        f"(§2.0)")
