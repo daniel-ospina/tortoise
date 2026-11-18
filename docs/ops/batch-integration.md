@@ -1273,8 +1273,9 @@ The `canary_producer` exemption is not a nicety: `fast_shard_runner` rule 1 pins
 hosted label precisely because the producer's artifacts feed the canary streak, and that streak is a
 comparison of TESTS across runs. Moving the producer onto another class would turn it into a
 comparison of runner classes — the failure measured 2026-10-27..30, when run `40986603502` (head
-`5a2ae6aa1`) had `test (i)`, the canary, taken by `pi-runner-vm-5` (ARM64) and killed at 32m12s of a
-30m budget (`docs/ops/ci-runner-x64.md:885`, `:926`). A fold gets priority on the legs that carry the
+`5a2ae6aa1`) had `test (i)`, the canary, taken by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s
+(`docs/ops/ci-runner-x64.md:885`) — 12 minutes past the 20 m watchdog budget the page records for
+these legs (`:884`, `:927`; the page states no 30 m budget, so do not quote one from here). A fold gets priority on the legs that carry the
 wall; the producer stays where the streak expects it.
 
 ⛔ **The class does not buy PARALLEL legs.** `strategy.max-parallel: 3` (#6744) is a bare literal on

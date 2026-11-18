@@ -5508,7 +5508,7 @@ def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
           `python-ci.yml` read as recording `ci.yml::repo-harnesses`, the #10237 canary's pin.
 
         So BOTH halves are matched on `[\w.-]` boundaries: the occurrence inside `<name>.yml` does
-        not count, while ``` `closes-coherence` job ``` and `(`ci.yml:1556`)` do.
+        not count, while ``` `closes-coherence` job ``` and `(`ci.yml:1623`)` do.
         """
         workflow, job = pin.split("::")
         return all(

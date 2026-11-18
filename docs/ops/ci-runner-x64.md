@@ -1053,8 +1053,8 @@ the #10237 canary above: a pin whose red costs a WAIT and a re-run, never a requ
 
 What it costs, stated rather than inherited, in the three modes this page records. A "WAIT with no
 hosted half" is only the first (`:963` states it as the canary's accepted cost, and `:977` records
-it as "one of its two modes"; the canary measures TWO — QUEUED, and RED with ZERO steps
-`:982-990`; the third, a red from a missing tool, is the #9018 mode recorded at `:269-272`). While
+it as "one of its two modes"; the canary measures TWO — QUEUED and RED with ZERO steps
+(`:980-990`); the third, a red from a missing tool, is the #9018 mode recorded at `:269-272`). While
 the pool is down or the label is detached, `closes-coherence` never advises on **any** PR (that
 workflow carries no `paths:` filter) and `redis-guard`'s `push: main` run never measures — a QUEUED
 job with no red and no annotation.
