@@ -6710,9 +6710,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ THE `_honours` CITE'S OWN HALF-DONE MOVE (#13489 review, finding 1 — MEASURED).
-    # D5 states the line the `_honours` definition sits on TWICE in current tense, and this
-    # PR re-pointed the same hit in `02-scope.md:61` to the measured `:22247` while leaving
-    # both of D5's statements on the pre-move `:22225` — i.e. the exact defect class this row
+    # D5 states the line the `_honours` definition sits on THREE TIMES in current tense, and
+    # this PR re-pointed the same hit in `02-scope.md:61` to the measured `:22247` while leaving
+    # all three of D5's statements on the pre-move `:22225` — i.e. the exact defect class this row
     # exists to close, one row over from where its sibling was fixed. Neither existing arm
     # could have caught it: `_pin_row_failures` scopes to a markdown LINE and D5 IS one line
     # carrying ~50 numbers, so a row passes as soon as ANY `:22247` is somewhere on it; and
