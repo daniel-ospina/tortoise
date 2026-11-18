@@ -846,8 +846,16 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #: * ``graph_fold`` — the graph row carries no vector. Repair:
 #:   `graph-scripts/backfill_embeddings.py` (it recomputes from the row text).
 #: * ``record_derivation`` — the RECORD row's embedding column is NULL. Repair:
-#:   a re-derivation / replay, NOT the graph backfill — that tool reads the
-#:   graph's nodes and would read 0 residual over this population.
+#:   a **live re-write** (re-derivation) through `RecordWriter.write`, which is
+#:   `derived_embedding_columns`' ONLY caller. ⛔ **A journal replay is NOT a
+#:   repair today**, and saying so is the point: `record_projection.replay()`
+#:   re-derives only when its caller passes `derived=`, and the shipped
+#:   `tools/record_runner.py` fold passes none — so a replay leaves the column
+#:   NULL on the rows it creates (`tortoise/record_projection.py` records the
+#:   same limitation at its `DERIVED_COLUMNS` note, and the record migration's
+#:   header states it). There is **no operator CLI for this leg yet**; the graph
+#:   backfill is not one either (it reads graph nodes and would report 0 residual
+#:   over this population).
 #:
 #: ``decline`` vocabulary — ``"<leg>:<cause>"``, where ``cause`` is the value
 #: ``EmbeddingModel.await_write_ready_reason`` returned. The four causes need
@@ -2902,7 +2910,10 @@ def record_derived_embed_decline(scope: str, reason: str) -> None:
 
     ``scope`` is the LEG the write belongs to and selects the REPAIR:
     ``graph_fold`` → ``graph-scripts/backfill_embeddings.py``;
-    ``record_derivation`` → a re-derivation/replay. ``reason`` is the cause
+    ``record_derivation`` → a live re-write (re-derivation), NOT a journal
+    replay and NOT the graph backfill — see the Counter's own note for why a
+    replay does not re-derive and why this leg has no operator CLI yet.
+    ``reason`` is the cause
     ``EmbeddingModel.await_write_ready_reason`` returned. They are emitted as
     ONE label value (``"<scope>:<reason>"``) rather than two labels because
     :func:`_collect_by_label` assumes one sample per label value.

@@ -1884,8 +1884,11 @@ def encode_for_row(
         if decline is not None:
             # Visible, not silent, on THREE channels — they answer different
             # questions and none is redundant: the metering term (#4488) counts
-            # "no model work ran" per org; the counter (#13417) counts ROWS the
-            # dense leg is now missing, by cause, on `monitoring.metrics()`; and
+            # "no model work ran" per org; the counter (#13417) counts the WRITES
+            # that stored no vector — the LEG and the cause, on
+            # `monitoring.metrics()`, and an UPPER BOUND on rows the dense leg is
+            # missing rather than a row count (a cold re-write of an
+            # already-embedded row counts and loses nothing); and
             # the line below explains once per process PER CAUSE what the two
             # numbers mean — a bulk write must not storm the log with one line
             # per row, and the cause travels with the line so the one entry an
