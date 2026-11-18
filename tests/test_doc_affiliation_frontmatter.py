@@ -700,7 +700,10 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                         f"{texts!r} became {got_list!r}"
                     )
                     continue
-                for raw_item, got_item in zip(texts, got_list):
+                # `strict=True` because the guard above already established the
+                # lengths agree: a mismatch `continue`d before this loop, so a
+                # truncation here would mean the guard itself was bypassed.
+                for raw_item, got_item in zip(texts, got_list, strict=True):
                     if raw_item in wholly_comment:
                         # (A) already named this item's loss; a second reason from
                         # _type_mismatch would contradict it in the same string.
