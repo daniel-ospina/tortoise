@@ -45238,10 +45238,10 @@ class TortoiseSDK:
         Object/Subject names its successor; the carrier holds a NAME, so it is
         never served under an `…Id` key) — the `stage` block (`slot` +
         `outcome`) for a record ended on the POSITION axis, and `endedAt`.
-        `linkedEvents` carries the events wired to the record, which is what
-        makes "planned and never happened" answerable without knowing a kind's
-        stage names: a plan is ``stage.slot == "terminal"`` with an empty
-        `linkedEvents`.
+        `linkedEvents` carries the Events wired to the record of ANY kind, which
+        is what makes "planned and never happened" answerable without knowing a
+        kind's stage names: a plan is ``stage.slot == "terminal"``, and telling
+        its occurrence from a mention is `planned_occurrence` (#13128).
         ⛔ A `query` beside it is REFUSED, not ignored: a state enumeration that
         silently dropped the caller's words would serve a whole population as if
         it were their answer. The refusal is a CLOSED LIST, and it names EVERY
