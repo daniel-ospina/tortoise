@@ -578,6 +578,38 @@ def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
         EmbeddingModel._reset()
 
 
+def test_the_refusal_names_a_recorded_cause_for_a_trace_only_decline(monkeypatch):
+    """⛔ THE CALL SITE, PINNED END-TO-END (#13543 review round 2).
+
+    ``test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason`` pins
+    the TRANSLATOR. A translator that is correct but no longer CALLED is the
+    defect restored: reverting ``failure_kind = cls._as_failure_kind(kind)`` back
+    to the removed fixed dict at the ``_unavailable`` seam leaves the helper
+    intact and every translator row above green (measured: 39 passed with the
+    call site reverted). Driven through ``_unavailable`` — the seam that actually
+    writes ``failure_kind`` onto the refusal — so that revert reds here.
+
+    Shape copied from ``test_a_designed_absence_is_refused_with_not_installed``:
+    the predicate and ``_unavailable`` are the two halves of the seam, and the
+    assertion is on the KIND the caller receives, never on a trace word.
+    """
+    EmbeddingModel._reset()
+    monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+    monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "load_failed")
+    try:
+        with pytest.raises(EmbedderUnavailableError) as excinfo:
+            EmbeddingModel._unavailable(
+                context="read: embedder not warm within the read's budget",
+                kind="load_in_flight")
+        assert excinfo.value.failure_kind == "load_failed", (
+            "the REFUSAL must carry the cause that was recorded, got "
+            f"{excinfo.value.failure_kind!r} — `model_unavailable` here means "
+            "the translator is no longer consulted at the seam, i.e. the "
+            "#13543 defect is back even though `_as_failure_kind` is correct")
+    finally:
+        EmbeddingModel._reset()
+
+
 # ── the budget itself ─────────────────────────────────────────────────────
 
 

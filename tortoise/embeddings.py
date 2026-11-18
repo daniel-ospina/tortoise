@@ -979,6 +979,17 @@ class EmbeddingModel:
         each passes ``kind=None``, so this function never runs on them — which
         is why the historical ``failure_kind`` values cannot drift here.
 
+        ⛔ THE DICT'S UNCONDITIONAL ``no_embedder -> not_installed`` ARM IS
+        DELIBERATELY GONE (#13543 review). It translated the designed-absence
+        word whatever had been recorded, so a ``no_embedder`` decline with
+        NOTHING recorded claimed ``not_installed`` — asserting that the extra is
+        absent, a fact no producer had recorded. A TRACE WORD is not evidence of
+        a cause; the recorded kind is. The reachable designed-absence state is
+        unaffected, because ``absent_reason()`` publishes ``no_embedder`` for a
+        ``not_installed`` record (or for none at all), and the recorded-cause arm
+        translates that record back to ``not_installed`` — pinned end-to-end by
+        ``test_a_designed_absence_is_refused_with_not_installed``.
+
         ⛔ THE SECOND BEHAVIOUR CHANGE, RECORDED HERE BECAUSE IT IS NOT THE ONE
         THE ``no_embedder`` NOTE NAMES. ``main`` published an UNMAPPED reason as
         ITSELF (``_READ_DECLINE_FAILURE_KIND.get(kind, kind)``), so
