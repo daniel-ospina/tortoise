@@ -127,6 +127,19 @@ that they may be deleted rather than merely made private, with the code archived
 whole `TortoiseSDK` class as it was, and that file carries the per-method restore recipe. Re-adding any
 of these to the public surface is a **new** surface change and needs the owner again.
 
+⚠️ **One manifest `response_fields` record was retired with its door, and its content is recorded
+here so nothing is lost.** `config/surface-manifest.yml` carried a row anchored to
+`tortoise_fts_query` documenting the `ended_scope=True` response keys (`successorId`,
+`allSuccessorIds`, `successorName`, `stage`, `endedAt`, `linkedEvents`, the ended-row shape). That
+parameter exists only on `_tortoise_fts_query`, and the row itself recorded that it is *"deliberately
+NOT exposed on the MCP `tortoise_search` door yet"* — so with the SDK method privatised the record
+had no surface left to describe, and a response-field record must anchor to the surface it describes.
+The two records that DID still have a door were re-anchored rather than dropped: `direction_basis`
+now anchors to `sdk:link_entities` (which builds the operator through `_create_operator`), and
+`nodes[].ep_state` to `tortoise_recall` (the only door that reaches `_recall_subgraph`). The
+`ended_scope` keys remain documented in `tortoise/sdk.py::_tortoise_fts_query`'s own docstring; they
+come back to the manifest when a served door is approved for them.
+
 | Removed method | What it did | The 40-method target it was recorded against |
 |---|---|---|
 | `apikey_list` | List API keys for an org (no plaintext or hashes). | `list_keys` |

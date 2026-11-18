@@ -146,7 +146,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 7f4485763bc3298d52b85bc2b1ec427802f7b51e
+cut_at_commit: 424368c05d8ee9b26aa2d77e4c5a93a4b207b58f
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -200,7 +200,7 @@ response_fields:
     "absent". Distinct from the `recall_ranking.ep_state` row: that one is the ranker''s OWN row, this one is the
     `ep` block that rides the hit payload. #11702.'
   unchanged_when_off: NO — additive key on an existing `ep` block (see tortoise_search / ep.ep_state). Not flag-gated
-- response: sdk:recall_subgraph
+- response: tortoise_recall
   field: nodes[].ep_state
   emitted_when: 'ALWAYS on every `Point` node in `nodes[]` — the same #11702 three-token state as `ep.ep_state`
     ("measured" / "baseline" / "absent"), paired with `nodes[].confidence`, which is `null` if and only if the state
@@ -675,7 +675,7 @@ response_fields:
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as gaps_ranking.confidence;
     every live gap keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent"
     (#11702) and an unreadable-spelling one, which reads "unreadable"
-- response: sdk:create_operator
+- response: sdk:link_entities
   field: direction_basis
   emitted_when: 'always, on every operator created through the #7852 W1 write path — the basis the recorded direction
     came from: explicit (the caller stated a non-default direction), semantics (the declared Layer-2 meaning resolved
@@ -985,31 +985,13 @@ response_fields:
     the reply is NON-EMPTY **and** that the call was not one whose reply is a no-op.'
   unchanged_when_off: not flag-gated — the key is ABSENT unless a shaping happened, and a write that shapes nothing
     returns byte-identical to before this field existed
-- response: sdk:tortoise_fts_query
-  field: successorId / successorName / allSuccessorIds / stage / endedAt / linkedEvents / the ended-row shape (the
-    ended_scope read) — each a separate row key, never a wrapper object
-  emitted_when: 'only for a call that passes ended_scope=True (#13302). Those rows are NOT match rows: they describe
-    an ENDED record and say how it ended, from the record''s own fields — `status` (the lifecycle word: `deprecated`
-    = nothing replaced it, `superseded` = see the successor), the successor as the TWO facts the model actually
-    records (**`successorId`/`allSuccessorIds` from a Point''s CORRECTS edge, and `successorName` from the `supersededBy`/`superseded_by`
-    carrier — that carrier holds a NAME by ONTOLOGY §4.2/§4.3, so it is never served under an `…Id` key and an Object/Subject
-    row has `successorId: null` beside its `successorName`**), `stage` {id, slot, outcome, since} on a record ended
-    on the POSITION axis, `isClosed`/`outdated`, `endedAt` plus the raw `validTo`/`expiredAt`/`supersededAt`/`pipelineStageSince`/`updatedAt`
-    it was resolved from, and `linkedEvents` (the Events wired to the record — empty is the product''s own statement
-    that no occurrence was ever recorded, which with stage.slot == "terminal" IS the "planned and never happened"
-    answer). Selection is the shared currency predicate `live._terminal_expression` in the positive direction, so
-    no status list, slot literal or visibility field is added anywhere.'
-  unchanged_when_off: 'yes — ended_scope defaults to False and the branch returns before any retrieval runs, so
-    with the flag off the read is byte-identical to pre-#13302: same rows, same keys, same order. ⛔ Deliberately
-    NOT exposed on the MCP `tortoise_search` door yet: that is a served-declaration change needing owner approval
-    (surface-guard), and the implementation plan marks read-tool scope parameters (S6) not-gated-yet.'
 approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
   tools: 44
-  sdk_public_methods: 105
+  sdk_public_methods: 39
   retired: 64
   keyword_distribution:
     fetch: 9
@@ -1028,7 +1010,7 @@ high_water_counts:
 retired:
 - name: tortoise_annotate_operator
   use_instead: tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)
-  sdk_method: annotate_operator
+  sdk_method: _annotate_operator
   http_policy: true
   approval: null
 - name: tortoise_assess_source
@@ -1038,12 +1020,12 @@ retired:
   approval: null
 - name: tortoise_audit
   use_instead: tortoise_graph_overview(section="audit", point_kinds=...)
-  sdk_method: audit
+  sdk_method: _audit__svc
   http_policy: true
   approval: null
 - name: tortoise_belief_timeline
   use_instead: tortoise_check_confidence(topic=...)
-  sdk_method: belief_timeline
+  sdk_method: _belief_timeline
   http_policy: true
   approval: null
 - name: tortoise_checkpoint
@@ -1053,28 +1035,28 @@ retired:
   approval: null
 - name: tortoise_compute_confidence
   use_instead: tortoise_check_confidence(recompute=True, factors=..., evidence=..., anchors=...)
-  sdk_method: compute_confidence
+  sdk_method: _compute_confidence
   http_policy: true
   approval: null
 - name: tortoise_create_document
   use_instead: 'tortoise_create_entity(type="document", name=<title>, props={"documentKind": ..., ...})'
-  sdk_method: create_document
+  sdk_method: _create_document
   http_policy: true
   approval: null
 - name: tortoise_create_event
   use_instead: 'tortoise_create_entity(type="event", name=..., props={"eventKind": ...})'
-  sdk_method: create_event
+  sdk_method: _create_event
   http_policy: true
   approval: null
 - name: tortoise_create_object
   use_instead: 'tortoise_create_entity(type="object", name=..., props={"objectKind": ...})'
-  sdk_method: create_object
+  sdk_method: _create_object
   http_policy: true
   approval: null
 - name: tortoise_create_point
   use_instead: 'tortoise_create_entity(type="point", name=<content>, props={"pointKind": ..., ...})  (a repeat folds
     by content, as this door did)'
-  sdk_method: create_point
+  sdk_method: _create_point
   http_policy: true
   approval: null
 - name: tortoise_create_source
@@ -1084,23 +1066,23 @@ retired:
   approval: null
 - name: tortoise_create_subject
   use_instead: 'tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})'
-  sdk_method: create_subject
+  sdk_method: _create_subject
   http_policy: true
   approval: null
 - name: tortoise_diary_write
   use_instead: 'tortoise_create_entity(type="diary", name=<entry>, props={"authoredBy": ..., "topic": ..., "wing":
     ...})'
-  sdk_method: diary_write
+  sdk_method: _diary_write
   http_policy: true
   approval: null
 - name: tortoise_dream
   use_instead: tortoise_refresh_confidence(scope="dirty"|"full", ...)
-  sdk_method: dream
+  sdk_method: _dream
   http_policy: false
   approval: null
 - name: tortoise_dream_health
   use_instead: tortoise_graph_overview(section="dream_health")
-  sdk_method: dream_health_check
+  sdk_method: _dream_health_check
   http_policy: false
   approval: null
 - name: tortoise_entity_profile
@@ -1120,7 +1102,7 @@ retired:
   approval: null
 - name: tortoise_find_cross_lens_candidates
   use_instead: tortoise_review_link_candidates(kind="cross_lens", limit=..., threshold=...)
-  sdk_method: get_cross_lens_candidates
+  sdk_method: _get_cross_lens_candidates
   http_policy: true
   approval: null
 - name: tortoise_get
@@ -1130,37 +1112,37 @@ retired:
   approval: null
 - name: tortoise_get_confidence
   use_instead: tortoise_check_confidence(claim_id=...)
-  sdk_method: get_confidence
+  sdk_method: _get_confidence
   http_policy: true
   approval: null
 - name: tortoise_get_events
   use_instead: tortoise_get_entity(None, type="events")
-  sdk_method: get_events
+  sdk_method: _get_events
   http_policy: true
   approval: null
 - name: tortoise_get_governance
   use_instead: tortoise_get_entity(id, type="governance")
-  sdk_method: get_owned_entities
+  sdk_method: _get_owned_entities
   http_policy: true
   approval: null
 - name: tortoise_get_operator
   use_instead: tortoise_get_entity(id, type="operator")
-  sdk_method: get_point
+  sdk_method: _get_point
   http_policy: true
   approval: null
 - name: tortoise_get_point
   use_instead: tortoise_get_entity(id, type="point")
-  sdk_method: get_point
+  sdk_method: _get_point
   http_policy: true
   approval: null
 - name: tortoise_get_session
   use_instead: tortoise_get_entity(id, type="session")
-  sdk_method: get_session
+  sdk_method: _get_session
   http_policy: true
   approval: null
 - name: tortoise_get_source_reliability
   use_instead: tortoise_list_knowledge(kind="source_reliability", url=...)
-  sdk_method: get_source_reliability
+  sdk_method: _get_source_reliability
   http_policy: true
   approval: null
 - name: tortoise_health
@@ -1180,17 +1162,17 @@ retired:
   approval: null
 - name: tortoise_ingest_corpus
   use_instead: tortoise_index_sources_from_directory(directory, file_type="doc")
-  sdk_method: ingest_corpus
+  sdk_method: _ingest_corpus
   http_policy: false
   approval: null
 - name: tortoise_invalidate
   use_instead: tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)
-  sdk_method: invalidate_point
+  sdk_method: _invalidate_point
   http_policy: true
   approval: null
 - name: tortoise_list_batch
   use_instead: tortoise_list_knowledge(kind="batch", id=...)
-  sdk_method: list_batch
+  sdk_method: _list_batch
   http_policy: true
   approval: null
 - name: tortoise_list_dedup_candidates
@@ -1226,7 +1208,7 @@ retired:
   approval: null
 - name: tortoise_mitigate_operator
   use_instead: tortoise_adjust_relationship(id, reason=..., strength=..., credibility=...)
-  sdk_method: mitigate_operator
+  sdk_method: _mitigate_operator
   http_policy: true
   approval: null
 - name: tortoise_onboarding_github_index
@@ -1252,12 +1234,12 @@ retired:
   approval: null
 - name: tortoise_paginated_query
   use_instead: tortoise_query(offset=..., limit=...)
-  sdk_method: paginated_query
+  sdk_method: _paginated_query
   http_policy: true
   approval: null
 - name: tortoise_promote_point
   use_instead: tortoise_refresh_confidence(scope="promote", point_id=...)
-  sdk_method: promote_point
+  sdk_method: _promote_point
   http_policy: true
   approval: null
 - name: tortoise_provenance
@@ -1267,22 +1249,22 @@ retired:
   approval: null
 - name: tortoise_query_points_by_tag
   use_instead: tortoise_query(tag=..., offset=..., limit=...)
-  sdk_method: query_points_by_tag
+  sdk_method: _query_points_by_tag
   http_policy: true
   approval: null
 - name: tortoise_recall
   use_instead: tortoise_check_confidence(recall=True, query=..., mode="state", min_confidence=..., limit=...)
-  sdk_method: recall_state
+  sdk_method: _recall_state
   http_policy: true
   approval: null
 - name: tortoise_retract_point
   use_instead: tortoise_update_knowledge(id, invalid_at=...)
-  sdk_method: retract_point
+  sdk_method: _retract_point
   http_policy: true
   approval: null
 - name: tortoise_review_connections
   use_instead: tortoise_review_link_candidates(kind="connections", mode=...)
-  sdk_method: review_connections
+  sdk_method: _review_connections
   http_policy: true
   approval: null
 - name: tortoise_session_capture
@@ -1293,7 +1275,7 @@ retired:
   approval: null
 - name: tortoise_set_point_baseline
   use_instead: tortoise_refresh_confidence(scope="baseline", point_id=..., alpha=..., beta=...)
-  sdk_method: set_point_baseline
+  sdk_method: _set_point_baseline
   http_policy: true
   approval: null
 - name: tortoise_set_source_tier
@@ -1313,7 +1295,7 @@ retired:
   approval: null
 - name: tortoise_summarize_structure
   use_instead: tortoise_graph_overview(section="structure")
-  sdk_method: summarize_structure
+  sdk_method: _summarize_structure
   http_policy: true
   approval: null
 - name: tortoise_supersede
@@ -1353,65 +1335,12 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  # ⛔ PROVENANCE, not a value: `served_from` below is `main`'s cell, written by a re-cut — this
-  # diff does not re-stamp it (see the end of this block). It is recorded here because `main`'s copy
-  # of this file carries NO per-row rationale at all (a re-cut re-emits only `MANIFEST_HEADER`), so
-  # every fact below is one a later lane would otherwise have to re-derive from scratch.
-  #
-  # WHY THE CELL WENT STALE. `#13075` (`a09a0b3840`, "the currency rule reads the position axis")
-  # edited `def tortoise_query` IN PLACE — its diff is three hunks INSIDE the handler, four in the
-  # file, the fourth being the module-level `from tortoise.live import is_terminal_status` import,
-  # so that count is scoped to the handler and no reader should take it as the file's total.
-  # `served_from` is `_code_digest` of that handler's CODE OBJECT, so an edit inside it re-stamps
-  # the cell, and the row went stale: `surface_manifest.py check --provenance-strict` read it as a
-  # FAIL on `main` ITSELF — measured on pristine `main` worktrees at `55ec2c71b1` and at
-  # `3d437429e9` (the re-cut whose only changed file was `config/ci-surfaces.yml`, so it cannot
-  # reach this row): rc=1, the identical `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8`
-  # pair. Re-derive it with that command; never type a digest from memory.
-  #
-  # ⛔ THIS ROW WAS RE-CUT, NOT HAND-HELD, IN #11609 P2 — and that is why the block survived the
-  # cut instead of being lost with it. The confidence-arms batch GREW `tortoise_check_confidence`
-  # (the RECOMPUTE/RECALL arms, then the refusal that an arm-only argument names its arm), so the
-  # handler's code object changed and `served_from`/`served_attributes` genuinely moved: the
-  # `cut` below wrote the derived pair, exactly as "Derived files re-cut, never hand-edited" says
-  # to. What that cut also does — silently, by design — is delete this block along with every
-  # other per-row one, which is the ONLY thing this block exists to warn about. It is restored by
-  # hand because `cut` re-emits `MANIFEST_HEADER` alone; the cell above is the cut's, never typed.
-  #
-  # ⛔ A LATER `main` LANE RESTATED THIS AND GOT IT WRONG, so its block is folded into this one
-  # instead of being kept twice. `#13000`'s `980f271acc` added eleven lines here saying this row
-  # was "refreshed here to the value the tree derives" and quoting `at 55` tools as "unchanged" —
-  # but that commit changes no `served_from` line at all (the refresh was `#13052`'s `cut`, landed
-  # earlier the same morning), and `#13052` had ALREADY retired seven doors, so 55 was a door count
-  # behind on the day it was written and 44 is what `rows` carries now (#11609 P2's
-  # confidence arms retired two, the create-arms wave two more). Keeping both blocks would
-  # leave this file asserting a count its own `rows` does not have — which is exactly what
-  # `test_no_per_row_comment_quotes_a_stale_surface_count` reds on. The measurement it quoted is
-  # preserved rather than erased: a pristine `main` at `2390101f68` read the same recorded/derived
-  # pair this block already names two paragraphs up, so what is dropped here is the stale COUNT and
-  # the wrong verb, not the fact.
-  #
-  # A full `cut` is deliberately NOT run from a docs branch. It is NOT owner-only — `p_cut.add_
-  # argument("--commit", …)` carries no `required=True` and `build_doc` falls back to
-  # `git rev-parse HEAD`, and `cmd_cut` carries no identity check — but it is gated on the owner's
-  # approval DOCUMENT: `read_approval` reads `docs/product/canonical-mcp-tools.md` and `build_doc`
-  # REFUSES when that file is missing (`_frontmatter` raises `SurfaceEvidenceUnreadable`) or
-  # carries no `approval_status`. The operative reason here is narrower: a re-cut would delete this
-  # block to buy back a cell that is already correct on `main`.
-  #
-  # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the
-  # source and RE-RUN the generator (buf/protoc baselines and the mainstream codegen convention
-  # all state it, and it is the right default) — because this file's provenance is only
-  # re-derivable from the record beside the row: a `cut` deletes every per-row block, so "just
-  # regenerate it" would cost the WHY to re-buy a value the tree already agrees with. The VALUE is
-  # still never hand-derived — it is the digest `check --provenance-strict` compares. A reader
-  # holding the "always regenerate" page should put it down here, not "fix" this row by cutting.
-  served_from: tortoise/mcp_server.py:59f8f7e5957d81d8
+  served_from: tortoise/mcp_server.py:cc4fd43c70e2b12e
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
   served: http
-  sdk_method: paginated_query
+  sdk_method: _paginated_query
   group_source: mapped
   keyword: fetch
   keyword_rank: 1
@@ -1426,7 +1355,7 @@ rows:
     no total order (#5346/#11062) — so treat a walked tag as approximate, not as the complete set. The `tag=` read
     itself still scans the whole tagged population before slicing, so a very large tag can still be slow. include_retracted=True
     surfaces tombstones. For semantic relevance use tortoise_search; for a single known ID use tortoise_get_point.'
-  dependency: declares TortoiseSDK.paginated_query (resolves)
+  dependency: declares TortoiseSDK._paginated_query (resolves)
   lifecycle: active
   used_by: agents, tooling, docs
   recommendation: keep
@@ -1465,12 +1394,12 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
-  served_from: tortoise/mcp_server.py:b3f090fa42c801f4
+  served_from: tortoise/mcp_server.py:7594e51b7e8dddad
   served_attributes: a54ebe88150f0091
   family: memory
   family_rank: 1
   served: http
-  sdk_method: tortoise_fts_query
+  sdk_method: _tortoise_fts_query
   group_source: mapped
   keyword: fetch
   keyword_rank: 1
@@ -1479,7 +1408,7 @@ rows:
   job: 'Hybrid semantic search — FTS + vector + structural RRF fusion with EP confidence annotation. Use when matching
     by MEANING (natural-language query); for exact structural/filter queries use tortoise_query. Full-scan mode:
     omit query, set kind → all Points of kind.'
-  dependency: declares TortoiseSDK.tortoise_fts_query (resolves)
+  dependency: declares TortoiseSDK._tortoise_fts_query (resolves)
   lifecycle: active
   used_by: never called, eval-harness, tooling, docs
   recommendation: keep
@@ -1524,7 +1453,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_suggest_entry_points
-  served_from: tortoise/mcp_server.py:e84ff2f166b5210f
+  served_from: tortoise/mcp_server.py:4d9e136ab2d3b5f9
   served_attributes: 542cf2dbb222d260
   family: memory
   family_rank: 1
@@ -1550,19 +1479,19 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary
-  served_from: tortoise/mcp_server.py:9016811f802f1d77
+  served_from: tortoise/mcp_server.py:785dfd3207055667
   served_attributes: d1d847feeecfe0de
   family: memory
   family_rank: 1
   served: http
-  sdk_method: calibrate_summary
+  sdk_method: _calibrate_summary
   group_source: mapped
   keyword: update
   keyword_rank: 3
   cluster: null
   canonical: null
   job: Audit graph calibration state. Returns per-point guidance.
-  dependency: declares TortoiseSDK.calibrate_summary (resolves)
+  dependency: declares TortoiseSDK._calibrate_summary (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1575,7 +1504,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_update_knowledge
-  served_from: tortoise/mcp_server.py:b200106389f77cea
+  served_from: tortoise/mcp_server.py:bf0a93a9c5fb1a97
   served_attributes: c76eb7b793da477b
   family: memory
   family_rank: 1
@@ -1604,12 +1533,12 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_delete
-  served_from: tortoise/mcp_server.py:0427451a3f8cb399
+  served_from: tortoise/mcp_server.py:0d854254e4fae7ef
   served_attributes: c5e5c4bda5ed08ed
   family: memory
   family_rank: 1
   served: http
-  sdk_method: delete
+  sdk_method: _delete
   group_source: mapped
   keyword: delete
   keyword_rank: 4
@@ -1619,7 +1548,7 @@ rows:
     Event. DESTRUCTIVE and PERMANENT: cannot be undone. The FIRST call changes nothing: it previews which node resolves
     and every edge that would go with it, and returns a confirmation token. Call again with confirmation=<token>
     to delete. When the item is wrong rather than unwanted, supersede it or retract it instead.'
-  dependency: declares TortoiseSDK.delete (resolves)
+  dependency: declares TortoiseSDK._delete (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1633,12 +1562,12 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_delete_point
-  served_from: tortoise/mcp_server.py:8449e50d5d6790b4
+  served_from: tortoise/mcp_server.py:7b4ee71cdf0ec4dc
   served_attributes: e613762460869509
   family: memory
   family_rank: 1
   served: http
-  sdk_method: delete_point_wrapped
+  sdk_method: _delete_point_wrapped
   group_source: mapped
   keyword: delete
   keyword_rank: 4
@@ -1646,7 +1575,7 @@ rows:
   canonical: false
   job: Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone. dry_run=True previews the blast
     radius (the point and every edge that would be removed) and changes nothing.
-  dependency: declares TortoiseSDK.delete_point_wrapped (resolves)
+  dependency: declares TortoiseSDK._delete_point_wrapped (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: merge
@@ -1693,12 +1622,12 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_list_batches
-  served_from: tortoise/mcp_server.py:9f24b2ea216a4739
+  served_from: tortoise/mcp_server.py:7b10522163a3916e
   served_attributes: a6f98a0ada3b45d0
   family: memory
   family_rank: 1
   served: http
-  sdk_method: list_batches
+  sdk_method: _list_batches
   group_source: defaulted
   keyword: list
   keyword_rank: 5
@@ -1706,7 +1635,7 @@ rows:
   canonical: null
   job: Batch discovery — the most recent distinct ingest batch_ids with their point/direct-edge counts (ordered
     by newest stamp, capped at limit, default 20).
-  dependency: declares TortoiseSDK.list_batches (resolves)
+  dependency: declares TortoiseSDK._list_batches (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1750,12 +1679,12 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_issue_insight
-  served_from: tortoise/mcp_server.py:c00d1786ba538ea6
+  served_from: tortoise/mcp_server.py:935980159bb45e72
   served_attributes: 432a3854a01085d8
   family: memory
   family_rank: 1
   served: http
-  sdk_method: issue_insight
+  sdk_method: _issue_insight
   group_source: mapped
   keyword: find
   keyword_rank: 6
@@ -1765,7 +1694,7 @@ rows:
     cross-session decisions / EP-tagged claims matching the title (semantic stage) plus prior indexed issues for
     the repo (repo= given). Fail-closed: empty graph -> no_prior_knowledge; populated graph + unindexed repo ->
     repo_not_indexed.'
-  dependency: declares TortoiseSDK.issue_insight (resolves)
+  dependency: declares TortoiseSDK._issue_insight (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1871,12 +1800,12 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_create_entity
 - name: tortoise_create_edge
-  served_from: tortoise/mcp_server.py:f584fb5c935a1e9a
+  served_from: tortoise/mcp_server.py:08e75951d0dbe463
   served_attributes: 674a7d628b644657
   family: graph
   family_rank: 2
   served: http
-  sdk_method: create_edge
+  sdk_method: _create_edge
   group_source: mapped
   keyword: create
   keyword_rank: 2
@@ -1885,7 +1814,7 @@ rows:
   job: 'Create a typed structural edge between two entities. Relation: performs, produces, uses, memberOf, ownedBy,
     managedBy, about*, related, dependsOn, etc. Operator-less per the reification rule (v3.5 §8) — lazy promotion
     via operator_action when mitigation is needed. Returns {edge, created, nudges}.'
-  dependency: declares TortoiseSDK.create_edge (resolves)
+  dependency: declares TortoiseSDK._create_edge (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1898,12 +1827,12 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_create_operator
-  served_from: tortoise/mcp_server.py:51dc8775a0953a53
+  served_from: tortoise/mcp_server.py:3ca6830bf6fac3ff
   served_attributes: 9c8df3f7f40e3d00
   family: graph
   family_rank: 2
   served: http
-  sdk_method: create_operator
+  sdk_method: _create_operator
   group_source: mapped
   keyword: create
   keyword_rank: 2
@@ -1912,7 +1841,7 @@ rows:
   job: 'Create an operator connecting Points. op_type: IMPL, NAND, coherence, composedOf, decomposesInto, contains,
     wraps. semantics: the Layer-2 meaning (addresses, supports, refutes, mutuallyExclusive, hasPart, related, …)
     — it resolves the direction.'
-  dependency: declares TortoiseSDK.create_operator (resolves)
+  dependency: declares TortoiseSDK._create_operator (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1925,12 +1854,12 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_ingest
-  served_from: tortoise/mcp_server.py:4f8e3f1f130f8d65
+  served_from: tortoise/mcp_server.py:3aadd7ddcfec8334
   served_attributes: c0ea3c28d0df1685
   family: graph
   family_rank: 2
   served: http
-  sdk_method: ingest
+  sdk_method: _ingest
   group_source: mapped
   keyword: create
   keyword_rank: 2
@@ -1951,7 +1880,7 @@ rows:
     deduped connections never retro-promote). NOT declared idempotent: points dedup by content hash + kind, sources
     by url and operators by input set, but the entities leg is append-only for document/event — a repeat can write
     a second Source.'
-  dependency: declares TortoiseSDK.ingest (resolves)
+  dependency: declares TortoiseSDK._ingest (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1964,12 +1893,12 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_delete_entity
-  served_from: tortoise/mcp_server.py:72d367c45cf4b38a
+  served_from: tortoise/mcp_server.py:eac377eef18b3e80
   served_attributes: e353b3f25fb68584
   family: graph
   family_rank: 2
   served: http
-  sdk_method: delete_entity
+  sdk_method: _delete_entity__svc
   group_source: mapped
   keyword: delete
   keyword_rank: 4
@@ -1977,7 +1906,7 @@ rows:
   canonical: false
   job: Delete any entity by ID. DESTRUCTIVE — cannot be undone. dry_run=True previews the node(s) and every edge
     that would be removed and changes nothing.
-  dependency: declares TortoiseSDK.delete_entity (resolves)
+  dependency: declares TortoiseSDK._delete_entity__svc (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: merge
@@ -2107,19 +2036,19 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_check_structure
-  served_from: tortoise/mcp_server.py:40375d9fd46546ee
+  served_from: tortoise/mcp_server.py:5a71d61b89cd7f8c
   served_attributes: d1d847feeecfe0de
   family: reasoning
   family_rank: 3
   served: http
-  sdk_method: check_structure
+  sdk_method: _check_structure
   group_source: mapped
   keyword: check
   keyword_rank: 8
   cluster: null
   canonical: null
   job: Check Gate 0→4 chain integrity (orphans, dangling refs).
-  dependency: declares TortoiseSDK.check_structure (resolves)
+  dependency: declares TortoiseSDK._check_structure (resolves)
   lifecycle: active
   used_by: never called, eval-harness, tooling, docs
   recommendation: keep
@@ -2215,19 +2144,19 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_list_graphs
-  served_from: tortoise/mcp_server.py:c801e357d4cc1991
+  served_from: tortoise/mcp_server.py:0a73c63d060a661d
   served_attributes: 06490fe8c983ed26
   family: sessions
   family_rank: 4
   served: http
-  sdk_method: list_graphs
+  sdk_method: _list_graphs
   group_source: mapped
   keyword: list
   keyword_rank: 5
   cluster: null
   canonical: null
   job: List all graph names in the database. Useful for namespace discovery.
-  dependency: declares TortoiseSDK.list_graphs (resolves)
+  dependency: declares TortoiseSDK._list_graphs (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -2329,19 +2258,19 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_session_context
-  served_from: tortoise/mcp_server.py:5e1abe12c810e056
+  served_from: tortoise/mcp_server.py:822a334110ea61be
   served_attributes: 734ca6ea44c83df3
   family: sessions
   family_rank: 4
   served: http
-  sdk_method: session_context
+  sdk_method: _session_context
   group_source: mapped
   keyword: trace
   keyword_rank: 7
   cluster: null
   canonical: null
   job: Return 'what happened last session' — diary entries, recent Points, Events, confidence changes.
-  dependency: declares TortoiseSDK.session_context (resolves)
+  dependency: declares TortoiseSDK._session_context (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -2354,12 +2283,12 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_org_create
-  served_from: tortoise/mcp_server.py:e457a262c42b17dc
+  served_from: tortoise/mcp_server.py:bf73af7ccada898b
   served_attributes: 1b06f44dc97e7126
   family: admin
   family_rank: 5
   served: stdio-only
-  sdk_method: org_create
+  sdk_method: _org_create
   group_source: mapped
   keyword: create
   keyword_rank: 2
@@ -2367,7 +2296,7 @@ rows:
   canonical: null
   job: Create isolated team graph via FalkorDB select_graph. EXCLUDED from tenant HTTP — provisioning belongs to
     /internal/provision behind FASTAPI_INTERNAL_KEY.
-  dependency: declares TortoiseSDK.org_create (resolves)
+  dependency: declares TortoiseSDK._org_create (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -2714,52 +2643,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:annotate_ask_hits
-  method: annotate_ask_hits
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.annotate_ask_hits.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, eval-harness, other-tooling'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:annotate_operator
-  method: annotate_operator
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.annotate_operator.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_annotate_operator (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:approve_merge
   method: approve_merge
   approved: true
@@ -2774,75 +2657,6 @@ rows:
   canonical: null
   job: Public SDK method TortoiseSDK.approve_merge.
   dependency: 'reached by 1 registered tool(s): tortoise_approve_merge'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:audit
-  method: audit
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.audit.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_audit (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:belief_timeline
-  method: belief_timeline
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.belief_timeline.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_belief_timeline (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:calibrate_summary
-  method: calibrate_summary
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.calibrate_summary.
-  dependency: 'reached by 1 registered tool(s): tortoise_calibrate_summary'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
@@ -2898,29 +2712,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:check_structure
-  method: check_structure
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.check_structure.
-  dependency: 'reached by 1 registered tool(s): tortoise_check_structure'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:close
   method: close
   approved: true
@@ -2945,144 +2736,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:compute_confidence
-  method: compute_confidence
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.compute_confidence.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_compute_confidence (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:compute_reputation
-  method: compute_reputation
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.compute_reputation.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:create_derivation
-  method: create_derivation
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_derivation.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:create_direct_edge
-  method: create_direct_edge
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_direct_edge.
-  dependency: 'reached by no registered MCP tool; caller categories: documentation, engine, other-tooling'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: documentation, engine, other-tooling'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:create_document
-  method: create_document
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_document.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_document (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:create_edge
-  method: create_edge
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_edge.
-  dependency: 'reached by 1 registered tool(s): tortoise_create_edge'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:create_entity
   method: create_entity
   approved: true
@@ -3101,29 +2754,6 @@ rows:
   used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:create_event
-  method: create_event
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_event.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_event (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3175,144 +2805,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:create_object
-  method: create_object
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_object.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_object (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:create_operator
-  method: create_operator
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_operator.
-  dependency: 'reached by 1 registered tool(s): tortoise_create_operator'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:create_point
-  method: create_point
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_point.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_point (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:create_subject
-  method: create_subject
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_subject.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_subject (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:delete
-  method: delete
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.delete.
-  dependency: 'reached by 1 registered tool(s): tortoise_delete'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:delete_entity
-  method: delete_entity
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.delete_entity.
-  dependency: 'reached by 1 registered tool(s): tortoise_delete_entity'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:delete_knowledge
   method: delete_knowledge
   approved: true
@@ -3359,144 +2851,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:delete_point
-  method: delete_point
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.delete_point.
-  dependency: 'reached by no registered MCP tool; caller categories: documentation, engine, other-tooling'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: documentation, engine, other-tooling'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:delete_point_wrapped
-  method: delete_point_wrapped
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.delete_point_wrapped.
-  dependency: 'reached by 1 registered tool(s): tortoise_delete_point'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:diary_write
-  method: diary_write
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.diary_write.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_diary_write (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:dream
-  method: dream
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.dream.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_dream (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:dream_health_check
-  method: dream_health_check
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.dream_health_check.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_dream_health (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:dream_health_state
-  method: dream_health_state
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.dream_health_state.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:explore_connections
   method: explore_connections
   approved: true
@@ -3520,52 +2874,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:get_confidence
-  method: get_confidence
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.get_confidence.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_confidence (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:get_cross_lens_candidates
-  method: get_cross_lens_candidates
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.get_cross_lens_candidates.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_find_cross_lens_candidates (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:get_entity
   method: get_entity
   approved: true
@@ -3584,29 +2892,6 @@ rows:
   used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:get_events
-  method: get_events
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.get_events.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_events (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3658,99 +2943,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:get_owned_entities
-  method: get_owned_entities
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.get_owned_entities.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_governance (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:get_point
-  method: get_point
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.get_point.
-  dependency: 'reached by 0 registered tool(s) and 2 retired name(s): tortoise_get_operator (retired), tortoise_get_point
-    (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 2 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:get_session
-  method: get_session
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.get_session.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_session (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:get_source_reliability
-  method: get_source_reliability
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.get_source_reliability.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_source_reliability (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:graph_overview
   method: graph_overview
   approved: true
@@ -3797,98 +2989,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:ingest
-  method: ingest
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.ingest.
-  dependency: 'reached by 1 registered tool(s): tortoise_ingest'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:ingest_corpus
-  method: ingest_corpus
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.ingest_corpus.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_ingest_corpus (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:invalidate_point
-  method: invalidate_point
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.invalidate_point.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_invalidate (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:issue_insight
-  method: issue_insight
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.issue_insight.
-  dependency: 'reached by 1 registered tool(s): tortoise_issue_insight'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:link_entities
   method: link_entities
   approved: true
@@ -3912,98 +3012,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:link_source_to_entity
-  method: link_source_to_entity
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.link_source_to_entity.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, other-tooling, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:list_batch
-  method: list_batch
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.list_batch.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_batch (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:list_batches
-  method: list_batches
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.list_batches.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_batches'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:list_graphs
-  method: list_graphs
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.list_graphs.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_graphs'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:list_keys
   method: list_keys
   approved: true
@@ -4165,75 +3173,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:mitigate_operator
-  method: mitigate_operator
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.mitigate_operator.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_mitigate_operator (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:org_create
-  method: org_create
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.org_create.
-  dependency: 'reached by 1 registered tool(s): tortoise_org_create'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:paginated_query
-  method: paginated_query
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.paginated_query.
-  dependency: 'reached by 1 registered tool(s) and 1 retired name(s): tortoise_paginated_query (retired), tortoise_query'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:poll_events
   method: poll_events
   approved: true
@@ -4252,168 +3191,6 @@ rows:
   used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:promote_point
-  method: promote_point
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.promote_point.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_promote_point (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:query
-  method: query
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.query.
-  dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling,
-    tenant-rest'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:query_points_by_tag
-  method: query_points_by_tag
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.query_points_by_tag.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_query_points_by_tag (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:recall_gaps
-  method: recall_gaps
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.recall_gaps.
-  dependency: 'reached by no registered MCP tool; caller categories: mcp-handler'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: mcp-handler'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:recall_state
-  method: recall_state
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.recall_state.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_recall (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:recall_subgraph
-  method: recall_subgraph
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.recall_subgraph.
-  dependency: 'reached by no registered MCP tool; caller categories: mcp-handler'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: mcp-handler'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:reconcile_sessions
-  method: reconcile_sessions
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.reconcile_sessions.
-  dependency: 'reached by no registered MCP tool; caller categories: cli'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: cli'
   recommended_family: null
   proposed: false
   exemption: false
@@ -4511,29 +3288,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:resolve_id
-  method: resolve_id
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.resolve_id.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:restore_memory_graph
   method: restore_memory_graph
   approved: true
@@ -4557,52 +3311,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:retract_point
-  method: retract_point
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.retract_point.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_retract_point (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:review_connections
-  method: review_connections
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.review_connections.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_review_connections (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:review_link_candidates
   method: review_link_candidates
   approved: true
@@ -4672,121 +3380,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:session_context
-  method: session_context
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.session_context.
-  dependency: 'reached by 1 registered tool(s): tortoise_session_context'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:session_index_health
-  method: session_index_health
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.session_index_health.
-  dependency: 'reached by no registered MCP tool; caller categories: cli, engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: cli, engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:set_point_baseline
-  method: set_point_baseline
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.set_point_baseline.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_set_point_baseline (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:stale_points
-  method: stale_points
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.stale_points.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:summarize_structure
-  method: summarize_structure
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.summarize_structure.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_summarize_structure (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:supersede_knowledge
   method: supersede_knowledge
   approved: true
@@ -4805,145 +3398,6 @@ rows:
   used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:supersede_point
-  method: supersede_point
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.supersede_point.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, eval-harness, other-tooling'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:test_guard
-  method: test_guard
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.test_guard.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:topic_summarize
-  method: topic_summarize
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.topic_summarize.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:tortoise_fts_query
-  method: tortoise_fts_query
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.tortoise_fts_query.
-  dependency: 'reached by 1 registered tool(s): tortoise_search'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:ulid
-  method: ulid
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.ulid.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:update
-  method: update
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.update.
-  dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling,
-    tenant-rest'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false
@@ -4996,52 +3450,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:update_point
-  method: update_point
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.update_point.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, eval-harness'
-  lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, eval-harness'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:volunteer_context
-  method: volunteer_context
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.volunteer_context.
-  dependency: 'reached by no registered MCP tool; caller categories: cli, engine, tenant-rest'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: cli, engine, tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:write_knowledge_batch
   method: write_knowledge_batch
   approved: true

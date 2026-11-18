@@ -122,457 +122,20 @@
     },
     {
       "kind": "sdk-method",
-      "symbol": "diary_read",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/diary_read.py",
+      "symbol": "annotate_operator",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: annotate_operator left the public SDK surface \u2014 privatised (body survives as `_annotate_operator`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/annotate_operator.py",
       "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
       "sources": [
         "tortoise/sdk.py"
       ],
       "blocks": [
         {
           "path": "tortoise/sdk.py",
-          "node": "FunctionDef:diary_read",
-          "sha256": "89cf225fc4b569c2b78f866a7fce2fb4b4f7505550288511e634ce24f0f4aed3"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "expand_relationships",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/expand_relationships.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:expand_relationships",
-          "sha256": "e7372e42b0e555872d8e225c17e41198394af556c85fb3f4e794f5a1c46ff804"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "list_dedup_candidates",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/list_dedup_candidates.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:list_dedup_candidates",
-          "sha256": "2b6abaee9a6b2e4e74945b68e49a1da66e451d7111806d375224dc55200d7a60"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "list_namespaces",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/list_namespaces.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:list_namespaces",
-          "sha256": "1fa134fac94d03526b3593f446a4477da82ce587208112b032751b088f815690"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "list_pointkinds",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/list_pointkinds.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:list_pointkinds",
-          "sha256": "430f0940327946b18715844063d0ab0eb71572edd03fef38a2092964abc3b380"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "list_sources",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/list_sources.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:list_sources",
-          "sha256": "285966af1b8b0d0b5de07037d363801b0c600c3661cffb4a63ca91612a8d0bef"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "list_tags",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/list_tags.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:list_tags",
-          "sha256": "29e577c7c75172eb53845f7ad04926bd34639f151450726bcfe4039e05c396f6"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "list_topics",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/list_topics.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:list_topics",
-          "sha256": "3229e8b1148964b856d83dfc6a718ab2cf7d7e8ca8761f9eca073bed7eba5f0b"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "provenance",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/provenance.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:provenance",
-          "sha256": "c7eeba4c3ed19f354a6225b25b6bf5d159fb507e18d169a9f32d828685e9495e"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "search_sessions",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/search_sessions.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:search_sessions",
-          "sha256": "f69df26b5825fafebcafdcecfd22e9f5a948e04d866204a061504786161c3bdb"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "status",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into graph_overview(section='status') (#11609 Phase 2, #4282 row 9): the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/status.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:status",
-          "sha256": "3318ebf7e5a81faf94e0e725c66df8b79055061359bfbe996edc0209581fb183"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "suggest_entry_points",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/suggest_entry_points.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:suggest_entry_points",
-          "sha256": "e4d25c482b9853d7b1fe7f57c4e9340c2910ef44e65e85a2c1a95deeae16464b"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "taxonomy",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/taxonomy.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:taxonomy",
-          "sha256": "e962de4bd674d5b634d320e365ef0dd9bc5654942dc042e18ae9eb6fdd2bf580"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "validate_domain",
-      "batch": "11609-a-read-containers",
-      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
-      "file": "archive/sdk-methods/11609-a-read-containers/validate_domain.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:validate_domain",
-          "sha256": "c41ac9817fb89846422ceaf218832cf8fd3e41374944958e71dbb5ac120b677a"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "checkpoint",
-      "batch": "11609-phase2-sources-containers",
-      "reason": "name retired into mine_knowledge_from_session(items=...) (#4282 Phase 2, #11609): row 16 keeps this batch filer as its items arm, frozen here as the record of what the retired name did",
-      "file": "archive/sdk-methods/11609-phase2-sources-containers/checkpoint.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:checkpoint",
-          "sha256": "eab69267989677c61a9c9bdadb1364e83a8201916c85b101f2430c3258a5b1b3"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "create_source",
-      "batch": "11609-phase2-sources-containers",
-      "reason": "name retired into register_source (#4282 Phase 2, #11609): the approved row 14 keeps this body under its own name, frozen here as the record of what the retired name did",
-      "file": "archive/sdk-methods/11609-phase2-sources-containers/create_source.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:create_source",
-          "sha256": "8b7dffdd5c78733f9f6515623e1138fe55526d422175b7ba55c03005949edb84"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "index_directory",
-      "batch": "11609-phase2-sources-containers",
-      "reason": "name retired into index_sources_from_directory (#4282 Phase 2, #11609): row 15 keeps this walker under its own name, frozen here as the record of what the retired name did",
-      "file": "archive/sdk-methods/11609-phase2-sources-containers/index_directory.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:index_directory",
-          "sha256": "b7c271211ccc065bab96e3c76af0714ffae8db04945f64cd8828e94e28926035"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "index_sessions",
-      "batch": "11609-phase2-sources-containers",
-      "reason": "name retired into index_sources_from_directory(file_type='agent_session') (#4282 Phase 2, #11609); it was a single delegation, frozen as the record of what the retired name did",
-      "file": "archive/sdk-methods/11609-phase2-sources-containers/index_sessions.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:index_sessions",
-          "sha256": "73cf36a7a355e28c4137e276a5b43288b942ad296c3b526c5cfd2bcecaca075f"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "mine_corpus",
-      "batch": "11609-phase2-sources-containers",
-      "reason": "name retired into mine_knowledge_from_directory (#4282 Phase 2, #11609): row 17 keeps this miner under its own name, frozen here as the record of what the retired name did",
-      "file": "archive/sdk-methods/11609-phase2-sources-containers/mine_corpus.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:mine_corpus",
-          "sha256": "5e3af56db6e2f1cdb752c49376225b7c84eb0e1af4ba231eef2b7be6b6c9f106"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "backfill_v25",
-      "batch": "b2-sdk-retirement-wave-1",
-      "reason": "One-shot ONTOLOGY v2.5 migration (status/pointKind backfill); zero callers. Beta w8_backfill region: dead code carrying a public promise. No recorded destination.",
-      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/backfill_v25.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:backfill_v25",
-          "sha256": "1f17fe7c0a1c22dd960adfe425a1041f03ebaf7e5d8eddfb5632a858e54f29c7"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "calibration_passed",
-      "batch": "b2-sdk-retirement-wave-1",
-      "reason": "Gate B calibration-milestone reader. It had ONE production caller - `tortoise/gates.py`'s CLI read `TortoiseSDK().calibration_passed()` inside a try/except - so the body went PRIVATE as `_calibration_marker_recorded()` and gates.py reads that: the public door closed and the capability stayed. Beta `r3` records `check_confidence`. `_CALIBRATION_MARKER_KEY` stays: projection config-reset reads it.",
-      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/calibration_passed.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:calibration_passed",
-          "sha256": "f846c7acffba43b64dcacf4dc96a64303a0cbb5b3b49929df34c829fe5f75fef"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "list_relations",
-      "batch": "b2-sdk-retirement-wave-1",
-      "reason": "Listed pack-declared relation declarations; zero callers. CANONICAL r6_canon (row R6) records graph_overview as destination (no def today, so no hint); the beta tables never recorded a target for this name. Registry call _get_kind_expander().list_relations() survives.",
-      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/list_relations.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:list_relations",
-          "sha256": "863c3266d2d8ac35a6521f848aaf00b8a700f996f05c5ae8ad86ab6368ca5a24"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "membership_get",
-      "batch": "b2-sdk-retirement-wave-1",
-      "reason": "Read one membership row by id. No PRODUCTION caller: the only call sites were two tests (test_membership_get_returns_membership / _returns_none_for_missing), DELETED with it because the empty branch they exercised went too. Beta n1_console: console plumbing, tenancy admin is not on the SDK. No recorded destination.",
-      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/membership_get.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:membership_get",
-          "sha256": "32964a8738eb57ac53df7d32d98ca5c74ea469389c9aafc394c2049092a75337"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "quarantine_batch",
-      "batch": "b2-sdk-retirement-wave-1",
-      "reason": "Thin SDK delegate to `tortoise.mining.quarantine_batch` (which stays). No PRODUCTION caller: the only call sites were tests, re-pointed at tortoise.mining.quarantine_batch, which is exactly what the delegate called. Beta `w11_lifecycle` records `update_knowledge` as destination.",
-      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/quarantine_batch.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:quarantine_batch",
-          "sha256": "248ab05e8b7283a56ba65158ec7744d6500acbe8645678363744c6434eca7410"
+          "node": "FunctionDef:annotate_operator",
+          "sha256": "a9ebe5ff098c61503943dce53d6f460396b05f6d34452cd1186e2d09c6e91b2f"
         }
       ]
     },
@@ -635,6 +198,329 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "backfill_v25",
+      "batch": "b2-sdk-retirement-wave-1",
+      "reason": "One-shot ONTOLOGY v2.5 migration (status/pointKind backfill); zero callers. Beta w8_backfill region: dead code carrying a public promise. No recorded destination.",
+      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/backfill_v25.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:backfill_v25",
+          "sha256": "1f17fe7c0a1c22dd960adfe425a1041f03ebaf7e5d8eddfb5632a858e54f29c7"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "belief_timeline",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: belief_timeline left the public SDK surface \u2014 privatised (body survives as `_belief_timeline`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/belief_timeline.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:belief_timeline",
+          "sha256": "56fe01449c2c79943480c81f6db64c636b99afa64d15127dab4a20991eb8e92c"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "calibrate_summary",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: calibrate_summary left the public SDK surface \u2014 privatised (body survives as `_calibrate_summary`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/calibrate_summary.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:calibrate_summary",
+          "sha256": "20819dc2738e431ade4ce52edbf2287ca39650db3728853e8247ad58ad34b908"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "calibration_passed",
+      "batch": "b2-sdk-retirement-wave-1",
+      "reason": "Gate B calibration-milestone reader. It had ONE production caller - `tortoise/gates.py`'s CLI read `TortoiseSDK().calibration_passed()` inside a try/except - so the body went PRIVATE as `_calibration_marker_recorded()` and gates.py reads that: the public door closed and the capability stayed. Beta `r3` records `check_confidence`. `_CALIBRATION_MARKER_KEY` stays: projection config-reset reads it.",
+      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/calibration_passed.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:calibration_passed",
+          "sha256": "f846c7acffba43b64dcacf4dc96a64303a0cbb5b3b49929df34c829fe5f75fef"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "checkpoint",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into mine_knowledge_from_session(items=...) (#4282 Phase 2, #11609): row 16 keeps this batch filer as its items arm, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/checkpoint.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:checkpoint",
+          "sha256": "eab69267989677c61a9c9bdadb1364e83a8201916c85b101f2430c3258a5b1b3"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "compute_confidence",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: compute_confidence left the public SDK surface \u2014 privatised (body survives as `_compute_confidence`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/compute_confidence.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:compute_confidence",
+          "sha256": "a0efe8c3b6b771a36fe68ae95f6b3f6068f954cf6049f40a6067b5a0f96f48f2"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "compute_reputation",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: compute_reputation left the public SDK surface \u2014 privatised (body survives as `_compute_reputation`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/compute_reputation.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:compute_reputation",
+          "sha256": "15d72a9baeeb9a72be28c26680f0e8dab040bc19c5f11f0e39899e4484551465"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "create_edge",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: create_edge left the public SDK surface \u2014 privatised (body survives as `_create_edge`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/create_edge.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:create_edge",
+          "sha256": "b29b5eea520d5a330b99e18997fdfd279f60a6c66e24c292dc9cf8376f87008a"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "create_source",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into register_source (#4282 Phase 2, #11609): the approved row 14 keeps this body under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/create_source.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:create_source",
+          "sha256": "8b7dffdd5c78733f9f6515623e1138fe55526d422175b7ba55c03005949edb84"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "delete",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: delete left the public SDK surface \u2014 privatised (body survives as `_delete`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/delete.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:delete",
+          "sha256": "6b0a1da5372b63ccb93d2e71842ab18551f22c07dcd2d2f185d497181844542c"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "delete_entity",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: delete_entity left the public SDK surface \u2014 privatised (body survives as `_delete_entity`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/delete_entity.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:delete_entity",
+          "sha256": "e8c76af0aae1077c51674d49bac21e0d4b1d032bb550c76ec3a73654e455cd33"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "diary_read",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/diary_read.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:diary_read",
+          "sha256": "89cf225fc4b569c2b78f866a7fce2fb4b4f7505550288511e634ce24f0f4aed3"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "diary_write",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: diary_write left the public SDK surface \u2014 privatised (body survives as `_diary_write`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/diary_write.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:diary_write",
+          "sha256": "63bd829e032940af91a7cd0c86063d095efecef1a653af75753762bbb36c9b82"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "dream",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: dream left the public SDK surface \u2014 privatised (body survives as `_dream`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/dream.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:dream",
+          "sha256": "292da02e52231c8e3932efe6883ce2f2a55ac148520287278641ca29bbf21d45"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "expand_relationships",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/expand_relationships.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:expand_relationships",
+          "sha256": "e7372e42b0e555872d8e225c17e41198394af556c85fb3f4e794f5a1c46ff804"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "get_confidence",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: get_confidence left the public SDK surface \u2014 privatised (body survives as `_get_confidence`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/get_confidence.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:get_confidence",
+          "sha256": "8a39db76e59c933a502d342223e2ff7fca8fb71469a704fe2bdac3c31281ad32"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "get_point",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: get_point left the public SDK surface \u2014 privatised (body survives as `_get_point`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/get_point.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:get_point",
+          "sha256": "b84551d1c4ea3ecbd88144e7d32a22e8eb3012419ece0922bf8ef7448bc999f3"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "graph_active_key_count",
       "batch": "12901-wave-2",
       "reason": "Non-revoked key count per graph. Body survives PRIVATE as `_graph_active_key_count`; recorded destination `list_keys`.",
@@ -687,6 +573,63 @@
           "path": "tortoise/sdk.py",
           "node": "FunctionDef:graph_key_ids",
           "sha256": "4516ceb244c24002ed1906118811c95ac4b00f441b81f3b7545beea4df755efe"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "index_directory",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into index_sources_from_directory (#4282 Phase 2, #11609): row 15 keeps this walker under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/index_directory.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:index_directory",
+          "sha256": "b7c271211ccc065bab96e3c76af0714ffae8db04945f64cd8828e94e28926035"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "index_sessions",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into index_sources_from_directory(file_type='agent_session') (#4282 Phase 2, #11609); it was a single delegation, frozen as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/index_sessions.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:index_sessions",
+          "sha256": "73cf36a7a355e28c4137e276a5b43288b942ad296c3b526c5cfd2bcecaca075f"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "ingest",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: ingest left the public SDK surface \u2014 privatised (body survives as `_ingest`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/ingest.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:ingest",
+          "sha256": "e22de76ff3aca8a72a66b3123eba581cb0895e9a7a977e003277c7817566a0fb"
         }
       ]
     },
@@ -749,6 +692,139 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "list_dedup_candidates",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_dedup_candidates.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_dedup_candidates",
+          "sha256": "2b6abaee9a6b2e4e74945b68e49a1da66e451d7111806d375224dc55200d7a60"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_namespaces",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_namespaces.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_namespaces",
+          "sha256": "1fa134fac94d03526b3593f446a4477da82ce587208112b032751b088f815690"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_pointkinds",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_pointkinds.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_pointkinds",
+          "sha256": "430f0940327946b18715844063d0ab0eb71572edd03fef38a2092964abc3b380"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_relations",
+      "batch": "b2-sdk-retirement-wave-1",
+      "reason": "Listed pack-declared relation declarations; zero callers. CANONICAL r6_canon (row R6) records graph_overview as destination (no def today, so no hint); the beta tables never recorded a target for this name. Registry call _get_kind_expander().list_relations() survives.",
+      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/list_relations.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_relations",
+          "sha256": "863c3266d2d8ac35a6521f848aaf00b8a700f996f05c5ae8ad86ab6368ca5a24"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_sources",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_sources.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_sources",
+          "sha256": "285966af1b8b0d0b5de07037d363801b0c600c3661cffb4a63ca91612a8d0bef"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_tags",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_tags.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_tags",
+          "sha256": "29e577c7c75172eb53845f7ad04926bd34639f151450726bcfe4039e05c396f6"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_topics",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_topics.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_topics",
+          "sha256": "3229e8b1148964b856d83dfc6a718ab2cf7d7e8ca8761f9eca073bed7eba5f0b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "membership_create",
       "batch": "12901-wave-2",
       "reason": "Add a user to an org with a role. Body survives PRIVATE as `_membership_create`; recorded destination `add_member` (row 37).",
@@ -768,6 +844,82 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "membership_get",
+      "batch": "b2-sdk-retirement-wave-1",
+      "reason": "Read one membership row by id. No PRODUCTION caller: the only call sites were two tests (test_membership_get_returns_membership / _returns_none_for_missing), DELETED with it because the empty branch they exercised went too. Beta n1_console: console plumbing, tenancy admin is not on the SDK. No recorded destination.",
+      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/membership_get.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:membership_get",
+          "sha256": "32964a8738eb57ac53df7d32d98ca5c74ea469389c9aafc394c2049092a75337"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "mine_corpus",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into mine_knowledge_from_directory (#4282 Phase 2, #11609): row 17 keeps this miner under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/mine_corpus.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:mine_corpus",
+          "sha256": "5e3af56db6e2f1cdb752c49376225b7c84eb0e1af4ba231eef2b7be6b6c9f106"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "mitigate_operator",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: mitigate_operator left the public SDK surface \u2014 privatised (body survives as `_mitigate_operator`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/mitigate_operator.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:mitigate_operator",
+          "sha256": "8a6af8b48966250146f59009d92ac0f859e63ff28cb9b2bb6e314b496d40c421"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "org_create",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: org_create left the public SDK surface \u2014 privatised (body survives as `_org_create`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/org_create.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:org_create",
+          "sha256": "87f28fb169c0d4990fe865c5da6bc4c35f4ca08d4d825457d2c011ed15f85b3d"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "org_get",
       "batch": "12901-wave-2",
       "reason": "Control-plane org read. Body survives PRIVATE as `_org_get`; recorded destination `get_organisation_account` (beta row 27). No hint: beta never names org_get.",
@@ -782,6 +934,215 @@
           "path": "tortoise/sdk.py",
           "node": "FunctionDef:org_get",
           "sha256": "6b25b8d3f55f861296f803b175e2016a213e3a396a2d2d5e7e659010635b469b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "promote_point",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: promote_point left the public SDK surface \u2014 privatised (body survives as `_promote_point`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/promote_point.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:promote_point",
+          "sha256": "2a7314973d3f25672aa122716fc52b5b126fe9750588a233dc9c4dccacc73cbe"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "provenance",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/provenance.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:provenance",
+          "sha256": "c7eeba4c3ed19f354a6225b25b6bf5d159fb507e18d169a9f32d828685e9495e"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "quarantine_batch",
+      "batch": "b2-sdk-retirement-wave-1",
+      "reason": "Thin SDK delegate to `tortoise.mining.quarantine_batch` (which stays). No PRODUCTION caller: the only call sites were tests, re-pointed at tortoise.mining.quarantine_batch, which is exactly what the delegate called. Beta `w11_lifecycle` records `update_knowledge` as destination.",
+      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/quarantine_batch.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:quarantine_batch",
+          "sha256": "248ab05e8b7283a56ba65158ec7744d6500acbe8645678363744c6434eca7410"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "recall_gaps",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: recall_gaps left the public SDK surface \u2014 privatised (body survives as `_recall_gaps`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/recall_gaps.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:recall_gaps",
+          "sha256": "3446c8cc58dc66dca56e971db66f908c037f2b686841a8e81520e46e5eef54d5"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "recall_state",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: recall_state left the public SDK surface \u2014 privatised (body survives as `_recall_state`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/recall_state.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:recall_state",
+          "sha256": "f5da04f963d17928c26604f49981b0adbe38074536b7fab502c6a7b7305c4430"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "recall_subgraph",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: recall_subgraph left the public SDK surface \u2014 privatised (body survives as `_recall_subgraph`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/recall_subgraph.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:recall_subgraph",
+          "sha256": "800a89b28eb3a2bf79344ec14c42611e2079312b1161f008eaeb218e2c24d118"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "reconcile_sessions",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: reconcile_sessions left the public SDK surface \u2014 privatised (body survives as `_reconcile_sessions`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/reconcile_sessions.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:reconcile_sessions",
+          "sha256": "13b81b1f4da0aaf4feef4af859ab1b292ef6f37eb54296045c4c01b9e34e0b29"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "resolve_id",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: resolve_id left the public SDK surface \u2014 privatised (body survives as `_resolve_id`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/resolve_id.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:resolve_id",
+          "sha256": "d15813f57182c14b46775eece5a371a1e5a1c3dcc04b306681cc5d37e9e474b3"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "search_sessions",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/search_sessions.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:search_sessions",
+          "sha256": "f69df26b5825fafebcafdcecfd22e9f5a948e04d866204a061504786161c3bdb"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "session_context",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: session_context left the public SDK surface \u2014 privatised (body survives as `_session_context`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/session_context.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:session_context",
+          "sha256": "13b952a78477eab0e2214c165cc89034edf259b1f73d8b53c344c39aabb92e3e"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "set_point_baseline",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: set_point_baseline left the public SDK surface \u2014 privatised (body survives as `_set_point_baseline`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/set_point_baseline.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:set_point_baseline",
+          "sha256": "869daf65dae7918db569b963674990930e47cdf886fc5d89baf7f50875ae3590"
         }
       ]
     },
@@ -844,6 +1205,63 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "stale_points",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: stale_points left the public SDK surface \u2014 privatised (body survives as `_stale_points`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/stale_points.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:stale_points",
+          "sha256": "c977be8df5e859f7d7a3b763a3381dd38f20b2dc7f2ace816c616264b59fb57c"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "status",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into graph_overview(section='status') (#11609 Phase 2, #4282 row 9): the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/status.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:status",
+          "sha256": "3318ebf7e5a81faf94e0e725c66df8b79055061359bfbe996edc0209581fb183"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "suggest_entry_points",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/suggest_entry_points.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:suggest_entry_points",
+          "sha256": "e4d25c482b9853d7b1fe7f57c4e9340c2910ef44e65e85a2c1a95deeae16464b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "sweep_invite_ghost_memberships",
       "batch": "12901-wave-2",
       "reason": "Scheduled repair of membership rows whose invite never completed. Body survives PRIVATE as `_sweep_invite_ghost_memberships`; beta rules it OUR MAINTENANCE; no destination.",
@@ -863,6 +1281,63 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "taxonomy",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/taxonomy.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:taxonomy",
+          "sha256": "e962de4bd674d5b634d320e365ef0dd9bc5654942dc042e18ae9eb6fdd2bf580"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "test_guard",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: test_guard left the public SDK surface \u2014 privatised (body survives as `_test_guard`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/test_guard.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:test_guard",
+          "sha256": "c8a304f6874e526e44b215dcba65b39bcd0a7e25055a46fb371f635e34bc6171"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "tortoise_fts_query",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: tortoise_fts_query left the public SDK surface \u2014 privatised (body survives as `_tortoise_fts_query`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/tortoise_fts_query.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:tortoise_fts_query",
+          "sha256": "260a26a8763e34f6e3ba69db3873ba3c81081421e95d9e184d58e81c5e17a06f"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "trash_graphs",
       "batch": "12901-wave-2",
       "reason": "Tombstoned custom graphs (the trash view). Body survives PRIVATE as `_trash_graphs`; beta rules it OUR MAINTENANCE, never product surface; no destination.",
@@ -877,6 +1352,82 @@
           "path": "tortoise/sdk.py",
           "node": "FunctionDef:trash_graphs",
           "sha256": "305fd299e7c3f24c9073678506762bf28637440ab7617a403b67e9fa0c157fa8"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "ulid",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: ulid left the public SDK surface \u2014 privatised (body survives as `_ulid`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/ulid.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:ulid",
+          "sha256": "0f74f4df73df8459b0aad8cc6eb0952680ed093d63ff4b8b7af5d75beedf1906"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "update",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: update left the public SDK surface \u2014 privatised (body survives as `_update`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/update.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:update",
+          "sha256": "fa3143e2c8ec0eceea7cd8742f92a42565476b5e0129848070773d556c7cfe41"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "validate_domain",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/validate_domain.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:validate_domain",
+          "sha256": "c41ac9817fb89846422ceaf218832cf8fd3e41374944958e71dbb5ac120b677a"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "volunteer_context",
+      "batch": "12901-final",
+      "reason": "#12901 FINAL batch: volunteer_context left the public SDK surface \u2014 privatised (body survives as `_volunteer_context`), no single owner-approved replacement. Frozen here so a mistake is inspected against the code that shipped it (#11609 ruling).",
+      "file": "archive/sdk-methods/12901-final/volunteer_context.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "424368c05d8ee9b26aa2d77e4c5a93a4b207b58f",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:volunteer_context",
+          "sha256": "ddcc3f0d03dc0f7cd27fe78787f169b577f01f56bbaea7c958aba17453a41f1d"
         }
       ]
     }
