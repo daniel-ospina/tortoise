@@ -647,10 +647,10 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                         f"{texts!r} became {got_list!r}"
                     )
                     continue
-                # Lengths are proved equal by the guard above, so `strict=True`
-                # cannot raise here — it states the invariant instead of leaving it
-                # implicit (ruff B905 on origin/main, which reds the required lint).
                 for raw_item, got_item in zip(texts, got_list, strict=True):
+                    # `strict=True` is free here: the length equality above already
+                    # `continue`s when the lists differ, so this asserts nothing new
+                    # and B905 gets its explicit parameter.
                     if raw_item in wholly_comment:
                         # (A) already named this item's loss; a second reason from
                         # _type_mismatch would contradict it in the same string.

@@ -981,7 +981,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6292`, `excluded = _terminal_object_statuses()` at `:5958` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:54248-54257`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:54389-54398`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,7 +1100,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:54248-54257`) — so each poll minted another `-reopened`
+    `sdk.py:54389-54398`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6292`).
@@ -1451,7 +1451,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:54096-54098`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:54237-54239`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3187,14 +3187,6 @@ _PINNED_MODULES = {
 # text required ON the last line; None when the citation is a single line)
 _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # entities.py — the status latch, its two refusals, and the by-name reopen reach
-    # ⛔ RE-DERIVED BY CONTENT, never carried (`#13447`). Every address below was read
-    # back off THIS tree by searching for each pin's own expected FIRST-line text; none
-    # is an offset of the number it replaced. The arithmetic trap is measured, not
-    # hypothetical: `main` already carried this block 12 lines stale, this change's own
-    # inserts add a further +24 above the status latch, and yet `:6251` and `:6303-6305`
-    # did not move at all. (Earlier round: 5128→5137, 5130→5139, 6215→6251, 6267→6303,
-    # 6269→6305 — that re-derivation is what put the +9 in the old comment, and it was
-    # still 12 lines short of `main`.)
     ("entities.py", 5137, 5139): (
         '"st": ev.get("status"),  # #1350: status ON CREATE only —',
         "# re-mention cannot reset superseded→live)."),
@@ -3214,32 +3206,40 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("entities.py", 6230, 6232): (
         "object_id = resolve_fold_name(",
         "mention=bool(_held) and not _live_holders)"),
-    ("entities.py", 6283, 6288): ("row = self.g.query(", ").result_set"),
     ("entities.py", 6251, 6251): ("declared_kinds=sorted(index.kind_forms))", None),
+    ("entities.py", 6283, 6288): ("row = self.g.query(", ").result_set"),
     ("entities.py", 6292, 6292): (
         "if status is not None and status in excluded:", None),
     ("entities.py", 6303, 6305): (
         "if (declared_kinds is not None and object_kind is not None", "return False"),
     # cache_projection.py — the NOT MONOTONE bullet the superseded claim rests on
-    # (`#13447`: +3 in this module's import and table-declaration block — re-derived by
-    # content at the current tree, 807→810).
     ("cache_projection.py", 810, 810): (
         "NOT MONOTONE — the carriers CAN be cleared", None),
     # sdk.py — the non-scalar refusal and the coherent un-supersede admission arm
-    # ⛔ RE-DERIVED BY CONTENT, never carried (`#13447`). History, kept because it is
-    # the reason for the rule: `#13348` re-derived these at +150 (`#13416`, `e52460b55e`,
-    # `git show --numstat` → `150 0`), and that table was STILL 22 lines short of
-    # `main` by the time this change started — a uniform shift from a diff stat, then
-    # more uniform shifts on top, is exactly how a "measured" pin rots. Each address
-    # below was resolved by searching for its own expected FIRST-line text at THIS
-    # tree. `if (_np_dead == [_SUPERSEDED_STATUS]` has TWO occurrences (the admission
-    # arm and a hint string); this pin is the ADMISSION one, whose last line is the
-    # `continue` that skips the record write.
-    ("sdk.py", 54096, 54098): (
+    # ⛔ RE-DERIVED AT THE MERGE WITH `origin/main` `130e20fdaf` (`#13447`), by CONTENT.
+    # Both inputs were stale here and neither was carried: this branch's block was
+    # re-derived at an older base (`#13447`), and `main`'s was re-derived at
+    # `f6793959a2ae` (`#13486`) — but the MERGED tree carries both sides' inserts, so
+    # every address was resolved again by searching for its own pinned FIRST-line text
+    # (and, where it has one, its own LAST-line text) at the merged tree:
+    #   * `entities.py` — this branch's values were already correct at the merge (its
+    #     inserts are the ones above the status latch: main's block read −24 under it,
+    #     and −9 at `:5128-5130`, which sits above the insertion).
+    #   * `sdk.py` — NEITHER side was right: `54132-54134→54237-54239`,
+    #     `54284-54293→54389-54398`, `54733→54838` (main's values) and this branch's
+    #     `54096-54098`/`54248-54257`/`54697` are all stale at the merge, because
+    #     `#13486`'s comment lane and `#13471`'s read move the same region again;
+    #     `update_knowledge`'s range end moved too (`22602`/`22590` → **22629**, the
+    #     function's own last line, located rather than computed).
+    # `cache_projection.py`'s bullet lands at `:810` (main: 807). Every one of the 18
+    # rows was confirmed against its pinned text at the merged tree before the numbers
+    # were written, and the test re-checks each address on every run. A pin resolved by
+    # arithmetic on a number you did not measure is how these rot.
+    ("sdk.py", 54237, 54239): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 54248, 54257): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22415, 22590): ("def update_knowledge(", None),
-    ("sdk.py", 54697, 54697): ("SET n += $props", None),
+    ("sdk.py", 54389, 54398): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 22454, 22629): ("def update_knowledge(", None),
+    ("sdk.py", 54838, 54838): ("SET n += $props", None),
 }
 
 
