@@ -10,10 +10,16 @@ reason rather than a missing arm:
 | # | reason class | doors |
 |---|---|---|
 | 1 | `-> list[dict]` wrap envelope (#8482) | `search_sessions`, `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`, `check_structure`, `calibrate_summary` |
-| 2 | `rest_spec` — the registry row IS the REST route | `issue_insight`, `session_context`, `search` |
+| 2 | `rest_spec` — *recorded* as "the registry row IS the REST route" | `issue_insight`, `session_context`, `search` |
 | 3 | the paged destination of two already-retired pointers | `query` |
 
 8 + 3 + 1 distinct names = **12** (`tortoise_search` carries reasons 1 and 2 at once).
+
+⛔ **Reason 2 is FALSE on `main`** and that is this lane's headline finding: no REST route is
+derived from a registry row (§1.5), so retiring those names deletes no route. `issue_insight`
+and `session_context` are therefore **not blocked at all**, and `search` is held only by the
+envelope. The names stay in `PROTECTED` — a stale reason is a reason to report and
+re-decide, never to retire quietly.
 The other 4 `PROTECTED` names are the "no arm on the container" class, and the 9
 `NO_CONTAINER_YET` are a separate population; the 9 are measured in §1.4 because the brief
 asks for them, and the 4 no-arm names are already measured by
@@ -33,7 +39,7 @@ Two independent reads agree — the pinned FastMCP source and a live probe.
 
 `fastmcp` is a **pinned dependency**, not vendored (`pyproject.toml:47`, `fastmcp==3.4.6`), so
 this citation is version-scoped and will drift on a bump;
-`.venv/lib/python3.12/site-packages/fastmcp/tools/base.py:355-369`:
+`.venv/lib/python3.12/site-packages/fastmcp/tools/base.py:357-369`:
 
 ```python
 if self.output_schema is None:            # <- `-> Any` lands here
@@ -59,11 +65,11 @@ Probe (`FastMCP("p").add_tool` + `call_tool`, a fake arm returning a list and a 
 | `dict` | object schema, **no** wrap marker | **raises** `structured_content must be a dict or None` | the dict itself |
 
 **Answer to (a).** The envelope adds exactly three wire facts: (i) `structuredContent`
-becomes `{"result": <value>}`, (ii) `result` is in `required`, and (iii) where the annotation
-is **concrete** — `list[dict]`, `dict`, `bool` — `result` also carries a declared `type`. An
-annotation with nothing to declare (`object`, or a union) publishes no `type` on `result`,
-which is precisely why `_violates_wrap_envelope` is type-blind for it. A container **can**
-return a pageable shape
+becomes `{"result": <value>}`, (ii) `result` is in `required`, and (iii) where a **wrapped**
+annotation declares one, `result` also carries a `type` (`array` for `list[dict]`, `object`
+for `dict | bool`). A union declares `anyOf` and no `type`, and `object` declares `{}` and no
+`type` — which is precisely why `_violates_wrap_envelope` is type-blind for both. A container
+**can** return a pageable shape
 while preserving the envelope — `list[dict] | dict` does it, which is the shape
 `tortoise_query` has shipped since #11057 — **but no annotation can preserve the envelope
 without re-wrapping the payload**, because the wrap is selected by the annotation and not by
@@ -108,10 +114,12 @@ tortoise_issue_insight   tool_registry.py:1054  GET /v1/issue-insight  (-> dict)
 Paged destination: `tortoise_query`, `mcp_server.py:4437`, `-> list[dict] | dict` — the only
 container-shaped door on main that already carries a pageable union.
 
-Containers, measured: the served tools whose `output_schema` is `None` — `get_entity`,
-`graph_overview`, `search_knowledge`, `list_knowledge`, `check_confidence`,
-`explore_connections`, `review_link_candidates` — i.e. **no envelope at all**.
-(`tortoise_overview` is a retired **alias** of `graph_overview`, not a second container.)
+Containers, measured: the **advertised (registry)** tools whose `output_schema` is `None` —
+`get_entity`, `graph_overview`, `search_knowledge`, `list_knowledge`, `check_confidence`,
+`explore_connections`, `review_link_candidates` — i.e. **no envelope at all**. (`get_entity`
+is a dict-only container and is **not** among S1's six: no envelope door lands on it. Two
+retired aliases, `tortoise_overview` and `tortoise_get`, are still served through the
+warning shim with `None` schemas and are excluded because they are not advertised tools.)
 
 ### 1.3 Why the containers are `Any` — it is not laziness
 
@@ -149,7 +157,7 @@ what `_destination()` asserts against.)
 
 ### 1.5 The REST route — question (b)
 
-`tool_registry.py:2384-2401`, `FastAPIRouterAdapter.register_all`:
+`tool_registry.py:2391-2403`, `FastAPIRouterAdapter.register_all`:
 
 ```python
 for entry in registry:
@@ -161,12 +169,45 @@ for entry in registry:
     self._router.add_api_route(entry.rest_spec.path, handler, methods=[...])
 ```
 
-**Answer to (b).** Every REST route is derived from a registry row that also has a handler.
-Retiring `tortoise_issue_insight` / `tortoise_session_context` / `tortoise_search` therefore
-**deletes `GET /v1/issue-insight` / `/v1/context` / `/v1/search`** — a public API removal, and
-exactly what `PROTECTED` exists to prevent. The registry already records the intended fix in
-prose: *"the member can stay live as a thin door and retire in the batch that re-homes its
-REST twin."*
+**Answer to (b) — and it is NOT the answer the registry's prose gives.**
+
+`register_all` *would* derive every route from a registry row. **But nothing calls it.**
+Measured on `main`:
+
+```
+$ rg -n 'FastAPIRouterAdapter' --glob '!.venv/*' .
+./tortoise/tool_registry.py:2343  # a comment about it
+tortoise/tool_registry.py:2367  # the class itself
+```
+
+There is no instantiation outside a test, and `tortoise/hosted_api.py` does not import
+`TOOL_REGISTRY` for routes at all (its only registry import is `capability_catalog`, an
+unrelated indexer table). The **served** routes are hand-written decorators that call the
+**SDK** directly:
+
+| route | where |
+|---|---|
+| `GET /v1/search` | `hosted_api.py:14927` (+ `selfhost_api.py:366` under the `/v1` prefix) |
+| `GET /v1/context` | `hosted_api.py:37761` |
+| `GET /v1/issue-insight` | `hosted_api.py:38059` → body calls `sdk.issue_insight(...)` at `:38076` |
+
+So **retiring `tortoise_issue_insight` / `tortoise_session_context` / `tortoise_search`
+deletes no REST route.** The coupling the registry records (*"retiring the registry entry
+deletes its REST route with it"*) is **aspirational, not real** — the intended-but-unwired
+design of #3875, which was **closed 2026-10-02** with the recommendation to *declare and
+check* drift rather than derive routes, leaving `FastAPIRouterAdapter` dead code. The same
+finding is already recorded at `docs/scoping/2026-09-17-3863-scope-output.md:309`: *"Wrong.
+… `FastAPIRouterAdapter` is used only in a test."*
+
+What `rest_spec` actually feeds today: the unwired adapter, `tools/dod_5090_probe.py`'s
+reporting (`:8729-8745`, which classifies a row without a `rest_spec` as "MCP only" — a fact
+about the surface, not a route), and comments in `tools/surface_manifest.py:341` and
+`config/surface-manifest.yml:98`. **None of them deletes a route when a row goes.**
+
+⛔ This is a **correction to a recorded reason**, so it is reported and not acted on: the
+three names stay in `PROTECTED` until the batch that changes the code moves them, with this
+evidence in front of whoever owns that decision. It also means the `rest_spec` half of the
+plan is **smaller than the brief assumed — it is not needed at all** (see §2.2).
 
 ---
 
@@ -187,9 +228,11 @@ Why the alternatives lose:
 
 - **`-> object`** — same envelope, unconstrained `result`; weaker than the union (it does not
   name the array arm) and identical cost. Rejected as strictly less precise.
-- **`-> dict`** — deletes the wrap marker and then *refuses* the list arms in FastMCP's own
-  result validation (measured `ToolError: structured_content must be a dict or None`; the
-  refusal is FastMCP's, not the Tortoise SDK's). Invalid.
+- **`-> dict`** — no wrap marker at all (so no `result` to declare), and FastMCP's own result
+  validation then *refuses* the list arms (measured `ToolError: structured_content must be a
+  dict or None`, raised in `ToolResult.__init__` at `fastmcp/tools/base.py:148`, reached from
+  `convert_result`'s wrap selection at `:365-368`; it is FastMCP's refusal, not the Tortoise
+  SDK's). Invalid.
 - **Keep the doors live** — settles nothing; the status quo this lane exists to end.
 - **A second tool per shape** — forbidden by the brief and by #4282's one-container direction.
 
@@ -206,19 +249,22 @@ Failure coverage after the change: the `required: ["result"]` repair still cover
 wait-bound refusal on both arms; dict-arm failures are covered by **#11153**, not #8482. The
 plan does **not** claim the array envelope's stronger "unreadable as data" property survives.
 
-### 2.2 `rest_spec` doors — re-home the route onto the container row
+### 2.2 `rest_spec` doors — no mechanism is needed; the reason is stale
 
-Smallest change, no new mechanism: move `rest_spec` from the leaf entry to the container
-entry that absorbs it, **in the same change that retires the leaf** (two rows on one path
-would double-register the route). The route keeps its path, method and handler contract —
-only its owning row moves — so nothing customer-facing changes. This is the registry's own
-recorded intent, and it is the **Gateway Routing / facade** pattern: the client-facing route
-is a stable facade over a changing backend (`learn.microsoft.com/azure/architecture/patterns/gateway-routing`
-— *"If a service is consolidated, decomposed or replaced, the client doesn't necessarily
-require updating… only the routing changes"*).
+The smallest change here is **none**. Because no route is derived from the row (§1.5),
+retiring `issue_insight` / `session_context` / `search` removes no route, so there is no route
+to preserve and no `rest_spec` to re-home. The re-homing step the registry sketches is
+unnecessary work built on an unwired adapter.
 
-`tortoise_search` needs **both** mechanisms in one batch: it is the only door carrying two
-blockers, and landing either alone leaves the other holding it.
+The consequence is that **two of the twelve doors are not blocked at all**:
+`tortoise_issue_insight` and `tortoise_session_context` are held only by a reason that is
+false on `main`. They are retirable in the batch that also updates `PROTECTED`; nothing
+about them needs a design decision (unlike the envelope doors, which do). `tortoise_search`
+remains blocked — by the **envelope**, which is real.
+
+⛔ Not acted on here: `PROTECTED` is a recorded decision, and a stale reason is a reason to
+**report and re-decide**, never to retire quietly. The value this lane delivers is that the
+next batch no longer has to do work that the tree does not require.
 
 ### 2.3 `query` — a re-pointing decision, not this lane's
 
@@ -235,14 +281,35 @@ union envelopes the #8482 shrinkage floor measures). Left untouched.
 mechanical step:
 
 - the envelope half needs a `structuredContent` change on six live tools ⇒ approval;
-- the route half is one edit per door that cannot land without the door's retirement ⇒ the
-  27/40 ruling;
+- the route half needs **no change at all** — the coupling it was written against does not
+  exist (§1.5), which is a finding to report, not a change to make;
 - all nine `NO_CONTAINER_YET` destinations are still not MCP doors ⇒ nothing to unblock.
 
 What **is** implemented is the executable pin the plan rests on —
-`tests/test_11609_structural_blockers.py` — so that none of the three claims above can rot,
-and so the next lane cannot repeat the one move that looks free and is not: annotating a
-container and shipping a silent re-wrap.
+`tests/test_11609_structural_blockers.py` — so that none of the claims above can rot, and so
+the next lane cannot repeat the one move that looks free and is not: annotating a container
+and shipping a silent re-wrap.
+
+### The external leg, and what it changed
+
+Research rung 2 (`web_search` / `sonar`) was unavailable on this box (no `PERPLEXITY_API_KEY`;
+the `brave-search` MCP closed the connection twice), so primary sources were fetched directly:
+
+- **MCP pagination** (`modelcontextprotocol.io/specification/2025-06-18/server/utilities/pagination`)
+  is **cursor-based**: the page of results stays a plain array and `nextCursor` is a **sibling**
+  field — not a wrapper object — and the protocol applies it to `*/list` operations, **not** to
+  `tools/call`. So there is no MCP-native "paged envelope" for a tool result: the `tools/call`
+  result is *already* a wrapper (`content` / `structuredContent` / `_meta`), which is why this
+tree's established out-of-band channel is `_meta` (`_SCHEMA_ERROR_META_KEY`, `mcp_server.py:2016`).
+- **Gateway Routing** (`learn.microsoft.com/azure/architecture/patterns/gateway-routing`):
+  *"If a service is consolidated, decomposed or replaced, the client doesn't necessarily
+  require updating… only the routing changes."* — the canonical shape for keeping a REST route
+  alive when the abstraction behind it moves.
+
+The first citation is what rules out a *wrapper* as the answer and why the union, not a
+paged object, is the shape that keeps the envelope. The second describes the mechanism the
+registry **intended** to have — and measurement showed this tree never wired it (§1.5), which
+is the finding that removed three steps from the plan.
 
 ---
 
@@ -250,14 +317,13 @@ container and shipping a silent re-wrap.
 
 | step | change | unblocks | gate |
 |---|---|---|---|
-| **S1** | `list[dict] \| dict` on `tortoise_list_knowledge`, `tortoise_search_knowledge`, `tortoise_graph_overview`, `tortoise_check_confidence`, `tortoise_explore_connections`, `tortoise_review_link_candidates` | `search_sessions`, `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`, `check_structure`, `calibrate_summary` (**8**) | **Daniel** — `structuredContent` re-wrap on 6 live tools |
-| **S2** | retire the 8 in S1's batch; update `PROTECTED` → 8 names move out (16 → 8) in the same change | the 8 above | follows S1 |
-| **S3** | re-home `rest_spec` `GET /v1/issue-insight` → the `search_knowledge` row, retire `tortoise_issue_insight` | `issue_insight` (**1**) | 27/40 ruling batch |
-| **S4** | re-home `GET /v1/context` → `check_confidence` row, retire `tortoise_session_context` | `session_context` (**1**) | 27/40 + D4 says the approved home is `recall_beliefs` (not live) — decide which |
-| **S5** | S1 **and** S3/S4 together for the `search` row: union annotation + `GET /v1/search` re-homed | `search` (**1**) | S1 + S3 |
-| **S6** | re-point `paginated_query` / `query_points_by_tag`, then retire `query` | `query` (**1**) | migration decision |
-| **S7** | land the missing containers (`delete_knowledge`, `link_entities`, `poll_events`, `recall_beliefs`, `write_knowledge_batch`, tenancy pair) | the 9 `NO_CONTAINER_YET` | out of scope here |
+| **S1** | `list[dict] \| dict` on `tortoise_list_knowledge`, `tortoise_search_knowledge`, `tortoise_graph_overview`, `tortoise_check_confidence`, `tortoise_explore_connections`, `tortoise_review_link_candidates` | `search_sessions`, `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`, `check_structure`, `calibrate_summary`, **and `search`** (**9**) | **Daniel** — `structuredContent` re-wrap on 6 live tools |
+| **S2** | retire those 9 in S1's batch; move them out of `PROTECTED` (16 → 7) in the same change | the 9 above | follows S1 |
+| **S3** | retire `tortoise_issue_insight` and `tortoise_session_context` — **no route work**, because the `rest_spec` reason is stale (§1.5) | `issue_insight`, `session_context` (**2**) | 27/40 ruling batch; update `PROTECTED` with the evidence |
+| **S4** | re-point `paginated_query` / `query_points_by_tag`, then retire `query` | `query` (**1**) | migration decision |
+| **S5** | land the missing containers (`delete_knowledge`, `link_entities`, `poll_events`, `recall_beliefs`, `write_knowledge_batch`, tenancy pair) | the 9 `NO_CONTAINER_YET` | out of scope here |
 
-Twelve structural doors: **8 in S1/S2**, **3 in S3–S5**, **1 (`query`) in S6**. Nine
-`NO_CONTAINER_YET`: all in S7. Nothing is retired by this change, and no door is removed from
-`PROTECTED` — S1 is not implemented, so none of the twelve reasons is false yet.
+Twelve structural doors: **9 in S1/S2** (8 envelope-only + `search`), **2 in S3** (stale
+reason, no work), **1 (`query`) in S4**. Nine `NO_CONTAINER_YET`: all in S5. Nothing is retired
+by this change, and no door is removed from `PROTECTED` — S1/S3 are not implemented, so none
+of the twelve reasons has been *acted on* yet (one has been shown false, and is reported).

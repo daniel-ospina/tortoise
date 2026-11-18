@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from typing import Any
 
 import pytest
@@ -69,11 +70,12 @@ LIST_CONTAINERS = (
     "tortoise_review_link_candidates",
 )
 
-#: The `rest_spec` doors, with the route each row owns. Retiring the row deletes the route.
+#: The `rest_spec` doors, with the route the row NOMINALLY owns. NOT the route that serves:
+#: the served routes are hand-written and never read this row (see the pins below).
 REST_SPEC_DOORS = {
-    "tortoise_issue_insight": ("GET", "/v1/issue-insight"),
-    "tortoise_session_context": ("GET", "/v1/context"),
-    "tortoise_search": ("GET", "/v1/search"),
+    "tortoise_issue_insight": ("/v1/issue-insight"),
+    "tortoise_session_context": ("/v1/context"),
+    "tortoise_search": ("/v1/search"),
 }
 
 #: All nine `NO_CONTAINER_YET` destinations. A `tenancy:`/`sdk:` prefix is not an MCP door.
@@ -107,7 +109,12 @@ def _schema(name: str) -> dict | None:
         assert tool is not None, (
             f"{name} is not served by the MCP server at all (get_tool returned None) — a "
             "container this table pins cannot be measured, which is drift, not a pass")
-        return getattr(tool, "output_schema", None)
+        # ⛔ `getattr(..., None)` would re-open the same vacuity one level down: a FastMCP
+        # rename of `output_schema` would read as `None`, which this file treats as PASS.
+        assert hasattr(tool, "output_schema"), (
+            f"{name}'s tool object has no `output_schema` — FastMCP changed shape, and this "
+            "pin would otherwise report 'no envelope' for a tool it can no longer read")
+        return tool.output_schema
 
     return asyncio.run(_get())
 
@@ -242,12 +249,13 @@ def test_the_list_arm_does_not_change_for_a_migrating_caller():
 
 
 def test_a_dict_annotation_cannot_be_the_answer():
-    """`-> dict` deletes the wrap marker and then REFUSES a list return in FastMCP's own
-    result validation (`fastmcp/tools/base.py:357`, surfaced as a `ToolError`).
+    """`-> dict` declares NO wrap marker and NO `result` property, so there is nothing to
+    declare a type on — and FastMCP's own result validation then REFUSES the list arm.
 
-    Measured, so the plan's rejection of `-> dict` is not a preference: the container would
-    crash on `kind="namespace"` rather than degrade. The refusal is FastMCP's, NOT the
-    Tortoise SDK's — `tortoise/sdk.py` raises nothing of the kind.
+    Measured: the `ValueError` is raised in `ToolResult.__init__`
+    (`fastmcp/tools/base.py:148`), reached from `convert_result`'s wrap selection at
+    `:365-368` (no wrap marker, so `structured_content=structured` — a list). It is
+    FastMCP's refusal, NOT the Tortoise SDK's: `tortoise/sdk.py` raises nothing of the kind.
     """
     with pytest.raises(ToolError, match="structured_content must be a dict or None"):
         _probe(dict)
@@ -265,45 +273,78 @@ class _RecordingRouter:
         self.routes.append((path, tuple(methods or ()), name))
 
 
-@pytest.mark.parametrize("door,route", sorted(REST_SPEC_DOORS.items()))
-def test_the_route_is_derived_from_the_registry_row(door, route):
-    """Question (b): a `rest_spec` route exists only while its row does.
+@pytest.mark.parametrize("door,path", sorted(REST_SPEC_DOORS.items()))
+def test_the_served_route_is_hand_written_and_never_reads_the_registry_row(door, path):
+    """Question (b), MEASURED — and the answer is the opposite of the registry's prose.
 
-    Both halves of `register_all`'s condition are exercised — a row WITHOUT a handler
-    registers nothing too, which is the second way a route silently disappears.
+    The registry records that *"retiring the registry entry deletes its REST route with it"*,
+    and `PROTECTED` lists three doors on that basis. It is not true on `main`:
+
+      · `FastAPIRouterAdapter` — the only thing that would derive a route from a `rest_spec` —
+        is instantiated **nowhere** in product code (only in tests). Measured, below.
+      · the served routes are hand-written decorators on FastAPI apps that call the **SDK**
+        directly; `hosted_api.py` does not read `TOOL_REGISTRY` for routes at all.
+
+    So this pin asserts the fact that MAKES the reason stale. If a future change wires the
+    adapter (the #3875 direction), this test reds — which is correct: the reason would then
+    become true again and `PROTECTED` would deserve the coupling it claims.
     """
-    method, path = route
-    entries = [e for e in TOOL_REGISTRY if e.name == door]
-    assert entries, f"{door} is not in TOOL_REGISTRY, so this row cannot be measured"
-    assert entries[0].rest_spec is not None, (
-        f"{door} no longer carries a `rest_spec`, so its REST route is already gone — "
-        "that is the S3-S5 change, and this pin should be updated with it")
-    assert (entries[0].rest_spec.method, entries[0].rest_spec.path) == (method, path), (
-        f"{door} moved its route: {entries[0].rest_spec.method} {entries[0].rest_spec.path}")
-    assert hasattr(ms, door), f"{door} is a registry row with no MCP door on the server"
+    from tortoise import hosted_api, selfhost_api
 
-    with_row = _RecordingRouter()
-    FastAPIRouterAdapter(with_row).register_all(entries, {door: lambda: None})
-    assert any(p == path and m == (method,) for p, m, _ in with_row.routes), with_row.routes
+    entry = _live().get(door)
+    assert entry is not None, f"{door} is not advertised — re-derive this pin"
+    assert entry.rest_spec is not None, (
+        f"{door} lost its `rest_spec`, which is the only thing `PROTECTED` cites for it")
+    assert entry.rest_spec.path == path, (
+        f"{door}'s `rest_spec` moved to {entry.rest_spec.path}, not {path}")
 
-    # …the SAME registry minus THIS row, with a handler for EVERY route-bearing row: every
-    # other route still registers and EXACTLY this one is gone. (An empty/short handler map
-    # would register nothing at all and so would not measure the removal.)
-    all_handlers = {e.name: (lambda: None) for e in TOOL_REGISTRY if e.rest_spec is not None}
-    survivors = [e for e in TOOL_REGISTRY if e.name != door]
-    assert len(survivors) == len(TOOL_REGISTRY) - 1
+    # (1) the adapter that would derive the route is not wired into the product
+    for module in (hosted_api, selfhost_api):
+        src = inspect.getsource(module)
+        assert "FastAPIRouterAdapter" not in src, (
+            f"{module.__name__} now uses FastAPIRouterAdapter — REST routes ARE registry-"
+            "derived again, so `PROTECTED`'s `rest_spec` reason became TRUE and the plan's"
+            " §1.5 (and S3) must be re-derived")
+
+    # (2) the route is SERVED anyway, by a hand-written decorator
+    decorator = re.compile(
+        r'@(?:app|router)\.(?:get|post)\(\s*"' + re.escape(path) + r'"')
+    serves_full = decorator.search(inspect.getsource(hosted_api)) is not None
+    # the self-hosted app mounts its router under a `/v1` prefix and spells the suffix
+    serves_prefixed = decorator.search(
+        inspect.getsource(selfhost_api).replace(
+            '"/' + path.split("/v1/", 1)[-1] + '"',
+            '"' + path + '"')) is not None
+    assert serves_full or serves_prefixed, (
+        f"{path} is not served by a hand-written decorator in {hosted_api.__name__} or "
+        f"{selfhost_api.__name__} — if the route is really gone, this pin's premise changed")
+
+
+def test_register_all_would_derive_the_route_from_the_row():
+    """The adapter's CAPABILITY, kept separate from the product's wiring (above).
+
+    Two distinct facts — "this would happen" and "this does happen" — and collapsing them is
+    how a dead adapter reads as the serving path (#3875).
+    """
+    entries = [e for e in TOOL_REGISTRY if e.name == "tortoise_issue_insight"]
+    assert entries, "tortoise_issue_insight left TOOL_REGISTRY — re-derive this pin"
+    path = entries[0].rest_spec.path
 
     full = _RecordingRouter()
+    all_handlers = {e.name: (lambda: None) for e in TOOL_REGISTRY if e.rest_spec is not None}
     FastAPIRouterAdapter(full).register_all(TOOL_REGISTRY, all_handlers)
     assert any(p == path for p, _, _ in full.routes), full.routes
 
+    # …and without THIS row, with a handler for every surviving route-bearing row, exactly
+    # that one route disappears. (A short handler map would register nothing at all and so
+    # would not measure the removal.)
+    survivors = [e for e in TOOL_REGISTRY if e.name != entries[0].name]
     without_row = _RecordingRouter()
     FastAPIRouterAdapter(without_row).register_all(survivors, all_handlers)
     assert not any(p == path for p, _, _ in without_row.routes), without_row.routes
     assert len(without_row.routes) == len(full.routes) - 1, (
         "removing one row changed the route count by "
-        f"{len(full.routes) - len(without_row.routes)}, not 1 — the route set is not a "
-        "one-to-one function of the rows")
+        f"{len(full.routes) - len(without_row.routes)}, not 1")
 
     # …and a row with no handler registers nothing either.
     no_handler = _RecordingRouter()
@@ -311,26 +352,36 @@ def test_the_route_is_derived_from_the_registry_row(door, route):
     assert not no_handler.routes, no_handler.routes
 
 
-def test_two_rows_on_one_path_double_register():
-    """§2.2's hazard: the re-home must RETIRE the leaf, not merely duplicate the route.
+def test_two_distinct_rows_on_one_path_double_register():
+    """If the adapter WERE wired, re-homing must retire the leaf, not duplicate the route.
 
-    `register_all` does not dedupe (measured), so re-homing the `rest_spec` onto the
-    container while the leaf still holds one produces two identical routes — which FastAPI
-    serves by first-match, i.e. the retirement silently does nothing.
+    Measures the real hazard shape — TWO DIFFERENT rows carrying the same `rest_spec` (a leaf
+    and the container that absorbed it), not the same row twice. `register_all` does not
+    dedupe (measured), and FastAPI serves first-match, so the leaf would still win and the
+    "retirement" would silently do nothing.
     """
-    entries = [e for e in TOOL_REGISTRY if e.name == "tortoise_search"]
-    assert entries, "tortoise_search left TOOL_REGISTRY — re-derive this pin"
-    doubled = _RecordingRouter()
-    FastAPIRouterAdapter(doubled).register_all(entries * 2, {"tortoise_search": lambda: None})
-    assert [p for p, _, _ in doubled.routes].count("/v1/search") == 2, doubled.routes
+    import dataclasses
+
+    leaf = next(e for e in TOOL_REGISTRY if e.name == "tortoise_search")
+    container = next(e for e in TOOL_REGISTRY if e.name == "tortoise_search_knowledge")
+    rehomed = dataclasses.replace(container, rest_spec=leaf.rest_spec)
+    assert rehomed.name != leaf.name and rehomed.rest_spec.path == leaf.rest_spec.path
+
+    router = _RecordingRouter()
+    FastAPIRouterAdapter(router).register_all(
+        [leaf, rehomed], {leaf.name: lambda: None, rehomed.name: lambda: None})
+    assert [p for p, _, _ in router.routes].count(leaf.rest_spec.path) == 2, router.routes
+    assert [n for _, _, n in router.routes][0] == leaf.name, (
+        "the leaf no longer wins first-match, so a duplicated route would not silently "
+        "shadow the container")
 
 
-def test_the_search_door_carries_both_blockers():
-    """`tortoise_search` is the one door needing S1 AND S3/S4 together.
+def test_the_search_door_is_held_by_the_envelope_not_the_route():
+    """`tortoise_search` was listed under BOTH reasons; only one of them is real.
 
-    It is `list[dict]` (envelope) *and* owns `GET /v1/search` (route). Landing either
-    mechanism alone leaves the other still holding it — which is why the plan sequences it
-    as its own step (S5) rather than grouping it with either family.
+    Its `rest_spec` is stale (§1.5) — the served `GET /v1/search` is hand-written — so what
+    holds it is the `list[dict]` envelope, i.e. S1, not any route work. Losing that
+    distinction is what put three unnecessary steps in the plan.
     """
     entry = _live()["tortoise_search"]
     assert entry.rest_spec is not None and entry.rest_spec.path == "/v1/search"
@@ -361,13 +412,17 @@ def test_the_recorded_destination_is_still_not_an_mcp_door(door, destination):
         assert prefix in {"tenancy", "sdk"}, (
             f"{door}'s destination {destination!r} uses an undeclared prefix {prefix!r} — "
             "the only declared non-door prefixes are `tenancy:` and `sdk:`")
-        # ⛔ Assert the thing that MATTERS, not a name shape no tool can have: no live tool
-        # name contains `:` (measured), so `f"tortoise_{destination}" not in live` is
-        # unconditionally true and would pass even if `rest` named a real live door.
-        assert rest not in live, (
-            f"{door}'s destination suffix {rest!r} IS a live MCP door — {door} became "
-            "retirable in the batch that landed it")
+        # ⛔ Compare `tortoise_<rest>`, NOT `<rest>`. Every live tool name starts with
+        # `tortoise_`, so `rest not in live` is unconditionally TRUE and the assertion could
+        # never fire even after the container landed. Measured.
+        assert f"tortoise_{rest}" not in live, (
+            f"{door}'s destination `{destination}` is now a live MCP door "
+            f"(tortoise_{rest}) — {door} became retirable in the batch that landed it, and "
+            "`NO_CONTAINER_YET` should lose the name there")
         return
-    assert destination not in live, (
+    assert f"tortoise_{destination}" not in live, (
+        f"{destination} IS now a live MCP door (tortoise_{destination}) — {door} became "
+        "retirable in the batch that landed it, and `NO_CONTAINER_YET` should lose the name")
+    assert destination not in {n.removeprefix("tortoise_") for n in live}, (
         f"{destination} IS now a live MCP door — {door} became retirable in the batch that "
         "landed it, and `NO_CONTAINER_YET` should lose the name there")
