@@ -339,15 +339,16 @@ measurement instead of repeating it.
 **Fixed at this head — a single-quoted `''` escape read as an unbalanced quote.**
 
 `'the ''KEEP'' #11395 ruling'` is legal, intact YAML: `parse_frontmatter` returns
-`the 'KEEP' #11395 ruling`. But the `''` escape leaves a quote immediately before the ` #`, so a
-close located by `raw[:i].rstrip().endswith(q)` fired at the wrong ` #` and check (C) reported
-*an unbalanced quote … remove the inner quote* — a remedy that asks the author to delete a legal
-escape. `_split_comment` now locates the close by PARITY (`_closing_quote`), so only a ` #` after
-the true closing quote is a comment. Measured: the value is now `('single-quoted', "the 'KEEP'
-#11395 ruling")` and the consumer agrees; the (C) mutant `"STORAGE-ARCHITECTURE.md, "#11901"
-KEEP"` has no ` #` after its close and STILL reds `broken`, so the truncation check is unchanged.
-Pinned by `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken`, which fails on the
-pre-fix helper (`('broken', None)`) — verified by re-applying the old body.
+`the 'KEEP' #11395 ruling`. But the `''` escape leaves a quote immediately before the space that
+introduces the comment, so a close located by `raw[:i].rstrip().endswith(q)` fired at the wrong
+`#` and check (C) reported *an unbalanced quote … remove the inner quote* — a remedy that asks the
+author to delete a legal escape. `_split_comment` now locates the close by PARITY
+(`_closing_quote`), so only a `#` that follows the true closing quote is a comment. Measured: the
+value is now `('single-quoted', ...)`, whose text is `the 'KEEP' #11395 ruling`, and the consumer
+agrees; the (C) mutant `"STORAGE-ARCHITECTURE.md, "#11901" KEEP"` has no space-then-hash after its
+close and STILL reds `broken`, so the truncation check is unchanged. Pinned by
+`test_a_single_quoted_escape_before_a_hash_is_measured_not_broken`, which fails on the pre-fix
+helper (`('broken', None)`) — verified by re-applying the old body.
 
 **Already fixed — the sequence branch's false diagnosis.** `- 13452` (int) once reported "a
 sequence item has no legal transform, so this is a truncation" while the scalar branch said
