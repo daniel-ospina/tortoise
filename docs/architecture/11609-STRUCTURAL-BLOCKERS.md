@@ -24,10 +24,12 @@ reason rather than a missing arm:
 | 2 | `rest_spec` — *recorded* as "the registry row IS the REST route" — **3**, of which 2 are non-envelope | `issue_insight`, `session_context`, `search` |
 | 3 | the paged destination of two already-retired pointers — **1** | `query` |
 
-**9 + 3 + 1 − 1 = 12** distinct names. `tortoise_search` is the `− 1`: it carries reasons 1
-and 2 at once (it is `list[dict]` *and* it carries a `rest_spec`). Read the class sizes as
-9 / 3 / 1, not 8 / 3 / 1 — with 8, `search` would have to hold only one reason, which §1.5
-disproves. S1 unblocks the 9, and §4's `16 → 7` follows from that count.
+**9 + 3 + 1 − 1 = 12** distinct names. The rows above state the reasons **as recorded**, and
+`tortoise_search` is the `− 1`: it is recorded under reasons 1 and 2 at once (it is
+`list[dict]` *and* it carries a `rest_spec`), so it appears in two rows and is counted once.
+§1.5 shows the **second** of those two recorded reasons is stale — `search` is held by the
+envelope alone — and that changes no row here: a stale reason is reported there, never quietly
+retired from the count. S1 unblocks the 9, and §4's `16 → 7` follows from that count.
 
 ⛔ **Reason 2 is FALSE on `main`** and that is this lane's headline finding: no REST route is
 derived from a registry row (§1.5), so retiring those names deletes no route. `issue_insight`
@@ -163,7 +165,7 @@ warning shim with `None` schemas and are excluded because they are not advertise
 
 ### 1.3 Why the containers are `Any` — it is not laziness
 
-`TortoiseSDK.list_knowledge` (`sdk.py:30300`) returns **different shapes per `kind`**:
+`TortoiseSDK.list_knowledge` (`sdk.py:30305`) returns **different shapes per `kind`**:
 
 - `claim` → `paginated_query` → `{results, total, hasMore}` (already paged, AIP-158)
 - `batch` (no `id`) → `list_batches` → **list**; `batch` with `id` → `list_batch` → dict
@@ -349,9 +351,10 @@ mechanical step:
 - all nine `NO_CONTAINER_YET` destinations are still not MCP doors ⇒ nothing to unblock.
 
 What **is** implemented is the executable pin the plan rests on —
-`tests/test_11609_structural_blockers.py` — so that none of the claims above can rot, and so
-the next lane cannot repeat the one move that looks free and is not: annotating a container
-and shipping a silent re-wrap.
+`tests/test_11609_structural_blockers.py` — so that the blockers, the cost and the route
+coupling cannot rot, and so the next lane cannot repeat the one move that looks free and is
+not: annotating a container and shipping a silent re-wrap. What it does **not** pin is
+listed in its own header, deliberately, rather than left to be inferred.
 
 ### The external leg, and what it changed
 

@@ -155,6 +155,85 @@ def _imported_names(source: str, module: str) -> set[str]:
     return names
 
 
+#: The class whose instantiation would make `PROTECTED`'s `rest_spec` reason TRUE again.
+_ADAPTER_CLASS = "FastAPIRouterAdapter"
+#: The module that both DEFINES it and is the only legitimate place it may be wired.
+_ADAPTER_MODULE = "tool_registry"
+
+
+def _dotted(node: ast.AST) -> str | None:
+    """`a.b.c` for a Name/Attribute chain, else None."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _adapter_instantiation_sites(source: str) -> list[int]:
+    """Line numbers where `source` INSTANTIATES `FastAPIRouterAdapter` — alias-aware.
+
+    ⛔ AST, not `"FastAPIRouterAdapter(" in source` (the reading this replaced). A literal
+    substring is wrong in BOTH directions, and both were measured:
+
+    * **false PASS** — `from tortoise.tool_registry import FastAPIRouterAdapter as RTA` …
+      `RTA(app).register_all(TOOL_REGISTRY, handlers)` derives every route from a registry
+      row while the literal never appears, so `PROTECTED`'s `rest_spec` reason is TRUE again
+      and every arm of that pin stayed green.
+    * **false BLOCK** — a docstring or comment that merely NAMES `FastAPIRouterAdapter(`
+      reded the pin with "REST routes ARE registry-derived again", a claim about a string.
+
+    Matched: the bare name, a `from … import FastAPIRouterAdapter as X` alias, an
+    `import … tool_registry as tr` / `import tortoise.tool_registry` attribute chain, and
+    `getattr(mod, "FastAPIRouterAdapter")`. DELIBERATELY not matched, and stated rather than
+    hidden: an instantiation the AST cannot resolve (`registry["FastAPIRouterAdapter"](…)`,
+    `__import__`, a subclass instantiated instead of the class). A regex cannot see those
+    either, and at least the AST cannot be fooled by prose.
+    """
+    tree = ast.parse(source)
+    local_names: set[str] = set()
+    module_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if (node.module or "").rsplit(".", 1)[-1] != _ADAPTER_MODULE:
+                continue
+            for alias in node.names:
+                if alias.name == _ADAPTER_CLASS:
+                    local_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.rsplit(".", 1)[-1] == _ADAPTER_MODULE:
+                    module_names.add(alias.asname or alias.name.split(".", 1)[0])
+
+    sites: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        dotted = _dotted(func)
+        if dotted is not None:
+            if dotted in local_names:
+                sites.append(node.lineno)
+                continue
+            head, _, tail = dotted.rpartition(".")
+            if tail == _ADAPTER_CLASS and (
+                head in module_names or head.rsplit(".", 1)[-1] == _ADAPTER_MODULE
+            ):
+                sites.append(node.lineno)
+                continue
+        if (
+            dotted == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == _ADAPTER_CLASS
+        ):
+            sites.append(node.lineno)
+    return sorted(sites)
+
+
 class _LiveIncludeRouter(ast.NodeVisitor):
     """The router arguments of `include_router(…)` calls in LIVE statements only."""
 
@@ -513,17 +592,19 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     repo = Path(__file__).resolve().parent.parent
     scanned = sorted((repo / "tortoise").rglob("*.py"))
     assert len(scanned) > 250, f"only {len(scanned)} modules found — the scan is not recursive"
-    offenders = [
-        str(source.relative_to(repo))
+    offenders = {
+        str(source.relative_to(repo)): lines
         for source in scanned
-        if "FastAPIRouterAdapter(" in source.read_text(encoding="utf-8", errors="replace")
-    ]
-    assert offenders == [], (
+        if (lines := _adapter_instantiation_sites(
+            source.read_text(encoding="utf-8", errors="replace")))
+    }
+    assert offenders == {}, (
         "FastAPIRouterAdapter is instantiated in product module(s) "
-        f"{offenders} — REST routes ARE registry-derived again, so `PROTECTED`'s "
-        "`rest_spec` reason became TRUE and §1.5 / S3 must be re-derived. (The class is "
-        "DEFINED in `tool_registry.py` as `class FastAPIRouterAdapter:`, which this scan "
-        "does not match — only a call does.)")
+        f"{sorted(offenders.items())} — REST routes ARE registry-derived again, so "
+        "`PROTECTED`'s `rest_spec` reason became TRUE and §1.5 / S3 must be re-derived. "
+        "(The class is DEFINED in `tool_registry.py` as `class FastAPIRouterAdapter:`, "
+        "which this reading does not match — only a CALL does, under any of the names the "
+        "module binds it to.)")
 
     # (2) the route is SERVED anyway, by a hand-written decorator. The METHOD and the PATH
     # must both match, on a DECORATOR line. Measured: matching the path alone false-PASSes
@@ -631,6 +712,64 @@ def test_the_mount_reading_is_not_comment_blind():
         "a docstring naming the mount reads as a mount")
     assert _mounted_router_names(f"if False:\n    {live_line}\n") == set(), (
         "a statically-false `if` branch reads as a mount")
+
+
+def test_the_adapter_reading_is_not_spelling_blind():
+    """The instantiation arm's own falsifier: an ALIASED instantiation is still one.
+
+    Measured on the pre-fix reading (`"FastAPIRouterAdapter(" in source`): a module that
+    binds the class under another name and calls it — `from tortoise.tool_registry import
+    FastAPIRouterAdapter as RTA` … `RTA(app).register_all(TOOL_REGISTRY, handlers)` —
+    derives every route from a registry row while the literal never appears, so `PROTECTED`'s
+    `rest_spec` reason is TRUE again and every arm of that pin stayed green. The same literal
+    fired the wrong way too: a docstring NAMING the call reded the pin with a claim about a
+    string. Both directions are asserted here, and so is the real tree under the new reading.
+    """
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as RTA\n"
+        "def wire(app):\n"
+        "    RTA(app).register_all(TOOL_REGISTRY, handlers)\n"
+    ), "an aliased import → instantiation reads as NO instantiation — the pin would stay " \
+       "green while routes ARE registry-derived"
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "app = FastAPIRouterAdapter(app)\n"
+    ), "the bare name after a `from … import` is not read"
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "app = tr.FastAPIRouterAdapter(app)\n"
+    ), "a module-attribute instantiation under an import alias is not read"
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry\n"
+        "app = tortoise.tool_registry.FastAPIRouterAdapter(app)\n"
+    ), "a fully-dotted module-attribute instantiation is not read"
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "app = getattr(tr, 'FastAPIRouterAdapter')(app)\n"
+    ), "`getattr(mod, 'FastAPIRouterAdapter')(…)` binds the same class without naming it"
+
+    # the DEFINITION is not a call — `tool_registry.py` legitimately declares the class.
+    assert _adapter_instantiation_sites(
+        "class FastAPIRouterAdapter:\n    def register_all(self, *a):\n        pass\n"
+    ) == [], "a class DEFINITION reads as an instantiation"
+
+    # prose is not a call, so a docstring/comment edit cannot red this pin.
+    assert _adapter_instantiation_sites(
+        '"""Never call FastAPIRouterAdapter(app) in product code."""\n'
+        "# FastAPIRouterAdapter(app)\n"
+    ) == [], (
+        "a docstring/comment naming the call reads as an instantiation — a pure prose edit "
+        "would red this pin with a claim about the product")
+
+    # and the REAL tree is clean under the new reading, not merely never-exercised.
+    repo = Path(__file__).resolve().parent.parent
+    offenders = {
+        str(path.relative_to(repo)): lines
+        for path in sorted((repo / "tortoise").rglob("*.py"))
+        if (lines := _adapter_instantiation_sites(
+            path.read_text(encoding="utf-8", errors="replace")))
+    }
+    assert offenders == {}, offenders
 
 
 def _rest_spec_use_outside_the_adapter(source: Path) -> list[int]:
