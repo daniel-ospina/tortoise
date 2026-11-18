@@ -151,12 +151,20 @@ class TestTheRecallArm:
     def test_the_preset_defaults_are_forwarded_resolved(self, monkeypatch):
         """`state` applies the preset (1.0 / 1.0 / 0.10) and `custom` passes through —
         at the SDK layer `recall_state`'s own signature defaults ARE that preset, so
-        the resolved value is the whole difference and it must be sent, not omitted."""
+        the resolved value is the whole difference and it must be sent, not omitted.
+        ⛔ AND IT COMES FROM ONE PLACE: `RECALL_STATE_PRESET` (sdk) is aliased by
+        `mcp_server._RECALL_STATE_DEFAULTS`, so a retune moves both layers or neither —
+        the P3 the architecture review filed was the arm pinning the LITERALS while the
+        door read a second dict."""
+        from tortoise.sdk import RECALL_STATE_PRESET
+
         sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
         sdk.check_confidence(recall=True, query="q")
-        assert calls[0][1]["relevance_exp"] == 1.0
-        assert calls[0][1]["confidence_exp"] == 1.0
-        assert calls[0][1]["centrality_weight"] == 0.10
+        assert calls[0][1]["relevance_exp"] == RECALL_STATE_PRESET["relevance_exp"]
+        assert calls[0][1]["confidence_exp"] == RECALL_STATE_PRESET["confidence_exp"]
+        assert calls[0][1]["centrality_weight"] == RECALL_STATE_PRESET["centrality_weight"]
+        assert ms._RECALL_STATE_DEFAULTS is RECALL_STATE_PRESET, (
+            "the door and the arm must read ONE preset, not two copies of the numbers")
 
     def test_a_structure_intent_is_refused_and_names_its_direct_route(self, monkeypatch):
         """`gaps`/`subgraph` are graph-structure reads, not confidence reads: they are
@@ -280,6 +288,43 @@ class TestTheArmArgumentsNameTheirArm:
         assert "recompute arm: " in out["error"], out
         assert "recall arm: " in out["error"], out
         assert calls == [], out
+
+    @pytest.mark.parametrize("kwargs,armed,off,arg", [
+        ({"recall": True, "query": "q", "factors": [{"id": "f1"}]},
+         "recall", "recompute", "factors"),
+        ({"recall": True, "query": "q", "anchors": ["p1"]},
+         "recall", "recompute", "anchors"),
+        ({"recompute": True, "factors": [], "mode": "gaps"},
+         "recompute", "recall", "mode"),
+        ({"recompute": True, "factors": [], "min_confidence": 0.9},
+         "recompute", "recall", "min_confidence"),
+    ])
+    def test_the_sdk_refuses_the_OTHER_arm_s_arguments(
+            self, kwargs, armed, off, arg, monkeypatch):
+        """P3 from the architecture review: the no-arm refusal compared the two sets
+        against NOTHING armed, so an explicitly-armed call carrying the other arm's
+        arguments was served with them on the floor."""
+        sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
+        sdk2, calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
+        with pytest.raises(ValueError) as exc:
+            sdk.check_confidence(**kwargs)
+        assert arg in str(exc.value), str(exc.value)
+        assert f"{off}-arm argument(s)" in str(exc.value), str(exc.value)
+
+    @pytest.mark.parametrize("kwargs,arg", [
+        ({"recall": True, "query": "q", "factors": [{"id": "f1"}]}, "factors"),
+        ({"recompute": True, "factors": [], "mode": "gaps"}, "mode"),
+    ])
+    def test_the_door_refuses_the_OTHER_arm_s_arguments(
+            self, kwargs, arg, monkeypatch):
+        monkeypatch.setattr(ms, "tortoise_recall",
+                            lambda *a, **k: {"mode": "state", "results": []},
+                            raising=True)
+        monkeypatch.setattr(ms, "tortoise_compute_confidence",
+                            lambda *a, **k: {"iterations": 0}, raising=True)
+        out = ms.tortoise_check_confidence(**kwargs)
+        assert out["code"] == ms.ERR_INVALID, out
+        assert arg in out["error"], out
 
     def test_a_shared_parameter_names_no_arm(self, monkeypatch):
         """`limit` and `require_calibration` belong to a LEGACY arm too, so supplying
