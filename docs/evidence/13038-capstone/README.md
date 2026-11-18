@@ -1,3 +1,14 @@
+---
+title: "Capstone #13038 — the state model measured by customer value"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-11-17
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#13038, #11824, docs/plans/2026-11-15-state-lifecycle-and-pipelines.md, tools/capstone_state_value.py, narrative.json"
+---
+
 # Capstone #13038 — the state model measured by customer value
 
 **Parent:** #11824 · **Design of record:** `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`

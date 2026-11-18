@@ -590,6 +590,29 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "05-verify.md must still state, in words, that the `tortoise/` path list is EMPTY "
         "— naming the command is not an answer, and deleting the FALSE reading must leave a "
         "reader who can see which way the measurement went (#13489 review, P1)")
+    # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
+    # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
+    # head they were measured at". The first cut of the repair said "at the head that still
+    # carried those modules" — a DESCRIPTION of a head, not one a reader can open, so the
+    # statements stayed exactly as uncheckable as before and this arm stayed green over
+    # them: `activation_scorecard.py` being the only `tortoise/` module `#12943` did not
+    # touch is true of `2584a86ec1` and false of THIS head (no `tortoise/` path is in the
+    # diff at all), so without a head the sentence reads as this head's.
+    #
+    # NON-VACUITY, MEASURED: reds on that cut (no SHA in the paragraph); green once the
+    # MERGE head is named beside the statements.
+    _module_claim = [p for p in doc.split("\n\n") if "`#12943` did not touch" in p]
+    assert _module_claim, (
+        "05-verify.md no longer states which `tortoise/` module `#12943` did not touch — "
+        "this leg reads the head that claim was measured at (#13489 review, P1)")
+    for _para in _module_claim:
+        assert "2584a86ec1" in _para, (
+            "05-verify.md states that `activation_scorecard.py` was the only `tortoise/` "
+            "module `#12943` did not touch WITHOUT naming the head it was measured at. "
+            "At this head that file is not in the diff at all, so the sentence is the MERGE "
+            "head's; name it beside the claim (`2584a86ec1`, with the merge-base command "
+            "that prints its set) or the two module statements stay uncheckable "
+            "(#13489 review, P1)")
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
