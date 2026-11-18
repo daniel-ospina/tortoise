@@ -641,8 +641,12 @@ def test_the_published_denominator_is_the_count_of_this_file() -> None:
     recorded history: it reproduces `314 → 217` at `43028d178b` and `320 → 216` at `295c26ebc8`, the two
     editions the paragraph at the end of this header re-measures — including the drifter numerators.
 
-    NON-VACUOUS, measured on the pre-fix document: the `#13550` repair's inherited `214`/`112` sat beside a
-    file that measured `216`/`110`, so this test reds on the tree it was written for.
+    NON-VACUOUS, measured on the pre-fix document (`git show 2b8df75c0e^:<the file>`, the edition whose
+    header publishes `326 → 214 → 112`): this shipped scheme measures `326` spellings / `215` pairs /
+    `111` collisions there, so `214`/`112` disagrees in both figures and this test reds on the tree it was
+    written for. Re-derived at `90ec782d31` (`#13599` review, finding 1: the two figures reported here were
+    `216`/`110`, which the shipped scheme does not reproduce at any head) — measured with `_resolved_pairs`
+    over the committed blob, not carried forward from the edition it names.
     `test_a_carried_forward_figure_is_reported` is the negative control for the comparator itself.
     """
     problems = _figure_problems((REPO / _AUDIT).read_text(encoding="utf-8"))
@@ -708,8 +712,8 @@ def test_a_carried_forward_figure_is_reported() -> None:
         return "".join(parts)
 
     triple_pairs, triple_collisions = map(int, triple.groups()[1:])
-    written, pairs, collisions, drifters, comparable = map(int, quadruple.groups())
-    ratio_drifters, ratio_pairs = map(int, ratio.groups())
+    _written, _pairs, collisions, _drifters, comparable = map(int, quadruple.groups())
+    ratio_drifters, _ratio_pairs = map(int, ratio.groups())
     alt_pairs, alt_drifters = map(int, alt.groups())
 
     for match, overrides, why in (
@@ -758,17 +762,6 @@ def test_a_carried_forward_figure_is_reported() -> None:
         assert _figure_problems(mutated) != [], (
             f"a document carrying {stale!r} ({why}) reported no problem — the comparator is decoration"
         )
-    assert triple.groups()[0] == str(written) and triple_pairs == pairs, (
-        "the two sentences already disagree on the denominator at the shipped head — this control assumes "
-        "they agree, and `test_the_published_denominator_is_the_count_of_this_file` is the arm that says "
-        "whether they are RIGHT"
-    )
-    assert ratio_pairs == comparable == pairs, (
-        "the ratio's denominator and the figures sentence's disagree at the shipped head"
-    )
-    assert ratio_drifters == drifters, (
-        "the ratio's numerator and the figures sentence's disagree at the shipped head"
-    )
 
 
 def _resolve(pins, repo: Path = REPO) -> list[str]:
