@@ -44784,11 +44784,19 @@ class TortoiseSDK:
         `linkedEvents`.
         ⛔ A `query` beside it is REFUSED, not ignored: a state enumeration that
         silently dropped the caller's words would serve a whole population as if
-        it were their answer. `entity_type` (point/object/subject — the kinds
-        with a lifecycle), `kind` and `limit` scope and bound it. `ended_scope`
-        is not a visibility field on the record and adds no word to the model:
-        it is design §6's "option on the call", and the default keeps every
-        existing surface answering exactly what it answered before.
+        it were their answer. The refusal is a CLOSED LIST, and it names every
+        retrieval keyword that could change or shrink the served rows:
+        `query`, `threshold`, `min_confidence`, `order_by`,
+        `relationship_filter`, `traversal_path`, `claim_class`,
+        `exclude_status` and `exclude_turn_echo_session` (the last would have
+        excluded rows the caller asked to exclude, in silence). A knob not on
+        that list is not applied either — the list is the contract, so a new
+        retrieval keyword must be classified in it rather than assumed covered
+        by "every retrieval knob". `entity_type` (point/object/subject — the
+        kinds with a lifecycle), `kind` and `limit` scope and bound it.
+        `ended_scope` is not a visibility field on the record and adds no word
+        to the model: it is design §6's "option on the call", and the default
+        keeps every existing surface answering exactly what it answered before.
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -45049,6 +45057,14 @@ class TortoiseSDK:
         # passed ``min_confidence`` and got rows below it would never learn the
         # floor was not applied. ``limit`` (the page bound), ``entity_type`` and
         # ``kind`` (the population's scope) DO apply and stay served.
+        #
+        # ⛔ THE REFUSED SET IS CLOSED AND EVERY MEMBER IS NAMED BELOW. A knob
+        # this block does not name is dropped silently, so a candidate is admitted
+        # only when dropping it cannot change the SERVED ROWS in a direction the
+        # caller would not expect — ``exclude_turn_echo_session`` is therefore
+        # here (it SHRINKS the rows and the caller passed it to exclude them).
+        # Any new retrieval keyword must be classified here or in the docstring;
+        # "every retrieval knob" is a claim only the list can keep true.
         if ended_scope:
             _refused_ended = sorted(
                 name for name, _supplied in (
@@ -45060,6 +45076,8 @@ class TortoiseSDK:
                     ("traversal_path", traversal_path is not None),
                     ("claim_class", claim_class is not None),
                     ("exclude_status", bool(exclude_status)),
+                    ("exclude_turn_echo_session",
+                     exclude_turn_echo_session is not None),
                 ) if _supplied
             )
             if _refused_ended:

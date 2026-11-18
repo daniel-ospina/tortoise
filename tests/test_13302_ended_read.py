@@ -217,14 +217,88 @@ def test_a_deprecated_record_says_nothing_replaced_it(sdk):
 
 @_docker_only
 def test_an_ended_record_carries_the_time_it_ended_where_it_has_one(sdk):
-    """A supersede stamps a window end; the read reports it (and the raw fields)."""
+    """A supersede stamps a window end; the read reports it (and the raw fields).
+
+    `endedAt` must be the record's WINDOW END (event time), never the ingestion
+    stamp beside it. `supersede_point` mints `validTo` and `expiredAt`/`updatedAt`
+    from the same clock, so a fast fixture can leave them equal and the ORDER
+    unobservable here — the mutating edit (`_TIME_FIELDS` putting `updatedAt`
+    first, or dropping `validTo`) is pinned structurally by
+    `test_the_ending_time_prefers_the_window_end_over_the_ingestion_stamp`
+    below. This case keeps the behavioural half honest: the served value IS the
+    window end, not merely "one of the record's time fields".
+    """
     old = sdk.create_point(kind="decision", content="the tier is 29")
     new = sdk.create_point(kind="decision", content="the tier is 39")
     sdk.supersede_point(old["id"], new["id"])
 
     row = {r["id"]: r for r in _ended(sdk, entity_type="point")}[old["id"]]
     assert row["endedAt"], "a supersede stamps the predecessor's end — it must be served"
-    assert row["endedAt"] == row["validTo"] or row["endedAt"] == row["expiredAt"]
+    assert row["endedAt"] == row["validTo"], (
+        "the window END is the event time and outranks the ingestion stamp: `endedAt` "
+        "must be `validTo`, not `expiredAt`/`updatedAt` (#13302 review F3.2)"
+    )
+
+
+def test_the_ending_time_prefers_the_window_end_over_the_ingestion_stamp():
+    """The `endedAt` ORDER is the statement's, so it is pinned where it lives.
+
+    #13302 review F3.2: `supersede_point` writes `validTo` (the successor's start)
+    and `expiredAt`/`updatedAt` (now) from the same clock, so a live fixture cannot
+    separate the two instants deterministically — the previous assertion accepted
+    EITHER field and stayed green when `_TIME_FIELDS` put `updatedAt` first or
+    dropped `validTo` entirely. The order is a property of the `coalesce(...)` the
+    store evaluates, so it is asserted on the generated statement (hermetic, no
+    store): event time first, ingestion time last.
+    """
+    from tortoise import ended
+
+    fields = ended._TIME_FIELDS
+    assert fields[0] == "validTo", (
+        "the ending time must resolve the record's WINDOW END first — an ingestion "
+        "stamp (`expiredAt`/`updatedAt`) reports when we learned of the ending, not "
+        "when it took effect"
+    )
+    assert fields.index("validTo") < fields.index("expiredAt") < fields.index("updatedAt")
+    cypher = ended.build_cypher("point", narrow_kinds=False)
+    assert f"coalesce(n.{', n.'.join(fields)})" in cypher, (
+        "the statement must resolve `ended_at` in `_TIME_FIELDS` order — a row "
+        "whose ORDER differs from the declared one is the same drift the "
+        "behavioural case cannot see"
+    )
+
+
+def test_the_snake_successor_spelling_is_read_too(sdk):
+    """`superseded_by` is a SECOND spelling a tree can carry — and is read.
+
+    #13302 review F3.1: `_SUCCESSOR_PROPS` reads both spellings because a row can
+    carry the shadow SNAKE property (`superseded_by`) instead of the camel one —
+    written before #12914's guard, or landed by a record-sourced rebuild (the
+    record's successor COLUMN is `superseded_by`, `sdk._SUCCESSOR_COLUMN`). There
+    was no case exercising it, so dropping the snake half from `_SUCCESSOR_PROPS`
+    left every row green and the documented reason unpinned.
+    """
+    gone = sdk.create_object("Old onboarding flow", objectKind="process")
+    sdk.update_knowledge(gone["id"], status="deprecated")
+    # ⛔ WRITTEN DIRECTLY, not through `update_knowledge`: since #12914 the revise
+    # door REFUSES a snake-only carrier (`_successor_named_by` requires the CAMEL
+    # spelling every camel-keyed reader resolves), so no SDK call can produce this
+    # row any more. The STATE is still real — it is what a tree written before
+    # that guard holds, and the record's own successor COLUMN is `superseded_by`
+    # (`sdk._SUCCESSOR_COLUMN`), so a record-sourced rebuild lands the snake
+    # property — which is exactly why the read resolves both spellings.
+    sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$id}) SET n.superseded_by = $succ",
+        params={"id": gone["id"], "succ": "row-v2"},
+    )
+
+    row = {r["id"]: r for r in _ended(sdk, entity_type="object")}[gone["id"]]
+    assert row["status"] == "deprecated"
+    assert row["successorId"] == "row-v2", (
+        "a successor recorded under the snake spelling must be reported — a read "
+        "that looked at `supersededBy` alone would say 'nothing replaced it' for "
+        "a record that names one"
+    )
 
 
 # ── the selector is the ONE shared currency predicate ──────────────────────────
@@ -337,3 +411,45 @@ def test_a_family_without_a_lifecycle_is_refused_not_answered_empty(sdk):
     with pytest.raises(ValueError) as exc:
         sdk.tortoise_fts_query(None, entity_type="event", ended_scope=True)
     assert "event" in str(exc.value).lower()
+
+
+@_docker_only
+def test_a_turn_echo_exclusion_beside_ended_scope_is_refused_rather_than_dropped(sdk):
+    """#13302 review F4: the refusal is a CLOSED list, and this knob SHRINKS rows.
+
+    `exclude_turn_echo_session` returns FEWER rows on purpose, so a silent drop
+    serves rows the caller explicitly asked to exclude — the very failure the
+    refusal block's own comment cites for `query`.
+    """
+    with pytest.raises(ValueError) as exc:
+        sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+                               exclude_turn_echo_session="sess-1")
+    assert "exclude_turn_echo_session" in str(exc.value)
+
+
+@_docker_only
+def test_a_direct_caller_naming_one_kind_is_narrowed_not_given_the_family(sdk):
+    """#13302 review F2: `kind` narrows the enumeration; it is never dropped.
+
+    The read path always passes the EXPANDED `kinds`, so the singular `kind` looks
+    wired through the SDK while a direct caller of `enumerate_ended` got the whole
+    family back — an enumeration of everything presented as their scope.
+    """
+    from tortoise import pipeline
+    from tortoise.ended import enumerate_ended
+
+    pipeline.seed_pipeline(sdk._get_proj().g, "core:testplan", PLAN_PIPELINE)
+    plan = sdk.create_object("Thursday partner call", objectKind="core:testplan")
+    pipeline.advance_stage(sdk, plan["id"], "core:testplan", "cancelled")
+    other = sdk.create_object("Old onboarding flow", objectKind="process")
+    sdk.update_knowledge(other["id"], status="deprecated")
+
+    rows = {r["id"]: r for r in enumerate_ended(
+        sdk._get_proj().g, entity_type="object", kind="core:testplan")}
+
+    assert plan["id"] in rows
+    assert other["id"] not in rows, (
+        "a caller that named ONE kind must not be served every ended Object of "
+        "the family — `kind` must narrow the statement, never be accepted and "
+        "ignored"
+    )

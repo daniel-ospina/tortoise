@@ -1854,6 +1854,28 @@ def test_the_ended_rows_reach_the_payload_a_reader_scores():
             assert rows[0]["linkedEvents"] == []
 
 
+def test_an_empty_linked_events_list_survives_the_served_projection():
+    """`linkedEvents` is keyed on PRESENCE, not truthiness — and that is pinned here.
+
+    #13302 review F3.3: the payload case above reads the STUB target's rows, which
+    bypass `_served_row`/`_ended_fields` entirely, so `if r.get("linkedEvents")`
+    (dropping the empty list) left everything green. An empty list is the product's
+    own statement that nothing is linked — half of "planned and never happened" —
+    so it must reach a reader, and a current-scope row (which carries no ending at
+    all) must stay byte-identical.
+    """
+    served = cap._served_row({"id": "plan-1", "name": "cancelled call",
+                              "linkedEvents": []})
+    assert "linkedEvents" in served, (
+        "an EMPTY linkedEvents is evidence, not absence: dropping it as falsy "
+        "deletes the 'nothing happened' half of the plan answer"
+    )
+    assert served["linkedEvents"] == []
+    # The pre-#13302 shape: a current-scope row carries no ending, so the ended
+    # half contributes nothing at all.
+    assert "linkedEvents" not in cap._served_row({"id": "live-1", "name": "live"})
+
+
 def test_a_query_less_call_is_not_reported_as_a_corpus_ranking():
     """`NO-RELATION-TO-QUESTION` describes a failed TEXT match; an enumeration is not one.
 

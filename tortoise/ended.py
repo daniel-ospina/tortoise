@@ -105,11 +105,12 @@ _TIME_FIELDS: tuple[str, ...] = (
 )
 
 #: Both spellings of the successor carrier. `supersededBy` is the field the
-#: Object/Subject doors write; `superseded_by` is the shadow SNAKE spelling a
-#: generic `update_entity` accepts and which lands a DIFFERENT property
-#: (`sdk.py`'s `_SUCCESSOR_COLUMN` note), so a read that looked at one of them
-#: would report "nothing replaced it" for a record whose other spelling names a
-#: successor.
+#: Object/Subject doors write; `superseded_by` is the shadow SNAKE spelling a row
+#: can carry instead — written before `#12914` made the revise door refuse a
+#: snake-only carrier, and the record's successor COLUMN is that snake name
+#: (`sdk.py`'s `_SUCCESSOR_COLUMN`), so a record-sourced rebuild lands it. A read
+#: that looked at one spelling would report "nothing replaced it" for a record
+#: whose other spelling names a successor.
 _SUCCESSOR_PROPS: tuple[str, ...] = ("supersededBy", "superseded_by")
 
 
@@ -245,6 +246,11 @@ def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = Non
     no second connection. ``kinds`` is the caller's kind EXPANDED the way the
     read filters expand one (``sdk._read_filter_kinds``) — an unexpanded kind
     here would miss the descendants a caller's own filter would have matched.
+    ``kind`` is the UNEXPANDED singular form and NARROWS the population too: a
+    keyword the statement cannot apply is refused rather than dropped, and a
+    direct caller passing only ``kind`` must get that kind's records, never the
+    whole family (the read path always passes both, because
+    ``_read_filter_kinds(kind)`` contains ``kind`` itself, so the two agree).
 
     The read is BOUNDED (``LIMIT $limit``) and ordered by the record's own
     ending time, so the caller gets the most recent endings rather than an
@@ -266,6 +272,10 @@ def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = Non
             f"no lifecycle (design §8) and an Operator/Source has no ending this "
             f"model defines, so there is no ended population to enumerate."
         )
+    # ``kind`` is NARROWED ON, never ignored: a caller that named one kind and
+    # got the whole family back would read an enumeration of everything as the
+    # answer to their scope, which is this read's own defect class.
+    kinds = list(kinds) if kinds else ([kind] if kind else None)
     where_kinds = bool(kinds)
     cypher = build_cypher(entity_type, narrow_kinds=where_kinds)
     params: dict = {"limit": int(limit)}
