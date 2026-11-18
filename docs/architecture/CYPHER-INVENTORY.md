@@ -409,7 +409,26 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where these numbers were last cut:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
+**This regeneration's base:** `origin/main` **`340d500491`** — the rebase base this branch now sits
+on. **No census SCALAR moved**: `--check` reports **`25 pinned counts match`**, and §1's `rg`
+reconciliation re-measured at this tree reproduces it exactly (door **1,625 / 108**, verb
+**2,343 / 144** whole-text, bare **1,631 / 109**), so every scalar below is the `9d13dc1bf7` cut's,
+carried through unchanged. **Appendix A moved anyway — 226 of its 1,313 rows were stale**, across
+three files, and **all 226 come from ONE commit**: `main`'s **`c51afee5a8`** (`#13392`), which
+inserted lines above hundreds of statement sites. Each file's shift is one hunk, read off the
+commit rather than inferred:
+
+| file | stale rows | shift | the single hunk that moved them |
+|---|---|---|---|
+| `tortoise/hosted_api.py` | 220 | all **+22** | `@@ -14402,16 +14402,38 @@` (16 → 38 lines) |
+| `tortoise/sdk.py` | 4 | all **+17** | `@@ -59275,9 +59275,26 @@` (9 → 26 lines) |
+| `tortoise/cache_projection.py` | 2 | all **+3** | `@@ -719,9 +719,12 @@` (9 → 12 lines) |
+
+Regenerated here with `uv run python tools/cypher_inventory.py --markdown` at this tree. That is the
+`file:line`-versus-SCALAR gap this section describes, reached from the other side: the pins were
+GREEN over the stale appendix, and only re-running the generator shows it.
+
+**Where these SCALARS were last cut:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
 forward merges (`0774035055`, then `9d13dc1bf7`) — re-derived by RUNNING the tool on the FINAL
 merged tree, never by arithmetic on the markers. `main`'s two commits between them move no census
 scalar, so every number below is the `0774035055` cut's, re-measured here and unchanged. **This cut CORRECTS a pair it inherited stale rather than moving it.** The branch's previous
