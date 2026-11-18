@@ -573,7 +573,7 @@ _GUARD_EXEMPT_FILES = {
 
 
 def _string_and_comment_spans(src: str) -> list[tuple[int, int]]:
-    """Absolute character spans of STRING and COMMENT tokens (#13490).
+    """Absolute character spans of STRING and COMMENT tokens (#13584 review).
 
     A call spelling that lives INSIDE a string is TEXT, not a construction:
     `test_12943_cache_leg.py` asserts `"_make_sdk(" in inspect.getsource(...)`,
@@ -687,7 +687,7 @@ def _select_graph_literals():
 
 
 def test_a_call_spelling_inside_a_string_is_not_a_construction():
-    """#13490: the guard's own evidence must name a LINE that holds a call.
+    """#13584 review: the guard's own evidence must name a LINE that holds a call.
 
     `test_12943_cache_leg.py` asserts `"_make_sdk(" in inspect.getsource(...)`.
     Counting that TEXT as a call site made the guard report a phantom site at
@@ -713,7 +713,7 @@ def test_a_call_spelling_inside_a_string_is_not_a_construction():
 
 @pytest.mark.parametrize("separator", ["\f", "\x85", "\u2028", "\u2029"])
 def test_the_span_table_counts_newlines_only_like_the_tokenizer_does(separator):
-    """#13490 follow-up: `splitlines()` is NOT the tokenizer's line count.
+    """#13584 review: `splitlines()` is NOT the tokenizer's line count.
 
     `str.splitlines()` additionally breaks on `\f`, `\x85`, `\u2028`/`\u2029`
     (`\v` and `\x1c`-`\x1e` too, but the tokenizer refuses those outright), while

@@ -74,7 +74,7 @@ def test_the_register_is_tied_to_the_real_symbols():
 
 
 def test_the_product_family_is_an_ALIAS_of_the_composer_that_strips_it():
-    """#13205/#13490: ONE declaration of the tenant family, and it is `sdk.py`'s.
+    """#13205/#13584: ONE declaration of the tenant family, and it is `sdk.py`'s.
 
     TWO pins, because the two sites tie to the composer in DIFFERENT ways — and
     saying which is which is the point:
@@ -142,8 +142,13 @@ def test_the_product_family_is_an_ALIAS_of_the_composer_that_strips_it():
         f"{[ast.unparse(v) for v in starred]}")
 
     # And the composed value must still be what the sweep documents it accepts.
+    # ⛔ EXACT tuple equality on the tail, not a set comparison (#13592 review 3):
+    # a set hides an extra non-tenant literal spliced in before the star —
+    # `("test_", "tortoise_test", "org_", *_TENANT_GRAPH_PREFIXES)` reds the
+    # exact form and passed the set form. The source pin above and this assert
+    # test DIFFERENT things (declaration form vs value shape); keep both.
     assert _SWEEP_OWNED_PREFIXES[:2] == ("test_", "tortoise_test")
-    assert set(_SWEEP_OWNED_PREFIXES[2:]) == set(sdk._TENANT_GRAPH_PREFIXES)
+    assert _SWEEP_OWNED_PREFIXES[2:] == sdk._TENANT_GRAPH_PREFIXES
 
 
 def test_the_wipe_literal_is_a_subset_of_the_journal_set():
