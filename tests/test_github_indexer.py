@@ -3187,7 +3187,12 @@ _PINNED_MODULES = {
 # text required ON the last line; None when the citation is a single line)
 _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # entities.py — the status latch, its two refusals, and the by-name reopen reach
-    ("entities.py", 5128, 5130): (
+    # ⛔ RE-DERIVED, never carried (`#13447`): the derive-and-encode seam inserts 9 lines
+    # above this block (the `objectKind` twin of the key-absent clause), so every address
+    # below it moved +9 — measured by searching for each pin's own expected FIRST-line
+    # text at the current tree, never by arithmetic on a diff stat
+    # (5128→5137, 5130→5139, 6215→6251, 6267→6303, 6269→6305).
+    ("entities.py", 5137, 5139): (
         '"st": ev.get("status"),  # #1350: status ON CREATE only —',
         "# re-mention cannot reset superseded→live)."),
     ("entities.py", 5922, 5922): ("excluded = _terminal_object_statuses()", None),
@@ -3206,14 +3211,16 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("entities.py", 6194, 6196): (
         "object_id = resolve_fold_name(",
         "mention=bool(_held) and not _live_holders)"),
-    ("entities.py", 6215, 6215): ("declared_kinds=sorted(index.kind_forms))", None),
     ("entities.py", 6247, 6252): ("row = self.g.query(", ").result_set"),
+    ("entities.py", 6251, 6251): ("declared_kinds=sorted(index.kind_forms))", None),
     ("entities.py", 6256, 6256): (
         "if status is not None and status in excluded:", None),
-    ("entities.py", 6267, 6269): (
+    ("entities.py", 6303, 6305): (
         "if (declared_kinds is not None and object_kind is not None", "return False"),
     # cache_projection.py — the NOT MONOTONE bullet the superseded claim rests on
-    ("cache_projection.py", 807, 807): (
+    # (`#13447`: +3 in this module's import and table-declaration block — re-derived by
+    # content at the current tree, 807→810).
+    ("cache_projection.py", 810, 810): (
         "NOT MONOTONE — the carriers CAN be cleared", None),
     # sdk.py — the non-scalar refusal and the coherent un-supersede admission arm
     # ⛔ RE-DERIVED, never carried (`#13348` post-merge review): `main` inserted a

@@ -102,7 +102,7 @@ Lifecycle decision table (THE rule):
   ⛔ ``None`` is not unconditional and the bound is not unconditional: it holds for
   a row a PACK fold keyed. ``_fold_object_stage`` carries a SECOND silent refusal
   this reader does not model — the kind-OWNERSHIP guard (``declared_kinds``, passed
-  at ``projection/entities.py:6215``, applied at ``:6267-6269``) — and the query
+  at ``projection/entities.py:6251``, applied at ``:6303-6305``) — and the query
   below does not even fetch ``o.objectKind`` (``:1288-1293``). So the moment a pack
   DECLARES state on ``pm:issue`` (a ``statuses:``/``pipeline:`` block on
   ``kindDefs.issue``, which ``packs/*/manifest.yaml`` does not have today), the
@@ -332,11 +332,11 @@ def _row_is_frozen(status, outdated) -> bool:
     writer can clear it" — the stronger claim is false. A coherent un-supersede
     (``update_entity(obj, status='live', supersededBy=None, supersededAt=None)``,
     admitted at ``sdk.py:54213-54222`` — the NOT MONOTONE exception, documented
-    at ``cache_projection.py:807``) DOES clear ``superseded``, and this read
+    at ``cache_projection.py:810``) DOES clear ``superseded``, and this read
     resumes the moment it does because the answer is derived from the stored row
     and never cached. What ``_upsert_object`` guarantees is narrower and is the
     part this module relies on: ``o.status`` is written ON CREATE only
-    (``projection/entities.py:5128-5130`` — *"status ON CREATE only — ON MATCH
+    (``projection/entities.py:5137-5139`` — *"status ON CREATE only — ON MATCH
     never touches it (the clobber guard)"*), so an unrelated re-mention cannot
     reset the word out from under a poll.
 
@@ -1404,7 +1404,7 @@ class GitHubIndexer:
         # this arm.
         # ⚠️ "While set", not "for ever": a coherent un-supersede DOES clear
         # `superseded` (`sdk.py:54213-54222`; the NOT-MONOTONE bullet at
-        # `cache_projection.py:807`), so the earlier "permanent" wording was one claim
+        # `cache_projection.py:810`), so the earlier "permanent" wording was one claim
         # too strong. It does not weaken the answer: this read derives from the
         # STORED row, so it resumes on the write that clears the word, and until
         # then `None` is the only answer that cannot mint without bound.
