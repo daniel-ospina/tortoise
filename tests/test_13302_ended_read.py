@@ -194,7 +194,7 @@ def test_a_plan_that_happened_carries_its_occurrence(sdk):
 
 
 @_docker_only
-def test_a_superseded_record_names_its_successor(sdk):
+def test_a_superseded_point_names_its_successor_by_id(sdk):
     old = sdk.create_point(kind="decision", content="the entry tier is 29")
     new = sdk.create_point(kind="decision", content="the entry tier is 39")
     sdk.supersede_point(old["id"], new["id"])
@@ -203,6 +203,31 @@ def test_a_superseded_record_names_its_successor(sdk):
     assert row["status"] == "superseded"
     # A Point names its successor by the CORRECTS edge, NOT by a property.
     assert row["successorId"] == new["id"]
+    assert row["allSuccessorIds"] == [new["id"]]
+    assert row["successorName"] is None
+
+
+@_docker_only
+def test_a_superseded_object_names_its_successor_by_NAME_not_by_id(sdk):
+    """`supersededBy` holds the successor's NAME (§4.2/§4.3) — never an id.
+
+    Serving that carrier under `successorId` would hand a caller a value no node
+    carries (review finding, #13302): a caller resolving it finds nothing, and one
+    unioning it with `allSuccessorIds` mixes a name with ids. The two facts are two
+    keys, and this test fails if they are ever collapsed.
+    """
+    new = sdk.create_subject("Acme Corp", subjectKind="organization")
+    old = sdk.create_subject("Acme", subjectKind="organization")
+    sdk.supersede_knowledge(old["id"], new["id"])
+
+    row = {r["id"]: r for r in _ended(sdk, entity_type="subject")}[old["id"]]
+    assert row["status"] == "superseded"
+    assert row["successorId"] is None
+    assert row["allSuccessorIds"] == []
+    assert row["successorName"] == "Acme Corp", (
+        "the Object/Subject successor carrier holds a NAME; a name served as an id "
+        "is worse than serving nothing"
+    )
 
 
 @_docker_only
@@ -312,7 +337,11 @@ def test_a_subject_is_served_by_its_own_carriers(sdk):
     assert subj["id"] in rows
     assert rows[subj["id"]]["name"] == "Acme"
     assert rows[subj["id"]]["status"] == "superseded"
-    assert rows[subj["id"]]["successorId"]
+    # ⛔ NOT `successorId`: a Subject's successor is a NAME on the carrier. The
+    # earlier form of this assertion accepted either ("truthy"), which is how a
+    # name could pass for an id.
+    assert rows[subj["id"]]["successorName"] == "Acme Corp"
+    assert rows[subj["id"]]["successorId"] is None
 
 
 # ── refusals: a state question is not a relevance read ─────────────────────────
@@ -329,6 +358,55 @@ def test_a_query_beside_ended_scope_is_refused_rather_than_dropped(sdk):
     assert "query" in message
     # The repair is named (AX §5): an admissible refusal leaves a writable way out.
     assert "omit" in message
+
+
+@_docker_only
+def test_every_knob_that_would_change_the_rows_or_their_order_is_refused(sdk):
+    """The refusal is a RULE, not the three knobs a first draft thought of.
+
+    A filter this read ignores (a pre-truncation exclusion, a recency ordering, a
+    hop traversal) does not merely go unused: it answers a narrower/differently
+    ordered question with the whole population. One parametrized case per knob, so
+    a knob added to the signature later fails here rather than silently.
+    """
+    knobs = {
+        "threshold": 0.5,
+        "min_confidence": 0.2,
+        "order_by": "confidence",
+        "relationship_filter": "addresses:x",
+        "traversal_path": "Product→Feature",
+        "claim_class": "asserted",
+        "exclude_status": ["live"],
+        "exclude_turn_echo_session": "sess-1",
+        "structural_kind": "decision",
+        "structural_hops": 1,
+        "recency_field": "createdAt",
+        "recency_boost": 0.5,
+        "graph_ranker": object(),
+    }
+    for knob, value in knobs.items():
+        with pytest.raises(ValueError) as exc:
+            sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+                                  **{knob: value})
+        assert knob in str(exc.value), f"{knob} was dropped, not refused"
+
+
+@_docker_only
+def test_the_retrieval_depth_knobs_are_accepted_and_inert(sdk):
+    """The other half of the rule: a knob that cannot change a row is not refused.
+
+    Refusing `pool_size`/`fusion_weights`/… would refuse a caller for asking about
+    a candidate set this read never builds. The population must be identical.
+    """
+    pid = sdk.create_point(kind="statement", content="the venue booked the beach club")
+    sdk.retract_point(pid["id"])
+
+    plain = _ids(_ended(sdk, entity_type="point"))
+    tuned = _ids(sdk.tortoise_fts_query(
+        None, entity_type="point", ended_scope=True, limit=50,
+        pool_size=200, fusion_weights={"vector": 2.0}, w4_enrich=False,
+        keep_numeric=True, time_aware=True))
+    assert plain == tuned
 
 
 @_docker_only

@@ -44725,7 +44725,11 @@ class TortoiseSDK:
         status set, slot literal or per-family deny-list lives here — served
         newest ending first, each row carrying the ending the record itself
         holds: its lifecycle `status` (``deprecated`` = nothing replaced it,
-        ``superseded`` = see `successorId`), the `stage` block (`slot` +
+        ``superseded`` = see the successor), the successor as the TWO facts the
+        model records — `successorId`/`allSuccessorIds` from a Point's `CORRECTS`
+        edge and `successorName` from the `supersededBy` carrier (an
+        Object/Subject names its successor; the carrier holds a NAME, so it is
+        never served under an `…Id` key) — the `stage` block (`slot` +
         `outcome`) for a record ended on the POSITION axis, and `endedAt`.
         `linkedEvents` carries the events wired to the record, which is what
         makes "planned and never happened" answerable without knowing a kind's
@@ -44733,8 +44737,19 @@ class TortoiseSDK:
         `linkedEvents`.
         ⛔ A `query` beside it is REFUSED, not ignored: a state enumeration that
         silently dropped the caller's words would serve a whole population as if
-        it were their answer. `entity_type` (point/object/subject — the kinds
-        with a lifecycle), `kind` and `limit` scope and bound it. `ended_scope`
+        it were their answer. Every knob that would change WHICH rows come back
+        or their ORDER is refused for the same reason (a filter or an ordering
+        this read ignores is a false answer) — `query`, `threshold`,
+        `min_confidence`, `order_by`, `relationship_filter`, `traversal_path`,
+        `claim_class`, `exclude_status`, `exclude_turn_echo_session`,
+        `structural_kind`, `structural_hops`, `recency_field`, `recency_boost`,
+        `graph_ranker` — while the retrieval-DEPTH and SCORING weights
+        (`pool_size`, `fusion_weights`/`fusion_k`, `w4_enrich`, `keep_numeric`,
+        `search_keys_prf`, `entity_key_expansion`, `time_aware`/`query_date`)
+        are accepted and inert: they size or re-score a candidate set this read
+        never builds, so they change no row and no order. `entity_type`
+        (point/object/subject — the kinds with a lifecycle), `kind` and `limit`
+        scope and bound it. `ended_scope`
         is not a visibility field on the record and adds no word to the model:
         it is design §6's "option on the call", and the default keeps every
         existing surface answering exactly what it answered before.
@@ -44998,6 +45013,20 @@ class TortoiseSDK:
         # passed ``min_confidence`` and got rows below it would never learn the
         # floor was not applied. ``limit`` (the page bound), ``entity_type`` and
         # ``kind`` (the population's scope) DO apply and stay served.
+        #
+        # ⛔ THE LIST IS "every knob that changes WHICH rows come back or their
+        # ORDER", not "the ones a first draft thought of". A filter the caller set
+        # and this read ignores is a false answer (``exclude_turn_echo_session``
+        # and the other ``exclude_*`` seams are FILTERS), and an ordering is a
+        # false answer too (``recency_*``, ``graph_ranker``, a structural hop
+        # traversal) — the ended read's order is the record's own ending time.
+        # The knobs NOT listed here are the retrieval-DEPTH and SCORING weights
+        # (``pool_size``, ``fusion_weights``/``fusion_k``, ``w4_enrich``,
+        # ``keep_numeric``, ``search_keys_prf``, ``entity_key_expansion``,
+        # ``time_aware``/``query_date``): they size or re-score a candidate set
+        # that this read never builds, so accepting them changes no row and no
+        # order — refusing them would be noise, and the module docstring says so
+        # where a caller reads it.
         if ended_scope:
             _refused_ended = sorted(
                 name for name, _supplied in (
@@ -45009,6 +45038,13 @@ class TortoiseSDK:
                     ("traversal_path", traversal_path is not None),
                     ("claim_class", claim_class is not None),
                     ("exclude_status", bool(exclude_status)),
+                    ("exclude_turn_echo_session",
+                     exclude_turn_echo_session is not None),
+                    ("structural_kind", structural_kind is not None),
+                    ("structural_hops", structural_hops not in (0, None)),
+                    ("recency_field", recency_field is not None),
+                    ("recency_boost", recency_boost not in (0.0, 0)),
+                    ("graph_ranker", graph_ranker is not None),
                 ) if _supplied
             )
             if _refused_ended:
@@ -45017,8 +45053,8 @@ class TortoiseSDK:
                     f"so it cannot apply {', '.join(_refused_ended)}. It answers "
                     f"\"what ended, and how\" from the records' own state: omit "
                     f"{', '.join(_refused_ended)} and read the returned rows' "
-                    f"`status` / `successorId` / `stage` (with its `slot` and "
-                    f"`outcome`) / `endedAt`. Narrow the population with "
+                    f"`status` / `successorId`+`successorName` / `stage` (with its "
+                    f"`slot` and `outcome`) / `endedAt`. Narrow the population with "
                     f"entity_type= and kind=, and bound the page with limit=; "
                     f"for a relevance read of what is still CURRENT, drop "
                     f"ended_scope and search as before."
@@ -45396,7 +45432,11 @@ class TortoiseSDK:
             # full page as complete (the #8447 defect) or an unfilled one as cut.
             _fatter = enumerate_ended(
                 graph, entity_type=entity_type, kind=kind,
-                kinds=expanded_kinds, limit=limit + 1)
+                kinds=expanded_kinds, limit=limit + 1,
+                # BOUNDED like every other statement this read issues: the
+                # caller's own budget (the capstone's `_elevated_timeout_ms`) or
+                # the shipped read budget, never an unbounded query.
+                timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS))
             _ended_rows = _fatter[:limit]
             # ``candidates`` is what this read could SEE and it may be BOUNDED
             # (exactly the hosted ``GET /v1/points`` ``limit+1`` probe shape), which
