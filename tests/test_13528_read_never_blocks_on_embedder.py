@@ -70,7 +70,6 @@ from tortoise.exceptions import EmbedderUnavailableError
 from tortoise.read_stages import (
     STAGE_EMBED_ENCODE,
     STAGE_EMBED_GET,
-    STAGE_PRE_HANDLER,
     begin,
     request_stages,
 )
@@ -282,8 +281,19 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
     still be able to say which half it died in), and on the cold path NEITHER
     may hold the load: the read declines instead of waiting, so ``embed_get``
     is a fast decision rather than a stall, and ``embed_encode`` never opens at
-    all. ``pre_handler`` must stay small too — the 7.2–9.3 s it published in
-    production was reads QUEUED behind workers parked in the load.
+    all.
+
+    ⛔ ``pre_handler`` IS PUBLISHED, BUT NOT ASSERTED (#13535 review F-1). It is
+    the arrival-to-first-mark span that published 7.2–9.3 s in production, and
+    that figure was reads QUEUED behind workers parked in the load — a
+    multi-worker phenomenon this harness cannot reproduce (one thread, no pool).
+    Measured with the defect REVERTED and with it fixed: ``pre_handler`` is
+    ``0.1`` ms in BOTH, because the first mark is ``embed_get`` and it is emitted
+    before the acquire. A bar there would therefore pass under the very defect
+    its message names — a guard that cannot speak. What does cover a stall
+    before the first mark is the wall-clock bar in
+    ``test_a_read_does_not_block_on_a_cold_embedder`` (it starts before any mark
+    and fails on a read that waits for the load anywhere).
     """
     timeline = begin()
     with request_stages(timeline):
@@ -298,15 +308,6 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
         f"embed_get took {spent[STAGE_EMBED_GET]} ms of a {_LOAD_S * 1000:.0f} ms "
         f"load — the read is waiting on it again instead of declining inside its "
         f"{READ_EMBED_BUDGET_S * 1000:.0f} ms budget (measured pre-fix: 7857.3 ms)")
-    # ⛔ ``spent_ms()`` IS MILLISECONDS (``read_stages.Timeline.spent_ms``), so
-    # the bar needs the same ``* 1000.0`` the frame above it carries. Without it
-    # this compares against 4 ms rather than 4 000 ms — a bar the message two
-    # lines down says is the wrong number, and a flake door on the contended
-    # 4-worker carve-out lane (#13528 review F2, pre-existing).
-    assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
-        f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms of a "
-        f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a read must not "
-        f"queue behind workers parked in the embedder load")
 
 
 # ── the counter-tests: the fix may not become "stop embedding" ────────────
