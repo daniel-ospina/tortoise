@@ -93,7 +93,7 @@ Two consequences the decision turns on:
 
 Envelope doors — all 8 confirmed `list[dict]` today:
 
-```
+```text
 tortoise_search_sessions        mcp_server.py:7085
 tortoise_suggest_entry_points   mcp_server.py:5403
 tortoise_list_batches           mcp_server.py:5274
@@ -106,7 +106,7 @@ tortoise_calibrate_summary      mcp_server.py:5744
 
 `rest_spec` doors — the row and the route it **nominally** owns (it does not serve it; §1.5):
 
-```
+```text
 tortoise_search          tool_registry.py:518   GET /v1/search         (also list[dict] -> both reasons)
 tortoise_session_context tool_registry.py:994   GET /v1/context        (-> dict)
 tortoise_issue_insight   tool_registry.py:1054  GET /v1/issue-insight  (-> dict)
@@ -175,7 +175,7 @@ for entry in registry:
 `register_all` *would* derive every route from a registry row. **But nothing calls it.**
 Measured on `main`:
 
-```
+```text
 $ rg -n 'FastAPIRouterAdapter' --glob '!.venv/*' .
 ./tortoise/tool_registry.py:2343:# 9 REST tool-ops classified for the FastAPIRouterAdapter:
 ./tortoise/tool_registry.py:2367:class FastAPIRouterAdapter:
