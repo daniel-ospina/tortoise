@@ -833,10 +833,11 @@ def test_the_declared_fold_defaults_are_the_folds_own_constants():
 _FOLD_LABEL_TABLES = (("Subject", "subject"), ("Object", "object"))
 
 #: The tables whose column lists are the universe for the property-space arm: the
-#: four an entity/node row is built from, NOT all ten `table_columns()` answers.
-#: Measured: no column in ANY of the ten carries an uppercase character, so the
-#: camel-case arm is equivalent over the full set; the own-table arm below is what
-#: keeps the check exact.
+#: four an entity/node row is built from, NOT the whole `table_columns()` answer
+#: (a count restated here would rot as tables are added). Measured: no column in
+#: ANY table it answers carries an uppercase character, so the camel-case arm is
+#: equivalent over the full set; the own-table arm below is what keeps the check
+#: exact.
 _FOLD_COLUMN_SPACE_TABLES = ("subject", "object", "event", "source")
 
 
@@ -865,9 +866,15 @@ def test_the_fold_defaults_keys_are_property_space_and_their_columns_exist():
     the fold's OWN table is a field-set WIDENING (`#10394` review P3, the
     conflation `#17.2` point 3 relies on) and must be re-derived, not absorbed.
 
-    MUTATION (proved non-vacuous): add `"widgetKind"` to
-    `FOLD_ON_CREATE_DEFAULTS["Object"]` → this test REDs on the own-table arm;
-    nothing else in this file does.
+    MUTATION (proved non-vacuous, both arms measured on a scratch copy):
+    `projected_columns('object')` dropping `object_kind` REDs this test on the
+    own-table arm while `test_the_declared_fold_defaults_are_the_folds_own_constants`
+    (which pins the fold's CLAUSES against the declared table, not the columns)
+    stays GREEN — a COLUMN-side drift is exactly what only this arm sees; and
+    adding `"widgetKind"` to `FOLD_ON_CREATE_DEFAULTS["Object"]` REDs this test
+    on the own-table arm AND that antecedent pin, because a new fold default is
+    the one edit both are built to see. Neither arm is unique here, and this
+    docstring does not claim it is.
     """
     owned = dict(_FOLD_LABEL_TABLES)
     column_space = {table: set(cp.projected_columns(table))

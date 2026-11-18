@@ -597,6 +597,28 @@ def test_the_shifted_cite_pin_runs_on_a_docs_only_diff():
     )
 
 
+def test_the_cache_projection_cite_pin_runs_on_a_docs_only_diff():
+    """#13439 review P3: the cited-legs arm must run on the diff that adds a cite.
+
+    `tests/test_10000_cache_projection_cite_pin.py` is the ONE arm of the retired
+    `test_10000_cache_projection_doc_pin.py` that `#13439`'s own rule keeps —
+    invariant-protecting, "a cited symbol still exists" — and it is the only thing
+    that can see the epic artifact's `### The pin` section cite a test name no
+    longer defined. A docs-only diff selects NO surface and runs `tier1` ONLY, so
+    the `core` row alone would leave the arm asleep on exactly the edit class that
+    adds a citation. Dropping the `tier1` row re-opens that hole (#4309
+    silent-drop class).
+    """
+    r = _sel(["docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == [], r["surfaces"]
+    assert "test_10000_cache_projection_cite_pin.py" in r["test_files"], (
+        "a docs-only edit of the artifact whose `### The pin` section this arm "
+        "guards must select the arm — otherwise a dangling cite can merge green "
+        "(#13439 review P3, #4309 class)"
+    )
+
+
 def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
     """#8614 review (P2): the runbook's own guards must run on the runbook.
 
