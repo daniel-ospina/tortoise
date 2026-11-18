@@ -18,8 +18,9 @@ So the arms below are pinned, each paired with the mutation that reverts it:
    drop `n.content` from that `RETURN` list — the very "fix" the docstring forbids.
 2. **the payload axis** — `_content(chars, i)` returns a body of EXACTLY `chars`
    characters, for every index. ⛔ Mutant: un-padded `" ".join(out)[:chars]`, which
-   returned one character SHORT on some rows — the two committed runs publish
-   59.84 / 299.81 / 1,199.98 for a declared 60 / 300 / 1,200 (the first cut of this
+   returned one character SHORT on some rows — the FIRST committed run publishes
+   59.84 / 299.81 / 1,199.98 for a declared 60 / 300 / 1,200 (the second measures the
+   declared length exactly, because it postdates the pad; the first cut of this
    instrument was 7 characters short, which is where the irreconcilable "22×" came
    from; #13436 review P3).
 3. **the gate-count composition** — the per-entity term comes from the shape NAMED
@@ -126,8 +127,48 @@ def test_the_unpadded_join_is_observably_short():
     assert short > 0, "the un-padded slice is now exact — re-derive the README's note"
 
 
+def test_the_seed_keeps_a_real_word_list_so_tokenisation_scales():
+    """⛔ THE RETRACTED FIRST CUT, pinned: `"x" * n` holds tokenisation constant.
+
+    `_nudge_candidates` scores by TOKEN OVERLAP, so a seed of one repeated character is
+    blind to the scoring leg the axis is supposed to include — and the conclusion built
+    on it ("the payload does not matter") was an artefact, retracted in the README. The
+    length tests above are green under `"x" * chars`, so this is the case that reds if
+    anyone reverts the seed: a real body must carry MANY distinct tokens, and their
+    number must GROW with the declared length.
+    """
+    import re
+
+    bank = set(measure._WORD_BANK)
+    previous = 0
+    for chars in (60, 300, 1200):
+        bodies = [measure._content(chars, i) for i in range(0, 40)]
+        for body in bodies:
+            tokens = set(re.findall(r"[a-z]+", body))
+            assert len(tokens) >= 5, (
+                f"a {chars}-char seed carries {len(tokens)} distinct tokens — that is the "
+                "retracted one-character seed, which is blind to the scoring leg")
+            # the truncation at `chars` can leave ONE partial word at the tail, so the
+            # bank check is "mostly the declared vocabulary", not "a subset of it"
+            assert len(tokens & bank) >= len(tokens) - 1, (
+                f"the seed left the declared word bank: {sorted(tokens - bank)}")
+        mean_tokens = sum(len(set(re.findall(r"[a-z]+", b))) for b in bodies) / len(bodies)
+        assert mean_tokens > previous, (
+            f"distinct tokens did not grow from {previous} to {mean_tokens} at {chars} chars")
+        previous = mean_tokens
+
+
 def test_the_committed_artifacts_publish_the_measured_axis():
-    """Both runs carry the MEASURED chars/row, not only the requested one."""
+    """Both runs carry the MEASURED chars/row, derived from the run's OWN bytes.
+
+    ⛔ AND THE DERIVATION IS THE ASSERTION, not a second artifact field: `#13445`'s
+    review (P1) measured that comparing `content_chars_per_row` with
+    `content_bytes_per_row` stays GREEN when both are edited to the REQUESTED number
+    while `content_bytes_returned` is left alone — the artifact-only PR that fabricates
+    a per-row figure would pass a test that only compares the artifact with itself.
+    So each published per-row value is recomputed from `content_bytes_returned /
+    rows_returned` here (the seed is an ASCII word bank, so bytes = characters).
+    """
     for path in ARTIFACTS:
         rows = json.loads(path.read_text(encoding="utf-8"))["arms"]["nudges"]["by_content_length"]
         assert rows, f"{path.name} published no payload axis"
@@ -136,8 +177,12 @@ def test_the_committed_artifacts_publish_the_measured_axis():
                 f"{path.name}: the axis publishes a declared length with no measured "
                 "one beside it (#13436 review P3)"
             )
-            measured = row["content_bytes_per_row"]
-            assert row["content_chars_per_row"] == pytest.approx(measured, abs=0.01)
+            derived = row["content_bytes_returned"] / row["rows_returned"]
+            assert row["content_bytes_per_row"] == pytest.approx(derived, abs=5e-4), (
+                f"{path.name}: content_bytes_per_row is not content_bytes_returned / rows")
+            assert row["content_chars_per_row"] == pytest.approx(derived, abs=5e-4), (
+                f"{path.name}: content_chars_per_row is not derived from the run's own "
+                "bytes — the declared number must never be published as the measured one")
             assert row["content_chars_requested"] >= row["content_chars_per_row"]
             # the shortfall the un-padded seeder produced: < 1 char, never >= 7
             assert row["content_chars_requested"] - row["content_chars_per_row"] < 1

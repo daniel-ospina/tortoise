@@ -163,9 +163,10 @@ def _content(chars: int, i: int) -> str:
     ⛔ AND THE LENGTH IS EXACT, NOT "~": the word loop overshoots `chars` and the
     slice then returns the WHOLE join when `len(" ".join(out)) < chars` (the join
     loses one character per boundary relative to `used`), so an unpadded body
-    landed up to ONE character short — the two committed runs average
-    **59.84 / 299.81 / 1,199.98** chars/row for a declared 60 / 300 / 1,200, i.e.
-    the axis published a length its rows did not have, at 0.3 % of the axis (#13436
+    landed up to ONE character short — the FIRST committed run averages
+    **59.84 / 299.81 / 1,199.98** chars/row for a declared 60 / 300 / 1,200 (the
+    second was taken after this pad landed and measures exactly 60 / 300 / 1,200),
+    i.e. the axis published a length its rows did not have, at 0.3 % of the axis (#13436
     review P3; the first cut of this instrument was 7 characters short — 53 / 293 /
     1,193 published as 60 / 300 / 1,200 — which is what made "22×" irreconcilable
     with its declared 20×). The trailing SPACES below pad to the declared length
@@ -473,8 +474,10 @@ def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
             "points": n,
             # MEASURED, and the requested number beside it: `_content` now pads to the
             # declared length exactly, and publishing BOTH is what lets a reader check
-            # that without re-running the instrument (#13436 review P3 — the committed
-            # runs average 59.84 / 299.81 / 1,199.98 chars/row for 60 / 300 / 1,200).
+            # that without re-running the instrument (#13436 review P3: the FIRST
+            # committed run averages 59.84 / 299.81 / 1,199.98 chars/row for a declared
+            # 60 / 300 / 1,200 — it predates this pad — while the second measures the
+            # declared length exactly, which is the pair the README publishes).
             "content_chars_requested": chars,
             "content_chars_per_row": (
                 round(content_chars / len(rows), 3) if rows else 0),
