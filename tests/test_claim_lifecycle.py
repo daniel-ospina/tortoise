@@ -279,13 +279,18 @@ def _ontology_status_section() -> str:
 #: The markdown BLOCK STARTS that end a lazy paragraph continuation (CommonMark).
 #: Prose that merely begins with a word — or with a code span — keeps continuing.
 #: ⛔ THE THEMATIC BREAKS, FENCES AND HTML BLOCKS ARE LOAD-BEARING, not completeness
-#: for its own sake: with `---` (and `***`, `___`, ``` ``` ```, `~~~`, `<`) missing,
-#: the lazy rule GLUED them to the note and then kept absorbing the lines after
-#: them — a gutted disclosure passed by borrowing a word from the next block
-#: (measured: v3.37 review, round 5). `test_ontology_legacy_pin_reads_the_note_not_
-#: the_section` drives each one adjacent, with no blank line.
+#: for its own sake: with `---` (and `***`, `___`, ``` ``` ```, `~~~`) missing, the
+#: lazy rule GLUED them to the note and then kept absorbing the lines after them —
+#: a gutted disclosure passed by borrowing a word from the next block (measured:
+#: v3.37 review, round 5). `test_ontology_legacy_pin_reads_the_note_not_the_section`
+#: drives each one BOTH bare and QUOTED (`> ---`), with no blank line.
+#: ⛔ AND `<` IS NARROWED TO THE INTERRUPTING FORMS (1-6 of CommonMark's HTML-block
+#: list, plus a tag that closes): a bare `<` also matched an AUTOLINK, which is
+#: INLINE, so a legitimate prose continuation `<https://…>` was cut and the note
+#: lost entirely — a false RED on a line that never started a block (round 6).
 _BLOCK_START_RE = re.compile(
-    r"^(?:[#>|]|[-*+]\s|\d+[.)]\s|=+\s*$|(?:[-*_][ \t]*){3,}$|```|~~~|<)")
+    r"^(?:[#>|]|[-*+]\s|\d+[.)]\s|=+\s*$|(?:[-*_][ \t]*){3,}$|```|~~~"
+    r"|<(?:!--|\?|!\[CDATA\[|/[A-Za-z]|[A-Za-z][A-Za-z0-9-]*(?:\s|/?>)))")
 
 
 def _unwrap(text: str) -> str:
@@ -353,6 +358,17 @@ def _read_side_legacy_note(section: str | None = None) -> str:
                 current = []
             continue
         if not stripped[1:].strip():  # a bare `>` is the MD028 paragraph break
+            if current:
+                paragraphs.append(current)
+                current = []
+            continue
+        # ⛔ A BLOCK START INSIDE THE QUOTE ENDS THE PARAGRAPH TOO. Blockquote content
+        # is parsed as blocks, so `> ---`, `> ``` `, `> ### H`, `> - item` each start
+        # a new block and end the paragraph — appending them unconditionally let a
+        # note missing a word borrow it from the block after a QUOTED break, the same
+        # false pass the unquoted branch closed (measured: v3.37 review, round 6).
+        body = stripped[1:].lstrip()
+        if body and _BLOCK_START_RE.match(body):
             if current:
                 paragraphs.append(current)
                 current = []
@@ -665,17 +681,33 @@ def test_ontology_legacy_pin_reads_the_note_not_the_section():
     # check — and so did `***`, `___`, a ``` fence, `~~~` and a `<div>`.
     for block_start in ("---", "***", "___", "```", "~~~", "<div>", "### Heading",
                         "| a | b |", "- item", "1. item"):
-        absorbing = (
-            "### Point Status Vocabulary (canonical)\n"
-            "\n"
-            "> **`retracted` and `outdated` are read-side legacy**, not statuses.\n"
-            f"{block_start}\n"
-            "rows may still hold `archived`.\n"
-        )
-        note = _read_side_legacy_note(absorbing)
-        assert "`archived`" not in note, (
-            f"a `{block_start}` BLOCK START did not end the note, so the lazy rule "
-            f"absorbed the block after it into the disclosure: {note!r}")
+        # ⛔ BOTH AXES: the break as a bare line AND inside the quote (`> ---`). The
+        # quoted axis was missed by the first cut of this pin and kept the false pass
+        # open (v3.37 review, round 6).
+        for quoted_break in (block_start, f"> {block_start}"):
+            absorbing = (
+                "### Point Status Vocabulary (canonical)\n"
+                "\n"
+                "> **`retracted` and `outdated` are read-side legacy**, not statuses.\n"
+                f"{quoted_break}\n"
+                "rows may still hold `archived`.\n"
+            )
+            note = _read_side_legacy_note(absorbing)
+            assert "`archived`" not in note, (
+                f"a `{quoted_break}` BLOCK START did not end the note, so the lazy "
+                f"rule absorbed the block after it into the disclosure: {note!r}")
+    # ...and the over-approximation the OTHER way: an AUTOLINK is inline, not a block
+    # start, so a marker-dropped continuation carrying one must still be read.
+    autolink = (
+        "### Point Status Vocabulary (canonical)\n"
+        "\n"
+        "> **`retracted`, `outdated` and `archived` are read-side legacy**,\n"
+        "<https://example.com/12855> not statuses.\n"
+    )
+    auto_note = _read_side_legacy_note(autolink)
+    assert "read-side legacy" in auto_note and "`archived`" in auto_note, (
+        "an autolink is INLINE, so a continuation carrying one is still the note; "
+        f"the block-start class cut it: {auto_note!r}")
 
 
 def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):
