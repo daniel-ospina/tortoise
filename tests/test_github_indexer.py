@@ -3213,7 +3213,14 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("entities.py", 6267, 6269): (
         "if (declared_kinds is not None and object_kind is not None", "return False"),
     # cache_projection.py — the NOT MONOTONE bullet the superseded claim rests on
-    ("cache_projection.py", 807, 807): (
+    # ⛔ RE-DERIVED, never carried (`#13466`): the `#13422`/`#13466` change inserts ONE
+    # line above this bullet in `tortoise/cache_projection.py`, so the address moved
+    # `807` -> `808`. Measured by content, not by delta arithmetic: `grep -n` for this
+    # pin's own FIRST-line text finds it at `808` on this tree and at `807` on
+    # `origin/main`. The two `tortoise/indexer/github_indexer.py` citations to it moved
+    # with it. The `entities.py`/`sdk.py` rows below are still red on `main` (#13289's
+    # class) — they are NOT this change's and were left for their own re-derivation.
+    ("cache_projection.py", 808, 808): (
         "NOT MONOTONE — the carriers CAN be cleared", None),
     # sdk.py — the non-scalar refusal and the coherent un-supersede admission arm
     # ⛔ RE-DERIVED, never carried (`#13348` post-merge review): `main` inserted a

@@ -332,7 +332,7 @@ def _row_is_frozen(status, outdated) -> bool:
     writer can clear it" — the stronger claim is false. A coherent un-supersede
     (``update_entity(obj, status='live', supersededBy=None, supersededAt=None)``,
     admitted at ``sdk.py:54213-54222`` — the NOT MONOTONE exception, documented
-    at ``cache_projection.py:807``) DOES clear ``superseded``, and this read
+    at ``cache_projection.py:808``) DOES clear ``superseded``, and this read
     resumes the moment it does because the answer is derived from the stored row
     and never cached. What ``_upsert_object`` guarantees is narrower and is the
     part this module relies on: ``o.status`` is written ON CREATE only
@@ -1404,7 +1404,7 @@ class GitHubIndexer:
         # this arm.
         # ⚠️ "While set", not "for ever": a coherent un-supersede DOES clear
         # `superseded` (`sdk.py:54213-54222`; the NOT-MONOTONE bullet at
-        # `cache_projection.py:807`), so the earlier "permanent" wording was one claim
+        # `cache_projection.py:808`), so the earlier "permanent" wording was one claim
         # too strong. It does not weaken the answer: this read derives from the
         # STORED row, so it resumes on the write that clears the word, and until
         # then `None` is the only answer that cannot mint without bound.
