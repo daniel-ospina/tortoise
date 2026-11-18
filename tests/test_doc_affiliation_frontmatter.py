@@ -1431,7 +1431,9 @@ def test_a_malformed_value_names_a_true_remedy(
     assert "not the last thing in the value" in msg, msg
 
     # (b) LEGAL YAML refused as `malformed`: a quoted scalar continued on the
-    # next line. The remedy names the one-line form / block scalar.
+    # next line. The remedy names the one-line form and NOTHING that cannot clear
+    # the red: a block scalar reaches no check (`_values`' `other` kind), so it
+    # would swap this red for (D)'s "not measured" red — pinned below.
     assert parse_frontmatter(
         '---\ntitle: x\naboutObjects: "a\n  b"\n---\n'
     )["aboutObjects"] == "a b", "control: a continued quoted scalar loads whole"

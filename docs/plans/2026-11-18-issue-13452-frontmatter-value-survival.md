@@ -728,7 +728,7 @@ aboutObjects: "a
 `parse_frontmatter` reads that whole as `'a b'`, but `_values` hands `_quoted_style` only the first
 line (`_values(['title: x','aboutObjects: "a','  b"'])` → `('aboutObjects','scalar','"a')`), which
 returns `('malformed', None)` — so the arm fails the file, and since this round prints the
-one-line/block-scalar remedy rather than *"the value is TERMINATED there — remove the inner quote"*
+one-line remedy rather than *"the value is TERMINATED there — remove the inner quote"*
 about a value YAML keeps intact (`test_a_malformed_value_names_a_true_remedy`). This is
 PRE-EXISTING: `main`'s
 helper reaches `malformed` here identically, and the fix neither causes nor clears it. It also
