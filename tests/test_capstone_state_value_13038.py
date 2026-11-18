@@ -2069,6 +2069,53 @@ def test_the_label_scan_flags_the_inline_renderings_it_replaced():
     ) == []
 
 
+def test_both_renderers_carry_the_ended_scope_marker():
+    """The complementary net: assert the RENDERERS' output, not their source shape.
+
+    The scan above is an AST net over one spelling. It cannot see a renderer that
+    still calls `_search_label` but hands it a request without `ended_scope`, and
+    it cannot see a label whose literal does not begin with `search(`. Rendering a
+    real `Call` through both renderers is the behavioural half the #13302 review
+    preferred, kept alongside the scan rather than instead of it.
+
+    Both `_answer_text` branches are pinned: the `→ 0 rows` one and the rows one,
+    the second being the line that prints the retired object in the committed
+    evidence. Restoring the pre-fix inlines makes this fail with the defect's own
+    signature — `` `search(None, object)` → 0 rows `` — while the scan stays local
+    to `tools/`.
+    """
+    request = {"query": None, "entity_type": "object", "ended_scope": True}
+
+    empty = cap.Answer("Q1")
+    empty.calls.append(cap.Call("search", request, True, rows=[]))
+    assert "ended_scope" in cap._answer_text(empty), (
+        "the '→ 0 rows' branch must name the scope — otherwise an empty ended read "
+        "reads as an empty default-scope read"
+    )
+
+    served = cap.Answer("Q1")
+    served.calls.append(
+        cap.Call(
+            "search", request, True,
+            rows=[{"id": "o1", "what": "Onboarding flow v2",
+                   "kind": "object", "status": "deprecated", "score": 0.5}],
+        )
+    )
+    assert "ended_scope" in cap._answer_text(served), (
+        "the rows branch must name the scope — this is the line that renders the "
+        "retired object in the committed evidence"
+    )
+
+    summary = cap._calls_summary(
+        [{"ok": True, "surface": "search", "request": request, "rows": [{"id": "o1"}]}]
+    )
+    assert "ended_scope" in summary, (
+        "the top table must name the scope too — it is the line the scoreboard is "
+        "skimmed on"
+    )
+    assert "`" not in summary, "the summary form is unfenced by contract (`tick=False`)"
+
+
 def test_the_ended_suffix_renders_how_a_row_ended():
     """The bracket is the reason a row is the answer — and it is not decorative."""
     suffix = cap._ended_suffix(
