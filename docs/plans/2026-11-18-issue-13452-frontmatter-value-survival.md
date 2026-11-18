@@ -335,8 +335,11 @@ THREE head-bound review rounds ran past the recorded attestation (`5fc01193de` �
 → `7963c4a851` → `9f25dc79c9`). The first of them is the one that matters: reviewing the attested
 head `5fc01193de`, a fresh-context reviewer found a **FAIL-OPEN in check (D)** — the arm whose
 entire job is "no affiliation value escapes measurement" — not a message defect; it is closed in
-`e488d2adcc` and listed below. The later rounds found message-level defects only. Where a finding
-was applied it was measured first, and where it was falsified the record was corrected in place
+`e488d2adcc` and listed below. The later rounds found no further fail-open, but the last of them —
+the review of `9f25dc79c9` — found a **false block**: a wrong VERDICT, not only a message. Legal
+YAML `'the ''KEEP'' #11395 ruling'` was read as an unbalanced quote and check (C) failed it; that
+one is fixed at this head and pinned below. Where a finding was applied it was measured first, and
+where it was falsified the record was corrected in place
 rather than restated. What is left is listed here so the next reader inherits the measurement
 instead of repeating it.
 
@@ -378,8 +381,8 @@ distinguish an indented `#` continuation from a comment without becoming a YAML 
 the refusal is declared in `_values`' docstring for that reason. Fixing it would require folding
 support, which is out of this issue's scope.
 
-**Recorded, not fixed — the PR body's `470 values compared` figure.** At this head the same probe
+**Recorded, not fixed — #13476's `470 values compared` figure.** At this head the same probe
 prints **90 measured / 94 compared**; the counter now counts affiliation values only. The
-substance — 8 of 8 flagged, every length pair exact — reproduces unchanged. The body is NOT
+substance — 8 of 8 flagged, every length pair exact — reproduces unchanged. That body is NOT
 edited: it carries the review attestation the gate reads, and an unrelated edit wipes that proof
 (the rule is in `AGENTS.md`). The corrected figure is recorded here instead.
