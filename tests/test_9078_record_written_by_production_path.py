@@ -2213,7 +2213,29 @@ def _ensure_record_schema(conn) -> None:
     A `creates`-bearing entry is applied only where its relation is ABSENT —
     that file's `CREATE POLICY`s are unguarded and it is append-only, so a
     re-apply over an existing table raises `42710`; see the list's own comment.
+
+    ⛔ THE PASS RELEASES THE PROCESS'S PARKED RECORD HANDLES FIRST, and that is a
+    correctness requirement rather than tidiness. The record pool parks the READ
+    door's handle IN TRANSACTION **on purpose** (its reset is at REUSE, not at
+    release — `record_writer._park_connection`), so a handle parked by any record
+    READ earlier in this process holds an `AccessShareLock` on every record table
+    that read touched. This pass issues `CREATE POLICY`/`ALTER TABLE`, which take
+    `AccessExclusiveLock` on the same tables — so the pass waits on a transaction
+    belonging to its OWN process. Measured at `0f153899` (#13466):
+    `test_12894_record_cursor_live.py`'s module fixture runs this pass straight
+    after `tests/test_11642_vector_move_live.py` has served `object`/`subject`
+    dense reads, and the `test-record-postgres` leg reds with
+    `psycopg2.errors.DeadlockDetected` at this function for ALL 43 of that
+    module's tests (CI run 44306051806, reproduced twice locally on a fresh
+    `pgvector/pgvector:pg16`; a clean `origin/main` tree on the same image passes
+    3/3 because those labels answered `None` before any statement ran).
+    `_release_pooled_connections` is the seam the pool already names as the TEST
+    suite's, and closing an IDLE handle costs this pass nothing: a BORROWED one is
+    untouched, and a fresh process simply has nothing to release.
     """
+    from tortoise.record_writer import _release_pooled_connections
+
+    _release_pooled_connections()
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.journal_event')")
         if cur.fetchone()[0] is not None:
