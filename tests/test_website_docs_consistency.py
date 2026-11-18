@@ -3,8 +3,11 @@
 Pins the facts the two public pages share — the Point status vocabulary, the
 ontology citation, and how `confidence` is computed — so they cannot silently
 drift apart again. The status vocabulary is asserted in full on `docs.html`
-(the page that documents the lifecycle); `faq.html` is held to "all six or none",
-since it does not document statuses at all.
+(the page that documents the lifecycle); `faq.html` is held to ALL-OR-NONE — every
+word in the write set or none at all — since it does not document statuses at all.
+(#13490: this line said "all six or none" while the write set has been FOUR words
+since #11824 S0; it now names the rule instead of a count that rots at the next
+door change.)
 #3332 was exactly this failure. `docs.html` had carried, for five weeks and through
 every PR that touched it:
 
@@ -108,10 +111,24 @@ def _normalise(text: str) -> str:
 
 
 def _canonical_statuses() -> set[str]:
-    src = _read(SDK)
-    m = re.search(r"POINT_STATUS_VALUES\s*=\s*frozenset\(\{([^}]*)\}\)", src)
-    assert m, "POINT_STATUS_VALUES not found in tortoise/sdk.py — did the definition move?"
-    return set(re.findall(r"'([^']+)'", m.group(1)))
+    """The Point status WRITE set, read from the LIVE constant (#13490).
+
+    It used to be parsed out of `sdk.py`'s source with a regex requiring the
+    literal `frozenset({...})` form. #11824 S0 (`2f1d5a5ca0`, #13143) narrowed
+    the set to the four lifecycle words and made the declaration a REFERENCE —
+    `POINT_STATUS_VALUES = frozenset(_LIFECYCLE_STATUS_VALUES)` — so the regex
+    matched nothing and the guard read as "did the definition move?" while the
+    change it exists to announce had already happened. Importing the constant
+    cannot rot that way, and it is the same discipline `_sdk_constant` states:
+    read the value the SDK ships, never restate it.
+
+    ⛔ FOUR words is the WRITE set (#11824 §3, `tortoise/lifecycle_vocabulary.py`).
+    The READ set is deliberately wider and is not this constant — stored rows
+    keep `retracted`/`archived`/`outdated` (no backfill), which is why the page
+    below may NAME those words while listing only these four.
+    """
+    from tortoise.sdk import POINT_STATUS_VALUES
+    return set(POINT_STATUS_VALUES)
 
 
 def _sdk_constant(name: str) -> int:
@@ -231,14 +248,25 @@ def _stated_factors(raw: str) -> dict[str, str]:
 
 
 def test_sdk_status_vocabulary_is_what_the_pins_below_assume() -> None:
-    """Guard the guard: if sdk.py's statuses change, the pins must be revisited."""
+    """Guard the guard: if sdk.py's statuses change, the pins must be revisited.
+
+    ⛔ THIS PIN FIRED, AND THIS IS THE REVISIT (#13490). It named the pre-#11824
+    set — `{draft, live, retracted, superseded, outdated, archived}` — which was
+    the #432 set plus the two words that were never lifecycle states: `outdated`
+    and `archived` (design §3.2). #11824 S0 (#13143) closed the WRITE vocabulary
+    at the four below and left the READ set wide, so the pins that follow were
+    re-derived together with this one (`website/docs.html` lists exactly these
+    four and explains the legacy words; `test_docs_lists_every_canonical_point_
+    status` compares against this same set).
+
+    Keeping the literal here is the point — a set derived from the same import
+    the pin checks would assert that the constant equals itself.
+    """
     assert _canonical_statuses() == {
         "draft",
         "live",
-        "retracted",
+        "deprecated",
         "superseded",
-        "outdated",
-        "archived",
     }
 
 
@@ -364,12 +392,22 @@ def test_the_extraction_write_path_sources_every_extracted_point() -> None:
 def test_docs_lists_every_canonical_point_status() -> None:
     """No public page may ship a partial Point status vocabulary.
 
-    `docs.html` documents the lifecycle, so it must carry all six. `faq.html`
-    does not document statuses at all — it is only required to stay internally
+    `docs.html` documents the lifecycle, so it must carry every word in the WRITE
+    set (`POINT_STATUS_VALUES`, four since #11824 S0 — see
+    `test_sdk_status_vocabulary_is_what_the_pins_below_assume`). `faq.html` does
+    not document statuses at all — it is only required to stay internally
     consistent if it ever starts to.
 
     Accepts either rendering the page uses: the lifecycle list uses
     ``status: <name>`` and the legacy-flag footnote uses ``<code><name></code>``.
+    ⛔ That two-form acceptance is NOT enough on the page that documents the
+    lifecycle, and #13490 is the proof: the legacy-spelling paragraph legitimately
+    writes ``<code>deprecated</code>`` and ``<code>superseded</code>``, so
+    deleting those two LIFECYCLE BULLETS from `docs.html` still left
+    ``present == canonical`` and this test GREEN — the guard reported OK while the
+    page shipped 2 of the 4 writable statuses, which is precisely the partial
+    vocabulary #3332 found. A bullet is therefore load-bearing only in the
+    ``status: <name>`` form, so `docs.html` must carry THAT form for every word.
     """
     canonical = _canonical_statuses()
     for page in (DOCS, FAQ):
@@ -382,14 +420,25 @@ def test_docs_lists_every_canonical_point_status() -> None:
         assert present in (set(), canonical), (
             f"{page.name} lists some but not all canonical Point statuses "
             f"({sorted(present)}). Canonical set: POINT_STATUS_VALUES in "
-            f"tortoise/sdk.py. Either list all six or none — a partial list is "
-            f"the #3332 defect."
+            f"tortoise/sdk.py. Either list every word in it or none — a partial "
+            f"list is the #3332 defect."
         )
         if page == DOCS:
             assert present == canonical, (
                 f"website/docs.html omits canonical Point status(es): "
                 f"{sorted(canonical - present)}."
             )
+            # The BULLET form, so prose that merely NAMES a word cannot satisfy
+            # the pin (see the docstring: measured on the two words the
+            # legacy-spelling paragraph mentions).
+            for s in sorted(canonical):
+                assert f"status: {s}" in html, (
+                    f"website/docs.html's lifecycle list has no "
+                    f"`status: {s}` bullet — the word is named somewhere else on "
+                    f"the page, which is what let a deleted bullet pass before "
+                    f"#13490. Every writable status needs its own lifecycle "
+                    f"entry, not a mention in the prose."
+                )
 
 
 # ── The belief mechanism (the #3332 headline defect) ─────────────────────────

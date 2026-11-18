@@ -2697,28 +2697,22 @@ this document (`tests/_cite_resolution.py`, `tests/test_10191_record_move_doc_pi
 `tests/test_11821_journal_vector_width.py`, `tests/test_7951_create_point_outbox.py`,
 `tests/test_7951_delete_point_outbox.py`, `tests/_about_call_time_census.py`).
 
----
+## §14.3 V2's `Source`-vector row — the delivery narration moves here (`#13490`)
 
-## §14.3 V2's "the rule that FILLS it landed at PR `#13473`" — the RULE stays, the delivery state leaves (`#13494`, 2026-11-18)
+The V2 row in §14.3 stated its own rule as *"The rule that FILLS it landed at PR `#13473`,
+closing `#13418`"* — a change record inside a document that must state the design, which is the
+defect `tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_
+or_change_narration` refuses (`<n> … landed … #<n>`), and it red-ed `test (a)` on `main`. The
+design sentence is unchanged in substance: the FILLING rule is
+`record_writer._RECORD_EMBEDDING_TEXT["SourceCreated"]`, derived from the payload's `_searchText`
+**ALONE**, with the `SourceVersioned` version transition served by the same entry and the same skip
+arms. What moved is only the delivery half, which belongs here per #8542:
 
-**What changed in the design document.** Row **V2** of the §14.3 register stated the embedding rule
-*and* its delivery state in one clause:
+* PR `#13473` landed that rule and closed `#13418`;
+* the `#13412` document-vector text rule rode the same PR — it now CALLS
+  `projection.entities._build_search_text` instead of composing `title + content`.
 
-> ✅ **The rule that FILLS it landed at PR `#13473`, closing `#13418`:** …
-
-`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`
-reads that as an issue-state claim — `landed` within 40 characters of a `#NNNN`, which is the shape the
-guard exists for (`#8542`) — so it was **RED on `main`** for a defect no PR in that lane introduced.
-
-**What stayed, unchanged and verbatim.** The rule itself, which is the design and the whole point of
-the row: `record_writer._RECORD_EMBEDDING_TEXT["SourceCreated"]` derives from the payload's
-`_searchText` **ALONE**, the same payload key the split binds into `public.source._search_text`, so
-vector and column describe one datum by construction. The clause now reads
-"✅ **The rule that FILLS it:**", with no tracker narration.
-
-**What left.** Only the delivery sentence: that the rule landed at PR `#13473` and that this closed
-`#13418`. That is a tracker fact — the two issues carry it — and a design document states the design.
-
-**Gate at this change.** `tests/test_extractor_v4_citation_rot.py` (17 passed on the tree that carries
-this move). ⚠️ **The arm is CLASS-level, not a literal**: it fires on any issue-state adjacent to a
-`#NNNN`, so a later edit that reintroduces the shape reds wherever it lands, not only on this row.
+The row keeps every design claim it carried (the three `:Source` populations that derive nothing,
+the caller-vector passthrough, the live≠rebuild difference on a SERVED label); only the "landed at
+PR X, closing Y" clause became "is X", and "closed by the same PR" was dropped from the `#13412`
+clause for the same reason.
