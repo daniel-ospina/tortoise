@@ -44,8 +44,10 @@ EP_AUDIT_DB_PORT=<that PORT> uv run python docs/evidence/11824-ep-across-entitie
 ```
 
 ⚠️ The port is read from `EP_AUDIT_DB_PORT`, never baked in — a hard-coded port points at whichever
-lane happens to hold it. **A probe cannot run without the lane's container already up** (`test_lane.py
-run` starts one). Every **⟨measured⟩** cell below was produced by the run recorded in §7.
+lane happens to hold it. Both probes read it as a **required** variable (`os.environ[…]`, no fallback),
+so a run that forgot it stops rather than quietly measuring a foreign container. **A probe cannot run
+without the lane's container already up** (`test_lane.py run` starts one). Every **⟨measured⟩** cell
+below was produced by the run recorded in §7.
 
 **The engine files read:** `tortoise/live.py` (the currency predicate, the epistemic-label set, the
 identity keys), `tortoise/ep.py` (factor assembly, the affected set, the two seed readers, the two
