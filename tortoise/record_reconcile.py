@@ -45,10 +45,12 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   declaration as a second writer; (5) **cache-HELD properties** — every
   property the cache holds that the partition did not judge, which is a
   DIFFERENT (larger) set than the one this bullet's earlier title named. Two
-  facts make a name cache-held — it is outside its label's placement, AND the
-  record side does not carry it — so FOUR populations reach it: (a) the EP and
-  derived scalars §17.5 places on the cache (``ep_alpha``/``ep_beta``/
-  ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
+  facts make a name cache-held — it is outside its label's placement (or
+  deliberately EXCLUDED from that placement: the record-held vector columns, see
+  below), AND the record side does not carry it — so FIVE populations reach it:
+  (a) the EP and derived scalars §17.5 places on the cache
+  (``ep_alpha``/``ep_beta``/``ep_dirty``/``content_hash``/``confidence``/…), which the
+  record schema
   REFUSES by name and so can never hold — the one §17.5 owns. ⚠️ ONE refused
   name the record's own derivation DOES supply: ``status`` (``Object``/
   ``Subject``) is refused as a record ``props`` KEY, but ``DERIVED_FROM_RECORD``
@@ -142,9 +144,18 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   too), which the record does not carry — §17.1's chokepoint signature,
   DECLARED BY NOTHING and reported rather than detected
   here (its repair is *find the writer*; measured at `#11184`'s review, filed
-  `#11221`); and the two declared classes below, which the record's TABLE can
+  `#11221`); and the three declared classes below, which the record's TABLE can
   hold and the record SIDE (this comparison's own projector-built map) omits —
-  which is why they are bucketed here rather than compared. The distinction is
+  which is why they are bucketed here rather than compared. The third is the
+  RECORD-HELD VECTOR COLUMN (:data:`cache_projection.RECORD_HELD_VECTOR_COLUMNS`,
+  ``object``/``subject``, `#13447`): the record's TABLE holds it and the ROW may
+  legitimately hold ``NULL``, because the vector is DERIVED from the text — a
+  row written before the column existed, or one this seam's restore derived
+  for — so the placement map excludes it and its repair is NONE: the derived
+  state is correct, and re-deriving would REPLACE a vector the record does not
+  have. Without that exclusion the name became a COMPARED field and every
+  restore-derived node read permanently `divergent` (measured: 1
+  `field_mismatch`; `clean` + `graph_only=(('embedding', 1),)` with it). The distinction is
   load-bearing, not pedantry: a name is withheld from the comparison because
   ``record_props`` does not carry it, and for these classes that is because the
   projector declines them, not because the record has nothing to say. ⚠️ It is
@@ -160,12 +171,12 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   the one clear that destroys it (see (5)).
   They are neither a mismatch nor invisible:
   :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
-  count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
+  count (the ``form_normalized`` precedent). ⚠️ FOUR DECLARED classes arrive
   here — (b) is declared by nothing — and the partition BUCKETS every name it
   cannot judge rather than comparing it (⛔ not "every one reads clean": a
   property on a node the record does not own is bucketed while the NODE itself
   is an ``extra_in_cache`` divergence, so that pair reads DIVERGENT), while the
-  three DECLARED ones differ in what repairs them: §17.5's cache-owned scalars,
+  four DECLARED ones differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair — bar ``status``, which the record's own derivation makes
   COMPARABLE wherever the record DERIVES one, and a ``status`` the record
@@ -620,15 +631,19 @@ class RecordReconcileResult:
     report: ReconciliationReport
     declaration: ResidencyDeclaration
     not_hot: int = 0
-    #: Properties the CACHE holds that this projection will not judge — THREE
+    #: Properties the CACHE holds that this projection will not judge — FOUR
     #: DECLARED omission classes PLUS one population no declaration names — as
-    #: ``(name, node count)``. The declared three: §17.5's EP/derived scalars
+    #: ``(name, node count)``. The declared four: §17.5's EP/derived scalars
     #: (the record schema refuses them by name), the pair the §9.1/D1 narrowing
     #: declines for an EPISODIC Source
     #: (``cache_projection.episodic_source_prose_properties()``, which the RECORD
     #: does hold), and the NOT-PROJECTABLE columns
     #: (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` — authority the record keeps
-    #: and the cache must not materialise, ``#10394``), PLUS one population no
+    #: and the cache must not materialise, ``#10394``), and the RECORD-HELD vector
+    #: columns (``cache_projection.RECORD_HELD_VECTOR_COLUMNS`` — the record's
+    #: TABLE holds them, the ROW may legitimately hold ``NULL`` because the vector
+    #: is DERIVED from the text, `#13447`, and the repair is NONE), PLUS one
+    #: population no
     #: declaration names — a property a SECOND WRITER put on a placed node the
     #: record does not carry, or on a node the record does not own at
     #: all (``#11221``; the bucket is partitioned OUT of ``field_mismatches``, so
@@ -713,8 +728,9 @@ def reconcile_record_and_cache(
     where the cache is the whole graph — so an absent key really is divergence.
 
     ``placed`` is :attr:`CacheScan.placed` — per key, the property names the
-    record PLACES for its label. It enables the **cache-HELD partition** (⛔ not
-    "cache-owned": the partition carries THREE DECLARED omission classes plus one
+    record PLACES for its label (the schema-authorized set MINUS the record-held
+    vector columns, plus the contract key). It enables the **cache-HELD partition** (⛔ not
+    "cache-owned": the partition carries FOUR DECLARED omission classes plus one
     undeclared population (a second writer's property, which no declaration
     names), only the first of
     which is §17.5-owned — ``_partition_cache_owned`` keeps its function name
@@ -876,7 +892,8 @@ def _partition_cache_owned(
     A cache property is excluded only when it is **both**
 
     * outside the record's placement for that label (``placed[key]`` — the
-      schema-authorized property set plus the contract key), and
+      schema-authorized property set, MINUS the record-held vector columns,
+      plus the contract key), and
     * absent from the RECORD side for that key.
 
     The first half is what keeps §17.5's EP/derived scalars out of
@@ -949,14 +966,14 @@ def log_result(result: RecordReconcileResult,
         names = ", ".join(name for name, _ in result.graph_only[:4])
         more = ", …" if len(result.graph_only) > 4 else ""
         # ⚠️ "cache-HELD", not "cache-OWNED" (#10394 review, P3). Each of the
-        # THREE DECLARED omission classes is a property the CACHE holds — and
+        # FOUR DECLARED omission classes is a property the CACHE holds — and
         # `graph_only` ALSO counts one population NO DECLARATION NAMES (a SECOND
         # WRITER's property on a placed node the record does not carry, or on a
         # node the record does not own at all; its repair is *find the writer*),
-        # so the bucket is not the three-name set
+        # so the bucket is not the four-name set
         # this comment's earlier wording implied. "owned" is the §17.5
-        # partition's term for ONE of the three (the EP/derived scalars the
-        # record schema refuses, which only the cache has). The other two are
+        # partition's term for ONE of the four (the EP/derived scalars the
+        # record schema refuses, which only the cache has). The other three are
         # record-owned: the §9.1/D1 pair the narrowing DECLINES (the record
         # holds it, its repair is the IN-PLACE reconciler #11070 — ⛔ not a
         # re-projection, whose write is additive —) and the not-projectable
@@ -974,7 +991,13 @@ def log_result(result: RecordReconcileResult,
         # (`_assert_test_graph`, "REFUSING to run bulk DETACH DELETE on non-test
         # graph", applying to every SERVER graph name per #2944 — an embedded
         # `path=` DB does not face that name check), so on a production server graph the
-        # replay is refused PRE-WIPE and the clear IS durable there); #10017's
+        # replay is refused PRE-WIPE and the clear IS durable there); ⚠️ the
+        # RECORD-HELD vector column (`cache_projection.RECORD_HELD_VECTOR_COLUMNS`,
+        # `object`/`subject`) is the fourth and the only one with NO repair at
+        # all: the record's TABLE holds it and a row legitimately holds `NULL`
+        # because the vector is DERIVED from the text (#13447), so the cache's
+        # copy is CORRECT as it stands and re-deriving it would replace a vector
+        # the record does not have; #10017's
         # purge is a DIFFERENT population — legacy episodic turn
         # :Points — and names no story_arc. Calling them all "owned" sends the
         # operator to the wrong repair.
