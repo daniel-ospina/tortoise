@@ -303,13 +303,30 @@ def test_a_carried_source_vector_is_HONOURED_and_not_recomputed(encoder):
     caller passthrough, so a caller-supplied vector lands on the node. Deriving
     over it in the record would give the two stores different vectors for the
     same source; the `EventRecorded` precedent is the same shape.
+
+    ⛔ THE PAYLOAD CARRIES `_searchText`, AND THAT IS LOAD-BEARING — a review
+    found the earlier cut of this test non-discriminating. With no derivable text
+    the no-`_searchText` arm answers `{}`/`[]` on its own, so DELETING the
+    carried-vector arm left both assertions green: the test named a guard it could
+    not defend. With a text present, the only thing that can keep `columns` empty
+    is the arm under test, and `skipped` names it — the same shape its sibling uses
+    (`tests/test_13220_record_label_embeddings.py`:
+    `test_a_carried_event_vector_is_HONOURED_and_not_recomputed`, whose payload
+    carries `subject`/`eventKind`/`object`).
     """
     out = rw.derived_embedding_columns({
         "type": "SourceCreated", "url": "https://example.com/a",
-        "title": "Acme pricing page", "embedding": [0.5] * 384,
+        "title": "Acme pricing page",
+        "_searchText": "acme pricing discounts renewal",
+        "embedding": [0.5] * 384,
     })
-    assert out.columns == {}
+    assert out.columns == {}, (
+        "the derivation recomputed over the caller's vector — `public.source` "
+        "would then hold a vector the node does not (#5004)")
     assert encoder.calls == []
+    assert out.skipped == "the record carries a vector", (
+        f"the skip must name the CARRIED vector, not the absent text — otherwise "
+        f"this test passes for the wrong arm (got {out.skipped!r})")
 
 
 def test_a_source_written_to_an_armed_record_CARRIES_a_vector(encoder):
