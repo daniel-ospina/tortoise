@@ -6539,10 +6539,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `return OrgInfoResponse(` — is 15279 (the call itself is `:15280`). The three offsets
         # (+29 `nodes_used`, +39 `max_nodes`, +77 END) still hold EXACTLY at the new START, which
         # is how the figures below were re-derived rather than nudged: `grep -n
-        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15202`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15231` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15241` (still inside it). The END was re-derived
-        # at the `#13486` head -- `return OrgInfoResponse(` -> `:15303`, so END = `:15302` (offset +100, not +77).
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15225`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15254` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15264` (still inside it). The END was re-derived
+        # at the `#13486` head -- `return OrgInfoResponse(` -> `:15303`, so END = `:15302` (+77 at this START).
         #
         # The `#13102` merge of `origin/main` `b8f56fdec4` (13 main
         # commits past `97fd713ffb`, which had already moved the span to 14896-14973): the span
@@ -6557,7 +6557,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
         # the blank line immediately before `return OrgInfoResponse(` at `:15258`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
-            ("15202", "point_count = await asyncio.to_thread("),
+            ("15225", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
         # ⛔ `:1186` IS NOT PINNED BY A ROW *ALONE*, and the reason is measured rather than
         # stylistic: it is stated TWICE on ONE doc line ("is STAMP-bound (`:1186` is the
@@ -6684,28 +6684,28 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15202-15279`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:15225-15302`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15241` (both needles are the file's only occurrences —
-    # `:15231` and `:15241` — so a later end cannot change the sum). Ends below `:15241` fail
+    # true for any end at or beyond `:15264` (both needles are the file's only occurrences —
+    # `:15254` and `:15264` — so a later end cannot change the sum). Ends below `:15264` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15202`-`:15240` gives a non-empty window that lacks at least the second needle,
-    # and an end below `:15202` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15225`-`:15263` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15225` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
-    assert _i7.count("`hosted_api.py:15202-15302`") == 1, (
+    assert _i7.count("`hosted_api.py:15225-15302`") == 1, (
         "04-plan.md I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
         "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
     _org_info = _EPIC_CITE_SOURCES["hosted_api"].read_text(encoding="utf-8").splitlines()
-    _span = _org_info[15202 - 1:15302]
+    _span = _org_info[15225 - 1:15302]
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
         assert sum(_needle in _l for _l in _span) == 1, (
-            f"04-plan.md I7 says `:15202-15302` publishes `nodes_used` / `max_nodes`, but "
+            f"04-plan.md I7 says `:15225-15302` publishes `nodes_used` / `max_nodes`, but "
             f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
             "range has moved, so re-derive it (start AND end) rather than bumping one end")
     # …and the END by structure, because membership inside a window cannot see it move.
