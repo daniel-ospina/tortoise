@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1314** | **100** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,069** | **825** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,064 / 9,069 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,070** | **825** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,064 / 9,069 / 9,070 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -98,7 +98,7 @@ door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
 1,628 occurrences of the door predicate across 109 files
-2,346 occurrences of the verb predicate across 145 files   (upper-bound shape, see below)
+2,347 occurrences of the verb predicate across 146 files   (upper-bound shape, see below)
 
 1,628  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
@@ -118,8 +118,8 @@ tool's number. A bare `rg … tortoise/` gives 1,634 / 110, the 6 extra occurren
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,628 / 109 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 299 files>` → **2,333** across **144** files, while the tool
-reports 2,346 / 145. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 299 files>` → **2,334** across **145** files, while the tool
+reports 2,347 / 146. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — **ten** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
@@ -131,16 +131,16 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 298 files finds exactly 13 — the verb-at-end-of-line scan alone finds 177 (one
+predicate over the same 299 files finds exactly 13 — the verb-at-end-of-line scan alone finds 177 (one
 `#13399` added is a COMMENT line ending “post-merge”, which is the point), which is why
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
-(A bare case-sensitive `rg` gives 2,067, and `-i` without the exclusion 2,405 — ⛔ both over
+(A bare case-sensitive `rg` gives 2,067, and `-i` without the exclusion 2,406 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
 number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 298
-`.py` files the same two predicates read **2,064** and **2,333**; with `-t py` and the test-module
-exclusion dropped they read **2,066** and **2,336**. The 69-occurrence 2,336→2,405 gap is entirely
+`.py` files the same two predicates read **2,064** and **2,334**; with `-t py` and the test-module
+exclusion dropped they read **2,066** and **2,337**. The 69-occurrence 2,337→2,406 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
 `tortoise/pi-hooks/tortoise-capture.test.ts` 14, `tortoise/pi-hooks/store-sync.test.mjs` 3,
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
@@ -436,18 +436,21 @@ describes, from a third side. The earlier cuts are kept below, each naming the t
 **neither parent's set is necessarily the answer at a later merged tree**, which is why the cut above
 is re-derived rather than carried.
 
-**Subsequent forward merge — `origin/main` **`ae54df166d`** (5 commits, no conflicts).** No census
-SCALAR moved (`--check` → **`25 pinned counts match`**): `tortoise/embeddings.py`,
-`tortoise/monitoring.py` and `tortoise/record_writer.py` gained no statement site. Appendix A moved by
-**one** row — `monitoring.py`'s `_probe_once._run_query` `RETURN 1`, 4,670→**4,787** — so it is
-regenerated again here: the `file:line`-versus-SCALAR gap, from a fourth side.
+**Subsequent forward merges — `origin/main` **`ae54df166d`**, **`36cb300057`** and **`8cc31bbb9e`**
+(11 commits, no conflicts).** None of them moved a census SCALAR (`--check` → **`25 pinned counts
+match`** at each): `tortoise/embeddings.py`, `monitoring.py`, `record_writer.py` and `mining.py`
+gained and lost no statement site. Two things moved anyway, which is the `file:line`-versus-SCALAR
+gap from a fourth side: **Appendix A** (one `monitoring.py` row at the first merge —
+`_probe_once._run_query` `RETURN 1`, 4,670→**4,787** — and further `embeddings.py` / `monitoring.py` /
+`mining.py` rows at the later ones), and **§1's verb reconciliation**, 2,346 / 145 → **2,347 / 146**:
+one whole-text `MATCH (` occurrence in a comment or docstring, which by definition moves no AST count.
 
-⚠️ **The one figure that DID move at that merge is the dated `--all-surface` reading, and that is
-exactly why it is not a pin:** §0 now reads **9,069 / 825** (measured with `--all-surface --json` at
-this head), where the `f462ad3acb` cut above recorded **9,064 / 824**. That population includes
-`tests/`, `docs/`, `graph-scripts/` and `eval/`, so it moves with any edit to those — and the
-`tortoise/**` SCALARS did not move at all, which is the distinction the row's own note draws. A
-reader checking §0 should re-run the tool rather than trust either integer.
+⚠️ **The figure that moves freely is the dated `--all-surface` reading, and that is exactly why it is
+not a pin:** §0 now reads **9,070 / 825** (measured with `--all-surface --json` at this head), where
+the `f462ad3acb` cut above recorded **9,064 / 824** and the `ae54df166d` head read 9,069 / 825. That
+population includes `tests/`, `docs/`, `graph-scripts/` and `eval/`, so it moves with any edit to
+those — and the `tortoise/**` SCALARS did not move at all, which is the distinction the row's own note
+draws. A reader checking §0 should re-run the tool rather than trust any integer here.
 
 **Earlier cut — `origin/main` **`48585c94ff`** merged into this branch.** **No scalar moved at that
 merge, and that was a measurement rather than an assumption:** `--check` reported **`25 pinned counts
