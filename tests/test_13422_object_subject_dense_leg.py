@@ -622,8 +622,13 @@ def test_each_arm_states_its_own_divisor_at_the_door(monkeypatch):
 def test_the_prefetch_does_not_select_the_payload_columns():
     """⛔ `SELECT *` ON THE PREFETCH IS A MEASURED ~2.0 s -> ~0.19 s (`#13466` P2).
 
-    The fold reads no vector and no jsonb, but `SELECT *` materialises both for
-    every row of the label. Per-row sizes, measured with `pg_column_size` on
+    The fold reads no VECTOR payload, but `SELECT *` materialises both payload
+    columns — `embedding` (the jsonb vector array) and `embedding_vec` (the
+    generated `vector(384)`) — for every row of the label. ⚠️ It DOES read `props`
+    (jsonb): `node_from_row` needs it, so `props` is NOT in the dropped set; an
+    earlier version of this sentence said "no vector and no jsonb", which is false
+    at this head and is exactly the sentence a lane would act on when widening
+    `_fold_prefetch_dropped()` (`#13466` review P3). Per-row sizes, measured with `pg_column_size` on
     `pgvector/pgvector:pg16`: `embedding_vec` is a FIXED `vector(384)` =
     **1,544 B** (fixed-width, so it cannot be larger), and `embedding` jsonb for a
     384-element array is **4.6–7.7 KB** depending on whether the floats are
@@ -637,7 +642,12 @@ def test_the_prefetch_does_not_select_the_payload_columns():
     prefetch-plus-fold STEP, and **~2.0 s** is that same step with `SELECT *`. So
     the payload-free step sits ~1.5x OVER its 125 ms share, not 4x under it: the
     step is what must be materialised, which is the follow-up the module docstring
-    names. The jsonb floor is written 4.6 KB, not 4.8: 4,616 B was measured for a
+    names. ⚠️ What the share IS, exactly: `FOLD_ARM_DIVISOR` = 4 and the arm ISSUES
+    **three** statements, so a 500 ms read gives each statement 500 / 4 = **125 ms**
+    (3 × 125 = 375 ms for the arm) and the fourth share is the graph branch's
+    reserve — "four folded statements" conflates the DIVISOR with the COUNT, the
+    defect `FOLD_ARM_STATEMENTS`/`FOLD_ARM_DIVISOR` were split to stop (`#13466`
+    review P3). The jsonb floor is written 4.6 KB, not 4.8: 4,616 B was measured for a
     short-repr 384-element array and 4,845 B for this lane's real `object` rows, so
     the lower bound is the honest one to quote.
 
@@ -762,7 +772,7 @@ def test_the_available_count_is_only_VECTOR_BEARING_non_terminal_rows(monkeypatc
         "spurious VectorShortfall (scan_fallback for the normal state)")
 
 
-def test_the_prefetch_row_budget_declines_instead_of_truncating():
+def test_the_prefetch_row_budget_declines_instead_of_truncating(monkeypatch):
     """⛔ `statement_timeout` CANNOT BOUND THE PYTHON FOLD, so this must.
 
     `_folded_terminal_keys` reads every row of the label and runs
@@ -778,8 +788,33 @@ def test_the_prefetch_row_budget_declines_instead_of_truncating():
     budget = record_vector._FOLDED_PREFETCH_ROW_BUDGET
     assert isinstance(budget, int) and budget > 0
 
+    # ⛔ THE FIXTURE MUST LET THE FOLD COMPLETE, or this row reds on whatever the
+    # runaway path hits next (`AttributeError: 'NoneType' object has no attribute
+    # 'cursor'`, then `KeyError: 'has_embedding_vec'`) instead of on its own
+    # assertion — the right row with the wrong diagnosis (`#13466` review P3).
+    # The journal half and the projection are therefore stubbed here too: with the
+    # bound removed the fold RETURNS `([], budget + 1)` and the `is None` below
+    # fails with the message that names the behaviour.
+    import tortoise.cache_projection as cp
+
+    class _Node:
+        key = "o_13422_row"
+        props: ClassVar[dict] = {}
+
+    monkeypatch.setattr(cp, "read_lifecycle_events", lambda conn, **kwargs: [])
+    monkeypatch.setattr(cp, "node_from_row", lambda label, row: _Node())
+
     class _OverBudgetCursor:
-        description: ClassVar[list[tuple[str]]] = [("id",)]
+        """`budget + 1` rows, WITH the probe column a real prefetch always selects.
+
+        ⚠️ The probe column is part of the fixture on purpose (`#13466` review P3):
+        the first version returned `("id",)`-shaped rows, so the over-budget mutant
+        red as `KeyError: 'has_embedding_vec'` from the pop instead of this row's
+        own message — the right row, the wrong diagnosis. A row shape a real
+        prefetch cannot produce is not a fixture.
+        """
+
+        description: ClassVar[list[tuple[str]]] = [("id",), ("has_embedding_vec",)]
 
         def __init__(self):
             self.sql = ""
@@ -789,7 +824,7 @@ def test_the_prefetch_row_budget_declines_instead_of_truncating():
             self.sql, self.params = sql, tuple(params or ())
 
         def fetchall(self):
-            return [("o_13422_row",)] * (budget + 1)
+            return [("o_13422_row", True)] * (budget + 1)
 
     cur = _OverBudgetCursor()
     assert record_vector._folded_terminal_keys(
@@ -948,6 +983,22 @@ def test_a_dropped_row_cannot_hide_an_over_budget_event_stream():
         cp._lifecycle_events(cur, org_id="org", graph_id="graph",
                              limit=budget + 1)
     assert cur.params[-1] == budget + 1, cur.params
+    # ⛔ THE CLAUSE, NOT JUST THE PARAMETER (`#13466` review P3). Pinning
+    # `params[-1]` alone left `tail = ""` alive: the read then carries the bound
+    # in its param tuple and NONE in its SQL, so it fetches the tenant's whole
+    # status-bearing journal into the uncancellable client-side fold that
+    # `_FOLDED_PREFETCH_EVENT_BUDGET` exists to bound — with every DB-free row
+    # green (measured: 24/24).
+    assert " LIMIT %s" in cur.sql, (
+        "the event bound reached the PARAMS but not the STATEMENT — the leg then "
+        f"folds the tenant's whole journal in Python: {cur.sql}")
+    # …and the unbounded path stays byte-identical: no clause, no param, so the
+    # bound cannot change a pre-existing read's plan (`limit=None` is the default
+    # every other caller uses).
+    unbounded = _Cur()
+    cp._lifecycle_events(unbounded, org_id="org", graph_id="graph")
+    assert " LIMIT " not in unbounded.sql, unbounded.sql
+    assert unbounded.params == ("org", "graph"), unbounded.params
 
     # Control: the same corpus with the skip repaired still raises. A FULL page
     # is the verdict — `LIMIT budget + 1` cannot tell "exactly at" from "one
