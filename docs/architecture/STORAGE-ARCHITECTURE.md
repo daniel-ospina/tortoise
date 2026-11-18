@@ -133,11 +133,12 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > and the point door `TortoiseSDK.get_point`'s `served_out` form (reached by the MCP typed door
 > `tortoise_get_entity(id, type="point")` — `tortoise_get_point` is that door's RETIRED alias — and by the operator
 > door), and the bare by-id entity door (`tortoise_get_entity` → `TortoiseSDK.get_entity`, `#13093`) — each through
-> `record_serve`, via its two serving entry points `serve_point` and `serve_entity`. The set is enumerated in
-> `record_serve.ANCHORED_READS`, with its exclusions and their reasons beside them; ⚠️ **that registry also carries
-> `node-by-key` as a SERVED CAPABILITY with no consumer wired yet** — its entry's own reason says so, and
-> `residency_router.route_for_coordinate`, which mints the coordinate a `fetch-record` repair is handed, has no
-> non-test caller — so that capability is named there and is not a door here. **`prefer` is the mode
+> `record_serve`, via its two serving entry points `serve_point` and `serve_entity`. `node-by-key` sits in the same
+> registry as a served CAPABILITY with **no consumer wired yet**: it answers any record label by its interface-E
+> coordinate, which is the shape the residency router's `fetch-record` repair is handed, and the router that mints that
+> coordinate (`residency_router.route_for_coordinate`) has no non-test caller today — so it serves no door, and it does
+> not consult the switch. The registry is `record_serve.ANCHORED_READS`, with each exclusion and its reason beside it.
+> **`prefer` is the mode
 > that MEASURES the migration** — every answer names the store that produced it (`servedFrom` / `fallbackReason`) — and
 > it is the mode armed in production; **`record` follows that count**, never a date. The epic's
 > `08-hosted-prerequisites.md` §0.1 and N1 state the same, and `docs/architecture/SEARCH-ARCHITECTURE.md` also
