@@ -18,7 +18,7 @@ and it pins the ONE thing a future lane is most likely to get wrong:
 
 WHAT IS PINNED, AND WHAT IS DELIBERATELY NOT
 --------------------------------------------
-  · the eight envelope doors still declare `list[dict]`, and their containers still have
+  · the doors S1 would unblock still declare `list[dict]`, and their containers still have
     NO advertised schema — i.e. the blocker is still LIVE, so removing a name from
     `PROTECTED` would be reversing a decision rather than recording a changed fact;
   · the union form does carry the envelope, so the design in the plan is actually available;
@@ -146,12 +146,12 @@ def test_the_container_still_advertises_no_envelope(name):
     """`typing.Any` ⇒ `output_schema is None` ⇒ no wrap ⇒ no #8482 repair on that door.
 
     A non-`None` schema here means S1 landed. That is not a failure — it is the signal
-    that the eight doors above became retirable, and this pin is where that is noticed.
+    that the doors above became retirable, and this pin is where that is noticed.
     """
     advertised = _schema(name)
     assert advertised is None, (
         f"{name} now advertises an output schema ({advertised!r}) — the container has "
-        "gained an envelope, so the eight `PROTECTED` envelope doors may now be retired "
+        "gained an envelope, so the `PROTECTED` envelope doors may now be retired "
         "(and their callers' `structuredContent` has moved one level down — see S1)")
 
 
@@ -253,7 +253,7 @@ def test_the_list_arm_does_not_change_for_a_migrating_caller():
     """Why the union is the SMALLEST change: a retiring door already answered wrapped.
 
     The door is `list[dict]`, so it shipped `{"result": [...]}`. The container's list arm
-    under the union also ships `{"result": [...]}` — so the eight doors in S1 can retire
+    under the union also ships `{"result": [...]}` — so the nine doors in S1 can retire
     with NO change for the caller the pointer migrates, and the cost lands only on the
     containers' dict arms (pinned above).
     """
@@ -295,7 +295,9 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, path):
     Three separate measurements, because the doc's headline rests on all three:
       (1) nothing in `tortoise/` instantiates the adapter that would derive routes;
       (2) a hand-written decorator serves the route, with the row's own METHOD;
-      (3) neither app reads a `rest_spec`, so no other path derives a route either.
+      (3) no product module reads a `rest_spec` to build routes — including the module that
+          defines the field, whose only permitted uses are inside `FastAPIRouterAdapter`.
+          Without it, no other path derives a route either.
 
     The registry records that *"retiring the registry entry deletes its REST route with it"*,
     and `PROTECTED` lists three doors on that basis. It is not true on `main`:
@@ -369,18 +371,57 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, path):
     # ⛔ REPO-WIDE, not the two apps: `tortoise/` carries THREE FastAPI apps
     # (`hosted_api.py:3536`, `selfhost.py:1040`, `__main__.py:17211`), and the vector named
     # here needs only one of them — a two-module scan reported "nothing reads it" for a
-    # claim about the product while the third app was unread. `tool_registry.py` DEFINES
-    # the field, so it is the one module this arm excludes by name.
+    # claim about the product while the third app was unread.
     readers = [
         str(source.relative_to(repo))
         for source in scanned
         if source.name != "tool_registry.py"
         and "rest_spec" in source.read_text(encoding="utf-8", errors="replace")
     ]
+    # ⛔ `tool_registry.py` is NOT exempt — it is where the route-deriving code LIVES, so a
+    # filename exclusion leaves the one module that could host the loop unwatched (measured:
+    # a `for e in TOOL_REGISTRY: app.add_api_route(e.rest_spec.path, …)` appended to that
+    # file passed the text scan above untouched). Its legitimate uses are BOTH inside
+    # `FastAPIRouterAdapter` — the field's definition and the adapter's own route wiring —
+    # so the module is read as an AST and every `.rest_spec` READ and every `add_api_route`
+    # call must sit inside that class.
+    outside = _rest_spec_use_outside_the_adapter(repo / "tortoise" / "tool_registry.py")
+    assert outside == [], (
+        f"`tortoise/tool_registry.py` uses `rest_spec` / `add_api_route` OUTSIDE "
+        f"`FastAPIRouterAdapter` at line(s) {outside} — that is the registry-derived route "
+        "vector §1.5 says does not exist; re-derive the `rest_spec` half of the plan")
+
     assert readers == [], (
         f"product module(s) {readers} now read `rest_spec` — routes may be "
         "registry-derived again; re-derive §1.5 before trusting the `rest_spec` half of "
         "the plan")
+
+
+def _rest_spec_use_outside_the_adapter(source: Path) -> list[int]:
+    """The line numbers where `tool_registry.py` uses `rest_spec` OUTSIDE its adapter.
+
+    Text-scanning this module cannot answer the question: the field is DEFINED here, every
+    registry row declares it as a keyword, and `FastAPIRouterAdapter` reads it by design.
+    What §1.5 claims is narrower — that nothing DERIVES a route from a row except that one
+    adapter — so this is an AST walk that tolerates the declarations and the adapter's own
+    body while flagging every other `.rest_spec` READ and every other `add_api_route` CALL.
+    A hand-rolled loop appended to this module is exactly the vector a filename exclusion
+    could not see (measured: it passed the text scan the other modules get).
+    """
+    tree = ast.parse(source.read_text(encoding="utf-8", errors="replace"))
+    inside_adapter: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "FastAPIRouterAdapter":
+            inside_adapter.update(id(inner) for inner in ast.walk(node))
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if id(node) not in inside_adapter
+        and ((isinstance(node, ast.Attribute) and node.attr == "rest_spec")
+             or (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                 and node.func.attr == "add_api_route"))
+    ]
+    return sorted(offenders)
 
 
 # ── what the SERVING HANDLER does — the other half of S3's premise ───────────

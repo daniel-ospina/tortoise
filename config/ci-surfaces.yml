@@ -2697,23 +2697,30 @@ surfaces:
   # `tortoise/tool_registry.py` (the `rest_spec` route registry) and
   # `tools/bridge_table.py` (S1's door→container edge).
   # ⛔ `tools/bridge_table.py` — NOT `tortoise/bridge_table.py`, which DOES NOT
-  # EXIST. A measurement quoting the phantom path reads `select()`'s `tortoise/`
-  # engine fallback (`--changed-files tortoise/bridge_table.py` -> `['core']`) and
+  # EXIST. A measurement quoting the phantom path reads `select()`'s UNKNOWN-PATH
+  # fail-closed answer, not the real module's — `--changed-files tortoise/bridge_table.py`
+  # -> `['core']` only because a nonexistent path under a CLAIMED prefix (`tortoise/`)
+  # inherits that prefix's `core` fallback (a nonexistent path outside every claimed
+  # prefix answers ALL surfaces with `full: True`: measured on `foo/bar.py`) — and
   # therefore proves nothing about the real module; three review rounds reproduced
-  # this comment's citation because a nonexistent path always answers `core`.
+  # this comment's citation that way.
   # MEASURED on the real path: `tools/ci_selection.py --changed-files
   # tools/bridge_table.py` -> `surfaces=['api']`, `full=False`, with
   # `test_bridge_table.py` selected and this file NOT — `tools/bridge_table.py` is a
   # `SOURCE_PATTERNS["api"]` entry and is absent from `CORE_ALSO`, so `core` alone
   # is a hole for the one edit path S1's sufficiency edge depends on. That is what
-  # the dual `api` registration below closes (same pattern as `test_bridge_table.py`).
+  # the dual `api` registration ABOVE closes (line 1228, same pattern as
+  # `test_bridge_table.py`).
   # The two other modules this file pins (`mcp_server.py`, `tool_registry.py`) are
   # `SHARED_MODULES` and select `full: True` (every surface incl. `core`), so they
   # were never the gap. Hermetic: the FastMCP
   # container is built in-process — no graph, no docker lane, no URI, no network,
   # no model call — which is why it carries no `uri_requiring` declaration. The
-  # row is SELF-PINNING: `classify_test_file()` reads only `surfaces`, so
-  # deleting it reds `--integrity` again (the #1349/#3332/#3616 drift class).
+  # row PAIR is what `--integrity` reads: `classify_test_file()` is first-match over
+  # `surfaces`, so this file classifies as `api` (the row at 1228 precedes `core`) and
+  # deleting EITHER row alone stays green — deleting BOTH is what reds `--integrity`
+  # (the #1349/#3332/#3616 drift class), and the `api` row is what keeps the file
+  # selected on a `tools/bridge_table.py`-only diff.
   - test_11609_structural_blockers.py
   - test_12296_entity_verdict.py
   # #11892 option (3): the `health.quota` boundary report — see the `api` row for
