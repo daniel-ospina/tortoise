@@ -1876,6 +1876,40 @@ def test_an_empty_linked_events_list_survives_the_served_projection():
     assert "linkedEvents" not in cap._served_row({"id": "live-1", "name": "live"})
 
 
+def test_the_two_successor_facts_survive_the_served_projection():
+    """BOTH successor facts reach a reader — the payload half of #13302's claim.
+
+    #13302 review F2: the projection gained `successorName` and `allSuccessorIds` in
+    `_ended_fields`, and no row asserted either. Deleting both left the whole suite
+    green, which is the SAME defect `test_an_empty_linked_events_list_survives_the_
+    served_projection` above was written for — one key earlier. The product rows in
+    `test_13302_ended_read.py` cannot see it: they read the stub target's rows, which
+    bypass `_served_row`/`_ended_fields` entirely.
+
+    So a reader scoring Q6 could lose the successor NAME (`docs/ONTOLOGY.md:431/:451`
+    — the carrier holds a name, stored verbatim) or the full predecessor set, and the
+    instrument would still report a passing run over an altered answer.
+    """
+    served = cap._served_row({"id": "p1", "name": "Onboarding v2",
+                              "successorName": "Onboarding flow v2",
+                              "allSuccessorIds": ["abc-123", "def-456"]})
+    assert served["successorName"] == "Onboarding flow v2", (
+        "the successor NAME is one of the two facts this PR exists to serve; "
+        "dropping it from the projection puts the pre-fix collapse back at the "
+        "one place a reader actually scores"
+    )
+    assert served["allSuccessorIds"] == ["abc-123", "def-456"], (
+        "the whole predecessor set must reach a reader — one id is not the chain"
+    )
+    # An id-only row serves the id and FABRICATES no name (the two facts stay two).
+    id_only = cap._served_row({"id": "p2", "successorId": "abc-123"})
+    assert id_only["successorId"] == "abc-123"
+    assert "successorName" not in id_only, (
+        "a name may never be fabricated from an id — the served pair is what the "
+        "model actually records"
+    )
+
+
 def test_a_query_less_call_is_not_reported_as_a_corpus_ranking():
     """`NO-RELATION-TO-QUESTION` describes a failed TEXT match; an enumeration is not one.
 
@@ -1928,6 +1962,41 @@ def test_an_ended_scope_call_is_labelled_as_one():
         {"query": None, "entity_type": "point", "ended_scope": True}, tick=False)
 
 
+def _inline_search_label_sites(source: str) -> list[str]:
+    """`fn:lineno` for every f-string in `source` that re-inlines a `search(…)` label.
+
+    A label f-string is recognised by its FIRST literal part being the identifier text
+    `search(`, optionally preceded by the backtick the ticked rendering wraps around
+    it. #13302 review F1: the previous version read `node.values[0].value` BEFORE the
+    `isinstance(…, ast.Constant)` test, so it compared a `str` against `ast.Constant`,
+    which is `False` for every possible input — `offenders` was always `[]` and the
+    pin could never fail. The backtick normalisation is the second half of the same
+    finding: the pre-fix detail renderer's literal was "`search(", so a bare
+    `str.lstrip().startswith("search(")` misses the very shape this scan replaced.
+
+    `_search_label` is skipped — it IS the one builder, by definition.
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(source))
+    offenders: list[str] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if fn.name == "_search_label":  # the ONE builder, by definition
+            continue
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.JoinedStr) or not node.values:
+                continue
+            head = node.values[0]
+            if not isinstance(head, ast.Constant):
+                continue
+            if str(head.value).lstrip("`").startswith("search("):
+                offenders.append(f"{fn.name}:{node.lineno}")
+    return offenders
+
+
 def test_every_search_label_comes_from_the_one_builder():
     """A re-inlined `f"search(…)"` in a renderer is the defect, so scan for it.
 
@@ -1936,28 +2005,68 @@ def test_every_search_label_comes_from_the_one_builder():
     AST shape of the same check `test_search_projects_through_the_served_row_helper`
     applies to the served-row projection.
     """
-    import ast
-    import textwrap
-
-    tree = ast.parse(textwrap.dedent(inspect.getsource(cap)))
-    offenders = []
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if fn.name == "_search_label":  # the ONE builder, by definition
-            continue
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.JoinedStr):
-                continue
-            head = node.values[0].value if node.values else None
-            if isinstance(head, ast.Constant) and str(head.value).lstrip().startswith(
-                "search("
-            ):
-                offenders.append(f"{fn.name}:{node.lineno}")
+    offenders = _inline_search_label_sites(inspect.getsource(cap))
     assert not offenders, (
         "a `search(...)` label is built inline instead of through "
         f"`_search_label` (it can drop `ended_scope`): {offenders}"
     )
+
+
+def test_the_label_scan_flags_the_inline_renderings_it_replaced():
+    """The scan must red on the code it was written to reject (review F1).
+
+    A rule with no failing fixture is untested, and this one HAD no failing fixture:
+    the pre-fix scan was permanently green, so restoring `origin/main`'s exact inline
+    bodies left it passing (rule 3 of the PR's own mutation-attribution block). These
+    are those bodies verbatim — the two ticked detail renderings whose literal is
+    "`search(", and the top table's plain "search(" — so the scan is pinned in BOTH
+    directions, which is how a lint rule is tested everywhere else (ESLint's
+    `RuleTester` pairs `valid` cases with `invalid` ones carrying an expected
+    diagnostic; ruff fixtures mark the triggering line).
+    """
+    pre_fix = '''
+        def _answer_text(answer):
+            bits = []
+            for call in answer.calls:
+                if not call.rows:
+                    bits.append(
+                        f"`search({call.request.get('query')!r}, "
+                        f"{call.request.get('entity_type')}"
+                        f"{', include_terminal' if call.request.get('include_terminal') else ''})`"
+                        f" → 0 rows"
+                    )
+                    continue
+                bits.append(
+                    f"`search({call.request.get('query')!r}, "
+                    f"{call.request.get('entity_type')}`"
+                )
+            return " ".join(bits)
+
+        def _calls_summary(answer):
+            out = []
+            for c in answer.calls:
+                out.append(
+                    f"search({c.get('query')!r}{', +terminal' if c.get('include_terminal') else ''})"
+                    f" → {len(c.get('rows') or [])} rows"
+                )
+            return out
+    '''
+    offenders = _inline_search_label_sites(pre_fix)
+
+    flagged = {site.split(":", 1)[0] for site in offenders}
+    assert flagged == {"_answer_text", "_calls_summary"}, (
+        "the scan must flag the pre-fix inline labels in BOTH renderers; it found "
+        f"{offenders or 'nothing'} — a scan that cannot red is not a pin"
+    )
+    assert len(offenders) == 3, (
+        "all three inline f-strings must be flagged, including the two whose "
+        f"literal starts with a backtick: {offenders}"
+    )
+    # The builder itself is never an offender, in either source.
+    assert _inline_search_label_sites(
+        'def _search_label(request):\n'
+        '    return f"search({request[\'query\']!r})"\n'
+    ) == []
 
 
 def test_the_ended_suffix_renders_how_a_row_ended():
