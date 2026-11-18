@@ -291,7 +291,7 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
     single-threaded read it holds argument validation and nothing else: it is
     structurally sub-millisecond, passes on the pre-change tree, and no mutation
     of this diff can redden it. The production 7.2–9.3 s was a QUEUE of reads
-    waiting for a worker slot, which this harness cannot construct; the shape is
+    waiting for a worker slot, which ONE READ cannot construct; that shape is
     built for real in
     ``test_a_read_queued_behind_loaders_does_not_breach_pre_handler`` below.
     """
