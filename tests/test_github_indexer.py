@@ -981,7 +981,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6268`, `excluded = _terminal_object_statuses()` at `:5934` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:54384-54393`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:54422-54431`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,7 +1100,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:54384-54393`) — so each poll minted another `-reopened`
+    `sdk.py:54422-54431`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6268`).
@@ -1451,7 +1451,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:54232-54234`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:54270-54272`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3225,20 +3225,20 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # sdk.py — the non-scalar refusal, the coherent un-supersede admission arm,
     # ``update_knowledge``'s span and the per-label ``SET n += $props`` write.
     #
-    # ⛔ RE-DERIVED AT THIS MERGE HEAD (`#13466` × `origin/main` `130e20fdaf`),
-    # never carried from either side: the two parents' inserts moved these
-    # addresses by DIFFERENT amounts (this branch's `+5` at `:1139`, `main`'s own
-    # lanes above `:22000` and `:54000`), so NEITHER parent's number was right for
-    # the merged tree — the set was RED on both. Every address below was MEASURED
-    # at this tree by searching for the pin's own anchor text; none was produced
-    # by adding a delta to a number that was already there, which is how these
-    # rotted twice (`#13348`, `#13486`). The 13 `entities.py` rows above arrived
-    # already correct from `main` and re-check green, so only these four moved.
-    ("sdk.py", 54232, 54234): (
+    # ⛔ RE-DERIVED AGAIN at this merge head (`#13466` × `origin/main` `501270a4bf`),
+    # never carried: `main`'s lanes above `:54000` moved these three addresses a
+    # further **+38** since the previous re-derivation, so the set was RED at the
+    # merged tree while every parent was individually green at its own head. Each
+    # address below was MEASURED at this tree by searching for the pin's OWN anchor
+    # text (`grep -n` the statement), never by adding a delta to a number that was
+    # already there — that is how these rotted twice (`#13348`, `#13486`). The
+    # `entities.py` rows and `update_knowledge`'s span above/below re-check green
+    # at this tree and did not move.
+    ("sdk.py", 54270, 54272): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 54384, 54393): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 54422, 54431): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
     ("sdk.py", 22454, 22629): ("def update_knowledge(", None),
-    ("sdk.py", 54833, 54833): ("SET n += $props", None),
+    ("sdk.py", 54871, 54871): ("SET n += $props", None),
 }
 
 

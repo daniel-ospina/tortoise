@@ -1367,25 +1367,31 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # `run_vector_query`, which moves every row below: +25 for the rows above that
     # function's body, +55 for the rows after it. Re-derived against the live file
     # again — the pin caught it, which is what it is for.
-    ("tortoise/search_engine.py", 2866, "def run_fts_query(",
-     "`tortoise/search_engine.py:2866`"),
+    ("tortoise/search_engine.py", 2886, "def run_fts_query(",
+     "`tortoise/search_engine.py:2886`"),
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
-    # moves the two LATE rows and only them: the FTS call +1 (3038 -> 3039,
-    # span 3039-3048) and the rank loop +2 (4544 -> 4546). Re-derived against
-    # the live file after the forward-merge, not nudged by a constant.
-    ("tortoise/search_engine.py", 3078, "CALL db.idx.fulltext.queryNodes",
-     "`:3078-3087`"),
-    ("tortoise/search_engine.py", 2708, "def recency_tie_clause(",
-     "`search_engine.py:2708`"),
-    ("tortoise/search_engine.py", 4707,
+    # moves the two LATE rows and only them: the FTS call and the rank loop.
+    # Re-derived against the live file after the forward-merge, not nudged by a
+    # constant. ⛔ Name NO line number in THIS comment (#12731): a number here
+    # drifts with every edit and reads as authoritative, and the tuples below
+    # are the only place this block may state one — the historical numbers in
+    # the rows ABOVE are the record of a drift, not a locator to trust.
+    ("tortoise/search_engine.py", 3098, "CALL db.idx.fulltext.queryNodes",
+     "`:3098-3107`"),
+    ("tortoise/search_engine.py", 2728, "def recency_tie_clause(",
+     "`search_engine.py:2728`"),
+    # #13422 (PR #13466) inserts inside `search_engine.py` above this loop, so
+    # the row moves +15 against the value `main` re-derived — re-measured on the
+    # MERGE tree, not nudged by the constant.
+    ("tortoise/search_engine.py", 4919,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4707`"),
-    ("tortoise/projection/__init__.py", 20401, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20401`"),
-    ("tortoise/projection/__init__.py", 20829, "def _create_fulltext_index(",
-     "`:20829`"),
-    ("tortoise/projection/__init__.py", 21279,
-     "self._create_fulltext_index(label, fields)", "`:21279`"),
+     "`tortoise/search_engine.py:4919`"),
+    ("tortoise/projection/__init__.py", 20822, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20822`"),
+    ("tortoise/projection/__init__.py", 21265, "def _create_fulltext_index(",
+     "`:21265`"),
+    ("tortoise/projection/__init__.py", 21715,
+     "self._create_fulltext_index(label, fields)", "`:21715`"),
 )
 
 

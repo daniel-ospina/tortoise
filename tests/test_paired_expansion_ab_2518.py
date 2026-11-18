@@ -389,8 +389,15 @@ def test_read_arm_records_the_ranked_list_for_every_arm():
     class _FakeSDK:
         def tortoise_fts_query(self, query, *, entity_type, limit,
                                include_terminal, _record_reads,
-                               _valid_time_rerank, leg_trace,
-                               entity_key_expansion):
+                               _valid_time_rerank, _rerank_candidates,
+                               leg_trace, entity_key_expansion):
+            # `read_arm` pins the fused rerank OFF (#12297's census requires it:
+            # the arm comparison below IS the order the lever would move).
+            # Asserted rather than merely accepted, so a caller that silently
+            # drops the flag reds here instead of re-picking the measured page.
+            assert _rerank_candidates is False, (
+                "`read_arm` must opt out of the fused rerank — with it armed the "
+                "arm comparison would measure a page the lever moved")
             ids = (["on-1", "off-1"] if entity_key_expansion
                    else ["off-1", "off-2"])
             return [{"id": i} for i in ids]
