@@ -131,7 +131,8 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 298 files finds exactly 13 — the verb-at-end-of-line scan alone finds 176, which is why
+predicate over the same 298 files finds exactly 13 — the verb-at-end-of-line scan alone finds 177 (one
+`#13399` added is a COMMENT line ending “post-merge”, which is the point), which is why
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
@@ -548,9 +549,11 @@ figure (`1,624` / `108` at `34bd33d22a`; `1,623` / `108` at `31bddb1dd9`) and th
 (`1,630` → `1,629`) are drawn from a predicate `#13265` did not touch — it added **0** door calls and
 exactly **1** verb occurrence (`git show 34bd33d22a -- tortoise/ | grep '^+' |
 grep -cE '\.(ro_)?(query|execute)\s*\('` → `0`; `… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`).
-The 13-occurrence one-file whole-text gap and the nine-prose/four-Cypher split are UNCHANGED by it
-(the added match is single-line, not cross-line, and §1 counts the same 13 sites — nine prose, four
-Cypher examples).
+The 13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED by it
+(the added match is single-line, not cross-line, and §1 counts the same 13 sites — ten prose, three
+Cypher examples). `record_projection.py` is the one file on both sides of that split: one of its two
+matches wraps a Cypher example, where the next line opens the `MATCH` pattern, and the other wraps
+prose, where the next line opens a parenthetical.
 ⛔ **AND IT MOVED AGAIN, TWICE, BEFORE THIS PR COULD MERGE — each figure bound to the ONE tree it was
 measured on.** At `origin/main` **`31bddb1dd9`** the appendix `main` carried was stale in **96 of its
 1,311 rows** over exactly two files: `#13330` (`3bcb6c6531`) added `+438 / −47` to
@@ -1242,7 +1245,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/mining.py:1476` | `EpSafeCommit.verify_no_auto_wire` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {is_operator:true})-[r]->(n:Point) WHERE n.id IN $ids…` |
 | `tortoise/mining.py:1484` | `EpSafeCommit.verify_no_auto_wire` | plain | read | candidate:SQL-shaped | `MATCH (o:Point {id:$id}) RETURN o.status` |
 | `tortoise/mining.py:1502` | `EpSafeCommit.verify_no_auto_wire` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {id:$oid})-[r]->(s:Point) RETURN s.id, s.status` |
-| `tortoise/monitoring.py:4670` | `_probe_once._run_query` | plain | read | candidate:SQL-shaped | `RETURN 1` |
+| `tortoise/monitoring.py:4787` | `_probe_once._run_query` | plain | read | candidate:SQL-shaped | `RETURN 1` |
 | `tortoise/navigation.py:95` | `_resolve_root` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/navigation.py:205` | `entityProfile` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/navigation.py:319` | `tortoise_traverse` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |

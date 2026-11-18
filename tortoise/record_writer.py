@@ -1906,7 +1906,7 @@ def derived_embedding_columns(
     if not text.strip():
         return _DerivedEmbedding(skipped="the composed text is blank")
     try:
-        from .embeddings import encode_for_row
+        from .embeddings import BOUNDED_SCOPE_RECORD_DERIVATION, encode_for_row
     except Exception:  # noqa: BLE001, RUF100 — an unimportable seam derives nothing
         return _DerivedEmbedding(skipped="the embedding seam is unimportable")
     try:
@@ -1932,7 +1932,19 @@ def derived_embedding_columns(
         # `required_embedding_dim` would make the seam DROP a vector of another
         # declared width while the pair's `GENERATED` `embedding_vec` simply stays
         # NULL (see the test that pins it).
-        vec = encode_for_row(text, None, bounded=True)
+        #
+        # ⛔ #13417: `bounded_scope="record_derivation"` — this is the RECORD
+        # leg, not a graph fold, and the two are repaired DIFFERENTLY. A decline
+        # here leaves `public.{object,subject,event}.embedding` NULL, which
+        # `graph-scripts/backfill_embeddings.py` cannot repair (it reads graph
+        # nodes and would report zero residual over this population); the repair
+        # is a re-derivation/replay. The seam cannot infer that, so the caller
+        # states it, and `monitoring.DERIVED_EMBED_DECLINE_COUNT` keeps the two
+        # legs apart in one label.
+        vec = encode_for_row(
+            text, None, bounded=True,
+            bounded_scope=BOUNDED_SCOPE_RECORD_DERIVATION,
+        )
     except Exception:  # noqa: BLE001, RUF100 — every failure is "this row has no vector"
         return _DerivedEmbedding(skipped="the encode raised")
     if not vec:

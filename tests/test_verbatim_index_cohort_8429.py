@@ -39,6 +39,7 @@ Two lanes:
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import os
 import sys
@@ -72,21 +73,49 @@ _INDEX_SETTLE_POLL_S = 0.1
 # `ConnectionError: ... 6379` red on a lane that has no server there — reading
 # as a #8429 regression, and falsifying this file's own "skips loudly" premise.
 # The candidates are tried in order and the URI that ANSWERED is the base every
-# cohort graph is derived from.
+# cohort graph is derived from. Each candidate's graph is the SAME per-run MINT
+# (`_probe_graph_name`, #13290 review): a fixed probe name is unreapable by both
+# cleanup arms, and `from_uri`'s default `ensure_indexes=True` CREATES the graph
+# it names — so a fixed name leaked one graph per lane, and on the ambient seam
+# it ran schema DDL on the shared env-URI handle.
+def _probe_graph_name() -> str:
+    """A PER-RUN name for the availability probe's OWN graph (#13290 review).
+
+    ⛔ The literal this replaces was the FIXED ``tortoise_probe_8429``, and it is
+    the exact class `_cohort_graph_name` below exists to close, one level up:
+    it satisfies NEITHER cleanup arm (``"tortoise_probe_8429".startswith(
+    ("test_", "tortoise_test"))`` is ``False``, and ``8429`` is 4 hex characters
+    against a floor of 8), so no arm could ever reap it — and ``from_uri``
+    defaults to ``ensure_indexes=True``, whose schema DDL **CREATES** the graph.
+    A fixed name is therefore a leak per lane and per CI run, and on the ambient
+    seam it aimed that DDL at whatever graph the env URI names — the same SHARED
+    handle the cohort arm must never write, so the override below also takes the
+    probe OFF that graph entirely.
+
+    Same vocabulary as ``_cohort_graph_name``: the ``tortoise_test`` prefix puts
+    it inside ``tests/_embedded.py``'s ``_SERVER_WIPE_PREFIXES``, and the
+    ``_<10 lowercase hex>`` suffix matches ``_PER_RUN_GRAPH_NAME_RE`` so
+    ``drop_test_graph`` admits it instead of refusing a shared spelling.
+    Pinned by ``test_the_probe_graph_name_is_one_this_tree_can_reap``.
+    """
+    return f"tortoise_test_probe_8429_{uuid.uuid4().hex[:10]}"
+
+
 FALKORDB_AVAILABLE = False
 _PROBE_URI: str | None = None
 _old_uri = os.environ.get("TORTOISE_DB_URI")
 try:
     from tortoise.projection import FalkorProjection as _FP
+    _probe_graph = _probe_graph_name()
     for _uri in (
         _old_uri,
-        _live_utils.docker_uri("tortoise_probe_8429", password=None),
-        _live_utils.legacy_uri("tortoise_probe_8429", password=None),
+        _live_utils.docker_uri(_probe_graph, password=None),
+        _live_utils.legacy_uri(_probe_graph, password=None),
     ):
         if not _uri:
             continue
         try:
-            _probe = _FP.from_uri(_uri)
+            _probe = _FP.from_uri(_uri, graph_name=_probe_graph)
             try:
                 _probe.g.query("RETURN 1")
             finally:
@@ -481,6 +510,70 @@ def test_the_cohort_graph_name_is_one_this_tree_can_reap():
     assert name != _cohort_graph_name(), (
         "the name must be minted per RUN — a stable spelling is a shared graph "
         "carrying a whole-label DETACH DELETE (#13290 F1)")
+
+
+def test_the_probe_graph_name_is_one_this_tree_can_reap():
+    """#13290 review — the SAME policy, applied to the probe's own graph.
+
+    The availability probe shipped with the FIXED ``tortoise_probe_8429``, which
+    failed both arms `test_the_cohort_graph_name_is_one_this_tree_can_reap`
+    pins (wrong prefix family, 4-hex suffix) while ``from_uri``'s default
+    ``ensure_indexes=True`` **creates** the graph it names — a leak no cleanup
+    arm could reach, and on the ambient seam a schema DDL aimed at the shared
+    env-URI handle. RED on that literal, GREEN on the mint.
+
+    Hermetic — it reads the policy's own declarations, so it needs no server.
+    """
+    from tests._embedded import _SERVER_WIPE_PREFIXES
+
+    name = _probe_graph_name()
+    assert name.startswith(_SERVER_WIPE_PREFIXES), (
+        f"{name!r} is outside the session sweep's prefix family "
+        f"{_SERVER_WIPE_PREFIXES} — nothing would ever drop it (#13290)")
+    assert _live_utils._PER_RUN_GRAPH_NAME_RE.match(name), (
+        f"{name!r} is not a per-run MINT shape, so `drop_test_graph` refuses to "
+        "delete it and the graph leaks (#13290)")
+    assert name != _probe_graph_name(), (
+        "the probe's graph must be minted per RUN — a stable spelling is a "
+        "shared graph, and `from_uri(ensure_indexes=True)` creates it (#13290)")
+
+    # ⛔ THE CALL SITE, not only the helper (review pass 3, P2 — MEASURED): the
+    # assertions above read a FRESH call and the `_probe_graph` global, and
+    # NEITHER is tied to the argument `from_uri` actually receives. MUTANT that
+    # was GREEN against them: replace the call site with
+    # `_probe = _FP.from_uri(_uri, graph_name="tortoise_probe_8429")` — the
+    # literal this change removes — leaving `_probe_graph` untouched. The pin
+    # passed and the census stayed `[]` (it only sees the PRESENCE of
+    # `graph_name=`), i.e. the leak could return with every gate green. So the
+    # call is read statically here: the ONE `from_uri` call in this module must
+    # take `graph_name=` AS the minted name, and that name must come from the
+    # minting helper.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    from_uri_calls = [node for node in ast.walk(tree)
+                      if isinstance(node, ast.Call)
+                      and getattr(node.func, "attr", None) == "from_uri"]
+    assert len(from_uri_calls) == 1, (
+        f"expected ONE `from_uri(` call in this module, found "
+        f"{len(from_uri_calls)} — this pin reads that one site (#13290)")
+    kw = {k.arg: k.value for k in from_uri_calls[0].keywords}
+    assert "graph_name" in kw, (
+        "the probe's `from_uri(` passes no `graph_name=` — the census reds and "
+        "the graph its schema DDL creates belongs to nobody (#13290)")
+    assert isinstance(kw["graph_name"], ast.Name) and \
+        kw["graph_name"].id == "_probe_graph", (
+        "the call site's `graph_name=` is not the MINTED `_probe_graph` — a "
+        "literal there feeds `ensure_indexes`' DDL into ONE graph shared by "
+        "every lane and CI run, and the census still passes because it only "
+        "sees the keyword (#13290)")
+    minted = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id == "_probe_graph"
+                      for t in n.targets)]
+    assert any(isinstance(n.value, ast.Call)
+               and getattr(n.value.func, "id", None) == "_probe_graph_name"
+               for n in minted), (
+        "`_probe_graph` is not assigned from `_probe_graph_name()` — the call "
+        "site is wired to something other than the per-run mint (#13290)")
 
 
 def test_the_live_fixture_teardown_drops_its_own_graph(monkeypatch):

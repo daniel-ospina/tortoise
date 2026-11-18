@@ -127,12 +127,18 @@ class _Recorder:
     def __init__(self, vector: list[float] | None = None):
         self.calls: list[tuple[str, int | None]] = []
         self.bounded: list[bool] = []
+        self.scopes: list[str] = []
         self.vector = vector
 
     def __call__(self, content: str, expected_dim: int | None = None, *,
-                 bounded: bool = False):
+                 bounded: bool = False,
+                 bounded_scope: str = "graph_fold"):
+        # The signature is mirrored EXACTLY, on purpose (#13417): a keyword the
+        # real seam gained and this stub did not would otherwise turn every test
+        # in the file into "the encode raised" instead of a signature mismatch.
         self.calls.append((content, expected_dim))
         self.bounded.append(bounded)
+        self.scopes.append(bounded_scope)
         if self.vector is not None:
             return list(self.vector)
         return [0.125] * 384
@@ -196,6 +202,25 @@ def test_a_document_derives_from_title_and_content(encoder):
 # ════════════════════════════════════════════════════════════════════════════
 # 3. The writer — where the graph derives NOTHING, the record derives nothing
 # ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_record_leg_declares_its_OWN_scope_not_the_graph_fold(encoder):
+    """#13417: the counter's label is the CALLER's fact, and the seam cannot infer it.
+
+    `record_writer` and the graph fold both reach the same bounded seam; if the
+    record leg kept the default scope, a record-side decline would be counted as
+    `graph_fold:…` and the operator would send it to the BACKFILL, which cannot
+    repair it (the repair for a record decline is a re-derivation/replay). The
+    kwarg is the only thing that distinguishes them — so it is pinned here, on
+    the stub that mirrors the real signature.
+    """
+    rw.derived_embedding_columns(
+        {"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"})
+    assert encoder.bounded == [True], "the record leg must stay BOUNDED"
+    assert encoder.scopes == ["record_derivation"], (
+        f"the record leg declared scope {encoder.scopes!r} — a record-side decline "
+        f"would be counted under the graph fold's label and reported as "
+        f"backfill-repairable, which it is not")
 
 
 def test_a_plain_source_derives_nothing_because_the_graph_holds_none(encoder):
