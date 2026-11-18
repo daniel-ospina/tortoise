@@ -68,7 +68,7 @@ jobs:
     # PINNED TO THE FLEET'S x64 POOL (owner decision 2026-11-18): this guard was
     # queueing on the hosted pool behind ~150 runs while the self-hosted runners sat
     # idle. It touches no `gh` surface -- its only `run:` step is
-    # `python3 tools/redis-guard.py`, and that script's only subprocess is
+    # `python tools/redis-guard.py`, and that script's only subprocess is
     # `git rev-parse --show-toplevel` -- so it needs no #9018 tool-contract step. What it
     # does depend on is the Python pin in this job's own steps below
     # (`actions/setup-python@v5`, 3.12), which is why moving off `ubuntu-latest` cannot
@@ -82,4 +82,4 @@ jobs:
         with:
           python-version: '3.12'
       - name: Run redis-guard
-        run: python3 tools/redis-guard.py
+        run: python tools/redis-guard.py
