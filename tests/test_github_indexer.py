@@ -1443,7 +1443,11 @@ def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
     # nothing — and it minted nothing BEFORE the split either: the pre-fix helper
     # returned `None` for this key, and the pre-fix reader's own
     # `_key not in _PIPELINE_DECLS` guard (`4c4fd7c90f~1:1250-1253`) did the same.
-    # The shape that DID loop is the CLOSED fixture below.
+    # ⚠️ That guard answers `None` for the CLOSED fixture below too (its `stageId` is
+    # PRESENT and its key is foreign, so the guard is reached), so `[0, 0, 0]` there
+    # as well. The shape that DOES loop is that same fixture on the baseline WITHOUT
+    # the declaration arm, where the read falls through to
+    # `if stage_id is not None or slot is not None: return "open"`.
     oid = "github-issue-acme/repo1-1"
     t = MockGitHubTransport(issues=[gh_issue(1)])
     _run(_indexer(t), sdk)
@@ -1461,7 +1465,8 @@ def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
     # with GitHub and mints nothing by accident. Fetch it CLOSED — a frozen row the
     # fold refuses (`cross-pipeline`) never moves, so a reader answering `open`
     # mints a `-closed` on EVERY poll, for ever:
-    #   pre-fix measured: mints=[1, 1, 1], events=['github-issue-acme/repo1-1-closed']
+    #   measured WITHOUT the declaration arm — F4's own regression shape, never
+    #   `4c4fd7c90f~1`: mints=[1, 1, 1], events=['github-issue-acme/repo1-1-closed']
     # The position is UNRESOLVABLE (`declared_slot is None` — unrecognised key) and
     # the prop never resolved (`pipelineSlot=null`), so no fold has moved this row
     # and none will: the answer is `None` ("no opinion"), exactly as

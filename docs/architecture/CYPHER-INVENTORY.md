@@ -453,9 +453,11 @@ over exactly three files — the same 1,311 statements, renumbered:
 | `tortoise/sdk.py` | 4 | +33 (4) |
 
 reproduced by `git show origin/main:docs/architecture/CYPHER-INVENTORY.md` versus a fresh
-`--markdown` at this tree. It is regenerated HERE because every commit that moved those statements
-has already merged without regenerating them (the rule assigns the refresh to the commit that moves
-the code; none of those commits did it), while
+`--markdown` at this tree. (Same base, same method — `main` against itself — it is **96 rows over two
+files**: `projection/__init__.py` 92 and `sdk.py` 4. The other 11 are this branch's own +16 lines in
+`indexer/github_indexer.py`, which is why that file enters the 107 and not the 96.) It is
+regenerated HERE because the commits that moved those statements merged without regenerating them
+(the rule assigns the refresh to the commit that moves the code; none of those commits did it), while
 `tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` is RED at
 `origin/main` today — the generated table is the only artifact in this document that no pin reaches.
 (Four earlier revisions of this paragraph are RETIRED rather than reconciled, because each named a
