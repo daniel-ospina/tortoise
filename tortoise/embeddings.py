@@ -984,11 +984,13 @@ class EmbeddingModel:
         word whatever had been recorded, so a ``no_embedder`` decline with
         NOTHING recorded claimed ``not_installed`` — asserting that the extra is
         absent, a fact no producer had recorded. A TRACE WORD is not evidence of
-        a cause; the recorded kind is. The reachable designed-absence state is
-        unaffected, because ``absent_reason()`` publishes ``no_embedder`` for a
-        ``not_installed`` record (or for none at all), and the recorded-cause arm
-        translates that record back to ``not_installed`` — pinned end-to-end by
-        ``test_a_designed_absence_is_refused_with_not_installed``.
+        a cause; the recorded kind is. The ``not_installed``-RECORD route is
+        unaffected — ``absent_reason()`` publishes ``no_embedder`` for it and the
+        recorded-cause arm translates that record back to ``not_installed``, pinned
+        end-to-end by ``test_a_designed_absence_is_refused_with_not_installed``. The
+        route where NOTHING was recorded is the deliberate change declared in the
+        paragraph below: it answers ``model_unavailable``, not an assertion that
+        the extra is absent.
 
         ⛔ THE SECOND BEHAVIOUR CHANGE, RECORDED HERE BECAUSE IT IS NOT THE ONE
         THE ``no_embedder`` NOTE NAMES. ``main`` published an UNMAPPED reason as

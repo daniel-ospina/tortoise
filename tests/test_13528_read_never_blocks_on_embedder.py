@@ -467,6 +467,24 @@ def test_a_spent_read_attempt_is_rearmed_and_spawned(monkeypatch):
             f"the re-armed read waited {elapsed:.2f}s (budget "
             f"{READ_EMBED_BUDGET_S}s) — it must SPAWN the retry and decline, "
             f"not sit out the budget for the attempt it just restarted")
+
+        # ⛔ END-TO-END, ON THE STATE THIS TEST ALREADY BUILT (#13548 review F2).
+        # Everything above reaches the real defect state — a stale recorded
+        # ``load_failed`` behind a ``load_in_flight`` decline — so the REFUSAL is
+        # asserted here rather than only on the translator. ``main``'s fixed dict
+        # answered ``model_unavailable`` for this decline (the "nothing was
+        # recorded" fallback) while a cause WAS recorded, which is #13543. This
+        # is the row that reds under that dict on the REAL path, not a
+        # re-statement of the translator's own rows.
+        monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+        with pytest.raises(EmbedderUnavailableError) as excinfo:
+            EmbeddingModel._unavailable(
+                context="read: embedder not warm within the read's budget",
+                kind=decline)
+        assert excinfo.value.failure_kind == "load_failed", (
+            "the refusal must name the cause that was recorded, got "
+            f"{excinfo.value.failure_kind!r} — `model_unavailable` here means "
+            "the recorded cause was replaced by the nothing-recorded fallback")
         assert EmbeddingModel._warm_up_started is True, (
             "the re-arm must SPAWN the retry before answering, or the answer "
             "is a claim about a load that does not exist")
@@ -522,12 +540,14 @@ def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
     decline and the raise that carries it, and ``_last_failure_kind`` then holds
     the operator's real answer. The earlier shape special-cased ``no_embedder``
     and returned the ``model_unavailable`` fallback for everything else, so that
-    recorded cause was discarded. No cold-window ROW in this suite reaches that
-    state (each leaves nothing recorded), but the READ PATH does: a failure older
-    than ``_FAIL_COOLDOWN_S`` leaves ``load_in_flight`` on the trace with a
-    recorded kind, and ``_as_failure_kind`` then reports that kind. It is pinned
-    at the seam because no fixture reproduces that staleness — not because the
-    arm is unreachable.
+    recorded cause was discarded. This is the READ PATH's real state, not a
+    hypothetical: a failure older than ``_FAIL_COOLDOWN_S`` leaves
+    ``load_in_flight`` on the trace with a recorded kind, and ``_as_failure_kind``
+    then reports that kind. ``test_a_spent_read_attempt_is_rearmed_and_spawned``
+    builds exactly that state (``_last_failure_kind = "load_failed`` with
+    ``_last_failed_at`` older than the cooldown) and this file pins the
+    translation it feeds BOTH ways: the direct rows below, and the end-to-end
+    refusal at the end of that test.
 
     ⛔ THE SECOND BEHAVIOUR CHANGE IS PINNED HERE TOO (#13548 review F1).
     ``no_embedder`` with NOTHING recorded now answers ``model_unavailable``;
