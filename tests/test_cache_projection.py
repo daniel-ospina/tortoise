@@ -828,6 +828,101 @@ def test_the_declared_fold_defaults_are_the_folds_own_constants():
     assert declared[("Object", "title")] == ""
 
 
+#: The fold's OWN table, derived from the label its defaults are keyed by — never a
+#: hand-restated member list, so a new fold default cannot leave this arm short.
+_FOLD_LABEL_TABLES = (("Subject", "subject"), ("Object", "object"))
+
+#: The tables whose column lists are the universe for the property-space arm: the
+#: four an entity/node row is built from, NOT the whole `table_columns()` answer
+#: (a count restated here would rot as tables are added). Measured: no column in
+#: ANY table it answers carries an uppercase character, so the camel-case arm is
+#: equivalent over the full set; the own-table arm below is what keeps the check
+#: exact.
+_FOLD_COLUMN_SPACE_TABLES = ("subject", "object", "event", "source")
+
+
+def _snake(prop: str) -> str:
+    """`subjectKind` → `subject_kind`: the record's spelling of a property name."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", prop).lower()
+
+
+def test_the_fold_defaults_keys_are_property_space_and_their_columns_exist():
+    """The value-filling class does NOT widen the field set — measured in columns.
+
+    CARRIED HERE by `#13439` out of `tests/test_10000_cache_projection_doc_pin.py`
+    (its `test_the_value_filling_class_is_proved_in_COLUMN_space_and_the_proof_is_measured`),
+    whose doc-reading arms are gone: the epic artifact
+    `docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md` is the
+    **target**, not this test's subject, so re-wording it must not red the suite.
+    THESE arms are not doc text and could not be retired with it — they measure
+    `cache_projection` against the record's own column lists, so any diff to this
+    module or to the fold's declarations selects `core` and runs them.
+
+    The distinction they keep: `FOLD_ON_CREATE_DEFAULTS` is keyed in PROPERTY
+    space (`subjectKind` — what the node carries) while `projected_columns`
+    answers in COLUMN space (`subject_kind` — what the record row carries). The
+    value-filling class is safe only because the fold supplies a VALUE for a
+    field the record already HAS; a key whose snake spelling is not a column of
+    the fold's OWN table is a field-set WIDENING (`#10394` review P3, the
+    conflation `#17.2` point 3 relies on) and must be re-derived, not absorbed.
+
+    MUTATION (proved non-vacuous, both arms measured on a scratch copy):
+    `projected_columns('object')` dropping `object_kind` REDs this test on the
+    own-table arm while `test_the_declared_fold_defaults_are_the_folds_own_constants`
+    (which pins the fold's CLAUSES against the declared table, not the columns)
+    stays GREEN — the antecedent pin names the fold's CLAUSES, so a column-side
+    drift does not reach it; and adding `"widgetKind"` to
+    `FOLD_ON_CREATE_DEFAULTS["Object"]` REDs this test on the own-table arm AND
+    that antecedent pin, because a new fold default is the one edit both are built
+    to see.
+
+    ⛔ NO UNIQUENESS CLAIM, in either direction. Measured on a scratch copy: the
+    `object_kind` drop reds this test AND several other arms in this file while
+    staying GREEN on the antecedent pin, and the `widgetKind` addition reds both
+    named arms. So the antecedent pin's blindness to a column-side drift is the
+    one asymmetry here, and "what only this arm sees" is simply not measured — it
+    appeared in an earlier revision of this docstring and was false.
+    """
+    owned = dict(_FOLD_LABEL_TABLES)
+    column_space = {table: set(cp.projected_columns(table))
+                    for table in _FOLD_COLUMN_SPACE_TABLES}
+    declared = {(label, prop)
+                for label, defaults in cp.FOLD_ON_CREATE_DEFAULTS.items()
+                for prop in defaults}
+    assert declared, (
+        "`FOLD_ON_CREATE_DEFAULTS` is empty — the value-filling class this arm "
+        "measures does not exist any more. Re-derive the census before trusting it")
+    unknown = sorted({label for label, _ in declared} - set(owned))
+    assert not unknown, (
+        f"`FOLD_ON_CREATE_DEFAULTS` carries label(s) {unknown} with no known fold "
+        "table. Either the fold grew a label this arm does not map (add it here, "
+        "deriving the table from the label) or a row was mis-keyed")
+
+    # The CONTROL: a single-word key spells identically in both spaces, so with no
+    # camel-case key left there is nothing for the property-space arm to check and
+    # the arm would pass vacuously.
+    camel = sorted(prop for _, prop in declared if _snake(prop) != prop)
+    assert camel, (
+        "no `FOLD_ON_CREATE_DEFAULTS` key is camel-case any more — the "
+        "property/column namespace split this arm measures has collapsed. "
+        "Re-derive the census (the module docstring's point 3) before trusting it")
+
+    for label, prop in sorted(declared):
+        table = owned[label]
+        assert _snake(prop) in column_space[table], (
+            f"`{label}.{prop}`'s snake spelling `{_snake(prop)}` is not in "
+            f"`projected_columns({table!r})` — the fold's OWN table. Either the "
+            "fold now supplies a VALUE for a field the record does not HAVE (a "
+            "field-set WIDENING, a different class) or it is landing on another "
+            "table. Re-derive the census before trusting the value-filling class")
+        if _snake(prop) != prop:
+            assert not any(prop in cols for cols in column_space.values()), (
+                f"`{label}.{prop}` is BOTH a `FOLD_ON_CREATE_DEFAULTS` key "
+                "(PROPERTY space) and a record COLUMN — the two namespaces have "
+                "collapsed, so `projected_columns` is no longer the wrong space "
+                "for the fold's keys. Re-derive the census")
+
+
 # ── 3. one-way by construction ──────────────────────────────────────────────
 
 
