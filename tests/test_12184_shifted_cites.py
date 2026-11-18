@@ -45,6 +45,8 @@ document.
 """
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -100,7 +102,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # entry in it and NOTHING red — the document went on naming held addresses over a tree that had
     # moved them, and the reader rule sent the reader to the wrong line. A pin per entry is what turns
     # the list into a guard.
-    (_AUDIT, "`:2876`", _SDK, 2877, "SET s.capture_redactions=$redactions"),
+    (_AUDIT, "`:2877`", _SDK, 2877, "SET s.capture_redactions=$redactions"),
     (_AUDIT, "`sdk.py:37051`", _SDK, 37051, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     (_AUDIT, "`:37074`", _SDK, 37074, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -154,6 +156,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, 'hosted_api.py:22925', 'tortoise/hosted_api.py', 22925, 'MERGE (s:Source {url:$did})'),
     (_AUDIT, '`:22737`', 'tortoise/hosted_api.py', 22737, 'def _execute_commit_writes'),
     (_AUDIT, '`:33601`', 'tortoise/hosted_api.py', 33601, 'MERGE (p:PackInstall {namespace: $ns})'),
+    # Row 13's family list carries two BARE tokens with no row of their own, so no count
+    # could be declared for them and re-pointing a single site left a sibling to satisfy
+    # the substring arm — measured: mutating the list's `:2715` to `:2716` left 22 passed.
+    (_AUDIT, "`:2715`", _CP, 2755, "tail_denied = forbidden | {"),
+    (_AUDIT, "`:2755`", _CP, 2755, "tail_denied = forbidden | {"),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -169,6 +176,10 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":2653-2654", _CP, 2694, "un-indexes a restored session"),
     (":2663-2665", _CP, 2703, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     (":2715", _CP, 2755, "tail_denied = forbidden | {"),
+    # These two bare tokens live in row 13's family list. Without a pin row of their
+    # own, no count can be declared for them, and re-pointing a SINGLE site leaves a
+    # sibling to satisfy the substring arm — measured: mutating the list's `:2715` to
+    # `:2716` left 22 passed. Each row makes its site load-bearing.
     (":3735", _CP, 3778, 'if table == "point"'),
     (":5646", _ENT, 5666, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
@@ -204,11 +215,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4123'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3003'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3070`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2715`'): 4,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2755`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2691-2702'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2703-2705'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2653-2654`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2755'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2876`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2877`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37051`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37074`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
@@ -397,7 +410,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6933`/`:6934`/`:6939`
     # sit 64/65/70 lines below `:6869`, while `:6938`, the row that had no pin, is the 69th), and row
     # 13b's Source-writer pin (`sdk.py:21692`) is the same shape added again, for the same reason.
-    assert len(_PINS) == 48
+    assert len(_PINS) == 50
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
@@ -644,7 +657,7 @@ def test_the_main_head_figures_the_header_names_are_still_counted() -> None:
     head-selecting arm that would actually open it.
     """
     # ⛔ THE POPULATION HAS AN ANTI-SHRINK ARM, and it is the file's own precedent applied to a new
-    # dict (`assert len(_PINS) == 48` above, `declared == pinned` in the sibling pin test). Without
+    # dict (`assert len(_PINS) == 50` above, `declared == pinned` in the sibling pin test). Without
     # it the guard above is defeatable exactly the way an absent pin is not coverage: re-point a
     # `main`-head figure in the document AND delete its row here, and the loop has nothing to check
     # — measured on a copy of this tree at `25b0fd5f` (`:6854-6870` -> `:6855-6871` in the audit doc
