@@ -273,22 +273,45 @@ def _ontology_status_section() -> str:
     return tail if end is None else tail[: end.start()]
 
 
-def _read_side_legacy_note() -> str:
-    """§5's read-side legacy note: the ONE blockquote paragraph that says it.
+def _read_side_legacy_note(section: str | None = None) -> str:
+    """§5's read-side legacy note: the ONE blockquote PARAGRAPH that says it.
 
     Scoped to a paragraph, not to §5, because the three retired words appear in
     text that is NOT the disclosure: the pre-v3.37 table carried them as status
-    ROWS, and §5's tombstone contract names `status='retracted'` after the note.
-    A section-wide search was satisfied by both, so it was green on the buggy
-    table this note exists to correct.
+    ROWS, and §5's tombstone contract names `status='retracted'` in the SAME
+    blockquote. A section-wide search was satisfied by both, so it was green on
+    the buggy table this note exists to correct.
+
+    ⛔ A BLANK-LINE split is not a paragraph split here. MD028 keeps §5's notes as
+    ONE blockquote, so its paragraphs are separated by bare `>` lines and never by
+    a blank line — splitting on `\\n\\s*\\n` returns the whole quote group, which
+    admits the tombstone contract (and any word a later edit puts there) as if it
+    were the disclosure. A bare `>` is therefore the break.
+
+    Reads the paragraph's `>` continuation lines with it: a rewrap changes nothing
+    semantic and must not redden a content pin.
+
+    Returns ``""`` when no such paragraph exists, so the caller's assertion fails
+    with the reason rather than this helper raising on a doc that lost the note.
+    ``section`` is injectable so the non-vacuity pin can drive it with the pre-v3.37
+    shape (words in the table, no note) without touching the real file.
     """
-    section = _ontology_status_section()
-    quoted = [p for p in re.split(r"\n\s*\n", section)
-              if p.lstrip().startswith(">") and "read-side legacy" in p]
-    assert len(quoted) == 1, (
-        f"§5 has {len(quoted)} blockquote paragraph(s) naming 'read-side legacy'; "
-        "exactly one note must disclose the retired words")
-    return quoted[0]
+    paragraphs: list[list[str]] = []
+    current: list[str] = []
+    for line in (_ontology_status_section() if section is None else section).splitlines():
+        stripped = line.lstrip()
+        quoted = stripped.startswith(">")
+        if not quoted or not stripped[1:].strip():  # not a quote / a bare `>` break
+            if current:
+                paragraphs.append(current)
+                current = []
+            continue
+        current.append(stripped)
+    if current:
+        paragraphs.append(current)
+    return "\n".join(
+        paragraph for paragraph in ("\n".join(p) for p in paragraphs)
+        if "read-side legacy" in paragraph)
 
 
 def _ontology_status_table_words() -> frozenset[str]:
@@ -383,14 +406,20 @@ def test_ontology_discloses_the_legacy_words_it_no_longer_lists():
     DISCLOSED rather than discovered, so it is pinned here: a lane that tidies the
     three words out of §5 entirely fails this test instead of quietly deleting the
     record of a live divergence. NON-VACUOUS: the pre-v3.37 table satisfied a
-    section-wide search for all three words, so the pin reads the note itself.
+    section-wide search for all three words, so the pin reads the note itself —
+    ``test_ontology_legacy_pin_reads_the_note_not_the_section`` drives that shape
+    and shows the scoped read refusing it.
     """
     # ⛔ SCOPED TO THE NOTE, not to §5 as a whole. The pre-v3.37 table listed all
     # three words as STATUS ROWS, so a section-wide `in section` was satisfied by
     # the very table this note exists to correct — the guard would have been green
-    # on the buggy doc it was written for. The note is the blockquote that follows
-    # the table; a word elsewhere in §5 is not a disclosure.
+    # on the buggy doc it was written for. The note is the blockquote paragraph
+    # that follows the table; a word elsewhere in §5 is not a disclosure.
     note = _read_side_legacy_note()
+    assert note, (
+        "§5 carries no `read-side legacy` blockquote paragraph — the retired words "
+        "must stay DISCLOSED in the note that says the model no longer produces "
+        "them, not merely named somewhere in the section (#12855)")
     for word in ("retracted", "outdated", "archived"):
         assert f"`{word}`" in note, (
             f"§5's read-side legacy note no longer names {word!r} — the retired "
@@ -402,6 +431,68 @@ def test_ontology_discloses_the_legacy_words_it_no_longer_lists():
     assert "`retract_point`" in note and "still writes `retracted`" in note, (
         "§5 no longer discloses that `retract_point` still writes `retracted` — that "
         "is the one place the code diverges from this model (#11824 S2)")
+
+
+def test_ontology_legacy_pin_reads_the_note_not_the_section():
+    """Non-vacuity for the scoping in ``test_ontology_discloses_the_legacy_words…``.
+
+    §5 as it read BEFORE v3.37 satisfied a section-wide word check without carrying
+    any disclosure at all: its six-row table named all three retired words in its
+    Status/Transitions cells (measured against the real artifact — `origin/main`'s
+    §5 — where the section-wide read is GREEN and this scoped read is RED). This
+    pins that the scoped read refuses that shape, so the check above cannot drift
+    back to a whole-section read and keep passing.
+
+    ⛔ It also pins the paragraph BREAK, which a blank-line split gets wrong: §5's
+    notes are one MD028 blockquote, so a blank-line split hands back the whole
+    quote group — tombstone contract included — and a word added there would
+    satisfy the disclosure assertions. The fixture carries the tombstone note with
+    the disclosure paragraph deleted, which must read as NO note at all.
+    """
+    words = ("retracted", "outdated", "archived")
+    pre_v337 = (
+        "### Point Status Vocabulary (canonical, #432/#690)\n"
+        "\n"
+        "| Status | Kind | Transitions to | Notes |\n"
+        "|--------|------|----------------|-------|\n"
+        "| `draft` | initial | `live` | Inert for EP |\n"
+        "| `live` | active | `retracted`, `outdated`, `archived` | Full EP |\n"
+    )
+    for word in words:
+        assert f"`{word}`" in pre_v337, (
+            "the fixture must reproduce the shape the whole-section read passed on")
+    assert _read_side_legacy_note(pre_v337) == "", (
+        "the legacy pin read the retired words out of the TABLE — that is the "
+        "whole-section read this finding raised, and it proves nothing about the "
+        "note")
+    tombstone_only = (
+        pre_v337
+        + "\n"
+        "> **Tombstone contract:** Retracted points stay in the graph "
+        "(`get_point` returns them with `status='retracted'`).\n"
+        ">\n"
+        "> **Consequence:** a stored inverted window is reported, not repaired.\n"
+    )
+    assert _read_side_legacy_note(tombstone_only) == "", (
+        "the note read escaped its paragraph — §5's tombstone contract is in the "
+        "same blockquote, so a blank-line paragraph split would admit it as the "
+        "disclosure")
+    # The split is not cosmetic: with the note PRESENT and a retired word carried
+    # only by the tombstone paragraph beside it, the scoped read must not see that
+    # word — a blank-line split returns both paragraphs as ONE note and does.
+    note_then_tombstone = (
+        "### Point Status Vocabulary (canonical)\n"
+        "\n"
+        "> **`retracted` and `outdated` are read-side legacy**, not statuses.\n"
+        ">\n"
+        "> **Tombstone contract:** stored rows may still hold `archived`.\n"
+    )
+    scoped = _read_side_legacy_note(note_then_tombstone)
+    assert "`retracted`" in scoped and "`outdated`" in scoped, scoped
+    assert "`archived`" not in scoped, (
+        "the scoped read picked up a word from the tombstone paragraph beside the "
+        "note — the paragraph break is being read as a blank line, and §5's notes "
+        "are one MD028 blockquote with bare `>` separators")
 
 
 def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):
