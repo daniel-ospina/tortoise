@@ -346,10 +346,13 @@ def test_a_cancelled_plan_is_discoverable_and_a_live_plan_is_not_never_happened(
 
 @_docker_only
 def test_a_plan_that_happened_carries_its_occurrence(sdk):
-    """`linkedEvents` separates "planned, never happened" from "planned and held".
+    """A plan that happened carries the Event that records it, on the row.
 
-    Without this the two are the same row: both ended on a terminal stage. The
-    occurrence is an Event wired `aboutObject` — the product's own link.
+    Without this the two cases read the same: both ended on a terminal stage. The
+    occurrence is an Event wired `aboutObject` — that is the product's own link.
+    ⚠️ The list is ANY kind (`#13128`): it being non-empty is not by itself "it
+    happened", because a mention (a note, an email summary) lands here too. The
+    occurrence/mention split is `planned_occurrence.OCCURRENCE_EVENT_KINDS`.
     """
     from tortoise import pipeline
 

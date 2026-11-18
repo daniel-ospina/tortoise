@@ -1508,8 +1508,12 @@ class TestAMentionIsNotAnOccurrence:
     So an Event can be *about* a plan without being its occurrence — a note, a
     reminder, an email summary — and before #13128 the read counted every linked
     Event, so a note made a plan read as "it happened". The distinguishing fact
-    is the linked Event's OWN kind: :data:`PO.OCCURRENCE_EVENT_KIND`, whose only
-    writer is :func:`record_occurrence` (which refuses any other kind).
+    is the linked Event's OWN kind: :data:`PO.OCCURRENCE_EVENT_KINDS`, which
+    :func:`record_occurrence` writes and which its ``event_kind=`` door accepts to
+    the exclusion of every other kind. That constant is also where the residuals
+    live — the kind is EVIDENCE, not proof (``occurrence`` is ONTOLOGY §5's
+    generic/fallback kind), and the read fails CLOSED on a plan-linked Event of
+    another kind.
 
     The two facts are then served SEPARATELY — ``mentions`` on the row — rather
     than one number being asked to mean both.
@@ -1552,6 +1556,23 @@ class TestAMentionIsNotAnOccurrence:
         PO.create_plan(sdk, "Nothing linked at all")
         rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
         assert rows["Nothing linked at all"]["mentions"] == 0
+
+    def test_a_linked_Event_with_NO_kind_is_a_mention(self, sdk):
+        """The `coalesce(…, '')` arm: absence is a mention, not an occurrence.
+
+        A raw/foreign writer can wire an Event that carries no `eventKind` at all;
+        `'' IN $occurrence_kinds` is false, so it must classify as a mention —
+        the arm the code comments most and the one nothing else pinned.
+        """
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Linked from an unkinded Event")
+        g.query("CREATE (e:Event {eventId:'nokind-1'})")
+        g.query("MATCH (e:Event {eventId:'nokind-1'}), (p:Object {id:$p}) "
+                "CREATE (e)-[:aboutObject]->(p)", params={"p": plan["id"]})
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        assert "Linked from an unkinded Event" in rows, (
+            "a kind-less linked Event was read as the occurrence")
+        assert rows["Linked from an unkinded Event"]["mentions"] == 1
 
     def test_a_mention_does_not_change_an_ENDED_plan_s_ending(self, sdk):
         """Q5's capstone row: a cancelled plan with a note about it.
@@ -1911,6 +1932,84 @@ class TestAMentionIsNotAnOccurrence:
         assert PO.OCCURRENCE_EVENT_KIND == PO.DEFAULT_OCCURRENCE_KIND
         assert PO.OCCURRENCE_EVENT_KIND in CANONICAL_EVENT_KINDS
 
+    def test_BOTH_legal_spellings_of_the_kind_count(self, sdk):
+        """`core:X` and `X` are ONE kind, and the door stores what it is given.
+
+        A bare-string comparison would report a plan that happened as
+        never-happened when its Event carries the `core:` spelling, and would
+        refuse `record_occurrence(event_kind='core:occurrence')` although it names
+        the same kind — the module's own `PLAN_KINDS` carries both spellings for
+        the same reason.
+        """
+        g = sdk._get_proj().g
+        assert set(PO.OCCURRENCE_EVENT_KINDS) == {"occurrence", "core:occurrence"}
+        # a mention written under the bare spelling is still a mention…
+        mentioned = PO.create_plan(sdk, "Mentioned, spelt the bare way")
+        sdk.create_entity("event", "a note", eventKind="email",
+                         aboutObject=mentioned["id"])
+        # …and an occurrence stored under the `core:` spelling still counts.
+        happened = PO.create_plan(sdk, "Happened, spelt with the namespace")
+        recorded = PO.record_occurrence(sdk, happened["id"],
+                                        event_kind="core:occurrence")
+        assert recorded["move"].applied is True
+        assert g.query(
+            "MATCH (e:Event {id:$e}) RETURN e.eventKind",
+            params={"e": recorded["eventId"]}).result_set[0][0] == (
+                "core:occurrence"), "the fixture must store the `core:` spelling"
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        assert "Mentioned, spelt the bare way" in rows
+        assert rows["Mentioned, spelt the bare way"]["mentions"] == 1
+        assert "Happened, spelt with the namespace" not in rows, (
+            "the `core:` spelling of the occurrence kind read as a mention")
+
+    def test_the_kind_test_survives_a_REBUILD(self, sdk):
+        """The new proof must be a JOURNALLED fact, not a live-write side channel.
+
+        This change makes the Event's kind load-bearing, so a replay that dropped
+        it would flip every happened plan to "never happened" — the inversion the
+        read exists to prevent — with nothing else red.
+
+        ⛔ BOTH legal spellings are recorded here ON PURPOSE (#13604 review,
+        FINDING 1). With only the bare spelling this pin was VACUOUS against the
+        mutant that matters most to this diff — the read narrowed back to
+        `= 'occurrence'` — because nothing in it ever stored `core:occurrence`, so
+        a red could only come from reverting pre-existing lines this PR does not
+        touch. The `core:` plan is the one that makes the pin discriminate the
+        ALIAS arm, and the post-replay `eventKind` assertion pins the fact the
+        whole read newly depends on: the spelling is journalled with the Event and
+        survives `rebuild_all` verbatim (`_EVENT_HANDLED` carries `eventKind`).
+        """
+        g = sdk._get_proj().g
+        happened = PO.create_plan(sdk, "Happened before the rebuild")
+        PO.record_occurrence(sdk, happened["id"], name="it happened")
+        aliased = PO.create_plan(sdk, "Happened, spelt with the namespace")
+        recorded = PO.record_occurrence(sdk, aliased["id"],
+                                        name="it happened, spelt with the namespace",
+                                        event_kind="core:occurrence")
+        mentioned = PO.create_plan(sdk, "Mentioned before the rebuild")
+        sdk.create_entity("event", "a note", eventKind="email",
+                         aboutObject=mentioned["id"])
+        # the fixture's journal is <root>/events.jsonl, and `rebuild_all` reads
+        # the DIRECTORY (the rotated-journal view) — the shape
+        # tests/test_8398_aboutobject_replay.py uses.
+        sdk._get_proj().rebuild_all(sdk._test_root, confirm_destructive=True)
+        assert g.query(
+            "MATCH (e:Event {id:$e}) RETURN e.eventKind",
+            params={"e": recorded["eventId"]}).result_set[0][0] == (
+                "core:occurrence"), (
+            "replay dropped/normalised the journalled `core:` spelling — the "
+            "kind the read tests is no longer the kind that was written")
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        assert "Happened before the rebuild" not in rows, (
+            "replay lost the occurrence kind — a happened plan reads as never "
+            "happened")
+        assert "Happened, spelt with the namespace" not in rows, (
+            "the `core:` spelling of the occurrence kind read as a mention after "
+            "the rebuild")
+        assert "Mentioned before the rebuild" in rows
+        assert rows["Mentioned before the rebuild"]["mentions"] == 1, (
+            "replay lost the mention link")
+
     def test_the_read_counts_the_linked_KIND_and_not_a_bare_edge(self):
         """The mutation that matters: a reader that counts every link is the bug.
 
@@ -1936,8 +2035,9 @@ class TestAMentionIsNotAnOccurrence:
         assert PO.planned_without_occurrence(graph) == []
         assert "count(e) AS occurrences" not in graph.cypher, (
             "the read counts every linked Event again — that is #13128")
-        assert graph.params["occurrence_kind"] == PO.OCCURRENCE_EVENT_KIND
-        assert graph.cypher.count("$occurrence_kind") == 2, (
+        assert sorted(graph.params["occurrence_kinds"]) == sorted(
+            PO.OCCURRENCE_EVENT_KINDS)
+        assert graph.cypher.count("$occurrence_kinds") == 2, (
             "the two arms (occurrence / mention) must both read the kind")
         assert graph.cypher.count("e IS NOT NULL") == 2, (
             "each arm must guard the OPTIONAL MATCH's null row")
