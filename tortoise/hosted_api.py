@@ -14406,12 +14406,17 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     misconfiguration.** Session and JWT credentials resolve no record tenant by
     design, so in `record` mode that is a **500** (there is no cache branch to
     fall back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
-    `record-tenant-unresolved`, the third of the FIVE reasons
-    (`record_serve.FALLBACK_REASONS`). The remaining two are conditions of the
-    READ LANE, not of the record: `record-read-lane-refused` (the submission
+    `record-tenant-unresolved`, the third of the SIX reasons
+    (`record_serve.FALLBACK_REASONS`). The remaining three: two are conditions of
+    the READ LANE, not of the record — `record-read-lane-refused` (the submission
     never ran, so the record was never asked) and `record-read-bound-miss` (the
     submission RAN and did not answer inside the lane's bound — asked, not
-    unasked, and not an outage claim either).
+    unasked, and not an outage claim either) — and the sixth,
+    `record-label-not-served`, is the ENTITY union's coverage reason (#13093):
+    the label is outside `ENTITY_UNION_LABELS`, so the read fell back on behalf
+    of a door that another route serves. It is not reachable from THIS route,
+    which is why the count above is over the vocabulary rather than over the
+    reasons a point read can name.
 
     ⚠️ A record-served answer carries the record's PRIMARY field set, and the
     differences from the cache answer are named here in full. `content_hash` is
