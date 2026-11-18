@@ -3583,6 +3583,28 @@ def run_bm25_query(
         return []
 
 
+class _NeverRaised(Exception):
+    """A never-matching `except` target for import-failure resilience (#13610)."""
+
+
+def _record_without_fallback() -> type[BaseException]:
+    """`record_vector.RecordVectorWithoutFallback`, resolved LAZILY (#13610).
+
+    ⛔ LAZY, and the failure is SWALLOWED, because `record_vector` imports THIS
+    module (the status vocabulary, the budget arithmetic) and a module-scope import
+    the other way would close the cycle. The swallow cannot hide a real state:
+    nothing can raise this class unless `record_vector` imported successfully in
+    the caller that BUILT the searcher, so an unimportable `record_vector` means
+    `pg_vector` was never supplied and this `except` clause is never reached.
+    """
+    try:
+        from .record_vector import RecordVectorWithoutFallback
+
+        return RecordVectorWithoutFallback
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring
+        return _NeverRaised
+
+
 def run_vector_query(
     graph, query_vec: list[float], limit: int = 20,
     timeout_ms: int = VECTOR_LEG_BUDGET_MS,
@@ -4013,6 +4035,28 @@ def run_vector_query(
         try:
             pg_rows = pg_vector(entity_type, query_vec, limit,
                                 excluded_statuses)
+        except _record_without_fallback() as e:  # #13610: NO graph branch
+            # ⛔ POST-CONTRACT, THE GRAPH IS NOT A FALLBACK (#13610). The record's
+            # coverage has been VERIFIED for this label (it holds a vector for
+            # every vector-bearing node the graph has), and the graph write has
+            # stopped, so the graph's dense population has been FROZEN since the
+            # contract while the record's has kept growing. Answering from it now
+            # would return a SMALLER cohort and present it as the answer — the
+            # `#5090` Q2 defect, on the branch that carries production traffic,
+            # and with `mechanism=scan_fallback` as the only trace of it.
+            #
+            # So the leg reports that it could not look: `degraded=True` with the
+            # documented `query_failed` reason, no rows. The read is then declared
+            # degraded (`declared_degraded_read`) and the keyword/structural legs
+            # still answer — which is the honest outcome and the one an operator
+            # can alert on. `#4999` is satisfied the other way round: there is no
+            # fallback to announce, and the trace says the leg failed.
+            logger.info(
+                "record dense leg for %s is the label's ONLY source and did not "
+                "answer (%s) — reporting the failed leg rather than a smaller "
+                "graph cohort", entity_type, e)
+            _record(ran=True, degraded=True, reason="query_failed", count=0)
+            return []
         except Exception as e:  # noqa: BLE001, RUF100 — every failure takes the fallback
             index_attempted = True
             # The record leg spent part of the read and did not answer: the

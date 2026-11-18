@@ -20264,6 +20264,55 @@ class FalkorProjection(
             return ("server", str(own_host), None)
         return ("instance", id(self))
 
+    def _label_vector_count(self, entity_type: str) -> int | None:
+        """How many nodes of ``entity_type``'s label carry an `embedding`? (#13610)
+
+        The DENOMINATOR of the dense cutover's coverage count, measured on THIS
+        projection's graph — the graph is the tenant's, so no further scoping is
+        needed, and this is the only place a graph handle exists for the question.
+
+        ⛔ WHY A COUNT AND NOT A DIFF. `record_vector.coverage` asks *"does the
+        record hold as many vectors as the graph can serve?"*, which is the
+        condition `#11395` `6956793300` set for retiring the graph copy ("once
+        the record holds and indexes them"). Comparing the two SETS would mean
+        shipping every id across the wire on a path that runs on a dense read; a
+        count is one aggregate per label per cache TTL, and the two vectors are
+        the same function of the same datum for these labels
+        (`tests/test_13220_record_label_embeddings.py` pins that), so a count is
+        sound where it would not be for an opaque index.
+
+        ⛔ ``None`` IS NOT ``0``. This answers `None` for any failure — no graph
+        handle, a driver error, an unparseable row — because `record_vector.
+        coverage` treats an unmeasurable denominator as UNVERIFIED, which keeps
+        the graph branch and the graph write. Answering `0` would verify coverage
+        on a failed measurement and retire the graph for a store that needs it.
+
+        ⚠️ NOT status-filtered, deliberately: the record's numerator is the whole
+        table's vector-bearing rows (`record_vector._record_vector_count`), so a
+        `#689` terminal cage here would compare two different populations and
+        leave a store permanently unverified. Terminal nodes carry vectors too, in
+        both stores.
+        """
+        from ..security import entity_label
+
+        try:
+            label = entity_label(entity_type)
+            rows = self.g.query(
+                f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
+                "RETURN count(n)").result_set
+        except Exception:  # noqa: BLE001, RUF100 — unmeasurable, never zero
+            logging.getLogger(__name__).debug(
+                "#13610: the graph's `%s` vector count could not be measured — "
+                "dense coverage stays unverified for this label", entity_type,
+                exc_info=True)
+            return None
+        if not rows or not rows[0]:
+            return None
+        try:
+            return int(rows[0][0])
+        except (TypeError, ValueError):
+            return None
+
     def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
         """Measure which of the labels the vector leg SERVES carry a VECTOR
         index on this engine, and REPORT THE PAIR — then the gap. (#4997, #11087)

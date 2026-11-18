@@ -1103,7 +1103,7 @@ def _capture_redaction_warning(count: int) -> str:
     )
 
 
-def _record_vector_searcher(sdk=None, timeout_ms=None):
+def _record_vector_searcher(sdk=None, timeout_ms=None, projection=None):
     """The dense leg's POSTGRES searcher for THIS request — or ``None``.
 
     #11642 / #4051 V1. Two properties are the whole reason this is a function
@@ -1171,9 +1171,25 @@ def _record_vector_searcher(sdk=None, timeout_ms=None):
         from .record_vector import searcher
     except Exception:  # noqa: BLE001, RUF100 — an unimportable accelerator is "unarmed"
         return None
+    # ⛔ #13610: THE COVERAGE DENOMINATOR. `record_vector.searcher` gates the
+    # `object`/`subject` arm on a COUNT — does the record hold a vector for every
+    # vector-bearing node the graph has? — and only the caller holds a graph
+    # handle, so the count is supplied here as a bound method on the projection
+    # this read is already using (no new handle is opened, and the count is
+    # cached per tenant/label by `record_vector.coverage`, so this is asked at
+    # most once per TTL whatever the read rate).
+    # `None` (no projection in hand) is SAFE and it is not neutral: with no
+    # denominator the gated labels DECLINE and the graph branch keeps answering,
+    # which is a deployment left in double-storage rather than one served a short
+    # cohort. See `searcher`'s docstring on why an unwired caller gets none of
+    # this issue's benefit.
+    population = None
+    if projection is not None:
+        population = getattr(projection, "_label_vector_count", None)
     try:
         return searcher(carried=getattr(sdk, "_record_tenant", None),
-                        timeout_ms=timeout_ms)
+                        timeout_ms=timeout_ms,
+                        graph_population=population)
     except Exception:  # noqa: BLE001, RUF100 — never let the accelerator break a read
         _logger.debug("record dense searcher unavailable — using the graph",
                       exc_info=True)
@@ -37777,7 +37793,8 @@ class TortoiseSDK:
                                     # keeps the graph branch unchanged.
                                     # #11691: bound to this read's budget.
                                     pg_vector=_record_vector_searcher(
-                                        self, timeout_ms=_budget_ms),
+                                        self, timeout_ms=_budget_ms,
+                                        projection=proj),
                                     # #13108: the store's own measured index
                                     # inventory, so an unindexed label skips the
                                     # doomed queryNodes attempt (`None` = not
@@ -46365,7 +46382,8 @@ class TortoiseSDK:
             # would find no tenant and take the graph branch on EVERY request
             # while reporting nothing. `None` (no record DSN, or no tenant
             # installed) keeps the graph branches byte-identically.
-            pg_vector=_record_vector_searcher(self, timeout_ms=_leg_budget_ms),
+            pg_vector=_record_vector_searcher(self, timeout_ms=_leg_budget_ms,
+                                              projection=proj),
         )
 
         if _bm25_lexical and "vector" not in _floored_legs:
@@ -48770,7 +48788,8 @@ class TortoiseSDK:
                 # #11691: bound to THIS pass's budget, the same `timeout_ms` the
                 # graph branches just above get — otherwise the record leg would
                 # still be on the door's 15 s inside a 500 ms read.
-                pg_vector=_record_vector_searcher(self, timeout_ms=timeout_ms),
+                pg_vector=_record_vector_searcher(self, timeout_ms=timeout_ms,
+                                                  projection=proj),
                 # ONE dense slot, ONE tally: the shipped leg already counted it
                 # (the #8488 arm's ``meter=False`` precedent — the trace still
                 # records the second pass, so a measurement can see it ran).
