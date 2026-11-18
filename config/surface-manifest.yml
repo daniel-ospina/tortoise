@@ -146,7 +146,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 501270a4bfd34d12c7b6638e02f2c712e5676fa0
+cut_at_commit: 9e9fc23276186749e36e9e9caf4a3ba75dd803b0
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1838,7 +1838,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_get_entity
 - name: tortoise_create_entity
-  served_from: tortoise/mcp_server.py:2ad91f43163a0f76
+  served_from: tortoise/mcp_server.py:874f2a0fc65eba5a
   served_attributes: 93b456ed38374aa3
   family: graph
   family_rank: 2
@@ -1853,10 +1853,10 @@ rows:
     aboutSubject/aboutObject/aboutPoint/aboutDocument props. Returns {node, nudges, advisories?} — nudges suggest
     IMPL/NAND/mitigate connections to related Points; advisories notes a write that declared no source and no provenance
     (advisory only, never a block). For type=''document'', declaring extractedFrom materializes the :Source (#8171);
-    on subject/object/event it is inert and an extracted_from_inert advisory is returned. type=''point'' absorbs
-    tortoise_create_point: `name` is the claim''s content and props={"pointKind": ...} is the kind (default ''statement'');
-    dedup defaults to True as that door declared. type=''diary'' absorbs tortoise_diary_write: `name` is the entry
-    and props carries authoredBy (required), topic and wing.'
+    on subject/object/event it is inert and an extracted_from_inert advisory is returned. type=''point'' writes
+    a belief: `name` is the claim''s content and props={"pointKind": ...} is the kind (default ''statement''); dedup
+    defaults to True, so a repeat folds into the existing point by content. type=''diary'' writes a journal entry
+    pinned to kind ''diary'': `name` is the entry and props carries authoredBy (required), topic and wing.'
   dependency: declares TortoiseSDK.create_entity (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
