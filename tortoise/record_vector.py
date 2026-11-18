@@ -66,6 +66,7 @@ __all__ = [
     "HNSW_ITERATIVE_SCAN",
     "LABEL_SERVED",
     "LOG_NAME",
+    "RecordVectorDeclined",
     "RecordVectorError",
     "VectorShortfall",
     "armed",
@@ -146,23 +147,24 @@ HNSW_ITERATIVE_SCAN = "strict_order"
 #: (``search_engine`` reads ``remaining_read_ms`` only after this leg returns).
 #: So the prefetch is bounded HERE instead, by two row budgets
 #: (:data:`_FOLDED_PREFETCH_ROW_BUDGET`, :data:`_FOLDED_PREFETCH_EVENT_BUDGET`):
-#: past either, the leg returns ``None`` — "not served HERE" — and the caller
-#: takes the graph branch, which applies the identical cage in Cypher. That is
-#: the SAME fail-safe direction as :data:`_FOLDED_TERMINAL_KEY_BUDGET`, and it is
-#: what makes the TIMEOUT story above true for the whole prefetch rather than
-#: only for its SQL.
+#: past either, :func:`_folded_terminal_keys` returns ``None`` and the leg raises
+#: :class:`RecordVectorDeclined` — the caller's named `scan_fallback`, whose graph
+#: branch applies the identical cage in Cypher while a TRUNCATED fold would have
+#: left terminal keys out. That is the SAME fail-safe direction as
+#: :data:`_FOLDED_TERMINAL_KEY_BUDGET`, and it is what makes the TIMEOUT story
+#: above true for the whole prefetch rather than only for its SQL.
 #:
-#: ⚠️ TWO COSTS THE BUDGETS DO NOT REMOVE, stated so no reader has to measure
-#: them again. (1) ``SELECT *`` carries ``embedding`` — the jsonb payload, ~384
-#: floats per row — for every row of the label, and ``node_from_row`` then
-#: DISCARDS it (`refused_props_names()` lists it), so the widest column in the
-#: table is paid per read and thrown away; the row budget bounds that, it does
-#: not make it cheap. (2) ``read_lifecycle_events`` has no ``target`` here, so it
-#: reads the TENANT's whole status-bearing journal subset, not this label's —
-#: reading ``object`` parses the ``subject`` birth records too. Both disappear
-#: when the fold is materialised, which is therefore the ARMING PRECONDITION
-#: for these two labels rather than an optimisation: `#13335`'s successor should
-#: cost exactly that.
+#: ⚠️ ONE COST THE BUDGETS DO NOT REMOVE, stated so no reader has to measure it
+#: again: ``read_lifecycle_events`` has no ``target`` here, so it reads the
+#: TENANT's whole status-bearing journal subset, not this label's — reading
+#: ``object`` parses the ``subject`` birth records too. The remaining cost is the
+#: FOLD ITSELF (~0.14 s of a measured 0.19 s for 8,000 rows), not the read: the
+#: payload columns are already excluded (:func:`_fold_prefetch_select`, 2.0 s →
+#: 0.19 s on the same 8,000 rows), which is why the budget that guards the
+#: uncancellable half is a ROW COUNT and not a byte count. Both the event scope and
+#: the fold disappear when the fold is materialised, which is therefore the ARMING
+#: PRECONDITION for these two labels rather than an optimisation: `#13335`'s
+#: successor should cost exactly that.
 #:
 #: The ``id column`` mirrors `search_engine`'s ``id_field`` derivation exactly
 #: (#448): ``source``/``document`` answer the canonical key ``url``, ``event``
@@ -306,23 +308,55 @@ ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 RECORD_LEG_STATEMENTS_PER_READ = 3
 
 
-def record_statement_ms(read_budget_ms: int | None) -> int | None:
+def record_statement_ms(read_budget_ms: int | None,
+                        statements: int = RECORD_LEG_STATEMENTS_PER_READ,
+                        ) -> int | None:
     """The per-statement bound for this leg inside a read of ``read_budget_ms``.
 
     ``None`` (an unbudgeted caller: health, replay, backup, restore — the reads
     that legitimately take seconds) stays ``None``, which leaves the door's own
-    ceiling untouched. A budget is divided by
-    :data:`RECORD_LEG_STATEMENTS_PER_READ` and never rounds down to ``0``:
-    Postgres reads ``statement_timeout = 0`` as NO TIMEOUT AT ALL, so the floor is
-    1 ms and :func:`tortoise.record_serve.open_record` clamps again on its side.
+    ceiling untouched. A budget is divided by ``statements`` and never rounds down
+    to ``0``: Postgres reads ``statement_timeout = 0`` as NO TIMEOUT AT ALL, so the
+    floor is 1 ms and :func:`tortoise.record_serve.open_record` clamps again on its
+    side.
+
+    ⛔ ``statements`` EXISTS SO THE RESERVE SURVIVES A LEG THAT ISSUES MORE THAN TWO,
+    and it is not a tuning knob (`#13466` review P3). The constant counts the DATA
+    statements a leg may issue *and the one share it must leave behind*: a
+    column-filtered label issues two (the kNN read, the shortfall ``count(*)``) and
+    a folded one issues three (its two prefetches, then the kNN), so passing the
+    raw statement count would let the folded leg spend the WHOLE read and hand the
+    graph branch a floored ``1 ms`` — turning the label's real path into an empty
+    result on exactly the labels whose graph branch is a brute-force scan. The
+    folded arm therefore divides by its count + 1.
     """
     if read_budget_ms is None:
         return None
-    return max(1, int(read_budget_ms) // RECORD_LEG_STATEMENTS_PER_READ)
+    return max(1, int(read_budget_ms) // max(1, int(statements)))
 
 
 class RecordVectorError(RuntimeError):
     """The record could not answer the dense leg. NOT an absence."""
+
+
+class RecordVectorDeclined(RecordVectorError):
+    """The record DECLINED this read — a bound, not a failure and not an absence.
+
+    ⛔ RAISED RATHER THAN RETURNED AS ``None`` (`#13466` review P3). ``None`` is the
+    contract's *"this label is not served from the record at all"*, and the caller's
+    two consequences are OPPOSITE for the two cases: a not-served label falls
+    through SILENTLY (its graph branch is its real path and always was), while a
+    DECLINED leg has already spent this read's prefetch and must report the
+    fallback (`#4999`: *a fallback must report the fallback*) and hand the graph
+    branch only the remainder of the budget (`#11691`). Returned as ``None``, the
+    decline was recorded as a plain ``scan`` — indistinguishable from "no record
+    serves this label" — which is the one trace signal an operator would use to
+    see the bound firing, and it gave the graph the full budget again.
+
+    Subclassing :class:`RecordVectorError` is deliberate: an unaware caller keeps
+    the correct behaviour (take the graph branch), and only a caller that wants to
+    tell the two apart has to look.
+    """
 
 
 class VectorShortfall(RecordVectorError):
@@ -491,15 +525,38 @@ def _sql_literal(value: str) -> str:
 #: How many folded terminal keys one dense read will bind into its statement.
 #:
 #: ⛔ A BOUND, NOT A QUALITY KNOB, and it fails toward the LEG THAT ALWAYS ANSWERED.
-#: The folded arm passes the record's own terminal keys as ``<> ALL(%s)``; the
-#: parameter is a text array, and a tenant whose fold calls an enormous number of
-#: Objects terminal would make that array the dominant cost of the read. Past this
-#: bound the leg returns ``None`` — *"this label is not served HERE"*, the
-#: documented not-armed outcome — so the caller takes its graph branch, which
-#: applies the identical cage in Cypher and is CORRECT rather than degraded. The
-#: failure direction therefore hides nothing and serves nothing terminal; it only
-#: declines the record's turn. Materialising the fold (so the list disappears) is
-#: what removes the bound.
+#: The folded arm passes the record's own terminal keys as ``<> ALL(%s)``; a tenant
+#: whose fold calls an enormous number of Objects terminal would make that array
+#: the dominant cost of the read's statement. Past this bound the leg DECLINES its
+#: turn (:class:`RecordVectorDeclined`, which the caller answers from the graph
+#: with the identical cage applied in Cypher) — so the failure direction hides
+#: nothing and serves nothing terminal. Materialising the fold, which makes the
+#: list disappear, is what removes the bound.
+#:
+#: ⚠️ WHEN IT CAN FIRE, stated because the first cut of this constant was justified
+#: by a cost that was not this one (`#13466` review P2). The prefetch reads the
+#: label's rows, so reaching 4,000 terminal keys means ~4,000 rows in this tenant,
+#: and the bound is therefore reachable only while the PREFETCH fits its statement
+#: share — which is why that prefetch selects every column EXCEPT the two payload
+#: ones (:func:`_fold_prefetch_select`). MEASURED on 8,000 `object` rows: `SELECT *`
+#: took **~2.0 s** (it materialised `embedding` jsonb at ~2.5 KB/row and the
+#: generated `embedding_vec` at ~7 KB/row, neither of which the fold reads), and the
+#: payload-free read took **~0.19 s** — against the ~0.125 s share a 500 ms read
+#: gives three folded statements plus the graph's reserve. So the bound is the
+#: operative guard it claims to be at this scale, while `SELECT *` made it
+#: unreachable (the statement was cancelled first, and the leg reported a timeout
+#: while presenting a bound it could never fire).
+#:
+#: ⛔ THE RESIDUAL, named rather than implied: ~0.19 s for 8,000 rows is still ABOVE
+#: the folded arm's per-statement share of a 500 ms read, so a tenant at that scale
+#: overruns its share and falls through to the graph as the NAMED `scan_fallback` —
+#: correct, but it means these two labels are not record-served at fleet scale. The
+#: cost is the FOLD ITSELF (~0.14 s of it is `node_from_row` +
+#: `apply_event_stream_folds` over 8,000 nodes), not the read, and it is removed by
+#: materialising the fold — the follow-up that makes the prefetch and this constant
+#: both disappear. Filed rather than attempted here: a per-target narrowing of the
+#: node read is exactly the place where a missed path becomes a `#689` LEAK, and
+#: correctness-before-cost is the order this lane was given.
 _FOLDED_TERMINAL_KEY_BUDGET = 4000
 
 #: How many of the label's ROWS one dense read will prefetch for the fold.
@@ -507,25 +564,63 @@ _FOLDED_TERMINAL_KEY_BUDGET = 4000
 #: ⛔ THE PYTHON HALF OF THE PREFETCH HAS NO OTHER BOUND. `_folded_terminal_keys`
 #: reads every row of the label for the tenant and runs `node_from_row` over each
 #: in the CLIENT process — `statement_timeout` cannot cancel that (it bounds the
-#: two SQL statements, not the fold). Past this many rows the leg returns `None`,
-#: i.e. "not served HERE": the caller's graph branch applies the identical cage in
-#: Cypher, which is CORRECT rather than degraded, and — unlike truncating the
-#: read — it cannot serve a terminal row (a truncated row set would silently drop
-#: terminal keys, which is the `#689` fail-OPEN direction).
+#: two SQL statements, not the fold) — and the measured fold cost is ~0.14 s for
+#: 8,000 rows. Past this many rows the leg DECLINES (`RecordVectorDeclined`), so
+#: the caller NAMES the fallback and its graph branch applies the identical cage in
+#: Cypher, which is CORRECT rather than degraded. ⚠️ And — unlike truncating the
+#: read — it cannot serve a terminal row: a trimmed row set would silently drop
+#: terminal keys, which is the `#689` fail-OPEN direction.
 #:
-#: It is a BOUND, not a target: 20,000 rows of `object`/`subject` is already a
-#: ~150 MB prefetch, because `SELECT *` carries the jsonb `embedding` payload that
-#: the projection discards. Materialising the fold is what removes this too.
-_FOLDED_PREFETCH_ROW_BUDGET = 20_000
+#: The number is tied to the measurement above rather than picked: 10,000 rows is
+#: already ~0.18 s of unfoldable Python inside a read whose folded arm gets ~0.125 s
+#: per statement, so a tenant past it is not record-served at fleet scale anyway
+#: (the other lane's 8,000-row measurement says so) — this bound just makes the
+#: answer NAMED and bounded instead of a cancellation somewhere downstream.
+#: Materialising the fold is what removes it.
+_FOLDED_PREFETCH_ROW_BUDGET = 10_000
 
 #: How many JOURNAL EVENTS one dense read will replay for the fold.
 #:
 #: The prefetch's second read is the tenant's status-bearing journal subset
 #: (`read_lifecycle_events` with no `target`), and `apply_event_stream_folds`
 #: builds two dicts over it before folding — again in Python, again uncancellable.
-#: Past this many events the leg returns `None` for the same reason, and with the
-#: same fail-safe direction, as the row budget above.
+#: Per-event work is a dict insert rather than a row projection, so this bound is
+#: an order of magnitude looser than the row one; past it the leg declines for the
+#: same reason, and with the same fail-safe direction, as the row budget above.
 _FOLDED_PREFETCH_EVENT_BUDGET = 50_000
+
+
+#: `table -> `t.col, t.col, …`` — every column of the label's table EXCEPT the two
+#: payload ones. Built once per process from the record's OWN column census
+#: (`record_projection.table_columns`, itself migration-fingerprint-cached), so a
+#: column added by a later migration is read without an edit here and no
+#: hand-written list can go stale.
+#:
+#: ⛔ WHY THE PAYLOAD IS DROPPED, measured (`#13466` review P2): the fold reads
+#: `id`/`name`/kind/`superseded_by`/`superseded_at` and the NULL-ness of
+#: `embedding_vec` — never the vector, never the jsonb. `SELECT *` materialises
+#: both (≈2.5 KB + ≈7 KB per row) and measured **~2.0 s on 8,000 rows** against
+#: **~0.19 s** for this projection end to end (**~47 ms** for the SELECT alone), so
+#: the great majority of the cost was two columns the fold never looks at.
+#:
+#: ⚠️ THE TWO NAMES ARE NOT A SECOND DECLARATION OF THE SCHEMA: they are the two
+#: the record declares DERIVED-and-STORED as VECTORS (`STORED_VECTOR_PROPS`' own
+#: columns), and a column merely absent here would not be dropped silently — it
+#: would still be `SELECT`ed once the census lists it.
+_FOLD_PREFETCH_SELECT: dict[str, str] = {}
+
+
+def _fold_prefetch_select(table: str) -> str:
+    """The payload-free column list for `table`, built once and cached."""
+    cached = _FOLD_PREFETCH_SELECT.get(table)
+    if cached is not None:
+        return cached
+    from .record_projection import table_columns
+
+    columns = sorted(table_columns()[table] - {"embedding", "embedding_vec"})
+    rendered = ", ".join(f"t.{column}" for column in columns)
+    _FOLD_PREFETCH_SELECT[table] = rendered
+    return rendered
 
 
 def _rows_as_dicts(cur: Any, sql: str, params: tuple) -> list[dict[str, Any]]:
@@ -618,7 +713,8 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
     # is not worth depending on for a boolean.
     rows = _rows_as_dicts(
         cur,
-        f"SELECT *, (t.embedding_vec IS NOT NULL) AS has_embedding_vec "
+        f"SELECT {_fold_prefetch_select(table)}, "
+        f"       (t.embedding_vec IS NOT NULL) AS has_embedding_vec "
         f"FROM public.{table} AS t "
         f"WHERE t.org_id = %s AND t.graph_id = %s "
         f"  AND t.{id_column} IS NOT NULL AND t.{id_column} <> '' "
@@ -925,6 +1021,15 @@ def vector_search(
     from .record_serve import open_record
 
     literal = "[" + ",".join(repr(v) for v in vec) + "]"
+    # ⛔ THE DIVISOR IS DECIDED HERE, BEFORE ANY STATEMENT RUNS, because the DOOR
+    # applies it: a folded label issues THREE data statements (its two prefetches,
+    # then the kNN) against the column arm's two, so it must divide by one MORE than
+    # it issues or it spends the whole read and hands the graph branch a floored
+    # 1 ms — see `record_statement_ms`.
+    status_source = _STATUS_COLUMN.get(entity_type)
+    folded = status_source is not None and status_source[0] == _FOLDED_STATUS
+    statements = (RECORD_LEG_STATEMENTS_PER_READ + 1 if folded
+                  else RECORD_LEG_STATEMENTS_PER_READ)
 
     try:
         # ⚠️ TWO CALL SHAPES ON PURPOSE: with no budget the door is asked exactly
@@ -936,7 +1041,8 @@ def vector_search(
         # one deadline).
         conn = (open_record(record_dsn) if timeout_ms is None
                 else open_record(record_dsn,
-                                 statement_timeout_ms=record_statement_ms(timeout_ms)))
+                                 statement_timeout_ms=record_statement_ms(
+                                     timeout_ms, statements)))
     except Exception as e:  # noqa: BLE001, RUF100 — every failure is "the record did not answer"
         raise RecordVectorError(
             f"the record could not be opened ({type(e).__name__}) — the dense "
@@ -957,33 +1063,42 @@ def vector_search(
             available: int | None = None
             if kind_filter:
                 where.append(kind_filter)
-            status_source = _STATUS_COLUMN.get(entity_type)
-            if status_source is not None and status_source[0] == _FOLDED_STATUS:
+            if folded:
                 fold = _folded_terminal_keys(
                     conn, cur, scope, entity_type, excluded_statuses)
                 if fold is None:
-                    # The prefetch itself is over budget (rows or journal events)
-                    # — see _FOLDED_PREFETCH_ROW_BUDGET. Declining the record's
-                    # turn is the fail-SAFE direction: the caller's graph branch
-                    # applies the identical cage in Cypher, and a truncated fold
-                    # would instead SERVE the rows `#689` hides.
+                    # ⛔ THE PREFETCH ITSELF IS OVER BUDGET (rows, or journal
+                    # events) — see _FOLDED_PREFETCH_ROW_BUDGET. It DECLINES the
+                    # same way the bind budget below does, and for the same two
+                    # reasons: the caller must NAME the fallback (`#4999`) rather
+                    # than take a silent `scan`, and it gets only the remainder of
+                    # the read (`#11691`). A TRUNCATED fold is not an option — the
+                    # terminal keys it dropped are rows this leg would SERVE.
                     logging.getLogger(LOG_NAME).warning(
                         "the record's `%s` fold prefetch is over its row/event "
-                        "budget, so this read stays on the graph branch (a "
+                        "budget, so this read declines to the graph branch (a "
                         "bound, not a degradation)", entity_type)
-                    return None
+                    raise RecordVectorDeclined(
+                        f"the `{entity_type}` fold prefetch is over its "
+                        f"row/event budget ({_FOLDED_PREFETCH_ROW_BUDGET} rows, "
+                        f"{_FOLDED_PREFETCH_EVENT_BUDGET} events)")
                 terminal_keys, available = fold
                 if len(terminal_keys) > _FOLDED_TERMINAL_KEY_BUDGET:
-                    # See _FOLDED_TERMINAL_KEY_BUDGET: declining the record's turn
-                    # is the fail-SAFE direction — the caller's graph branch
-                    # applies the identical cage in Cypher.
+                    # See _FOLDED_TERMINAL_KEY_BUDGET. RAISED, not `return None`:
+                    # the leg has already spent its prefetch, so the caller must
+                    # NAME the fallback (#4999) and hand the graph only the
+                    # remainder of the read (#11691). See
+                    # `RecordVectorDeclined`.
                     logging.getLogger(LOG_NAME).warning(
                         "the record's fold calls %d `%s` keys terminal — over "
-                        "the %d-key bind budget, so this read stays on the "
+                        "the %d-key bind budget, so this read declines to the "
                         "graph branch (a bound, not a degradation)",
                         len(terminal_keys), entity_type,
                         _FOLDED_TERMINAL_KEY_BUDGET)
-                    return None
+                    raise RecordVectorDeclined(
+                        f"the folded terminal-key set for `{entity_type}` holds "
+                        f"{len(terminal_keys)} keys, over the "
+                        f"{_FOLDED_TERMINAL_KEY_BUDGET}-key bind budget")
                 if terminal_keys:
                     # The LEG's key column, not the record's `node_key` — see
                     # `_folded_terminal_keys`'s note on why the two differ.
@@ -1044,7 +1159,7 @@ def vector_search(
         finally:
             with contextlib.suppress(Exception):
                 cur.close()
-    except VectorShortfall:
+    except (VectorShortfall, RecordVectorDeclined):
         raise
     except Exception as e:  # noqa: BLE001, RUF100
         raise RecordVectorError(
