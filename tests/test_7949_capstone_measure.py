@@ -6710,28 +6710,34 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "if the line moved, re-derive EVERY statement of it, because a half-done move "
             "leaves the document asserting two numbers for one `git grep` hit")
 
-    # ⛔ THE OTHER TWO `_honours` CURRENCY CLAIMS ON D5, READ BY A DERIVED LITERAL (#13494
-    # review cycle 4). The `_pin_row_failures` row added for this clause is scoped to the
+    # ⛔ THE OTHER THREE `_honours` CURRENCY CLAIMS ON D5, READ BY A DERIVED LITERAL (#13494
+    # review cycles 4 and 5). The `_pin_row_failures` row added for this clause is scoped to the
     # phrase `is at \`:22296\` at THIS head`, and THAT PHRASE CONTAINS THE NUMBER IT GATES —
-    # so the row is satisfied whatever the two SIBLING claims say (the addendum's
-    # "`_honours: dict[str, frozenset[str]]` measures `:22296` here", and the same number in
-    # the earlier clause). Measured before this arm existed: re-pointing both siblings to
-    # `:22291` left the four suites GREEN. A row cannot separate two statements on one
-    # markdown LINE, and D5 is one line carrying ~50 numbers, so the number is taken from the
-    # SOURCE and required inside each claim's OWN wording: a half-done move now reds, and a
-    # source move that nobody re-derived reds too.
+    # so the row is satisfied whatever the SIBLING claims say (the addendum's
+    # "`_honours: dict[str, frozenset[str]]` measures `:22296` here", the mid clause's
+    # "**`:22296` at this head**", and the stated `grep` OUTPUT "-> 22296, the file's ONLY
+    # occurrence"). Measured before this arm existed: re-pointing the claims to `:22291` left
+    # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
+    # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
+    # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
+    # because D5 is one markdown LINE carrying ~50 numbers: a row cannot separate two
+    # statements on one line, and an arm that covers half of them reports a guarantee it does
+    # not hold. The number comes from the SOURCE, so a source move nobody re-derived reds too.
     _honours_line = next(
         _n for _n, _ln in enumerate(sources["sdk"], 1)
         if "_honours: dict[str, frozenset[str]] = {" in _ln)
     for _claim in (
         f"is at `:{_honours_line}` at THIS head",
+        f"`grep -n '_honours: dict' tortoise/sdk.py` -> {_honours_line}, the file's ONLY occurrence",
+        f"**`:{_honours_line}` at this head**",
         f"`_honours: dict[str, frozenset[str]]` measures `:{_honours_line}` here",
     ):
         assert _d5.count(_claim) == 1, (
             f"05-verify.md states {'the current-tense'} `_honours` clause and this spelling now "
             f"occurs {_d5.count(_claim)} time(s): {_claim!r} \u2014 the source definition is at "
-            f"`tortoise/sdk.py:{_honours_line}`. Re-derive EVERY statement of it: these two are "
-            "the pair the pin row cannot read, because its scoping phrase carries the number")
+            f"`tortoise/sdk.py:{_honours_line}`. ALL FOUR statements of it must move together: "
+            "they are the set the pin row cannot read, because its scoping phrase carries the "
+            "number")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
     # `hosted_api.py:15225-15302`, and the END of that range is a BLANK line — so the row
