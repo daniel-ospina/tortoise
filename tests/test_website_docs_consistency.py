@@ -453,7 +453,12 @@ def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
     topic OBJECT), so an invalidated decision Point — which keeps its
     `aboutObject` edge, `invalidate_point` transfers no edges — comes back
     as-is, and a superseded one is re-attached down the CORRECTS chain
-    (`:27834-27844`). `get_point` (`:29952`) returns the row by address. That
+    (`:27834-27844`) — but only when the SUCCESSOR is itself a decision about
+    the topic: `supersede_point` hands the prior's `aboutObject` to the
+    successor, and the re-attach's `WHERE cur.id IN $ids` (`:27835`) can only
+    match when that successor is one of the topic's decisions, so a decision
+    superseded by a point of another kind drops out of the history.
+    `get_point` (`:29952`) returns the row by address. That
     the prior SURVIVES is asserted by
     `tests/test_de2e6_temporal.py::TestDe2e6ReviewFixes::test_timeline_keeps_superseded_prior`
     (`:405`, its assertions at `:420-422`: `len(timeline) >= 2` plus a `CORRECTS`
