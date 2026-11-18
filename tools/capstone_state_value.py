@@ -442,6 +442,62 @@ def _served_row(r: dict) -> dict:
     }
 
 
+def _link_ids(row: dict) -> list[str]:
+    """The ids a served row's ``supersedes`` link names, in whichever shape it has.
+
+    The projection (`_served_row`) reduces the link to ids, while a raw SDK row
+    carries ``[{id, content_snippet, created_at}]`` (`search_engine`'s decorated
+    state). Accepting both keeps this reading the ROW rather than a shape.
+    """
+    out: list[str] = []
+    for link in row.get("supersedes") or []:
+        if isinstance(link, str):
+            out.append(link)
+        elif isinstance(link, dict) and link.get("id"):
+            out.append(link["id"])
+    return out
+
+
+def _successor_carrier(node: dict, served: list) -> tuple[bool, str]:
+    """Does this record name its successor, and BY WHICH of the family's carriers?
+
+    #13302 review F2. The successor is TWO facts and each family carries its own
+    (#13302, `tortoise/ended.py:227`): a **Point**'s is the `CORRECTS` edge —
+    `supersede_point` writes the edge and NO `supersededBy` — while an
+    **Object**/**Subject**'s is the `supersededBy` NAME. A by-id `read_entity`
+    serves the node's PROPERTIES only (`projection._resolve_entity` returns
+    `properties(n)`), so a Point comes back with neither carrier and the old
+    signal's `bool(node.get("supersededBy"))` printed `names-its-successor=False`
+    for every superseded Point in the graph, forever — on the row a judge scores
+    Q3 from, contradicting that same run's own judge reason.
+
+    So the fact is looked for where the FAMILY puts it: the id carrier when the
+    read serves one, the name carrier when the record holds one, and otherwise
+    the successor's own row, which names the Point's `CORRECTS` edge in its
+    `supersedes` link. The carrier is returned WITH the verdict, because "no"
+    from a carrier that was never searched is the false signal this replaces.
+    """
+    oid = node.get("id")
+    ids = [i for i in (node.get("successorId"), *(node.get("allSuccessorIds") or []))
+           if i]
+    if ids:
+        return True, f"by id {ids[0]!r} — the CORRECTS edge"
+    named = node.get("supersededBy") or node.get("superseded_by")
+    if named:
+        return True, f"by name {named!r} — the `supersededBy` carrier"
+    for row in served:
+        if oid and oid in _link_ids(row):
+            return True, (
+                f"by edge — the successor's own row {row.get('id')!r} names it "
+                f"(a Point's successor is the CORRECTS edge)"
+            )
+    return False, (
+        "neither carrier on the replaced record nor a successor row naming the "
+        "edge (a Point's successor is the CORRECTS edge; a by-id read does not "
+        "serve edges)"
+    )
+
+
 def _ended_fields(r: dict) -> dict:
     """The #13302 half of a served row: HOW the record ended, when it says so.
 
@@ -1220,9 +1276,15 @@ def recipe_why_changed(target: LocalTarget, refs: dict[str, str], spec: dict) ->
         else None,
     }
     if node_old:
+        # #13302 review F2: the successor fact is read off the CARRIER THE FAMILY
+        # USES (a Point's `CORRECTS` edge is only visible on the successor's own
+        # row, never on a by-id property read), and the signal says which one
+        # answered — the alternative is a `False` that means "not looked for".
+        _named, _carrier = _successor_carrier(
+            node_old, ans.rows("default") + ans.rows("include_terminal"))
         ans.signals.append(
             f"replaced node status={node_old.get('status')!r}, "
-            f"names-its-successor={bool(node_old.get('supersededBy'))}"
+            f"names-its-successor={_named} ({_carrier})"
         )
     _require_call(ans, "default", "include_terminal", "replaced_node", "successor_node")
     _signal_refs(ans, refs, spec)

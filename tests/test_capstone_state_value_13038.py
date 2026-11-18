@@ -2169,3 +2169,93 @@ def test_the_ended_signal_states_the_rows_own_ending_and_mints_none():
     assert "superseded" in signal2, (
         "a superseded row must state `superseded`, not inherit the label's word"
     )
+
+
+class _SupersededPointTarget:
+    """A store shaped like `supersede_point` — the F2 defect's own shape.
+
+    The replaced Point carries the `CORRECTS` edge and **no `supersededBy`**, and a
+    by-id `read_entity` serves `properties(n)` only, so the replaced node comes
+    back with neither carrier. The successor's own search row is where the edge is
+    legible (`supersedes=[<the replaced id>]`), which is exactly what the
+    committed payload of the 13038 run shows.
+    """
+
+    def __init__(self, *, age_link: bool = True):
+        self.age_link = age_link
+
+    def search(self, query=None, *, entity_type="point", limit=10,
+               include_terminal=False, ended_scope=False, role=""):
+        new_row = {"id": "new-1", "what": "the entry tier is 49",
+                   "kind": "statement", "status": "live"}
+        if self.age_link:
+            new_row["supersedes"] = ["old-1"]
+        rows = [
+            {"id": "old-1", "what": "the entry tier is 39", "kind": "statement",
+             "status": "superseded"},
+            new_row,
+        ]
+        return cap.Call("search", {"query": query, "entity_type": entity_type},
+                        True, f"{len(rows)} rows", {}, rows, role=role)
+
+    def read_entity(self, entity_id, *, role=""):
+        node = {"id": entity_id, "content": "the entry tier", "status": "superseded"}
+        if entity_id == "new-1":
+            node["status"] = "live"
+        return cap.Call("read_entity", {"id": entity_id}, True, "one node", {},
+                        [node], role=role)
+
+
+def _q3_signal(target) -> str:
+    answer = cap.RECIPES["why_changed"](
+        target, {"q3_pricing": "old-1", "q4_pricing": "new-1"}, {})
+    return next(s for s in answer.signals if "names-its-successor=" in s)
+
+
+def test_the_q3_signal_tests_the_successor_fact_the_POINT_family_carries():
+    """#13302 review F2: `names-its-successor=False` was true of every Point, forever.
+
+    The signal read `bool(node_old.get("supersededBy"))` on a **Point**, whose
+    successor is the `CORRECTS` edge — and a by-id read serves properties, so the
+    name carrier is absent BY DESIGN. The committed payload shows the
+    contradiction verbatim: `"supersededBy": null` on that node while the same
+    run's judge reason says the successor "carries a supersedes link to the Q3 id,
+    naming the successor". The fact must be looked for on the carrier the FAMILY
+    uses — here the successor's own row — and the signal must SAY which one
+    answered.
+    """
+    signal = _q3_signal(_SupersededPointTarget())
+    assert "names-its-successor=True" in signal, (
+        "a superseded Point whose successor's row names the CORRECTS edge DID name "
+        "its successor; the old signal printed False here for every Point in the "
+        "graph, which is the false signal this replaces"
+    )
+    assert "by edge" in signal and "new-1" in signal, (
+        "the signal must say WHICH carrier answered and name the successor it "
+        "found, or a reader cannot tell 'no successor' from 'not looked for'"
+    )
+
+    class _SupersededObjectTarget(_SupersededPointTarget):
+        def read_entity(self, entity_id, *, role=""):
+            call = super().read_entity(entity_id, role=role)
+            if entity_id == "old-1":
+                # An Object's successor IS a NAME (the `supersededBy` carrier).
+                call.rows[0]["supersededBy"] = "Onboarding flow v2"
+            return call
+
+    named = _q3_signal(_SupersededObjectTarget())
+    assert "names-its-successor=True" in named and "by name" in named, (
+        "an Object's successor is the `supersededBy` NAME — the carrier that "
+        "`tortoise/ended.py` serves as `successorName`, never as an id"
+    )
+    assert "Onboarding flow v2" in named
+
+    silent = _q3_signal(_SupersededPointTarget(age_link=False))
+    assert "names-its-successor=False" in silent, (
+        "with no carrier on the record AND no successor row naming the edge, the "
+        "honest answer is still `False` — the fix is not a constant `True`"
+    )
+    assert "neither carrier" in silent and "CORRECTS edge" in silent, (
+        "a `False` must say which carriers were consulted, or it reads as the "
+        "same unqualified claim the finding rejected"
+    )

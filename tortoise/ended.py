@@ -97,6 +97,34 @@ FAMILIES: dict[str, dict[str, str]] = {
     },
 }
 
+#: The budget a family-wide ended scan is given, in ms — what the read path uses
+#: when the caller supplied no budget of its own (#13302 review F1).
+#:
+#: ⛔ IT IS NOT ``VECTOR_LEG_BUDGET_MS`` (500 ms), and pointing that number at
+#: this statement was the F1 defect. That constant is the DENSE LEG's budget: its
+#: own docstring says it is one home so the legs of a fused read agree and "a leg
+#: on a different budget is a leg the cap cannot bound", and the other three
+#: call sites on this path are the reachability probe (``RETURN 1``),
+#: ``_read_declaration`` and the vector legs — every one of them single-hop and
+#: cheap. What THIS budget bounds is the statement this module calls the most
+#: expensive the read issues: ``MATCH … OPTIONAL MATCH … collect() … ORDER BY …
+#: LIMIT`` over ``live._terminal_expression`` — an OR across four status words,
+#: ``outdated``, ``isClosed`` and ``pipelineSlot = 'terminal'`` that no single
+#: index covers, ordered by ``coalesce(validTo, expiredAt, supersededAt,
+#: pipelineStageSince, updatedAt) DESC``, which forces the matched set to be
+#: materialised before the ``LIMIT``. Its cost grows with the family; 500 ms does
+#: not. Under that budget the read answered ``[]`` + ``incomplete`` on exactly the
+#: population it exists for, which is the shape this read was written to end.
+#:
+#: 10 000 ms is the VENDOR's own general-query default, not a guess: FalkorDB's
+#: GraphRAG client ships ``ConnectionConfig.query_timeout_ms = 10_000``, and
+#: ``GRAPH.QUERY`` takes its per-query ``TIMEOUT`` in milliseconds and terminates
+#: the statement on expiry (``Query timed out``). The scan stays BOUNDED — a
+#: wedged store degrades (zero rows, ``incomplete``, a ``degraded`` leg) and never
+#: hangs this read — and a caller that supplies its own budget (the capstone's
+#: ``_elevated_timeout_ms``) always wins over this default.
+ENDED_SCAN_BUDGET_MS = 10_000
+
 #: The ending-time fields, in the order ``endedAt`` resolves them. Declared here
 #: (not in the Cypher) so the docstring above, the query and the row cannot
 #: drift, and so adding a carrier is one edit.
