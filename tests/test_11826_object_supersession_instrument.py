@@ -2550,10 +2550,11 @@ def test_a_dead_SOURCE_is_not_an_active_edge(sdk):
                                   require_calibration=False)["confidences"], \
         "fixture drifted: the live edge must build a factor"
     # EP-dead source BEFORE the supersession: the factor is already gone.
-    # #9649: this ARCHIVE is a PRE-#9649 shape — `live -> archived` is not a
-    # declared Point transition (§5 v3.37 declares `deprecated`/`superseded` and
-    # deleted the "reserved on Points" row; `archived` survives only as
-    # `deprecated`'s write-side synonym), so the generic door refuses it now. The subject here is the audit
+    # #9649: this ARCHIVE is a PRE-#9649 shape — on a plain Point `status`
+    # `archived` is now ACCEPTED and stored as `deprecated` (it is that word's
+    # declared synonym, `lifecycle_vocabulary.py:95`; the "reserved on Points" row
+    # this comment used to quote was deleted in v3.37), so the pre-#9649 WRITER is
+    # what this fixture reproduces, not a state the current doors refuse. The subject here is the audit
     # instrument comparing `status` rather than the node, not the door, so the
     # dead state is seeded the way a pre-#9649 writer left it (the same treatment
     # `test_3311` / `test_6239` got in that change). `retract_point` is NOT a

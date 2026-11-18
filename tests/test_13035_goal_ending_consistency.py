@@ -1246,12 +1246,15 @@ def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
     raised again — the caller was sent in a circle.
 
     ⛔ The review's own suggested replacement (``status='archived'`` "works on both
-    layers") is FALSIFIED by the primary source and MEASURED here: a Point's
-    declared transitions from a live state are exactly ``{retracted, superseded}``
-    (``_ALLOWED_TRANSITIONS``), and ``update_knowledge(<live goal Point>,
-    status='archived')`` raises ``update_entity refused the status transition
-    'live' -> 'archived'`` — ``archived`` is RESERVED on a Point. So the repair is
-    carrier-aware, and this test performs the Point half rather than grepping it.
+    layers") is FALSIFIED on THIS carrier, and MEASURED here: a live goal Point
+    refuses ``status='archived'`` — but by the **goalState-coherence arm**, not by
+    any §5 reservation: ``update_knowledge(<live goal Point>, status='archived')``
+    raises *"status='archived' ends the goal, but goalState='active' still describes
+    a live commitment"* (#13035), and the same call on a PLAIN Point is accepted and
+    stored as ``deprecated`` (v3.37: ``archived`` is that word's declared synonym;
+    the "reserved on Points" row this docstring used to cite was deleted). So the
+    repair is carrier-aware, and this test performs the Point half rather than
+    grepping it.
     """
     goal = sdk.create_point("goal", "GOAL - successor repair", goalState="active")
     with pytest.raises(ValueError) as exc:
@@ -1259,13 +1262,28 @@ def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
                              status="superseded")
     msg = str(exc.value)
     assert "successor" in msg, msg
-    assert "status='retracted'" in msg, msg              # the :Point route
-    assert "status='deprecated'" not in msg, msg         # the unperformable one
+    # ⛔ THE PRESCRIBED POINT WORD IS THE CANONICAL ONE SINCE v3.37. This asserted
+    # `"status='retracted'" in msg` and `"status='deprecated'" NOT in msg` — the
+    # second pinned "deprecated is unperformable on a Point", which the four-word
+    # model makes FALSE (measured: `update_knowledge(<live goal>, goalState=
+    # 'abandoned', status='deprecated')` lands, and `_ALLOWED_TRANSITIONS['live']`
+    # declares it). `retracted` still LANDS — it is `deprecated`'s declared synonym
+    # and normalises to it — so it is disclosed, not prescribed.
+    assert "status='deprecated'" in msg, msg             # the :Point route
+    assert "'retracted' is the legacy spelling" in msg, msg   # disclosed, not prescribed
     # the prescribed Point write is accepted on both fields at once
-    sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
+    sdk.update_knowledge(goal["id"], goalState="abandoned", status="deprecated")
     node = sdk.get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
     assert node["status"] == _CANONICAL_ENDED, node
+    # ...and the legacy spelling the message discloses still lands the SAME ending,
+    # so the disclosure is true rather than decorative
+    legacy = sdk.create_point("goal", "GOAL - successor repair (legacy word)",
+                              goalState="active")
+    sdk.update_knowledge(legacy["id"], goalState="abandoned", status="retracted")
+    legacy_node = sdk.get_point(legacy["id"])
+    assert legacy_node["goalState"] == "abandoned", legacy_node
+    assert legacy_node["status"] == _CANONICAL_ENDED, legacy_node
 
 
 def test_the_DRY_RUN_reports_None_for_the_goal_it_is_about_to_CLEAR(sdk):
