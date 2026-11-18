@@ -1641,8 +1641,15 @@ class TestAMentionIsNotAnOccurrence:
         message = str(exc.value)
         assert "MENTION" in message and "create_entity" in message, message
         # …and the message names the kind that was REFUSED, not a `!r` the
-        # subclass could have rewritten.
+        # subclass could have rewritten. `_Kind.__repr__` LIES, so the assertion
+        # that PINS this is the second one: the message interpolates the kind
+        # TWICE (the refusal span and the WHAT TO DO example), so
+        # `"'meeting'" in message` alone is satisfied by the example even when the
+        # refusal span formats the raw object — measured: with the refusal span
+        # reverted to `event_kind!r` this row stayed GREEN until the assertion
+        # below was added (#13586 review R1, finding 2).
         assert "'meeting'" in message, message
+        assert "<lying _Kind>" not in message, message
         assert g.query(
             "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
             params={"p": plan["id"]}).result_set[0][0] == 0
