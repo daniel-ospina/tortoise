@@ -57,12 +57,15 @@ no longer hold an `.apply` of their own: the append, the record projection and
 the fold are ONE call (`tortoise/live_write.py::write`), classified `chokepoint`
 below. The two former `journal-first-door` / `journal-first-own-envelope` entries
 were therefore **removed, not re-counted** — their sites are gone. (The SDK's
-`_emit_event` never held one — it has always delegated — and its fold half is
-still `_apply_and_journal`, which stays in the map. Naming it above as a
-"no longer" would be the same overclaim the review rounds in this file's header
-catalogued.) The map tracks the fold SITES, so a door that stops folding is no
-longer a door — which means those two directions are no longer covered HERE,
-and are pinned instead by
+`_emit_event` never held one either — at `origin/main` it appends the journal
+record itself and folds nowhere, and at this head it appends through
+`live_write.write(..., fold=False)` and still owns no fold, so it was never a
+fold site in this map. `_apply_and_journal` is the SDK CLASS's own fold site for
+its other live doors, and stays in the map. Calling the SDK door a former one
+would be the same overclaim the review rounds in this file's header catalogued.)
+The map tracks the fold SITES, so a door that stops folding is no longer a door
+— which means those two directions are no longer covered HERE, and are pinned
+instead by
 `test_9078_record_written_by_production_path.py::test_only_the_shipped_package_can_satisfy_the_wiring_gate`,
 which asserts `api.py` and `mining.py` both reach the seam through
 `live_write.write(`.
@@ -149,18 +152,20 @@ _APPLY_VALUE_USES: dict[tuple[str, str], tuple[str, int]] = {
 _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # ── JOURNAL-FIRST DOORS — each appends before it folds ───────────────
     # #13331: the ONE write chokepoint. `tortoise/live_write.py::write` performs
-    # append → record projection → cache fold as one call, in that order, and it
-    # is where `EventAPI._emit`, `ConversationMiner._emit_event` and
-    # `TortoiseSDK._emit_event` now fold WITHOUT holding an `.apply` of their
-    # own — which is why those three no longer appear in this map as fold sites
-    # (the SDK door passes `fold=False` and keeps folding through
-    # `_apply_and_journal` below, and the other two pass their projection in).
+    # append → record projection → cache fold as one call, in that order. It is
+    # where `EventAPI._emit` and `ConversationMiner._emit_event` now fold WITHOUT
+    # holding an `.apply` of their own — which is why those two rows were REMOVED
+    # from this map (their `.apply` sites are gone). `TortoiseSDK._emit_event`
+    # passes `fold=False` and owns no fold at all, so it was never a fold site
+    # here; `_apply_and_journal` below is the SDK class's own fold site for its
+    # other live doors, not that door's.
     # The append is the commit point: `write` raises out of a failed append
     # before the record or the fold is reached.
     ("tortoise/live_write.py", "write"): ("chokepoint", 1),
-    # `TortoiseSDK._apply_and_journal`: the SDK's OWN chokepoint (the fold half
-    # the SDK door keeps). The append is the commit point; a failed append
-    # returns before the fold.
+    # `TortoiseSDK._apply_and_journal`: the SDK class's OWN fold site (the fold
+    # half the SDK's other live doors keep — NOT `_emit_event`, which passes
+    # `fold=False`). The append is the commit point; a failed append returns
+    # before the fold.
     ("tortoise/sdk.py", "TortoiseSDK._apply_and_journal"): ("chokepoint", 1),
 
     # ── CLOSED BY THIS LANE: journal-first, then the fold ─────────────────
