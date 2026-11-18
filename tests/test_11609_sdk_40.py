@@ -291,7 +291,56 @@ def _unbound_tenant(monkeypatch):
     monkeypatch.setattr(record_writer, "record_tenant_effective", lambda carried=None: None)
 
 
-def test_create_key_delegates_to_apikey_create(monkeypatch):
+def test_refresh_confidence_scope_graph_walks_the_CLAIM_population_not_every_point():
+    """`kind="claim"` picks the COLLECTION; `point_kind=` narrows the walk.
+
+    `list_knowledge` forwards `kind=point_kind` to `paginated_query`, so leaving
+    `point_kind` unset walked every Point that is not an operator — entities, sources,
+    documents and events included — while row 26 and the docstring both say every live
+    CLAIM. The pre-existing test substitutes `list_knowledge` wholesale, so it pins the
+    paging and cannot see the population; this one pins the population (#11609 P3 F4).
+    """
+    sdk = _sdk()
+    seen: list[tuple[str, str | None]] = []
+
+    def fake_list(kind="claim", point_kind=None, limit=20, offset=0, **kw):
+        seen.append((kind, point_kind))
+        return {"results": [{"id": "c1"}], "hasMore": False}
+
+    sdk.list_knowledge = fake_list
+    sdk.compute_confidence = lambda **kw: {"converged": True}
+
+    sdk.refresh_confidence("graph")
+
+    assert seen == [("claim", "claim")], (
+        "the anchor walk must select claims: an unset point_kind walks every Point"
+    )
+
+
+def test_refresh_confidence_scope_graph_answers_an_empty_graph_instead_of_re_scoping():
+    """An empty whole-graph walk is an ANSWER, not a licence to answer something else.
+
+    Pre-fix the empty walk fell through to `compute_confidence()` — the no-arg,
+    DIRTY-ROOTS path. That is the narrower question the unknown-scope refusal exists to
+    keep out, arriving through a different trigger: a cold store, an unbound graph or a
+    page-shape change all produce it, and all come back looking like a whole-graph pass.
+    """
+    sdk = _sdk()
+    sdk.list_knowledge = lambda **kw: {"results": [], "hasMore": False}
+    seen = {}
+    sdk.compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
+
+    sdk.refresh_confidence("graph")
+
+    assert seen == {"anchors": []}, (
+        "an empty whole-graph walk must not re-scope to the dirty-roots path"
+    )
+
+
+def test_create_key_delegates_to_apikey_create_in_registry_mode(monkeypatch):
+    from tortoise import supabase_control
+
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
     _bound_tenant(monkeypatch)
     sdk = _sdk()
     seen = {}
@@ -382,6 +431,200 @@ def test_remove_member_delegates_to_membership_remove(monkeypatch):
     sdk._membership_remove = lambda org_id, user_id: True
 
     assert sdk.remove_member("u1") == {"user_id": "u1", "removed": True}
+
+
+# ── 3b. the three credential rows read the store the AUTH PATH reads (#11609 F3) ──
+#
+# `list_members` / `_membership_remove` branch on the control plane 80 lines away; the
+# key rows did not, so on the hosted deployment (where keys live in `api_keys` and the
+# registry has no `Team` node at all, #765) they answered a reassuring `[]`, a false
+# "not found", and a mint the auth path cannot see. Each test below stubs the REGISTRY
+# to fail, so the pre-fix code reds by reaching the wrong store rather than by
+# disagreeing about a value.
+
+
+def _hosted(monkeypatch):
+    """Put the supabase_control seam in hosted mode, with a sentinel control plane."""
+    from tortoise import supabase_control
+
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(supabase_control, "get_control_plane", lambda: "CP")
+    return supabase_control
+
+
+def test_list_keys_reads_the_hosted_api_keys_table_when_the_control_plane_is_supabase(
+    monkeypatch,
+):
+    _bound_tenant(monkeypatch)
+    sc = _hosted(monkeypatch)
+    seen = {}
+
+    def fake_org_api_keys(cp, org_id, graph_id=None):
+        seen.update(cp=cp, org_id=org_id, graph_id=graph_id)
+        return [
+            {"id": "k1", "key_prefix": "tt_aaaaaaa", "graph_id": "g_1",
+             "name": "prod", "scopes": ["read"], "created_at": "t0",
+             "created_by": "api", "expires_at": None, "revoked_at": None},
+            {"id": "k2", "key_prefix": "tt_bbbbbbb", "graph_id": "g_1",
+             "name": "old", "scopes": [], "created_at": "t0",
+             "created_by": "api", "expires_at": None, "revoked_at": "t1"},
+        ]
+
+    monkeypatch.setattr(sc, "org_api_keys", fake_org_api_keys)
+    sdk = _sdk()
+    sdk._get_registry = lambda: pytest.fail(
+        "the hosted credentials live in `api_keys`; a registry read is also a read-side "
+        "mint of the control-plane graph (#669)"
+    )
+
+    rows = sdk.list_keys()
+
+    assert seen == {"cp": "CP", "org_id": "org_1", "graph_id": None}
+    assert [r["id"] for r in rows] == ["k1"], (
+        "a revoked host key is a tombstone, and a live one must not be reported absent"
+    )
+    assert rows[0]["created_by"] == "api", "the hosted row's own attribution field"
+
+
+def test_list_keys_forwards_graph_id_and_include_revoked_on_the_hosted_limb(monkeypatch):
+    _bound_tenant(monkeypatch)
+    sc = _hosted(monkeypatch)
+    seen = {}
+
+    def fake_org_api_keys(cp, org_id, graph_id=None):
+        seen["graph_id"] = graph_id
+        return [{"id": "k2", "key_prefix": "tt_b", "graph_id": "g_1",
+                 "name": "old", "scopes": None, "created_at": "t0",
+                 "created_by": None, "expires_at": None, "revoked_at": "t1"}]
+
+    monkeypatch.setattr(sc, "org_api_keys", fake_org_api_keys)
+    sdk = _sdk()
+    sdk._get_registry = lambda: pytest.fail("must not reach the registry in hosted mode")
+
+    rows = sdk.list_keys(graph_id="g_1", include_revoked=True)
+
+    assert seen["graph_id"] == "g_1"
+    assert rows[0]["scopes"] == [] and rows[0]["revoked_at"] == "t1"
+
+
+def test_revoke_key_patches_the_hosted_row_when_the_control_plane_is_supabase(monkeypatch):
+    _bound_tenant(monkeypatch, ("org_1", "g_1"))
+    sc = _hosted(monkeypatch)
+    calls = {}
+
+    monkeypatch.setattr(sc, "api_key_by_id",
+                        lambda cp, key_id: {"org_id": "org_1", "revoked_at": None})
+    monkeypatch.setattr(
+        sc, "revoke_api_key",
+        lambda cp, key_id, now=None: calls.update(cp=cp, key_id=key_id, now=now),
+    )
+    sdk = _sdk()
+    sdk._get_registry = lambda: pytest.fail("must not read the registry in hosted mode")
+    sdk._apikey_revoke = lambda key_id: pytest.fail(
+        "a registry revoke cannot reach an `api_keys` row — row 36's rotation would no-op"
+    )
+
+    out = sdk.revoke_key("k1")
+
+    assert calls["key_id"] == "k1" and calls["cp"] == "CP"
+    assert out == {"revoked": True, "key_id": "k1", "revoked_at": calls["now"]}
+
+
+def test_revoke_key_refuses_a_hosted_credential_from_another_account(monkeypatch):
+    _bound_tenant(monkeypatch, ("org_1", "g_1"))
+    sc = _hosted(monkeypatch)
+
+    monkeypatch.setattr(sc, "api_key_by_id",
+                        lambda cp, key_id: {"org_id": "org_OTHER", "revoked_at": None})
+    monkeypatch.setattr(sc, "revoke_api_key",
+                        lambda *a, **kw: pytest.fail("must not revoke another account's key"))
+    sdk = _sdk()
+    sdk._get_registry = lambda: pytest.fail("must not read the registry in hosted mode")
+
+    with pytest.raises(ControlPlaneError, match="does not belong to this account"):
+        sdk.revoke_key("k1")
+
+
+def test_revoke_key_is_idempotent_and_reports_absence_on_the_hosted_limb(monkeypatch):
+    _bound_tenant(monkeypatch, ("org_1", "g_1"))
+    sc = _hosted(monkeypatch)
+    monkeypatch.setattr(sc, "revoke_api_key",
+                        lambda *a, **kw: pytest.fail("nothing to revoke"))
+    sdk = _sdk()
+    sdk._get_registry = lambda: pytest.fail("must not read the registry in hosted mode")
+
+    monkeypatch.setattr(sc, "api_key_by_id", lambda cp, key_id: None)
+    assert sdk.revoke_key("k1") == {
+        "revoked": False, "reason": "not found", "key_id": "k1"}
+
+    monkeypatch.setattr(sc, "api_key_by_id",
+                        lambda cp, key_id: {"org_id": "org_1", "revoked_at": "t1"})
+    assert sdk.revoke_key("k1") == {
+        "revoked": True, "already": True, "key_id": "k1"}
+
+
+def test_create_key_mints_through_the_hosted_lane_when_the_control_plane_is_supabase(
+    monkeypatch,
+):
+    _bound_tenant(monkeypatch)
+    sc = _hosted(monkeypatch)
+    from tortoise import hosted_api
+
+    monkeypatch.setattr(sc, "org_by_id", lambda cp, org_id: {"id": org_id})
+    seen = {}
+
+    def fake_mint(org_id, **kw):
+        seen.update(kw, org_id=org_id)
+        return {"id": "k9", "key_prefix": "tt_zzzzzzz", "key_plaintext": "tt_secret",
+                "created_at": "t0"}
+
+    monkeypatch.setattr(hosted_api, "_mint_key", fake_mint)
+    sdk = _sdk()
+    sdk._get_registry = lambda: pytest.fail("must not write a registry node in hosted mode")
+    sdk._org_get = lambda org_id: pytest.fail(
+        "no `Team` node exists in hosted mode (#765) — that read refused an org that exists"
+    )
+
+    out = sdk.create_key(name="prod", graph_id="g_9", scopes=["read"])
+
+    assert out == {"id": "k9", "key_prefix": "tt_zzzzzzz", "api_key": "tt_secret",
+                   "org_id": "org_1", "created_at": "t0"}
+    assert (seen["org_id"], seen["graph_id"], seen["name"], seen["scopes"]) == (
+        "org_1", "g_9", "prod", ["read"])
+    assert seen["session_user_id"] == "sdk"
+
+
+def test_create_key_refuses_an_account_the_hosted_control_plane_does_not_have(monkeypatch):
+    _bound_tenant(monkeypatch)
+    sc = _hosted(monkeypatch)
+    from tortoise import hosted_api
+
+    monkeypatch.setattr(sc, "org_by_id", lambda cp, org_id: None)
+    monkeypatch.setattr(hosted_api, "_mint_key",
+                        lambda *a, **kw: pytest.fail("nothing to mint against"))
+    sdk = _sdk()
+    sdk._get_registry = lambda: pytest.fail("must not write a registry node in hosted mode")
+
+    with pytest.raises(ControlPlaneError, match="not found"):
+        sdk.create_key()
+
+
+def test_create_key_maps_the_hosted_key_cap_to_a_control_plane_refusal(monkeypatch):
+    _bound_tenant(monkeypatch)
+    sc = _hosted(monkeypatch)
+    from tortoise import hosted_api
+
+    monkeypatch.setattr(sc, "org_by_id", lambda cp, org_id: {"id": org_id})
+
+    def full(org_id, **kw):
+        raise hosted_api._KeyCapExceeded()
+
+    monkeypatch.setattr(hosted_api, "_mint_key", full)
+    sdk = _sdk()
+    sdk._get_registry = lambda: pytest.fail("must not write a registry node in hosted mode")
+
+    with pytest.raises(ControlPlaneError, match="API-key cap"):
+        sdk.create_key()
 
 
 @pytest.mark.parametrize(

@@ -40400,6 +40400,22 @@ class TortoiseSDK:
               O(len(claims)) to enumerate and priced accordingly; it is the expensive
               answer and the only way to reach a belief a dirty flag never touched.
 
+        ⛔ **"Every live claim" is the CLAIM population, not "every Point".** The walk
+        passes ``point_kind="claim"``, so entities, sources, documents and events are
+        never collected as anchors: they carry no operator inputs, so the only thing
+        they could contribute is a longer enumeration that still answers with claim
+        posteriors. ``list_knowledge`` takes ``kind=`` as the COLLECTION selector and
+        forwards ``point_kind=`` to ``paginated_query`` (which filters ``pointKind``
+        through the one shared kind expander), so leaving it unset walked every
+        non-operator Point in the graph (#11609 P3 review F4).
+
+        ⛔ **An empty anchor set is answered, not re-scoped.** It reaches
+        ``compute_confidence(anchors=[])``, whose named ``no_factors`` result is the
+        honest answer to "the whole graph holds no live claim". It must never fall
+        through to ``compute_confidence()``'s no-arg path, which answers about the DIRTY
+        ROOTS — a narrower question that comes back looking like a whole-graph pass,
+        the exact failure the unknown-scope refusal below exists to prevent.
+
         ⛔ Any other value is REFUSED rather than defaulted. "Recompute something" is not
         a scope, and guessing one is wrong in both directions: a whole-graph pass is a
         cost the caller did not ask for, while a changed-nodes pass silently answers a
@@ -40419,7 +40435,8 @@ class TortoiseSDK:
             offset = 0
             page = 200
             while True:
-                chunk = self.list_knowledge(kind="claim", limit=page, offset=offset)
+                chunk = self.list_knowledge(
+                    kind="claim", point_kind="claim", limit=page, offset=offset)
                 rows = chunk.get("results") or []
                 anchors.extend(
                     row["id"] for row in rows if row.get("id")
@@ -40427,8 +40444,10 @@ class TortoiseSDK:
                 if not chunk.get("hasMore") or not rows:
                     break
                 offset += len(rows)
-            if not anchors:
-                return self.compute_confidence()
+            # ``anchors=[]`` (never the no-arg path): an empty graph is a real answer
+            # to "the whole graph", reported as ``no_factors`` over zero anchors.
+            # The no-arg path would answer about the dirty roots instead — a different,
+            # narrower question wearing the whole-graph label.
             return self.compute_confidence(anchors=anchors)
         raise ValueError(
             f"Unknown confidence scope {scope!r}. Row 26 defines exactly two: "
@@ -50768,8 +50787,16 @@ class TortoiseSDK:
 
         Delegates to ``_apikey_create`` — the single mint, so the properties that matter
         are the ones the rest of the product already relies on: only the SHA-256 hash is
-        stored, the plaintext comes back exactly ONCE, the ``APIKey`` node is bound to
-        the org, and the mint is audited.
+        stored, the plaintext comes back exactly ONCE, and the mint is audited.
+
+        ⛔ **Mode-aware, in the delegate.** ``_apikey_create`` owns the split, the same
+        way ``_graph_create`` and ``_membership_remove`` own theirs: on the hosted
+        (Supabase) control plane the key is minted into the ``api_keys`` table through
+        ``hosted_api._mint_key`` — the ONE low-level key write, with its serialized
+        ``max_api_keys`` cap gate — because that is the table ``resolve_api_key`` (the
+        auth path) reads. Minting a registry node there would produce a credential that
+        authenticates nowhere, and a registry-only org lookup would refuse an account
+        that exists (#11609 P3 review F3).
         """
         org_id = self._tenancy_tenant("create_key")
         return self._apikey_create(
@@ -50798,9 +50825,42 @@ class TortoiseSDK:
         ``key_prefix`` (the first 10 characters), which is what identifies a key in the
         console and what the lookup surfaces match on.
 
+        ⛔ Reads the mode-appropriate store: the hosted control plane's ``api_keys``
+        table (``org_api_keys``) when that is the control plane, the registry ``APIKey``
+        nodes otherwise — the same split, and the same reason, as ``list_members``.
+        On the hosted deployment the credentials the auth path resolves live in
+        ``api_keys``, so a registry read there would report a funded account as
+        credential-less: a reassuring ``[]`` produced by having asked the wrong store
+        (#11609 P3 review F3). Branching before the registry also keeps this READ from
+        minting the ``{ns}_control_plane`` graph (#669's read-side mint).
+
         Takes no ``org_id`` — see ``_tenancy_tenant``.
         """
         org_id = self._tenancy_tenant("list_keys")
+        from .supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+            org_api_keys,
+        )
+
+        if is_supabase_enabled():
+            hosted = org_api_keys(
+                get_control_plane(), org_id, graph_id=graph_id)
+            return [
+                {
+                    "id": row.get("id"),
+                    "key_prefix": row.get("key_prefix"),
+                    "graph_id": row.get("graph_id"),
+                    "name": row.get("name"),
+                    "scopes": list(row.get("scopes") or []),
+                    "created_at": row.get("created_at"),
+                    "created_by": row.get("created_by"),
+                    "expires_at": row.get("expires_at"),
+                    "revoked_at": row.get("revoked_at"),
+                }
+                for row in hosted
+                if include_revoked or row.get("revoked_at") is None
+            ]
         reg = self._get_registry()
         cypher = "MATCH (k:APIKey {org_id:$tid})"
         params: dict = {"tid": org_id}
@@ -50847,10 +50907,47 @@ class TortoiseSDK:
 
         Delegates the write to ``_apikey_revoke`` so the ``revoked_at`` stamp and the
         audit record are the ones the rest of the product already writes.
+
+        ⛔ Mode-aware, like ``list_keys``: on the hosted (Supabase) control plane the
+        revocation is the ``api_keys`` row PATCH (``supabase_control.revoke_api_key``,
+        resolved through ``api_key_by_id``) — the table ``resolve_api_key`` reads, so a
+        registry-only lookup here answered ``{"revoked": False, "reason": "not found"}``
+        for a LIVE key on the very deployment row 36 exists for, which made row 36's
+        documented mint-then-revoke rotation a no-op (#11609 P3 review F3). The
+        ownership check runs FIRST in both arms, and the already-revoked arm stays
+        idempotent. No registry audit node is written on the hosted arm — the hosted
+        lane's audit is the REST surface's ``_async_audit``, and the zero-registry-write
+        cutover contract (#765) forbids one here.
         """
         from .exceptions import ControlPlaneError
 
         org_id = self._tenancy_tenant("revoke_key")
+        from .supabase_control import (
+            api_key_by_id,
+            get_control_plane,
+            is_supabase_enabled,
+            revoke_api_key,
+        )
+
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            row = api_key_by_id(cp, key_id)
+            if row is None:
+                # Absence is reported as absence, not as a revoked key: a caller that
+                # mistyped an id must not read a success.
+                return {"revoked": False, "reason": "not found", "key_id": key_id}
+            if row.get("org_id") != org_id:
+                raise ControlPlaneError(
+                    f"Credential {key_id!r} does not belong to this account, so it was "
+                    "not revoked. Nothing was written."
+                )
+            if row.get("revoked_at") is not None:
+                return {"revoked": True, "already": True, "key_id": key_id}
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            revoke_api_key(cp, key_id, now)
+            return {"revoked": True, "key_id": key_id, "revoked_at": now}
+
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (k:APIKey {id:$id}) RETURN k.org_id",
@@ -51041,6 +51138,25 @@ class TortoiseSDK:
                     _ESCALATION_SCOPES & set(scopes))) + ".",
             )
 
+        from .supabase_control import is_supabase_enabled
+
+        if is_supabase_enabled():
+            # The hosted control plane's keys live in ``api_keys``, not in the registry:
+            # a registry node there is a credential nothing authenticates with, and
+            # ``_org_get``'s ``Team`` read would refuse an org that exists. The hosted
+            # arm is its own method so the registry path below stays byte-identical.
+            return self._apikey_create_hosted(
+                org_id, created_by,
+                graph_id=graph_id,
+                scopes=scopes,
+                created_by_key_id=created_by_key_id,
+                delegation_depth=delegation_depth,
+                prefix=prefix,
+                name=name,
+                created_via=created_via,
+                expires_at=expires_at,
+            )
+
         org = self._org_get(org_id)
         if org is None:
             raise ControlPlaneError(f"Team {org_id!r} not found")
@@ -51090,6 +51206,83 @@ class TortoiseSDK:
                      resource_type="apikey", resource_id=kid)
         return {"id": kid, "key_prefix": key_prefix, "api_key": api_key,
                 "org_id": org_id, "created_at": now}
+
+    def _apikey_create_hosted(self, org_id: str, created_by: str,
+                              *, graph_id: str | None = None,
+                              scopes: list | None = None,
+                              created_by_key_id: str | None = None,
+                              delegation_depth: int | None = None,
+                              prefix: str = "tt_",
+                              name: str | None = None,
+                              created_via: str | None = None,
+                              expires_at: str | None = None) -> dict:
+        """Mint into the hosted control plane's ``api_keys`` table (#11609 P3 F3).
+
+        The Supabase arm of :meth:`_apikey_create`, kept in its own method so the
+        registry path stays byte-identical. On this deployment the credential the auth
+        path resolves is a row in ``api_keys`` (``supabase_control.resolve_api_key``),
+        NOT a registry ``APIKey`` node — and ``_graph_create``'s recorded #765 cutover
+        means no ``Team`` node exists to look up either, so the registry arm refused an
+        org that exists.
+
+        ⛔ It DELEGATES to ``hosted_api._mint_key``, the ONE low-level key write (D14:
+        "never re-implemented"). That is where the ``max_api_keys`` cap gate lives —
+        pre-checked in Python and re-applied authoritatively inside the serialized
+        ``provision_api_key`` RPC — along with the per-graph ACL hook and the
+        ``tk_``/``tt_`` prefix convention. Re-implementing any of that here would be a
+        second opinion about how many keys an account may hold. The import is deferred
+        because ``hosted_api`` imports this module at load time.
+
+        Returns the SAME envelope the registry arm returns, so ``create_key`` is one
+        contract on both modes: ``{id, key_prefix, api_key, org_id, created_at}``, with
+        the plaintext present exactly once.
+        """
+        from .exceptions import ControlPlaneError
+        from .supabase_control import get_control_plane, org_by_id
+
+        # The registry arm's org check, in this mode's vocabulary: a tenant that is
+        # bound but names no account must be refused, not minted against. (The cap gate
+        # inside ``_mint_key`` SKIPS itself when the org row is absent — it documents
+        # that "the caller's org check already ran" — so this check is load-bearing.)
+        if org_by_id(get_control_plane(), org_id) is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
+
+        from tortoise.hosted_api import _KeyCapExceeded, _mint_key
+
+        try:
+            minted = _mint_key(
+                org_id,
+                graph_id=graph_id,
+                scopes=scopes,
+                delegation_depth=delegation_depth,
+                caller_key_id=created_by_key_id,
+                session_user_id=created_by,
+                prefix=prefix,
+                # An SDK-minted credential is a PROVISIONED durable key, not one of the
+                # 24h bootstrap/session rows #2481's predicate excludes: absent is
+                # recorded as "provisioned" rather than left NULL, which is the same
+                # default every hosted caller of ``_mint_key`` gets.
+                created_via=created_via or "provisioned",
+                name=name,
+                expires_at=expires_at,
+            )
+        except _KeyCapExceeded as exc:
+            # A private HTTP-layer exception must never escape a public SDK method as
+            # itself; a cap refusal is a control-plane answer, in the same class the
+            # registry arm raises when the org is missing.
+            raise ControlPlaneError(
+                f"Team {org_id!r} is at its API-key cap (max_api_keys), so nothing was "
+                "minted. Rotate: mint the replacement first, then revoke the old "
+                "credential (row 36) — revoking frees the slot."
+            ) from exc
+        return {
+            "id": minted["id"],
+            "key_prefix": minted["key_prefix"],
+            "api_key": minted["key_plaintext"],
+            "org_id": org_id,
+            "created_at": minted["created_at"],
+        }
+
     def _apikey_revoke(self, key_id: str) -> dict:
         """Revoke an API key (soft delete — sets revoked_at). Idempotent."""
         from datetime import datetime, timezone
