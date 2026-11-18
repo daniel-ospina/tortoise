@@ -111,13 +111,23 @@ EXIT CODES
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/capstone_state_value.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/capstone_state_value.py`"
+    )
+
 import argparse
 import json
 import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import traceback
@@ -675,16 +685,24 @@ class LocalTarget:
                     read_status_out=status,
                     _truncation_out=trunc,
                     leg_trace=trace,
-                    # #12297's census (`tests/test_rerank_pool.py`) requires every
-                    # caller in `tools/` to either opt out or be on its
-                    # intentional-keep list: this instrument's OUTPUT is the page
-                    # the lever moves (which rows survive `limit`, and whether a
-                    # retired id appears in them), so an armed rerank would move
-                    # the scoreboard with no narrated cause — the same class as
-                    # `docs/evidence/7983-cost-magnitudes/probes/ledger_probe.py`,
-                    # which also opts out. The gate is default-OFF; this keeps the
-                    # measurement stable when it is armed, and names the choice
-                    # instead of inheriting it.
+                    # #12297's census requires every `tools/` caller of this read
+                    # to either opt out or be named in its intentional-keep list.
+                    # This door opts out, as a RECORDED-BASELINE instrument:
+                    # `docs/evidence/13038-capstone/README.md` commits
+                    # `verdicts-baseline.json` so "a later run can be compared
+                    # against" it, and what this read RETURNS is the page the
+                    # lever moves — which rows survive `limit`, and whether a
+                    # retired id appears among them. `sdk.py`'s
+                    # `_rerank_candidates` docstring names this class and records
+                    # that pinning the rerank ALONE is its norm.
+                    # ⚠️ Unlike the `tools/` harnesses in that class this read
+                    # does NOT pin `_valid_time_rerank` — it runs the shipped
+                    # valid-time ordering and pins only the fused rerank, the
+                    # `docs/`-half shape the same docstring describes. So with the
+                    # gate armed the trace reports `reason=order_owned_downstream`
+                    # for a caller that owns no downstream order; noted here so the
+                    # recorded `legs` are not later read as a decision this door
+                    # never made.
                     _rerank_candidates=False,
                     **extra,
                 )

@@ -1508,6 +1508,17 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         "tools/gen_ask_transcripts.py",     # shipped reader, i.e. the lever ON
         "tools/candidate_recall_11901.py",  # measures the rerank itself
         "tools/rerank_calibration_12297.py",  # ditto
+        # ⛔ A MIRROR of `extractor_v2._fts_rows`, which keeps the rerank ON
+        # DELIBERATELY: `sdk.py`'s `_rerank_candidates` docstring records the
+        # departure verbatim — "the capture path (`extractor_v2._fts_rows`)
+        # deliberately KEEPS the rerank — it has a measured recall@3 delta and
+        # its own `OVERRIDES:` record — while opting out of the valid-time
+        # selection. One flag for both would force that departure to choose",
+        # and `test_rerank_pool`'s `runs_the_lever` names the same site. This
+        # helper's entire contract is to run EXACTLY that leg, so opting it out
+        # would make the recall figures it prints describe a reader `_fts_rows`
+        # does not run — the mirror would be broken by the fix, not by the gate.
+        "tools/window_quality_m2.py",
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
