@@ -786,12 +786,13 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                         f"{texts!r} became {got_list!r}"
                     )
                     continue
-                # `strict=True` on both sides of the merge (this branch and
-                # `origin/main` added it independently, for the same reason): the
-                # length equality above already `continue`s when the lists differ,
-                # so a mismatch here would mean the guard itself was bypassed —
-                # the parameter asserts nothing new and gives B905 its explicit
-                # argument. Kept as ONE line with both sides' intent, not two.
+                # `strict=True` (#13452 + this branch added it independently, for
+                # the same reason): the length guard above already `continue`d when the
+                # lists differ, so an unequal pair here is unreachable — and if that
+                # guard is ever weakened, this must RAISE rather than silently compare
+                # a prefix (the fail-open this arm exists to close). It also gives
+                # ruff B905 its explicit argument (#13492 merge, inherited red on
+                # `main`).
                 for raw_item, got_item in zip(texts, got_list, strict=True):
                     if raw_item in wholly_comment:
                         # (A) already named this item's loss; a second reason from
