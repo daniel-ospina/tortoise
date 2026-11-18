@@ -57,17 +57,24 @@ SHIPPED_CORE = ("how-to-use-tortoise", "tortoise-decide", "tortoise-file-finding
 # canonical source for these three skills, so the fix lands there first).
 KNOWN_STALE_TOOL_NAMES = {
     "analyse-for-contradictions": {
-        # #4282 — FIVE of the six served skills are MIRRORS of
+        # #4282 — THREE of the six served skills are MIRRORS of
         # `daniel-ospina/tortoise-skills-and-integrations`, whose canonical text this repo
-        # does not own: three are sha-pinned in `config/served-skills-upstream.yml`
-        # (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) and two more are
-        # equally upstream-authored though unpinned — `tests/test_served_skill_byte_parity.py`
-        # names them as #4914's stated scope boundary (analyse-for-contradictions,
-        # research-domain). Only `tortoise-onboarding` is authored here, and its references
-        # WERE re-pointed in this batch. The names above still RESOLVE through the #3883
-        # warning shim and each warning names the container, so an agent following the
-        # skill is redirected rather than broken. Re-cutting the mirror from upstream
-        # SHRINKS these entries back out; the ratchet must never grow for any other reason.
+        # does not own; all three are sha-pinned in `config/served-skills-upstream.yml`
+        # (how-to-use-tortoise, tortoise-decide, tortoise-file-finding).
+        # ⛔ THIS NOTE USED TO SAY FIVE — that `analyse-for-contradictions` and
+        # `research-domain` were "equally upstream-authored though unpinned". MEASURED
+        # FALSE 2026-11-18: the pinned MIT repo's `skills/` tree contains exactly three
+        # entries (how-to-use-tortoise, tortoise-decide, tortoise-file-finding — `gh api
+        # repos/daniel-ospina/tortoise-skills-and-integrations/contents/skills`), and
+        # `docs/license-notes.md` §7.1's ownership table lists the same three plus
+        # `tortoise-onboarding` and the installer, NOT the #1652 pair. So FIVE skills are
+        # authored HERE and only three are mirrors — which is why the pair's references
+        # were RE-POINTED in this batch rather than ratcheted: there is no upstream copy
+        # to re-cut, so a ratchet row for them could never shrink. The remaining names
+        # still RESOLVE through the #3883 warning shim and each warning names the
+        # container, so an agent following a MIRROR is redirected rather than broken.
+        # Re-cutting those three mirrors from upstream SHRINKS this map; the ratchet must
+        # never grow for any other reason.
         "tortoise_audit",           # #4282 → tortoise_graph_overview(section="audit")
         # #11609 Phase 2 retired these three into containers; the mirror still
         # names them and they still RESOLVE through the #3883 warning shim, which
@@ -78,6 +85,14 @@ KNOWN_STALE_TOOL_NAMES = {
         "tortoise_review_connections",   # → tortoise_review_link_candidates(kind="connections")
     },
     "how-to-use-tortoise": {
+        # #11609's CREATE-ARMS wave retired `tortoise_create_point` into
+        # `tortoise_create_entity(type="point", ...)`. These three mirrors are the
+        # upstream-pinned ones (`config/served-skills-upstream.yml`), so the name is
+        # RATCHETED here rather than re-pointed: editing them here is exactly what
+        # `served_skills_parity.py --check-upstream` exists to catch and what the next
+        # `--sync` would revert. `research-domain` and `tortoise-onboarding` ARE authored
+        # here and were re-pointed in the same change.
+        "tortoise_create_point",    # → tortoise_create_entity(type="point", ...)
         "tortoise_fts_query",      # an SDK method name, never a tool
         # #4282 → tortoise_graph_overview(section="structure") — see the note above.
         "tortoise_summarize_structure",
@@ -99,6 +114,10 @@ KNOWN_STALE_TOOL_NAMES = {
         "tortoise_set_point_baseline",  # → tortoise_refresh_confidence(scope="baseline", point_id=…)
         "tortoise_supersede",           # → tortoise_supersede_knowledge(old_id, new_id, …)
         "tortoise_update_point",        # → tortoise_update_knowledge(id, props=…)
+        # #11609 P2 strengthened the confidence container: `compute_confidence` is its
+        # `recompute=True` arm now. Upstream-authored mirror, still resolves via the
+        # #3883 shim (see the note at the top of the map).
+        "tortoise_compute_confidence",  # → tortoise_check_confidence(recompute=True, ...)
     },
     "research-domain": {
         # #4282 → tortoise_graph_overview(section=...) — see the note above.
@@ -108,12 +127,35 @@ KNOWN_STALE_TOOL_NAMES = {
         # mirror is upstream-authored (see the note above), and the retired name
         # still resolves through the #3883 warning shim.
         "tortoise_review_connections",
+        # #11609 P2 → tortoise_check_confidence(recall=True, mode="gaps", query=...).
+        # ⛔ NOT ratcheted: `research-domain` is authored IN THIS REPO (see the ownership
+        # note above — the MIT repo has no such skill), so its four `tortoise_recall`
+        # references were re-pointed in this batch, exactly as `tortoise-onboarding`'s
+        # were. A ratchet row here could never shrink.
     },
-    "tortoise-file-finding": {"tortoise_list_sources"},
+    # `tortoise-decide` is one of the three sha-pinned mirrors
+    # (`config/served-skills-upstream.yml`), so its references are NOT re-pointed here:
+    # #11609 P2's arm retirement moved both names off the advertised surface, and both
+    # still resolve through the #3883 shim, whose warning names the arm. A "`--sync`"
+    # from upstream would overwrite a local fix, which is why the ratchet records the
+    # stale name instead of editing the text.
+    "tortoise-decide": {
+        "tortoise_compute_confidence",  # → tortoise_check_confidence(recompute=True, ...)
+        "tortoise_recall",              # → tortoise_check_confidence(recall=True, ...)
+        # → tortoise_create_entity(type="point", ...); see the note at the top.
+        "tortoise_create_point",
+    },
+    "tortoise-file-finding": {
+        # → tortoise_create_entity(type="point", ...); see the note above.
+        "tortoise_create_point",
+        "tortoise_list_sources",
+    },
     # #4282: `tortoise/onboarding/SKILL.md` is the ONE served skill authored in THIS repo
     # (not the external mirror), so its `check_structure`/`overview` references were
     # re-pointed at the container in the same change. This entry is unchanged by that
     # re-pointing — `tortoise_health` predates this batch and still resolves via the shim.
+    # #11609 P2 re-pointed its `tortoise_compute_confidence` references the same way (to
+    # `tortoise_check_confidence(recompute=True)`), so that name does NOT appear here.
     "tortoise-onboarding": {"tortoise_health"},
 }
 
@@ -230,8 +272,11 @@ def test_1652_tortoise_decide_names_the_research_domain_loop():
 
     # …and the skill it names exists, so the reference is not a dangling one.
     research = _read(os.path.join(SERVED, "research-domain", "SKILL.md"))
-    assert 'mode="gaps"' in research and "tortoise_recall" in research, (
-        "research-domain must itself document the UC2 gaps recall")
+    assert 'mode="gaps"' in research and (
+        "tortoise_check_confidence(recall=True" in research
+    ), (
+        "research-domain must itself document the UC2 gaps recall — through the "
+        "live container name, since #11609 P2 retired `tortoise_recall`")
 
 
 def test_1652_installer_core_set_unchanged_and_new_skills_are_documented():

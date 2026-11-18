@@ -47,7 +47,7 @@ deliberate act through `how-to-use-tortoise`.
    words. "We will move the ingest path to a single-flight queue" is a claim;
    "this improves reliability" is a hope and is not checkable.
 2. **Match each claim against the graph.** For every claim:
-   - `tortoise_recall(mode="state", query=<claim>)` — UC1: the current
+   - `tortoise_check_confidence(recall=True, mode="state", query=<claim>)` — UC1: the current
      high-confidence state on that subject, object-centric, with superseded /
      deprecated / retracted claims excluded and *contested* claims flagged with
      their counter-evidence attached. This is the primary matcher.
@@ -139,7 +139,7 @@ CONFIRMS
 
 ## Error handling
 
-- If `tortoise_recall(mode="state")` returns nothing for a claim, that is a
+- If `tortoise_check_confidence(recall=True, mode="state")` returns nothing for a claim, that is a
   **NOVEL** verdict — not a skipped claim, and not a pass.
 - If the graph is unreachable, say so plainly and return the extracted claims
   without verdicts. Never mark a claim "consistent" with a graph you could not

@@ -468,6 +468,14 @@ class TestHintsCannotDrift:
             # re-derived score (#4122 measurement: 0.693315 -> 0.693320)
             ("tortoise_compute_confidence", False),
             ("tortoise_get_confidence", False),
+            # #11609 P2: the container now ABSORBS both non-idempotent doors above —
+            # `recompute=True` is `tortoise_compute_confidence` and the `claim_id` arm is
+            # `tortoise_get_confidence` — so an advertisement that derives
+            # `idempotentHint=True` from its `maintenance` tier would tell a retrying
+            # client that a call which re-derives and re-stores a score is safe to
+            # repeat. Pinned BY NAME here for the same reason those two are: the arms
+            # carry the operation, so the declaration must travel with them.
+            ("tortoise_check_confidence", False),
         }, sorted(overrides)
 
     def test_write_names_are_exactly_the_writing_tiers(self):
