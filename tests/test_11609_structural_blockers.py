@@ -327,6 +327,29 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
             for child in node.body:
                 _walk(child, inner, False)
             return
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            # ⛔ A COMPREHENSION IS A BLOCK (`#13585 review c2a6c706` P2). Python compiles it to
+            # an implicit function (PEP 709 inlines it from 3.12, but the SCOPE is unchanged), so
+            # its generator targets do NOT leak into the enclosing block. Attributing them there
+            # made the whole enclosing block look like it rebound the name, so a module that
+            # wires the adapter on the line AFTER a comprehension reported `[]` while `main`
+            # reported the site — the false PASS this reader exists to prevent.
+            # The FIRST iterable is evaluated in the ENCLOSING scope; every later iterable, every
+            # target and every `if` runs inside the comprehension's own block.
+            _walk(node.generators[0].iter, stack, branched)
+            inner = (*stack, node)
+            for index, generator in enumerate(node.generators):
+                if index:
+                    _walk(generator.iter, inner, False)
+                _walk(generator.target, inner, False)
+                for condition in generator.ifs:
+                    _walk(condition, inner, False)
+            if isinstance(node, ast.DictComp):
+                _walk(node.key, inner, False)
+                _walk(node.value, inner, False)
+            else:
+                _walk(node.elt, inner, False)
+            return
         deeper = branched or isinstance(node, branches)
         for child in ast.iter_child_nodes(node):
             _walk(child, stack, deeper)
@@ -338,7 +361,8 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     MODULE_BINDING = "module"
     SHADOWED = "shadowed"
 
-    def _bind(env: dict[str, set[str]], name: str, kind: str, node: ast.AST) -> None:
+    def _bind(env: dict[str, set[str]], name: str, kind: str, node: ast.AST,
+              join: bool = False) -> None:
         """Record that `name` may hold `kind` after `node` runs.
 
         ⛔ A CONDITIONAL BINDING IS A JOIN, NOT AN OVERWRITE (`#13585 review round 4` F1). The
@@ -366,7 +390,7 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         UNCONDITIONAL shadow rows assert the other direction so this cannot decay into
         "always report".
         """
-        if conditional.get(id(node), False):
+        if join or conditional.get(id(node), False):
             env[name] = env.get(name, set()) | {kind}
         else:
             env[name] = {kind}
@@ -388,6 +412,34 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
             keys.append(id(block))
         keys.append(MODULE)
         return keys
+
+    def _env_key(name: str, chain: tuple[ast.AST, ...]) -> int | None:
+        """The block whose ENV a binding's value lands in, honouring `global` / `nonlocal`.
+
+        ⛔ The name and its VALUE must be filed in the SAME block (`#13585 review c2a6c706` P3).
+        `_note_binding` already redirects `global` to the module and `nonlocal` to the enclosing
+        FUNCTION block that owns `binds`, but the value side wrote into whatever block the
+        statement sat in — so the two disagreed and the reading broke in both directions:
+
+            def outer():
+                tr = None
+                def inner():
+                    nonlocal tr
+                    tr = tool_registry      # value -> inner's env, name -> outer's binds
+                inner()
+                return tr.FastAPIRouterAdapter(x)   # outer reads {shadowed} -> `[]` (main `[8]`)
+
+        is a false PASS and a regression against `main`, while the `global` mirror kept the
+        module env holding the import and so reported a call of `object(x)`.
+        """
+        if name in declared_global.get(_key(chain), ()):
+            return MODULE
+        if name in declared_nonlocal.get(_key(chain), ()):
+            for block in reversed(chain[:-1]):
+                if isinstance(block, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    return id(block)
+            return MODULE
+        return _key(chain)
 
     #: The names each block binds ANYWHERE (so a same-block shadow shadows the module name for
     #: every read in that block, exactly as Python's compile-time scoping does), and the value
@@ -463,8 +515,11 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
                 _note_binding(node.name, chain)
         elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             for generator in node.generators:
+                # ⛔ the target belongs to the COMPREHENSION's block, not the enclosing one
+                # (`#13585 review c2a6c706` P2) — read it off the target node's own chain, which
+                # `_walk` sets to the comprehension.
                 for name in _target_names(generator.target):
-                    _note_binding(name, chain)
+                    _note_binding(name, _chain(generator.target))
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 _note_binding(alias.asname or alias.name.split(".", 1)[0], chain)
@@ -523,48 +578,60 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         return kind is not None and MODULE_BINDING in kind
 
     def _apply_import_or_definition(node: ast.AST, chain: tuple[ast.AST, ...]) -> None:
-        env = envs.setdefault(_key(chain), {})
         if isinstance(node, ast.ClassDef):
             # ⛔ The DEFINING module is where a bare-name wiring is most likely, so the class
             # definition is itself a binding. An import-only reading made
             # `FastAPIRouterAdapter(app)` inside `tool_registry.py` invisible — the one module
             # the docstring above names as the legitimate wiring site.
-            _bind(env, node.name,
+            _bind(envs.setdefault(_env_key(node.name, chain), {}), node.name,
                   CLASS_BINDING if node.name == _ADAPTER_CLASS else SHADOWED, node)
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 bound = alias.asname or alias.name.split(".", 1)[0]
+                key = _env_key(bound, chain)
+                env = envs.setdefault(key, {})
+                join = key != _key(chain)
                 if alias.name == _ADAPTER_CLASS:
-                    _bind(env, bound, CLASS_BINDING, node)
+                    _bind(env, bound, CLASS_BINDING, node, join=join)
                 elif _is_module_name(alias.name):
                     # `from tortoise import tool_registry as tr` — the spelling this very file
                     # uses for `mcp_server` (`from tortoise import mcp_server as ms`), so it is
                     # a realistic regression path rather than an exotic one.
-                    _bind(env, bound, MODULE_BINDING, node)
+                    _bind(env, bound, MODULE_BINDING, node, join=join)
                 else:
-                    _bind(env, bound, SHADOWED, node)
+                    _bind(env, bound, SHADOWED, node, join=join)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 bound = alias.asname or alias.name.split(".", 1)[0]
-                _bind(env, bound, MODULE_BINDING if _is_module_name(alias.name) else SHADOWED,
-                      node)
+                key = _env_key(bound, chain)
+                _bind(envs.setdefault(key, {}), bound,
+                      MODULE_BINDING if _is_module_name(alias.name) else SHADOWED,
+                      node, join=key != _key(chain))
 
     def _apply_assignment(node: ast.Assign | ast.AnnAssign, chain: tuple[ast.AST, ...]) -> None:
-        env = envs.setdefault(_key(chain), {})
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         bound_value = _dotted(node.value) if node.value is not None else None
         class_bound = _resolves_to_class(bound_value, chain, envs)
         module_bound = _resolves_to_module(bound_value, chain, envs)
         for target in targets:
             for name in _target_names(target):
+                # ⛔ THE VALUE LANDS IN THE BLOCK THAT OWNS THE NAME (`#13585 review c2a6c706`
+                # P3) — `global` goes to the module, `nonlocal` to the enclosing function — and a
+                # redirected write is a JOIN, because whether it takes effect at all depends on
+                # whether this function runs. Over-reporting there is the declared direction (a
+                # re-read of the pin answers it); under-reporting would be the false PASS this
+                # reader exists to prevent.
+                key = _env_key(name, chain)
+                env = envs.setdefault(key, {})
+                join = key != _key(chain)
                 if class_bound:
-                    _bind(env, name, CLASS_BINDING, node)
+                    _bind(env, name, CLASS_BINDING, node, join=join)
                 elif module_bound:
-                    _bind(env, name, MODULE_BINDING, node)
+                    _bind(env, name, MODULE_BINDING, node, join=join)
                 else:
                     # a reassignment that resolves to neither DROPS the name (see docstring)…
                     # unless it sits in a BRANCH, where it only ADDS a possibility (`_bind`).
-                    _bind(env, name, SHADOWED, node)
+                    _bind(env, name, SHADOWED, node, join=join)
 
     def _apply_parameters(node: ast.AST, chain: tuple[ast.AST, ...]) -> None:
         """Bind a function's parameters in ITS block.
@@ -1476,6 +1543,61 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "A(app)\n"
     ) == [], ("a NAME rebinding before the attribute store was forgotten — a store must be "
               "TRANSPARENT, not a reset to the module binding")
+    # ⛔ A COMPREHENSION IS ITS OWN BLOCK (`#13585 review c2a6c706` P2). Python compiles it to an
+    # implicit function (PEP 709 inlines it in 3.12+, but the SCOPE is unchanged), so its target
+    # does NOT leak. Filing the target in the enclosing block made that whole block look like it
+    # rebound the name, so a module wiring the adapter on the line AFTER a comprehension reported
+    # `[]` while `main` reported the site — a false PASS, measured in all four comprehension
+    # shapes. The first iterable is still evaluated in the ENCLOSING scope.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "def wire(app):\n"
+        "    picked = [FastAPIRouterAdapter for FastAPIRouterAdapter in _cands()]\n"
+        "    return FastAPIRouterAdapter(app).register_all(TOOL_REGISTRY, handlers)\n"
+    ), ("a comprehension target leaked into the ENCLOSING block and erased the wiring after it "
+        "— the comprehension is its own scope (`main` reported this site)")
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "def wire(app):\n"
+        "    picked = [tr for tr in _candidates()]\n"
+        "    return tr.FastAPIRouterAdapter(app)\n"
+    ), "the module-alias spelling of the comprehension leak"
+    # …without trading it for a blind spot: a call INSIDE the comprehension body still resolves
+    # against the enclosing block (only the comprehension's TARGETS are scoped to it).
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "def build(apps):\n"
+        "    return [FastAPIRouterAdapter(app) for app in apps]\n"
+    ), "a call INSIDE a comprehension body stopped resolving against the enclosing block"
+    # ⛔ `global` / `nonlocal` REDIRECT WHERE THE VALUE LANDS (`#13585 review c2a6c706` P3). The
+    # name was filed in the block that OWNS it while the value stayed in the block the statement
+    # sat in, so the two disagreed and the reading broke: `nonlocal` left the owner reading
+    # `{shadowed}` and lost a real wiring that `main` reported.
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "def outer():\n"
+        "    tr = None\n"
+        "    def inner():\n"
+        "        nonlocal tr\n"
+        "        tr = tool_registry\n"
+        "    inner()\n"
+        "    return tr.FastAPIRouterAdapter(x)\n"
+    ), ("a `nonlocal` binding's VALUE was filed in the inner block — the enclosing block kept "
+        "reading `{shadowed}` and the real wiring after it was lost (`main` reported it)")
+    # …and the `global` arm is the DECLARED OVER-READ, pinned rather than hidden: a module-level
+    # name written through `global` may or may not have been rebound, depending on whether that
+    # function ran, so the name keeps BOTH possibilities and the call is still reported.
+    # Over-reporting is the sanctioned direction (A/B: a false PASS is the one that must never
+    # ship, an over-block is a re-read); the row pins the disclosure, not a silence.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "def reset():\n"
+        "    global FastAPIRouterAdapter\n"
+        "    FastAPIRouterAdapter = object\n"
+        "reset()\n"
+        "FastAPIRouterAdapter(x)\n"
+    ), ("a `global` rebinding is a JOIN over 'did that function run', so the call stays "
+        "REPORTED — the declared over-read (AGENTS.md A/B), deliberately not a silent drop")
     # and the forward-reference half must survive the per-position read: Python resolves a name
     # at CALL time, so a chain declared below its use still instantiates the adapter.
     assert _adapter_instantiation_sites(
