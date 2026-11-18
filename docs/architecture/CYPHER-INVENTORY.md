@@ -453,6 +453,19 @@ now does touch `tortoise/indexer/github_indexer.py` — measured, it moves **no*
 (`non_cypher_door_calls` stays 258), so this cut's numbers are unaffected. `--check` reports **`25
 pinned counts match`**.
 
+**This re-cut's base:** `origin/main` **`ae54df166d`**, merged here — re-derived by RUNNING the tool
+on the final merged tree, never by arithmetic on the markers. **No census SCALAR moved** (`--check`
+reports **`25 pinned counts match`**), and **Appendix A moved by exactly ONE row**: section (b) of
+this test's appendix arm reddened on the merge over
+`tortoise/monitoring.py:4670` → the tool measuring `4787` (**+117**). All of it comes from ONE commit,
+`main`'s **`b8723c0f16`** (`#13430`), which added **132** lines to that file above the single site
+across two hunks — `@@ -806,6 +806,89 @@` (**+83**) and `@@ -2816,6 +2899,40 @@` (**+34**), whose
+sum is the row's shift; the two hunks below it (`@@ -7622,6 +7739,12 @@`, `@@ -7832,6 +7955,15 @@`)
+sit under line 4670 and move nothing. ⚠️ The paragraph two above says `main` had touched
+tortoise/` not at all since `340d500491`; that was true of ITS base, and `b8723c0f16` now does — the
+`file:line`-versus-SCALAR gap this section describes, from a fourth side: every SCALAR stayed green
+while the appendix had already rotted, because line numbers are only graded by the byte-compare arm.
+
 **Where these SCALARS were last cut:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
 forward merges (`0774035055`, then `9d13dc1bf7`) — re-derived by RUNNING the tool on the FINAL
 merged tree, never by arithmetic on the markers. `main`'s two commits between them move no census
@@ -1244,7 +1257,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/mining.py:1476` | `EpSafeCommit.verify_no_auto_wire` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {is_operator:true})-[r]->(n:Point) WHERE n.id IN $ids…` |
 | `tortoise/mining.py:1484` | `EpSafeCommit.verify_no_auto_wire` | plain | read | candidate:SQL-shaped | `MATCH (o:Point {id:$id}) RETURN o.status` |
 | `tortoise/mining.py:1502` | `EpSafeCommit.verify_no_auto_wire` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {id:$oid})-[r]->(s:Point) RETURN s.id, s.status` |
-| `tortoise/monitoring.py:4670` | `_probe_once._run_query` | plain | read | candidate:SQL-shaped | `RETURN 1` |
+| `tortoise/monitoring.py:4787` | `_probe_once._run_query` | plain | read | candidate:SQL-shaped | `RETURN 1` |
 | `tortoise/navigation.py:95` | `_resolve_root` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/navigation.py:205` | `entityProfile` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/navigation.py:319` | `tortoise_traverse` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
