@@ -1691,8 +1691,9 @@ def test_the_restore_verb_still_exists():
 #    and the sort is by version, never by the whole name.
 # 2. THE BODY IS THE FUNCTION'S OWN, not first-function-to-last-function in the
 #    file. Multi-function migrations are ordinary here — measured at this head,
-#    `20260915000001_tenancy_team_to_org.sql` defines 13 functions, and three
-#    others define 3–5 — so a slice from the file's first `AS $$` to its last `$$`
+#    `20260915000001_tenancy_team_to_org.sql` defines 13 functions, and TWELVE
+#    other files define 3–5 (13 files define three or more) — so a slice from the
+#    file's first `AS $$` to its last `$$`
 #    lets a SIBLING function's `RAISE WARNING` satisfy the assertion.
 # 3. THE SELECTOR IS CLOSED OVER THE DEFINITION'S SPELLING SPACE. `CREATE
 #    [OR REPLACE] FUNCTION [schema.]name` tolerates an optional `OR REPLACE`, an
@@ -2026,7 +2027,7 @@ def test_the_body_scan_is_bounded_to_the_named_function():
 
     The slice this replaces ran from the file's FIRST `AS $$` to its LAST `$$`,
     so in a multi-function migration (ordinary here: one file defines 13
-    functions, three others 3–5) the snapshot's own `RAISE WARNING` could be
+    functions, twelve others 3–5) the snapshot's own `RAISE WARNING` could be
     deleted and the assertion would still pass on a neighbour's. Measured
     consequence of the old shape: `code` below matched `RAISE WARNING`.
     """
@@ -2094,6 +2095,14 @@ def test_the_body_scan_honours_a_named_dollar_tag():
     assert code is not None
     assert "RAISE WARNING" in code
     assert "after" not in code, f"the scan ran past the closing tag: {code!r}"
+    # ⛔ THE OTHER HALF OF THE DOCSTRING, and the half a naive closer fails: with
+    # `code.find("$$", opener.end())` the slice ends at the literal inside the
+    # string, so `code` becomes "\nBEGIN\n  RAISE WARNING 'mentions " — which
+    # satisfies BOTH assertions above (the warning is inside the truncated prefix)
+    # while every statement AFTER the literal goes unasserted: a fail-open for the
+    # exact regression class this test exists to catch. These two live past it.
+    assert "RETURN;" in code, f"the scan stopped at the literal $$ in the body: {code!r}"
+    assert "END;" in code, f"the scan stopped at the literal $$ in the body: {code!r}"
 
 
 # --------------------------------------------------------------------------- #
