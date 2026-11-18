@@ -850,12 +850,16 @@ def _assert_labels_are_ADDRESSABLE(labels, state):
     the old `KEY_PROPERTY == "id"` literal could not see, because it reddened on
     CORRECT states (`Event`, `Source`) instead.
 
-    ⛔ AND A SECOND BRANCH IS ALLOWED ONLY WHERE IT IS DECLARED. `extra` must be
-    empty or the label must sit in `ENTITY_UNION_ADDRESS_RESIDUALS` — the one
-    home that says "the cache resolves this label from a value the record cannot
-    be assumed to carry", and the fact `entity_coverage_complete` turns into an
-    abstention. Without that half, a new branch on a served label would move the
-    defect to a declaration nothing reads.
+    ⛔ AND NOTHING HERE IS SAID ABOUT A *SECOND* BRANCH, DELIBERATELY. Whether an
+    extra branch is addressed by the record is `ENTITY_UNION_ADDRESS_RESIDUALS`'
+    question, derived and pinned by
+    `test_the_two_coverage_facts_are_SEPARATE_and_Event_is_not_a_residual` — and a
+    guard here that demanded "declare it as a residual" would be the SAME defect
+    one step later: `#13351`'s repair RETIRES that entry (the probe covers the
+    branch), so the message would send that lane backwards. One home per question:
+    this row pins the contract key, the residual map pins what the read does not
+    cover, and a second blocker with a misdirecting message is what #13392 review,
+    P2 removed.
     """
     from tortoise.cache_projection import KEY_PROPERTY
     from tortoise.projection import FalkorProjection
@@ -869,13 +873,9 @@ def _assert_labels_are_ADDRESSABLE(labels, state):
             f"record addresses it by {contract_key!r} — a label whose contract "
             f"key is not one of its cache branches is resolved from a value the "
             f"record row cannot carry, which is an ADDRESSABILITY defect, not a "
-            f"residual (#13351 repairs the reverse case)")
-        extra = branch_props - {contract_key}
-        assert not extra or label in rs.ENTITY_UNION_ADDRESS_RESIDUALS, (
-            f"{state}: {label} is resolved from {sorted(extra)} as well as its "
-            f"contract key {contract_key!r}, and is not declared in "
-            f"ENTITY_UNION_ADDRESS_RESIDUALS — declare it there, so the absence "
-            f"verdict knows this read cannot be assumed to cover that value")
+            f"residual (#13351 repairs the reverse case: a branch the read does "
+            f"not probe yet, which is ENTITY_UNION_ADDRESS_RESIDUALS' question "
+            f"and not this row's)")
 
 
 def test_the_served_labels_are_the_ones_with_measured_parity():
@@ -923,7 +923,10 @@ def test_the_addressability_guard_does_NOT_prohibit_the_13351_repair():
     So the invariant is asserted over the whole JURISDICTION — which is that
     state with `Event` included — rather than over today's smaller served set:
     every label a bare value can name has its contract key among its cache
-    branches, and any second branch is DECLARED as an address residual.
+    branches. What the record does NOT cover (a second branch, until a probe
+    does) stays `ENTITY_UNION_ADDRESS_RESIDUALS`' question, derived and pinned by
+    the sibling row — see the helper's docstring for why it must not be doubled
+    here.
     MEASURED non-vacuous: under the previous equality spelling this row reds
     today, on `Source` (`{'id', 'url'} != {'url'}`).
     """
