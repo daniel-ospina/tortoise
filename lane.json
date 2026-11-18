@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-P5-1795038882-p322225-44c862ea",
+  "_sha": "cabb378ee96034684747e96c7a8389c26e8739dd",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/P5.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/12901-sdk-final-batch"
+    },
+    {
+      "kind": "sha",
+      "value": "25240f983732905155d1fad563cdd84b39293eb1"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/.worktrees/P5"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "duration_s": 7212,
+  "ended_at": 1795046094,
+  "exit_code": 143,
+  "heartbeat_at": 1795046094,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-P5-1795038882-p322225-44c862ea",
+  "lease_until": 1795053894,
+  "pid": 322225,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795038882,
+  "state": "FAILED",
+  "tag": "P5",
+  "worktree": "/home/cmux/.worktrees/P5"
+}
