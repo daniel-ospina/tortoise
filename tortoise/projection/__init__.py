@@ -4645,7 +4645,9 @@ def note_live_write_target(proj) -> None:
 
     * the fold (`FalkorProjection.apply`) — once per fold that LANDED;
     * the structural-edge mint (`edges._record_structural_edges`) — once per
-      mint that created a row;
+      mint, which is NOT "only a genuinely new row": its gate is
+      `MERGE … RETURN count(*) > 0`, true for an idempotent re-MERGE of an edge
+      that already existed (`edges.py` states that bound at the call site).
     * the three declared live gateways that issue their own statements —
       `onboarding.state._run`, `webhook_delivery._run`, `why_snapshot._run` —
       and the two hosted session-delete sweeps
@@ -12850,6 +12852,17 @@ class FalkorProjection(
             never UNDER-report, which is the direction that would recreate the
             illusion this registry exists to end. The graph NAME is right either
             way, and that is the question `cache_write_targets` answers.
+
+            ⛔ ONE BOUND ON THAT "never", so it is not read as more than it is:
+            the hook runs on the fold's RETURN (`apply` counts a fold that
+            returned, never one that was attempted), so a fold that issues its
+            statements and then RAISES is counted as nothing. It can land and
+            still raise — `_upsert` writes props and THEN edges, and
+            `_fold_session_deleted` deletes the Source and THEN the Session — so
+            the first statement is a landed write this registry does not count.
+            The claim is therefore "never under-reports a fold that RETURNED";
+            closing the interrupted case belongs at the fold's own statement
+            boundary, not in this arm.
             """
             if _wrote is not None:
                 _wrote[0] = False

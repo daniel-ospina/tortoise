@@ -16230,6 +16230,19 @@ class TortoiseSDK:
             # `_cache_graph_name` parses the URI, which raises `ValueError` on a
             # malformed one (`docker://[::1/db`). #5148 protects the call, not
             # the argument (review cycle 2, finding 4).
+            #
+            # ⛔ NAMED RESIDUAL (review cycle 8, P3): when the derivation raises,
+            # `cache_graph=None` reaches `cache_leg.tenant_graph_reason`, whose
+            # `if not cache_graph: return None` arm is its "no bind shape decided
+            # yet" silence — so the tenant/cache GRADE does not run and NOTHING
+            # records that it did not. That is the honest bound rather than a
+            # claim: the alternative was a 500 on a bind that otherwise
+            # succeeded, and the silence is pinned by
+            # `tests/test_12943_cache_leg.py::
+            # test_a_malformed_uri_does_not_turn_binding_a_tenant_into_a_failure`.
+            # The repair is a counter for a grade that COULD NOT RUN (which the
+            # health block would then have to publish), not a different except
+            # clause here.
             try:
                 _cache_graph = self._cache_graph_name()
             except Exception:  # noqa: BLE001, RUF100
