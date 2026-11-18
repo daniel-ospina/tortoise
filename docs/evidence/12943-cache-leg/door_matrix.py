@@ -194,8 +194,6 @@ def _cache_counts(graph_name: str) -> dict[str, int]:
             out[label] = int(res.result_set[0][0]) if res.result_set else 0
         return out
     finally:
-        # A close that fails must not mask the count (SIM105: one home, not a
-        # bare try/except).
         with contextlib.suppress(Exception):
             db.connection.close()
 

@@ -23237,10 +23237,10 @@ class TortoiseSDK:
         # silently MISSING from the index-served Point dense leg (#8429) — the
         # write seam exists so a server-owned vector is always the typed,
         # indexable shape. (#8316 has since normalised a right-width `List` at
-        # the READ boundary, so the "expected Null or Vectorf32 but was List"
-        # abort this comment used to cite no longer happens for the right-width
-        # case; a wrong-width or non-numeric value still aborts the MATCH —
-        # #8430.) That is the #4521 class on the LIVE path
+        # the READ boundary, and #8430 drops a stored value the read cannot
+        # consume — a wrong width or a non-numeric value — instead of aborting
+        # the whole MATCH; a wrong-width TYPED row is its declared residual.)
+        # That is the #4521 class on the LIVE path
         # (#4521 / PR #7740 fixed only the replay's `_revise_point`). The
         # derived vector is SERVER-owned, so it is cast and CLEARED first,
         # exactly like `_revise_point`: `vecf32()` alone is not enough,
@@ -59275,9 +59275,26 @@ class TortoiseSDK:
         store a write has not finished projecting. Serving it would also hand
         them a TRUTHY ``{"residency": …}`` where they test ``or MISSING`` / ``or
         {}`` and read it as a found node. This is the same internal-vs-caller
-        split ``get_point``'s opt-in ``served_out`` sink makes; here it is a
-        method split because a bare ``get_entity`` caller carries no parameter by
-        which a mid-write one could be told apart.
+        split ``get_point``'s opt-in ``served_out`` sink makes; here it is the
+        ``cache_only=True`` keyword, declared AT THE CALL SITE rather than by a
+        second method name — the internal-reader arms are pinned by intercepting
+        this method BY NAME, and their contract says that interception must hold
+        regardless of how the call is spelled (``test_11926_derived_invalidation``).
+        ⚠️ The flag is a DEFAULT, not a structural guarantee: a new internal caller
+        that forgets it gets the seam — a bounded record round trip on the caller's
+        thread, and then, mid-write, EITHER a raise (record unavailable, or no
+        tenant to scope the read — ⛔ both of those raise in ``record`` mode ONLY:
+        in ``prefer`` they are named, counted fallbacks) OR a projection miss. The
+        miss is the arm that bites in EITHER mode: in ``prefer`` it hands back the
+        cache's answer (this marker only when the cache misses too), while in
+        ``record`` there is no cache branch at all — the answer is ``props is
+        None`` from the record itself, and
+        :func:`record_serve.entity_absent_wire` mints the TRUTHY
+        ``{"residency": "not-hot"}`` this docstring warns about two paragraphs up,
+        where an ``or MISSING`` test reads it as a found node (absence IS
+        established there — ``served_from == "record"`` — and what keeps the falsy
+        ``{}`` arm unreachable is the entity union's incomplete coverage, not the
+        mode).
         """
         if cache_only:
             return self._get_entity(id_val)
