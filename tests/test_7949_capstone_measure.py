@@ -16486,20 +16486,22 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
         "silent bind to the easier of two matches")
     line = rows[0]
     opening = re.search(r"consumed `sdk\.py:(\d+)`/`:(\d+)`", line)
-    # ⛔ ONE spelling was not enough (#13602 review, cycle 3): the first cut matched only
-    # the bare `are `N`/`M` here` shape, so re-introducing the duplicate in the document's
-    # OWN prevailing style (`sdk.py:N`/`:M`) stayed GREEN — measured by a fresh reviewer:
-    # appending "the sibling cites are `sdk.py:12110`/`:12163` here" gave
-    # `2 passed, 420 deselected`. What the rule forbids is a SECOND pair asserted as
-    # CURRENT, and the marker of a CURRENT assertion is the word `here` — so read it in
-    # ANY spelling. A pair stated as HISTORY names the head/delta that moved it and
-    # carries no `here`, so it stays exempt.
+    # ⛔ ONE spelling was not enough (#13602 review, cycles 3 and 4). The first cut matched
+    # only the bare `are `N`/`M` here` shape; the second added the `sdk.py:N`/`:M` form. A
+    # THIRD reviewer pass measured that two more stayed GREEN — `:N`/`:M` and
+    # `sdk.py:N`/`sdk.py:M` — and the missed `:N`/`:M` form is not hypothetical: it is the
+    # DOMINANT spelling in the sibling D5 cell this PR is about (13 distinct pairs, e.g.
+    # `:27330`/`:27442`). So BOTH elements now take an optional `sdk.py:` prefix and an
+    # optional leading `:`, and any pair asserted as CURRENT (marker = the word `here`)
+    # must equal the opening pair, in whichever spelling the document happens to use. A
+    # pair stated as HISTORY names the head/delta that moved it and carries no `here`, so
+    # it stays exempt.
     assert opening is not None, (
         "03-test-design.md's `subject_binding_available` row no longer states its "
         "`consumed sdk.py:N/M` pair in the shape this pin reads — re-derive it and "
         "update this pin rather than dropping it")
     first = (int(opening.group(1)), int(opening.group(2)))
-    for current in re.finditer(r"`(?:sdk\.py:)?(\d+)`/`:?(\d+)`\s+here", line):
+    for current in re.finditer(r"`(?:sdk\.py)?:?(\d+)`/`(?:sdk\.py)?:?(\d+)`\s+here", line):
         second = (int(current.group(1)), int(current.group(2)))
         assert second == first, (
             f"this ONE markdown line names two different pairs for the same cite: "
