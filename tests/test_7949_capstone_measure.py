@@ -6283,9 +6283,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # insertion moves by +39 — this row's two, and the `19558`/`19583`/`19451`/`18991`
         # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
         # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
-        # pointer to a row that no longer exists). Measured at THIS head, not copied: `@app.post("/v1/sessions")` is
-        # `:19504` and `@app.post("/v1/sessions/install-probe")` is `:22064` — the pair the row
-        # below pins, each the file's ONLY occurrence of its needle. (Prose here had `:18854`/`:21409`, `#12947`'s head.)
+        # pointer to a row that no longer exists). ⛔ NO NUMBERS ARE TYPED HERE, on purpose — the row
+        # below is pinned by CONTENT (each route is the file's ONLY occurrence of its needle), so it cannot
+        # rot, while a typed pair here did: `:19481`/`:22036` named a COMMENT and a BLANK line
+        # (#13489 review F2). (Prose here had `:18854`/`:21409`, `#12947`'s head.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("19504", ("exact", '@app.post("/v1/sessions")')),
             ("22064", '@app.post("/v1/sessions/install-probe")'),
@@ -6481,6 +6482,24 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # conclusion that the end was therefore unpinnable was not.
             ("4230", ("exact", ")")),
         ), "capstone_preregistration"),
+        # ⛔ THE PROMOTE/DEDUP CLUSTER, WHICH WAS LABELLED "AT THIS HEAD" AND WAS NOT
+        # (#13489 review, finding 1(a) — MEASURED). The clause read `:24677`/`:24789`/
+        # `:24700`/`:24965` as this head's anchors; `git show 2584a86ec1:tortoise/sdk.py`
+        # returns exactly those four, so they were the BRANCH head's values carried across
+        # the `origin/main` merge that grew `sdk.py` by ~2.5k lines — this row's own thesis,
+        # missed by this row. They now name `2584a86ec1` as the head they were read at and
+        # state this head's measured quartet, which is what this row holds to the tree so
+        # the next merge reds here instead of leaving a reader 2,500 lines from where the
+        # document says to go. `if batch_id:` is the FIRST of two occurrences (the second
+        # opens a different block), which is why the cited line is graded rather than the
+        # anchor's uniqueness.
+        ("05-verify.md", "their THIS-HEAD values are", (
+            ("27266", "if batch_id:"),
+            ("27378", "dedup_wired = False"),
+            ("27289", ("def", "def _cas_witness(result) -> bool:")),
+            ("27554", ("def",
+                       "def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:")),
+        ), "sdk"),
         # ⚠️ BOTH RANGE ENDS ARE NOW HELD: `:4208` by the `("4201", …)` row above (that line
         # carries text) and `:4230` by the exact-closer form above. A range whose END a
         # bare-string anchor cannot discriminate is pinned by comparing the STRIPPED line,
@@ -7220,6 +7239,75 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "— there is no number there to re-derive; fix the manifest block or the "
         "document sentence.\n"
         + "\n".join(f"- {f}" for f in row_failures + block_failures))
+
+
+def test_the_merge_head_honours_line_is_what_that_head_carries():
+    """D5's `:20236` is a MEASURED value at `2584a86ec1`, not a quoted one.
+
+    ⛔ THE POLARITY (#13489 review, P1). A comment inside the epic-bundle pin called
+    `:20236` "QUOTED HISTORY, not a re-measurement", because `2584a86ec1` was said to
+    be ABSENT from this box and a `fatal: Not a valid object name` was quoted as the
+    proof. The polarity WAS backwards and the stated limit did not exist: on a box that
+    HOLDS the object, `git cat-file -t 2584a86ec1` -> `commit` and
+    `git show 2584a86ec1:tortoise/sdk.py` carries the definition on `:20236`, the exact
+    value the pin asserts. Presence is what the probe CONFIRMS; a `fatal` there would be
+    the absence. This arm is that measurement, so the figure is checkable by an
+    instrument rather than asserted in prose.
+
+    ⛔ WHAT THIS ARM CANNOT DO, and CORRECTED because an earlier cut of this docstring
+    claimed a presence measured on exactly ONE box (#13489 review, P1): `2584a86ec1` is
+    a REBASE ORPHAN — no ref TIP equals it (`git ls-remote origin` matches none) and a
+    clone's DEFAULT refspec does not fetch `refs/pull/*`, so a FRESH clone does not carry
+    it and `git cat-file -t` there is a `fatal`. Presence of the object
+    is therefore a property of the CLONE, not of the repository, and neither a `fatal`
+    nor a `commit` is by itself evidence about the figure. The arm distinguishes the two:
+    it reads the line when the object is present (the real check) and SKIPS with a
+    stated reason when it is not, because a `fatal` cannot mean "the sha is wrong" when
+    the same `fatal` is what every clean checkout of this repo returns. ⛔ AND "NO REF
+    CARRIES IT" IS FALSE (#13489 review, P1 — MEASURED): `git ls-remote origin | grep -c
+    2584a86ec1` -> 0 counts ref TIPS equal to the sha, which is not a containment test.
+    `refs/pull/12950/head` is advertised by the same remote (`git ls-remote origin
+    refs/pull/12950/head` -> `4e8f00dc…`, PR #12950's merged head) and CONTAINS the orphan
+    (`git fetch origin refs/pull/12950/head && git merge-base --is-ancestor 2584a86ec1
+    FETCH_HEAD` -> rc=0), which is why this clone holds the object at all.
+
+    ⛔ AND THE COVERAGE LIMIT IS STATED, not implied: CI checks this repo out with a
+    bare `actions/checkout@v4` (`python-ci.yml`, default `fetch-depth: 1`), where no
+    other head exists by construction, so on CI this arm SKIPS — the figure is
+    re-checkable by fetching `refs/pull/12950/head` on a full clone (see above), not only
+    where an old clone happens to have kept the object. That is WEAKER than the docstring
+    used to claim, and saying so here is the only honest place to say it.
+
+    NON-VACUITY, MEASURED on a box that holds the object: reds if the definition moves
+    off `:20236` at that head (the value is read THERE, not here).
+    """
+    head = "2584a86ec1"
+    try:
+        shown = subprocess.run(
+            ["git", "show", f"{head}:tortoise/sdk.py"],
+            cwd=_REPO, capture_output=True, text=True)
+    except FileNotFoundError:  # no `git` on this host at all
+        pytest.skip("`git` is not installed here, so no commit can be read")
+    if shown.returncode != 0:
+        pytest.skip(
+            f"{head} (the MERGE head D5 quotes `:20236` for) is not carried by this "
+            "clone, so the figure is UNCHECKED here, not disproved. It is a REBASE "
+            "ORPHAN: no ref TIP equals it (`git ls-remote origin` matches none) and a "
+            "clone's default refspec does not fetch `refs/pull/*`, so a fresh clone "
+            "and CI's `fetch-depth: 1` checkout both lack it by construction — but it "
+            "IS carried by `refs/pull/12950/head`, so re-arm anywhere with `git fetch "
+            "origin refs/pull/12950/head` (fetching the bare sha, `git fetch origin " + head + "`,"
+            " is REFUSED: `fatal: couldn't find remote ref`, because an unadvertised "
+            "sha is not a ref name)."
+            f" git: {shown.stderr.strip()}")
+    hits = [
+        _n for _n, _line in enumerate(shown.stdout.splitlines(), 1)
+        if "_honours: dict[str, frozenset[str]] = {" in _line]
+    assert hits == [20236], (
+        f"`_honours: dict[str, frozenset[str]] = {{` sits at {hits} in "
+        f"`{head}:tortoise/sdk.py`, while 05-verify.md D5 names `:20236` for that "
+        "head — re-derive the figure with `git show "
+        f"{head}:tortoise/sdk.py | grep -n '_honours: dict'`, never carry it forward")
 
 
 @pytest.mark.parametrize("prose", [
@@ -14808,7 +14896,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     and a later drift reds the arm while leaving this sentence stale — which is the
     #11555 convention exactly (cite the number beside the symbol; let the arm derive it) —
     `probes/capstone_measure.py:2238-2243`
-    ->`:2747-2749`, which was `:2738-2740` before this branch's own +9
+    ->`:2787-2789`, which was `:2738-2740` before this branch's own +9
     `TORTOISE_PARTIAL_GAP_FILL` pin landed above it, `:2736-2738` before `#11523`'s
     `DOOR_PINNED_ON` comment rewrap (`8212c41eff`, +2), and `:2724-2726` before main's
     #11517 (`7dabb59e0f45`) landed its +12 above it;
@@ -15977,3 +16065,140 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
                 f"capstone_measure.py:{num} is cited for {symbol!r}, but that line is "
                 f"{'a definition' if line.startswith('def ') else 'not a definition'} — the "
                 "entry names the two CALLS whose order it argues from, never a definition")
+
+
+# ── The D5 row must stay ONE table row (docs-check cascade) ──────────────────
+#
+# ⛔ WHY THIS EXISTS (MEASURED, #13489 — the required `docs` check was RED at
+# `62611368` with `docs-lint baseline: 178 new, 0 known`). Every one of those 178
+# markdownlint findings sat on the SAME markdown LINE: `05-verify.md:102`, the D5
+# deviation row. They were not 178 defects — they were TWO raw `|` characters,
+# inside a `` `git ls-remote origin | grep -c 2584a86ec1` `` probe, splitting the
+# row into 6 cells where its header carries 4 (MD056). GFM splits cells before
+# inline parsing, so the split ALSO broke the backtick pairing for the remaining
+# ~1,250 backticks on that 35,202-character line and every mis-paired code span
+# emitted its own MD038 (`Spaces inside code span elements`). Escaping the two
+# pipes (`\|`, the form this row already used three times) collapsed the cascade
+# to zero:
+#
+#   before: Linting: 15 files / Summary: 178 issues in 1 file
+#   after:  Linting: 15 files / Summary:   0 issues in 0 files
+#
+# So the failure mode is asymmetric and worth a pin: an artifact row this long is ONE keystroke away from 178 findings, and NONE of the cite pins in this
+# file can see it — `_pin_row_failures` scopes to a markdown LINE, so a row of
+# numbers stays satisfied however badly the row's own table structure breaks.
+# The pin is structural rather than numeric (no count, no line number): every
+# table row in the document must carry its own header's cell count.
+
+_TABLE_ROW_RE = re.compile(r"^\|.*\|$")
+_TABLE_DELIM_RE = re.compile(r"^[:\- ]+$")
+
+
+def _table_cells(line: str) -> list[str]:
+    """Split a GFM table row on UNESCAPED pipes.
+
+    GFM splits cells BEFORE inline parsing, so a pipe inside a code span is
+    still a separator — which is exactly the defect: a `` `… | …` `` probe reads
+    as an escaped pipe to the author and as a cell boundary to the parser. Only
+    a backslash-escaped `\\|` is literal.
+    """
+    cells: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\" and index + 1 < len(line):
+            current.append(line[index:index + 2])
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    cells.append("".join(current))
+    # A GFM row is delimiter-prefixed and -suffixed (`| a | b |`), so the outer
+    # pipes yield an empty leading and trailing segment. Drop those ONE each —
+    # they are the row's borders, not cells — so a rectangular 4-column row
+    # reads as 4 and a row split by one raw `|` reads as 5.
+    if cells and not cells[0].strip():
+        cells = cells[1:]
+    if cells and not cells[-1].strip():
+        cells = cells[:-1]
+    return cells
+
+
+def test_every_bundle_table_row_carries_its_headers_cell_count():
+    """A raw `|` in a cell is 178 docs-check findings, not one typo (#13489).
+
+    Measured on the pre-fix tree: `05-verify.md:102` split into 6 cells against a
+    4-cell header, and the required `docs` check reddened with 178 MD038/MD037/
+    MD049/MD056 findings all on that line. Measured after the two pipes were
+    escaped: `Summary: 0 issues in 0 files`, and every row of every table in the
+    document is rectangular.
+    """
+    path = _EPIC_CITE_DOCS["05-verify.md"]
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    mismatches = []
+    parsed_rows = 0
+    header = None
+    for number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not _TABLE_ROW_RE.match(stripped):
+            header = None
+            continue
+        cells = _table_cells(stripped)
+        parsed_rows += 1
+        if header is None:
+            header = len(cells)
+            continue
+        # The delimiter row (`|---|---|`) is part of the header, not a body row.
+        if _TABLE_DELIM_RE.match(cells[1].strip()):
+            continue
+        if len(cells) != header:
+            mismatches.append((number, header, len(cells)))
+
+    # ⛔ A parser that found nothing is not a pass — the population is asserted
+    # so a reworded document cannot satisfy this pin by carrying no tables at all.
+    assert parsed_rows >= 60, (
+        f"this pin read {parsed_rows} table row(s) in 05-verify.md — the document "
+        "carries ~62, so the parser is no longer reading the tables it guards and "
+        "a green here would mean nothing")
+
+    assert not mismatches, (
+        "these 05-verify.md table rows carry a different cell count than their "
+        f"header (line, header cells, row cells): {mismatches}. A raw `|` splits "
+        "the row — GFM splits cells before inline parsing, so it ALSO mis-pairs "
+        "every backtick after it and the docs check reds with one MD038 per "
+        "mis-paired code span (measured: 178 findings from two pipes on D5). "
+        "Escape it as `\\|`")
+
+
+def test_the_D5_row_is_still_one_table_row():
+    """D5 is the row this bundle re-derives ~50 numbers on, and it is ONE line.
+
+    ⛔ THE MEASUREMENT THAT MAKES THIS A PIN RATHER THAN A NICETY: every cite arm in
+    this file is line-scoped, so this row can be broken structurally — 6 cells against a
+    4-cell header — while all 47 `_PINS` rows, the spelling loop and the `_honours` clause
+    pin stay GREEN (measured at `62611368`: `test_7949_capstone_measure.py` was green on
+    the tree whose required `docs` check carried 178 new findings). ⛔ Its LENGTH is NOT
+    typed here: it was 35,202 characters at `62611368` and moves on every commit that
+    edits the row, so read it with `sed -n '102p' <doc> | wc -c` at the head you are on.
+    """
+    d5 = [
+        line for line in
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("| **D5** |")
+    ]
+    assert len(d5) == 1, (
+        f"D5 must be exactly ONE markdown line — found {len(d5)}. Splitting the row "
+        "moves half of it out of every line-scoped pin in this file")
+    assert len(_table_cells(d5[0].strip())) == 4, (
+        "the D5 row must carry the 4 cells its header declares (got "
+        f"{len(_table_cells(d5[0].strip()))}). The row is tens of thousands of "
+        "characters of citations (its length is not typed — it moves with every commit "
+        "that edits the row); one unescaped `|` splits it and reds the REQUIRED `docs` check "
+        "with ~178 findings (#13489). Escape a pipe in a cell as `\\|`")

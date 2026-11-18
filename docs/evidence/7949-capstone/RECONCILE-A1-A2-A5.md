@@ -795,7 +795,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # because this branch's own added rows move the scan
                                                           # line — so it was RE-DERIVED (`_self_scan_line` in
                                                           # `tests/test_7949_capstone_measure.py`, measured
-                                                          # at the merge, `:15092` on the resolved tree) rather than side-picked.
+                                                          # at the merge, `:15191` on the resolved tree) rather than side-picked.
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the

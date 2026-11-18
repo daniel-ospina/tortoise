@@ -6,7 +6,7 @@ doc_status: draft
 created: 2026-11-17
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "#13232, #13247, #13224, storage layer, record/cache split, STORAGE-ARCHITECTURE.md"
+aboutObjects: "#13232, #13247, #13224, storage layer, record/cache split, STORAGE-ARCHITECTURE.md, exploration/13232-storage-picture"
 ---
 
 # The storage picture — where the layer is going, and where it hurts

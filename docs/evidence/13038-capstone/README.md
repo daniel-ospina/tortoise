@@ -6,7 +6,7 @@ doc_status: final
 created: 2026-11-17
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "#11824, #13038, #13303, #12855, state/lifecycle model, docs/plans/2026-11-15-state-lifecycle-and-pipelines.md"
+aboutObjects: "#11824, #13038, #13303, #12855, state/lifecycle model, docs/plans/2026-11-15-state-lifecycle-and-pipelines.md, tools/capstone_state_value.py, narrative.json"
 ---
 
 # Capstone #13038 — the state model measured by customer value

@@ -5203,7 +5203,18 @@ jobs:
     runs-on: ubuntu-latest
     # Bounded: this job feeds the REQUIRED aggregate, and it makes a handful of API
     # reads. A stalled GitHub must not hold `python-ci-gate` pending for hours.
-    timeout-minutes: 15
+    #
+    # ⛔ 25, NOT 15, AND THE REASON IS THE BUDGET IT HOSTS (#13513). 15 min was measured
+    # against a 300 s per-call bound; the main-baseline sweeps genuinely need more than
+    # that on a rate-limited runner, and the module now spends up to `NFG_TOTAL_BUDGET_S`
+    # (1300 s) across its calls. The cap must EXCEED that budget or the runner kills the
+    # job at 15 min as `timed_out` — the aggregate reds that with no message naming what
+    # ran out, which is strictly worse than the UNMEASURED the module reaches by itself.
+    # The property the old 15 protected is preserved and made stronger: the job still
+    # cannot hold the required check pending indefinitely, and it is now the SCRIPT's own
+    # budget — not the runner's cap — that bounds it (pinned by
+    # `tests/test_ci_new_failure_gate.py`).
+    timeout-minutes: 25
     # Reading the run's jobs and their step logs is the whole requirement. Explicit, so
     # a repository-setting drift cannot silently widen the token this check uses.
     permissions:
@@ -5285,6 +5296,33 @@ jobs:
           # `GH_TOKEN` is what the jobs/logs API reads. `github.token` carries exactly
           # the `actions: read` this job declares — no wider.
           GH_TOKEN: ${{ github.token }}
+          # ── THE TWO TIMEOUT BOUNDS (#13513) ──────────────────────────────────
+          # This job feeds the REQUIRED aggregate, and until #13513 every subprocess
+          # carried ONE hardcoded `timeout=300` — measured too tight on 2026-11-18,
+          # when the main-baseline sweep (`ci-failure-set.sh --main-union-rates 10`)
+          # hit exactly 300 s and the gate raised `Unmeasured`: the required check
+          # failed CLOSED over a tree it could certify, on a PR whose remaining reds
+          # were main's own. Same morning, measured: every PR that reached this predicate
+          # was blocked, and 2 of the 3 were blocked on a baseline the gate could not
+          # READ (this timeout, and a pruned main log — #10765), not on a failure they
+          # introduced.
+          #
+          # The sweeps are SEQUENTIAL and expensive (ten main runs' failing sets, plus
+          # each failing job's log), so the per-call bound cannot be the only one: N x
+          # per-call can exceed `timeout-minutes` below, and a job killed at its cap
+          # reports `timed_out` with no message naming what ran out. `NFG_TOTAL_BUDGET_S`
+          # is enforced ACROSS calls (`min(per-call, remaining)`), so the module always
+          # reaches its own UNMEASURED verdict — which NAMES the budget — before the
+          # runner would kill it. Fail-closed is unchanged: running out is still exit 2.
+          #
+          # ⛔ THESE ARE READ BY `Runner` AT CONSTRUCTION, and a value that cannot be
+          # parsed is UNMEASURED rather than defaulted — so a typo here reds the gate
+          # loudly instead of silently restoring the 300 s that caused #13513.
+          # `tests/test_ci_new_failure_gate.py::test_the_verdict_job_cap_leaves_room_
+          # for_the_verification_budget` pins that the cap below exceeds the budget here
+          # with margin, in both directions.
+          NFG_SUBPROCESS_TIMEOUT: "600"
+          NFG_TOTAL_BUDGET_S: "1300"
           # The event payload, passed as ENV rather than inline: the values are only
           # meaningful on `pull_request`, and a `push` invocation is refused by the
           # module on purpose (below).

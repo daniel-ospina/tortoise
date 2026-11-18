@@ -112,7 +112,17 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:            a declined leg that is skipped still passes the aggregate. The shortcut now
 #:            credits `_UNCONDITIONAL_LEGS` only and the rest are PROBED; the basis is
 #:            returned PER LEG. Verdict direction (fail-closed, exit 2) is unchanged.
-_GATE_MODULE_SHA256 = "32be7dadd68f32ff0e8455b6d84dffd3791fcfbbdce115c9bf3cfb69442c9d9d"
+#:   #13513 (budget) — re-cut IN THE SAME COMMIT: `Runner` gained the two bounds
+#:            (`NFG_SUBPROCESS_TIMEOUT` per call, `NFG_TOTAL_BUDGET_S` across calls, both
+#:            env-read at construction, a malformed value UNMEASURED) and the hardcoded
+#:            `timeout=300` at both subprocess sites now asks `_bound()`. This ADDS a
+#:            refusal path (an exhausted budget) and NARROWS nothing: every existing exit
+#:            code keeps its meaning and a timeout is still UNMEASURED, never CLEAN. The
+#:            job cap moved 15 -> 25 in the same change so the budget's own bound is
+#:            reached before the runner's. Measured: the main-rate sweep exceeded 300 s on
+#:            run 44308191683 attempt 2 and red'd the REQUIRED check over a tree it could
+#:            certify.
+_GATE_MODULE_SHA256 = "590a4dfce2c418029f6526f70eb04f0f156ee5773f1310646f385e40364424d0"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box
@@ -1052,7 +1062,7 @@ def test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs():
 
 
 def test_the_docs_point_the_aggregates_needs_citation_at_the_needs_line():
-    """Two docs cite the required aggregate's `needs:` BY LINE; both must land on it.
+    """Docs cite the required aggregate's `needs:` BY LINE; every cite must land on it.
 
     `needs:` here IS the required-check surface (#5215 I5): a lane editing that list
     from a doc's anchor edits whatever line the anchor names. PR #11429 inserted 24
@@ -1061,8 +1071,11 @@ def test_the_docs_point_the_aggregates_needs_citation_at_the_needs_line():
     stayed on `:4951`, which is the `python-ci-gate:` JOB HEADER. Nothing parses that
     row's number, so no check red, and the next reader is landed 24 lines early.
 
-    Both cites are therefore pinned against the workflow itself — and against EACH
-    OTHER, since one re-cut without the other is exactly how this went stale.
+    Every cite is therefore pinned against the workflow itself — one row per
+    (document, WORDING), because a row only inspects the lines ITS OWN phrase matches.
+    A single phrase per document is how #13513's plan doc kept two hand-maintained
+    cites that no pin ever read: it names this line in three different phrases, and
+    only the one carrying `python-ci-gate.needs` was checked.
 
     Non-vacuity (measured at the pre-fix head, #11429 review cycle 5): the index row
     cited `:4951`, whose content is `python-ci-gate:` rather than `needs:` — the
@@ -1090,14 +1103,26 @@ def test_the_docs_point_the_aggregates_needs_citation_at_the_needs_line():
         "the aggregate carries no `needs:` under its header — the required-check "
         "surface this test locates no longer exists in the shape it reads")
 
-    # doc -> a phrase on the SAME line that the cited number is there to support.
-    claims = {
-        "docs/00_index.md": r"python-ci-gate\.needs",
-        "docs/ops/ci-runner-x64.md": r"required aggregate's `needs:`",
-    }
+    # (doc, a phrase on the SAME line that the cited number is there to support).
+    # ONE ROW PER (DOC, WORDING) — the reader below only inspects the lines its own
+    # phrase matches, so a document that names the same line in two or three different
+    # words needs a row for each. #13513: the plan doc cites this `needs:` line three
+    # times and no pin covered any of them, so it was ALREADY stale at the previous
+    # head (it pointed at `python-ci.yml:5343`, a comment inside the predicate step,
+    # not the `needs:` at all) and this change would have moved it again. Added here
+    # rather than only re-cut by hand, because a hand-fix is exactly what drifts next
+    # time — which is only true for the wordings that have a row.
+    claims: list[tuple[str, str]] = [
+        ("docs/00_index.md", r"python-ci-gate\.needs"),
+        ("docs/ops/ci-runner-x64.md", r"required aggregate's `needs:`"),
+        ("docs/plans/2026-09-26-5215-merge-throughput.md", r"python-ci-gate\.needs"),
+        ("docs/plans/2026-09-26-5215-merge-throughput.md",
+         r"required aggregate's `needs:` is load-bearing"),
+        ("docs/plans/2026-09-26-5215-merge-throughput.md", r"required-ness is the aggregate"),
+    ]
     cite = re.compile(r"python-ci\.yml:(\d+)")
     wrong: list[str] = []
-    for rel, claim in claims.items():
+    for rel, claim in claims:
         lines = (REPO / rel).read_text(encoding="utf-8").splitlines()
         found = [(n, int(m.group(1)))
                  for n, line in enumerate(lines, start=1) if re.search(claim, line)
@@ -1349,11 +1374,52 @@ def test_the_verdict_job_is_pinned_and_bounded():
         f"the agent-infra checkout must be pinned to a full commit sha (got {ref!r}): "
         "unpinned, this job would track another repo's main on the surface every PR's "
         "merge depends on")
-    assert isinstance(job.get("timeout-minutes"), int) and job["timeout-minutes"] <= 15, (
+    assert isinstance(job.get("timeout-minutes"), int) and job["timeout-minutes"] <= 25, (
         "the verdict job feeds the REQUIRED aggregate: an unbounded job would hold "
         "python-ci-gate pending on every PR")
     assert set(job.get("permissions") or {}) == {"actions", "contents", "pull-requests"}, (
         "the job's token must be the three reads it needs, stated explicitly")
+
+
+def test_the_verdict_job_cap_leaves_room_for_the_verification_budget():
+    """The job's cap must EXCEED the budget the module enforces, with margin (#13513).
+
+    Two bounds now govern this job and they are coupled: the module spends up to
+    `NFG_TOTAL_BUDGET_S` across its subprocess calls and refuses (UNMEASURED, naming the
+    budget) when it runs out, while the runner kills the job at `timeout-minutes`. If the
+    cap is not comfortably above the budget, the RUNNER wins — and a job killed at its
+    cap concludes `timed_out`, which the aggregate reds with no message naming what ran
+    out. That is the failure this pin exists to prevent, and it is why the cap moved
+    from 15 to 25 in the same change that introduced the budget.
+
+    Measured (#13513, run 44308191683 attempt 2): the main-baseline sweep exceeded the
+    old hardcoded 300 s per-call bound and the required `python-ci-gate` failed CLOSED
+    over a tree the predicate could certify.
+    """
+    import yaml
+
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "python-ci.yml")
+                              .read_text(encoding="utf-8"))
+    job = workflow["jobs"]["ci-introduced-failure"]
+    steps = [s for s in job["steps"]
+             if (s.get("env") or {}).get("NFG_TOTAL_BUDGET_S") is not None
+             or (s.get("env") or {}).get("NFG_SUBPROCESS_TIMEOUT") is not None]
+    assert len(steps) == 1, (
+        "exactly one step must declare the two timeout bounds; got "
+        f"{len(steps)} — the module reads them once, at `Runner` construction")
+    env = steps[0]["env"]
+    per_call = float(env["NFG_SUBPROCESS_TIMEOUT"])
+    budget = float(env["NFG_TOTAL_BUDGET_S"])
+    cap_s = job["timeout-minutes"] * 60
+    assert per_call > 0 and budget > 0
+    assert per_call <= budget, (
+        f"a per-call bound larger than the total budget ({per_call} > {budget}) can "
+        "never be reached, so the workflow would declare a bound it does not have")
+    assert cap_s - budget >= 60, (
+        f"the job cap ({cap_s:.0f}s) must leave the script's budget ({budget:.0f}s) at "
+        "least 60s of headroom, or the runner kills the job as `timed_out` before the "
+        "module can reach its own UNMEASURED verdict and NAME the budget it spent "
+        "(#13513)")
 
 
 # ── the LEG dimension: did main ever EXECUTE the leg this run failed in? (#10289) ──
@@ -1692,3 +1758,124 @@ def test_a_missing_main_job_listing_is_unmeasured_never_unexecuted(tmp_path):
     proc = _leg_case(tmp_path, main_jobs={})          # provenance names runs, no listings
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "no recorded job listing for run" in proc.stdout
+
+
+# ── the two timeout bounds (#13513) ─────────────────────────────────────────
+#
+# WHY THESE CASES EXIST AT ALL. `ci-introduced-failure` feeds the REQUIRED
+# `python-ci-gate`, and until #13513 both of its subprocess sites carried ONE hardcoded
+# `timeout=300`. The main-baseline sweep (`ci-failure-set.sh --main-union-rates 10`)
+# queries ten main runs' failing sets and reads each failing job's log; measured on run
+# 44308191683 attempt 2 it hit exactly 300 s, the module raised `Unmeasured`, and the
+# required check failed CLOSED over a tree it could certify — a repo-wide merge block on
+# a PR whose remaining reds were main's own (3 of 3 PRs that reached the predicate that
+# morning). The bound is now ENV-DECLARED and paired with a total budget, so the two
+# cases below pin the two ways that arrangement can go wrong: a bound nobody can read,
+# and a budget spent before a verdict.
+
+def _budget_case(root: Path) -> Sandbox:
+    """A sandbox whose whole pipeline SUCCEEDS, so only a timeout bound can refuse it.
+
+    The stand-in decision answers CLEAN and writes its verdict, and `Sandbox.env`'s
+    default window is self-consistent (`STUB_PROV`/`STUB_EXAMINED` name the one examined
+    run whose listing `Sandbox.run` always writes) — so pre-fix each case below exits 0
+    with `VERDICT: CLEAN`, and `pytest` sees the assertion fail rather than an unrelated
+    refusal. That is the non-vacuity: the cases fail on the OLD code by PASSING a tree
+    the new code refuses to certify without a readable bound.
+    """
+    box = Sandbox(root, copy_exemption=False)
+    (box.agent_infra / "scripts" / "ci_exemption.py").write_text(
+        _decision_stub(rc=0, verdict="VERDICT\tCLEAN\texempt=1\n"), encoding="utf-8")
+    return box
+
+
+def _budget_run(box: Sandbox, **env: str) -> subprocess.CompletedProcess:
+    return box.run(jobs=_jobs((900, "test-slow (d)", "failure")), logs={900: NEW_LOG},
+                   red_legs="test-slow", **env)
+
+
+@pytest.mark.parametrize("bad", ["not-a-number", "0", "-5", "inf", "nan"])
+def test_an_unreadable_timeout_bound_is_unmeasured_never_defaulted(tmp_path, bad):
+    """A bound that cannot be READ is UNMEASURED — never silently the 300 s default.
+
+    This is the failure that would silently reinstate #13513: if `_seconds_env`
+    defaulted on a parse error, a typo in the workflow's `NFG_SUBPROCESS_TIMEOUT` would
+    leave the caller believing it had raised the bound while the gate kept dying at
+    300 s — and the run would look like a generic UNMEASURED rather than a
+    misconfiguration. The refusal must NAME the variable.
+    """
+    proc = _budget_run(_budget_case(tmp_path), NFG_SUBPROCESS_TIMEOUT=bad)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "NFG_SUBPROCESS_TIMEOUT" in proc.stdout, (
+        f"the refusal must name the variable that could not be read ({bad!r}): "
+        f"{proc.stdout!r}")
+    assert "VERDICT: UNMEASURED" in proc.stdout
+    assert "VERDICT: CLEAN" not in proc.stdout
+
+
+def test_an_exhausted_verification_budget_names_the_budget_and_fails_closed(tmp_path):
+    """The budget is enforced ACROSS calls, and running out is exit 2 that NAMES it.
+
+    `NFG_TOTAL_BUDGET_S` exists because a per-call bound alone cannot bound the JOB: the
+    calls are sequential, so N x per-call can exceed the job's `timeout-minutes`, and a
+    job killed at its cap reports `timed_out` — which the aggregate reds with no message
+    naming what ran out. The module must therefore refuse FIRST, in its own words. A
+    budget too small to make one call is the cheapest case that proves it does.
+    """
+    proc = _budget_run(_budget_case(tmp_path), NFG_TOTAL_BUDGET_S="0.001")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "verification budget" in proc.stdout and "NFG_TOTAL_BUDGET_S" in proc.stdout, (
+        f"the refusal must say the BUDGET ran out and name it: {proc.stdout!r}")
+    assert "VERDICT: UNMEASURED" in proc.stdout
+    assert "VERDICT: CLEAN" not in proc.stdout
+
+
+def test_the_workflow_never_declares_a_bound_tighter_than_the_module_fallback():
+    """The workflow's declared bounds are never TIGHTER than the module's fallbacks.
+
+    DELIBERATELY not named "the defaults are the workflow's numbers" — they are not,
+    and the difference is load-bearing: the module falls back to
+    ``_DEFAULT_SUBPROCESS_BOUND_S`` / ``_DEFAULT_TOTAL_BUDGET_S``, which are knowingly
+    TIGHTER than the ``NFG_SUBPROCESS_TIMEOUT`` / ``NFG_TOTAL_BUDGET_S`` this workflow
+    declares (a missing env therefore degrades to the module's own numbers — that
+    residual is real and is NOT what this test covers; an env that is present but
+    unreadable is `UNMEASURED`, pinned by
+    `test_an_unreadable_timeout_bound_is_unmeasured_never_defaulted`).
+
+    What is asserted here is the direction that must never invert: the workflow — the
+    door that decides this job's budget in practice — may not declare LESS time than
+    the fallback. A per-call bound declared below the module's own default is tighter
+    than the value #13513 was filed against (300 s, the sweep that timed out), i.e. it
+    reintroduces the defect by configuration, and without this assertion every other
+    pin in this file stays green through it (the cap test only checks
+    `per_call <= budget`).
+
+    ⛔ EQUALITY IS REFUSED, not merely "less". The comparison is `>` and not `>=`,
+    because the fallback IS the 300 s literal that timed out on run `44308191683`
+    attempt 2: an env declaring exactly 300 does not "match the fallback", it puts
+    the measured-too-short bound back in the door that actually decides this job's
+    budget. `>=` read that mutant GREEN — `300 >= 300` — and the `600 -> 300` mutant
+    reddened no row anywhere in the tree (mutation-attributed on #13538's review).
+    """
+    import yaml
+
+    module = _gate_module()
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "python-ci.yml")
+                              .read_text(encoding="utf-8"))
+    step = next(s for s in workflow["jobs"]["ci-introduced-failure"]["steps"]
+                if (s.get("env") or {}).get("NFG_TOTAL_BUDGET_S") is not None)
+    assert module._DEFAULT_SUBPROCESS_BOUND_S <= module._DEFAULT_TOTAL_BUDGET_S, (
+        "the module's default per-call bound must fit inside its default total budget")
+    per_call = float(step["env"]["NFG_SUBPROCESS_TIMEOUT"])
+    assert per_call > module._DEFAULT_SUBPROCESS_BOUND_S, (
+        f"the workflow declares NFG_SUBPROCESS_TIMEOUT={per_call:.0f}s, not ABOVE the "
+        f"module's own default ({module._DEFAULT_SUBPROCESS_BOUND_S:.0f}s) — that is "
+        "a per-call bound AT OR BELOW the 300 s sweep that caused #13513, "
+        "reintroducing it by configuration; raise the declared bound rather than "
+        "lowering the default. `>=` is not enough: the fallback IS that 300 s "
+        "literal, so an env declaring exactly it passed `>=` while putting the "
+        "timed-out bound back in the door that decides the budget")
+    assert float(step["env"]["NFG_TOTAL_BUDGET_S"]) >= module._DEFAULT_TOTAL_BUDGET_S, (
+        "the workflow may not declare LESS budget than the module assumes by default: "
+        "a caller that forgot the env would then be given more time than the job's own "
+        "cap allows for")
