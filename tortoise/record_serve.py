@@ -36,6 +36,14 @@ consumer must NOT hard-code this list):
   coordinate the residency router already mints
   (``cache_projection.declared_key``), which is what a ``fetch-record`` repair
   is handed.
+* ``entity-union-by-id`` — the BARE by-id entity door
+  (``tortoise_get_entity(<id>)`` -> ``TortoiseSDK.get_entity``), #13093. It is a
+  UNION over the five labels a bare value can name in the cache
+  (``ENTITY_UNION_JURISDICTION``), so it has no ONE coordinate — and it is served
+  only for ``ENTITY_UNION_LABELS`` (the labels whose record row reproduces the
+  cache node), abstaining with ``residency: "not-hot"`` for the rest through
+  :func:`entity_absent_wire`'s coverage rule. Its absence verdict is therefore
+  CONSERVATIVE on purpose: see :data:`ENTITY_UNION_ADDRESS_RESIDUALS`.
 
 **Not served, with the reason** — a decision that does not name its exclusions
 in the same artifact is indistinguishable from an omission:
@@ -64,16 +72,31 @@ in the same artifact is indistinguishable from an omission:
   finished projecting. The caller-facing reads are the hosted endpoint served
   here and the MCP route that reaches the same accessor —
   ``tortoise_get_entity(id, type="point")`` (``tortoise_get_point`` is its
-  RETIRED alias, ``tool_registry.RETIRED_USE_INSTEAD``) — neither is wired,
-  because an MCP call carries no hosted org credential to resolve a record
-  tenant from. (#8877 names the same internal/caller-facing
-  separation.) ⚠️ The TYPED form ``tortoise_get_entity(id, type="point")`` is
-  that route and DOES reach this accessor; the BARE ``tortoise_get_entity(id)``
-  reaches ``TortoiseSDK.get_entity`` — a different read with its own coordinate,
-  excluded under ``entity-accessor`` below rather than folded in here.
-* ``entity-accessor`` — ``TortoiseSDK.get_entity``. A different coordinate (a
-  name/alias resolution), not a node id, so a record answer would have to
-  re-decide the resolution order to claim parity.
+  RETIRED alias, ``tool_registry.RETIRED_USE_INSTEAD``) — the point route WAS
+  not wired when this exclusion was written, because an MCP call carried no
+  hosted org credential to resolve a record tenant from (#8877 names the same
+  internal/caller-facing separation). ⛔ THAT REASON IS RETIRED: since #12941 the
+  MCP lane installs the tenant ambiently (``mcp_auth._record_tenant_scope``,
+  ``OrgResolutionMiddleware`` since #9192/#10025/#10046) and the point door
+  honours this seam through ``get_point``'s opt-in ``served_out`` sink —
+  ``mcp_server.py``'s own note says so. What stays excluded is the ACCESSOR, for
+  the mid-write reason in its own bullet below; do not read this paragraph as
+  "the MCP point route cannot consult the record".
+  ⚠️ The TYPED form ``tortoise_get_entity(id, type="point")`` is
+  that route and DOES reach this accessor. ⛔ The BARE
+  ``tortoise_get_entity(id)`` is a DIFFERENT read and it IS served, under
+  ``entity-union-by-id`` above (since #13093). What #13093 retired is THE BARE
+  DOOR'S OWN exclusion, which used to be folded into this accessor bullet — NOT
+  any entry of this list: ``entity-accessor`` and the typed form above remain
+  here, for the reasons each gives. The note is kept, and phrased this way, so a
+  reader coming from the pre-#13093 text does not re-file the same defect and
+  does not read it as licence to delete the accessor entry.
+* ``entity-accessor`` — ``TortoiseSDK._get_entity``, the SDK's INTERNAL accessor.
+  It is NOT the bare door (that is ``entity-union-by-id``, served), and it DOES
+  have a by-id coordinate — ``_resolve_entity(by_id=…, by_eventId=…, by_url=…)``
+  is an index-backed, per-label UNION, not a name/alias resolution. It is
+  cache-only because the write echoes and the internal read paths call it
+  mid-write, not because it lacks a coordinate (#12941 review P2-1).
 * ``selfhost-endpoint`` — the self-host server's point route. It carries no
   hosted org credential either, so there is no record tenant to scope the read
   to; serving it would answer ACROSS tenants.
@@ -340,9 +363,20 @@ READ_ENTITY_UNION_BY_ID = "entity-union-by-id"
 #:
 #: WHY THE OTHER TWO ARE NOT — measured, and still open as #9721:
 #:
-#: * ``Event`` — a record-sourced ``:Event`` loses SEVEN fold-written ``ON
-#:   CREATE`` properties (``id``, ``eventKind``, ``subject``, ``object``,
-#:   ``startedAt``, ``classificationLevel``, ``format``, ``participants``) and
+#: * ``Event`` — a record-sourced ``:Event`` loses the fold-written ``ON CREATE``
+#:   properties its record row does not carry, and ⛔ THE LOSS IS PER COLUMN, not
+#:   a fixed count: each of ``id``, ``eventKind``, ``subject``, ``object``,
+#:   ``startedAt``, ``classificationLevel``, ``format`` and ``participants`` is
+#:   lost only when ITS OWN column is NULL (measured: row all-NULL → 8,
+#:   ``event_kind`` set and the rest NULL → 7, every column set → 0). #9721's
+#:   measured `only in fold` set is the SEVEN — ``id``, ``subject``, ``object``,
+#:   ``startedAt``, ``classificationLevel``, ``format``, ``participants`` — for
+#:   the shape it probed, a producer that SUPPLIED ``event_kind``; ``eventKind``
+#:   joins them as an eighth when that column is NULL, and it matters most
+#:   because the fold writes the ONTOLOGY §4.5-required ``''`` where the record
+#:   stores the absence. State the count WITH the shape, never as a property of
+#:   every ``:Event`` (#13392 review cycle 2 — a count quoted without its shape is
+#:   what made an earlier revision name eight defaults as "seven"). And
 #:   ``FOLD_ON_CREATE_DEFAULTS`` has no ``Event`` row, so
 #:   ``parity_difference(label='Event')`` reports them as UNEXPLAINED. ``id``
 #:   matters most: it is the fold's copy of ``eventId`` and id-keyed MATCHes in
@@ -435,7 +469,14 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         name=READ_NODE_BY_KEY,
         status=SERVED,
         cypher="MATCH (n:<Label> {<key_property>:$key}) RETURN properties(n)",
-        coordinate=("Label", "interface-E key"),
+        # ⛔ `None`, for the same reason the union read has none: this read is a
+        # TEMPLATE over labels, and the pair it used to carry —
+        # `("Label", "interface-E key")` — is two placeholders, not a coordinate.
+        # `"Label"` is not a `node_label` (`public.node_identity` restricts that
+        # column to the six real labels), so `declared_key(*coordinate)` would mint
+        # `Label:interface-E key`: a coordinate no store resolves. Stating one rule
+        # twice is how a registry starts lying in one place (#13353 review, c3 F3).
+        coordinate=None,
         parity="tortoise.record_serve.parity_difference",
         reason="a served CAPABILITY with no consumer wired yet: it answers any "
                "record label by its interface-E coordinate, which is the shape "
@@ -481,8 +522,10 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "`FOLD_ON_CREATE_DEFAULTS` covers, plus `Point` — and ABSTAINS "
                "(`residency: \"not-hot\"`) for the rest rather than answering "
                "an absence it cannot establish: `Event` and `Source` carry the "
-               "OPEN parity gap in #9721 (a served `:Event` would lose `id` and "
-               "six other fold-written keys), and `Source` ALSO sits in "
+               "OPEN parity gap in #9721 (a served `:Event` would lose the "
+               "fold-written keys its row does not carry — per column, so the "
+               "count rides the row: up to eight, seven of them measured), and "
+               "`Source` ALSO sits in "
                ":data:`ENTITY_UNION_ADDRESS_RESIDUALS` (its record key is `url`, "
                "while the cache resolves one by `id` too — so a bare Source id "
                "names a node this read would miss). ⚠️ THE "
@@ -637,7 +680,7 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "FIVE labels with Point priority and then an AgentSession lookup, "
                "all on the cache. ⛔ The LIVE bare form is NOT this door: "
                "`tortoise_get_entity(<id>)` routes to `TortoiseSDK.get_entity` "
-               "(`entity-accessor` above), because the tool only dispatches when a "
+               "(`entity-union-by-id` above), because the tool only dispatches when a "
                "`type` is given — so a lane closing the residual must decide about "
                "BOTH. It carries a "
                "coordinate but not ONE label's, so a record answer would have to "
@@ -825,17 +868,20 @@ FALLBACK_RECORD_BOUND_MISS = "record-read-bound-miss"
 #: named coordinate: the record WAS asked, answered `no row` for every label this
 #: door serves, and the door does NOT serve every label the read could have
 #: meant. It is the UNION door's own condition (#13093): `tortoise_get_entity`
-#: resolves across five labels, only `ENTITY_UNION_LABELS` are served at parity,
-#: so a `no row` among those cannot establish that the id is absent — it may name
-#: an `Event` or a `Source`, both excluded by #9721.
+#: resolves across five labels while only `ENTITY_UNION_LABELS` are served, so a
+#: `no row` among those cannot establish that the id is absent — it may name an
+#: `Event` or a `Source`, neither of which this door serves: BOTH carry the open
+#: parity gap in #9721, and `Source` is additionally unaddressable by a bare id
+#: (its record key is `url` — the residual #13351 exists to retire).
 #:
 #: ⛔ NOT folded into `record-miss`, and the difference is not cosmetic:
 #: `record-miss` is a member of :data:`RECORD_ANSWERED_REASONS`, which is what
 #: makes an empty answer an ESTABLISHED absence. Folding this in would turn
 #: "this door does not serve that label" into "the node does not exist" — the
 #: exact conflation #7952 forbids, re-introduced by a reason string. The repair
-#: differs too: `record-miss` is a backfill question, this is the per-label
-#: parity work in #9721.
+#: differs too: `record-miss` is a backfill question, while this one needs the
+#: parity work in #9721 AND the addressing repair in #13351 — two facts, and
+#: :func:`entity_coverage_complete` requires both.
 FALLBACK_RECORD_LABEL_NOT_SERVED = "record-label-not-served"
 FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS,
@@ -1225,12 +1271,20 @@ def entity_coverage_complete() -> bool:
     production:
 
       * the falsy ``{}`` arm of :func:`entity_absent_wire` is UNREACHABLE today,
-        so every absent id on an armed deployment answers a TRUTHY
-        ``{"residency": "not-hot", …}``. A verifier written ``if out:`` reads that
-        as success — the exposure #12941 P0-1 exists to prevent — so
+        so every absent NAMED id on an armed deployment answers a TRUTHY
+        ``{"residency": "not-hot", …}``. (An EMPTY key names nothing and answers
+        ``{}`` in the armed modes — ``TortoiseSDK.get_entity`` short-circuits it
+        before any store.) A verifier written ``if out:`` reads the marker as
+        success — the exposure #12941 P0-1 exists to prevent — so
         ``TortoiseSDK.get_entity``'s own docstring states it at the door;
-      * ``FALLBACK_RECORD_MISS`` is not emitted by this door; every miss is
-        ``record-label-not-served``;
+      * WHILE COVERAGE IS INCOMPLETE, ``FALLBACK_RECORD_MISS`` is not emitted by
+        this door: the only miss it names is ``record-label-not-served``, and only
+        in ``prefer`` (where a fallback really happened) — a ``record``-mode miss
+        names no reason at all. ⛔ AT COMPLETE COVERAGE that flips, which is what
+        the next bullet means: ``_miss_reason`` then returns
+        ``FALLBACK_RECORD_MISS``, a member of ``RECORD_ANSWERED_REASONS``, and THAT
+        is what makes the miss an absence rather than a marker. Do not build a
+        signal on "this door never emits ``record-miss``";
       * ``{}`` becomes reachable when BOTH facts hold — #9721 lands ``Event``
         parity AND the Source addressing residual is retired.
 
@@ -1272,8 +1326,11 @@ def read_entity(conn: Any, *, org_id: str, graph_id: str, id_val: str,
     caller can read ONE label's row — the tests use it, and it is how the
     per-label addressing is measured — and it deliberately does NOT re-check
     parity: a caller that names ``Event`` gets the Event ROW, which is missing the
-    seven fold-written keys (#9721, ``id`` among them) that a served ``:Event``
-    must not lose. Only :func:`serve_entity` decides what may be SERVED, and it
+    fold-written keys ITS COLUMNS do not carry — per column, never a fixed count
+    (measured over every column subset: all optional columns NULL → 8 lost,
+    ``event_kind`` set and the rest NULL → the seven #9721 measured, every column
+    set → 0). See this module's ``Event`` bullet for why the count rides the row.
+    Only :func:`serve_entity` decides what may be SERVED, and it
     reads through this function with no ``labels`` argument. State this rather
     than let a future caller infer a parity guarantee from proximity.
 
@@ -1398,14 +1455,18 @@ class ServedAnswer:
 
         `not-hot` is a directive (*"ask the record"*), never a status term
         (#7953) — so it rides the response beside the attribution and is never
-        allowed to BE the answer.
+        allowed to BE the answer. ⛔ The empty-key short-circuit is the ONE armed
+        response that reaches NO store: it answers a bare ``{}`` with no
+        attribution at all, which is why the invariant below is scoped to
+        responses that reached one.
         """
         return self.props is None and not self.absence_established
 
     def as_wire(self) -> dict[str, Any]:
         """The attribution fields a caller puts on the response.
 
-        ⚠️ BOTH names are emitted on every ARMED read, ``fallbackReason`` as
+        ⚠️ BOTH names are emitted on every ARMED response THAT REACHED A STORE,
+        ``fallbackReason`` as
         ``None`` when no fallback happened. Omitting the null would let a point
         whose own ``props`` carry that name ship a FAKE fallback attribution —
         the same confusion (attribution vs stored data) in the other direction,
@@ -1585,8 +1646,10 @@ def entity_absent_wire(answer: ServedAnswer) -> dict[str, Any]:
     from .residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
 
     if answer.props is not None:
-        # ⛔ THE ATTRIBUTION RIDES A HIT TOO. The seam's own contract is that
-        # `servedFrom`/`fallbackReason` appear on EVERY armed response; returning
+        # ⛔ THE ATTRIBUTION RIDES A HIT TOO. The seam's contract is that
+        # `servedFrom`/`fallbackReason` appear on every armed response that reached
+        # a store (the empty-key short-circuit reaches none and answers a bare
+        # `{}`); returning
         # bare props here would mint an unattributable hit — an answer whose store
         # no operator can name — the invisible-answer class #12941 exists to
         # eliminate. This is the same merge the door's found arm performs.
@@ -1758,15 +1821,33 @@ def serve_entity(*, tenant: tuple[str, str], id_val: str,
     label it does not serve (`Event`, `Source` — #9721), so its `no row`
     settles only those labels. :func:`entity_absent_wire` holds that rule; this
     function's job is to answer honestly and never to decide the caller's
-    absence for it — which is why an armed miss here carries
-    :data:`FALLBACK_RECORD_LABEL_NOT_SERVED` where :func:`serve_point` carries
-    nothing.
+    absence for it. ⛔ WHAT AN ARMED MISS CARRIES DIFFERS BY MODE, and the
+    difference is deliberate: in ``prefer`` the read FELL BACK, so the miss is
+    NAMED AND COUNTED; in ``record`` nothing fell back — no cache branch, nothing
+    counted — so the miss NAMES no fallback reason: the key is still emitted as
+    ``fallbackReason: None`` (``as_wire`` emits both names on any response that
+    reached a store, deliberately — an OMITTED null would let a prop of that name
+    ship a fake attribution), and the coverage gap is expressed by
+    :func:`entity_absent_wire`'s ``residency: "not-hot"``. (An
+    earlier revision named the reason in both modes, which put a fallback
+    attribution on a read where no fallback happened; #13353 review cycle 2.)
+    ⛔ AND THE ``prefer`` REASON ITSELF FLIPS WITH COVERAGE — see
+    :func:`_miss_reason`, which this function only calls: while
+    :func:`entity_coverage_complete` is ``False`` the miss names
+    :data:`FALLBACK_RECORD_LABEL_NOT_SERVED` (a declared gap, so the answer stays
+    ``not-hot``); at complete coverage it names :data:`FALLBACK_RECORD_MISS`, a
+    member of :data:`RECORD_ANSWERED_REASONS`, and the same miss then settles as
+    an ABSENCE. Today's blend is the first; do not read this function's reason as
+    permanent (#13392 review cycle 1).
 
     ``record`` mode does NOT raise on a miss (it raises on an OUTAGE, exactly as
     :func:`serve_point` does). Raising here would turn every Event read into a
     500 in a `record`-armed deployment — an answer that cannot be attributed
-    does not become more honest by being an error, and this answer CAN be
-    attributed: to a declared coverage gap, named on the response.
+    does not become more honest by being an error. This answer IS attributable,
+    but by ``servedFrom``/``residency`` on the wire rather than by a
+    ``fallbackReason``: the store that answered is named, and the coverage gap is
+    named as the ``not-hot`` verdict, which is the fact that makes the answer
+    what it is.
     """
     mode = mode if mode is not None else serve_mode()
     if mode not in MODES:
@@ -1806,12 +1887,16 @@ def serve_entity(*, tenant: tuple[str, str], id_val: str,
         `record-miss` is a member of :data:`RECORD_ANSWERED_REASONS`, i.e. it
         makes the empty answer an ESTABLISHED ABSENCE. That is true for a
         single-label read (which has settled its whole coordinate) and FALSE
-        here while any label this union can be handed is unserved (#9721): the
-        id may name an `Event` or a `Source`, which the record holds and this
-        door cannot answer at parity. Naming it `record-label-not-served` is
-        what keeps the verdict honest in BOTH armed modes, and the two reasons
-        have different repairs (a backfill vs the parity work), so folding them
-        would also send an operator to the wrong one.
+        here while :func:`entity_coverage_complete` is ``False`` — a TWO-fact
+        gap, not one repair and not one label's problem: ``Event`` and ``Source``
+        BOTH lack parity (#9721), and ``Source`` is additionally unaddressable by
+        a bare id (:data:`ENTITY_UNION_ADDRESS_RESIDUALS`, #13351 — a read-path
+        decision on top of the parity one). In ``prefer``, naming it
+        `record-label-not-served` is what keeps the verdict honest — and the two
+        reasons have different repairs (a backfill vs the parity-plus-addressing
+        work), so folding them would also send an operator to the wrong one. ⚠️ This helper is
+        therefore called from the ``prefer`` arm ONLY: a ``record``-mode miss
+        reached no fallback and must not name one (#13353 review cycle 2/3).
         """
         return (FALLBACK_RECORD_MISS if entity_coverage_complete()
                 else FALLBACK_RECORD_LABEL_NOT_SERVED)

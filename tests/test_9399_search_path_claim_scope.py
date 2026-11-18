@@ -97,6 +97,7 @@ Static, stdlib-only, no network / DB / graph.
 
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -374,10 +375,65 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
         "`ABOUT_EDGE_TYPES` no longer carries `aboutObject`; the alternation the "
         "claim cites as the reason a literal grep misses the ranking reads is gone"
     )
-    # …and it must be USED, not merely defined: the claim is that ranking reads
-    # the edge *through* the alternation, so a dead constant would leave the
-    # document's justification false while the assertion above stayed green.
-    assert '"|".join(ABOUT_EDGE_TYPES)' in ranking, (
+    # …and the constant must be CONSUMED BY the alternation, not merely defined:
+    # a dead constant would leave the document's justification false while the
+    # assertion above stayed green. What is pinned here is exactly that — the
+    # constant reaches a `"|".join(...)` — and nothing beyond that (the limits
+    # below are not exhaustive).
+    # ⛔ THE BEHAVIOUR, NOT THE SPELLING (#13387): `8ba6de4438` (#13124) composed
+    # the alternation with extra predicates — `"|".join(tuple(extra_preds) +
+    # tuple(ABOUT_EDGE_TYPES))` — while still joining the constant, and a literal
+    # `'"|".join(ABOUT_EDGE_TYPES)'` substring then refused a CORRECT tree and
+    # reddened `main`. What this asserts is that the constant reaches a
+    # `"|".join(`, in either shape: a dead constant (joined nowhere) still
+    # reddens it, which is the failure the assertion exists to catch.
+    # ⛔ AND IT IS READ FROM THE PARSE, NOT FROM THE LINES (#13387 review P2).
+    # A line scan replaced one false red with a narrower one: wrapping the SAME
+    # expression over three lines is valid Python with unchanged semantics, and
+    # the scan refused it. The AST has no formatting, so a reflow cannot redden
+    # this, while the reverts that BREAK it still do — dropping
+    # `+ tuple(ABOUT_EDGE_TYPES)`, or deleting the join, leave no
+    # `"|".join(...)` call whose argument mentions the constant. Composing the
+    # alternation from literals reddens it too, but ONLY while no other
+    # `"|".join(...)` mentioning the constant remains — see the FIRST LIMIT below,
+    # which is the sentence this one must not contradict.
+    # STATED LIMITS — not exhaustive; a shape test is only honest when it says
+    # which shapes it cannot see, and the ones below are the ones found so far:
+    #   * FALSE GREEN, the same limit the substring had: a DIFFERENT
+    #     `"|".join` that mentions `ABOUT_EDGE_TYPES` satisfies it. The quote
+    #     regex above independently refuses the MODULE-LEVEL definition losing
+    #     its `aboutObject`, so that revert has to keep the value and fake the
+    #     consumption — which is false for a shadowed name, see the last bullet.
+    #   * FALSE RED on an alias: `_t = tuple(ABOUT_EDGE_TYPES); "|".join(_t)` is
+    #     correct and would be refused — the name must appear in the call's own
+    #     arguments. Resolving local aliases was considered and declined: it is
+    #     more machinery in a guard whose failure would be loud and a one-line
+    #     fix, and a wrong resolver re-opens the false-GREEN direction.
+    #   * FALSE GREEN on a discarded result: a `preds` computed and then never
+    #     read stays green. That was equally true of the substring, and pinning
+    #     it needs dataflow, not a shape test.
+    #   * FALSE RED on a hoisted separator: `_sep = "|"` then `_sep.join(...)` is
+    #     correct and refused, because the receiver must be the literal `"|"`.
+    #   * FALSE GREEN on a shadowed name: the match is name-only, so a same-scope
+    #     `ABOUT_EDGE_TYPES = ("aboutSubject",)` would satisfy it, even though the
+    #     binding consumed at the join then no longer carries `aboutObject`.
+    #     NO arm refuses this one: the regex above is a whole-file `re.search`,
+    #     so it is satisfied by the module-level definition at :1579 even when
+    #     that is not the binding the join site reads.
+    joins_the_constant = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and isinstance(node.func.value, ast.Constant)
+        and node.func.value.value == "|"
+        and any(
+            isinstance(sub, ast.Name) and sub.id == "ABOUT_EDGE_TYPES"
+            for arg in node.args
+            for sub in ast.walk(arg)
+        )
+        for node in ast.walk(ast.parse(ranking))
+    )
+    assert joins_the_constant, (
         "`ABOUT_EDGE_TYPES` is no longer joined into a Cypher alternation, so "
         "`ranking.py` no longer reads the edge THROUGH it — the reason the claim "
         "gives for a literal grep missing these reads no longer holds"
