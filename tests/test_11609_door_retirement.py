@@ -45,24 +45,31 @@ THAT UNBLOCKS IT, not silently:
   · `query` is the PAGED destination two ALREADY-retired pointers name
     (`paginated_query`, `query_points_by_tag`), so retiring it is a re-pointing decision,
     not a door removal;
-  · `compute_confidence` / `recall` have no arm on the container the map records:
-    `check_confidence` does not recompute a posterior, and it takes no `mode`/`query`
-    selector at all, so `recall`'s four-intent dispatch (confidence gate, centrality
-    weighting, NAND/mitigation surfacing) is unreachable through it.
+  · `create_point` / `diary_write` — RETIRED by #11609 lane P1, the batch that gave
+    `create_entity` its `type="point"` / `type="diary"` arms; and `compute_confidence` /
+    `recall` — RETIRED by #11609 lane P2, the batch that gave `check_confidence` its
+    `recompute=True` / `recall=True` arms. Both pairs were held by the SAME kind of
+    reason, an ABSENCE at the recorded container, and each left the table in the change
+    that made that absence FALSE — which is the contract this file states: a door may
+    leave the held list only in the batch that makes its stated reason untrue, with a
+    test behind it, not silently and not in two steps.
 
-  8 (envelope) + 3 (rest_spec) + 1 (paged destination) + 2 (no arm) + 9 (destination not
-  an MCP door yet) = 23, and `TestProtectedDoorsStayLive` reads EVERY one of the first
-  fourteen back from the code — a name that lands in this list without an assertion behind
-  it is the shape the #13052 review caught.
+  8 (envelope) + 3 (rest_spec) + 1 (paged destination) + 0 (no arm) + 9 (destination
+  not an MCP door yet) = 21, and `TestProtectedDoorsStayLive` reads EVERY one of the
+  first twelve back from the code — a name that lands in this list without an
+  assertion behind it is the shape the #13052 review caught.
 
-⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1. `create_point` and `diary_write` were two of
-those twenty-five, held by ONE reason each — "create_entity has no point arm" / "…no diary
-arm". That is the reason this file's own contract is written around: a door may leave
-`PROTECTED` only in the batch that makes its stated reason FALSE, and lane P1 built the
-two arms (`create_entity` now dispatches `type="point"` and `type="diary"`) and retired
-both doors in the same change. The arithmetic moved with them: 4 (no arm) became 2, and
-the population 25 became 23 — a count left at 25 would have been a table claiming two
-names that are no longer live, which is the rot the population check exists to red.
+⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, AND 23 UNTIL LANE P2. `create_point` and
+`diary_write` were two of those twenty-five, held by ONE reason each — "create_entity has
+no point arm" / "…no diary arm". That is the reason this file's own contract is written
+around: a door may leave `PROTECTED` only in the batch that makes its stated reason FALSE,
+and lane P1 built the two arms (`create_entity` now dispatches `type="point"` and
+`type="diary"`) and retired both doors in the same change. `compute_confidence` and
+`recall` were two of the remaining twenty-three on the same terms, and lane P2 built
+their arms (`check_confidence(recompute=True)` / `check_confidence(recall=True)`) and
+retired both. The arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the
+population 25 became 23 became 21 — a count left at 25 would have been a table claiming
+two names that are no longer live, which is the rot the population check exists to red.
 
 NO ARCHIVE ROW IS EXPECTED HERE. `archive/mcp-tools/` holds doors with NO destination
 (owner ruling 2026-11-12, `archive/README.md`); a forwarded name is STILL SERVED, so the
@@ -207,8 +214,12 @@ PROTECTED = {
     # The paged destination of two already-retired pointers.
     "tortoise_query": "paged destination of paginated_query/query_points_by_tag",
     # No arm on the recorded container.
-    "tortoise_compute_confidence": "check_confidence does not recompute",
-    "tortoise_recall": "check_confidence has no recall arm",
+    # ⛔ `tortoise_create_point` / `tortoise_diary_write` USED to sit here (held by two
+    # ABSENCES at `create_entity`: "has no point arm" / "has no diary arm") and left in
+    # #11609 lane P1; `tortoise_compute_confidence` / `tortoise_recall` used to sit here
+    # (held by "`check_confidence` does not recompute" / "has no recall arm") and left in
+    # #11609 lane P2. Each pair retire FORWARD in `RETIRED_USE_INSTEAD` in the batch that
+    # grew the arms. Do not restore them without first removing those arms.
 }
 
 #: The other NINE of the registry block's 25: live, off the 27-target, and held for a
@@ -380,11 +391,19 @@ class TestEveryPointerResolvesInOneHop:
             f"lands on another shim (aliases are not transitive): {strays}")
 
     def test_the_live_count_moved_strictly_lower(self):
-        """#11609's arithmetic: 48 → 46 advertised, with no container row arriving."""
-        assert len(TOOL_REGISTRY) == 46, (
-            f"live surface is {len(TOOL_REGISTRY)}, not 46 — this wave removes doors only "
-            "(lane P1 builds ARMS on a container that already existed; no new tool "
-            "ships), so the number can only fall")
+        """#11609's arithmetic: 55 → 48 → 46 → 44 advertised, no container row arriving.
+
+        Each retiring wave removes doors into arms its container had to grow for them
+        (#11609 P1: `create_entity`'s `point`/`diary`; P2: `check_confidence`'s
+        `recompute=True` / `recall=True`), so the count can only fall and no container is
+        added. The two waves are independent subtractions on the same base surface —
+        48 minus 2 minus 2 — because each merged on its own; the pin is the SUM, which is
+        what the merged registry actually advertises.
+        """
+        assert len(TOOL_REGISTRY) == 44, (
+            f"live surface is {len(TOOL_REGISTRY)}, not 44 — these waves remove doors only "
+            "(each builds ARMS on a container that already existed; no new tool ships), "
+            "so the number can only fall")
 
 
 class TestTheDestinationPerformsTheAbsorbedOperation:
@@ -481,6 +500,19 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
         monkeypatch.setattr(TortoiseSDK, "_create_entity", record, raising=True)
         monkeypatch.setattr(TortoiseSDK, "_entity_identity_for",
                             lambda _self, _l, _n, explicit_id=None: "fixed-id",
+                            raising=True)
+        # ⛔ The `object` arm resolves its target BEFORE the write (the #3590 adopt
+        # path), so `resolve_or_mint` is a SECOND identity-minting leg — the
+        # docstring's "identity minting" is two entry points, not one. It takes the
+        # live graph, so leaving it unstubbed made this case reach
+        # `entity_identity.py`'s `g.query` with the `g=None` below and raise
+        # `AttributeError: 'NoneType' object has no attribute 'query'` instead of
+        # measuring dispatch. `(None, True)` is the "no carrier, create it" answer,
+        # which is what a door creating a NEW entity is asking; `_create_entity`
+        # stays the measured seam.
+        from tortoise import entity_identity as _entity_identity
+        monkeypatch.setattr(_entity_identity, "resolve_or_mint",
+                            lambda _g, _label, _name, explicit_id=None: (None, True),
                             raising=True)
         monkeypatch.setattr(TortoiseSDK, "_get_proj",
                             lambda _self: type("P", (), {"g": None})(), raising=True)
@@ -581,27 +613,30 @@ class TestProtectedDoorsStayLive:
       · 3 `rest_spec` doors — the registry entry's own `rest_spec`;
       · 1 paged destination (`tortoise_query`) — the two retired pointers that name it,
         and the paging parameters those pointers and the live door agree on;
-      · 2 "no arm on the recorded container" doors — both `check_confidence`, measured
-        from its parameter SET: it does not recompute a posterior, and it takes no
-        `mode`/`query` selector, so `recall`'s four-intent dispatch is unreachable
-        through it. ⛔ THE OTHER TWO OF THE FOUR ARE GONE, and how they left is the
-        contract working: the two write doors were CALLED with their kind and had to
-        still refuse it (that is `create_entity`'s dispatch branch — not its
-        `_ENTITY_ITEM_LABELS` map, which is ingest's Phase-1 allow-list and carries no
-        `point`/`diary` key at all: #13556 review N1); lane P1 made that call STOP
-        refusing by building the arms, which is exactly the signal the row existed to
-        produce.
+      · 0 "no arm on the recorded container" doors — the category is EMPTY, and that is
+        the interesting state, not an omission. It held FOUR absences, two per container,
+        and each pair left in the batch that made its absence false: #11609 P1 built
+        `create_entity`'s `type="point"` / `type="diary"` arms (the doors were CALLED
+        with their kind and had to still refuse it — that is `create_entity`'s dispatch
+        branch, not its `_ENTITY_ITEM_LABELS` map, which is ingest's Phase-1 allow-list
+        and carries no `point`/`diary` key at all: #13556 review N1), and #11609 P2 built
+        `check_confidence`'s `recompute=True` / `recall=True` arms. Both departures are
+        asserted the other way round, by
+        `test_the_door_retired_only_because_the_container_grew_the_arm` (P2's pair) and
+        by `test_a_create_door_lands_on_its_own_arm_and_carries_its_kind` (P1's pair),
+        which prove the reason false AT the container instead of trusting the table's
+        silence.
 
     The other NINE (`NO_CONTAINER_YET`) have no live container at all, so the only thing
     to measure is "still live, still not retired" — pinned below for them too. The two
     tables together are what make the enumeration checkable as a POPULATION; neither
-    alone is 23 of 23.
+    alone is 21 of 21.
     """
 
     def test_the_two_tables_cover_the_enumerated_population_and_do_not_overlap(self):
         live = _live()
-        assert len(PROTECTED) == 14, (
-            f"PROTECTED holds {len(PROTECTED)}: the registry block names 14 doors with a "
+        assert len(PROTECTED) == 12, (
+            f"PROTECTED holds {len(PROTECTED)}: the registry block names 12 doors with a "
             "retaining property — if a door gained or lost one, move it in the batch that "
             "changed the code, not to wherever a green run lands")
         assert len(NO_CONTAINER_YET) == 9, (
@@ -610,8 +645,8 @@ class TestProtectedDoorsStayLive:
         both = set(PROTECTED) & set(NO_CONTAINER_YET)
         assert not both, f"a door is in both tables, which is a contradiction: {both}"
         population = set(PROTECTED) | set(NO_CONTAINER_YET)
-        assert len(population) == 23, (
-            f"the two tables cover {len(population)} names, not the 23 live names off the "
+        assert len(population) == 21, (
+            f"the two tables cover {len(population)} names, not the 21 live names off the "
             "27-target that the registry block enumerates — a live door dropped from both "
             "is a door with NO recorded reason to stay live")
         missing = sorted(n for n in population if n not in live)
@@ -652,32 +687,57 @@ class TestProtectedDoorsStayLive:
             f"{name} no longer carries a `rest_spec`, so retiring the entry no longer "
             "deletes a REST route — it may be retirable in that batch")
 
-    @pytest.mark.parametrize("name,forbidden", [
-        ("tortoise_compute_confidence", ("recompute", "posterior")),
-        ("tortoise_recall", ("mode", "query")),
+    # ⛔ THE `no arm` CATEGORY IS EMPTY, AND BOTH HALVES OF ITS DEPARTURE ARE ASSERTED
+    # FROM THE CODE ABOVE, not from this table's silence:
+    #   · #11609 P1 retired `create_point` / `diary_write` when `create_entity` grew their
+    #     arms — covered by `test_a_create_door_lands_on_its_own_arm_and_carries_its_kind`
+    #     and `test_create_entity_routes_every_retired_create_type`, which drive
+    #     `create_entity(type="point"|"diary")` and record the `_create_entity` write it
+    #     reaches. ⛔ NOT read from `_ENTITY_ITEM_LABELS` (#13052 review, round 6 / #13556
+    #     review N1): that constant is interpolated into the `unknown type` message and
+    #     decides nothing, so adding `"point"` to it alone leaves `create_entity` refusing
+    #     the type (a false RED) and adding a real arm leaves the map untouched (a false
+    #     GREEN, on the exact drift the row existed to catch).
+    #   · #11609 P2 retired `compute_confidence` / `recall` when `check_confidence` grew
+    #     `recompute=True` / `recall=True` — the row below.
+    @pytest.mark.parametrize("name,arm,selector", [
+        ("tortoise_compute_confidence", "recompute", ("factors", "evidence", "anchors")),
+        ("tortoise_recall", "recall", ("query", "mode")),
     ])
-    def test_the_recorded_container_still_has_no_arm_for_it(self, name, forbidden):
-        """The "no arm" reason, asserted against the CONTAINER rather than as prose.
+    def test_the_door_retired_only_because_the_container_grew_the_arm(
+            self, name, arm, selector):
+        """The retired half of the ``no arm`` category: reason FALSE, measured.
 
-        This is the one category whose retaining property is an ABSENCE, and an absence
-        stated only in a comment is exactly what an arm landing later leaves behind —
-        `recall` would then look protected while its container could serve it. `forbidden`
-        names the parameters whose ARRIVAL on the container would open an arm; measured
-        from the door's own signature, so a `mode=`/`recompute=` selector cannot be added
-        without reddening this row.
+        These two doors were held by an ABSENCE ("`check_confidence` does not recompute" /
+        "has no recall arm"). #11609 P2 added the arms, so the doors retire FORWARD — and
+        the obligation that comes with it is the one this row discharges: the reason must
+        be provably FALSE at the container, not merely re-worded in the table. The arm is
+        read from the door's own SIGNATURE (so an arm deleted later reddens here), from
+        its ``RETIRED_USE_INSTEAD`` pointer (so a name retired without its arm is caught),
+        and from its ABSORBED ARGUMENTS (so an arm whose parameters were dropped does not
+        pass by name alone — the migrating caller would lose the arguments the door took).
         """
-        destination = _destination(name)
-        door = destination if destination.startswith("tortoise_") else f"tortoise_{destination}"
-        container = getattr(ms, door, None)
-        assert container is not None, (
-            f"{name}'s recorded container {door} is no longer a door, so the reason this "
-            "table records for it cannot be asserted — re-derive it before retiring")
-        params = set(inspect.signature(container).parameters)
-        arrived = sorted(set(forbidden) & params)
-        assert not arrived, (
-            f"{door} now accepts {arrived}, so {name!r}'s recorded reason "
-            f"({PROTECTED[name]}) no longer holds — it may serve the operation now. "
-            "Re-check whether it is retirable in the batch that added the arm")
+        assert name not in PROTECTED, (
+            f"{name} is still in PROTECTED, whose reason is now false — a door leaves that "
+            "table in the SAME batch that makes its stated reason untrue")
+        assert name not in _live(), f"{name} is still advertised, so it did not retire"
+        pointer = RETIRED_USE_INSTEAD[name]
+        assert f"{arm}=True" in pointer, (
+            f"{name} is pointed at {pointer!r}, which does not select the {arm} arm: the "
+            "container's DEFAULT is a different operation, so the pointer would return "
+            "something else with no error")
+        params = set(inspect.signature(ms.tortoise_check_confidence).parameters)
+        assert arm in params, (
+            f"`tortoise_check_confidence` no longer accepts {arm}=, so {name}'s "
+            "retirement points at an arm that does not exist")
+        missing = sorted(set(selector) - params)
+        assert not missing, (
+            f"`tortoise_check_confidence` no longer accepts {missing} — the {arm} arm "
+            f"cannot carry the arguments {name} took, so a migrating caller loses them")
+        SDK_PARAMS = set(inspect.signature(TortoiseSDK.check_confidence).parameters)
+        assert {arm, *selector} <= SDK_PARAMS, (
+            f"the SDK container does not carry {{{', '.join(sorted({arm, *selector} - SDK_PARAMS))}}} "
+            f"— {name}'s absorption stopped at the MCP door, so the two layers disagree")
 
     def test_a_dropped_destination_is_a_named_assertion(self, monkeypatch):
         """`_destination()`'s assert is only reachable on the DRIFT path, so pin it here.

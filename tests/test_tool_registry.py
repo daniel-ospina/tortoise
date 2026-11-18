@@ -161,28 +161,35 @@ class TestRegistryEquivalence:
             60 −  7 + 6 = 59   lane C (SOURCES/MINE/SESSION)
             59 −  9 + 5 = 55   #12951 (READ/QUERY)              = origin/main @ 486f5ca
             55 −  7 + 0 = 48   #13052 (door retirement, lane E)
-            48 −  2 + 0 = 46   THIS PR (#11609 lane P1 — the two POINT-shaped doors)
+            48 −  2 + 0 = 46   #11609 lane P1 (the two POINT-shaped doors)
+            46 −  2 + 0 = 44   THIS PR (#11609 P2 confidence arms)
 
         Retired composes the same way, and it is a UNION — no wave drops another's
         rows: 23 + 7 + 14 = 44 at main, + 9 = **53** after #12951, + 7 = **60** after
-        #13052, + 2 = **62** here. Neither door-retirement wave adds a container row:
-        they remove doors whose containers were already advertised by the three
-        Phase 2 waves, so each live delta is a bare `− n` with no `+ n` term.
+        #13052, + 2 = **62** after #11609 lane P1, + 2 = **64** here. Neither
+        door-retirement wave adds a container row: they remove doors whose containers
+        were already advertised by the three Phase 2 waves, so each live delta is a bare
+        `− n` with no `+ n` term.
 
-        #11609 lane P1 (THIS PR): `tortoise_create_point` and `tortoise_diary_write`
-        retire FORWARD into `create_entity`'s new `type="point"` / `type="diary"`
-        arms. This is the batch that makes their recorded reason false — the
-        `PROTECTED` table in `tests/test_11609_door_retirement.py` held them as
-        *"create_entity has no point arm"* / *"…no diary arm"*, and a door may only
-        leave that table in the change that makes its reason false. No container
-        arrives: the two arms are built on a tool that was already live, so the
-        live delta is exactly −2.
+        #11609 lane P1: `tortoise_create_point` and `tortoise_diary_write` retire FORWARD
+        into `create_entity`'s new `type="point"` / `type="diary"` arms. That batch made
+        their recorded reason false — the `PROTECTED` table in
+        `tests/test_11609_door_retirement.py` held them as *"create_entity has no point
+        arm"* / *"…no diary arm"*, and a door may only leave that table in the change that
+        makes its reason false. No container arrived: the two arms are built on a tool
+        that was already live, so the live delta is exactly −2.
+
+        #11609 P2 (THIS PR): `tortoise_compute_confidence` and `tortoise_recall` retire
+        FORWARD the same way, into `check_confidence`'s new `recompute=True` /
+        `recall=True` arms — again on a tool that was already live, so again exactly −2
+        live and +2 retired-forward, with no container row in either term.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
-        # lane C composes on top of lane B (59), then the READ/QUERY wave (55), then
-        # THIS PR's door-retirement wave: 55 - 7 + 0 = 48.
-        assert len(TOOL_REGISTRY) == 46, f"Expected 46, got {len(TOOL_REGISTRY)}"
+        # lane C composes on top of lane B (59), then the READ/QUERY wave (55), then the
+        # door-retirement wave (48), then lane P1 (46), then THIS PR's confidence arms:
+        # 46 - 2 + 0 = 44.
+        assert len(TOOL_REGISTRY) == 44, f"Expected 44, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated, the 5 #4282 container members, the 14 #11609 lane B
@@ -190,7 +197,7 @@ class TestRegistryEquivalence:
         # members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
 
-        assert len(retired) == 62, f"Expected 62 retired, got {len(retired)}"
+        assert len(retired) == 64, f"Expected 64 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -264,7 +271,11 @@ class TestRegistryEquivalence:
         # (owner decision, docs/product/canonical-mcp-tools.md @ approval_pr 4120).
         # `tortoise_overview` left this set when #4282 retired it into
         # `tortoise_graph_overview` — the container is the W3 consolidation now.
-        w_consolidations = {"tortoise_recall", "tortoise_delete",
+        # #11609 P2: W1's `tortoise_recall` left the same way — the confidence
+        # container grew a `recall=True` arm and the door retires FORWARD into it, so
+        # the capability assertion follows the container (asserting the NAME would
+        # re-assert the surface shape the approved target removes).
+        w_consolidations = {"tortoise_check_confidence", "tortoise_delete",
                             "tortoise_create_edge",
                             "tortoise_graph_overview", "tortoise_get_entity",
                             "tortoise_ingest",
@@ -274,6 +285,11 @@ class TestRegistryEquivalence:
                             "tortoise_adjust_relationship"}
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
+        # …and the arm that keeps W1's recall capability reachable by name.
+        assert "recall=True" in _rui["tortoise_recall"], (
+            "#888 W1's recall capability must name the arm that serves it — a pointer "
+            "without `recall=True` lands the caller on the calibration view, a "
+            "different read")
         # #454-era surface tools covered by this PR's tests
         for name in ("tortoise_query", "tortoise_suggest_entry_points",
                      "tortoise_graph_overview"):
