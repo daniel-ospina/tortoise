@@ -8,7 +8,7 @@ subjects.team: epistemic-team
 ---
 
 <!-- research-path: https://github.com/daniel-ospina/tortoise/issues/13452#issuecomment-6967218550 -->
-<!-- plan-review: cycles=1, status=clean, version=2.3.0 -->
+<!-- plan-review: cycles=3, status=clean, version=2.3.0 -->
 
 # Frontmatter value survival — #13452
 
@@ -32,7 +32,8 @@ the space-preceded `#`**, because YAML admits `#` inside a plain scalar only wit
 lookbehind (`ns-plain-char(c)`, YAML 1.2.2 §7.3.3). The parse succeeds, the key survives, and the
 value is short.
 
-On `main` today, measured through that same consumer across `docs/research/**/*.md`:
+On `main` **before `#13476` landed** (`c0463806db`), measured through that same consumer across
+`docs/research/**/*.md`:
 
 ```text
 103 files · 68 frontmatter blocks · 8 truncated values · all 8 are `aboutObjects`
@@ -41,7 +42,13 @@ On `main` today, measured through that same consumer across `docs/research/**/*.
   disagreement — see §7's before/after count)
 ```
 
-`tests/test_doc_affiliation_frontmatter.py:591` cannot see any of them:
+The count is tied to that head on purpose: `#13476` is now ON `main`, so the same probe over
+the same glob at this head reports **0** truncated values (`broken` count re-measured through
+`_values` + `_quoted_style` at `ae275460df`: `files: 103 blocks: 68 broken(truncated): 0`).
+Stating `8` as a present-tense `main` measurement would be the exact defect this section
+exists to prevent — a number that no longer reproduces against the tree it names.
+
+`tests/test_doc_affiliation_frontmatter.py:606` cannot see any of them:
 `missing = [key for key in REQUIRED_KEYS if key not in parsed]` asks whether four keys are
 **present**, and `REQUIRED_KEYS` does not even contain the two fields that carry the affiliation
 to other entities.
@@ -85,7 +92,7 @@ is `test_pack_shipping.py`), and the issue body's `:13061` is a different module
 | Surface | Consumer | Test layer that proves it |
 |---|---|---|
 | the 8 `docs/research` blocks | `parse_frontmatter` → index pipeline | the pytest arm (this change) |
-| **5 pins that actually OPEN the 8 files** — `test_entity_attachment_brief_claims.py`, `test_12184_shifted_cites.py`, `test_m3_fts_leg_recall_12298.py`, `test_candidate_recall_11901.py`, and `test_entry_point_python_guard.py`'s docs scan (`test_capacity_page.py`, `test_name_entropy_12294.py` and `tools/edge_census.py` only NAME them in prose and open nothing — corrected after round 2) | those tests | all 5 run on both trees; failure sets **identical** (`7 failed, 784 passed` either side), so unaffected is a diff of two runs, not an assertion |
+| **5 pins that actually OPEN the 8 files** — `test_entity_attachment_brief_claims.py`, `test_12184_shifted_cites.py`, `test_m3_fts_leg_recall_12298.py`, `test_candidate_recall_11901.py`, and `test_entry_point_python_guard.py`'s docs scan (`test_capacity_page.py`, `test_name_entropy_12294.py` and `tools/edge_census.py` only NAME them in prose and open nothing — corrected after round 2) | those tests | the **4 git-free** pins run on both trees with identical results; the 5th (`test_entry_point_python_guard.py`) cannot run against `main` content and is **NOT** claimed identical — see §7 item 5. Re-measured at `ae275460df`, the 4 give `4 failed, 186 passed` (190 collected), so the earlier `3 failed, 182 passed` / `7 failed, 784 passed` figures are superseded: the latter was a SINGLE-tree whole-batch count, never an "either side" comparison, and quoting it as one contradicted §7 item 5 |
 | `tests/test_doc_affiliation_frontmatter.py` | CI `tier1` + `core` (dual-registered) | itself |
 | `config/ci-surfaces.yml` (2 registrations) | CI lane selection | unchanged; the file is not edited |
 | `tortoise/file_indexer.py` | `docs_miner`, `sdk`, `ingest` | **unchanged** — `tests/test_file_indexer.py` must stay green |
@@ -179,8 +186,8 @@ rationale drift, or the 2 pre-existing absence reds.
 |---|---|---|---|
 | `tortoise.file_indexer.parse_frontmatter` | python consumer | `tests/test_file_indexer.py` (unchanged) | the read path this fix depends on; **not modified** |
 | `tortoise/docs_miner.py:352` | importer | `tests/test_file_indexer.py` | consumes the same parse; unaffected by quoting data |
-| `tests/test_doc_affiliation_frontmatter.py:509` | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
-| `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at `23cfffc260`) | data | the arm's glob `:574` | the population the assertion iterates |
+| `tests/test_doc_affiliation_frontmatter.py:524` | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
+| `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at this head) | data | the arm's glob `:589` | the population the assertion iterates |
 | `scripts/check-doc-affiliation.cjs` | commit-time advisory | not CI-wired | **not touched**; deferred per §2 alternative E |
 
 ## 7. Verification plan — measured (PROVE evidence)
@@ -203,7 +210,10 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    `^def test_` lines against `origin/main`), and each count is tied to the head that produced it,
    because tests are appended to this file every round:
    `8 passed` on `main` (`f6793959a2`), `9 passed` at the rebased `36700a89b7` (the extra pass is
-   `#13485`'s own new test, which main added under ours), `10 passed` once the `''`-parity pin
+   this branch's OWN first pin, `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` —
+   `comm` on the two `^def test_` lists against `origin/main` names exactly that one test, and
+   `#13485`'s `test_a_wholly_commented_value_gets_ONE_TRUE_diagnosis` is already inside the `8`, so
+   it cannot be the extra pass), `10 passed` once the `''`-parity pin
    landed, `11 passed` once the `"`-backslash pin landed, `12 passed` once the (C)-ordering pin
    landed, and `13 passed` once the never-closing/`malformed` pin landed in `b0940c7a4f`. The 2 are the
    pre-existing absence reds
@@ -478,19 +488,21 @@ support, which is out of this issue's scope.
 
 **Recorded, not fixed — the guard's sanity counters can red on an empty population.** Two sites in
 `tests/test_doc_affiliation_frontmatter.py` report the same wrong diagnosis as round 5's escape
-finding, and neither is an escape: `:848-849` assert `measured` and `compared` BEFORE
-`assert not failures` (`:850`), so a tree the guard samples sparsely reds on *"measured no
+finding, and neither is an escape: `:863-864` assert `measured` and `compared` BEFORE
+`assert not failures` (`:865`), so a tree the guard samples sparsely reds on *"measured no
+
 affiliation value at all — re-point this guard"* — advice that points at the guard instead of at
-the value; and `:753` skips `escaped` before `compared += 1` (`:763`), so a tree whose affiliated
+the value; and `:768` skips `escaped` before `compared += 1` (`:778`), so a tree whose affiliated
 values are all escaped leaves the counter legitimately empty and fires the same message. (Line
-numbers are re-measured at `23cfffc260`: `assert measured` sits at `:848`, against `:792` on
-`f6793959a2` — **+77** from `#13485` rewriting the arm above it and a further **+56** from this
+numbers are re-measured at this head: `assert measured` sits at `:863`, against `:715` on
+`a5f1e7db46` → `:792` once `#13485` landed → `:863` here — so of the total, **+77** is
+`#13485`'s and the remaining **+71** is this
 branch's own `_closing_quote`, its docstring and the fifth pin. They move with every appended test,
 so they are re-measured rather than carried: an earlier revision of this section cited the
 pre-rebase `:751-752`,
 `:753`, `:658`, `:666`, and the revision before this one cited `:828-829`/`:830`/`:733`/`:743` — all
 of which had drifted, by the same mechanism. The sequence branch carries
-the same pair at `:719` / `:723`.) Both are
+the same pair at `:734` / `:738`.) Both are
 false blocks of an author's tree, not fail-opens — nothing escapes measurement, they fail closed
 and name a remedy — and both live in the guard, not in the escape branch this PR fixes. Recorded
 here because a reader meets the message before the reason; fixing the ordering is a separate change
@@ -545,8 +557,30 @@ nor clears it, and it is recorded rather than chased for the reason the sibling 
 clearing it means teaching the arm to accept a non-space-separated trailing comment after a close,
 which is the same lexer widening and the same out-of-scope boundary. It fails CLOSED — the value is
 reported, never silently skipped — so it cannot ship a defect. It is worth naming because a reader
-meets it the first time anyone writes `"…"#comment`, and because it is the third member of one
-family: the remedy text is wrong, the gate is shut.
+meets it the first time anyone writes `"…"#comment`, and because it is one member of a family
+whose remedy text is wrong while the gate is shut.
+
+**Recorded, not fixed — a MULTI-LINE QUOTED scalar is refused with the same mis-worded remedy.**
+Found by the second fresh-context review at `ae275460df` and re-measured there. A quoted scalar may
+legally continue onto the next line:
+
+```text
+aboutObjects: "a
+  b"
+```
+
+`parse_frontmatter` reads that whole as `'a b'`, but `_values` hands `_quoted_style` only the first
+line (`_values(['title: x','aboutObjects: "a','  b"'])` → `('aboutObjects','scalar','"a')`), which
+returns `('malformed', None)` — so the arm fails the file and prints *"the value is TERMINATED
+there — remove the inner quote"* about a value YAML keeps intact. This is PRE-EXISTING: `main`'s
+helper reaches `malformed` here identically, and the fix neither causes nor clears it. It also
+falsifies the code comments that say a quoted value is closed on its line
+(`tests/test_doc_affiliation_frontmatter.py:169` and `:210`) — those are corrected to the narrower
+true statement (an indented **comment** line after a closed quoted value is not a continuation).
+Not fixed here for the same scoping reason as its siblings, and it is the one member of this family
+whose honest remedy is already modelled by the arm: `_values` has a `scalar_multiline` verdict for
+PLAIN folding, and clearing this means teaching it to emit that for a quoted value with no close on
+its line — a lexer change, out of this issue's scope. It fails CLOSED, so it cannot ship a defect.
 
 ## 10. Rebase onto `main` — the conflict, and why the resolution is additive
 
@@ -585,7 +619,7 @@ Measured at the post-rebase head:
   test's own docstring describes — measured both ways at this head, so the two
   verdicts are not interchangeable. The failing assertion is
   `assert style == "single-quoted"` in
-  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:1001` at this
+  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:1016` at this
   head; it was `:974` when the mutant was run, and it moves whenever a test is
   appended to this file, so cite it by name, not by line);
 - over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s

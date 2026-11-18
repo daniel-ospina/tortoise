@@ -166,10 +166,16 @@ def _values(fm: list[str]) -> list[tuple[str, str, object]]:
                             value parses to its first line only). Folding cannot
                             be verified without becoming a YAML implementation,
                             so this arm REFUSES the style and asks for quotes.
-                            A QUOTED value is closed, so an indented comment
-                            line after it is not a continuation; a PLAIN value
-                            can continue, and a continuation line opening with
-                            `#` becomes a comment — so that shape is refused.
+                            A QUOTED value that CLOSES on its line is not
+                            continued by an indented COMMENT line — the comment
+                            is just a comment. ⚠️ That is NOT the same as "a
+                            quoted value is always closed on its line": a quoted
+                            scalar may legally continue onto the next line, which
+                            this arm still refuses (see the multi-line residual in
+                            the plan doc §9) — the narrower claim is the true one.
+                            A PLAIN value can continue, and a continuation line
+                            opening with `#` becomes a comment — so that shape is
+                            refused.
     ``sequence``            ``key:`` then ``- item`` lines (which may sit at
                             column 0, as several files in this population do).
                             A `- #11395` item is a whole-value comment and parses
@@ -201,8 +207,12 @@ def _values(fm: list[str]) -> list[tuple[str, str, object]]:
                 i += 1
                 continue
             nxt = fm[i + 1] if i + 1 < len(fm) else ""
-            # A QUOTED scalar is CLOSED: a following indented line cannot be part
-            # of it, so an indented comment is just a comment. A PLAIN scalar can
+            # A QUOTED scalar that closes ON THIS LINE is closed: a following
+            # indented line cannot be part of it, so an indented COMMENT is just a
+            # comment. (A quoted scalar can legally continue onto the next line;
+            # that shape is refused elsewhere, see the plan doc §9 residual — this
+            # branch must not be read as claiming every quoted value is closed
+            # here.) A PLAIN scalar can
             # continue — and a continuation line opening with `#` becomes a
             # comment, which is the truncation this arm refuses. Getting this
             # backwards was measured both ways: treating every indented `#` line
@@ -289,11 +299,16 @@ def _split_comment(raw: str) -> str:
     """
     close = _closing_quote(raw)
     if close == -1:
-        # `-1` means no quote in this text TERMINATES the scalar, so there is no
-        # close to split at and nothing YAML can keep. The caller reports
-        # `malformed` for it — `_quoted_style` re-runs this same parity scan
-        # rather than trusting `endswith`, because a body whose last character is
-        # an ESCAPED quote ends in the quote char anyway.
+        # DEFENSIVE, and UNREACHABLE in practice — said plainly so no reader looks
+        # for the test that owns it and concludes the verdict is untested. `raw[0]`
+        # is a quote and every ` #` sits at `i >= 1`, so
+        # `len(raw[:i].rstrip()) - 1` can never be `-1`: the loop below cannot match
+        # and falls through to the same `return raw`. Deleting this branch leaves
+        # the file at `2 failed, 13 passed` (measured), so no test CAN pin it. The
+        # caller is unaffected either way — `_quoted_style` re-runs the same parity
+        # scan and reports `malformed` for a value with no close, rather than
+        # trusting `endswith`, since a body whose last character is an ESCAPED
+        # quote ends in the quote char anyway.
         return raw
     i = raw.find(" #")
     while i != -1:
