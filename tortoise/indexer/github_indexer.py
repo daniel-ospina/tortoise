@@ -1346,10 +1346,9 @@ class GitHubIndexer:
         and the rule is per-direction, not per-term: a LATCHED word answers `None`
         always (`_status_is_latched` — the fold refuses both ways); the WIDE terms
         answer the POSITION where the row has an ENDED one, `None` where it is LIVE,
-        and `"closed"` where there is no position unless the word maps to `open` —
-        the cases are enumerated on `_object_state_to_issue_state`'s docstring rather
-        than restated here (`_row_is_frozen` — the close fold is unreachable for them,
-        the reopen fold is not). "Written once and never cleared" was the earlier, WRONG summary:
+        and `"closed"` where there is no position unless the word maps to `open`
+        (`_row_is_frozen` — the close fold is unreachable for them, the reopen fold
+        is not). "Written once and never cleared" was the earlier, WRONG summary:
         a coherent un-supersede does clear `superseded` (`sdk.py:54213-54222`). Answering `"closed"` there was the fix's own regression:
         it is a SUPERSET of the fold's guard set, and a superset re-fires exactly
         as a subset does.
@@ -1492,9 +1491,10 @@ class GitHubIndexer:
         # needs a LIVE holder, and an `outdated` row has none, so the close can never
         # be applied and must get no opinion; the REOPEN fold takes
         # `_reopen_targets_closed` and DOES apply. So for these rows this read answers
-        # the POSITION where the row has one — which is what converges — and the word's
-        # DIRECTION where it has none. Measured on a row at
-        # `status='outdated'` + closed position, GitHub reopened:
+        # the POSITION where the row has an ENDED one — which is what converges —
+        # `None` where it is LIVE (a close could never be dispatched, so it must get no
+        # opinion), and the word's direction where it has no position. Measured on a row
+        # at `status='outdated'` + closed position, GitHub reopened:
         #
         #   `None` for both directions  -> [0, 0, 0], row stays `done`/`isClosed=true`
         #                                 — a reopen the projection WOULD apply is dropped
