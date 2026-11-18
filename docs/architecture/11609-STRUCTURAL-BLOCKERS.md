@@ -9,11 +9,14 @@ reason rather than a missing arm:
 
 | # | reason class | doors |
 |---|---|---|
-| 1 | `-> list[dict]` wrap envelope (#8482) | `search_sessions`, `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`, `check_structure`, `calibrate_summary` |
-| 2 | `rest_spec` — *recorded* as "the registry row IS the REST route" | `issue_insight`, `session_context`, `search` |
-| 3 | the paged destination of two already-retired pointers | `query` |
+| 1 | `-> list[dict]` wrap envelope (#8482) — **8 envelope-only**, plus `search` (row 2) = **9** | `search_sessions`, `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`, `check_structure`, `calibrate_summary` |
+| 2 | `rest_spec` — *recorded* as "the registry row IS the REST route" — **3**, of which 2 are non-envelope | `issue_insight`, `session_context`, `search` |
+| 3 | the paged destination of two already-retired pointers — **1** | `query` |
 
-8 + 3 + 1 distinct names = **12** (`tortoise_search` carries reasons 1 and 2 at once).
+**9 + 3 + 1 − 1 = 12** distinct names. `tortoise_search` is the `− 1`: it carries reasons 1
+and 2 at once (it is `list[dict]` *and* it carries a `rest_spec`). Read the class sizes as
+9 / 3 / 1, not 8 / 3 / 1 — with 8, `search` would have to hold only one reason, which §1.5
+disproves. S1 unblocks the 9, and §4's `16 → 7` follows from that count.
 
 ⛔ **Reason 2 is FALSE on `main`** and that is this lane's headline finding: no REST route is
 derived from a registry row (§1.5), so retiring those names deletes no route. `issue_insight`
@@ -91,7 +94,8 @@ Two consequences the decision turns on:
 
 ### 1.2 The population, measured
 
-Envelope doors — all 8 confirmed `list[dict]` today:
+Envelope doors — the 8 envelope-only ones, all confirmed `list[dict]` today (`search`, the
+ninth, is in the `rest_spec` table below because it carries both reasons):
 
 ```text
 tortoise_search_sessions        mcp_server.py:7085
@@ -195,6 +199,16 @@ unrelated indexer table). The **served** routes are hand-written decorators that
 | `GET /v1/search` | `hosted_api.py:14927` (+ `selfhost_api.py:366` under the `/v1` prefix) |
 | `GET /v1/context` | `hosted_api.py:37761` |
 | `GET /v1/issue-insight` | `hosted_api.py:38059` → body calls `sdk.issue_insight(...)` at `:38076` |
+
+⛔ **What the handler BODY does is MEASURED, not cited.** "No route is derived from a row" is
+only half of S3's premise; the other half is that retiring the MCP door cannot break the
+route, and nothing read the handler body until review round 3 — a handler that called the MCP
+tool would have broken a live public route while every pin stayed green.
+`tests/test_11609_structural_blockers.py` now holds both halves:
+`test_the_serving_handler_reaches_the_sdk_not_the_mcp_door` (the door's MCP name and
+`TOOL_REGISTRY` are absent from the serving handler's AST — docstring excluded — and the body
+reaches `sdk.<method>`), and `test_the_sdk_edge_reading_is_not_vacuous` (its own falsifier: a
+handler that DOES call the door is detected, and the real handler still yields the SDK edge).
 
 So **retiring `tortoise_issue_insight` / `tortoise_session_context` / `tortoise_search`
 deletes no REST route.** The coupling the registry records (*"retiring the registry entry

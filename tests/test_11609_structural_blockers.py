@@ -36,6 +36,7 @@ those, and duplicating them would give a future lane two places to update.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import re
@@ -340,6 +341,134 @@ def test_the_served_route_is_hand_written_and_never_reads_the_registry_row(door,
         f"{path} is not served by a hand-written {entry.rest_spec.method} decorator in "
         f"{hosted_api.__name__} or {selfhost_api.__name__} — if the route is really gone, "
         "this pin's premise changed")
+
+
+# ── what the SERVING HANDLER does — the other half of S3's premise ───────────
+
+def _handler_asts(app_module, method: str, prefix: str, path: str) -> list:
+    """The AST of every function `app_module` decorates to serve `method path`.
+
+    The SAME predicate the pin above states in text — a DECORATOR node, the row's own
+    METHOD, and the decorator's own literal argument under the module's real prefix — so a
+    comment or a look-alike route on another verb cannot satisfy it.
+    """
+    tree = ast.parse(inspect.getsource(app_module))
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if not (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)):
+                continue
+            if dec.func.attr.lower() != method.lower():
+                continue
+            arg = dec.args[0] if dec.args else None
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+                    and prefix + arg.value == path:
+                found.append(node)
+                break
+    return found
+
+
+def _body_source(node) -> str:
+    """The handler body as text, with the DOCSTRING dropped.
+
+    The docstring legitimately names the SDK method it mirrors (`TortoiseSDK.issue_insight()`)
+    and executes nothing, so keeping it would let prose satisfy the "does this reach the SDK"
+    half while the code did not — a docstring mention is not a call site (#3836(c)).
+    """
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+            and isinstance(body[0].value.value, str):
+        body = body[1:]
+    return ast.unparse(ast.Module(body=body, type_ignores=[]))
+
+
+def _sdk_attributes(node) -> set[str]:
+    """Attribute names reached on a name called `sdk` — the SDK-object edges in a body."""
+    return {n.attr for n in ast.walk(node)
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+            and n.value.id == "sdk"}
+
+
+@pytest.mark.parametrize("door,path", sorted(REST_SPEC_DOORS.items()))
+def test_the_serving_handler_reaches_the_sdk_not_the_mcp_door(door, path):
+    """S3's premise, MEASURED — retiring the MCP door cannot break the live route.
+
+    The two pins above prove the route EXISTS, that the deriving adapter is unwired, and what
+    the registry row says. None of them reads what the handler's own BODY does — and that body
+    is the entire basis for retiring `tortoise_issue_insight` / `tortoise_session_context` with
+    "no route work": a handler that called the MCP TOOL (or looked its row up in
+    `TOOL_REGISTRY`) would break a live public route the moment the tool is retired, while
+    every other pin here stayed green. That is the false-PASS shape this file exists to
+    prevent, and it was live: the review's mutant — *"make a /v1/issue-insight handler call
+    the MCP tool"* — reddened no row.
+
+    Both halves are asserted, so neither is vacuous on its own:
+      · the door's MCP name does not appear in the body, and the body names no `TOOL_REGISTRY`;
+      · the body DOES reach the SDK object (`sdk.<method>`), which is what makes the route
+        independent of the MCP surface.
+    """
+    from tortoise import hosted_api, selfhost_api
+
+    entry = _live().get(door)
+    assert entry is not None and entry.rest_spec is not None, (
+        f"{door} is not advertised with a `rest_spec` — re-derive this pin")
+    method = entry.rest_spec.method
+
+    found = [(module, node)
+             for module, prefix in ((hosted_api, ""), (selfhost_api, "/v1"))
+             for node in _handler_asts(module, method, prefix, path)]
+    assert found, (
+        f"no hand-written {method} decorator serves {path} in `hosted_api` or "
+        "`selfhost_api` — this pin's premise changed and S3 must be re-derived")
+
+    for module, node in found:
+        where = f"{module.__name__}:{node.name}"
+        body = _body_source(node)
+        assert door not in body, (
+            f"{where} names the MCP door `{door}` — retiring that door would now break the "
+            f"live route {path}, so S3 is NOT free and `PROTECTED`'s reason became TRUE")
+        assert "TOOL_REGISTRY" not in body, (
+            f"{where} reads `TOOL_REGISTRY` — the route would then depend on the registry "
+            "row it is supposed to be independent of (§1.5, S3)")
+        assert _sdk_attributes(node), (
+            f"{where} reaches no `sdk.<method>` at all — either the SDK left this handler, "
+            f"or this pin's SDK-edge reading is stale; {path} must be served by an SDK call "
+            "for S3's 'no route work' to hold")
+
+
+def test_the_sdk_edge_reading_is_not_vacuous():
+    """The pin above's own falsifier: a body that DOES call the door is detected.
+
+    Kept as a test rather than as a comment because the reading is AST work over a ~50k-line
+    module: a silently-empty walk (a FastAPI decorator-shape change, or the docstring being
+    mistaken for code) would let every `assert door not in body` pass while measuring nothing.
+    """
+    mutant = (
+        '@router.get("/v1/issue-insight")\n'
+        'async def issue_insight(title: str):\n'
+        '    """Docstring names TortoiseSDK.issue_insight() legitimately."""\n'
+        '    return await mcp.call_tool("tortoise_issue_insight", {"title": title})\n'
+    )
+    node = next(n for n in ast.walk(ast.parse(mutant))
+                if isinstance(n, ast.AsyncFunctionDef))
+    body = _body_source(node)
+    assert "tortoise_issue_insight" in body, (
+        "a handler that calls the MCP door escaped the reading — the pin is vacuous")
+    assert _sdk_attributes(node) == set(), (
+        "the MCP-door mutant reached something on a name `sdk`, so the two halves do not "
+        "discriminate the way the pin assumes")
+
+    # …and the same reading DOES find the SDK edge on the REAL serving handler, which is what
+    # keeps the mutant's RED from being an artefact of the measurement.
+    from tortoise import hosted_api
+
+    real = _handler_asts(hosted_api, "GET", "", "/v1/issue-insight")
+    assert real and _sdk_attributes(real[0]), (
+        "the real `/v1/issue-insight` handler reaches no `sdk.<method>` — either it moved "
+        "onto the MCP door (S3's premise gone) or the reading broke")
+    assert "tortoise_issue_insight" not in _body_source(real[0])
 
 
 def test_register_all_would_derive_the_route_from_the_row():
