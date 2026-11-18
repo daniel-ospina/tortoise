@@ -157,19 +157,34 @@ class _FakeConn:
         return None
 
 
-def _run_folded_read(monkeypatch, fold_answer, *, excluded_statuses=None):
-    """One `vector_search` over `object`, with the fold's DB half stubbed.
+def _run_folded_read(monkeypatch, fold_answer, *, excluded_statuses=None,
+                     entity_type="object", timeout_ms=None):
+    """One `vector_search` with the fold's DB half stubbed.
 
-    Returns ``(fold_calls, knn_statement)`` — the two things the wiring pins
-    assert on. ``fold_answer`` is what the stubbed fold returns, so a test can
-    choose "terminal keys found" versus "the audit opt-in excluded nothing".
+    Returns ``(fold_calls, knn_statement, door)`` — the wiring pins assert on the
+    first two, and ``door`` is what reached `record_serve.open_record`, which is
+    the ONLY place the arm's budget is observable
+    (``door["kwargs"]["statement_timeout_ms"]``). That third element is what
+    pins the divisor by OBSERVATION (`#13466` cycle 8, P2).
+
+    ``fold_answer`` is what the stubbed fold returns, so a test can choose
+    "terminal keys found" versus "the audit opt-in excluded nothing".
+    ``entity_type`` is overridable so the COLUMN arm can be driven through the
+    same fake door: the two arms' bounds are only meaningful against each other.
     """
     import tortoise.record_projection as rp
     import tortoise.record_serve as rs
 
     cur = _FakeCursor()
     conn = _FakeConn()
-    monkeypatch.setattr(rs, "open_record", lambda *a, **k: conn, raising=True)
+    door: dict = {}
+
+    def _open(*args, **kwargs):
+        door["args"] = args
+        door["kwargs"] = kwargs
+        return conn
+
+    monkeypatch.setattr(rs, "open_record", _open, raising=True)
     monkeypatch.setattr(rp, "scope_connection", lambda c, org: cur, raising=True)
     calls: list[tuple[str, object]] = []
 
@@ -180,11 +195,12 @@ def _run_folded_read(monkeypatch, fold_answer, *, excluded_statuses=None):
     monkeypatch.setattr(record_vector, "_folded_terminal_keys", _fold, raising=True)
     record_vector.vector_search(
         record_vector._Scope(org_id="org_13422", graph_id="graph_13422"),
-        "object", [0.0] * 8, 10, record_dsn="postgresql://localhost/record",
-        excluded_statuses=excluded_statuses)
+        entity_type, [0.0] * 8, 10,
+        record_dsn="postgresql://localhost/record",
+        excluded_statuses=excluded_statuses, timeout_ms=timeout_ms)
     knn = [s for s in cur.statements if "<=>" in s[0]]
     assert len(knn) == 1, cur.statements
-    return calls, knn[0]
+    return calls, knn[0], door
 
 
 def test_the_folded_arm_is_wired_and_its_keys_reach_the_statement(monkeypatch):
@@ -196,7 +212,8 @@ def test_the_folded_arm_is_wired_and_its_keys_reach_the_statement(monkeypatch):
     that observes the CALL. This one does: the fold must be asked, and the keys it
     returns must arrive as the statement's `<> ALL(%s)` parameter.
     """
-    calls, (sql, params) = _run_folded_read(monkeypatch, (["o_13422_term"], 0))
+    calls, (sql, params), _door = _run_folded_read(
+        monkeypatch, (["o_13422_term"], 0))
     assert calls == [("object", None)], (
         "`object` never reached the folded arm — it was answered by the column arm "
         f"(which emits NO clause for it) or not caged at all: {calls}")
@@ -214,8 +231,8 @@ def test_the_audit_opt_in_reaches_the_folded_arm_and_emits_no_clause(monkeypatch
     this replaces: the first assertion reds if the folded arm is bypassed, the
     second if the clause is appended regardless of the key list being empty.
     """
-    calls, (sql, _params) = _run_folded_read(monkeypatch, ([], 0),
-                                             excluded_statuses=())
+    calls, (sql, _params), _door = _run_folded_read(monkeypatch, ([], 0),
+                                                   excluded_statuses=())
     assert calls == [("object", ())], (
         "the audit opt-in did not reach the folded arm as `()` — the leg would "
         f"answer the default cage for the one caller that asked to SEE it: {calls}")
@@ -503,13 +520,68 @@ def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
         f"graph branch after {statements} × {folded_share} ms statements — less "
         "than one full share, so a cancelled kNN hands the label's real path a "
         "floored timeout and it returns nothing")
-    # …and the divisor really is the one the arm decides with.
-    tree = ast.parse(MODULE.read_text())
-    func = next(node for node in ast.walk(tree)
-                if isinstance(node, ast.FunctionDef)
-                and node.name == "vector_search")
-    assert "FOLD_ARM_DIVISOR" in ast.unparse(func), (
-        "vector_search no longer adds the reserve share for folded labels")
+    # ⛔ WHICH DIVISOR THE ARM *USES* IS PINNED IN ANOTHER ROW, AND ONLY BY
+    # OBSERVATION — see `test_each_arm_states_its_own_divisor_at_the_door` below,
+    # which reads the bound the leg hands `open_record`. It used to be pinned
+    # HERE as ``"FOLD_ARM_DIVISOR" in ast.unparse(vector_search)``, and that
+    # assertion was VACUOUS: `ast.unparse` includes the DOCSTRING, and the
+    # docstring names the constant — so it answered "does this function mention
+    # it", never "does it use it". Measured at `2a29894bc41f`: with the folded
+    # branch's selection mutated to `RECORD_LEG_STATEMENTS_PER_READ` — the
+    # divisor-equals-the-count defect `FOLD_ARM_DIVISOR` exists to prevent — the
+    # whole file stayed GREEN (`#13466` cycle 8, P2, fifth recurrence).
+
+
+def test_each_arm_states_its_own_divisor_at_the_door(monkeypatch):
+    """⛔ THE `#11691` RESERVE, OBSERVED AT THE VALUE — not in the function's PROSE.
+
+    `vector_search` decides the divisor per arm and hands the quotient to
+    `record_serve.open_record` as `statement_timeout_ms`; that value IS the
+    reserve policy, so it is what this row asserts:
+
+    * a folded label (`object`/`subject`) issues THREE data statements and must
+      get a QUARTER of the read (`FOLD_ARM_DIVISOR`, 4) — 125 ms of 500;
+    * the column arm issues TWO and must get a THIRD
+      (`RECORD_LEG_STATEMENTS_PER_READ`, 3) — 166 ms of 500.
+
+    Both arms are asserted in ONE test on purpose: the failure this guards is the
+    folded arm silently falling back to the column arm's divisor, and only a
+    comparison between the two bounds can see that.
+
+    ⛔ NON-VACUITY (measured, `#13466` cycle 8): mutate
+    ``record_vector.py``'s ``statements = (FOLD_ARM_DIVISOR if folded else …)``
+    to use `RECORD_LEG_STATEMENTS_PER_READ` in the folded branch and this reds on
+    the first assert (166 ≠ 125) AND on the last (the two bounds collapse). The
+    AST assertion it replaces stayed green under exactly that mutant.
+    """
+    budget = 500
+    _, _, folded_door = _run_folded_read(
+        monkeypatch, (["o_13422_term"], 0), timeout_ms=budget)
+    _, _, column_door = _run_folded_read(
+        monkeypatch, None, entity_type="point", timeout_ms=budget)
+
+    expected_folded = record_vector.record_statement_ms(
+        budget, record_vector.FOLD_ARM_DIVISOR)
+    expected_column = record_vector.record_statement_ms(
+        budget, record_vector.RECORD_LEG_STATEMENTS_PER_READ)
+    folded_bound = folded_door["kwargs"].get("statement_timeout_ms")
+    column_bound = column_door["kwargs"].get("statement_timeout_ms")
+
+    assert folded_bound == expected_folded, (
+        "the folded arm did not hand the door the bound its OWN divisor "
+        f"produces: got {folded_bound} ms, expected {expected_folded} ms "
+        f"({budget} / {record_vector.FOLD_ARM_DIVISOR}). Dividing by "
+        f"RECORD_LEG_STATEMENTS_PER_READ "
+        f"({record_vector.RECORD_LEG_STATEMENTS_PER_READ}) instead spends the "
+        "whole read across its three statements and hands the graph branch a "
+        "floored timeout, which is the defect #13466 cycle 4 fixed")
+    assert column_bound == expected_column, (
+        "the column arm's bound moved: got "
+        f"{column_bound} ms, expected {expected_column} ms "
+        f"({budget} / {record_vector.RECORD_LEG_STATEMENTS_PER_READ})")
+    assert folded_bound != column_bound, (
+        "both arms divided the read by the same figure — the folded arm spent "
+        "the whole read and the graph reserve `#11691` requires is gone")
 
 
 def test_the_prefetch_does_not_select_the_payload_columns():
