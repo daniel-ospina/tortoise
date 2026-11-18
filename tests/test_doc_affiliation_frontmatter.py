@@ -35,19 +35,29 @@ WHAT THIS PINS
    keys are PRESENT as lines; a block can carry every key and still fail to
    parse, in which case ``tortoise.file_indexer.parse_frontmatter`` returns
    ``{}`` by design and the whole affiliation vanishes — met on paper only.
+6. (#13452) A frontmatter VALUE **survives**, not merely its key: a value written
+   as a plain scalar and containing a space-preceded `#` is silently TERMINATED
+   there — the rest becomes a YAML comment — so the block parses, the key
+   survives, and the value is short. Measured on ``main`` before this arm: 8 of
+   68 blocks, every one an ``aboutObjects``, the merged dossier's value landing
+   at 57 characters of its 141. Check 5 cannot see any of them, because presence
+   is not survival.
 
 Non-vacuity: on the pre-fix tree the two architecture companions carry neither
 ``created`` nor a team key, and the STORAGE companion carries the copied gate —
 so checks 2 and 3 fail there; and ``docs/evidence/9664-capstone/README.md``
 opens at ``# #9664 — capstone acceptance``, so check 4 fails there; and
 ``docs/research/2026-11-18-13420-vector-placement/dossier.md`` opened its
-``aboutSubjects`` value with a backtick, so check 5 fails there.
+``aboutSubjects`` value with a backtick, so check 5 fails there; and eight
+``aboutObjects`` values were terminated early at an inline ``#`` comment, so
+check 6 fails there.
 
 Static, no network / DB / graph.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -58,12 +68,42 @@ ROOT = Path(__file__).resolve().parent.parent
 REQUIRED_KEYS = ("type", "domain", "doc_status", "created")
 TEAM_KEYS = ("subjects.team", "ownedBy")
 
-#: The changelog companions this change adds — the files the review flagged.
-COMPANIONS = (
-    "docs/ONTOLOGY-CHANGELOG.md",
-    "docs/architecture/EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md",
-    "docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md",
-)
+# ── #13452: presence is not SURVIVAL ───────────────────────────────────────
+
+#: A `#` + DIGIT at the start of a value or preceded by whitespace: an ISSUE
+#: REFERENCE (`#11395`) sitting exactly where YAML will read a COMMENT. YAML
+#: admits `#` inside a plain scalar only with a NON-SPACE lookbehind
+#: (`ns-plain-char(c)`, YAML 1.2.2 §7.3.3; PyYAML here is 6.0.3, a YAML 1.1
+#: resolver whose [154]/[156] productions state the same rule), so such a `#`
+#: TERMINATES the scalar and every consumer loses the reference.
+#:
+#: Deliberately NARROW — it matches a lost issue REFERENCE, not any ` <space>#`.
+#: A trailing `# a comment` on a plain value is legal YAML that loses no
+#: affiliation, and an arm that reds on it would be the over-block it exists to
+#: avoid. This is the shape #13452 measured: 8 blocks, every one losing `#NNNN`.
+_LOST_REF = re.compile(r"(?:^|\s)#\d")
+
+#: `key: value` / `key:` at column 0. Group 2 is the one-line value.
+_KV = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*):(?:[ \t]+(\S.*))?$")
+
+#: A block-sequence item under a key (`- value`).
+_ITEM = re.compile(r"^[ \t]*-[ \t]+(\S.*)$")
+
+#: Styles that open a value: block scalar (`|`, `>`) or flow collection (`[`, `{`).
+_BLOCK_OR_FLOW = "|>[{ "
+
+#: The two fields that carry the affiliation itself (#13452). The arms above
+#: check that the KEYS are present; here every one of these VALUES must be
+#: measured by a named check, or the arm fails: an unmeasured affiliation is
+#: exactly the defect (a value at 40% of its length keeps its key and its green).
+AFFILIATION_KEYS = ("aboutSubjects", "aboutObjects")
+
+#: Styles this arm declines to compare, as explicit ``(path, key)`` pairs.
+#: DELIBERATELY EMPTY: #13452's target is zero truncated values AND zero silent
+#: omissions, so an unmeasured affiliation FAILS (check D) until somebody writes
+#: the pair here — a new exemption is a line a person had to add, never a blanket
+#: rule that lets a whole style or file go unmeasured without saying so.
+UNMEASURED: frozenset[tuple[str, str]] = frozenset()
 
 
 def _frontmatter(path: Path) -> list[str]:
@@ -75,6 +115,138 @@ def _frontmatter(path: Path) -> list[str]:
         if lines[i].strip() == "---":
             return lines[1:i]
     return []
+
+
+def _values(fm: list[str]) -> list[tuple[str, str, object]]:
+    """Classify each top-level frontmatter value: ``(key, kind, payload)``.
+
+    Kinds, each distinguishable WITHOUT re-implementing YAML:
+
+    ``scalar``              one-line value; ``payload`` is its raw text.
+    ``scalar_multiline``    a plain value continued on the next line — legal
+                            YAML FOLDING, and the shape in which a continuation
+                            line opening with `#` is swallowed (measured: the
+                            value parses to its first line only). Folding cannot
+                            be verified without becoming a YAML implementation,
+                            so this arm REFUSES the style and asks for quotes.
+    ``sequence``            ``key:`` then ``- item`` lines (which may sit at
+                            column 0, as several files in this population do).
+                            A `- #11395` item parses to ``None`` — 100% of that
+                            reference lost — so items are checked individually.
+    ``sequence_multiline``  a sequence whose item is itself continued on a
+                            following indented line: the same swallowing shape as
+                            ``scalar_multiline``, refused for the same reason.
+    ``other``               block scalar / flow collection / nested mapping.
+                            `|`/`>` preserve text by construction and a flow
+                            collection is not this defect's shape, but these
+                            reach NO check — so an AFFILIATION value in this kind
+                            is reported by check (D), never passed quietly.
+    """
+    out: list[tuple[str, str, object]] = []
+    i = 0
+    while i < len(fm):
+        m = _KV.match(fm[i])
+        if not m:
+            i += 1
+            continue
+        key, raw = m.group(1), m.group(2)
+        if raw is not None:
+            raw = raw.rstrip()
+            if raw[:1] in _BLOCK_OR_FLOW:
+                out.append((key, "other", raw))
+                i += 1
+                continue
+            nxt = fm[i + 1] if i + 1 < len(fm) else ""
+            continued = (
+                nxt[:1] in (" ", "\t")
+                and bool(nxt.strip())
+                and not _ITEM.match(nxt)
+                and not _KV.match(nxt.strip())
+            )
+            out.append((key, "scalar_multiline" if continued else "scalar", raw))
+            i += 1
+            continue
+        items: list[str] = []
+        continued = False
+        j = i + 1
+        while j < len(fm):
+            im = _ITEM.match(fm[j])
+            if im:
+                items.append(im.group(1).rstrip())
+                j += 1
+                continue
+            if items and fm[j][:1] in (" ", "\t") and fm[j].strip():
+                continued = True
+                j += 1
+                continue
+            break
+        if items:
+            out.append((key, "sequence_multiline" if continued else "sequence", items))
+            i = j
+        else:
+            out.append((key, "other", ""))
+            i += 1
+    return out
+
+
+def _split_comment(raw: str) -> str:
+    """The value text of ``raw``, with a trailing `` <space>#…`` comment removed.
+
+    For a QUOTED value the split only happens after the closing quote, so a ` #`
+    inside the quotes stays content. For a plain value any ` #` ends it — that is
+    exactly YAML's rule, and whether the tail was a LOST REFERENCE (defect) or a
+    deliberate comment (fine) is decided by ``_LOST_REF``, not here.
+    """
+    quoted = raw[:1] in ('"', "'")
+    i = raw.find(" #")
+    while i != -1:
+        if not quoted or raw[:i].rstrip().endswith(raw[0]):
+            return raw[:i].rstrip()
+        i = raw.find(" #", i + 1)
+    return raw
+
+
+def _expectation(raw: str) -> tuple[str, str | None]:
+    """``(style, expected)`` for a one-line value, computed WITHOUT ``yaml``.
+
+    ``expected`` is ``None`` where this arm declines to state one: a block scalar
+    / flow collection (``other``), or a double-quoted value carrying an escape
+    (``\\"``, ``\\t``, ``\\uXXXX``) that hand de-quoting cannot reproduce.
+    Declining is NOT passing — an affiliation value in a style with no check at
+    all is caught by (D), and an escaped quoted value is still checked for
+    truncation by ``broken``/``malformed`` below.
+    """
+    value = _split_comment(raw)
+    first = value[:1]
+    if first in _BLOCK_OR_FLOW.strip():
+        return "other", None
+    if first == '"':
+        if len(value) < 2 or not value.endswith('"'):
+            return "malformed", None          # unterminated
+        body = value[1:-1]
+        if "\\" in body:
+            return "double-quoted-escaped", None
+        if '"' in body:
+            # YAML ends the scalar at that inner quote: `"a, "#1" KEEP"` parses
+            # to `a, ` — measured. This is the one truncation de-quoting misses.
+            return "broken", None
+        return "double-quoted", body
+    if first == "'":
+        if len(value) < 2 or not value.endswith("'"):
+            return "malformed", None
+        body = value[1:-1]
+        if re.search(r"(?<!')'(?!')", body):
+            return "broken", None
+        return "single-quoted", body.replace("''", "'")
+    return "plain", value
+
+
+#: The changelog companions this change adds — the files the review flagged.
+COMPANIONS = (
+    "docs/ONTOLOGY-CHANGELOG.md",
+    "docs/architecture/EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md",
+    "docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md",
+)
 
 
 def _missing(path: Path) -> list[str]:
@@ -232,6 +404,20 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     This arm reads the block through the SAME consumer the index pipeline uses,
     so it measures the real degradation rather than a re-implementation.
 
+    #13452 added a SECOND defect class here, because "the block parses and the key
+    is present" is satisfied while the VALUE is silently short: a plain scalar
+    containing a space-preceded `#` ends at that `#` (YAML admits `#` in a plain
+    scalar only with a non-space lookbehind), so
+    `aboutObjects: A, #11395 reopen, #13220` parses to `A,` — key present, block
+    parseable, seven references gone. The arm therefore now measures the
+    MECHANISM on the RAW text (type-blind: a value that is entirely a comment
+    parses to `None`, `issue: 3615 # refs` keeps its int while losing its text,
+    and a `- #11395` sequence item parses to `None` — all three are caught here
+    and were invisible to an ``isinstance(value, str)`` comparison), REFUSES the
+    shapes it cannot verify without re-implementing YAML (a folded multi-line
+    plain value), and ASSERTS that every declared affiliation value was measured,
+    so a silently skipped style is a failure instead of a green.
+
     Non-vacuity: at the pre-fix tree ``docs/research/2026-11-18-13420-vector-
     placement/dossier.md`` opens its ``aboutSubjects`` value with a backtick, so
     ``parse_frontmatter`` returns ``{}`` and this reds on it.
@@ -241,10 +427,14 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     paths = sorted((ROOT / "docs" / "research").glob("**/*.md"))
     assert paths, "docs/research/ has no markdown files — re-point this guard"
     failures: dict[str, str] = {}
+    declared: set[tuple[str, str]] = set()
+    measured: set[tuple[str, str]] = set()
+    compared = 0
     for path in paths:
         # No frontmatter block at all is the OTHER arms' business; this arm is
-        # about blocks that exist and do not parse.
-        if not _frontmatter(path):
+        # about blocks that exist and do not parse / do not survive.
+        fm = _frontmatter(path)
+        if not fm:
             continue
         rel = str(path.relative_to(ROOT))
         parsed = parse_frontmatter(path.read_text(encoding="utf-8"))
@@ -254,10 +444,83 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
         missing = [key for key in REQUIRED_KEYS if key not in parsed]
         if missing:
             failures[rel] = f"parsed, but drops {missing}"
+            continue
+        declared |= {(rel, k) for k, _, _ in _values(fm) if k in AFFILIATION_KEYS}
+
+        # ── #13452: SURVIVAL, not presence ────────────────────────────────
+        # (A) the MECHANISM on the RAW text — a lost ISSUE REFERENCE, type-blind,
+        #     so `aboutObjects: #11395, #13082` (parses to None), `issue: 3615
+        #     # refs` and a `- #11395` item are all measurable.
+        # (B) value survival for the styles where YAML performs no legal
+        #     transform (plain, simply-quoted).
+        # (C) quoting integrity — an unescaped inner quote TERMINATES the value.
+        # (D) no silent omission — asserted after the loop.
+        bad: list[str] = []
+        for key, kind, payload in _values(fm):
+            if kind != "other" and key in AFFILIATION_KEYS:
+                measured.add((rel, key))
+            texts: list[str] = []
+            if kind in ("scalar", "scalar_multiline"):
+                texts = [str(payload)]
+            elif kind in ("sequence", "sequence_multiline"):
+                texts = [str(it) for it in payload]  # type: ignore[union-attr]
+            for text in texts:
+                if text[:1] not in "\"'" and _LOST_REF.search(text):
+                    bad.append(
+                        f"`{key}` loses an ISSUE REFERENCE to a YAML comment — "
+                        f"the value ends at {text[:28]!r}… and everything after "
+                        "it becomes a comment. Quote the value."
+                    )
+                    break
+            if kind in ("scalar_multiline", "sequence_multiline"):
+                bad.append(
+                    f"`{key}` is a MULTI-LINE value — YAML folds it, and a "
+                    "continuation line opening with `#` is silently swallowed; "
+                    "quote the whole value instead"
+                )
+                continue
+            if kind != "scalar":
+                continue
+            style, expected = _expectation(texts[0])
+            if style in ("broken", "malformed"):
+                bad.append(
+                    f"`{key}` is a quoted value YAML cannot keep whole "
+                    f"({style}: an unescaped inner quote, an unbalanced quote, or "
+                    "no closing quote) — it is TERMINATED at that quote. Remove "
+                    "the inner quote, or use a block scalar."
+                )
+                continue
+            if expected is None:
+                continue
+            got = parsed.get(key)
+            if isinstance(got, str):
+                compared += 1
+                if got != expected:
+                    bad.append(
+                        f"`{key}` does not SURVIVE the parse: raw "
+                        f"{expected!r} (len {len(expected)}) became "
+                        f"{got!r} (len {len(got)})"
+                    )
+        if bad:
+            failures[rel] = "; ".join(bad)
+
+    # (C) NO SILENT OMISSION: every declared affiliation value must have been
+    # measured, unless it is an explicit per-value entry above. A style or a
+    # block that silently escapes measurement is the defect this arm exists for,
+    # so it fails here rather than passing quietly.
+    unmeasured = sorted(declared - measured - UNMEASURED)
+    assert not unmeasured, (
+        "these affiliation values were NOT measured by ANY check — a silently "
+        "unmeasured affiliation is the #13452 defect. Quote the value (plain or "
+        "simply-quoted is measured), or, if the style is deliberate, add the "
+        f"(path, key) pair to UNMEASURED with a reason: {unmeasured}"
+    )
+    assert measured, "measured no affiliation value at all — re-point this guard"
+    assert compared, "compared no value at all — re-point this guard"
     assert not failures, (
-        "docs/research/**/*.md frontmatter is unparseable or loses required "
-        f"fields after parsing: {failures} — quote a value that starts with a "
-        "YAML reserved indicator (e.g. a backtick) instead of leaving it plain"
+        "docs/research/**/*.md frontmatter is unparseable or does not SURVIVE "
+        f"the parse ({measured.__len__()} affiliation values measured, {compared} "
+        f"values compared): {failures}"
     )
 
 
