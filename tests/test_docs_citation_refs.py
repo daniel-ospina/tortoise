@@ -560,6 +560,36 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "`origin/main`'s). Without it the next reader reads the red as this branch's, "
         "or is asked to repair `main`'s drift inside a docs PR "
         "(#13489 review, P0)")
+    # ⛔ THE ANTI-NEGATION LEG (#13489 review, P1 — MEASURED). The leg just above only requires
+    # the command to be PRESENT, and it occurs six times in this file: five say `tortoise/` is
+    # empty and one said the OPPOSITE ("… is NOT empty, and neither is `git diff --name-only
+    # origin/main...HEAD -- tortoise/`"), so the false sentence SATISFIED that leg — and the
+    # cell contradicted itself, five sentences apart. Presence was never the property being
+    # relied on; AGREEMENT is, so that is what is asserted here.
+    #
+    # NON-VACUITY, MEASURED: on the pre-fix document the first tuple member below IS present
+    # (`grep -c 'and neither is'` -> 1) and this leg reds on it; it is green only after the
+    # clause is deleted. The third member refuses the same claim in the other spelling the cell
+    # used to carry — `… tortoise/` "returns exactly those two" — and the QUOTES are what tell
+    # that quoted retraction apart from a re-assertion (the pattern matches only the unquoted
+    # form, so the retraction that still records the false spelling stays legal).
+    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    for _negation in (
+        f"neither is `{_tortoise_cmd}`",
+        f"{_tortoise_cmd}` is NOT empty",
+        f"{_tortoise_cmd}` returns exactly those two",
+    ):
+        assert _negation not in doc, (
+            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints 0 lines at "
+            "this head (the `#12943` modules landed on `main`, so they sit on BOTH sides "
+            "of the merge and contribute no path here), so the sentence is refuted by the "
+            "very command it quotes — and it satisfied the presence-only leg above while "
+            "contradicting the empty claims beside it (#13489 review, P1)")
+    assert any(f"{_tortoise_cmd}` {_word}" in doc
+               for _word in ("is empty", "-> empty", "is EMPTY")), (
+        "05-verify.md must still state, in words, that the `tortoise/` path list is EMPTY "
+        "— naming the command is not an answer, and deleting the FALSE reading must leave a "
+        "reader who can see which way the measurement went (#13489 review, P1)")
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
