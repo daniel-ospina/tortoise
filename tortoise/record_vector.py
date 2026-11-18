@@ -79,6 +79,7 @@ __all__ = [
     "RecordVectorError",
     "RecordVectorWithoutFallback",
     "VectorShortfall",
+    "arm_is_explicit",
     "armed",
     "coverage",
     "coverage_verified",
@@ -746,8 +747,19 @@ def _record_vector_count(label: str, scope: _Scope, *,
     ``None`` for every failure, never ``0``: a count that could not be taken is
     not evidence of an empty table, and reporting it as one would be the exact
     "an absence is not a verdict" error this module's readers exist to avoid.
+
+    ⛔ THE KIND PREDICATE IS APPLIED (#13630). `operator` ⊂ `public.point` and
+    `document` ⊂ `public.source`, and the SERVE applies `LABEL_SERVED[label][2]`
+    (`if kind_filter: where.append(kind_filter)` in :func:`vector_search`) — so a
+    numerator taken over the whole table would let a record holding only plain
+    points verify `operator` on a SURPLUS of plain points, and the kind-filtered
+    read would then be served from the record with zero rows of that kind while
+    reporting `mechanism=pgvector, reason=ok`. One-sided on purpose: the graph
+    DENOMINATOR is the whole label (the graph has no per-kind vector property to
+    count), so the comparison for those two labels is deliberately HARDER to pass
+    — the cost is a longer double-storage, never a short answer.
     """
-    table = LABEL_SERVED[label][0]
+    table, _id_column, kind_filter = LABEL_SERVED[label][:3]
     try:
         from .record_projection import scope_connection
         from .record_serve import open_record
@@ -761,12 +773,17 @@ def _record_vector_count(label: str, scope: _Scope, *,
     try:
         cur = scope_connection(conn, scope.org_id)
         try:
-            cur.execute(
+            sql = (
                 f"SELECT count(*) FROM public.{table} AS t "
                 "WHERE t.org_id = %s AND t.graph_id = %s "
-                "  AND t.embedding_vec IS NOT NULL",
-                (scope.org_id, scope.graph_id),
-            )
+                "  AND t.embedding_vec IS NOT NULL")
+            if kind_filter:
+                # Verbatim, exactly as :func:`vector_search` appends it: the
+                # predicates are written against the unqualified columns of the
+                # one table in the statement (`document_kind IS NULL`,
+                # `(is_operator IS TRUE OR op_type IS NOT NULL)`).
+                sql += f" AND {kind_filter}"
+            cur.execute(sql, (scope.org_id, scope.graph_id))
             row = cur.fetchone()
             return int(row[0]) if row else None
         finally:
@@ -777,6 +794,33 @@ def _record_vector_count(label: str, scope: _Scope, *,
     finally:
         with contextlib.suppress(Exception):
             conn.close()
+
+
+def arm_is_explicit() -> bool:
+    """Did this deployment SPELL the arm, or is it the default? (#13631)
+
+    `#13610` made :data:`ARMING_DEFAULT` true, so an unset switch is ARMED. That is
+    the right answer for the READ (the coverage gate decides per label what the
+    record may answer), but it is the WRONG answer for the in-graph index
+    RETIREMENT: at setup time no coverage exists, every served label is declining to
+    the graph, and dropping the index would take it off the leg that is answering —
+    `#4997`'s defect with its alarm downgraded.
+
+    So the drop asks this instead: an explicit truthy :data:`ARMING_ENV` is the
+    operator's statement that the record is expected to serve the dense read. A
+    default-armed deployment keeps its index (and `#4997`'s WARNING) until someone
+    says otherwise. ⚠️ NOT `cutover_armed()` — that answers "may the record answer",
+    which is true by default and is the fact this function exists to distinguish.
+
+    A malformed value answers ``False`` (`env_flag`'s typo rule): a typo'd arm is
+    not an operator statement, and the safe direction here is keeping the index.
+    """
+    try:
+        from .env_truthy import env_flag
+
+        return bool(env_flag(ARMING_ENV, False))
+    except Exception:  # noqa: BLE001, RUF100 — unreadable is not "explicit"
+        return False
 
 
 def record_tenant_available(carried: tuple[str, str] | None = None) -> bool:

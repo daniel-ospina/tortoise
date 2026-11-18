@@ -865,21 +865,32 @@ def vector_index_retired() -> bool:
     except Exception:  # noqa: BLE001, RUF100 — a malformed DSN is "unarmed"
         return False
     try:
-        from ..record_vector import cutover_armed, record_tenant_available
+        from ..record_vector import arm_is_explicit as _arm_is_explicit
     except Exception:  # noqa: BLE001, RUF100 — see above: "unarmed"
         return False
     try:
-        if not cutover_armed():
+        if not _arm_is_explicit():
             return False
     except Exception:  # noqa: BLE001, RUF100 — a broken predicate is not an "armed"
         return False
-    # The third condition: the record ANSWERS the dense read for this request. A
-    # store that is merely armed still gets its non-gated labels — and its gated
-    # ones, until coverage verifies — from the graph, so the graph keeps its index.
-    try:
-        return bool(record_tenant_available())
-    except Exception:  # noqa: BLE001, RUF100 — no tenant means the graph answers
-        return False
+    # ⛔ A THIRD CONDITION, AND IT IS AN EXPLICIT ARM (#13631). `#13610` made the
+    # cutover's DEFAULT on, which collapsed `DSN ∧ armed` back to "a DSN resolves" —
+    # the exact false "yes" round 6 P1-3 is about — because `_ensure_indexes()` runs
+    # at construction, BEFORE any coverage can have been measured, and at that moment
+    # every served label is declining to the GRAPH. So the DROP asks a question whose
+    # answer is knowable at setup time and is an OPERATOR statement: has this
+    # deployment SPELLED the arm (`TORTOISE_RECORD_VECTOR_LEG=1`), rather than
+    # inheriting it from the default? A store that did not is one where the record's
+    # coverage has never been asserted by anyone, so the graph keeps its index and
+    # `#4997` keeps its WARNING.
+    #
+    # ⛔ AND IT IS NOT THE REQUEST'S TENANT (an earlier cut of #13610 asked that, and
+    # it was wrong twice over): this decision is STORE-scoped and one-shot, while a
+    # tenant is REQUEST-scoped — so a by-value CREDENTIAL lane would never retire
+    # (its tenant is never ambient) while an ambient-tenant request on the same graph
+    # WOULD, letting the create path and the drop path disagree about one store. A
+    # deployment-level fact cannot have that failure.
+    return True
 
 
 # ── #11087: the last serves/indexes PAIR reported per (endpoint, graph) ──

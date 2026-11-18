@@ -164,8 +164,10 @@ and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in execut
 > 2. **With the leg unarmed — the ROLLBACK spelling `TORTOISE_RECORD_VECTOR_LEG=0` — the graph keeps
 >    its ANN index**, so dense `Point`/`Source`/`Event` reads are unchanged; a label with NO index is
 >    `#4997`'s defect and the setup reports it at **WARNING** (`#4997/#11642` line). `#13610` added a
->    third condition to the retirement: a store must also resolve a record TENANT, because an armed
->    store whose request resolves none is served by the GRAPH and must keep its index.
+>    third condition to the retirement: an EXPLICIT `TORTOISE_RECORD_VECTOR_LEG=1`. The arm's default is
+>    ON for the READ (and gated per label on coverage), but the DROP happens at setup, before any
+>    coverage exists and while every served label still answers from the GRAPH — so a default-armed
+>    store keeps its index and `#4997` keeps its WARNING.
 > 3. **An armed deployment WITHOUT a backfilled record does not drop pre-existing points out of the
 >    dense pool** — `#13610` closed exactly that hazard: the per-label coverage count is unverified, so
 >    the graph branch answers and the graph write is retained (this used to read "silently drops every

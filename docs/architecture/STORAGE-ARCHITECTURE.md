@@ -1731,9 +1731,19 @@ at all, is a ROLLING DEPLOY: instances that have closed the write gate stop writ
 while instances still on pre-#13610 code serve those labels from the graph. Nothing compares versions;
 the graph-side sweep is the repair.
 
+⚠️ **The in-graph index is retired only on an EXPLICIT arm.** `#13610` made the cutover's default ON,
+which collapsed `vector_index_retired()`'s `DSN ∧ armed` back to "a DSN resolves" — the false "yes"
+`#11660` round 6 P1-3 is about — because the drop happens at setup, before any coverage can exist, when
+every served label is still answering from the GRAPH. So the DROP (a store-scoped, one-shot act) asks a
+store-scoped fact: has this deployment SPELLED `TORTOISE_RECORD_VECTOR_LEG=1`? Unset is armed for the
+READ and silent for the DROP; the index stays and `#4997` keeps its WARNING.
+
 ⚠️ **Stated residuals, not oversights.** The count compares SIZES, so it is a coverage claim and not
 a membership proof (a cardinality-preserving mismatch verifies; the graph keys on `id` while the
-record keys on `name`). The contract is process-local, so a restart between the contract and the
+record keys on `name`). For the two labels that are a SUB-kind of another (`operator` ⊂ `point`,
+`document` ⊂ `source`) the numerator applies the label's kind predicate while the denominator is the
+whole graph label, so the comparison there can only be HARDER to pass — a longer double-storage, never
+a short answer. The contract is process-local, so a restart between the contract and the
 first write re-opens a bounded window in which the graph copy is already frozen but unmeasured.
 Neither is introduced here, and closing either is a persisted contract or an identity-aware sweep —
 filed from #13610, not folded into it.

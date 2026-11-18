@@ -934,6 +934,62 @@ def test_the_graph_denominator_counts_only_vector_bearing_nodes():
     assert "count(n)" in body, body
 
 
+def test_the_numerator_applies_the_labels_kind_predicate():
+    """`operator` ⊂ `point` and `document` ⊂ `source`, so the count must be filtered.
+
+    ⛔ THE DEFECT THIS PINS (#13630). The SERVE applies the label's `kind_filter`
+    (`vector_search`: `if kind_filter: where.append(kind_filter)`), so a numerator
+    taken over the whole table compares a KIND's served rows against the PARENT
+    table's total: a record holding only plain points would verify `operator` on a
+    surplus of plain points, and the operator-scoped read would then be answered
+    from the record with zero rows of that kind, reported `mechanism=pgvector,
+    reason=ok`. `record ≥ graph` is the expected steady state once the record (truth)
+    is ahead of the graph (cache), so the surplus is not exotic.
+    """
+    sql: list[str] = []
+
+    class _Cur:
+        def execute(self, statement, params=None):
+            sql.append(statement)
+
+        def fetchone(self):
+            return (3,)
+
+        def close(self):
+            return None
+
+    import tortoise.record_projection as rp
+    import tortoise.record_serve as rs
+
+    class _Conn:
+        def close(self):
+            return None
+
+    # the door is patched for the length of the call only
+    real_open = rs.open_record
+    real_scope = rp.scope_connection
+    try:
+        rs.open_record = lambda *a, **k: _Conn()
+        rp.scope_connection = lambda c, org: _Cur()
+        for label in ("operator", "document", "object"):
+            sql.clear()
+            record_vector._record_vector_count(
+                label, record_vector._Scope(*_SCOPE), record_dsn=None,
+                timeout_ms=None)
+            assert len(sql) == 1, sql
+            predicate = record_vector.LABEL_SERVED[label][2]
+            if predicate:
+                assert predicate in sql[0], (
+                    f"`{label}`'s count does not apply its own kind predicate "
+                    f"(`{predicate}`), so the parent table's rows count for it: "
+                    f"{sql[0]}")
+            else:
+                assert "is_operator" not in sql[0] and "document_kind" not in sql[0]
+    finally:
+        rs.open_record = real_open
+        rp.scope_connection = real_scope
+
+
 def test_the_record_numerator_counts_only_vector_bearing_rows():
     """The numerator's predicate, which is the other half of the same comparison.
 

@@ -498,31 +498,29 @@ def test_the_gap_level_follows_the_cutover_not_the_dsn(monkeypatch):
         "a DSN alone muted #4997's WARNING on a ROLLED-BACK store — the index is "
         "dropped and nothing replaced it, which is the state the warning is FOR")
 
+    # ⛔ #13610'S THIRD CONDITION, and it is the OPERATOR'S WORD, not the request's
+    # tenant (#13631). `#13610` made the arm the DEFAULT, which collapsed
+    # `DSN ∧ armed` back to "a DSN resolves" — the false "yes" #11660 round 6 P1-3
+    # is about — because `_ensure_indexes()` runs at construction, BEFORE any
+    # coverage can exist, and at that moment every served label is declining to the
+    # GRAPH. So the DROP asks a question knowable at setup and store-scoped: did the
+    # deployment SPELL the arm? An unset switch is armed for the READ and silent for
+    # the DROP.
     monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
-    # ⛔ #13610'S THIRD CONDITION, and it is the one the default flip made
-    # necessary: AMED is not "the record answers". The record still has no
-    # backfill, so the gated READ declines every served label to the GRAPH until
-    # `record_vector.coverage` proves the record holds them — on a request that
-    # resolves no tenant, the graph IS the answering leg and must keep its index.
     assert projection.vector_index_retired() is False, (
-        "an ARMED store with a DSN but NO record tenant retired the in-graph "
-        "index — the graph is the leg answering every unverified label, so this "
-        "is the #4997 defect with the alarm muted (#11660 round 6 P1-3, reached "
-        "through the default flip)")
+        "an ARMED-BY-DEFAULT store retired its in-graph index — at setup no coverage "
+        "exists, every gated label is still answering from the GRAPH, and the move "
+        "takes the index off the answering leg (#4997's defect with its alarm "
+        "muted). The drop is an operator statement: spell the arm (#13631)")
 
-    # The documented single-tenant declaration (`record_writer`, #9192): the
-    # posture in which a tenant resolves with no request scope.
-    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
-    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "test-org")
-    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "test_graph")
-    assert projection.vector_index_retired() is True, (
-        "#13610: an unset switch is the ARMED posture, so the replacement is "
-        "earned by default and the line may be an INFO")
+    monkeypatch.setenv(record_vector.ARMING_ENV, "0")
+    assert projection.vector_index_retired() is False, (
+        "the explicit rollback retired the index")
 
     monkeypatch.setenv(record_vector.ARMING_ENV, "1")
     assert projection.vector_index_retired() is True, (
-        "an armed cutover with a DSN and a tenant IS the replacement — the "
-        "exemption is earned, so the line may be an INFO")
+        "an EXPLICITLY armed cutover with a DSN is the operator saying the record "
+        "serves the dense read — the exemption is earned, so the line may be an INFO")
 
     monkeypatch.delenv("TORTOISE_RECORD_DSN")
     assert projection.vector_index_retired() is False, (
