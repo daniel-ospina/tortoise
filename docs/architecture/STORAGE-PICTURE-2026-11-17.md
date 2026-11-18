@@ -1,6 +1,6 @@
 ---
 title: "The storage picture — where the layer is going, and where it hurts (#13232)"
-type: architecture
+type: engineering
 domain: platform
 doc_status: draft
 created: 2026-11-17
