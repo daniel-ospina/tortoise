@@ -30,6 +30,12 @@ from the lane that measured it.
 > served from the record, `TORTOISE_RECORD_SERVE` selects `off` / `prefer` / `record`, and `prefer` — armed in
 > production — is the mode that measures the migration. **The authority is `STORAGE-ARCHITECTURE.md` §2.0, not this
 > file**, and the two rows below that read the old status now say so.
+>
+> ⛔ **EVERY `file:line` BELOW IS AN ADDRESS AT `d1bfef778f`, NOT AT THE HEAD YOU ARE READING IT ON.** The header's
+> `Read at` is the reading, and a cite that is re-pointed to a later head by adding a line delta lands on prose that no
+> reader can use — while still reading exactly like a correct number (`tests/test_12184_shifted_cites.py` exists for
+> that class). Do **not** move one; re-derive it by content at `d1bfef778f` (`git show d1bfef778f:tortoise/sdk.py |
+> grep -nF '<the fragment the row quotes>'`) or leave it as the dated record it is.
 
 **How to read a proposal here.** Every proposal carries a **CONTRADICTION TEST** line, run FIRST — before cost, fit
 or convergence — against the recorded decisions in §6. A proposal that contradicts one is **not a candidate**: it
@@ -149,7 +155,7 @@ Before the landscape lane found PR `#13229`, I traced both paths end to end. **`
 | stage | subject | object | same? |
 |---|---|---|---|
 | hosted route | `hosted_api.py:13888` | `:13820` | ✅ `_require_scope` → `_data_sdk_offloaded` (`:10303`, a **fresh per-request SDK**) → `_check_org_limit_off_loop(org,"points")` → `named_kind` → `_require_approved_kind` (`:13758`, a **whole-graph O(nodes) read**, *"documented to run per call"*, lines 13785–13787) |
-| SDK alias | `create_subject` `sdk.py:54919` | `create_object` `:54970` | ✅ thin relays to `create_entity` |
+| SDK alias | `create_subject` `sdk.py:54919` | `create_object` `:54961` | ✅ thin relays to `create_entity` |
 | kind guard + layer note | `sdk.py:54073`/`:54092` | identical | ✅ `kind_guards.resolve` is pure and process-cached (`kind_guards.py:732-734`) |
 | **subject-only** | `roleHolder`/`role_holder` pops, `resolve_role_holder`, `refuse_role_self_edge`, `wire_holds_role` (`sdk.py:54152-54241`) | — | ⚠️ **gated on `roleHolder` being supplied** (`:54180`), and `CreateSubjectRequest` declares **only** `name`/`subjectKind` (`hosted_api.py:13881-13885`). **Does not run.** |
 | create lock + identity | `entity_create_lock("Subject", name)` `:54206` → `resolve_or_mint` (`entity_identity.py:547`) | `"Object"` `:54244`, same resolver | ✅ same predicate, same two indexed reads; both labels carry RANGE indexes on `name`/`canonical_name`/`resolved_from` (`projection/__init__.py::_REQUIRED_RANGE_INDEXES`, `:20340-20375`) |
