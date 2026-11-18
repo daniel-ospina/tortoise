@@ -1701,8 +1701,11 @@ class TestAMentionIsNotAnOccurrence:
         call later, the shape it just refused. The `eventKind` kwarg is captured
         at the door: comparing `==` alone cannot tell a subclass from its
         rendering (the store flattens it), so the assertion is on the TYPE. This
-        is also the positive control — without it, a mutant that refuses EVERY
-        kind reddens only negatives.
+        is also the positive control for the rows ABOVE it: without it, a mutant
+        that refuses EVERY kind would redden only the negatives they add. (The
+        pre-existing plain-`str` acceptance row catches a blanket refusal too —
+        what it cannot see is the TYPE written, which is what this row pins
+        (#13586 review, observation 3).)
         """
 
         class _Kind(str):
@@ -1794,15 +1797,34 @@ class TestAMentionIsNotAnOccurrence:
         assert cur["isClosed"] is False
         assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
 
-    def test_a_NON_STRING_stage_cannot_settle_a_plan(self, sdk):
-        """`settle_plan`'s non-`str` arm: refuse it, do not ask it (#13586 f2).
+    def test_a_NON_STRING_stage_cannot_settle_a_plan(self, sdk, monkeypatch):
+        """`settle_plan`'s non-`str` arm: refuse it BEFORE the resolve (#13586 f2).
 
         `stage not in (…)` on a non-`str` consults that object's own `__eq__`,
-        so a non-`str` liar is "contained" and the refusal never fires. The value
-        then reaches `advance_stage`, where a guard that only resolves `str`
-        parks a write behind a call it was supposed to refuse — the "a refused
-        call leaves nothing behind" rule the surrounding comments state twice.
-        Same rule as the `str`-subclass arm above and as `is_plan_kind` (:176).
+        so a non-`str` liar is "contained" and the refusal never fires. What
+        follows is NOT the sibling arm's wreckage — measured, and the reason
+        this row asserts different things (#13586 review, finding 1):
+        `pipeline.advance_stage` classifies a non-`str` as *no stage reported*
+        (`pipeline.py:1126-1130`) and returns
+        `StageMove(applied=False, reason="no-stage")` **before any write** —
+        nothing is parked, nothing is written, so no inversion is reachable
+        through THIS door (that door is the `str`-subclass row above, where a
+        lying `__eq__` is contained, `resolve`'s `ref.strip()` returns an exact
+        `str`, and the terminal move really does apply).
+
+        The pre-fix defect here is a LATE refusal with the wrong remedy:
+        `settle_plan`'s unapplied-move branch (:827-835) interpolates
+        `({move.reason})`, so the caller is told the plan "could not reach
+        <object> (no-stage)" and prescribed a stale-date repair — for a plan
+        that is merely `scheduled` and was never asked anything.
+
+        So the assertions below are the two consequences this arm can actually
+        show, and each reddens on a different mutant: the refusal is the EARLY
+        one (it names the offending value as a bad ending, never as a `no-stage`
+        move), and `advance_stage` is never called at all. The "nothing was
+        written" post-conditions are NOT repeated here — they would be
+        constant-true on this path and they already live in the sibling row,
+        where they genuinely red.
         """
 
         class _NotAString:
@@ -1814,19 +1836,31 @@ class TestAMentionIsNotAnOccurrence:
             def __ne__(self, other):
                 return False
 
-        g = sdk._get_proj().g
         plan = PO.create_plan(sdk, "Held through the non-string door")
+
+        # Installed AFTER `create_plan` (which advances the plan into
+        # `scheduled` through this same function) so the list holds only the
+        # call `settle_plan` makes.
+        calls = []
+        real_advance = pipeline.advance_stage
+
+        def _spy(*args, **kwargs):
+            calls.append(args)
+            return real_advance(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline, "advance_stage", _spy)
+
         with pytest.raises(ValueError) as exc:
             PO.settle_plan(sdk, plan["id"], _NotAString())
         message = str(exc.value)
         assert "not a no-occurrence ending" in message, message
-        assert g.query(
-            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
-            params={"p": plan["id"]}).result_set[0][0] == 0
-        cur = _stage(sdk, plan["id"])
-        assert cur["stageId"] == PO.STAGE_SCHEDULED
-        assert cur["isClosed"] is False
-        assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
+        # ⛔ Measured: reverting the guard to `if stage not in (STAGE_MISSED,
+        # STAGE_CANCELLED):` reddens BOTH lines below — the pre-fix refusal is
+        # the unapplied-move branch, which interpolates `(no-stage)` verbatim.
+        assert "(no-stage)" not in message, message
+        # ⛔ Measured: moving the guard BELOW `advance_stage` reddens this one.
+        assert calls == [], (
+            "the refused stage reached `advance_stage` — the guard fired late")
 
     def test_a_SUBCLASS_stage_that_IS_a_no_occurrence_ending_still_settles(
             self, sdk):

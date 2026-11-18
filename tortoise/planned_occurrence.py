@@ -657,7 +657,7 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     # this guard exists to make unrepresentable: the plan advances to terminal
     # `held` and the read serves it as *planned and never happened*, with nothing
     # raising. That is the same rule `is_plan_kind` (:176) and
-    # `lifecycle_props_by_rendering` (:722) already follow (#13578 review,
+    # `lifecycle_props_by_rendering` (:730) already follow (#13578 review,
     # finding 1). ⛔ Its TWIN DOOR is `settle_plan`'s `stage not in (…)` below — a
     # caller-supplied-`str` comparison that trusted `__eq__` the same way, and
     # it is repaired in this same change (#13586 review, finding 1): closing one
