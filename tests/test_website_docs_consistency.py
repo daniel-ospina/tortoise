@@ -452,9 +452,10 @@ def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
     (`:27831-27844`); `get_point` (`:29952`) returns the row by address. That
     the prior SURVIVES is asserted by
     `tests/test_de2e6_temporal.py::TestDe2e6ReviewFixes::test_timeline_keeps_superseded_prior`
-    (`:405`, `len(timeline) >= 2` plus a `CORRECTS` link) — the test does NOT
-    assert the `outdated` key itself, so the flag's emission is pinned by no
-    test, and this page must not be the only place that states it.
+    (`:405`, `len(timeline) >= 2` plus a `CORRECTS` link). The `outdated` key the
+    page names is pinned as well — the same test asserts the re-attached prior is
+    marked, so `sdk.py`'s `if outdated: entry["outdated"] = True` cannot be
+    deleted with the suite still green (measured: removing it fails that case).
 
     Two absolutes are pinned here, both measured on a real page:
     `no longer writable at all` — falsified by the server's three `outdated`
