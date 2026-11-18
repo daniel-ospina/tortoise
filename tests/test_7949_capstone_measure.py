@@ -6284,8 +6284,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
         # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
         # pointer to a row that no longer exists). Measured at THIS head, not copied: `@app.post("/v1/sessions")` is
-        # `:19481` and `@app.post("/v1/sessions/install-probe")` is `:22036` — the pair the row
-        # below pins, each the file's ONLY occurrence of its needle. (Prose here had `:18854`/`:21409`, `#12947`'s head.)
+        # `:19504` and `@app.post("/v1/sessions/install-probe")` is `:22064` — the pair the row
+        # below pins, each the file's ONLY occurrence of its needle. (Prose here had `:18854`/`:21409`, `#12947`'s head;
+        # ⚠️ and `:19481`/`:22036` until this re-derivation, which are `#13363`'s `+23`/`+28` short —
+        # the two deltas that merge produced in two different `hosted_api.py` regions. Fixing the
+        # ROW and leaving THIS sentence on the old pair is the half-move this very comment
+        # describes, one level down.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("19504", ("exact", '@app.post("/v1/sessions")')),
             ("22064", '@app.post("/v1/sessions/install-probe")'),
@@ -6481,6 +6485,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # conclusion that the end was therefore unpinnable was not.
             ("4230", ("exact", ")")),
         ), "capstone_preregistration"),
+        # ⛔ `05-verify.md` D5's `_honours` STATEMENT HAD NO READER AT ALL (#13489 review,
+        # F1). The paragraph states ONE `git grep` hit four times — `_honours: dict[…]`
+        # "is at `:NNNNN` at the MERGE head", "`:NNNNN` at this head", "measures `:NNNNN`
+        # here", and "`main` measures `:NNNNN` too" — and every one of them read `:22225`
+        # while the hit was at `:22247` from `#13363`'s merge onward (`#13363`'s only
+        # inserting `sdk.py` hunk is at `:16225`, net `+22`, and `:22225` is the value at
+        # the pre-merge `ae54df166d`). So the document asserted TWO numbers for ONE hit —
+        # `02-scope.md:61` was re-pointed to `:22247` by this same PR — which is verbatim
+        # the failure the `count` arm below names. It shipped green through three review
+        # rounds because no row and no count covered it: D5's other rows pin the
+        # `Measured at` sentence and the composition clauses, never this one.
+        ("05-verify.md", "`_honours: dict[str, frozenset[str]]` measures", (
+            ("22247", "_honours: dict[str, frozenset[str]] = {"),
+        ), "sdk"),
         # ⚠️ BOTH RANGE ENDS ARE NOW HELD: `:4208` by the `("4201", …)` row above (that line
         # carries text) and `:4230` by the exact-closer form above. A range whose END a
         # bare-string anchor cannot discriminate is pinned by comparing the STRIPPED line,
@@ -6689,6 +6707,27 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             f"{_d5.count(_spelling)} time(s): {_spelling!r}. Both halves are the same hit \u2014 "
             "if the line moved, re-derive EVERY statement of it, because a half-done move "
             "leaves the document asserting two numbers for one `git grep` hit")
+
+    # ⛔ AND THE `_honours` HIT'S STATEMENTS, SAME RULE ONE LEVEL FURTHER (#13489 review F1).
+    # The row above reds when NO statement of the hit carries the live number; a PARTIAL move
+    # leaves it GREEN, because the surviving sibling still satisfies the token check. D5
+    # states this one hit four times on its single markdown line — the MERGE-head sentence,
+    # the `grep ... -> N` output inside it, the RESOLVED clause's "at this head", and
+    # "measures `:N` here" with its "`main` measures `:N` too" clause — so each spelling is
+    # counted at exactly 1. MEASURED on the pre-fix document: all five numeric occurrences
+    # read `:22225` while the hit was at `:22247`, and this loop reds on the first spelling
+    # (count 0) — which is why the row alone would not have caught a half-done repair.
+    for _spelling in (
+        "is at `:22247` at the MERGE head",
+        "**`:22247` at this head**",
+        "`_honours: dict[str, frozenset[str]]` measures `:22247` here",
+        "where `main` measures `:22247` too",
+    ):
+        assert _d5.count(_spelling) == 1, (
+            f"05-verify.md D5 states the `_honours` hit in four places and this spelling "
+            f"now occurs {_d5.count(_spelling)} time(s): {_spelling!r} — re-derive EVERY "
+            "statement of the hit, not only the one a failing row names, because a half-done "
+            "move leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3, RE-DERIVED for `#13363`).
     # The sentence cites `hosted_api.py:15225-15302`, and the END of that range is a BLANK
