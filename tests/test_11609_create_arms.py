@@ -266,8 +266,16 @@ class TestTheRetiredNamesStillAnswer:
         from tortoise.tool_registry import RETIRED_USE_INSTEAD
 
         source = inspect.getsource(TortoiseSDK.create_entity)
-        arms = set(re.findall(r'^        (?:el)?if t == "([a-z_]+)":$', source,
-                              re.MULTILINE))
+        # Both arm shapes, for the reason `test_11609_door_retirement.py`'s
+        # `_create_entity_dispatch_arms` states: a COMBINED arm
+        # (`elif t == "point" or t == "diary":`) names both kinds, and this test would
+        # otherwise call the container's own arm "not dispatched" (measured: the
+        # single-shape regex derived `['document', 'event', 'object', 'subject']`).
+        arms: list[str] = []
+        for line in source.splitlines():
+            match = re.match(r'^ {8}(?:el)?if ((?:t == "[a-z_]+"(?: or )?)+):$', line)
+            if match:
+                arms.extend(re.findall(r't == "([a-z_]+)"', match.group(1)))
         for name, kind in (("tortoise_create_point", "point"),
                            ("tortoise_diary_write", "diary")):
             pointer = RETIRED_USE_INSTEAD[name]
@@ -321,8 +329,6 @@ class TestTheCompletionSignalMovedWithTheDoor:
         no org context is set so the quota pre-write short-circuits — the pin is
         about the OBSERVATION, and a quota fixture would hide it behind infra.
         """
-        import contextlib
-
         from tortoise.mcp_auth import _transport_mode
 
         calls: list[dict] = []

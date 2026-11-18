@@ -150,6 +150,15 @@ def _create_entity_dispatch_arms() -> tuple[str, ...]:
     adding `"point"` to it alone changes no behaviour (a false RED). The arms are the
     `if t == "<kind>":` / `elif t == "<kind>":` branches at the method's own body indent.
 
+    ⛔ BOTH ACCEPTED SHAPES ARE READ (added by #11609 lane P1): a single arm
+    `if t == "point":`, and a COMBINED arm `elif t == "point" or t == "diary":` — two
+    kinds that share one body because the bodies would be identical, which is what ruff's
+    SIM114 requires of a dispatch that has nothing to decide between them. Reading only
+    the single-arm shape would silently drop `point` and `diary` from the derivation, and
+    the set-equality pin below would then red the whole wave for a syntax it merely did
+    not parse (measured: the combined form derived `['document', 'event', 'object',
+    'subject']`).
+
     ⛔ STATED LIMIT (not a gap a future reviewer should re-derive): the arms must stay on
     ONE line at the body indent. A reflow that splits `if t == "subject":` across two
     lines drops that arm from the derivation — which the set-equality pin below reds, so
@@ -158,8 +167,20 @@ def _create_entity_dispatch_arms() -> tuple[str, ...]:
     to a hot write path for the sake of a test, and it is deliberately not made here.
     """
     source = inspect.getsource(TortoiseSDK.create_entity)
-    return tuple(
-        re.findall(r'^        (?:el)?if t == "([a-z_]+)":$', source, re.MULTILINE))
+    arms: list[str] = []
+    for line in source.splitlines():
+        match = _DISPATCH_ARM_LINE.match(line)
+        if match:
+            arms.extend(_DISPATCH_ARM_KIND.findall(match.group(1)))
+    return tuple(arms)
+
+
+#: One dispatch arm at `create_entity`'s body indent, in either accepted shape — see the
+#: function docstring's "BOTH ACCEPTED SHAPES ARE READ".
+_DISPATCH_ARM_LINE = re.compile(r'^ {8}(?:el)?if ((?:t == "[a-z_]+"(?: or )?)+):$')
+
+#: Every kind named inside a matched arm, so an `or` chain contributes each of its kinds.
+_DISPATCH_ARM_KIND = re.compile(r't == "([a-z_]+)"')
 
 
 _CREATE_ENTITY_TYPES: tuple[str, ...] = _require_non_empty(

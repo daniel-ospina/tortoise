@@ -55588,10 +55588,13 @@ class TortoiseSDK:
             node = self._create_entity("Document", did, {
                 "title": name, "documentKind": documentKind, **props},
                 "DocumentCreated", is_episodic=is_episodic)
-        elif t == "point":
-            return self._absorbed_point_write(
-                t, name, props, is_episodic=is_episodic, guard=_guard)
-        elif t == "diary":
+        elif t == "point" or t == "diary":
+            # ONE branch, not two: the arms differ in NOTHING here — the door's own
+            # `dedup` semantics are replayed inside `_absorbed_point_write` from the
+            # `t` it receives, so a split body would be two copies of one call that
+            # ruff reds as SIM114 (agent-infra-ci / lint). `t` still rides through
+            # unchanged, which is what lets the two arms disagree later without this
+            # line deciding anything.
             return self._absorbed_point_write(
                 t, name, props, is_episodic=is_episodic, guard=_guard)
         else:
