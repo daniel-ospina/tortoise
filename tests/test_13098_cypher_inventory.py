@@ -143,18 +143,25 @@ def test_the_doc_appendix_row_count_is_the_census_site_count():
 
 NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
 
-# ⛔ EVERY LOOKUP `_grade_doc_text` MAKES, one row each, as `(arm, what, bounds, pattern)`.
-# The patterns are the ARM'S OWN constants (defined here, used by `_grade_doc_text` below),
-# so this table cannot drift from the arms it claims to cover: renaming or re-cutting a
-# pattern re-points the row with it, and deleting a row cannot leave a stale literal behind.
-# `what` is the `what=` string the arm passes to `_exactly_one`, which lets the assertion
-# name the arm that fired rather than accepting any refusal.
+# ⛔ EVERY `_exactly_one` ARM `_grade_doc_text` MAKES, one row each, as
+# `(arm, what, bounds, pattern)`. The patterns are the ARM'S OWN constants (defined here, used
+# by `_grade_doc_text` below), so this table cannot drift from the arms it claims to cover:
+# renaming or re-cutting a pattern re-points the row with it, and deleting a row cannot leave a
+# stale literal behind. `what` is the `what=` string the arm passes to `_exactly_one`, which lets
+# the assertion name the arm that fired rather than accepting any refusal.
+#
+# ⛔ "ARM" IS THE UNIT OF THIS TABLE, NOT "LOOKUP" — `_grade_doc_text` also makes TWO
+# `re.search` calls (#13458` review F1): the §0/§1 bounds lookups. Those are not arms and are
+# not graded here: their slice is a SUPERSET of the region an arm reads, so an in-section decoy
+# is still refused by the arm that reads it. They are COUNTED instead, below.
 #
 # ⛔ THIS TABLE IS THE UNIQUENESS COVERAGE CLAIM (`#13458` review P2-3). Before it existed,
 # the mutant proof duplicated only NARRATIVE_PATTERN, so arm (b) was the only arm whose
 # revert-to-`re.search` any test could redden, while two docstrings said "any arm". One row
-# per lookup — 7 rows for 7 lookups — makes that claim executable; because a deleted row
-# leaves the remaining rows passing, the test also asserts the cardinality.
+# per arm — 7 rows for 7 `_exactly_one` arms — makes that claim executable. A deleted row, a
+# DUPLICATED row and a row whose `what=` matches nothing are all reds
+# (`test_every_graded_lookup_has_a_coverage_row`); a deleted row alone would not be, which is
+# why that test asserts multiplicity and arm-id uniqueness on top of set equality.
 #
 # A row whose pattern no longer matches its section fails loudly ("no line in the scoped
 # section matches") rather than silently proving nothing, so a re-cut that moves a row
@@ -186,6 +193,13 @@ _GRADED_LOOKUPS: tuple[tuple[str, str, str, str], ...] = (
     ("c-product-surface", "§1's product-surface table row", SECTION1_BOUNDS,
      PRODUCT_SURFACE_PATTERN),
 )
+
+# The ONLY bare `re.search` lookups `_grade_doc_text` is allowed to make: the §0 and §1 region
+# bounds. They are not arms — a slice is a SUPERSET of the region its arms read, so an
+# in-section decoy is still refused by the arm that reads it — and they are counted by
+# `test_every_graded_lookup_has_a_coverage_row` so a third one cannot arrive unremarked
+# (`#13458` review F1).
+_UNGRADED_BOUNDS_LOOKUPS = 2
 
 
 def _exactly_one(pattern: str, text: str, *, what: str, flags: int = re.MULTILINE) -> tuple[str, ...]:
@@ -234,9 +248,12 @@ def _grade_doc_text(doc_text: str, *, sites: int, non_cypher: int, candidates: i
     end for arm (b), and `test_every_anchored_arm_refuses_a_duplicate` walks
     `_GRADED_LOOKUPS` — one case per lookup — so reverting ANY arm to a first-match
     `re.search` reds the row named after THAT arm instead of quietly re-opening the false
-    PASS. ⛔ Every lookup below appears in `_GRADED_LOOKUPS`; a new lookup that is not
-    listed there is a coverage gap, and adding one without a row is the overclaim this
-    was caught making (`#13458` review P2-3).
+    PASS. ⛔ Every `_exactly_one` ARM below appears in `_GRADED_LOOKUPS`; a new arm that is not
+    listed there is a coverage gap, and adding one without a row is the overclaim this was
+    caught making (`#13458` review P2-3). The function's TWO other regex lookups are the §0/§1
+    bounds `re.search` calls, which are deliberately NOT arms — their slice is a superset of
+    the region an arm reads, so an in-section decoy is still refused by that arm. They are
+    counted by the coverage test so a THIRD bare `re.search` cannot slip in unremarked.
 
     The reasoning below is the test's, moved with the arms it explains.
     """
@@ -507,13 +524,23 @@ def measured_census() -> dict[str, int]:
 
 
 def test_every_graded_lookup_has_a_coverage_row():
-    """`_GRADED_LOOKUPS` and the arms in `_grade_doc_text` are the SAME set (`#13458` P2-3).
+    """`_GRADED_LOOKUPS` and the `_exactly_one` arms of `_grade_doc_text` are the SAME set.
 
     Read from the function's own source rather than counted, so the pairing is mechanical: an
     arm added without a row is a coverage gap named here, and a row left behind for an arm
     that no longer exists is a DEAD case that silently proves nothing. Both directions matter
     — before this existed the mutant proof covered arm (b) only while two docstrings said
-    "any arm", which is the overclaim the review returned.
+    "any arm", which is the overclaim the review returned (`#13458` P2-3).
+
+    ⛔ SET EQUALITY ALONE WAS NOT ENOUGH (`#13458` review F1/F2), and both gaps were executed
+    before they were closed:
+
+    * the `what=` scan can only see a DOUBLE-QUOTED literal, so an arm added as
+      `what=f"…"`, `what='…'` or a bare `re.search` was invisible to it while this function's
+      own docstring promised it would be caught. The call COUNTS below close that: arms by
+      `_exactly_one(`, and the two bounds lookups by `re.search(` against a named constant.
+    * a DUPLICATED row keeps set equality (`set` dedupes), so nothing redded. Multiplicity and
+      arm-id uniqueness are asserted explicitly.
     """
     source = inspect.getsource(_grade_doc_text)
     armed = set(re.findall(r'what="([^"]+)"', source))
@@ -523,17 +550,32 @@ def test_every_graded_lookup_has_a_coverage_row():
         "row needs a live arm — otherwise the uniqueness claim has a hole nobody can see:\n"
         f"  arms with NO proof row: {sorted(armed - listed)}\n"
         f"  proof rows with NO arm: {sorted(listed - armed)}")
+    assert len(_GRADED_LOOKUPS) == len(listed), (
+        f"`_GRADED_LOOKUPS` carries {len(_GRADED_LOOKUPS)} rows but only {len(listed)} distinct\n"
+        "arms: a DUPLICATED row proves nothing twice and is invisible to the set comparison")
+    assert len({row[0] for row in _GRADED_LOOKUPS}) == len(_GRADED_LOOKUPS), (
+        "two rows share an arm id, so one of their cases reports under the other's name")
+    assert source.count("_exactly_one(") == len(_GRADED_LOOKUPS), (
+        f"`_grade_doc_text` makes {source.count('_exactly_one(')} `_exactly_one` calls but the\n"
+        f"table lists {len(_GRADED_LOOKUPS)} arms. The `what=` scan above only sees a\n"
+        "double-quoted literal, so an arm added with `what=f\"…\"` or `what='…'` would pass it\n"
+        "silently — add a row for the arm, and this count keeps the two in step")
+    assert source.count("re.search(") == _UNGRADED_BOUNDS_LOOKUPS, (
+        f"`_grade_doc_text` makes {source.count('re.search(')} bare `re.search` lookups; only\n"
+        f"the {_UNGRADED_BOUNDS_LOOKUPS} section bounds are allowed to be ungraded. A new one\n"
+        "is either an ARM (use `_exactly_one` and add a `_GRADED_LOOKUPS` row) or it needs its\n"
+        "own justification written down where the bounds are established")
 
 
 @pytest.mark.parametrize("arm, what, bounds, pattern", _GRADED_LOOKUPS,
                          ids=[row[0] for row in _GRADED_LOOKUPS])
 def test_every_anchored_arm_refuses_a_duplicate(arm, what, bounds, pattern, measured_census):
-    """EACH lookup's uniqueness guard reds on its own duplicate (`#13458` review P2-3).
+    """EACH ARM's uniqueness guard reds on its own duplicate (`#13458` review P2-3).
 
     The sibling mutant test proves arm (b) end to end, including the false PASS a first-match
-    search reproduces. That is one arm. `_grade_doc_text` makes SEVEN lookups, and a guard no
-    test can redden is exactly the "quietly re-opened false PASS" the arms exist to refuse —
-    so this test drives the REAL grading path once per row of `_GRADED_LOOKUPS`:
+    search reproduces. That is one arm. `_grade_doc_text` makes SEVEN `_exactly_one` arms, and
+    a guard no test can redden is exactly the "quietly re-opened false PASS" the arms exist to
+    refuse — so this test drives the REAL grading path once per row of `_GRADED_LOOKUPS`:
 
       1. locate the line this arm binds, INSIDE the section it is scoped to;
       2. duplicate that line ABOVE itself — a CORRECT restatement, which is the decoy shape
