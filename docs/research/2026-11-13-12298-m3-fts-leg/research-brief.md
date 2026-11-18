@@ -130,7 +130,7 @@ contain):
 
 ## 2. Method — paired, pinned, controlled, and where the control breaks
 
-**Why recall and not ranking.** `rrf_fusion` discards each leg's score (`search_engine.py:4823`), so on
+**Why recall and not ranking.** `rrf_fusion` discards each leg's score (`search_engine.py:4838`), so on
 the multi-leg read the scorer can only act through `ORDER BY … LIMIT`; the one arm where the magnitude
 survives uses it as a *floor* (`SEARCH-ARCHITECTURE.md` §6.2 says the same). A different scorer is
 therefore a **recall** lever (`#12186` round 2; `#12308` A-3). So M3 reports `recall@k` of the FTS leg
