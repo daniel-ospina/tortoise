@@ -8,81 +8,112 @@
       "arm": "kindgate",
       "by_shape": [
         {
+          "expected_gate_reads": 0,
           "gate_ms_per_request": 0.0,
           "gate_reads_per_request": 0,
           "note": "control \u2014 names no pack",
           "request_ms": {
-            "max_ms": 48.647,
-            "median_ms": 13.454,
-            "min_ms": 12.599,
+            "max_ms": 14.305,
+            "median_ms": 11.625,
+            "min_ms": 10.492,
             "n": 7
           },
           "shape": "point_core"
         },
         {
+          "expected_gate_reads": 0,
           "gate_ms_per_request": 0.0,
           "gate_reads_per_request": 0,
           "note": "control \u2014 names no pack",
           "request_ms": {
-            "max_ms": 16.619,
-            "median_ms": 12.452,
-            "min_ms": 11.456,
+            "max_ms": 11.906,
+            "median_ms": 11.07,
+            "min_ms": 9.72,
             "n": 7
           },
           "shape": "point_bare"
         },
         {
-          "gate_ms_per_request": 19.23,
+          "expected_gate_reads": 1,
+          "gate_ms_per_request": 18.367,
           "gate_reads_per_request": 1,
           "note": "names a pack",
           "request_ms": {
-            "max_ms": 70.967,
-            "median_ms": 44.637,
-            "min_ms": 37.647,
+            "max_ms": 48.846,
+            "median_ms": 37.421,
+            "min_ms": 30.664,
             "n": 7
           },
           "shape": "point_ns"
         },
         {
-          "gate_ms_per_request": 19.23,
+          "expected_gate_reads": 1,
+          "gate_ms_per_request": 18.367,
           "gate_reads_per_request": 1,
           "note": "names a pack through the props passthrough",
           "request_ms": {
-            "max_ms": 50.254,
-            "median_ms": 46.085,
-            "min_ms": 38.44,
+            "max_ms": 43.182,
+            "median_ms": 37.169,
+            "min_ms": 36.075,
             "n": 7
           },
           "shape": "point_ns_in_props"
         },
         {
-          "gate_ms_per_request": 19.23,
+          "expected_gate_reads": 1,
+          "gate_ms_per_request": 18.367,
           "gate_reads_per_request": 1,
           "note": "names a pack",
           "request_ms": {
-            "max_ms": 71.442,
-            "median_ms": 52.42,
-            "min_ms": 43.047,
+            "max_ms": 47.711,
+            "median_ms": 43.816,
+            "min_ms": 39.647,
             "n": 7
           },
           "shape": "object_ns"
+        },
+        {
+          "expected_gate_reads": 2,
+          "gate_ms_per_request": 36.734,
+          "gate_reads_per_request": 2,
+          "note": "SAME pack named twice (positional + props)",
+          "request_ms": {
+            "max_ms": 69.08,
+            "median_ms": 60.244,
+            "min_ms": 58.824,
+            "n": 7
+          },
+          "shape": "point_ns_twice"
+        },
+        {
+          "expected_gate_reads": 2,
+          "gate_ms_per_request": 36.734,
+          "gate_reads_per_request": 2,
+          "note": "SAME pack named twice (camel + snake)",
+          "request_ms": {
+            "max_ms": 69.656,
+            "median_ms": 64.043,
+            "min_ms": 60.593,
+            "n": 7
+          },
+          "shape": "object_ns_twice"
         }
       ],
       "cost": "whole-graph approval scan (#5475 gate), per write that names a pack",
       "hosted_commit_composition": {
         "measured_as": "composition of measured parts \u2014 not an HTTP sample",
         "per_entity_site": "tortoise/sdk.py::_create_entity \u2192 _refuse_unapproved_kinds_in_props",
-        "per_entity_writes": 1,
+        "per_entity_writes": 2,
         "pre_check_reads": 1,
         "pre_check_site": "tortoise/hosted_api.py:23946 (deliberately NOT rescanned at :23976)",
         "rule": "1 pre-check read per request + 1 read per namespaced entity written",
-        "single_entity_commit_total_reads": 2
+        "single_entity_commit_total_reads": 3
       },
       "points": 5000,
       "single_gate_read": {
-        "max_ms": 21.283,
-        "median_ms": 19.23,
-        "min_ms": 17.949,
+        "max_ms": 19.616,
+        "median_ms": 18.367,
+        "min_ms": 16.516,
         "n": 7
       }
     },
@@ -93,9 +124,9 @@
           "content_bytes_returned": 21200,
           "content_chars_per_row": 60,
           "nudge_call": {
-            "max_ms": 8.771,
-            "median_ms": 8.009,
-            "min_ms": 7.716,
+            "max_ms": 10.688,
+            "median_ms": 9.427,
+            "min_ms": 7.899,
             "n": 7
           },
           "points": 1000,
@@ -105,9 +136,9 @@
           "content_bytes_returned": 117200,
           "content_chars_per_row": 300,
           "nudge_call": {
-            "max_ms": 10.071,
-            "median_ms": 9.351,
-            "min_ms": 8.515,
+            "max_ms": 9.813,
+            "median_ms": 8.731,
+            "min_ms": 8.406,
             "n": 7
           },
           "points": 1000,
@@ -117,9 +148,9 @@
           "content_bytes_returned": 477200,
           "content_chars_per_row": 1200,
           "nudge_call": {
-            "max_ms": 10.232,
-            "median_ms": 9.945,
-            "min_ms": 9.745,
+            "max_ms": 9.781,
+            "median_ms": 9.606,
+            "min_ms": 9.42,
             "n": 7
           },
           "points": 1000,
@@ -129,24 +160,24 @@
       "by_size": [
         {
           "nudge_call": {
-            "max_ms": 13.241,
-            "median_ms": 12.068,
-            "min_ms": 11.867,
+            "max_ms": 13.446,
+            "median_ms": 12.185,
+            "min_ms": 11.881,
             "n": 7
           },
           "nudges_produced": 3,
           "object_create_ms": {
-            "delta_ms": 9.627,
+            "delta_ms": 11.22,
             "with_nudge": {
-              "max_ms": 20.045,
-              "median_ms": 15.973,
-              "min_ms": 15.488,
+              "max_ms": 17.108,
+              "median_ms": 16.491,
+              "min_ms": 15.622,
               "n": 7
             },
             "without_nudge": {
-              "max_ms": 6.825,
-              "median_ms": 6.346,
-              "min_ms": 5.347,
+              "max_ms": 5.728,
+              "median_ms": 5.271,
+              "min_ms": 4.867,
               "n": 7
             }
           },
@@ -161,24 +192,24 @@
         },
         {
           "nudge_call": {
-            "max_ms": 12.652,
-            "median_ms": 12.097,
-            "min_ms": 11.934,
+            "max_ms": 16.88,
+            "median_ms": 13.068,
+            "min_ms": 12.436,
             "n": 7
           },
           "nudges_produced": 3,
           "object_create_ms": {
-            "delta_ms": 14.138,
+            "delta_ms": 11.087,
             "with_nudge": {
-              "max_ms": 22.05,
-              "median_ms": 19.771,
-              "min_ms": 16.416,
+              "max_ms": 18.03,
+              "median_ms": 17.19,
+              "min_ms": 15.737,
               "n": 7
             },
             "without_nudge": {
-              "max_ms": 10.21,
-              "median_ms": 5.633,
-              "min_ms": 5.375,
+              "max_ms": 6.565,
+              "median_ms": 6.103,
+              "min_ms": 5.579,
               "n": 7
             }
           },
@@ -200,34 +231,34 @@
         {
           "points": 1000,
           "probe_ms": {
-            "max_ms": 5.416,
-            "median_ms": 4.967,
-            "min_ms": 4.702,
+            "max_ms": 5.95,
+            "median_ms": 5.167,
+            "min_ms": 4.926,
             "n": 7
           },
-          "us_per_point": 4.967,
+          "us_per_point": 5.167,
           "verdict": true
         },
         {
           "points": 5000,
           "probe_ms": {
-            "max_ms": 8.154,
-            "median_ms": 6.169,
-            "min_ms": 5.777,
+            "max_ms": 5.923,
+            "median_ms": 5.594,
+            "min_ms": 5.489,
             "n": 7
           },
-          "us_per_point": 1.234,
+          "us_per_point": 1.119,
           "verdict": true
         },
         {
           "points": 20000,
           "probe_ms": {
-            "max_ms": 17.332,
-            "median_ms": 13.077,
-            "min_ms": 10.564,
+            "max_ms": 11.903,
+            "median_ms": 9.691,
+            "min_ms": 8.896,
             "n": 7
           },
-          "us_per_point": 0.654,
+          "us_per_point": 0.485,
           "verdict": true
         }
       ],
@@ -238,17 +269,17 @@
     "db_uri_env": "docker://:@127.0.0.1:16402/tortoise_test_matrix",
     "engine": "graph ver 42006 (4.20.6)",
     "loadavg_at_end": [
-      4.01,
-      3.77,
-      6.07
+      5.67,
+      5.12,
+      5.86
     ],
     "loadavg_at_start": [
-      3.54,
-      3.67,
-      6.07
+      5.85,
+      5.11,
+      5.88
     ],
     "python": "3.12.3"
   },
   "issue": 13436,
-  "measured_at": "2026-11-18T01:53:19Z"
+  "measured_at": "2026-11-18T01:59:57Z"
 }
