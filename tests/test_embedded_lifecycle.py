@@ -259,6 +259,14 @@ RAW_EMBEDDED_ALLOWLIST = {
     "fixtures/redis-guard/good_absolute_path.py",  # redis-guard fixture — embedded path resolution input
     "repro/reproduce_redislite_leak.py",  # repro — deliberate embedded leak reproduction
     "test_backup_e2e.py",
+    # #13417: carve-out member (`tests/_embedded.py::TEST_NO_REDIRECT_STEMS` and its
+    # `carve_out` row in `config/ci-surfaces.yml`) that drives real DERIVED-entity
+    # folds against its OWN embedded `FalkorProjection` per test, so the raw
+    # construction (`tests/test_13417_vectorless_rows.py:95`) IS the under-test
+    # input. Membership of the carve-out list is the justification (#13492: the
+    # stem was registered without this entry, which redded `test-carve-out` — and
+    # so `python-ci-gate` — on main for every PR).
+    "test_13417_vectorless_rows.py",
     "test_config.py",
     "test_derived_names.py",  # epic #1647 Task 7 — the path= construction IS the derived-name-under-test input
     "test_divergence_conformance.py",  # epic #1647 E2E-8 — both legs construct the projection as the input
