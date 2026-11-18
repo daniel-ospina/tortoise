@@ -3255,6 +3255,12 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # last line `return self._update_entity_any(id, **props)`) and `55807` (the
     # per-label `SET n += $props`). The two deltas — **+186** for the three later rows
     # and **+15** for `update_knowledge` — are the consistency check, not the input.
+    # ⛔ Where a pinned first-line text is NOT itself a unique locator, the search used
+    # the longer form of the same line and that is what locates the row: `SET n +=
+    # $props` occurs **40×** in `sdk.py`, so `55807` was found by its per-label write
+    # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurs **once**.
+    # A row recorded as "found by its pinned text" must name text that actually finds
+    # it, or the record does not reproduce the address it explains.
     ("sdk.py", 55206, 55208): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 55358, 55367): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
