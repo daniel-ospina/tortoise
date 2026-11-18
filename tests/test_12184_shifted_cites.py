@@ -103,14 +103,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # moved them, and the reader rule sent the reader to the wrong line. A pin per entry is what turns
     # the list into a guard.
     (_AUDIT, "`:2882`", _SDK, 2882, "SET s.capture_redactions=$redactions"),
-    (_AUDIT, "`sdk.py:37067`", _SDK, 37067, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
-    (_AUDIT, "`:37090`", _SDK, 37090, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "`sdk.py:37087`", _SDK, 37087, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    (_AUDIT, "`:37110`", _SDK, 37110, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
-    (_AUDIT, "`mcp_server.py:5089`", _MCP, 5089, "entity_type=entity_type"),
-    (_AUDIT, "`:5529`", _MCP, 5529, "entity_type=entity_type"),
-    (_AUDIT, "`:8034`", _MCP, 8034, "entity_type=entity_type"),
+    (_AUDIT, "`mcp_server.py:5133`", _MCP, 5133, "entity_type=entity_type"),
+    (_AUDIT, "`:5573`", _MCP, 5573, "entity_type=entity_type"),
+    (_AUDIT, "`:8124`", _MCP, 8124, "entity_type=entity_type"),
     (_AUDIT, "`:6923-6939`", _PI, 6923, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6933`", _PI, 6933, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6934`", _PI, 6934, '("Subject", ["name"])'),
@@ -124,7 +124,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6938`", _PI, 6938, '("Object", ["name"])'),
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
-    (_AUDIT, "sdk.py:24064", _SDK, 24064, "(n:Point {id:$id})-[:TAGGED]->()"),
+    (_AUDIT, "sdk.py:24084", _SDK, 24084, "(n:Point {id:$id})-[:TAGGED]->()"),
     (_AUDIT, "search_engine.py:6738", _SE, 6738, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3451", _SE, 3451, "``:Source``/``:Document`` row must not contribute"),
@@ -148,19 +148,19 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `d1bfef778f` and at every later head: `27866` is prose and `27861` is the PRE-`#13290` value).
     # The row above is what makes "carries the same number" a fact instead of a promise; these two are
     # what make the NUMBER the live site rather than merely a matching one.
-    (_EVIDENCE, "sdk.py:28019", _SDK, 28019, "n.dedup_reviewed IS NULL"),
-    (_INDEX, "sdk.py:28019", _SDK, 28019, "n.dedup_reviewed IS NULL"),
+    (_EVIDENCE, "sdk.py:28039", _SDK, 28039, "n.dedup_reviewed IS NULL"),
+    (_INDEX, "sdk.py:28039", _SDK, 28039, "n.dedup_reviewed IS NULL"),
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2776", _CP, 2776, "tail_denied = forbidden | {"),
-    (_AUDIT, 'sdk.py:21750', 'tortoise/sdk.py', 21750, 's.summary=CASE WHEN $sum'),
-    (_AUDIT, '`:21873`', 'tortoise/sdk.py', 21873, 's.summary, s.topics, s.'),
+    (_AUDIT, 'sdk.py:21770', 'tortoise/sdk.py', 21770, 's.summary=CASE WHEN $sum'),
+    (_AUDIT, '`:21893`', 'tortoise/sdk.py', 21893, 's.summary, s.topics, s.'),
     # ⚠️ Row 13b's Source-writer cite, added by the peer lane because the site had NO pin at
     # all. Its number is re-derived by CONTENT at THIS tree, not carried from theirs —
     #   grep -n 'search_text = _source_search_text(topics=topics)' tortoise/sdk.py
     # -> 21708, the capture writer's actual `_searchText` assignment (the `#3518`
     # contract), not the comment above it and not the `sessionCaptured` provenance block
     # an earlier pin sat on.
-    (_AUDIT, 'sdk.py:21708', _SDK, 21708, 'search_text = _source_search_text(topics=topics)'),
+    (_AUDIT, 'sdk.py:21728', _SDK, 21728, 'search_text = _source_search_text(topics=topics)'),
     (_AUDIT, 'hosted_api.py:22925', 'tortoise/hosted_api.py', 22925, 'MERGE (s:Source {url:$did})'),
     (_AUDIT, '`:22737`', 'tortoise/hosted_api.py', 22737, 'def _execute_commit_writes'),
     # ⛔ The document carries TWO addresses for this one statement on purpose: `:33583` is the number
@@ -194,10 +194,10 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     # attribute change; the two-` and there is NO `DELETE` in 23990-24040, so a DELETE elsewhere
     # in the file is not a DELETE in this region. `hosted_api.py:22919` IS
     # `if is_subject_kind(_ekind or ""):` and `:22925` is the `)` closing `create_entity(...)`.
-    ("sdk.py:24064", _SDK, 24064, "(n:Point {id:$id})-[:TAGGED]->()"),
+    ("sdk.py:24084", _SDK, 24084, "(n:Point {id:$id})-[:TAGGED]->()"),
     ("search_engine.py:6738", _SE, 6738, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
-    ("sdk.py:21750", _SDK, 21750, "s.summary=CASE WHEN $sum"),
-    (":21873", _SDK, 21873, "s.summary, s.topics, s."),
+    ("sdk.py:21770", _SDK, 21770, "s.summary=CASE WHEN $sum"),
+    (":21893", _SDK, 21893, "s.summary, s.topics, s."),
     ("hosted_api.py:22925", "tortoise/hosted_api.py", 22925, "MERGE (s:Source {url:$did})"),
     (":22737", "tortoise/hosted_api.py", 22737, "def _execute_commit_writes"),
 )
@@ -225,19 +225,19 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3072`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2712-2723'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28019'): 1,
-    ('docs/00_index.md', 'sdk.py:28019'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28039'): 1,
+    ('docs/00_index.md', 'sdk.py:28039'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2882`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37067`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37090`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37087`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37110`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5089`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5529`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8034`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5133`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5573`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8124`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6923-6939`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6933`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6934`'): 1,
@@ -245,7 +245,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24064'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24084'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6738'): 2,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3451'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3449`'): 1,
@@ -255,12 +255,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4840`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3081-3096'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28019'): 1,
-    ('docs/00_index.md', 'sdk.py:28019'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28039'): 1,
+    ('docs/00_index.md', 'sdk.py:28039'): 1,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21750'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21873`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21708'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21770'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21893`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21728'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22925'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22737`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33601`'): 1,
