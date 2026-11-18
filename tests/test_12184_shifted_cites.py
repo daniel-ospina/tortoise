@@ -104,6 +104,23 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_CENSUS, "cache_projection.py:2712", _CP, 2712, "tail_denied = forbidden | {"),
 )
 
+#: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
+#: header must carry, target file, 1-based line at `main`, verbatim fragment on that line). Five of these
+#: are reached by `_PINS` already; `:2430`, `:2487` and `projection/entities.py:5618` were in NO pin at all
+#: before this one, and the header named none of the eight — which is the defect
+#: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
+_ENT = "tortoise/projection/entities.py"
+_MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
+    (":2430", _CP, 2430, "def _episodic_source_search_text_is_the_lexicon"),
+    (":2487", _CP, 2487, 'return summary == f"{SESSION_SOURCE_SUMMARY_PREFIX}{joined}"'),
+    (":2650-2657", _CP, 2650, "it is the ONLY field the Source FTS index"),
+    (":2650-2651", _CP, 2651, "un-indexes a restored session"),
+    (":2660-2662", _CP, 2660, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
+    (":2712", _CP, 2712, "tail_denied = forbidden | {"),
+    (":3732", _CP, 3732, 'if table == "point"'),
+    (":5618", _ENT, 5618, "s.summary=coalesce($summary, s.summary, '')"),
+)
+
 
 def _resolve(pins, repo: Path = REPO) -> list[str]:
     """Every reason the *pins* do not hold at *repo*'s tree (empty list = they all hold)."""
@@ -196,3 +213,57 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
         "the same reader row at `:4511-4513` — two addresses for one reader, and only one of them can "
         "open at any head. That is the defect class this file exists for."
     )
+
+
+def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
+    """The header's reader rule was an ABSOLUTE, and the absolute was false.
+
+    `#13124`'s header said the enumeration was "the WHOLE of the `main` set" and that every other
+    `file:line` "is at the pin `ccb49741b2ec`". The `#13124` REVIEW measured both false: eight addresses
+    open at `main` and are named in neither list — `cache_projection.py` `:2430`, `:2487`, `:2650-2657`,
+    `:2650-2651`, `:2660-2662`, `:2712`, `:3732` and `projection/entities.py`:5618. `:3732` is a
+    `MERGE (n:…) SET n += $props` at the pin and the `cache_tier` arm at `main`, so a reader who followed
+    the rule opened the pin and landed on a statement their row does not quote: "cite rotated, reader
+    confidently opens the wrong line" — this document's own failure class, inverted.
+
+    Two arms, because the defect was two-sided:
+
+    * CONTENT — each of the eight carries, at `main` (the working tree: this branch is docs-only, so
+      `main`'s `.py` files are this tree's), the fragment the document quotes for it. `_PINS` reaches
+      five of them; `:2430`, `:2487` and `projection/entities.py:5618` were in NO pin before this one.
+    * CLAIM — the header still NAMES them, and no longer states the three absolutes the review measured
+      false, nor the "pin-written remainder" label whose denominator contradicted it.
+
+    NON-VACUOUS on the pre-fix document (`git show 295c26ebc8:<the file>`): the header region — every
+    line before `## 1.` — carries **0** occurrences of `cache_projection` and **1** of each of the three
+    absolutes, so every assertion below reds there. The region bound is what makes the token arm
+    discriminating: `:2430`, `:2487` and `:2712` DO appear later in the document (row 13, §2.5), so an
+    unbounded `in text` check would pass on the broken file.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    header = text.split("## 1. The population", 1)[0]
+
+    rows = tuple((_AUDIT, token, path, line, fragment) for token, path, line, fragment in _MAIN_SET_MISSED)
+    errors = _resolve(rows)
+    assert not errors, "\n".join(errors)
+
+    assert "cache_projection.py" in header, (
+        "the header's `main` set names no `cache_projection.py` address, but that module carries eight "
+        "cites in this document that open at `main` and NOT at the pin (`:3732` is a `MERGE … SET n += "
+        "$props` at `ccb49741b2ec`). An enumeration that omits them is not the set it claims to be."
+    )
+    for token, _path, _line, _fragment in _MAIN_SET_MISSED:
+        assert f"`{token}`" in header, (
+            f"the header's `main` set does not name `{token}`, yet that address opens at `main` and not "
+            "at the pin. Add it to the enumeration with its head instead of widening the claim."
+        )
+
+    for stale, why in (
+        ("mechanical and complete", "the rule is exact only for the addresses IN the enumeration"),
+        ("the WHOLE of the `main` set", "eight addresses open at `main` and sat outside it"),
+        ("pin-written remainder", "its own population counts the `main`-set addresses too"),
+    ):
+        assert stale not in text, (
+            f"the header still claims {stale!r}, which the `#13124` review measured false ({why}). "
+            "A claim a reader can act on has to hold for the file it is written in."
+        )

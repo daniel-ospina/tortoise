@@ -51,15 +51,25 @@ squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/
 'refs/pull/13095/head:ccb49741b2ec'`), so every cite the census wrote can be opened there.
 ⚠️ **That is no longer true of EVERY cite below, and the honest fix is to name both heads rather than to
 pick one.** A later pass has re-derived a **named** set of addresses at `main`; they are enumerated in one
-place in this header (the sixteen, below, plus this revision's own groups) and they open at **`31bddb1dd9`**,
+place in this header (the sixteen, below, plus this revision's own group and the eight the `#13124` review
+found outside it) and they open at **`31bddb1dd9`**,
 the `main` this revision was cut at — a docs commit moves no `.py` line, so they also open at this branch's
-head. **The rule a reader applies is then mechanical and complete: an address in that enumeration opens at
-`main` `31bddb1dd9`; every other `file:line` here was written at the pin and opens at `ccb49741b2ec`.**
+head. **The rule a reader applies is mechanical, and it is exact for the addresses IN that enumeration: an
+address in it opens at `main` `31bddb1dd9`.** ⛔ **There is no rule for an address OUTSIDE it — open the
+line, never infer its head.** Such an address was *written* at the pin `ccb49741b2ec`, and that is where
+the census read it; it is not a promise that the line still carries what the row quotes. `#13083` found
+sixteen written at the pin that never opened there, and the `#13124` review found eight **written at
+`main`** and sitting outside this list — so **the enumeration is a list of what has been RE-DERIVED, not
+the whole of the `main` set**, and the pin is the default for a cite in neither list only because that is
+where it was written.
 ⛔ **Take the head from the list, never from the row.** §2.5's whole-node row carries one of each
 (`record_serve.py:427` is in the `main` list; `projection/__init__.py:14169` is not, so it is at the pin),
 and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. The
-ratio below is the measurement of the pin-written remainder, so it is also the count of how much of it has
-already moved. On any later head they
+ratio below is a **whole-document** measurement — every `path.py:NNNN` pair in this file, the `main`-set
+addresses above included — so it is the count of how much of a document written at the pin has since
+moved, not a count of that remainder alone. ⚠️ **An earlier form of this paragraph called the ratio the
+measurement of the pin's own remainder — a label its own population contradicts**, because the addresses
+this header assigns to `main` are counted in it. On any later head they
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
 **111 of this document's 217** `file:line` pairs name a different line at `534f3e1bee` (counted as the
@@ -95,13 +105,26 @@ file — `search_engine.py` FTS
 `:4097`, label derivation `:2983`, index note `:3050`; `projection/__init__.py` `("Object", ["name"])`
 `:6869`; `sdk.py`'s second `capture_redactions` writer `:2876`; `audit.py`'s carrier probe `:2452`/`:2463`;
 and `mcp_server.py`'s `entity_type` passthrough `:5529` — and the drift figure
-above was re-measured afterwards. ⚠️ **That enumeration is the WHOLE of the `main` set — a range entry
-spans every line it covers — and this revision adds its own entries to it**: `projection/__init__.py`'s
-fulltext declarations `:6854-6870` (the block), `:6864` (`Event`), `:6865` (`Subject`), `:6870` (`Source`);
+above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the `main` set, and an earlier
+form of this header was false for saying it was.** The `#13124` review found a group it did not name —
+`cache_projection.py` `:2430`, `:2487`, `:2650-2657`, `:2650-2651`, `:2660-2662`, `:2712`, `:3732` and
+`projection/entities.py` `:5618` — **eight addresses that open at `main` and not at the pin** (measured,
+`git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `31bddb1dd9`: `:3732` is a
+`MERGE (n:…) SET n += $props` at the pin and the `cache_tier` arm at `main`; `:2712` is
+`placement_spellings()` at the pin and `tail_denied = forbidden | {` at `main`; `projection/entities.py`
+`:5618` is a comment at the pin and the `s.summary=coalesce($summary, s.summary, '')` write at `main`).
+Five of the eight are already asserted at `main` by `_PINS` in `tests/test_12184_shifted_cites.py`, and the
+test beside this paragraph pins all eight to the content they quote. They are listed here now. ⚠️ **So the
+enumeration is what has been RE-DERIVED, each entry carrying the head it was measured at — never a claim
+that nothing else is at `main`** — and a range entry spans every line it covers.
+⚠️ **This revision adds its own entries to it**: `projection/__init__.py`'s fulltext declarations
+`:6854-6870` (the block), `:6864` (`Event`), `:6865` (`Subject`), `:6870` (`Source`);
 `record_serve.py:427` (`READ_POINT_BY_ID`); `sdk.py:36985`/`:37008` (the whole-node pair, still 23 apart);
-`audit.py:817`; and `mcp_server.py:5089`/`:8034`. **Every `file:line` in this document that is in neither
-this revision's list nor the sixteen above is at the pin `ccb49741b2ec`** — that is the enumeration the
-rule at the top of this header sends the reader to.
+`audit.py:817`; and `mcp_server.py:5089`/`:8034`. ⛔ **A `file:line` in NEITHER list is at the pin
+`ccb49741b2ec` BY DEFAULT, not by proof**: the census wrote it there, so open it there first — and if the
+line does not carry what the row quotes, re-derive the cite from the row's own quoted fragment
+(`grep -n '<fragment>' <path>`) rather than moving its head by a guess. That is the enumeration the rule at
+the top of this header sends the reader to.
 ⚠️ **The figure counts the file it is written in, so every revision moves it — and the re-cut onto `main` moved it again, which is why the two figures at the top of this header are MEASURED over this file as it now stands** (314 written spellings → 217 pairs → 111 drifters of the 217 comparable) rather than carried forward by arithmetic from an earlier edition. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
