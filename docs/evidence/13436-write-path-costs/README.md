@@ -55,14 +55,27 @@ of a 16.8–19.6 ms write.**
 **The payload axis — and the first cut of this instrument got it wrong.** Content length against the
 same 1,000-Point population, seeded from a real word list so bytes AND tokenisation scale together:
 
-| content chars/row | `content` moved | nudge call run 1 | nudge call run 2 |
+| content chars/row (declared → measured) | `content` moved | nudge call run 1 | nudge call run 2 |
 |---|---|---|---|
-| 60 | 23.4 KiB | 9.10 ms | 9.10 ms |
-| 300 | 117.1 KiB | 12.84 ms | 13.62 ms |
-| 1,200 | 468.7 KiB | **23.35 ms** | **24.87 ms** |
+| 60 → **59.84** | 23.4 KiB | 9.10 ms | 9.10 ms |
+| 300 → **299.81** | 117.1 KiB | 12.84 ms | 13.62 ms |
+| 1,200 → **1,199.98** | 468.7 KiB | **23.35 ms** | **24.87 ms** |
 
 ⇒ **20× the content length (20× the bytes moved) takes the call from 9.1 ms to 23.4 / 24.9 ms in the two
-runs — 2.6× / 2.7× — so the content IS a term, and the shape is close to linear above 300 chars.** ⛔ **A first cut seeded `"x" * n` and concluded the opposite
+runs — 2.6× / 2.7× — so the content IS a term, and the shape is close to linear above 300 chars.**
+
+⚠️ **«Declared → measured» is not decoration** (`#13436` review P3). The word-list seeder aims at the
+declared length and could land **up to one character short** — `" ".join(out)[:chars]` returns the
+WHOLE join when that join is a character short — so the two committed runs average
+**59.84 / 299.81 / 1,199.98** chars/row. Both artifacts now carry `content_chars_requested` beside the
+MEASURED `content_chars_per_row` / `content_bytes_per_row`, re-derived from their own
+`content_bytes_returned / rows_returned` (the seed is an ASCII word bank, so bytes = characters for
+these runs). The instrument now **pads to exactly the declared length and raises otherwise**, so a
+re-run's axis is 60 / 300 / 1,200 to the character. ⚠️ The multiplier is quoted from the DECLARED axis
+(**20×**) because that is what the axis is chosen on; at the measured lengths it is
+1,199.975 / 59.84 = **20.05×**, the same number to the precision this box holds. (The first cut of this
+instrument was 7 characters short — 53 / 293 / 1,193 published as 60 / 300 / 1,200 — which is where the
+irreconcilable "22×" came from, and why this is now a pinned invariant rather than a comment.) ⛔ **A first cut seeded `"x" * n` and concluded the opposite
 (~flat).** That seed varies BYTES while holding tokenisation constant (one repeated character is one
 distinct token), and `_nudge_candidates` scores by TOKEN OVERLAP — so the shape was blind to the
 scoring leg and its "flat within noise" reading was an artefact. Both the seed and the conclusion were

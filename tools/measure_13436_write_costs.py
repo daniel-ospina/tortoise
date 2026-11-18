@@ -33,7 +33,8 @@ version is recorded in the artifact) through the SHIPPED code, never a re-implem
   blocks are SEQUENTIAL, not interleaved — so a load drift between them lands entirely
   in the delta, and the delta is a block-pair estimate rather than a paired one. That is
   stated rather than fixed: interleaving would halve each block's sample count for the
-  same wall clock, and the artifact publishes load before/after so a reader can see it. The counterfactual is an instance-attribute patch
+  same wall clock, and the artifact publishes load before/after so a reader can see it.
+  The counterfactual is an instance-attribute patch
   (`sdk._nudge_candidates = lambda *a, **k: []`) — the same object, the same graph, the
   same seeds, so nothing but the nudge differs between the two medians.
 * **arm `kindgate`** — the gate's own read is counted, not inferred. `pack_state.
@@ -148,7 +149,7 @@ def _time_call(fn, repeats: int, warmups: int = 2) -> dict:
 
 
 def _content(chars: int, i: int) -> str:
-    """A ~`chars`-long claim built from a REAL word list.
+    """A claim of EXACTLY `chars` characters, built from a REAL word list.
 
     ⛔ NOT `"x" * n`: a repeated character produces one distinct token, so a
     content-length axis built that way varies BYTES while holding TOKENISATION
@@ -157,6 +158,18 @@ def _content(chars: int, i: int) -> str:
     the hard way: the first cut of this tool read a 3.45 ms level shift between two
     1,000-Point arms that differed only in content SHAPE, and the "the bytes are
     not the term" sentence built on it was an artefact of the seed, not a finding.
+
+    ⛔ AND THE LENGTH IS EXACT, NOT "~": the word loop overshoots `chars` and the
+    slice then returns the WHOLE join when `len(" ".join(out)) < chars` (the join
+    loses one character per boundary relative to `used`), so an unpadded body
+    landed up to ONE character short — the two committed runs average
+    **59.84 / 299.81 / 1,199.98** chars/row for a declared 60 / 300 / 1,200, i.e.
+    the axis published a length its rows did not have, at 0.3 % of the axis (#13436
+    review P3; the first cut of this instrument was 7 characters short — 53 / 293 /
+    1,193 published as 60 / 300 / 1,200 — which is what made "22×" irreconcilable
+    with its declared 20×). The trailing SPACES below pad to the declared length
+    without adding a token, and the assertion makes a short body impossible to
+    publish rather than unlikely to occur.
     """
     words = _WORD_BANK
     out: list[str] = []
@@ -167,7 +180,10 @@ def _content(chars: int, i: int) -> str:
         out.append(w)
         used += len(w) + 1
         k += 1
-    return " ".join(out)[:chars]
+    body = " ".join(out)[:chars].ljust(max(1, chars))
+    if len(body) != max(1, chars):
+        raise ValueError(f"seeded body is {len(body)} chars, declared {chars}")
+    return body
 
 
 #: Real vocabulary, so both the byte length AND the token structure scale together.
@@ -281,12 +297,58 @@ def _graph_name(tag: str, n: int) -> str:
 # ── arm 1: `_nudge_candidates` ──────────────────────────────────────────────
 
 
-def _reads_of(rows: list[dict], shape: str) -> int | None:
-    """The measured gate-read count for ONE named shape (None if absent)."""
+#: The one shape whose count is "1 read per namespaced entity written" — a request
+#: that names one pack kind, once. Selected BY NAME, never by position.
+PER_ENTITY_SHAPE = "object_ns"
+
+
+def _reads_of(rows: list[dict], shape: str) -> int:
+    """The measured gate-read count for ONE named shape.
+
+    ⛔ REFUSES when the shape is absent. It used to return `None`, and the composition
+    called it as `1 + (… or 0)` — so a run that lost the shape would have published a
+    single-entity total of **1** (no per-entity read at all) rather than saying it could
+    not derive one. A missing part is not a zero, and the composition is the one block a
+    reader cannot re-derive from the millisecond table beside it.
+    """
     for row in rows:
         if row["shape"] == shape:
             return row["gate_reads_per_request"]
-    return None
+    raise ArmRefused(
+        f"no shape named {shape!r} in this arm's rows ({sorted(r['shape'] for r in rows)}) "
+        "— the per-entity term cannot be derived, and a guess here publishes a total "
+        "nobody measured")
+
+
+def _hosted_commit_composition(rows: list[dict]) -> dict:
+    """The hosted commit door's approval-read count, as arithmetic on measured parts.
+
+    ⛔ A COMPOSITION OF MEASURED PARTS, NOT AN END-TO-END HTTP MEASUREMENT — the
+    per-request count for the HOSTED commit door. Its own comment
+    (`hosted_api.py:23943-23946`) says a second `graph_installed_namespaces` in the
+    pre-check would be "a second whole-graph scan AND a second answer", so the pre-check
+    reads the set ONCE per request and the write doors underneath then pay their own
+    read per namespaced entity. The parts are measured here; the sum is arithmetic on
+    them and is labelled as such so no reader takes it for a request-level sample.
+
+    ⛔ AND THE PER-ENTITY TERM IS SELECTED **BY NAME** (`object_ns`, the one shape that
+    names a pack kind once), never by position: `rows[-1]` is `object_ns_twice`, the
+    deliberately worst case, and reading it published `per_entity_writes: 2` /
+    `single_entity_commit_total_reads: 3` while this block's own `rule` string, the README
+    and the PR body all said 2 (#13436 review P2).
+    """
+    per_entity = _reads_of(rows, PER_ENTITY_SHAPE)
+    return {
+        "rule": "1 pre-check read per request + 1 read per namespaced entity written",
+        "pre_check_reads": 1,
+        "per_entity_writes": per_entity,
+        "pre_check_site": "tortoise/hosted_api.py:23946 (deliberately NOT rescanned at :23976)",
+        "per_entity_site": "tortoise/sdk.py::_create_entity → _refuse_unapproved_kinds_in_props",
+        "single_entity_commit_total_reads": 1 + per_entity,
+        "derived_from_shape": PER_ENTITY_SHAPE,
+        "measured_as": "composition of measured parts — not an HTTP sample",
+    }
+
 
 
 def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
@@ -366,10 +428,19 @@ def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
         _assert_seeded(proj, n, prefix)
         rows = proj.g.query(NUDGE_SQL, params={"ex": []}).result_set
         content_bytes = sum(len(str(r[1] or "").encode("utf-8")) for r in rows)
+        content_chars = sum(len(str(r[1] or "")) for r in rows)
         call = _time_call(lambda: sdk._nudge_candidates(NUDGE_TEXT, limit=3), reps)
         out["by_content_length"].append({
             "points": n,
-            "content_chars_per_row": chars,
+            # MEASURED, and the requested number beside it: `_content` now pads to the
+            # declared length exactly, and publishing BOTH is what lets a reader check
+            # that without re-running the instrument (#13436 review P3 — the committed
+            # runs average 59.84 / 299.81 / 1,199.98 chars/row for 60 / 300 / 1,200).
+            "content_chars_requested": chars,
+            "content_chars_per_row": (
+                round(content_chars / len(rows), 3) if rows else 0),
+            "content_bytes_per_row": (
+                round(content_bytes / len(rows), 3) if rows else 0),
             "rows_returned": len(rows),
             "content_bytes_returned": content_bytes,
             "nudge_call": call,
@@ -490,26 +561,7 @@ def arm_kindgate(n: int, reps: int) -> dict:
         "approved_set": sorted(approved),
         "single_gate_read": single_scan,
         "by_shape": rows,
-        # ⛔ A COMPOSITION OF MEASURED PARTS, NOT AN END-TO-END HTTP MEASUREMENT —
-        # the per-request count for the HOSTED commit door. Its own comment
-        # (`hosted_api.py:23943-23946`) says a second `graph_installed_namespaces`
-        # in the pre-check would be "a second whole-graph scan AND a second
-        # answer", so the pre-check reads the set ONCE per request and the write
-        # doors underneath then pay their own read per namespaced entity. The
-        # parts are measured here; the sum is arithmetic on them and is labelled
-        # as such so no reader takes it for a request-level sample.
-        "hosted_commit_composition": {
-            "rule": "1 pre-check read per request + 1 read per namespaced entity written",
-            "pre_check_reads": 1,
-            # ⛔ BY NAME, never `rows[-1]`: the last shape is the TWO-SPELLING one,
-            # so `[-1]` published 3 here while every prose statement said 2 — the
-            # artifact was the wrong side of its own contradiction (found by review).
-            "per_entity_writes": _reads_of(rows, "object_ns"),
-            "pre_check_site": "tortoise/hosted_api.py:23946 (deliberately NOT rescanned at :23976)",
-            "per_entity_site": "tortoise/sdk.py::_create_entity → _refuse_unapproved_kinds_in_props",
-            "single_entity_commit_total_reads": 1 + (_reads_of(rows, "object_ns") or 0),
-            "measured_as": "composition of measured parts — not an HTTP sample",
-        },
+        "hosted_commit_composition": _hosted_commit_composition(rows),
     }
 
 

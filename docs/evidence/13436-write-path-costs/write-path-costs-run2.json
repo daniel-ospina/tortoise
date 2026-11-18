@@ -101,6 +101,7 @@
       ],
       "cost": "whole-graph approval scan (#5475 gate), per write that names a pack",
       "hosted_commit_composition": {
+        "derived_from_shape": "object_ns",
         "measured_as": "composition of measured parts \u2014 not an HTTP sample",
         "per_entity_site": "tortoise/sdk.py::_create_entity \u2192 _refuse_unapproved_kinds_in_props",
         "per_entity_writes": 1,
@@ -121,8 +122,10 @@
       "arm": "nudges",
       "by_content_length": [
         {
+          "content_bytes_per_row": 59.84,
           "content_bytes_returned": 23936,
-          "content_chars_per_row": 60,
+          "content_chars_per_row": 59.84,
+          "content_chars_requested": 60,
           "nudge_call": {
             "max_ms": 9.804,
             "median_ms": 9.097,
@@ -133,8 +136,10 @@
           "rows_returned": 400
         },
         {
+          "content_bytes_per_row": 299.812,
           "content_bytes_returned": 119925,
-          "content_chars_per_row": 300,
+          "content_chars_per_row": 299.812,
+          "content_chars_requested": 300,
           "nudge_call": {
             "max_ms": 15.193,
             "median_ms": 13.615,
@@ -145,8 +150,10 @@
           "rows_returned": 400
         },
         {
+          "content_bytes_per_row": 1199.975,
           "content_bytes_returned": 479990,
-          "content_chars_per_row": 1200,
+          "content_chars_per_row": 1199.975,
+          "content_chars_requested": 1200,
           "nudge_call": {
             "max_ms": 26.963,
             "median_ms": 24.87,
