@@ -647,7 +647,13 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                         f"{texts!r} became {got_list!r}"
                     )
                     continue
-                for raw_item, got_item in zip(texts, got_list):
+                # `strict=True`: the guard directly above already rejected a
+                # length divergence with its own single diagnosis, so an unequal
+                # pair here is unreachable — and if that guard is ever weakened,
+                # this must RAISE rather than silently compare a prefix (the
+                # fail-open this arm exists to close). ruff B905 (#13492 merge,
+                # inherited red on `main`).
+                for raw_item, got_item in zip(texts, got_list, strict=True):
                     if raw_item in wholly_comment:
                         # (A) already named this item's loss; a second reason from
                         # _type_mismatch would contradict it in the same string.
