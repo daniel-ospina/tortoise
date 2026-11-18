@@ -588,7 +588,8 @@ column is stale on one of them.
 **237 rows added and 237 dropped** of 1,313 (`git show 340d500491:docs/architecture/CYPHER-INVENTORY.md`
 versus a fresh `--markdown` at the MERGE tree **`48585c94ff`**, whose tree carries this branch's hunks). The 226
 above are `main`'s; the extra **11** are
-THIS BRANCH's own, and they are a different cause, not a rounding of the same one: these
+THIS BRANCH's own — the `#13348` hunks, which landed on `main` at `48585c94ff` — and they are a
+different cause, not a rounding of the same one: these
 comment/docstring hunks sit above every statement site in `tortoise/indexer/github_indexer.py`, which
 moves all of that file's rows (a fresh cut at `340d500491`'s tree against a fresh cut at `48585c94ff`
 differs in exactly those 11, and in no other file). 226 + 11 is the whole 237, and **not one of
@@ -597,10 +598,16 @@ tree that can produce it: measured on the base it landed on (`6264dc670c`, which
 branch's hunks) the same two commands give **`226/226`** — this branch's own 11 rows do not exist
 there. (`787/785`, above, is NOT tree-sensitive: `34bd33d22a` against a fresh cut reads 787/785 at
 `6264dc670c` **and** at `48585c94ff`.) Two figures, two different dependencies — and only one of them
-can be got wrong by cutting at the wrong tree. ⛔ An earlier revision
-of this paragraph attributed the indexer's
-11 to `main`'s insertions — `main` inserted nothing into that file — which is the defect class this
-section exists to name.
+can be got wrong by cutting at the wrong tree. ⛔ One note to keep straight, because it is where two
+earlier revisions went wrong in opposite directions: the 11 are `#13348`'s own hunks that LANDED on
+`main` at `48585c94ff` (`git diff --numstat 48585c94ff^ 48585c94ff -- tortoise/indexer/github_indexer.py`
+→ `51 35`), so §7's base paragraph above — which calls that commit `main`'s and says it touches the
+file while moving no census SCALAR — and this sentence agree: between `340d500491` and `6264dc670c`
+that file takes no change at all (`git diff --name-only 340d500491 6264dc670c -- tortoise/` → empty),
+and everything the 11 rows reflect arrives with `48585c94ff`. An earlier revision got the tree binding right and then defended
+the attribution with "`main` inserted nothing into that file", which is true only of the
+`340d500491 → 6264dc670c` interval and false of the commit the figure is measured at; the revision
+before that mis-bound the figure. Same defect class this section names, twice.
 ⚠️ Earlier revisions of this sentence are RETIRED rather than reconciled, because each named a unit,
 a metric or a base it did not measure: one said "31 of 1,313 rows" (`1,313` is the table's LINE
 count — the table carried **1,313 rows over 1,315 lines** at the base it landed on — and `31` was attributed to no
