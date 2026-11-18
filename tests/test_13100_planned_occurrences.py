@@ -1601,6 +1601,101 @@ class TestAMentionIsNotAnOccurrence:
         assert _stage(sdk, plan["id"])["stageId"] == PO.STAGE_SCHEDULED
         assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
 
+    def test_a_LYING_SUBCLASS_kind_cannot_slip_past_the_refusal(self, sdk):
+        """The refusal asks the RENDERING, not `__eq__` (#13578 review).
+
+        A `str` subclass whose `__ne__` returns False makes
+        `event_kind != OCCURRENCE_EVENT_KIND` False, so a `__eq__`-trusting
+        refusal does not fire — and `create_entity` files the kind under its
+        name. The plan then advances to terminal `held` while the read
+        honestly serves it as *planned and never happened*: the exact inversion
+        this guard exists to make unrepresentable, with nothing raising. The
+        assertions are the same three post-conditions the plain-`str` case
+        uses, because a refusal that fires late leaves the same wreckage.
+        """
+
+        class _Kind(str):
+            """Lies to equality in BOTH directions, as the file's `_KeyHash` does."""
+
+            def __eq__(self, other):
+                return False
+
+            def __ne__(self, other):
+                return False
+
+            __hash__ = str.__hash__
+
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held as a lying meeting")
+        with pytest.raises(ValueError) as exc:
+            PO.record_occurrence(sdk, plan["id"], event_kind=_Kind("meeting"))
+        message = str(exc.value)
+        assert "MENTION" in message and "create_entity" in message, message
+        # …and the message names the kind that was REFUSED, not a `!r` the
+        # subclass could have rewritten.
+        assert "'meeting'" in message, message
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+        assert _stage(sdk, plan["id"])["stageId"] == PO.STAGE_SCHEDULED
+        assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
+
+    def test_a_LYING_SUBCLASS_of_the_occurrence_kind_is_written_as_its_RENDERING(
+            self, sdk):
+        """Normalising must cover the value WRITTEN, not only the one CHECKED.
+
+        A subclass that IS the occurrence kind (but lies about equality) is
+        accepted — and `create_entity` must receive the plain rendering, because
+        a guard that compares one kind and writes another admits, one writer
+        call later, the shape it just refused. The `eventKind` kwarg is captured
+        at the door: comparing `==` alone cannot tell a subclass from its
+        rendering (the store flattens it), so the assertion is on the TYPE. This
+        is also the positive control — without it, a mutant that refuses EVERY
+        kind reddens only negatives.
+        """
+
+        class _Kind(str):
+            def __eq__(self, other):
+                return False
+
+            def __ne__(self, other):
+                return False
+
+            __hash__ = str.__hash__
+
+        class _Door:
+            """The sdk with `create_entity` observed, everything else delegated."""
+
+            def __init__(self, inner):
+                self._inner = inner
+                self.kwargs = None
+
+            def __getattr__(self, attr):
+                return getattr(self._inner, attr)
+
+            def create_entity(self, *args, **kwargs):
+                self.kwargs = kwargs
+                return self._inner.create_entity(*args, **kwargs)
+
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held, lying kind")
+        door = _Door(sdk)
+        recorded = PO.record_occurrence(
+            door, plan["id"], event_kind=_Kind(PO.OCCURRENCE_EVENT_KIND))
+        assert recorded["move"].applied is True
+        written = door.kwargs["eventKind"]
+        assert type(written) is str, (
+            f"the subclass {type(written).__name__} reached the write, not its "
+            f"rendering — the guard checked one kind and the store keeps another")
+        assert written == PO.OCCURRENCE_EVENT_KIND
+        stored = g.query(
+            "MATCH (e:Event)-[:aboutObject]->(:Object {id:$p}) "
+            "RETURN e.eventKind",
+            params={"p": plan["id"]}).result_set
+        assert [row[0] for row in stored] == [PO.OCCURRENCE_EVENT_KIND]
+        assert plan["id"] not in {r["id"]
+                                 for r in PO.planned_without_occurrence(g)}
+
     def test_the_explicit_occurrence_kind_is_accepted(self, sdk):
         g = sdk._get_proj().g
         plan = PO.create_plan(sdk, "Held, kind stated")

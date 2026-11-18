@@ -651,11 +651,24 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     """
     from . import pipeline
 
+    # ⛔ THE RENDERING, not `__eq__`. A `str` subclass whose `__ne__` lies
+    # returns False for `event_kind != OCCURRENCE_EVENT_KIND` and slips past this
+    # refusal while `create_entity` files it under the name — the exact inversion
+    # this guard exists to make unrepresentable: the plan advances to terminal
+    # `held` and the read serves it as *planned and never happened*, with nothing
+    # raising. That is the same rule `is_plan_kind` (:176) and
+    # `lifecycle_props_by_rendering` (:703) already follow, and this was the only
+    # caller-supplied-`str` comparison in this file that still trusted `__eq__`
+    # (#13578 review, finding 1). Normalising ONCE means the value WRITTEN is the
+    # same value CHECKED — otherwise the guard compares one kind and the store
+    # keeps another.
+    kind = (str.__str__(event_kind) if isinstance(event_kind, str)
+            else event_kind)
     # ⛔ BEFORE the resolve and before ANY write: a refused call leaves nothing
     # behind (the same rule the two `_owned`/collision guards below follow).
-    if event_kind != OCCURRENCE_EVENT_KIND:
+    if kind != OCCURRENCE_EVENT_KIND:
         raise ValueError(
-            f"Refused: `event_kind={event_kind!r}` cannot be the Event that "
+            f"Refused: `event_kind={kind!r}` cannot be the Event that "
             f"records an OCCURRENCE. This call's `{OCCURRENCE_REL}` link is the "
             f"claim that the plan happened, and an occurrence is told apart from "
             f"a MENTION of the plan by the linked Event's kind — so the Event "
@@ -663,7 +676,7 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
             f"§5). WHAT TO DO: call this with no `event_kind` to record that the "
             f"plan happened; to record something merely ABOUT the plan (a note, "
             f"an email summary, a reminder), write the Event directly — "
-            f"`create_entity('event', <name>, eventKind={event_kind!r}, "
+            f"`create_entity('event', <name>, eventKind={kind!r}, "
             f"aboutObject=<plan id>)` — which is a mention and never reads as "
             f"the occurrence. Nothing has been written.")
 
@@ -716,7 +729,7 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
             f"{', '.join(collided)} from the props.")
     event_name = name or cur.get("name") or plan_id
     created = sdk.create_entity(
-        "event", event_name, eventKind=event_kind,
+        "event", event_name, eventKind=kind,
         **({"startedAt": at} if at is not None else {}),
         aboutObject=plan_id,
         **event_props)
