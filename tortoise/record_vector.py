@@ -57,6 +57,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -66,11 +68,14 @@ __all__ = [
     "HNSW_ITERATIVE_SCAN",
     "LABEL_SERVED",
     "LOG_NAME",
+    "READINESS_TTL_SECONDS",
+    "RECORD_JOURNAL_ENV",
     "RecordVectorDeclined",
     "RecordVectorError",
     "VectorShortfall",
     "armed",
     "cutover_armed",
+    "journal_ready",
     "searcher",
 ]
 
@@ -968,6 +973,428 @@ def cutover_armed() -> bool:
     return is_truthy(os.environ.get(ARMING_ENV))
 
 
+#: Where this process's tenant journal lives — the SECOND input a coverage check
+#: needs. `journal_coverage` reads the RECORD; the journal's own enumeration is
+#: the caller's fact, and on the read path nobody holds it (the searcher has the
+#: record's `(org_id, graph_id)`, never the cache graph name the journal path is
+#: derived from). So the operator DECLARES it — the same declaration discipline
+#: `TORTOISE_RECORD_SINGLE_TENANT` already takes, and for the same reason: a
+#: wrong guess about which tenant this process serves would gate the wrong one.
+#:
+#: Unset is NOT an error and NOT a silent skip: the gate CANNOT answer without
+#: it, so `journal_ready` returns "not enforced" and a WARNING is emitted once per
+#: process naming exactly what is unchecked (see :func:`journal_ready`).
+#:
+#: ⛔ THE DECLARATION IS SUBJECT TO `#9192`'s RULE, and this module ENFORCES it
+#: rather than repeating its name: a journal path is process-global, so it can
+#: only describe ONE tenant. `journal_ready` therefore refuses to apply it unless
+#: the deployment declared single tenancy
+#: (`single_tenant_declared()`, `TORTOISE_RECORD_SINGLE_TENANT=1`) — on a process
+#: serving several tenants the comparison would be tenant A's journal against
+#: tenant B's rows, which `record_writer`'s own docstring calls "not a weaker
+#: answer than the scope — it is a WRONG one, and it fails silently". The
+#: direction is `#9192`'s: NOT READY (and one warning naming the declaration),
+#: because a check that cannot be applied to this tenant must never report that
+#: tenant as complete. The consequence is stated where it bites: an armed
+#: MULTI-TENANT deployment keeps the graph branch until the journal can be
+#: resolved PER SCOPE rather than from the environment (#13366).
+RECORD_JOURNAL_ENV = "TORTOISE_RECORD_JOURNAL"
+
+#: How long one tenant's readiness verdict is trusted. A coverage read is one
+#: aggregate over `journal_event`, but this gate runs on EVERY read construction,
+#: and a search must not pay a round trip it does not need. 30 s bounds how long
+#: a record that has just fallen behind can still be served by the dense leg —
+#: and a positive verdict is the only one that can be wrong in that direction
+#: (a NEGATIVE verdict keeps the graph branch, which is always correct).
+READINESS_TTL_SECONDS = 30.0
+
+#: `(dsn, org, graph, journal) -> (checked_at, ready)`.
+_READINESS: dict[tuple[str, str, str, str], tuple[float, bool]] = {}
+_READINESS_LOCK = threading.Lock()
+
+
+def _readiness_key(scope: _Scope, record_dsn: str | None) -> tuple[str, str, str, str] | None:
+    """The cache key, or ``None`` when the DSN cannot be resolved.
+
+    ⛔ A MALFORMED DSN IS "NOT READY", not an exception into the search path.
+    `searcher` resolves the DSN before calling this, so the arm is unreachable
+    from there — but this function is also reachable from the public
+    :func:`journal_ready`, and the read path's rule is that a check which cannot
+    run keeps the graph branch (it never turns a search into a 500).
+    """
+    # The DSN is keyed by its FINGERPRINT, never by value (#2903/#2796): this
+    # dict is process-global and a raw DSN is secret material.
+    from .record_writer import dsn_fingerprint
+    from .record_writer import record_dsn as _resolve
+
+    try:
+        dsn = _resolve(record_dsn) or ""
+    except Exception:
+        return None
+    return (dsn_fingerprint(dsn) if dsn else "", scope.org_id,
+            scope.graph_id, os.environ.get(RECORD_JOURNAL_ENV, ""))
+
+
+def reset_readiness_cache() -> None:
+    """Forget every readiness verdict. For tests, and for an operator who has
+    just completed a backfill and does not want to wait out the TTL."""
+    with _READINESS_LOCK:
+        _READINESS.clear()
+
+
+def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
+                  now: float | None = None,
+                  timeout_ms: int | None = None) -> bool:
+    """Does the record hold this tenant's journal? The dense leg's gate (#13331).
+
+    `ARMING_ENV` is a DEPLOYMENT switch; this is the per-tenant CONDITION that
+    keeps it honest. Requirement 5 of `#13331`: *"do not arm the dense leg for a
+    tenant whose backfill is incomplete."* The record is a fold of the journal,
+    so a fold that is short of positions is a corpus that is short of memories
+    — and the dense leg would answer from it with `mechanism=pgvector,
+    reason=ok`, which is the silent-invisibility class `#5090` Q2 forbids.
+
+    THE CHECK IS EXACT AND IT NEEDS BOTH SIDES: `journal_event`'s positions (the
+    RECORD) against the journal's own enumeration (`EventLog.position()`), which
+    is the number a replay numbers against. The read path holds only the
+    record's `(org_id, graph_id)` — the journal path is derived from the CACHE
+    graph's name, which this scope does not carry — so the operator DECLARES the
+    path (:data:`RECORD_JOURNAL_ENV`), the same declaration discipline
+    `TORTOISE_RECORD_SINGLE_TENANT` takes and for the same reason.
+
+    ⛔ WITHOUT THE DECLARATION THE CHECK CANNOT RUN, and this is stated rather
+    than papered over. The tempting record-only fallback is WRONG in both
+    directions and is therefore not implemented:
+
+    * requiring a contiguous prefix from 1 would refuse EVERY live-write tenant —
+      a fresh graph is seeded at its journal's floor and legitimately starts at
+      position N > 1 (`record_runner.read_checkpoint`'s `allocated` arm exists
+      for exactly that shape), so the gate would disable the very population
+      this issue is about;
+    * accepting any contiguous suffix would never catch an incomplete backfill,
+      which is the defect the gate exists for.
+
+    So an undeclared journal returns ``True`` (the deployment switch decides, as
+    it did before this issue) and emits ONE WARNING per process naming what is
+    unchecked. The arming procedure makes the declaration part of the act: read
+    `python -m tortoise record-reconcile --journal <path>` (it exits 3 with
+    `verdict=unprojected_journal` while the record lags, and it REFUSES the leg
+    with exit 2 rather than reporting a clean pass when the path cannot be
+    counted), then declare the path AND `TORTOISE_RECORD_SINGLE_TENANT=1` for
+    any tenant the leg is armed for — the second is what lets the declaration be
+    applied at all (see below).
+
+    FAIL-CLOSED once declared: an unreadable journal, an unreadable record, a
+    missing dependency — every failure keeps the graph branch, which is a correct
+    answer (`#11642` P1), and a check that cannot run must never be read as
+    "ready".
+
+    ⛔ THE MEASUREMENT IS BOUND BY THE READ'S OWN BUDGET (`timeout_ms`), because
+    it runs on the REQUEST's thread *before* :func:`searcher` returns; an
+    unbounded read here is the `#11691` defect re-opened one function above the
+    fix for it. See :func:`_measure_readiness`.
+
+    ⛔ AND THE DECLARATION MUST BE APPLICABLE TO THIS TENANT, or it is not
+    applied (the `#9192` rule, ENFORCED here rather than cited): a
+    process-global journal path describes ONE tenant, so on a process that did
+    not declare single tenancy
+    (:func:`tortoise.record_writer.single_tenant_declared`) the comparison would
+    be one tenant's journal against another tenant's rows. That is not a weaker
+    answer than the scope, it is a WRONG one, and it fails silently — so this
+    returns ``False`` with ONE warning naming `TORTOISE_RECORD_SINGLE_TENANT`.
+    The graph branch answers instead, which is `#11642` P1's correct answer,
+    until the journal can be resolved per scope (#13366).
+
+    ⛔ THE COUNT COMES FROM `EventLog.position_readonly()`, never from
+    `EventLog.position()` (#13331 review F2): the latter takes the append lock
+    and opens the journal for WRITING, so a read-shaped call on the request
+    thread could suppress the `seq` of a concurrent live write for 30 s (the
+    `_FLOCK_UNHEALTHY` amplification) and would need write permission on a
+    journal a reader is legitimately mounting read-only. A journal path that
+    does not EXIST is "not measured" (``None``), never "0 records, so nothing is
+    missing" — the false PASS of review F3/B.
+    """
+    if not os.environ.get(RECORD_JOURNAL_ENV):
+        _warn_readiness_undeclared()
+        return True
+    if not _journal_declaration_applies():
+        return False
+    clock = time.monotonic() if now is None else now
+    key = _readiness_key(scope, record_dsn)
+    if key is None:
+        return False
+    with _READINESS_LOCK:
+        cached = _READINESS.get(key)
+    if cached is not None and clock - cached[0] < READINESS_TTL_SECONDS:
+        return cached[1]
+    ready = _measure_readiness(scope, record_dsn=record_dsn,
+                               timeout_ms=timeout_ms)
+    with _READINESS_LOCK:
+        _READINESS[key] = (clock, ready)
+    return ready
+
+
+#: One warning per process, not one per read.
+_WARNED_UNDECLARED = False
+_WARN_LOCK = threading.Lock()
+
+
+def _warn_readiness_undeclared() -> None:
+    global _WARNED_UNDECLARED
+    with _WARN_LOCK:
+        if _WARNED_UNDECLARED:
+            return
+        _WARNED_UNDECLARED = True
+    logging.getLogger(LOG_NAME).warning(
+        "record dense leg: %s is armed but %s is unset, so the PER-TENANT "
+        "backfill-coverage gate cannot run — the leg will serve any tenant the "
+        "deployment switch admits, including one whose record is short of "
+        "journal positions (#13331 requirement 5, #5090 Q2). Declare the "
+        "tenant's journal path and re-check with `python -m tortoise "
+        "record-reconcile --journal <path>` before arming a tenant",
+        ARMING_ENV, RECORD_JOURNAL_ENV)
+
+
+def _journal_declaration_applies() -> bool:
+    """May this process's journal declaration be applied to a tenant at all?
+
+    ⛔ ONE PATH, PROCESS-GLOBAL, THEREFORE ONE TENANT (#9192). The env pair
+    `TORTOISE_RECORD_ORG`/`TORTOISE_RECORD_GRAPH` is gated exactly this way by
+    :func:`tortoise.record_writer.single_tenant_declared`, whose docstring states
+    the reason verbatim: *"it can only be correct where the process serves one
+    graph … on a process serving several tenants it is not a weaker answer than
+    the scope — it is a WRONG one, and it fails silently."* `journal_ready`
+    measures THIS tenant's rows against the journal the declaration names, so a
+    declaration that does not apply to this tenant must not produce a verdict
+    about it: ``False`` keeps the graph branch (a correct answer, `#11642` P1),
+    while ``True`` would be a false PASS over a tenant nobody measured.
+
+    Unset AND unimportable are the same answer (not applicable): this runs on
+    the SEARCH path, where a missing arming module is not worth a raise.
+    """
+    try:
+        from .record_writer import single_tenant_declared
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable arming module is "unarmed"
+        return False
+    try:
+        applies = bool(single_tenant_declared())
+    except Exception:  # noqa: BLE001, RUF100 — a raising declaration is not a declaration
+        return False
+    if not applies:
+        _warn_readiness_multitenant()
+    return applies
+
+
+#: One warning per process for the multi-tenant refusal, like the undeclared one.
+_WARNED_MULTITENANT = False
+
+#: A THIRD absence, and the one an operator is most likely to cause: the journal
+#: IS declared and the tenancy IS declared, but the path cannot be counted
+#: (a typo, a reader deployment that does not mount the writer's volume). Keyed
+#: by path so the message can name the one to fix.
+_WARNED_UNMEASURABLE: set[str] = set()
+
+
+#: A FOURTH absence: the journal was COUNTED, and the count contradicts the
+#: record (it enumerates no records while the record holds rows). Keyed by path
+#: like `_WARNED_UNMEASURABLE`, and reported for the same reason.
+_WARNED_CONTRADICTORY: set[str] = set()
+
+
+def _warn_readiness_unmeasurable(path: str | None) -> None:
+    """Say ONCE PER PATH that a declared journal could not be counted.
+
+    ⛔ WARNING, not DEBUG (#13331 review F2, point 3). The gate is CORRECTLY
+    off — a check that cannot run is not ready — but this is the one failure the
+    operator CAUSED, by declaring a path, and it was the quietest of the three:
+    "nothing declared" warns (`_warn_readiness_undeclared`) and "cannot be
+    attributed" warns (`_warn_readiness_multitenant`), so a typo in the path was
+    the only way to disable the dense leg with nothing in the default log. The
+    review priced exactly that: *"the dense leg is silently off for ever on that
+    box with no operator-visible signal in the default log level"*. Once per
+    path, because a read path must not log per read.
+    """
+    key = path or ""
+    with _WARN_LOCK:
+        if key in _WARNED_UNMEASURABLE:
+            return
+        _WARNED_UNMEASURABLE.add(key)
+    logging.getLogger(LOG_NAME).warning(
+        "record dense leg: %s declares %r, which this process cannot count — "
+        "it is missing, unreadable, or not a regular file. An uncountable "
+        "journal is NOT an empty one, so every tenant keeps the graph branch "
+        "until the path is fixed (#13331, #5090 Q2). Reported once per path.",
+        RECORD_JOURNAL_ENV, key)
+
+
+def _warn_readiness_contradictory(path: str | None, cov) -> None:
+    """Say ONCE PER PATH that a counted journal CONTRADICTS the record.
+
+    ⛔ A LEG THAT IS CORRECTLY OFF MUST NOT BE SILENTLY OFF — the same rule
+    `_warn_readiness_unmeasurable` states, for the shape one branch over
+    (#13345 review P2). Here the journal WAS counted and the count cannot be the
+    one behind this tenant's rows, so `JournalCoverage.unprojected` refuses to
+    answer and the gate keeps the graph branch. Without this, declaring a
+    rotated, replaced or freshly-truncated path would disable the dense leg for
+    ever with nothing in the default log — the failure an operator caused
+    THEMSELVES being the quietest one, which review F2 point 3 already priced.
+
+    ⛔ THE REASON IS THE COVERAGE'S OWN (#13345 review F2), not a sentence
+    re-spelled here. The first cut hardcoded "enumerates NO records", which was
+    the whole vocabulary when the empty-journal shape was the only one guarded;
+    the guard now refuses ANY record holding more positions than its journal
+    enumerates (a rotated file that has since received a few lines), and a
+    message that names the empty case for a 100-row record would send the
+    operator looking for an empty file. Quoting the reading is also what
+    `record_reconcile.log_result` does, so the log and the reconcile line cannot
+    describe one contradiction in two ways.
+    """
+    key = path or ""
+    with _WARN_LOCK:
+        if key in _WARNED_CONTRADICTORY:
+            return
+        _WARNED_CONTRADICTORY.add(key)
+    logging.getLogger(LOG_NAME).warning(
+        "record dense leg: %s declares %r, which CONTRADICTS this tenant's "
+        "record — %s. Its lag cannot be measured, so every tenant keeps the "
+        "graph branch (a correct answer, #11642 P1) until the declaration "
+        "names the right file (#13371, #13345). Reported once per path.",
+        RECORD_JOURNAL_ENV, key, cov.unprojected_unknown_reason)
+
+
+def _warn_readiness_multitenant() -> None:
+    """Say ONCE PER PROCESS that one journal cannot serve several tenants.
+
+    ⛔ IT NAMES THE DECLARATION IN PROSE AND NEVER READS IT (#9192's reader
+    pin). This module must not touch the process-global tenant variables —
+    `tests/test_9192_tenant_armed_by_request.py::
+    test_the_env_pair_has_no_reader_outside_the_gated_resolver` allows those
+    literals only inside `record_writer`'s gated resolver, and the earlier cut
+    of this warning imported `RECORD_SINGLE_TENANT_ENV` to format its message.
+    That import is a READER as far as the AST pin can tell, and it is the exact
+    shape the pin exists to refuse (a copy of the read shape beside the gate).
+    Naming the variable in an operator message is not a read — `cache_leg.py`
+    already spells it the same way — and the only thing this function needs is
+    the WORD the operator can search for, never the value.
+    """
+    global _WARNED_MULTITENANT
+    with _WARN_LOCK:
+        if _WARNED_MULTITENANT:
+            return
+        _WARNED_MULTITENANT = True
+
+    logging.getLogger(LOG_NAME).warning(
+        "record dense leg: %s names ONE journal, but this process did not "
+        "declare single tenancy (TORTOISE_RECORD_SINGLE_TENANT is unset), so "
+        "the per-tenant backfill "
+        "coverage of EACH tenant cannot be measured — comparing one tenant's "
+        "journal against another tenant's rows is a wrong answer, not a weak "
+        "one (#9192). Every tenant on this process keeps the graph branch, "
+        "which is a correct answer, until the journal is declared per tenant "
+        "(#13366); set TORTOISE_RECORD_SINGLE_TENANT=1 ONLY in a process that "
+        "serves one graph",
+        RECORD_JOURNAL_ENV)
+
+
+def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
+                       timeout_ms: int | None = None) -> bool:
+    """The coverage read behind :func:`journal_ready`. Never raises.
+
+    ⛔ ``present > 0`` IS PART OF THE ANSWER, not a formality: `contiguous` is
+    true for an EMPTY record (there is no hole to find), so without it a tenant
+    whose backfill never ran would read as ready and be served an empty dense
+    leg as though it were a small corpus.
+
+    ⛔ BOUNDED BY THE READ'S BUDGET, AND ONLY THE STATEMENT IT NEEDS (#13331
+    review F3). This runs on the REQUEST's thread, before :func:`searcher`
+    returns, so an unbounded door here is the `#11691` defect one function above
+    the fix for it: the door's ceiling is ``RECORD_STATEMENT_TIMEOUT_MS`` (15 s)
+    and the read's own budget is typically 500 ms, so a wedged record could
+    stall the request for the door's ceiling *before* the leg's budget existed
+    at all. Two things keep that shut, and both are needed:
+
+    * the budget is DIVIDED by :func:`record_statement_ms` — the same one
+      convention :func:`vector_search` uses — and reaches the door as its
+      ``statement_timeout_ms``, so the read's budget TIGHTENS the ceiling and
+      never widens it;
+    * ``want_gap=False``: :func:`journal_coverage` otherwise issues a SECOND
+      statement (``_FIRST_GAP_SQL``) whose answer this function never reads —
+      readiness asks only ``unprojected`` and ``present``. Issuing it would
+      spend the read's budget on a fact nobody consumes.
+
+    ⛔ AND THE JOURNAL IS COUNTED READ-ONLY (#13331 review F2).
+    `EventLog.position_readonly()` is `position()` without its side effects: no
+    append lock (so a wedged peer cannot park this call, and a timeout here can
+    never stamp the path `_FLOCK_UNHEALTHY` and suppress a concurrent writer's
+    `seq` for 30 s), no ``a+b`` open (so a journal mounted READ-ONLY is
+    countable instead of an endless `OSError`), and ``None`` for a path it could
+    not count — which is this function's ``False``, not the ``0`` that would read
+    as "the journal is empty, so the record holds all of it" (review F3/B).
+    """
+    path = os.environ.get(RECORD_JOURNAL_ENV)
+    try:
+        from .log import EventLog
+
+        enumerated = EventLog(path).position_readonly()
+    except Exception as exc:
+        logging.getLogger(LOG_NAME).debug(
+            "record dense leg: the declared journal %r could not be counted "
+            "(%s) — keeping the graph branch", path, type(exc).__name__)
+        return False
+    if enumerated is None:
+        # ⛔ NOT ZERO (#13331 review F3/B). A declared path that does not exist
+        # is the shape a mistyped value or an unmounted volume takes, and a `0`
+        # here makes `unprojected` 0 for any tenant whose record holds a row —
+        # i.e. the gate reports a journal it never counted as fully projected.
+        # WARNED once per path, not DEBUG: see `_warn_readiness_unmeasurable`.
+        _warn_readiness_unmeasurable(path)
+        return False
+    conn = None
+    try:
+        from .record_projection import journal_coverage
+        from .record_serve import open_record
+
+        # ⚠️ TWO CALL SHAPES ON PURPOSE, as in `vector_search`: with no budget
+        # the door is asked exactly as it was before this fix (no kwarg, the
+        # door's own bound), so the unbudgeted callers and the one-argument
+        # doubles that stub this door stay honest about what is asked for.
+        conn = (open_record(record_dsn) if timeout_ms is None
+                else open_record(record_dsn,
+                                 statement_timeout_ms=record_statement_ms(timeout_ms)))
+        cov = journal_coverage(conn, org_id=scope.org_id,
+                               graph_id=scope.graph_id,
+                               enumerated=enumerated,
+                               want_gap=False)
+    except Exception as exc:
+        logging.getLogger(LOG_NAME).debug(
+            "record dense leg: the coverage check could not answer (%s) — "
+            "keeping the graph branch", type(exc).__name__)
+        return False
+    finally:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+    # Exact: no position the journal enumerates may be missing from the record.
+    # `present > 0` guards the shape where the journal itself is empty (a brand
+    # new tenant whose first live write has not landed): there is nothing to
+    # serve, and the graph branch is the correct answer.
+    # ⛔ `unprojected` answers `None` — never `0` — when the reading is not a
+    # measurement, and the JOURNAL-AHEAD-IMPOSSIBLE shape is one of them: a
+    # record holding MORE positions than its journal enumerates cannot be a
+    # fold of that journal (it is the empty-journal case when the journal
+    # enumerates none, and a rotated/replaced file when it enumerates fewer
+    # than the record holds), so `max(enumerated - within_prefix, 0)` there is a
+    # detectable contradiction, and `== 0` below would arm the dense leg on the
+    # strength of it (JournalCoverage.unprojected_unknown_reason,
+    # #13371/#13345 P2/F2). The `None` cannot come
+    # from an uncountable journal here — that arm returned above — so it is
+    # exactly that contradiction, and it is REPORTED rather than silently off.
+    if cov.unprojected is None:
+        _warn_readiness_contradictory(path, cov)
+        return False
+    return cov.unprojected == 0 and cov.present > 0
+
+
 #: The shape `run_vector_query` consumes for BOTH legs: ``(id, distance,
 #: recency)`` rows, or ``None`` for "this label is not served here". The FOURTH
 #: positional argument is the caller's `#689` `excluded_statuses` — declared so a
@@ -1094,6 +1521,19 @@ def searcher(
         return None
     scope = _resolve_scope(carried)
     if scope is None:
+        return None
+    # #13331 requirement 5 — the PER-TENANT condition on the deployment switch:
+    # a tenant whose record does not hold its journal is not served from it. This
+    # is the arm `#13210` §7.4 said could only start moving once live writes were
+    # wired: a fresh tenant's positions are consumed at write time, so its record
+    # is authoritative for new rows with no backfill to wait for.
+    if not journal_ready(scope, record_dsn=record_dsn,
+                         timeout_ms=timeout_ms):
+        logging.getLogger(LOG_NAME).debug(
+            "record dense leg: tenant %s/%s's record does not hold its journal "
+            "yet (or could not be measured) — the graph branch answers, which "
+            "is the correct branch and not a degraded one (#11642 P1, #13331)",
+            scope.org_id, scope.graph_id)
         return None
 
     def _search(

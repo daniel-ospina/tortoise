@@ -11,7 +11,13 @@ from __future__ import annotations
 
 import logging
 
-from . import derived_embedding, record_writer
+# #13447/#13456: `derived_embedding` is the one derive-and-encode seam this door
+# now shares with `mining` — main's addition, kept. ⛔ `record_writer` is NOT
+# imported here: this door reaches the record only through
+# `live_write.write`, the chokepoint `test_9078…::test_only_the_shipped_package_
+# can_satisfy_the_wiring_gate` holds it to, so main's second name on this import
+# would be an unused import that re-opens the direct seam call that gate refuses.
+from . import derived_embedding
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
 
@@ -43,7 +49,6 @@ from .percent import refuse_malformed_percent_in_payload
 from .projection import (
     _ENTITY_MUTATION_STATE_OPS,
     EVIDENCE_FOLD_KEY,
-    _live_write_scope,
     fold,
 )
 
@@ -2164,35 +2169,29 @@ class EventAPI:
         # reason `amountMinor` without a currency must not land.
         refuse_malformed_percent_in_payload(event, door=f"EventAPI.{type_}")
         # #9190: the append REPORTS the record's journal position, and that
-        # number is the record's `journal_event.seq`. Dropping it here is what
-        # kept layer 1 empty on live writes (the row was deferred with a
-        # `position=False` that attributed the gap to #9190, which has landed).
-        seq = self.log.append(event)
-        # #9188: the Postgres record, AFTER the append (the commit point, §17.1)
-        # and before the fold. This door is a LIVE journal writer — the v1
-        # extractor, `ingest`, `docs_miner`, `mining` and the CLI all append
-        # through it — so without this call every one of their records would
-        # reach the journal and never the record. Best-effort by construction
-        # (`write_live_record` counts and logs, never raises): the append above
-        # already committed.
+        # number is the record's `journal_event.seq`.
         #
-        # ⛔ but only when the log IS a journal. `durable` is the log's own
-        # answer, defaulting True for every duck-typed double and for
-        # `EventLog`; `TortoiseSDK._extract_session_llm` hands this door an
-        # `_InMemoryEventLog` (no file I/O, by design) whose records no journal
-        # ever carries, so a row from it could never be reproduced or healed by
-        # a replay — the record is `replay(journal)`, and a scratch buffer is
-        # not a journal. The seam DECLINES it (no row) and counts the decline on
+        # #13331 — ONE CHOKEPOINT (epic #7879 surface S2). Append → record →
+        # cache fold is ONE call (`tortoise/live_write.py`), so this door cannot
+        # order them differently from the SDK's or the miner's. The append is
+        # still the commit point (#7951) and it is not conditional: the truth
+        # store never waits for a derived store, so a record refusal leaves a
+        # NAMED `unprojected` disagreement rather than withholding the line.
+        #
+        # ⛔ `durable` is the log's own answer. `TortoiseSDK._extract_session_llm`
+        # hands this door an `_InMemoryEventLog` (no file I/O, by design) whose
+        # records no journal ever carries, so a row from it could never be
+        # reproduced or healed by a replay — the record is `replay(journal)`, and
+        # a scratch buffer is not a journal. `write_live_record` DECLINES it (no
+        # row) and counts the decline on
         # `monitoring.metrics()["record_non_journal_skips"]`, NOT on
         # `record_write_failures`: a lane with no journal by design lost nothing a
         # replay could restore (#9231 review P2).
-        record_writer.write_live_record(
-            event, durable=getattr(self.log, "durable", True), seq=seq)
-        if self.projection is not None:
-            # #7951 §17.1: journal-first door — the append above is the COMMIT
-            # POINT, so the fold runs inside the live-write scope.
-            with _live_write_scope("event_api._emit"):
-                self.projection.apply(event)
+        from . import live_write
+
+        live_write.write(
+            event, log=self.log, durable=getattr(self.log, "durable", True),
+            projection=self.projection, scope_label="event_api._emit")
         return event
 
     def emit_belief(self, type_: str, **payload) -> None:

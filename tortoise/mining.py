@@ -23,7 +23,12 @@ from datetime import datetime, timezone
 
 from typing import Any
 
-from . import derived_embedding, record_writer
+# #13447/#13456: `derived_embedding` is the one derive-and-encode seam this door
+# shares with `api` — main's addition, kept. ⛔ `record_writer` is NOT imported
+# here: this door reaches the record only through `live_write.write` (the
+# chokepoint), so the direct seam name would be unused and would re-open the
+# write path `test_7951_write_doors.py` classifies.
+from . import derived_embedding
 from .api import EventAPI
 from .extractor import (
     MockExtractor,
@@ -998,24 +1003,21 @@ class ConversationMiner:
         # the class. A double whose ``projection`` carries no graph handle
         # abstains, exactly as a projection-less lane does.
         EventAPI._refuse_unapproved_kinds(api, record)
-        seq = api.log.append(record)
-        # #9188: the Postgres record, AFTER the append (the commit point) and
-        # before the fold — this miner builds its OWN envelope and appends
-        # directly, so without this call every record it mines reaches the
-        # journal and never the record. Best-effort by construction.
+        # #13331 — ONE CHOKEPOINT (epic #7879 surface S2): append → record →
+        # cache fold is ONE call. This miner builds its OWN envelope and used to
+        # append directly, which made it the second spelling of the ordering
+        # contract; it now shares the SDK's and `EventAPI._emit`'s.
+        #
         # DURABILITY IS READ, not assumed (#9231 review P1): the miner appends
         # to `api.log`, which may be the MCP lane's temp scratch buffer. The
         # seam must see that, or a scratch buffer files a row the journal can
         # never replay.
-        record_writer.write_live_record(
-            record, durable=getattr(api.log, "durable", True), seq=seq)
-        if api.projection is not None:
-            # #7951 §17.1: journal-first door (its own envelope) — the append
-            # above is the COMMIT POINT, so the fold runs inside the
-            # live-write scope.
-            from tortoise.projection import _live_write_scope
-            with _live_write_scope("conversation_miner._emit_event"):
-                api.projection.apply(record)
+        from tortoise import live_write
+
+        live_write.write(
+            record, log=api.log, durable=getattr(api.log, "durable", True),
+            projection=api.projection,
+            scope_label="conversation_miner._emit_event")
 
     @staticmethod
     def _make_event(
