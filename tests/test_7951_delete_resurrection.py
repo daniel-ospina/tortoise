@@ -1125,6 +1125,100 @@ class TestOrphanedWriteSweepIsJournaled:
             "was a NO-OP (the same-id re-capture won the race) — a replay "
             "would delete the live re-capture (#7951 P2-d)")
 
+    def test_sweep_records_its_live_write_target(self, hosted, monkeypatch):
+        """#12943: the capture-sweep lane must be PINNED, not merely explained.
+
+        `_capture_session_impl`'s Source sweep is a raw multi-statement
+        `DETACH DELETE` that CHOOSES its graph and folds no record, so it calls
+        `projection.note_live_write_target` directly. Deleting that call left
+        the whole repo green while the PR body claimed the lane was pinned
+        (review cycle 7, F1) — and it stayed invisible because every existing
+        registry assertion drives a lane that ALSO folds, so the fold hook
+        records the same projection's target regardless.
+
+        Isolation: the registry is reset immediately before the sweep's own
+        Source statement executes, and it is sampled again at the FIRST
+        statement issued after it. From the trace at this head the only hook
+        call inside that window is the sweep's own — the capture's fold hooks
+        ran before the reset, and the onboarding checkpoint gateways fire after
+        the next statement — so the sample is exactly 1 with the hook present
+        and `{}` with it deleted.
+        """
+        from tortoise.cache_leg import (
+            cache_write_targets,
+            reset_cache_write_targets,
+        )
+
+        tc, sdk = hosted
+        real_proj = sdk._get_proj()
+        real_query = real_proj.g.query
+        sid = "s-7951-target"
+        after_sweep = {"armed": False}
+        observed: list[dict[str, int]] = []
+
+        def fake_query(query, params=None, **kw):
+            merged = dict(params or {})
+            merged.update(kw)  # state helpers pass params as **kwargs
+            if after_sweep["armed"]:
+                # The first statement issued AFTER the sweep finished: the
+                # sweep's hook has run, and nothing else has yet.
+                after_sweep["armed"] = False
+                observed.append(cache_write_targets().copy())
+            if "DETACH DELETE" in query and "src:Source {url:$url}" in query:
+                # Last sweep statement, issued immediately before the hook:
+                # clear the capture's earlier fold counts, so what remains can
+                # only be the sweep lane's own contribution.
+                reset_cache_write_targets()
+                after_sweep["armed"] = True
+                return type("Rows", (), {"result_set": [[1]]})()
+            if ("DETACH DELETE" in query
+                    and ("p.id IN $ids" in query
+                         or "e.eventId = $eid" in query)):
+                return type("Rows", (), {"result_set": [[1]]})()
+            if "count(s)" in query and "{id:$sid}" in query:
+                # "the delete already won": dead branch -> the sweep runs.
+                return type("Rows", (), {
+                    "result_set": [[0, None, None, None]]})()
+            return real_query(query, params=merged)
+
+        class _FakeProj:
+            g = type("G", (), {"query": staticmethod(fake_query)})()
+            query = staticmethod(fake_query)
+
+            def __getattr__(self, name):  # delegate everything else
+                return getattr(real_proj, name)
+
+        class _GuardSdk:
+            def _get_proj(self):
+                return _FakeProj()
+
+            def __getattr__(self, name):
+                return getattr(sdk, name)
+
+        real_make_sdk = _ha._make_sdk
+
+        def patched_make_sdk(namespace=None, **kw):
+            if namespace == TEAM_ID:
+                return _GuardSdk()
+            return real_make_sdk(namespace=namespace, **kw)
+
+        monkeypatch.setattr(_ha, "_make_sdk", patched_make_sdk)
+        r = tc.post("/v1/sessions", json={"conversation": CONV,
+                                          "session_id": sid})
+        assert r.status_code == 200, r.text
+
+        assert observed, (
+            "the sweep's Source statement never ran, so this test is vacuous "
+            "rather than green")
+        recorded = observed[0]
+        assert sum(recorded.values()) == 1, (
+            "the capture-sweep lane wrote the graph and did not record its "
+            f"target: the registry read {recorded!r} at the first statement "
+            "after the sweep, where the sweep's own hook is the only writer. "
+            "Deleting `note_live_write_target(proj)` from "
+            "`_capture_session_impl`'s Source sweep must red THIS assertion "
+            "(#12943 review cycle 7, F1).")
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # The harness contract this file depends on: one refused capture must not
