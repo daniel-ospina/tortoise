@@ -84,6 +84,7 @@ from tortoise import (  # noqa: E402
     monitoring,
     postgres_bytes,
     record_projection,
+    record_vector,
     record_writer,
 )
 from tortoise.record_writer import use_record_tenant  # noqa: E402
@@ -951,7 +952,13 @@ def test_env_example_declares_the_record_tenant_pair():
                  # tenant pair. Added here in the same commit as the declaration
                  # — the tuple is hand-maintained, so a declaration alone would
                  # drift silently.
-                 record_writer.RECORD_ALLOCATE_ENV):
+                 record_writer.RECORD_ALLOCATE_ENV,
+                 # #13345 review P2: `RECORD_JOURNAL_ENV` is the ONLY record
+                 # switch that decides whether the dense leg can be served from
+                 # the record at all, and it shipped with no declaration — the
+                 # operator's only prose about it was the runtime warning they
+                 # read AFTER the fall-back. Same tuple, same reason.
+                 record_vector.RECORD_JOURNAL_ENV):
         assert name in env, (
             f"{name} (the #9078 single-tenant arming surface) decides whether an "
             "armed record write is filed or refused, and is not declared in "

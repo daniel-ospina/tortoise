@@ -225,16 +225,26 @@ def write(event: Mapping[str, Any], *,
     seq: int | None = (append() if append is not None else log.append(event))
 
     # ── 2. THE RECORD, on ONE transaction, after the append. ───────────────
-    if project is None:
-        from . import record_writer
-
-        def _default_project(record: Mapping[str, Any],
-                             seq: int | None) -> Any:
-            return record_writer.write_live_record(
-                record, durable=durable, seq=seq, tenant=tenant)
-
-        project = _default_project
     try:
+        # ⛔ THE SEAM IS IMPORTED *INSIDE* THIS TRY, not above it (#13345 review
+        # P2). A door that passes no `project=` reaches the real
+        # `record_writer`, and an import of it can fail (a wheel missing the
+        # module, a partially-shipped install, an import-time error in its
+        # dependencies) — which is a RECORD fault, so it takes the record
+        # fault's rules. Imported above the `try`, that failure raised to the
+        # producer for a write the journal had ALREADY committed, and skipped
+        # the fold: the write was gone from both derived stores, the exact
+        # outcome the comment below says this module prevents. Cost of the
+        # guard: one dict lookup on the import path, already cached by CPython.
+        if project is None:
+            from . import record_writer
+
+            def _default_project(record: Mapping[str, Any],
+                                 seq: int | None) -> Any:
+                return record_writer.write_live_record(
+                    record, durable=durable, seq=seq, tenant=tenant)
+
+            project = _default_project
         outcome = project(event, seq)
     except Exception as exc:
         # ⛔ NEVER RAISE AFTER THE APPEND. The line is committed; a raise would
@@ -242,6 +252,11 @@ def write(event: Mapping[str, Any], *,
         # skip the cache fold below — losing the write from BOTH derived stores
         # for a record fault. The disagreement is reported instead, which is the
         # same posture `write_live_record` takes for its own refusals.
+        #
+        # This arm covers the record SEAM as well as the record CALL: the import
+        # above is inside the `try`, so an unimportable `record_writer` lands
+        # here as `projection_raised` rather than as an exception out of the
+        # chokepoint.
         LOGGER.warning(
             "live_write: the record projection RAISED after the journal append "
             "committed (%s: %s) — the journal holds position %s and the record "

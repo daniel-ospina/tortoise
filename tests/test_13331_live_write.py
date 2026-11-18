@@ -17,10 +17,12 @@ here, because a test that needs Postgres cannot run in every lane.
 """
 from __future__ import annotations
 
+import sys
 import types
 
 import pytest
 
+import tortoise
 from tortoise import live_write
 from tortoise.reconciliation import ReconciliationReport
 from tortoise.record_projection import JournalCoverage
@@ -174,6 +176,45 @@ def test_a_raising_projection_is_reported_not_raised_after_the_append():
     assert result.unprojected == 1
     assert result.refusal == "projection_raised"
     assert order == ["append", "project", "fold"]
+    assert len(projection.applied) == 1
+
+
+def test_a_record_seam_that_cannot_be_imported_is_reported_not_raised_after_the_append(
+        monkeypatch):
+    """⛔ #13345 review P2 — the DEFAULT record half imports its seam AFTER the
+    append, so it must fail like a record fault and not like an exception.
+
+    `test_a_raising_projection_is_reported_not_raised_after_the_append` pins the
+    same rule for a `project=` the caller handed in, which every other test here
+    does (8/8 call sites) — so the DEFAULT arm, the one `EventAPI._emit` and
+    `ConversationMiner._emit_event` actually reach, was the unguarded path. A
+    ModuleNotFoundError there is a record fault on a committed line: reported as
+    `projection_raised`, and the fold still runs.
+    """
+    order: list = []
+    log = _Log(order=order)
+    projection = _Projection(order=order)
+
+    # The exact shape of "the seam is not importable here": the submodule is not
+    # bound on the package AND its `sys.modules` entry is `None`, so
+    # `from . import record_writer` raises
+    # `ImportError: import of tortoise.record_writer halted; None in sys.modules`.
+    # Clearing the package attribute matters: with it still bound, `from . import
+    # X` is satisfied by `getattr(package, "X")` and never reaches the import
+    # machinery, so a `sys.modules` poison alone would silently test nothing.
+    # monkeypatch restores both.
+    monkeypatch.delattr(tortoise, "record_writer", raising=False)
+    monkeypatch.setitem(sys.modules, "tortoise.record_writer", None)
+
+    result = live_write.write({"type": "PointAdded"}, log=log,
+                              projection=projection)
+
+    assert result.appended is True
+    assert result.seq == log.seq
+    assert result.refusal == "projection_raised"
+    assert result.unprojected == 1
+    assert result.armed is False            # nothing claimed the write
+    assert order == ["append", "fold"]     # ⛔ the fold is NOT skipped
     assert len(projection.applied) == 1
 
 
