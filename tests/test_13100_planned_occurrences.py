@@ -1783,19 +1783,24 @@ class TestAMentionIsNotAnOccurrence:
 
             __hash__ = str.__hash__
 
-        g = sdk._get_proj().g
         plan = PO.create_plan(sdk, "Held through the twin door")
         with pytest.raises(ValueError) as exc:
             PO.settle_plan(sdk, plan["id"], _AlwaysEqual(PO.STAGE_HELD))
         message = str(exc.value)
         assert "not a no-occurrence ending" in message, message
-        assert g.query(
-            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
-            params={"p": plan["id"]}).result_set[0][0] == 0
+        # ⛔ NO "nothing was written" POST-CONDITIONS HERE, and not because of
+        # style: `settle_plan` contains no write call at all (it resolves, moves
+        # a stage and returns), so `MATCH (:Event)-[:aboutObject]->…` is 0 under
+        # EVERY mutant on this path, and `planned_without_occurrence` lists any
+        # plan with no occurrence `:Event` — which on this path is always. Both
+        # would be constant-true, so the pin lives where a write door EXISTS:
+        # the `record_occurrence` rows above (:1654-1657, :1689-1692), where a
+        # guard moved after `create_entity` leaves the `:Event` behind. What the
+        # rows here can show is that the refusal is the EARLY one and that the
+        # plan did not move — which is what they assert.
         cur = _stage(sdk, plan["id"])
         assert cur["stageId"] == PO.STAGE_SCHEDULED
         assert cur["isClosed"] is False
-        assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
 
     def test_a_NON_STRING_stage_cannot_settle_a_plan(self, sdk, monkeypatch):
         """`settle_plan`'s non-`str` arm: refuse it BEFORE the resolve (#13586 f2).
@@ -1822,9 +1827,10 @@ class TestAMentionIsNotAnOccurrence:
         show, and each reddens on a different mutant: the refusal is the EARLY
         one (it names the offending value as a bad ending, never as a `no-stage`
         move), and `advance_stage` is never called at all. The "nothing was
-        written" post-conditions are NOT repeated here — they would be
-        constant-true on this path and they already live in the sibling row,
-        where they genuinely red.
+        written" post-conditions are NOT repeated here — `settle_plan` has no
+        write call, so on this path they cannot fail under any mutant; that pin
+        lives in the `record_occurrence` rows (:1654-1657, :1689-1692), which sit
+        behind a real write door.
         """
 
         class _NotAString:
@@ -1876,7 +1882,6 @@ class TestAMentionIsNotAnOccurrence:
         class _Ending(str):
             """A ``str`` subclass with no lying comparison — only a new type."""
 
-        g = sdk._get_proj().g
         plan = PO.create_plan(sdk, "Missed through a subclass")
         settled = PO.settle_plan(sdk, plan["id"], _Ending(PO.STAGE_MISSED))
         assert settled["move"].applied is True
@@ -1884,9 +1889,10 @@ class TestAMentionIsNotAnOccurrence:
         assert cur["stageId"] == PO.STAGE_MISSED
         assert cur["outcome"] == "lost"
         assert cur["isClosed"] is True
-        assert g.query(
-            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
-            params={"p": plan["id"]}).result_set[0][0] == 0
+        # The absence of an occurrence `:Event` is `settle_plan`'s contract, but
+        # not an assertion that can fail here: it never writes one (see the
+        # sibling `_AlwaysEqual` row). `isClosed`/`outcome`/`stageId` above are
+        # the discriminating half of this control.
 
     def test_the_explicit_occurrence_kind_is_accepted(self, sdk):
         g = sdk._get_proj().g
