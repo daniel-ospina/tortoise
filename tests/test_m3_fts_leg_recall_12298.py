@@ -1372,9 +1372,10 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
     # moves the two LATE rows and only them: the FTS call and the rank loop.
     # Re-derived against the live file after the forward-merge, not nudged by a
-    # constant. ⛔ NO numbers in this prose (#12731): the tuples below carry the
-    # only line numbers this file may state, because a number here drifts with
-    # every edit and reads as authoritative.
+    # constant. ⛔ Name NO line number in THIS comment (#12731): a number here
+    # drifts with every edit and reads as authoritative, and the tuples below
+    # are the only place this block may state one — the historical numbers in
+    # the rows ABOVE are the record of a drift, not a locator to trust.
     ("tortoise/search_engine.py", 3098, "CALL db.idx.fulltext.queryNodes",
      "`:3098-3107`"),
     ("tortoise/search_engine.py", 2728, "def recency_tie_clause(",
