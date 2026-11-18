@@ -992,14 +992,19 @@ rules are arguable here.
 
 - **The decision:** a `:Source` is **to get** a summary vector, **in Postgres** (`STORAGE-ARCHITECTURE.md` §14.3 **V2**, owner
   2026-11-17, `#13220`). The demand question below no longer decides whether — it sizes what the vector is worth.
-- **The remaining DESIGN question:** *which text* a `:Source` with no session narrative embeds — named as V2's one open
-  choice in `STORAGE-ARCHITECTURE.md` §14.3 and `SEARCH-ARCHITECTURE.md`. The demand measurement below still informs it;
-  it is not a placement question.
-- **A PLACEMENT question the row above does not cover, raised by the writer:** `_upsert_source` computes no embedding and
-  `SourceCreated` is deliberately absent from `_RECORD_EMBEDDING_TEXT` ("the graph holds **0** `:Source` embeddings on
-  NON-DOCUMENT rows"), so a plain `:Source` carries no vector on either side today. Giving it one on **both** legs is a
-  change to where it is WRITTEN; giving it one on the record alone would make the record return sources the graph leg never
-  had. The ruling names neither, and this census poses the question rather than answering it.
+- **The DESIGN question this row used to carry is answered for the RECORD:** *which text* a `:Source` with no session
+  narrative embeds — the payload's `_searchText` alone, the same key the split binds into `public.source._search_text`
+  (PR `#13473`, `#13418`; `STORAGE-ARCHITECTURE.md` §14.3 V2 and `SEARCH-ARCHITECTURE.md` state it). ⚠️ The
+  `title`-only door states no `_searchText` and therefore abstains by name — a TEXT-CARRIER gap whose fix is the producer
+  (`#13474`), not a vector rule. The demand measurement below still informs the graph-side half; it is not a placement
+  question.
+- **A PLACEMENT question the row above does not cover, raised by the writer:** `_upsert_source` computes no embedding, and
+  `SourceCreated` is no longer absent from `_RECORD_EMBEDDING_TEXT` (PR `#13473`, closing `#13418`) — so the placement
+  question this census posed is now answered for the RECORD and still open for the GRAPH. "The graph holds **0** `:Source`
+  embeddings on NON-DOCUMENT rows" remains a true reading of the LIVE fold (`_upsert_source` computes none), while a
+  record-sourced REBUILD of the now-occupied rows writes one, because `source` is a SERVED label
+  (`cache_projection.node_statement` writes `n.embedding` for every label outside `UNSERVED_VECTOR_LABELS`). Giving the
+  graph leg one is a change to where it is WRITTEN, and the ruling does not order it.
 - **The measurement it still wants:** *what share of vector queries hit a `:Source` embedding?* — P0-c's query-mix
   measurement.
 

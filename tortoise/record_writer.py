@@ -2312,7 +2312,8 @@ class RecordWriter:
         try:
             # #13220 — the values the RECORD computes and the JOURNAL does not
             # carry (`object`/`subject` fingerprints, an event's composed vector, a
-            # document's title+content vector). Computed HERE, at the write seam,
+            # document's `_build_search_text` vector, a plain `:Source`'s `_searchText`).
+            # Computed HERE, at the write seam,
             # and not in the plan builder: the derivation needs the embedder, and
             # `record_projection`'s statement set is pinned DB-FREE and
             # deterministically (`tests/test_11075_record_declared_type_contract.py`
