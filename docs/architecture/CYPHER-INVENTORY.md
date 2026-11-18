@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1313** | **99** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,055** | **820** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,058** | **820** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -143,7 +143,7 @@ exclusion dropped they read **2,063** and **2,333**. The 69-occurrence 2,333→2
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** and
-the **= 1,571 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+the **= 1,573 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
@@ -409,24 +409,29 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where THESE numbers were cut (the current cut):** `#13331`/`#13345`'s branch, merged with
-`origin/main` **`340d500491`** — re-derived by RUNNING the tool on that merged tree, never by
-arithmetic on the markers. The composition is exact and was measured rather than asserted: `main`'s
-own cut at `9d13dc1bf7` (its record is the paragraph below) carries every census scalar on this tree
-**except the three the branch moves**, and the branch moves only those three because
-`tortoise/live_write.py` is one new file that issues **no Cypher of its own** — it carries two
-non-Cypher door calls and zero statement sites. So `files_scanned` **297→298**,
-`non_cypher_door_calls` **258→260** and `ast_door_calls` **1571→1573**, while `sites` **1313**
-(`plain` **860** — read **579**, write **281**), `candidates` **579**, `unresolved` **107**,
-`partial` **315** and `files_with_sites` **99** are `main`'s. Appendix A is regenerated with
-`--markdown` (this branch's edits shift `file:line` rows in `tortoise/__main__.py`,
-`tortoise/mining.py`, `tortoise/api.py`, `tortoise/record_projection.py`,
-`tortoise/record_reconcile.py` and `tortoise/projection/__init__.py`), §1's reconciliation is
-re-measured on this tree (door **1,627 / 108**, `−54` non-call occurrences, verb **2,343 / 144**
-whole-text, bare **1,633 / 109**), `--all-surface` reads **9,058 / 820**, and `--check` reports
-**`25 pinned counts match`**.
+**Where THESE numbers were cut (the current cut — the `origin/main` `340d500491` re-cut into this
+branch):** re-derived by RUNNING the tool on the merged tree, never by arithmetic on either parent's
+markers. The two parents moved DIFFERENT counters, and neither parent's set is the answer:
+`main`'s cuts move `sites` 1311→**1313**, `plain` 859→**860** (read 578→**579**), `candidates`
+578→**579**, `unresolved` 106→**107** and `partial` 314→**315**; this branch adds
+`tortoise/live_write.py` and routes the three live doors through it, so `files_scanned` **297→298**
+and `non_cypher_door_calls` **258→260**, while the chokepoint issues no Cypher of its own. `--check`
+on the merged tree printed exactly three DRIFTs, and all three are scalars no single parent set
+correctly:
 
-**Where the numbers were cut before that — `main`'s own, at the tree it measured:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
+```text
+DRIFT ast_door_calls: doc=1571 tool=1573
+DRIFT files_scanned: doc=297 tool=298
+DRIFT non_cypher_door_calls: doc=258 tool=260
+```
+
+So the pinned `ast_door_calls` is **1573** (= 1313 + 260) and BOTH parents' **1571** — arrived at by
+two different sums — is retired here. §1's reconciliation is re-measured on this merged tree (door
+**1,627 / 108** whole-text, bare **1,633 / 109**, verb **2,330 / 143** against the tool's
+**2,343 / 144**), the `--all-surface` row is re-run (**9,058 / 820**), Appendix A is regenerated with
+`--markdown`, and `--check` then reports **`25 pinned counts match`**.
+
+**Where these numbers were last cut:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
 forward merges (`0774035055`, then `9d13dc1bf7`) — re-derived by RUNNING the tool on the FINAL
 merged tree, never by arithmetic on the markers. `main`'s two commits between them move no census
 scalar, so every number below is the `0774035055` cut's, re-measured at that tree and unchanged. **This cut CORRECTS a pair it inherited stale rather than moving it.** The branch's previous
@@ -442,11 +447,31 @@ merged tree they read **1571 / 258** while every other scalar holds: `sites` **1
 **9,055 / 820**, Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts
 match`**.
 
-⛔ **Neither parent's scalar is the answer, and this cut is the measured proof:** this head's parent
-read 1573 / 260 while `main`'s own cut at `bf3a7b8e77` recorded 1569 / 258, and the merged tree reads
+⛔ **Neither parent's scalar is the answer, and that cut is the measured proof:** that head's parent
+read 1573 / 260 while `main`'s own cut at `bf3a7b8e77` recorded 1569 / 258, and that merged tree read
 **1571 / 258** — the branch's two Cypher sites (1313 = 1311 + 2) plus `main`'s two removed door calls.
 A lane that carried either parent's figure forward, or reused the branch's pre-merge cut, would have
 written a pin `--check` then accepted. Only running the tool says which tree you are holding.
+
+**The branch's own parallel cut, kept as the record of it** (measured on this branch's merge with
+`origin/main` BEFORE `main`'s `9d13dc1bf7` cut landed, so its `1311 / 859 / 578` are that tree's and
+not this one's; the phrasing below is its own):
+
+**Where this branch's cut was made (before this merge):** `#13331`/`#13345`'s branch, merged with
+`origin/main`, re-derived from that merged tree — not by arithmetic on the markers. The branch adds
+`tortoise/live_write.py` and routes the three live doors through it, so `files_scanned` **297→298** and
+`non_cypher_door_calls` **258→260** (two door calls move into the new module; `sites`, `plain` and
+`candidates` are unchanged at 1311 / 859 / 578, because the chokepoint issues no Cypher of its own).
+`ast_door_calls` is therefore **1569→1571**. Appendix A is regenerated with `--markdown` (the edits
+shift `file:line` rows in `tortoise/__main__.py`, `mining.py`, `api.py` and
+`projection/__init__.py`), §1's reconciliation is re-measured on this tree (1,625 / 108 files, `−54`
+non-call occurrences, verb predicate 2,343 across 144 files), and `--check` reports **`25 pinned
+counts match`**. The `differential` job's census leg was RED at this branch's previous head for
+exactly these three counts (`doc=297 tool=298`, `258/260`, `1569/1571`). ⛔ Its closing claim — that
+this branch *removes* two door calls, landing the merge on 1569 / 258 — was true of an earlier shape
+of this branch and is **retired**: measured at this head, `main` reads **258** door calls and this
+merged tree reads **260**, so the chokepoint ADDS two and the merge lands on 1573.
+
 
 **The cut before that:** `origin/main` **`34bd33d22a`**, forward-merged into the branchfor the third time (`54682177bc`, then `34bd33d22a`) — neither merge moved a count: they add no Cypher
 statement site, so every scalar is unchanged from the `a218f8867b` cut and only Appendix A's
