@@ -1381,8 +1381,8 @@ def _block_bodies(changelog: str) -> list[str]:
 
     ``^`` is load-bearing: a block's prose can QUOTE an older header
     (``> > **Changelog v3.7 …`` inside the v3.2 entry), and an unanchored
-    pattern counts that quote as a release — measured at this head: 42 pieces
-    for 41 blocks, one of them a fragment starting at the quoted header.
+    pattern counts that quote as a release — measured at this head: 43 pieces
+    for 42 blocks, one of them a fragment starting at the quoted header.
     """
     starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
     # `pairwise` over the spans plus the end offset — the spans are DELIBERATELY
@@ -2321,8 +2321,8 @@ def test_every_declared_sweep_arm_refuses_a_stale_restatement() -> None:
     wrong_ordinal = "second" if lands_first else "first"
     # ⛔ A NUMERATOR THAT IS STALE IN BOTH DIRECTIONS: `k + 1` collides with the
     # complement when `k + 1 == n - k`, i.e. `2k + 1 == n` — a collision only an ODD
-    # block count can produce. With 41 blocks and 5 citing, `k + 1` cannot collide
-    # with the complement — `2·5 + 1 = 11 ≠ 41` — so
+    # block count can produce. With 42 blocks and 6 citing, `k + 1` cannot collide
+    # with the complement — `2·6 + 1 = 13 ≠ 42` — so
     # the fixture below is a deliberate construction rather than a state this file
     # reaches; what it pins is that the arm rejects a stale numerator in EITHER
     # direction, which is as true of a hand-built pair as of a real one.

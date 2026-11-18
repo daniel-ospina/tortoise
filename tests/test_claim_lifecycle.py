@@ -273,6 +273,24 @@ def _ontology_status_section() -> str:
     return tail if end is None else tail[: end.start()]
 
 
+def _read_side_legacy_note() -> str:
+    """§5's read-side legacy note: the ONE blockquote paragraph that says it.
+
+    Scoped to a paragraph, not to §5, because the three retired words appear in
+    text that is NOT the disclosure: the pre-v3.37 table carried them as status
+    ROWS, and §5's tombstone contract names `status='retracted'` after the note.
+    A section-wide search was satisfied by both, so it was green on the buggy
+    table this note exists to correct.
+    """
+    section = _ontology_status_section()
+    quoted = [p for p in re.split(r"\n\s*\n", section)
+              if p.lstrip().startswith(">") and "read-side legacy" in p]
+    assert len(quoted) == 1, (
+        f"§5 has {len(quoted)} blockquote paragraph(s) naming 'read-side legacy'; "
+        "exactly one note must disclose the retired words")
+    return quoted[0]
+
+
 def _ontology_status_table_words() -> frozenset[str]:
     """The status words §5's canonical model table lists, one per row."""
     section = _ontology_status_section()
@@ -330,7 +348,7 @@ def test_ontology_transitions_column_matches_the_guard_map():
     NON-VACUOUS on that table: `draft` parses to `{live}` against the code's
     `{live, deprecated, superseded}`, failing on the two missing edges.
     """
-    from tortoise.sdk import _ALLOWED_TRANSITIONS  # noqa: I001
+    from tortoise.sdk import _ALLOWED_TRANSITIONS
 
     section = _ontology_status_section()
     rows = [ln for ln in section.splitlines() if ln.startswith("|")]
@@ -364,17 +382,24 @@ def test_ontology_discloses_the_legacy_words_it_no_longer_lists():
     stored rows still hold `archived`. The note is what makes that residual
     DISCLOSED rather than discovered, so it is pinned here: a lane that tidies the
     three words out of §5 entirely fails this test instead of quietly deleting the
-    record of a live divergence.
+    record of a live divergence. NON-VACUOUS: the pre-v3.37 table satisfied a
+    section-wide search for all three words, so the pin reads the note itself.
     """
-    section = _ontology_status_section()
+    # ⛔ SCOPED TO THE NOTE, not to §5 as a whole. The pre-v3.37 table listed all
+    # three words as STATUS ROWS, so a section-wide `in section` was satisfied by
+    # the very table this note exists to correct — the guard would have been green
+    # on the buggy doc it was written for. The note is the blockquote that follows
+    # the table; a word elsewhere in §5 is not a disclosure.
+    note = _read_side_legacy_note()
     for word in ("retracted", "outdated", "archived"):
-        assert f"`{word}`" in section, (
-            f"§5 no longer names {word!r} anywhere — the retired words are read-side "
-            "legacy over stored rows and must stay disclosed (#12855)")
-    assert "read-side legacy" in section, (
+        assert f"`{word}`" in note, (
+            f"§5's read-side legacy note no longer names {word!r} — the retired "
+            "words are read-side legacy over stored rows and must stay disclosed "
+            "(#12855); naming it elsewhere in §5 is not the note")
+    assert "read-side legacy" in note, (
         "§5's note no longer calls the retired words read-side legacy — without it "
         "the table reads as 'the code never produced these'")
-    assert "`retract_point`" in section and "still writes `retracted`" in section, (
+    assert "`retract_point`" in note and "still writes `retracted`" in note, (
         "§5 no longer discloses that `retract_point` still writes `retracted` — that "
         "is the one place the code diverges from this model (#11824 S2)")
 
