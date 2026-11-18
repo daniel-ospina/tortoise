@@ -657,7 +657,7 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     # this guard exists to make unrepresentable: the plan advances to terminal
     # `held` and the read serves it as *planned and never happened*, with nothing
     # raising. That is the same rule `is_plan_kind` (:176) and
-    # `lifecycle_props_by_rendering` (:703) already follow, and this was the only
+    # `lifecycle_props_by_rendering` (:722) already follow, and this was the only
     # caller-supplied-`str` comparison in this file that still trusted `__eq__`
     # (#13578 review, finding 1). Normalising ONCE means the value WRITTEN is the
     # same value CHECKED — otherwise the guard compares one kind and the store
