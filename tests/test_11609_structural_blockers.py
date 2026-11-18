@@ -716,6 +716,39 @@ def test_the_search_door_is_held_by_the_envelope_not_the_route():
 
 # ── the nine are still not doors ─────────────────────────────────────────────
 
+def _doors_missing_the_prefix(live) -> list[str]:
+    """Live door names that do NOT carry the `tortoise_` prefix.
+
+    Every destination comparison below asks about `tortoise_<destination>`, which is the
+    door's real name only under this convention — so the convention is measured here
+    rather than asserted in a comment.
+    """
+    return sorted(name for name in live if not name.startswith("tortoise_"))
+
+
+def test_every_live_door_carries_the_prefix_the_destination_pins_compare_against():
+    """The NAME CONVENTION, pinned because the destination comparisons rest on it.
+
+    `test_the_recorded_destination_is_still_not_an_mcp_door` asks whether
+    `tortoise_<destination>` is a live door. That is the door's name only if EVERY live
+    door carries the prefix: a door landed under the bare destination name
+    (`delete_knowledge`) would be invisible to the comparison, which then stays green
+    while `NO_CONTAINER_YET` keeps a door that became retirable — the container's landing
+    goes unnoticed, which is the drift the nine-door pin exists to catch. A review round
+    measured exactly that mutant green, so the convention is part of the pin.
+    """
+    missing = _doors_missing_the_prefix(_live())
+    assert missing == [], (
+        f"live MCP door(s) {missing} do not carry the `tortoise_` prefix — the "
+        "`tortoise_<destination>` comparisons in this file no longer name every door, so a "
+        "destination landing under its bare name would leave them green. Either pin the "
+        f"comparison to the real name(s) or restore the convention")
+
+    # …and the reading detects the shape it exists for, so the assertion above cannot pass
+    # by measuring nothing.
+    assert _doors_missing_the_prefix({"delete_knowledge": object()}) == ["delete_knowledge"]
+
+
 @pytest.mark.parametrize("door,destination", sorted(NO_CONTAINER_DESTINATIONS.items()))
 def test_the_recorded_destination_is_still_not_an_mcp_door(door, destination):
     """A retirement pointer must name a LIVE tool (`TestEveryPointerResolvesInOneHop`).
@@ -740,7 +773,9 @@ def test_the_recorded_destination_is_still_not_an_mcp_door(door, destination):
             "the only declared non-door prefixes are `tenancy:` and `sdk:`")
         # ⛔ Compare `tortoise_<rest>`, NOT `<rest>`. Every live tool name starts with
         # `tortoise_`, so `rest not in live` is unconditionally TRUE and the assertion could
-        # never fire even after the container landed. Measured.
+        # never fire even after the container landed. Measured — and the convention itself
+        # is pinned by `test_every_live_door_carries_the_prefix_the_destination_pins_…`,
+        # so this prefixed comparison is not a bare assumption.
         assert f"tortoise_{rest}" not in live, (
             f"{door}'s destination `{destination}` is now a live MCP door "
             f"(tortoise_{rest}) — {door} became retirable in the batch that landed it, and "
