@@ -128,7 +128,7 @@ form of this header was false for saying it was.** The `#13124` review found a g
 they are listed at the head the PINS read — this branch's integration head `2c1065a52e`, which is also
 the working tree — NOT at `ae54df166d`.** `#13494` re-derived them ON the tree so that each one's
 `content` could be pinned there; the `#13124` review had measured them at `ae54df166d`, which is why
-the sizes in the row below (`:2720` / `:2715`, `:3837` / `:3834`) are `ae54df166d` values and are not
+the `ae54df166d` values this paragraph goes on to quote (`:2720` / `:2715`, `:3837` / `:3834`) are not
 the addresses in this list. (measured,
 `git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `ae54df166d`: the pin's `:3735` is
 `for prop in sorted(STORED_VECTOR_PROPS):` — the `MERGE (n:…) SET n += $props` this document quotes is the

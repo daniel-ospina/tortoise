@@ -50,7 +50,7 @@ claims:
 | `test_an_UNMEASURED_consequence_is_CARRIED_not_dropped` | the under-reporting channel, `surface_consequence.unmeasured_labels` | a label whose consequence is `UNMEASURED` is skipped like a `False`, so `entity_types_whose_query_results_change` reads as the whole population while it is only the measured part |
 | `test_an_unresolvable_leg_method_reports_UNMEASURED_not_an_EMPTY_surface` | round-2 P2: a rename must not read as "no tool is affected" | `VECTOR_LEG_SDK_METHOD` stops resolving, both sets empty, and the surface reports `[]` — a measured-looking "no MCP tool can pass `entity_type`" — with no `UNMEASURED` channel |
 | `test_the_surface_named_is_the_one_that_can_pass_entity_type` | the CALLERS, derived from the registry **and** the handler AST **and** the SDK's own fixed-type call sites | the `sdk_method` binding alone is used, so `tortoise_query` (bound to `paginated_query`, yet forwarding a `text=` argument to `tortoise_fts_query(entity_type=…)`) is missing — the direction that UNDERSTATES a surface change |
-| `test_a_tool_whose_SDK_method_fixes_entity_type_is_named` | the THIRD entrant source, and the default it must resolve before reading any call site | a tool whose SDK method names the type itself (`tortoise_recall` → `object`, `tortoise_search_sessions` → `event`) is named by neither the registry nor the handler scan, and a one-pass walk reports a defaulted call as `UNKNOWN` |
+| `test_a_tool_whose_SDK_method_fixes_entity_type_is_named` | the THIRD entrant source, and the default it must resolve before reading any call site | a tool whose SDK method reaches the leg at a fixed type the caller does not choose (`check_confidence` → `object`+`point` through `recall_state`; `search_knowledge` → `event` through `_search_sessions` — its own `entity_type` default is `point`, and it forwards the caller's) is named by neither the registry nor the handler scan, and a one-pass walk reports a defaulted call as `UNKNOWN` |
 | `test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure` | `#11088` round 7 P2: one row's width is not the label's | `stored × width × 4` multiplies ONE sampled row across every row, so a mixed-width label (an `EMBEDDING_DIM` rotation) publishes a wrong byte figure with no UNMEASURED signal |
 | `test_the_census_reports_EVERY_index_KIND_not_only_VECTOR` | §3.1's *"the same run settles it"* — the FULLTEXT datum the run promised to answer | the catalogue parse keeps VECTOR rows only, so whether a lexically-matching query survives a removal is not in the answer, while the doc says it is |
 | `test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING` | E2E D9 (`04-plan.md` §7) on a real engine: `Point` indexed, the four served labels unindexed **with bytes**, and the graph's visible shape unchanged across the call (⚠️ a corroborating observation — the READ-ONLY verb is what forbids the write) | the census mutates the graph it measures (labels / node counts / edges / the index catalogue / per-label embedding counts), or an unindexed label loses its `entity_type` set |
@@ -7285,12 +7285,21 @@ def test_the_census_states_the_consequence_of_removing_each_label():
         "a label with no query path is not a surface consequence")
 
     # ⛔ EVERY entrant, and WHICH of them actually change (review round 7, P1):
-    # `tortoise_recall` reaches `:Object` (affected) and `:Point` (indexed, so
-    # not); the `:Point`-only tools are entrants with NO change — printing them
-    # as affected would over-report as surely as dropping them under-reported.
+    # the confidence container reaches `:Object` (affected) and `:Point`
+    # (indexed, so not); the `:Point`-only tools are entrants with NO change —
+    # printing them as affected would over-report as surely as dropping them
+    # under-reported.
     by_tool = {e["tool"]: e for e in sc["surface"] if "tool" in e}
-    assert by_tool["tortoise_recall"]["reaches_affected_labels"] == ["object"], \
-        by_tool["tortoise_recall"]
+    assert by_tool["tortoise_check_confidence"]["reaches_affected_labels"] == \
+        ["object"], by_tool["tortoise_check_confidence"]
+    # ⛔ #11609 Phase 2 ALSO retired `tortoise_recall` — the door whose
+    # `sdk_method="recall_state"` used to make it the entrant asserting the line
+    # above. Its reach did NOT leave with it: `tortoise_check_confidence` now
+    # carries the `recall=True` arm and dispatches to `recall_state`, so the SAME
+    # `:Object` read is still named, by the container. Asserting the absence keeps
+    # a silently-vanished door (one that left without its reach moving) from
+    # reading as a surface with nothing to say about it.
+    assert "tortoise_recall" not in by_tool, sorted(by_tool)
     # ⛔ #11609 Phase 2 RETIRED the two doors whose `sdk_method` used to make them
     # entrants here (`tortoise_suggest_entry_points`, `tortoise_search_sessions`):
     # each now declares no `sdk_method` because its member method is private behind
@@ -7397,13 +7406,20 @@ def test_the_surface_named_is_the_one_that_can_pass_entity_type():
     assert {"tortoise_search", "tortoise_query"} <= named, (
         f"the surface census missed a tool that can pass entity_type: {surface}")
     # ⛔ AND the third entrant class (#11088 review round 7, P1): a tool whose
-    # SDK method names the type itself. `tortoise_recall`'s DEFAULT mode calls
-    # `recall_state`, which asks the leg for `:Object`; `tortoise_search_sessions`
-    # asks for `:Event`. Neither forwards `entity_type`, so both sources above
-    # miss them — and dropping them understates the approval request.
-    recall = next(t for t in surface if t.get("tool") == "tortoise_recall")
+    # SDK method names the type itself. `tortoise_check_confidence`'s `recall=True`
+    # arm dispatches to `recall_state`, which asks the leg for `:Object`;
+    # `tortoise_search_knowledge` asks for `:Event`. Neither forwards
+    # `entity_type`, so both sources above miss them — and dropping them
+    # understates the approval request. (Until #11609 Phase 2 this entrant was
+    # `tortoise_recall` itself; the door retired FORWARD into this container, so
+    # the pin follows the container and the retired name must be ABSENT.)
+    recall = next(t for t in surface
+                  if t.get("tool") == "tortoise_check_confidence")
     assert "object" in recall["entity_types"], (
-        f"tortoise_recall's default state read queries :Object and is not named: {recall}")
+        f"the container's recall arm queries :Object and is not named: {recall}")
+    assert not [t for t in surface if t.get("tool") == "tortoise_recall"], (
+        "a retired door is still named by the census — it is not on the "
+        f"advertised surface: {[t for t in surface if t.get('tool') == 'tortoise_recall']}")
     sessions = next(t for t in surface
                     if t.get("tool") == "tortoise_search_knowledge")
     assert "event" in sessions["entity_types"], sessions
@@ -8370,8 +8386,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 184 candidate sentences
-# (the 151 rows across the four sets — 63 / 20 / 35 / 33 — plus the 33 sentences of
+# one of the same four verbs AFTER the negation, so on all 186 candidate sentences
+# (the 151 rows across the four sets — 63 / 20 / 35 / 33 — plus the 35 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -11156,7 +11172,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `280 + 1` and `279 + 2` at THIS tree, both equal to the `281` the pin re-derives
+    count: `281 + 1` and `280 + 2` at THIS tree, both equal to the `282` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as lane-bound: a carve-out run must not
     "correct" the docker lane's figure.
@@ -11306,13 +11322,62 @@ def test_a_non_literal_entity_type_is_UNMEASURED_not_a_measured_no(
     graph = _CensusGraph(
         catalogue=[], labels=["Object"], vectors={"Object": (2, [0.0] * 384)},
     )
+    # ⛔ The key is the method a LIVE tool BINDS, not the method whose fixed
+    # type the reach belongs to: #11609 Phase 2 retired `tortoise_recall`, and the
+    # entrant is now `tortoise_check_confidence` (bound to `check_confidence`,
+    # whose `recall=True` arm reaches `recall_state`). Injecting the retired
+    # door's method would name no tool at all and this arm would StopIteration
+    # instead of falsifying anything.
     monkeypatch.setattr(
         probe, "_sdk_methods_on_vector_leg",
-        lambda: ({"recall_state": {"UNKNOWN(entity_type_var)"}}, None, None))
+        lambda: ({"check_confidence": {"UNKNOWN(entity_type_var)"}}, None, None))
     sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
                              graph_names=["g"])["surface_consequence"]
-    recall = next(e for e in sc["surface"] if e.get("tool") == "tortoise_recall")
+    recall = next(e for e in sc["surface"]
+                  if e.get("tool") == "tortoise_check_confidence")
     assert str(recall["reaches_affected_labels"]).startswith("UNMEASURED"), recall
+
+
+def test_the_census_doc_names_every_entrant_the_derivation_currently_names():
+    """§3's entrant table is the derivation's OUTPUT, so today's entrants must be reachable from it.
+
+    ⛔ MEASURED ON THE PRE-FIX TREE (#13595 fresh review, P2): the table's seven rows named
+    `tortoise_recall`, `tortoise_search_sessions`, `tortoise_review_connections` and
+    `tortoise_suggest_entry_points`, and NONE of the seven tools `vector_leg_surface()`
+    derives appeared anywhere in the section — 0 of 7. Four of those rows are doors
+    #11609 Phase 2 retired or renamed, so the table described a surface that no longer
+    exists, and the sentence beside it cited
+    `test_the_surface_named_is_the_one_that_can_pass_entity_type` — the very test that
+    now asserts `tortoise_recall` is ABSENT. Nothing redded: no pin read the table at all.
+
+    ⚠️ This does NOT require the table to be re-derived. §7 records the census as a dated
+    measurement that is deliberately not retro-edited, and that decision stands — the
+    table's rows are the 2026-11-06 derivation and stay. What must hold is narrower and
+    checkable: a reader of §3 can reach every entrant the derivation names TODAY, which
+    the note under the table does by naming each successor beside the door it replaced.
+    So the arm is a COVERAGE test over the live set, not an equality with the table —
+    re-deriving the rows is still a judgement call, while hiding a live entrant is not.
+    """
+    doc = (Path(probe.__file__).resolve().parent.parent / "docs" / "epics"
+           / "2026-11-04-5090-vector-layer" / "S3-VECTOR-CENSUS.md")
+    assert doc.exists(), f"the census doc moved: {doc}"
+    section = _doc_section(doc.read_text(encoding="utf-8"), "## 3.", "## 4.")
+    # A parser that found nothing is not a pass: the table is asserted so a section
+    # rename or an emptied table cannot satisfy this by naming no entrant at all.
+    rows = [ln for ln in section.splitlines() if ln.startswith("| `tortoise")]
+    assert len(rows) >= 5, (
+        f"the section carries {len(rows)} entrant row(s) — the table this pin reads has "
+        "gone missing or moved out of §3, so a green here would mean nothing")
+    derived = {e["tool"] for e in probe.vector_leg_surface() if "tool" in e}
+    assert len(derived) >= 5, (
+        f"the derivation named {sorted(derived)} — a surface this small means the scan "
+        "or the registry broke, and a green here would measure nothing")
+    missing = sorted(t for t in derived if t not in section)
+    assert not missing, (
+        f"§3 names none of these live entrants: {missing}. The table is the 2026-11-06 "
+        "derivation and is not retro-edited (§7), but a reader must still be able to reach "
+        "every tool the derivation names TODAY — name each successor beside the door it "
+        "replaced, re-derived from `vector_leg_surface()`, never carried from a row")
 
 
 def test_a_tool_that_reaches_the_leg_through_a_HELPER_is_named():
