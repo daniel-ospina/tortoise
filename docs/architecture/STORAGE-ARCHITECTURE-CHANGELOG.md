@@ -2501,6 +2501,79 @@ that distinction while this changelog still asserted it, and left the sites abov
 **while `#13220` is in flight, nothing may be removed and nothing may stop being written.** No measurement was
 re-read and no figure was retired.
 
+## §12.1c's latency verdict now states EVERY reading of the same unindexed read — pre-removal and post-removal — and the size dependence carries the conclusion rather than one number (`#13428`, 2026-11-18)
+
+**What was wrong.** §12.1c's comparison paragraph settled the latency question from **one** of the readings the
+document holds for **the same unindexed `:Object` read**, and that one is the cheapest of them:
+
+| reading | the unindexed `:Object` read | section |
+|---|---|---|
+| bare linear scan | **9.26 ms** | §12.1d (2026-09-24) |
+| the same read, app path (census) | **16.96 ms p50** (vs `point` 4.97 ms) | §12.1b (2026-09-24) |
+| the 2026-11-17 re-read | **34.45 ms p50**; **133.25 ms p50 / 634.50 ms p99** under load (7/60 windows over the 500 ms budget) | §14.3 V3 (`#13108`) |
+| the hop it is compared against | ~10–15 ms | §12.1c |
+
+The sentence read *"…is faster than the ~10–15 ms cross-store hop — **so at this size the scan wins on latency**, and
+what makes the case for the index is the SIZE dependence…"*. A categorical verdict drawn from the bare scan is
+**false of the two app-path readings the same document reports**, both of which are slower than the hop — and the
+document already states why they differ: §14.3 V3 prices **two REFUSED `queryNodes` round trips at ≈58 % of the
+unindexed read's store time**, which the bare scan does not pay.
+
+**What changed.** The paragraph now names all three readings with the date of each, attributes the app-path/bare-scan
+gap to the round trips §14.3 V3 already prices, and keeps the conclusion at **`⇒ What makes the case for the index is
+the SIZE dependence rather than today's number`** — the same conclusion, now supported by the readings that disagree
+about today rather than by the one that agrees.
+
+**⚠️ One attribution in the finding was corrected before landing, by re-deriving it.** The finding's ready-made patch
+attributed the ≈58 % pricing to **§12.1b** (`"§12.1b, which prices the two refused queryNodes round trips at ≈58 %…"`).
+`git show origin/main:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returns exactly **one** hit — §14.3
+V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that ≈58 % of the unindexed read's
+store time was two REFUSED queryNodes round trips"* — and §12.1b (`:1080–1168`) carries the `16.96 / 13.40 / 4.97 ms`
+pair with **no** round-trip pricing. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which
+is where it is measured. The correction moves a citation, not a number.
+
+**⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
+as **§12.2**'s. The paragraph is inside **§12.1c** (`### 12.1c ⭐ DECISION (RESOLVED 2026-11-07)` at `:1169`), and
+§12.2 — *the lever is "what gets an embedding"* — begins at `:1250`; the DECIDED block that follows the paragraph is
+§12.1c's too. This entry states the measured location rather than propagating the issue's, because a changelog entry
+whose section number sends a reader to an unrelated lever is the one thing it exists to prevent. The issue carries a
+comment recording the correction.
+
+**⚠️ And the pre-removal readings are now labelled as such — a review finding, fixed before merge.** The first landed
+version said the app path *"pays"* the `queryNodes` round trips, present tense, and concluded *"both slower than the
+hop"* from that. §14.3 V3's own row says the opposite: *"≈58 % of the unindexed read's store time was two REFUSED
+`queryNodes` round trips, **which `#13108` removed**"* — and the code carries the removal (`search_engine.py`
+`_index_known_absent`, which skips the doomed attempt). The paired artifacts in `docs/research/2026-11-17-13108-dense-leg/`
+§5 measure what that read does once the round trips are gone: **34.78 ms → 13.26 ms p50** at 1,000 rows (−62 %) —
+*inside* the ~10–15 ms hop band the paragraph compares against — and **65.73 ms → 47.47 ms** at 8,000, still well
+outside it (⚠️ with §5's own qualification on that pair: it was measured against a draft of the fix rather than the
+merged commit; both arms `scan_fallback`, so the direction stands). So a sentence citing the removal's cost as the
+current app-path number would have made the paragraph's own claim ("the readings disagree, so no single number
+decides it") rest on a defect that no longer exists — and the clause written to replace it ("today's app-path number
+does not settle it either way") was itself corrected by the next review round, because it generalised the
+**1,000-row** reading to the paragraph's own ~8,000-object size. The readings are **kept with their dates**, the two
+app-path ones are marked **pre-removal**, the post-removal readings are stated at BOTH sizes — **and their own size
+dependence with them**, because a conclusion resting on the *pre-removal* pair alone would be the same error one level
+down: the paired artifacts give the post-removal read as **13.26 ms → 47.47 ms** from 1,000 to 8,000 rows (−62 % / −28 %
+against each arm's own pre-removal pair), so the SIZE argument holds on the shipped series as well as on the
+single-arm `34.45 → 56.88 ms` one. The conclusion is unchanged, and it now rests on the readings as they are rather
+than on one of them as it was.
+
+**What did NOT change.** The argument for option 2 is untouched **by this change**: it rests on the **ledger**
+(provisioned, unevictable RAM for a row the record already holds, §12.1a / §14.3 V1) and on the **size dependence**,
+and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
+sentence immediately below the changed paragraph was itself revised on `main` by `#13435` in the same window (it now
+says *“held for a row the record already has”* and carries the two-population clause, `:1213–1217`), and this
+rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
+ledger/sequencing conclusion are what this entry claims survived; nothing here re-states the neighbouring sentence as
+though it were unchanged. No decision was reopened, no figure was retired, and nothing here authorises removal — the
+record-first sequencing and its release boundary are untouched (§12.1c's DECIDED block, `#11395` comment `6956793300`).
+
+**Why it is recorded rather than silently reworded.** This is the class `#13395` exists to fix — a design document
+stating a conclusion its own measurements contradict — and the `#13395` review found it as a P2 **after** the sibling
+finding (§14.3's lead omitting the SERVING half, `#13422`) had already been fixed on main. The same shape recurred one
+sentence below the fixed one, from the other side; the record of that is the point.
+
 ## 2026-11-18 — the anchored-read cutover's deferral is RESCINDED, and §2.0 states the armed cutover (`#7970`, `#8542`)
 
 **The decision.** The owner rescinded the deferral of `#7970`'s anchored-read cutover on 2026-11-18 (`#7970` comment

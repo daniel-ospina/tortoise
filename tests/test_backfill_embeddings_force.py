@@ -1137,16 +1137,13 @@ def test_dry_run_discloses_but_never_counts_an_unreachable_row(
 def test_two_nodes_sharing_a_key_are_both_counted(proj, monkeypatch):
     """#12496: the count is per SUBMITTED ROW, not per distinct id.
 
-    Two ``:Point`` nodes sharing one ``id`` are both collected, and the write's
-    ``MATCH`` finds both for one batch row — the vector lands on BOTH nodes.
-    Counting distinct returned ids would report 1 repair where 2 happened, so
-    the returned ids feed a per-row membership count instead.
+    Two ``:Point`` nodes sharing one ``id`` are both collected, and after #12570
+    each batch row writes its OWN node — so both rows repair and the count is 2.
 
-    ⚠️ This is a COUNT assertion on purpose, and the count is correct. The end
-    state underneath it is NOT: both nodes end up holding one of the two
-    vectors (#12570, and `test_shared_key_nodes_each_get_their_own_vector`
-    pins that defect). Do not read this test as evidence that both nodes were
-    repaired correctly.
+    ⚠️ Read this with `test_shared_key_nodes_each_get_their_own_vector`, which
+    pins the END STATE. Before #12570 the count was right while the state under
+    it was corrupt (one vector on both nodes); a count assertion alone cannot
+    tell those apart, which is why both live here.
     """
     g = _g(proj)
     _create(g, "Point", {"id": "dup", "content": "first body"})
@@ -1167,22 +1164,26 @@ def test_two_nodes_sharing_a_key_are_both_counted(proj, monkeypatch):
 
 
 def test_written_row_count_semantics():
-    """#12496: the counter's three edge cases, in isolation.
+    """#12496 / #12570: the counter's edge cases, in isolation.
 
-    Pins the semantics the batch loop depends on without needing a graph: a
-    returned-but-unsubmitted id is not counted, a submitted-but-unreturned id
-    is not counted, and a duplicated id counts once per submitted row. A
-    mutant that counts ``len(written_ids)`` reds the duplicated case; one that
-    counts ``len(batch)`` reds the unreturned case.
+    Pins the semantics the batch loop depends on without needing a graph: an
+    index the store returned but no row was submitted under is not counted, a
+    submitted row the store did not return is not counted, and two rows sharing
+    ONE id count twice because each carries its OWN index. A mutant that counts
+    ``len(written_indices)`` uninspected reds the out-of-range case; one that
+    counts ``len(batch)`` reds the unreturned case; one that counts distinct ids
+    reds the shared-id case (#12570).
     """
     mod = _load_backfill()
     batch = [{"id": "a"}, {"id": "b"}, {"id": "b"}, {"id": "missing"}]
-    # 'a' and both 'b' rows matched; 'missing' did not; 'ghost' was never sent.
-    assert mod._written_row_count(batch, ["a", "b", "ghost"]) == 3
+    # rows 0-2 matched; row 3 did not; index 99 was never submitted.
+    assert mod._written_row_count(batch, [0, 1, 2]) == 3
     # Nothing matched at all — every submitted row was not repaired.
     assert mod._written_row_count(batch, []) == 0
-    # Same id in two nodes is ONE returned id, TWO repaired submitted rows.
-    assert mod._written_row_count([{"id": "dup"}, {"id": "dup"}], ["dup"]) == 2
+    # A returned index outside the batch cannot inflate the count.
+    assert mod._written_row_count(batch, [0, 99]) == 1
+    # Two nodes sharing id 'dup' are TWO submitted rows, each with its own index.
+    assert mod._written_row_count([{"id": "dup"}, {"id": "dup"}], [0, 1]) == 2
 
 
 def test_completeness_marker_names_the_unreachable_population(
@@ -1396,21 +1397,17 @@ def test_marker_carries_the_run_limit_so_residual_is_interpretable(
     assert marker["residual_keyless"] == 0, marker
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "#12570: the write addresses nodes by a NON-UNIQUE key, so two nodes sharing "
-    "one id both receive the same vector — one node ends up describing the "
-    "other's text. strict=True so #12570 must remove this marker when it lands."))
 def test_shared_key_nodes_each_get_their_own_vector(proj, monkeypatch):
-    """#12496 review (P3): the duplicate-key test must not read as "repaired".
+    """#12570: each node holds the vector for ITS OWN text.
 
-    `test_two_nodes_sharing_a_key_are_both_counted` asserts a COUNT. That count
-    is correct, but the end state underneath it is corrupt: the write MATCHes
-    both nodes for one batch row, so the last row's vector lands on both. This
-    test is the discriminating half — it asserts each node holds the vector for
-    ITS OWN text, which is what a reader of the count would assume.
+    `test_two_nodes_sharing_a_key_are_both_counted` asserts a COUNT. The count
+    was already right while the end state underneath it was corrupt: the write
+    MATCHed both nodes for one batch row, so the last row's vector landed on
+    both. This is the discriminating half — it asserts each node holds the
+    vector for its own text, which is what a reader of the count would assume.
 
-    It is expected to fail today (#12570). `strict=True` means it starts passing
-    only when the follow-up lands, at which point this marker must be removed.
+    #12570's fix addresses the row's OWN node (`_write_identity`), not "every
+    node with this key", so this now passes and the ``xfail`` marker is gone.
     """
     g = _g(proj)
     _create(g, "Point", {"id": "dup", "content": "first body"})
@@ -1422,11 +1419,106 @@ def test_shared_key_nodes_each_get_their_own_vector(proj, monkeypatch):
     _backfill_run(mod, proj, ["Point"])
     # Order-free on purpose (#12570 review): two nodes with the SAME id cannot be
     # ordered by the query, so a positional assertion would depend on the
-    # engine's row order — and would make this strict xfail inert on a dialect
-    # that returns them the other way round.
+    # engine's row order — and would make this test inert on a dialect that
+    # returns them the other way round.
     rows = g.query(
         "MATCH (n:Point {id: 'dup'}) RETURN n.content, n.embedding").result_set
     assert len(rows) == 2, rows
     for content, stored in rows:
         assert stored == pytest.approx(fake(content)), (
             f"the node whose content is {content!r} does not hold its own vector")
+
+
+def test_a_surface_never_writes_the_neighbour_it_does_not_sweep(
+        proj, monkeypatch):
+    """#12570 part 2: the write honours ``kind_pred``, so no collateral.
+
+    ``Document`` and ``Source`` are two SURFACES over ONE ``:Source`` label,
+    discriminated by ``documentKind``. The sweep's predicate carried the
+    discriminator; the WRITE's ``MATCH`` carried only ``{url: row.id}`` — so a
+    ``Document``-surface row wrote its vector onto the provenance ``:Source``
+    that happens to share the ``url``, and vice versa. A ``url`` is plausibly
+    shared whenever a document's URL is also recorded as a provenance source.
+
+    The assertion is the neighbour's STORED VECTOR, unchanged — not its count,
+    because the defect left the counts correct (the wrong node was written and
+    reported). The provenance node is given a distinctive pre-existing vector so
+    "untouched" is observable rather than "still NULL".
+    """
+    g = _g(proj)
+    shared = "https://shared.example/paper"
+    provenance_vector = [0.25] * 384
+    _create(g, "Source", {"url": shared, "sourceKind": "web",
+                           "title": "Provenance source"},
+            emb=provenance_vector)
+    _create(g, "Source", {"url": shared, "documentKind": "brief",
+                           "_searchText": "the document body"})
+
+    mod = _load_backfill()
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+
+    stats = _backfill_run(mod, proj, ["Document"])
+    assert stats["updated"] == 1, stats
+
+    rows = g.query(
+        "MATCH (n:Source {url: $u}) "
+        "RETURN n.documentKind IS NOT NULL AS _is_doc, n.embedding",
+        params={"u": shared}).result_set
+    assert len(rows) == 2, rows
+    by_kind = {bool(is_doc): stored for is_doc, stored in rows}
+    assert by_kind[True] == pytest.approx(fake("the document body")), (
+        "the swept Document row must carry its own vector")
+    assert by_kind[False] == pytest.approx(provenance_vector), (
+        "the provenance :Source sharing this url must be UNTOUCHED — the write "
+        "carried no kind_pred, so it rewrote a surface it never swept (#12570)")
+
+
+def test_the_event_branch_discriminator_reaches_the_write(proj, monkeypatch):
+    """#12570 review cycle-2 finding 2: ``Event`` has NO ``kind_pred``.
+
+    ``LABEL_CONFIG["Event"]`` declares no ``kind_pred`` (its two SURFACES are
+    ``:Event``'s two BRANCHES), so `_write_where` contributes no discriminator
+    for this label — the predicate that put a row on the ``AgentSession`` branch
+    (``n.eventKind = 'AgentSession'``) reached the COLLECT and then stopped. The
+    write for such a row was ``eventId`` + null-safe ``name``/``keywords``/
+    ``topics``/``content_metadata``, so a ``:Event`` carrying a DIFFERENT
+    ``eventKind`` but agreeing on those five was matched and written.
+
+    ⛔ The sharpest instance is a ``meeting``: `_force_reembed_graph` PURGES
+    meeting embeddings and every collect branch excludes meetings, so a meeting
+    is only ever vectorless by design — and this hole let an AgentSession row
+    re-embed one it never collected, silently undoing the purge.
+
+    The assertion is the meeting's STORED VECTOR (``None`` — still purged), not
+    the counts: the defect left ``updated`` correct, because the wrong node was
+    written and reported.
+    """
+    g = _g(proj)
+    shared = {
+        "eventId": "shared-1",
+        "name": "standup",
+        "keywords": ["falkordb", "migration"],
+        "topics": ["storage"],
+        "content_metadata": json.dumps({"summary": "the summary"}),
+    }
+    _create(g, "Event", {**shared, "eventKind": "AgentSession"})
+    _create(g, "Event", {**shared, "eventKind": "meeting"})  # purged: NULL
+
+    mod = _load_backfill()
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+
+    stats = _backfill_run(mod, proj, ["Event"])
+    assert stats["updated"] == 1, stats
+
+    rows = g.query(
+        "MATCH (n:Event {eventId: $e}) RETURN n.eventKind, n.embedding",
+        params={"e": "shared-1"}).result_set
+    assert len(rows) == 2, rows
+    by_kind = {kind: stored for kind, stored in rows}
+    assert by_kind["AgentSession"] is not None, (
+        "the collected AgentSession row must carry its own vector")
+    assert by_kind["meeting"] is None, (
+        "the meeting sharing every other component must stay PURGED — the write "
+        "carried no eventKind, so it rewrote a branch it never swept (#12570)")
