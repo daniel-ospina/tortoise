@@ -94,8 +94,9 @@ was an artefact. Both the seed and the conclusion were replaced; the retraction 
 ⚠️ **The two arms are separate graph populations, and they agree less at higher load:** the
 1,000-Point population arm seeds the same 300 chars and read 12.77 vs the content arm's 12.84 in run 1
 (0.5 %), but 13.24 vs 14.56 in run 2 (9.9 %). That is why the axis is reported per run rather than
-pooled, and why the 60-and-1,200-char endpoints — which agree to 1 % across both runs — carry the
-conclusion rather than the middle point.
+pooled, and why the ratio is what carries the conclusion rather than the middle point's absolute: the
+1,200-char endpoint reproduces across both runs to **0.3 %** (23.35 vs 23.42), while the 60-char cell
+moves **9.6 %** between them (9.10 vs 9.98) — the same magnitude as the disagreement above.
 
 **Who owns this cost — checked, because the first cut of this file said "nobody" and that was wrong.**
 **`#11796` (OPEN)** owns the `ingest` half: *"the write-nudge block runs a placeholder keyed on the

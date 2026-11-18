@@ -55725,7 +55725,7 @@ class TortoiseSDK:
         of it). ⚠️ The two blocks are SEQUENTIAL, not interleaved. The
         CONTENT LENGTH is a real term once the seed is realistic: 60 / 300 / 1,200
         chars per row measured **9.1 / 12.8 / 23.4 ms** (run 1) and **10.0 / 14.6 /
-        23.4 ms** (run 2) — 20x the length costs 2.35x / 2.57x the call, close to linear. ⚠️ A first
+        23.4 ms** (run 2) — 20x the length costs 2.57x (run 1) / 2.35x (run 2) the call, close to linear. ⚠️ A first
         cut of the instrument seeded a repeated character and concluded the
         opposite; that seed holds TOKENISATION constant while varying bytes, and
         this method scores by token overlap, so the reading was an artefact.
