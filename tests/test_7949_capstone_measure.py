@@ -6482,6 +6482,24 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # conclusion that the end was therefore unpinnable was not.
             ("4230", ("exact", ")")),
         ), "capstone_preregistration"),
+        # ⛔ THE PROMOTE/DEDUP CLUSTER, WHICH WAS LABELLED "AT THIS HEAD" AND WAS NOT
+        # (#13489 review, finding 1(a) — MEASURED). The clause read `:24677`/`:24789`/
+        # `:24700`/`:24965` as this head's anchors; `git show 2584a86ec1:tortoise/sdk.py`
+        # returns exactly those four, so they were the BRANCH head's values carried across
+        # the `origin/main` merge that grew `sdk.py` by ~2.5k lines — this row's own thesis,
+        # missed by this row. They now name `2584a86ec1` as the head they were read at and
+        # state this head's measured quartet, which is what this row holds to the tree so
+        # the next merge reds here instead of leaving a reader 2,500 lines from where the
+        # document says to go. `if batch_id:` is the FIRST of two occurrences (the second
+        # opens a different block), which is why the cited line is graded rather than the
+        # anchor's uniqueness.
+        ("05-verify.md", "their THIS-HEAD values are", (
+            ("27222", "if batch_id:"),
+            ("27334", "dedup_wired = False"),
+            ("27245", ("def", "def _cas_witness(result) -> bool:")),
+            ("27510", ("def",
+                       "def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:")),
+        ), "sdk"),
         # ⚠️ BOTH RANGE ENDS ARE NOW HELD: `:4208` by the `("4201", …)` row above (that line
         # carries text) and `:4230` by the exact-closer form above. A range whose END a
         # bare-string anchor cannot discriminate is pinned by comparing the STRIPPED line,
