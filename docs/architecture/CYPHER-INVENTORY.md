@@ -467,8 +467,9 @@ regenerated; then "one row", measured at `34bd33d22a`, a base seven commits old 
 read; then "709 of 1,311 rows over exactly five files" — that one DOES reproduce, but only against
 **its own** tree at `9cebd72ad7` (it is `main`'s own drift at that base, a DIFFERENT metric from the
 `origin/main`-versus-this-tree count above); against **this tree's** table that base gives **746 over
-eight** (`search_engine.py` 21, `cache_projection.py` 2 and `ranking.py` 5 are shifted there and are
-absent from its table), and two bases have moved since. All four are the
+eight** — the three extra files being `search_engine.py` 21, `cache_projection.py` 2 and `ranking.py`
+5, whose 5 counts one statement `#13124` REPLACED rather than moved — and two bases have moved since.
+All four are the
 same defect — a count taken off the wrong unit, off a base that has since
 moved, or off an unnamed metric — which is why the figure above names its base and its command.)
 
