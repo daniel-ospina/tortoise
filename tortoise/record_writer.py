@@ -1700,13 +1700,92 @@ def _release_pooled_connections() -> None:
                 conn.close()
 
 
+#: One record type's embedding text, as the parts the text is composed from.
+#: The ENTRY is a CALLABLE rather than a list of field names, and that is a
+#: correctness requirement rather than a style choice: every composition here has
+#: its own shape (`DocumentCreated` calls a function whose third argument is a
+#: LIST, `EventRecorded` joins three parts with the falsy ones dropped), so a
+#: field-name list would DESCRIBE the datum without being able to produce it — a
+#: seam that joined such a list would stringify a document's `topics` and keep an
+#: event's empty ones (`#13412`). The callable IS the plug point, and it returns
+#: the COMPOSITION and nothing else: the arms that REFUSE to derive (a carried
+#: vector, a session `:Source`, a source record that states no text — see
+#: `derived_embedding_columns` below) are the CALLER's, so a consumer of this table
+#: must apply them too, or it will embed a session source's topic lexicon.
+_EmbeddingTextParts = Callable[[Mapping[str, Any]], Sequence[tuple[str, Any]]]
+
+def _session_source_skip(payload: Mapping[str, Any]) -> str:
+    """Why a SESSION `:Source` derives no vector here, or `""` if it is not one.
+
+    §9.4: *"one vector attached to the `:Source` node, whose embedded text is the
+    S1 narrative read from `public.session_narrative` — ⛔ never from
+    `:Source.summary`"*. The narrative is a RECORD column (`#9555`), not a
+    journal key, so this fold cannot compose it: a derivation from the journal
+    line would encode the node's topic LEXICON (`#10000` puts it in
+    `_searchText`) — the wrong text in a column the narrative arm must own.
+
+    ⛔ THE CLASSIFICATION IS NOT RE-IMPLEMENTED. `cache_projection.
+    is_episodic_source_node` is the repo's ONE declaration of a session
+    `:Source`'s identity (two arms, never a flag: a `session:` url prefix, or
+    `sourceKind == 'agentSession'` on a non-URL) and it already reads GRAPH
+    property names, which is exactly what a journal payload carries. A second
+    predicate here is how the two would drift.
+
+    Fail-CLOSED on an unreadable predicate (`"the predicate is unreadable"` ⇒
+    no vector) rather than fail-open: this function's answer decides WHICH TEXT
+    a column encodes, and a wrong text is invisible where a missing vector is
+    counted (`#13417`).
+
+    ⚠️ NO WRITER COMPUTES THE NARRATIVE VECTOR TODAY, so this arm does not take
+    a vector away from anyone: the encode calls on the capture path are the
+    Point/turn ones, and nothing reads `public.session_narrative` to embed it.
+    The population therefore has no vector on either side, and §14.3 V2's answer
+    for the `:Source` label does not require inventing one out of the wrong text
+    — `#13418`'s indicator 1 allows a documented skip in exactly this shape.
+    """
+    # ⛔ THE IDENTITY IS RESOLVED THE WAY BOTH LAYERS RESOLVE IT, before the
+    # predicate sees it. `is_episodic_source_node` reads `props["url"]` (its own
+    # docstring: it is the CACHE side's vocabulary), while the record resolves a
+    # `:Source` key as `url OR id` (`record_projection._key_value`: "Absence is the
+    # one shape that is a real producer — `add_document` emits `id` and no `url` at
+    # all") and the fold does the same (`projection/entities.py:7081`, `raw_key =
+    # url or sid`). Handing the payload over VERBATIM meant an `id`-keyed
+    # `session:…` source was classified as a plain one and got the topic lexicon
+    # embedded — the exact text §9.4 forbids, on the row `document_kind IS NULL`
+    # routes to the `source` dense leg. Latent today (both in-tree emitters pass
+    # `url=`), and free to close here.
+    resolved = payload
+    if payload.get("url") is None and payload.get("id") is not None:
+        resolved = {**payload, "url": payload.get("id")}
+    try:
+        from .cache_projection import is_episodic_source_node
+
+        episodic = is_episodic_source_node(resolved)
+    except Exception:  # noqa: BLE001, RUF100 — unclassifiable ⇒ derive nothing
+        return ("the episodic-source predicate is unreadable, so the session "
+                "narrative rule (STORAGE §9.4) cannot be ruled out")
+    if not episodic:
+        return ""
+    return ("a session :Source embeds the S1 narrative read from "
+            "public.session_narrative (STORAGE §9.4), which the journal line "
+            "this fold reads does not carry")
+
+
 #: ⛔ MOVED (#13447). The per-label text rule now lives in the ONE seam both
 #: callers read — :data:`tortoise.derived_embedding.TEXT_PARTS_BY_RECORD_TYPE` —
 #: because the live write and the rebuild cannot be allowed to disagree about the
 #: text they encode (a second copy here is the §12.2a "second rule set" defect).
-#: The name is kept as an alias because the record's own docs and the parity test
-#: (`tests/test_13220_record_label_embeddings.py`) cite it: same dict, one owner.
-_RECORD_EMBEDDING_TEXT: dict[str, tuple[str, ...]] = (
+#: The name is kept as an ALIAS, not a copy, because the record's own docs and the
+#: parity test (`tests/test_13220_record_label_embeddings.py`) cite it: same dict,
+#: one owner, and `tests/test_13447_derived_embedding_seam.py` pins the `is`
+#: identity so a second dict cannot quietly reappear.
+#:
+#: What came WITH the entries is `#13412`/`#13418`, and it survives the move: the
+#: document text is the GRAPH's `_build_search_text(title, summary, topics)`, CALLED
+#: rather than re-implemented, and a plain `:Source` derives from `_searchText` —
+#: the text its record ROW holds. Those rules now live on the seam's own helpers so
+#: one table serves the live write, the fold and the rebuild.
+_RECORD_EMBEDDING_TEXT: dict[str, _EmbeddingTextParts] = (
     _derived_embedding.TEXT_PARTS_BY_RECORD_TYPE)
 
 
@@ -1734,19 +1813,21 @@ def derived_embedding_columns(
 
     The journal never carried a vector for `object`/`subject` (the graph fold
     derives it and writes it straight onto the node, #7845) and carries none for
-    `event`/`document` unless a caller supplied one, so `public.event.embedding`
-    and `public.source.embedding` sat EMPTY under a built HNSW index. This is the
-    writer that fills them, and it fills them in the RECORD's own row — never in
-    `public.journal_event.payload`, because that row is the record's copy of the
-    journal line and a value the record invented would make a record-sourced
-    rebuild and a JSONL rebuild disagree.
+    `event`/`document`/`source` unless a caller supplied one, so
+    `public.event.embedding` and `public.source.embedding` sat EMPTY under a
+    built HNSW index. This is the writer that fills them, and it fills them in
+    the RECORD's own row — never in `public.journal_event.payload`, because that
+    row is the record's copy of the journal line and a value the record invented
+    would make a record-sourced rebuild and a JSONL rebuild disagree.
 
     ⛔ THE THREE OUTCOMES, and each is the graph fold's own choice mirrored rather
     than invented:
 
     * a CARRIED vector is honoured where the graph honours one — `_upsert_event`
       consumes `inner["embedding"]` when present, so an event that already has a
-      vector keeps it and none is computed;
+      vector keeps it and none is computed; a `:Source`'s `embedding` is a
+      declared caller passthrough (`_SOURCE_EXTRA_PROPS`), so the same arm
+      applies to `SourceCreated`;
     * a carried vector is IGNORED where the graph ignores one —
       `_upsert_object`/`_upsert_subject` call `encode_for_row(name)`
       unconditionally, so the record derives from `name`; the split REFUSES a
@@ -1757,8 +1838,10 @@ def derived_embedding_columns(
       snapshot;
     * nothing is derived where the graph suppresses the write — an `EventRecorded`
       whose `eventKind` is `meeting` (cycle-16: no subject/object ⇒ a junk vector
-      and an unbounded network call on every meeting write/repair/replay) and a
-      `DocumentCreated` carrying `suppress_embedding` (epic #900 T3).
+      and an unbounded network call on every meeting write/repair/replay), a
+      `DocumentCreated` carrying `suppress_embedding` (epic #900 T3), and a
+      SESSION `:Source` (whose vector text is the S1 narrative in
+      `public.session_narrative`, §9.4 — see `_session_source_skip`).
 
     ⛔ NO SECOND EMBEDDING RULE. The seam is `embeddings.encode_for_row` — the SAME
     `#5008`-gated submission step every graph write calls — and the width passed is
@@ -1787,14 +1870,15 @@ def derived_embedding_columns(
     `required_embedding_dim` threaded through the write seam; that is a follow-up,
     not something this docstring may claim.
 
-    ⛔ COST, DISCLOSED — and this paragraph is the POST-FIX state (#13447), because the
-    pre-fix claim that stood here is now false and would send the next lane to re-do
-    landed work. Before #13447 this derivation encoded the SAME text the graph fold then
-    encoded again (`projection/entities.py::_upsert_object`/`_upsert_subject` call
-    `encode_for_row(name)` for the same row, `_upsert_document`/`_upsert_event` the same
-    for theirs) and `encode_for_row` memoises nothing, so on an ARMED record every live
-    `ObjectRegistered`/`SubjectAdded`/`EventRecorded`/`DocumentCreated` write paid TWO
-    model calls for one text.
+    ⛔ COST, DISCLOSED — and this paragraph is the POST-FIX state (#13447), because
+    the pre-fix claim that stood here is now false and would send the next lane to
+    re-do landed work. Before #13447 this derivation encoded the SAME text the graph
+    fold then encoded again (`projection/entities.py::_upsert_object`/
+    `_upsert_subject` call `encode_for_row(name)` for the same row,
+    `_upsert_document`/`_upsert_event` the same for theirs) and `encode_for_row`
+    memoises nothing — so on an ARMED record every live `ObjectRegistered`/
+    `SubjectAdded`/`EventRecorded`/`DocumentCreated` write paid TWO model calls for
+    one text.
 
     That sharing now exists and it is ONE seam, not a follow-up: this column encodes
     through `derived_embedding.encode` (see the call below), the folds encode through
@@ -1802,16 +1886,19 @@ def derived_embedding_columns(
     `ConversationMiner._emit_event`, `TortoiseSDK._apply_and_journal`,
     `TortoiseSDK._create_entity`) hold `derived_embedding.write_scope()` across the
     record write AND its fold. The memo is keyed on the TEXT, so the fold's second
-    encode of the same text is served from it at ZERO model calls — one paid encode per
-    live write.
+    encode of the same text is served from it at ZERO model calls — one paid encode
+    per live write.
 
-    Two residuals, stated rather than implied: a `DocumentCreated` write still pays TWO
-    calls, because the fold composes `_build_search_text(title, summary, topics)` (#8419)
-    while this column composes `title`+`content` — a text divergence `#13412` owns, and
-    the memo cannot dedupe two different strings (its fix dedupes documents for free);
-    and a live door that does NOT carry `write_scope` pays the pre-#13447 second call.
-    That last one is the fail-open direction on COST only — never a wrong vector. No
-    cost figure is quoted here — the record write path's own per-record cost lives in
+    ⛔ AND THE DOCUMENT IS NO LONGER THE EXCEPTION. `#13412` (landed after this seam
+    was cut) moved the record's document text onto the GRAPH's
+    `_build_search_text(title, summary, topics)`; the two legs now compose the same
+    string, so the text-keyed memo dedupes `DocumentCreated` exactly like the other
+    labels. A plain `:Source` pays ONE call for a different reason — the graph
+    encodes nothing for it (`_upsert_source`), so there is no second half to share.
+
+    The residual that remains is a live door that does NOT carry `write_scope`: it
+    pays the pre-#13447 second call. That last one is the fail-open direction on COST
+    only — never a wrong vector. No cost figure is quoted here — the record write path's own per-record cost lives in
     `docs/evidence/9558-record-write-cost/` and an encode dominates it.
 
     ⛔ AND WHAT THIS DOES **NOT** REACH: a `record_projection.replay()` that is
@@ -1856,9 +1943,8 @@ def derived_embedding_columns(
     A TRUTHY non-string is the arm above: the graph raises, the record refuses.
     """
     record_type = record.get("type")
-    keys = (_RECORD_EMBEDDING_TEXT.get(record_type)
-            if isinstance(record_type, str) else None)
-    if keys is None:
+    if (not isinstance(record_type, str)
+            or record_type not in _RECORD_EMBEDDING_TEXT):
         return _DerivedEmbedding(skipped="no embedding rule for this record type")
     # A producer may NEST its node under its own envelope key: `ConversationMiner`
     # emits `{type: "EventRecorded", event: {...}}` and the fold reads
@@ -1876,13 +1962,36 @@ def derived_embedding_columns(
     elif record_type == "DocumentCreated":
         if payload.get("suppress_embedding") or record.get("suppress_embedding"):
             return _DerivedEmbedding(skipped="suppress_embedding is set")
+    elif record_type in ("SourceCreated", "SourceVersioned"):
+        # BOTH source writers share the arms below — `SourceVersioned` is the
+        # transition that moves the row's text, and the skip reasons apply to it
+        # unchanged (a version line stating no `_searchText` binds no column, so
+        # its old text and old vector stay a matched pair rather than drifting).
+        #
+        # The three `:Source` arms that derive NOTHING, each stated on the table
+        # above: a caller-carried vector (the node's own, via the `embedding`
+        # passthrough), a session `:Source` (§9.4's narrative rule), and a record
+        # that states no text at all (the `title`-only door — a TEXT-CARRIER gap,
+        # `#13474`, not a vector rule). Checked HERE rather than inside the rule so
+        # the refusal NAMES its cause: "the composed text is blank" would be true
+        # and useless to whoever reads the debug line.
+        if payload.get("embedding") is not None:
+            return _DerivedEmbedding(skipped="the record carries a vector")
+        session_skip = _session_source_skip(payload)
+        if session_skip:
+            return _DerivedEmbedding(skipped=session_skip)
+        if not payload.get("_searchText"):
+            return _DerivedEmbedding(
+                skipped="the record states no _searchText, so the row holds no "
+                        "text for a vector to describe (the producer must carry "
+                        "the composed text — #13474)")
 
     # ⛔ THE TEXT RULE IS THE SEAM'S, NOT THIS FUNCTION'S (#13447). One copy of the
     # per-label composition serves the record's column, the graph fold and the
     # rebuild, so the three cannot drift — see
-    # `derived_embedding.TEXT_PARTS_BY_RECORD_TYPE`. The falsy/non-string arms and
-    # their reasons ride back on `ComposedText` and are re-tagged below as this
-    # function's own vocabulary, which the DEBUG log reads.
+    # `derived_embedding.TEXT_PARTS_BY_RECORD_TYPE`. The falsy/non-string/raising
+    # arms and their reasons ride back on `ComposedText` and are re-tagged below as
+    # this function's own vocabulary, which the DEBUG log reads.
     composed = _derived_embedding.compose(record_type, payload)
     if not composed.text:
         return _DerivedEmbedding(skipped=composed.skipped)
@@ -2073,7 +2182,8 @@ class RecordWriter:
         try:
             # #13220 — the values the RECORD computes and the JOURNAL does not
             # carry (`object`/`subject` fingerprints, an event's composed vector, a
-            # document's title+content vector). Computed HERE, at the write seam,
+            # document's `_build_search_text` vector, a plain `:Source`'s `_searchText`).
+            # Computed HERE, at the write seam,
             # and not in the plan builder: the derivation needs the embedder, and
             # `record_projection`'s statement set is pinned DB-FREE and
             # deterministically (`tests/test_11075_record_declared_type_contract.py`

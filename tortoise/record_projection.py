@@ -3146,12 +3146,21 @@ GENERATED_COLUMNS: frozenset[str] = frozenset({
 #:     `derived_embedding_columns` closes the other side: `EventRecorded` derives
 #:     NOTHING when the record already carries a vector, so the two routes cannot
 #:     disagree.
-#:   * **`source`** — the same NAME, a different property. `_upsert_source`
-#:     computes no vector at all and `_upsert_document` derives one from
-#:     `title`+`content` wherever the GRAPH derives one (`suppress_embedding`
-#:     suppresses both, which `derived_embedding_columns` mirrors) — and it never
-#:     READS a carried `embedding`, so no `:Source` writer honours one and a
-#:     `source.embedding` is not "record-truth the graph also holds".
+#:   * **`source`** — the same NAME, a different property, and the reason it is
+#:     not here is NOT "the record never derives one" any more: since `#13418`
+#:     `derived_embedding_columns` derives a vector for `SourceCreated` too — from
+#:     `_searchText`, the ONE text the record row is known to hold (it is the key
+#:     the split binds `_search_text` from; a title-only record states no text and
+#:     derives nothing) — and for `DocumentCreated` (from `_build_search_text`,
+#:     `#13412`). It stays out of this table for TWO narrower reasons:
+#:     * `SourceCreated` HONOURS a carried vector (like `event`):
+#:       `_SOURCE_EXTRA_PROPS` (`projection/entities.py`) declares `embedding` a
+#:       caller passthrough, so the caller's vector is the node's own and the
+#:       record must not recompute over it — the derivation already skips that
+#:       case, so refusing the name here would make the record POORER than the
+#:       history (Interface A's failure);
+#:     * a carried `source.embedding` therefore stays a legal payload value,
+#:       which is what `#3018`/`#5004` require of a caller-supplied vector.
 #:     ⚠️ CONSEQUENCE, stated because nothing pins it: for a `DocumentCreated`
 #:     record the derived binding runs AFTER the split (`col_values[column] =
 #:     value` in `_declared_mutations`), so a CARRIED `source.embedding` is
@@ -6121,13 +6130,25 @@ def _declared_mutations(
         if derived:
             # #13220 — the values the RECORD computes that the JOURNAL does not
             # carry (`object`/`subject` fingerprints, an event's composed vector,
-            # a document's title+content vector). Bound AFTER the split and not
-            # merged into `props`, because these are the ONE class the payload may
-            # not write through the ordinary path (`DERIVED_COLUMNS`):
-            # a carried `embedding` is refused as DERIVED-authority while the
-            # record's own derivation is the column's legitimate writer. Merging
-            # them would have made one name behave differently depending on who
-            # supplied it in the same dict, which is a rule nobody could read.
+            # a SOURCE row's text vector — a document's `_searchText` and a
+            # plain `:Source`'s `_searchText`, `#13412`/`#13418`). Bound
+            # AFTER the split and not merged into `props`, so one name cannot
+            # behave differently depending on who supplied it in the same dict —
+            # the rule nobody could read.
+            #
+            # ⛔ NOT ONLY `DERIVED_COLUMNS` ANY MORE. `event`/`document`/`source`
+            # are served from the record (`record_vector.LABEL_SERVED`) and their
+            # payloads DO carry `embedding` (a caller's passthrough, e.g.
+            # `_SOURCE_EXTRA_PROPS`), so on those three the payload may write the
+            # column through the ordinary split. What is enforced here is "the
+            # record's derivation is the LAST writer WHERE IT WRITES", not "the
+            # payload may not write it" (which is what this comment said, and it
+            # was false for three of the five labels) and not "a carried value is
+            # always overwritten": `event` and `source` derive NOTHING when the
+            # record carries a vector, so there the payload's own value is the one
+            # that stands (see the `source` paragraph on `DERIVED_COLUMNS`).
+            # `DERIVED_COLUMNS` still names the two labels where a payload value is
+            # REFUSED (`object`/`subject`).
             for column, value in derived.items():
                 if column in GENERATED_COLUMNS or column in _BOOKKEEPING_COLUMNS:
                     # Postgres computes it / the payload may not write it: the

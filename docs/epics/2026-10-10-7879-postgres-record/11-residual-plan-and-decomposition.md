@@ -4,7 +4,7 @@ type: plan
 domain: engineering
 doc_status: draft
 created: 2026-11-05
-updated: 2026-11-05
+updated: 2026-11-18
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #7879, plan, residual decomposition, record write path, deploy drift gate"
@@ -226,7 +226,7 @@ acceptance criteria**, with one criterion honestly marked *waived* rather than s
 | criterion | verdict this plan carries |
 |---|---|
 | 2 — EP scalars recomputed, and the schema says so | **MET** (7 `chk_*_props_no_derived` CHECKs, measured live). Needs only a regression guard, not a group. |
-| 3 — a read path answers from Postgres with the engine stopped | ⛔ **WAIVED BY THE RULING, NOT MET.** #7970 is closed and its own body says the read-path shift *"is DEFERRED by the owner's own ruling … it must not hold the critical path."* Closing-as-completed is not satisfaction; §2.0's §"keep the limit in falkor high so we don't need to rush" is the deferral. **This plan must not be read as claiming criterion 3.** Amending the acceptance table is the owner's act. |
+| 3 — a read path answers from Postgres with the engine stopped | ⛔ **WAIVED BY THE RULING, NOT MET.** #7970 is closed and its own body says the read-path shift *"is DEFERRED by the owner's own ruling … it must not hold the critical path."* Closing-as-completed is not satisfaction; §2.0's §"keep the limit in falkor high so we don't need to rush" is the deferral. **This plan must not be read as claiming criterion 3.** Amending the acceptance table is the owner's act. *Superseded on the deferral, not on the verdict (2026-11-18):* the deferral this waiver rests on is **rescinded** — the read path is **ARMED**, not deferred (`#7970` comment `6965853268`) — so the ground above no longer stands; whether criterion 3 now reads **MET** remains the owner's acceptance act, not this plan's claim. |
 | 4 — one artifact for the schema | **MET** (one `RECORD_MIGRATIONS` registry, no glob, pinned and shipped in the wheel). |
 
 ### 2.1 Out of scope — declared, not omitted

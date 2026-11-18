@@ -8,7 +8,7 @@ updated: 2026-09-25
 subjects.team: epistemic-team
 issue: "#4503"
 aboutSubjects: Tortoise relationship count, edge-resident EP message state, per-edge RAM
-aboutObjects: tortoise/quota.py, tortoise/metering.py, product/pricing.json cost_basis, #4333 census, #5380
+aboutObjects: "tortoise/quota.py, tortoise/metering.py, product/pricing.json cost_basis, #4333 census, #5380"
 ---
 
 # The edge class is outside every accounting surface — measured

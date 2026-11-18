@@ -306,8 +306,11 @@ def test_a_label_with_no_row_text_rule_is_never_invented(model_calls):
 
     `public.source.embedding` / `public.event.embedding` are ALREADY projected, so a
     row that holds one restores it with no help from this seam; a row that holds
-    none is the document-text divergence `#13412` owns. A seam that quietly widened
-    to those labels would change what the two legs return for `:Source`.
+    none is `#13417`'s recording/backfill question. `#13412` and `#13418` widened the
+    RECORD's text table (the document text, and a plain `:Source`'s `_searchText`) and
+    neither moved this boundary: a rebuild that suddenly derived for those labels
+    would change what the two legs return for `:Source`, which is a separate
+    decision with its own evidence rather than a side effect of a restore repair.
     """
     assert "Source" not in de.ROW_TEXT_PARTS
     assert "Event" not in de.ROW_TEXT_PARTS

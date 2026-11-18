@@ -8,7 +8,7 @@ updated: 2026-10-14
 subjects.team: epistemic-team
 issue: "#2730"
 aboutSubjects: Tortoise entity resolution (S3 RESOLVE), extractor v4 write path
-aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, entity-attachment, #3584 opaque id, D10 #5013, D4/D9
+aboutObjects: "EXTRACTOR-V4-ARCHITECTURE.md, entity-attachment, #3584 opaque id, D10 #5013, D4/D9"
 ---
 
 # Entity attachment & disambiguation from context — what S3 RESOLVE should resolve *to*
