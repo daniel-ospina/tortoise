@@ -585,8 +585,10 @@ def test_the_refusal_names_a_recorded_cause_for_a_trace_only_decline(monkeypatch
     the TRANSLATOR. A translator that is correct but no longer CALLED is the
     defect restored: reverting ``failure_kind = cls._as_failure_kind(kind)`` back
     to the removed fixed dict at the ``_unavailable`` seam leaves the helper
-    intact and every translator row above green (measured: 39 passed with the
-    call site reverted). Driven through ``_unavailable`` — the seam that actually
+    intact and every translator row above green (measured at this head: with the
+    call site reverted the two files are `1 failed, 47 passed`, and the only red
+    is THIS row — the translator rows stay green, which is the whole point).
+    Driven through ``_unavailable`` — the seam that actually
     writes ``failure_kind`` onto the refusal — so that revert reds here.
 
     Shape copied from ``test_a_designed_absence_is_refused_with_not_installed``:
