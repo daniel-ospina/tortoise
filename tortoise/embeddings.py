@@ -1846,9 +1846,10 @@ def encode_for_row(
     already held a vector, so `graph_fold` counts a cold RE-write that stored the
     SAME text and lost nothing — and, for `Event`/`Document` (whose folds rewrite
     their text on match), a re-write of CHANGED text leaves a STALE vector that
-    the null-only repair reads CLEAN over (#13451). `monitoring
-    .DERIVED_EMBED_DECLINE_COUNT` states both limits; its repair reading is exact
-    for `embedding IS NULL` and is NOT a proof of "no divergence here".
+    the null-only repair reads CLEAN over (#13451).
+    `monitoring.DERIVED_EMBED_DECLINE_COUNT` states both limits; its repair
+    reading is exact for `embedding IS NULL`, and is NOT a proof of "no
+    divergence here".
 
     ⚠️ **Deliberately NOT routed through here**, so the boundary is written
     down rather than inferred: `encode_batch_for_store` (the session TURN
