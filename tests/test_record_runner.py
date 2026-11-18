@@ -1139,11 +1139,18 @@ def test_a_committed_batch_is_counted_from_the_replay_report_not_from_the_plan(
 
 
 class _ScriptedCursor:
-    """Answers `read_checkpoint`'s two reads from a script, in order."""
+    """Answers `journal_coverage`'s reads from a script, in order.
+
+    ⛔ `journal_coverage` is the ONE coverage reader since #13331 (the SQL used to
+    live in this tool), so this double now models ITS shape: the aggregate row
+    carries a FOURTH column (`within_prefix`, the journal leg's number, which
+    `read_checkpoint` does not read), and the cursor is CLOSED by the reader.
+    """
 
     def __init__(self, rows):
         self._rows = list(rows)
         self._current = None
+        self.closed = False
 
     def execute(self, sql, params=None):
         self._current = self._rows.pop(0)
@@ -1151,12 +1158,19 @@ class _ScriptedCursor:
     def fetchone(self):
         return self._current
 
+    def close(self):
+        self.closed = True
+
 
 def _read_checkpoint_with(monkeypatch, *, aggregate, gap_row, allocated=False):
     """`read_checkpoint` with only its SQL answers stubbed — the DECISION is the subject."""
     from tortoise import record_projection
 
-    fake = _ScriptedCursor([aggregate, gap_row])
+    # `within_prefix` (4th column) is the #13331 journal leg's fact; this tool's
+    # Checkpoint does not carry it, so the aggregate's `present` is the honest
+    # filler (it is the same count whenever the journal's enumeration is unknown).
+    padded = (*tuple(aggregate), aggregate[1])
+    fake = _ScriptedCursor([padded, gap_row])
     monkeypatch.setattr(record_projection, "scope_connection",
                         lambda conn, org_id: fake)
     return record_runner.read_checkpoint(None, "o", "g", allocated=allocated)
