@@ -1,22 +1,22 @@
 {
   "schema": "capstone-state-value-scoreboard/v1",
   "header": {
-    "started": "2026-11-18T00:33:51Z",
-    "finished": "2026-11-18T00:35:41Z",
-    "duration_s": 110.2,
+    "started": "2026-11-18T03:03:25Z",
+    "finished": "2026-11-18T03:05:37Z",
+    "duration_s": 131.8,
     "target": "local",
-    "product": "tortoise-sdk @ c8ecf9b37e6f0147769ada8ae7b0699376fbea26",
-    "store": "docker://<redacted>@127.0.0.1:16415/tortoise_test_matrix",
-    "graph": "capstone13038_20261118t003351z",
+    "product": "tortoise-sdk @ 353c225703affc3d8b46972216bf998da8781478",
+    "store": "docker://<redacted>@127.0.0.1:16417/tortoise_test_matrix",
+    "graph": "capstone13038_20261118t030325z",
     "narrative": "docs/evidence/13038-capstone/narrative.json",
     "narrative_frozen": "2026-11-16",
     "provenance": {
       "target": "local",
-      "store": "docker://<redacted>@127.0.0.1:16415/tortoise_test_matrix",
-      "graph": "capstone13038_20261118t003351z",
+      "store": "docker://<redacted>@127.0.0.1:16417/tortoise_test_matrix",
+      "graph": "capstone13038_20261118t030325z",
       "product": {
         "schema": "tortoise-sdk",
-        "commit": "c8ecf9b37e6f0147769ada8ae7b0699376fbea26"
+        "commit": "353c225703affc3d8b46972216bf998da8781478"
       },
       "ingest_surface": [
         "Objects (create_object / update_knowledge)",
@@ -86,7 +86,7 @@
     "judge": {
       "mode": "fresh",
       "ok": true,
-      "elapsed_s": 84.5,
+      "elapsed_s": 92.9,
       "judge_cmd": "pi -p --no-session --no-tools",
       "reason": ""
     }
@@ -102,113 +102,113 @@
       "op": "object",
       "ref": "launch_plan",
       "ok": true,
-      "detail": "core:plan \u2192 1a1ec132801-088dd205af0b",
-      "product_id": "1a1ec132801-088dd205af0b"
+      "detail": "core:plan \u2192 1a1ec9c0884-d8373eba5f01",
+      "product_id": "1a1ec9c0884-d8373eba5f01"
     },
     {
       "op": "advance_stage",
       "ref": "launch_plan",
       "ok": true,
       "detail": "{\"applied\": true, \"reason\": \"\", \"stage\": \"scheduled\", \"slot\": \"entry\", \"outcome\": null}",
-      "product_id": "1a1ec132801-088dd205af0b"
+      "product_id": "1a1ec9c0884-d8373eba5f01"
     },
     {
       "op": "point",
       "ref": "q3_pricing",
       "ok": true,
-      "detail": "decision \u2192 1a1ec132aa6-07bdbef2b880",
-      "product_id": "1a1ec132aa6-07bdbef2b880"
+      "detail": "decision \u2192 1a1ec9c0eba-f5af7bb71877",
+      "product_id": "1a1ec9c0eba-f5af7bb71877"
     },
     {
       "op": "point",
       "ref": "q4_pricing",
       "ok": true,
-      "detail": "decision \u2192 1a1ec132f4a-197413b54f44",
-      "product_id": "1a1ec132f4a-197413b54f44"
+      "detail": "decision \u2192 1a1ec9c15b0-f9180220d210",
+      "product_id": "1a1ec9c15b0-f9180220d210"
     },
     {
       "op": "supersede_point",
       "ref": "q3_pricing",
       "ok": true,
-      "detail": "superseded by 1a1ec132f4a-197413b54f44",
-      "product_id": "1a1ec132aa6-07bdbef2b880"
+      "detail": "superseded by 1a1ec9c15b0-f9180220d210",
+      "product_id": "1a1ec9c0eba-f5af7bb71877"
     },
     {
       "op": "object",
       "ref": "old_onboarding",
       "ok": true,
-      "detail": "process \u2192 1a1ec133130-eaeee588aab3",
-      "product_id": "1a1ec133130-eaeee588aab3"
+      "detail": "process \u2192 1a1ec9c22d8-bc97b44a6085",
+      "product_id": "1a1ec9c22d8-bc97b44a6085"
     },
     {
       "op": "deprecate_object",
       "ref": "old_onboarding",
       "ok": true,
       "detail": "status=deprecated",
-      "product_id": "1a1ec133130-eaeee588aab3"
+      "product_id": "1a1ec9c22d8-bc97b44a6085"
     },
     {
       "op": "object",
       "ref": "partner_call",
       "ok": true,
-      "detail": "core:plan \u2192 1a1ec133272-64582e57791c",
-      "product_id": "1a1ec133272-64582e57791c"
+      "detail": "core:plan \u2192 1a1ec9c289f-42df472d886d",
+      "product_id": "1a1ec9c289f-42df472d886d"
     },
     {
       "op": "advance_stage",
       "ref": "partner_call",
       "ok": true,
       "detail": "{\"applied\": true, \"reason\": \"\", \"stage\": \"cancelled\", \"slot\": \"terminal\", \"outcome\": \"withdrawn\"}",
-      "product_id": "1a1ec133272-64582e57791c"
+      "product_id": "1a1ec9c289f-42df472d886d"
     },
     {
       "op": "object",
       "ref": "uptime_goal",
       "ok": true,
-      "detail": "core:goal \u2192 1a1ec133371-de7dd1c1d98a",
-      "product_id": "1a1ec133371-de7dd1c1d98a"
+      "detail": "core:goal \u2192 1a1ec9c2d31-3deeb73050c0",
+      "product_id": "1a1ec9c2d31-3deeb73050c0"
     },
     {
       "op": "object",
       "ref": "uptime_target",
       "ok": true,
-      "detail": "core:target \u2192 1a1ec1333d5-fcfef6fdbf22",
-      "product_id": "1a1ec1333d5-fcfef6fdbf22"
+      "detail": "core:target \u2192 1a1ec9c304e-f1edb5ce0dec",
+      "product_id": "1a1ec9c304e-f1edb5ce0dec"
     },
     {
       "op": "reading",
       "ref": "uptime_oct",
       "ok": true,
       "detail": "99.95percent asOf 2026-10-31T23:59:00+00:00",
-      "product_id": "1a1ec1333ed-8f81460ac5cc"
+      "product_id": "1a1ec9c3073-e189d9673a20"
     },
     {
       "op": "reading",
       "ref": "uptime_nov",
       "ok": true,
       "detail": "99.72percent asOf 2026-11-15T23:59:00+00:00",
-      "product_id": "1a1ec133692-fec0ad360937"
+      "product_id": "1a1ec9c34af-5eab3fa46b2c"
     },
     {
       "op": "judge_goal",
       "ref": "uptime_goal",
       "ok": true,
-      "detail": "state=unmet value=99.72 reading=1a1ec133692-fec0ad360937",
-      "product_id": "1a1ec133371-de7dd1c1d98a"
+      "detail": "state=unmet value=99.72 reading=1a1ec9c34af-5eab3fa46b2c",
+      "product_id": "1a1ec9c2d31-3deeb73050c0"
     },
     {
       "op": "point",
       "ref": "beach_club_claim",
       "ok": true,
-      "detail": "statement \u2192 1a1ec134353-a233c156731f",
-      "product_id": "1a1ec134353-a233c156731f"
+      "detail": "statement \u2192 1a1ec9c4373-06032d7ab85b",
+      "product_id": "1a1ec9c4373-06032d7ab85b"
     },
     {
       "op": "retract_point",
       "ref": "beach_club_claim",
       "ok": true,
       "detail": "status=retracted",
-      "product_id": "1a1ec134353-a233c156731f"
+      "product_id": "1a1ec9c4373-06032d7ab85b"
     }
   ],
   "rows": [
@@ -216,32 +216,32 @@
       "id": "Q1",
       "question": "What are we currently committed to?",
       "verdict": "wrong",
-      "because": "It serves Q4 pricing ($39) and the uptime target but omits the pending 12 December launch plan, which the narrative counts as a current commitment, so the 'what we are committed to' set is incomplete.",
-      "cause": "Plans vocabulary / S0-S7 slice: the plan object (core:plan) is not returned by an object-scope 'current commitments' search (0 rows, vector leg no_embedder, fts empty), so the only served items are points.",
+      "because": "The answer serves only Q4 pricing and the Q4 uptime goal (correctly excluding Q3 and the retired onboarding flow) but omits the 12 December launch plan, which the narrative names as a current commitment, so the list of commitments is incomplete.",
+      "cause": "The object-side reads returned 0 rows (empty fts/structural legs plus degraded no-embedder vector), so a plan stored as an object cannot be reached by the commitment query.",
       "product_answer": "`search('what are we currently committed to \u2014 pricing, onboarding, launch and uptime', point)` \u2192 2 rows [related-to-question: 2/2]: *Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 dec\u2026* (kind=decision, status=live, rrf=1.0); *Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwel\u2026* (kind=statement, status=live, rrf=0.666666666666667) \u00b7 `search('current commitments', object)` \u2192 0 rows \u00b7 `search('onboarding flow', object)` \u2192 0 rows",
-      "evidence": "search: read_status='degraded'; search: read_status='degraded'; search: read_status='degraded'; found: q4_pricing (1a1ec132f4a-197413b54f44); DEGRADED-READ: the product reported the read degraded (legs: fallback, vector) \u2014 rows may be the whole corpus ranked, not a match set",
+      "evidence": "search: read_status='degraded'; search: read_status='degraded'; search: read_status='degraded'; found: q4_pricing (1a1ec9c15b0-f9180220d210); DEGRADED-READ: the product reported the read degraded (legs: fallback, vector) \u2014 rows may be the whole corpus ranked, not a match set",
       "wrong_means": "If the replaced Q3 pricing decision or the retired onboarding flow appears, the product serves retired things as current \u2014 the trust failure this model exists to remove.",
       "degraded": true,
       "answer_status": "answered",
       "signals": [
-        "found: q4_pricing (1a1ec132f4a-197413b54f44)",
+        "found: q4_pricing (1a1ec9c15b0-f9180220d210)",
         "DEGRADED-READ: the product reported the read degraded (legs: fallback, vector) \u2014 rows may be the whole corpus ranked, not a match set"
       ],
       "payload": {
         "served_points": [
           {
-            "id": "1a1ec132f4a-197413b54f44",
+            "id": "1a1ec9c15b0-f9180220d210",
             "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
             "kind": "decision",
             "status": "live",
             "score": 1.0,
             "match": "fts",
             "supersedes": [
-              "1a1ec132aa6-07bdbef2b880"
+              "1a1ec9c0eba-f5af7bb71877"
             ]
           },
           {
-            "id": "1a1ec1339bf-acd338f7fe2c",
+            "id": "1a1ec9c3bb8-e46508758603",
             "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
             "kind": "statement",
             "status": "live",
@@ -313,18 +313,18 @@
           },
           "rows": [
             {
-              "id": "1a1ec132f4a-197413b54f44",
+              "id": "1a1ec9c15b0-f9180220d210",
               "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
               "kind": "decision",
               "status": "live",
               "score": 1.0,
               "match": "fts",
               "supersedes": [
-                "1a1ec132aa6-07bdbef2b880"
+                "1a1ec9c0eba-f5af7bb71877"
               ]
             },
             {
-              "id": "1a1ec1339bf-acd338f7fe2c",
+              "id": "1a1ec9c3bb8-e46508758603",
               "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
               "kind": "statement",
               "status": "live",
@@ -448,22 +448,22 @@
       "id": "Q2",
       "question": "Did we ever plan a launch event, and did it happen?",
       "verdict": "right",
-      "because": "It serves the launch as a core:plan node with stage 'scheduled', isClosed=false and no occurrence event anywhere in the graph, so plan and fact are told apart.",
+      "because": "It serves the launch as a core:plan at stage 'scheduled' with isClosed=false and no linked events, which says it was planned and has not happened.",
       "cause": "",
       "product_answer": "`search('launch event', object)` \u2192 1 rows [related-to-question: 1/1]: *Launch event \u2014 12 December at the beach club* (kind=core:plan, status=live, rrf=4.0) \u00b7 `read_entity` \u2192 {\"isClosed\": false, \"name\": \"Launch event \\u2014 12 December at the beach club\", \"objectKind\": \"core:plan\", \"pipelineOutcome\": \"\", \"pipelineSlot\": \"entry\", \"pipelineStageId\": \"scheduled\"} \u00b7 `read_events` \u2192 2 events",
-      "evidence": "search: read_status='degraded'; stage='scheduled' slot='entry' isClosed=False status=None; found: launch_plan (1a1ec132801-088dd205af0b); DEGRADED-READ: the product reported the read degraded (legs: vector) \u2014 rows may be the whole corpus ranked, not a match set",
+      "evidence": "search: read_status='degraded'; stage='scheduled' slot='entry' isClosed=False status=None; found: launch_plan (1a1ec9c0884-d8373eba5f01); DEGRADED-READ: the product reported the read degraded (legs: vector) \u2014 rows may be the whole corpus ranked, not a match set",
       "wrong_means": "If 'planned' and 'happened' cannot be told apart, plans are being stored as facts \u2014 the answer would let an agent claim an event occurred.",
       "degraded": true,
       "answer_status": "answered",
       "signals": [
         "stage='scheduled' slot='entry' isClosed=False status=None",
-        "found: launch_plan (1a1ec132801-088dd205af0b)",
+        "found: launch_plan (1a1ec9c0884-d8373eba5f01)",
         "DEGRADED-READ: the product reported the read degraded (legs: vector) \u2014 rows may be the whole corpus ranked, not a match set"
       ],
       "payload": {
         "served_objects": [
           {
-            "id": "1a1ec132801-088dd205af0b",
+            "id": "1a1ec9c0884-d8373eba5f01",
             "what": "Launch event \u2014 12 December at the beach club",
             "kind": "core:plan",
             "status": "live",
@@ -473,7 +473,7 @@
           }
         ],
         "the_plan_node": {
-          "id": "1a1ec132801-088dd205af0b",
+          "id": "1a1ec9c0884-d8373eba5f01",
           "name": "Launch event \u2014 12 December at the beach club",
           "objectKind": "core:plan",
           "status": null,
@@ -484,7 +484,7 @@
         },
         "events_in_the_graph": [
           {
-            "id": "1a1ec133692-fec0ad360937",
+            "id": "1a1ec9c34af-5eab3fa46b2c",
             "name": "Uptime reading 2026-11",
             "kind": "measurement",
             "value": 99.72,
@@ -492,7 +492,7 @@
             "asOf": "2026-11-15T23:59:00+00:00"
           },
           {
-            "id": "1a1ec1333ed-8f81460ac5cc",
+            "id": "1a1ec9c3073-e189d9673a20",
             "name": "Uptime reading 2026-10",
             "kind": "measurement",
             "value": 99.95,
@@ -550,7 +550,7 @@
           },
           "rows": [
             {
-              "id": "1a1ec132801-088dd205af0b",
+              "id": "1a1ec9c0884-d8373eba5f01",
               "what": "Launch event \u2014 12 December at the beach club",
               "kind": "core:plan",
               "status": "live",
@@ -564,7 +564,7 @@
           "role": "plan_node",
           "surface": "read_entity",
           "request": {
-            "id": "1a1ec132801-088dd205af0b"
+            "id": "1a1ec9c0884-d8373eba5f01"
           },
           "ok": true,
           "detail": "one node",
@@ -574,8 +574,8 @@
           "rows": [
             {
               "canonical_name": "launch event 12 december at the beach club",
-              "createdAt": "2026-11-18T00:34:00.837960+00:00",
-              "id": "1a1ec132801-088dd205af0b",
+              "createdAt": "2026-11-18T03:03:31.208246+00:00",
+              "id": "1a1ec9c0884-d8373eba5f01",
               "isClosed": false,
               "name": "Launch event \u2014 12 December at the beach club",
               "objectKind": "core:plan",
@@ -583,7 +583,7 @@
               "pipelineSlot": "entry",
               "pipelineStageId": "scheduled",
               "pipelineStageKey": "core:plan",
-              "pipelineStageSince": "2026-11-18T00:34:00.951763+00:00",
+              "pipelineStageSince": "2026-11-18T03:03:31.362464+00:00",
               "title": ""
             }
           ]
@@ -601,7 +601,7 @@
           "overlap": {},
           "rows": [
             {
-              "id": "1a1ec133692-fec0ad360937",
+              "id": "1a1ec9c34af-5eab3fa46b2c",
               "name": "Uptime reading 2026-11",
               "kind": "measurement",
               "value": 99.72,
@@ -609,7 +609,7 @@
               "asOf": "2026-11-15T23:59:00+00:00"
             },
             {
-              "id": "1a1ec1333ed-8f81460ac5cc",
+              "id": "1a1ec9c3073-e189d9673a20",
               "name": "Uptime reading 2026-10",
               "kind": "measurement",
               "value": 99.95,
@@ -624,22 +624,22 @@
       "id": "Q3",
       "question": "Why did the pricing decision change, and what replaced it?",
       "verdict": "right",
-      "because": "The served rows name Q4 pricing ($39) as the replacement, carry supersedes=[Q3 id] and a live successor node, and invent no rationale.",
+      "because": "The Q3 decision is served as superseded ($29/seat) alongside the live Q4 decision that names itself as 'replacing the Q3 decision' and carries the supersedes edge to Q3's id, so the successor is named and no rationale is invented.",
       "cause": "",
-      "product_answer": "`search('pricing decision Q3 Q4', point)` \u2192 2 rows [related-to-question: 1/2]: *Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwel\u2026* (kind=statement, status=live, rrf=0.333333333333333); *Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 dec\u2026* (kind=decision, status=live, rrf=0.222222222222222) \u00b7 `search('pricing decision Q3 Q4', point, include_terminal)` \u2192 3 rows [related-to-question: 2/3]: *Q3 pricing: the entry tier is $29 per seat.* (kind=decision, status=superseded, rrf=3.0); *Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwel\u2026* (kind=statement, status=live, rrf=0.333333333333333); *Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 dec\u2026* (kind=decision, status=live, rrf=0.222222222222222) \u00b7 `read_entity` \u2192 {\"content\": \"Q3 pricing: the entry tier is $29 per seat.\", \"status\": \"superseded\", \"validTo\": \"2026-11-18T00:34:02.698636+00:00\"} \u00b7 `read_entity` \u2192 {\"content\": \"Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.\", \"status\": \"live\"}",
-      "evidence": "search: read_status='degraded'; search: read_status='degraded'; replaced node status='superseded', names-its-successor=False; found: q4_pricing (1a1ec132f4a-197413b54f44); DEGRADED-READ: the product reported the read degraded (legs: vector) \u2014 rows may be the whole corpus ranked, not a match set",
+      "product_answer": "`search('pricing decision Q3 Q4', point)` \u2192 2 rows [related-to-question: 1/2]: *Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwel\u2026* (kind=statement, status=live, rrf=0.333333333333333); *Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 dec\u2026* (kind=decision, status=live, rrf=0.222222222222222) \u00b7 `search('pricing decision Q3 Q4', point, include_terminal)` \u2192 3 rows [related-to-question: 2/3]: *Q3 pricing: the entry tier is $29 per seat.* (kind=decision, status=superseded, rrf=3.0); *Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwel\u2026* (kind=statement, status=live, rrf=0.333333333333333); *Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 dec\u2026* (kind=decision, status=live, rrf=0.222222222222222) \u00b7 `read_entity` \u2192 {\"content\": \"Q3 pricing: the entry tier is $29 per seat.\", \"status\": \"superseded\", \"validTo\": \"2026-11-18T03:03:34.576716+00:00\"} \u00b7 `read_entity` \u2192 {\"content\": \"Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.\", \"status\": \"live\"}",
+      "evidence": "search: read_status='degraded'; search: read_status='degraded'; replaced node status='superseded', names-its-successor=False; found: q4_pricing (1a1ec9c15b0-f9180220d210); DEGRADED-READ: the product reported the read degraded (legs: vector) \u2014 rows may be the whole corpus ranked, not a match set",
       "wrong_means": "If the successor cannot be named, change is illegible \u2014 the agent cannot explain a change to a human.",
       "degraded": true,
       "answer_status": "answered",
       "signals": [
         "replaced node status='superseded', names-its-successor=False",
-        "found: q4_pricing (1a1ec132f4a-197413b54f44)",
+        "found: q4_pricing (1a1ec9c15b0-f9180220d210)",
         "DEGRADED-READ: the product reported the read degraded (legs: vector) \u2014 rows may be the whole corpus ranked, not a match set"
       ],
       "payload": {
         "served_default_scope": [
           {
-            "id": "1a1ec1339bf-acd338f7fe2c",
+            "id": "1a1ec9c3bb8-e46508758603",
             "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
             "kind": "statement",
             "status": "live",
@@ -648,20 +648,20 @@
             "supersedes": []
           },
           {
-            "id": "1a1ec132f4a-197413b54f44",
+            "id": "1a1ec9c15b0-f9180220d210",
             "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
             "kind": "decision",
             "status": "live",
             "score": 0.222222222222222,
             "match": "fts",
             "supersedes": [
-              "1a1ec132aa6-07bdbef2b880"
+              "1a1ec9c0eba-f5af7bb71877"
             ]
           }
         ],
         "served_include_terminal": [
           {
-            "id": "1a1ec132aa6-07bdbef2b880",
+            "id": "1a1ec9c0eba-f5af7bb71877",
             "what": "Q3 pricing: the entry tier is $29 per seat.",
             "kind": "decision",
             "status": "superseded",
@@ -670,7 +670,7 @@
             "supersedes": []
           },
           {
-            "id": "1a1ec1339bf-acd338f7fe2c",
+            "id": "1a1ec9c3bb8-e46508758603",
             "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
             "kind": "statement",
             "status": "live",
@@ -679,27 +679,27 @@
             "supersedes": []
           },
           {
-            "id": "1a1ec132f4a-197413b54f44",
+            "id": "1a1ec9c15b0-f9180220d210",
             "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
             "kind": "decision",
             "status": "live",
             "score": 0.222222222222222,
             "match": "fts",
             "supersedes": [
-              "1a1ec132aa6-07bdbef2b880"
+              "1a1ec9c0eba-f5af7bb71877"
             ]
           }
         ],
         "the_replaced_node": {
-          "id": "1a1ec132aa6-07bdbef2b880",
+          "id": "1a1ec9c0eba-f5af7bb71877",
           "content": "Q3 pricing: the entry tier is $29 per seat.",
           "status": "superseded",
-          "validTo": "2026-11-18T00:34:02.698636+00:00",
-          "expiredAt": "2026-11-18T00:34:02.802058+00:00",
+          "validTo": "2026-11-18T03:03:34.576716+00:00",
+          "expiredAt": "2026-11-18T03:03:35.555989+00:00",
           "supersededBy": null
         },
         "the_successor_node": {
-          "id": "1a1ec132f4a-197413b54f44",
+          "id": "1a1ec9c15b0-f9180220d210",
           "content": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
           "status": "live"
         }
@@ -760,7 +760,7 @@
           },
           "rows": [
             {
-              "id": "1a1ec1339bf-acd338f7fe2c",
+              "id": "1a1ec9c3bb8-e46508758603",
               "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
               "kind": "statement",
               "status": "live",
@@ -769,14 +769,14 @@
               "supersedes": []
             },
             {
-              "id": "1a1ec132f4a-197413b54f44",
+              "id": "1a1ec9c15b0-f9180220d210",
               "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
               "kind": "decision",
               "status": "live",
               "score": 0.222222222222222,
               "match": "fts",
               "supersedes": [
-                "1a1ec132aa6-07bdbef2b880"
+                "1a1ec9c0eba-f5af7bb71877"
               ]
             }
           ]
@@ -835,7 +835,7 @@
           },
           "rows": [
             {
-              "id": "1a1ec132aa6-07bdbef2b880",
+              "id": "1a1ec9c0eba-f5af7bb71877",
               "what": "Q3 pricing: the entry tier is $29 per seat.",
               "kind": "decision",
               "status": "superseded",
@@ -844,7 +844,7 @@
               "supersedes": []
             },
             {
-              "id": "1a1ec1339bf-acd338f7fe2c",
+              "id": "1a1ec9c3bb8-e46508758603",
               "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
               "kind": "statement",
               "status": "live",
@@ -853,14 +853,14 @@
               "supersedes": []
             },
             {
-              "id": "1a1ec132f4a-197413b54f44",
+              "id": "1a1ec9c15b0-f9180220d210",
               "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
               "kind": "decision",
               "status": "live",
               "score": 0.222222222222222,
               "match": "fts",
               "supersedes": [
-                "1a1ec132aa6-07bdbef2b880"
+                "1a1ec9c0eba-f5af7bb71877"
               ]
             }
           ]
@@ -869,7 +869,7 @@
           "role": "replaced_node",
           "surface": "read_entity",
           "request": {
-            "id": "1a1ec132aa6-07bdbef2b880"
+            "id": "1a1ec9c0eba-f5af7bb71877"
           },
           "ok": true,
           "detail": "one node",
@@ -884,19 +884,19 @@
               "confidence": 0.5,
               "content": "Q3 pricing: the entry tier is $29 per seat.",
               "content_hash": "af81b3e72f80844300b4858521010b188ac610d9d767900c5e7021b204582f5c",
-              "createdAt": "2026-11-18T00:34:01.510509+00:00",
+              "createdAt": "2026-11-18T03:03:32.792837+00:00",
               "ep_alpha": 3.0,
               "ep_beta": 1.0,
-              "expiredAt": "2026-11-18T00:34:02.802058+00:00",
-              "id": "1a1ec132aa6-07bdbef2b880",
+              "expiredAt": "2026-11-18T03:03:35.555989+00:00",
+              "id": "1a1ec9c0eba-f5af7bb71877",
               "is_operator": false,
               "outdated": true,
               "pointKind": "decision",
               "posterior_alpha": 1.0,
               "posterior_beta": 1.0,
               "status": "superseded",
-              "updatedAt": "2026-11-18T00:34:02.802058+00:00",
-              "validTo": "2026-11-18T00:34:02.698636+00:00"
+              "updatedAt": "2026-11-18T03:03:35.555989+00:00",
+              "validTo": "2026-11-18T03:03:34.576716+00:00"
             }
           ]
         },
@@ -904,7 +904,7 @@
           "role": "successor_node",
           "surface": "read_entity",
           "request": {
-            "id": "1a1ec132f4a-197413b54f44"
+            "id": "1a1ec9c15b0-f9180220d210"
           },
           "ok": true,
           "detail": "one node",
@@ -918,16 +918,16 @@
               "baseline_system_default": true,
               "content": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
               "content_hash": "f990eb13f6d4530c93f2a79e5f7b471aea7d39845da5d79cd8c8102a6f4cab05",
-              "createdAt": "2026-11-18T00:34:02.698636+00:00",
+              "createdAt": "2026-11-18T03:03:34.576716+00:00",
               "ep_alpha": 3.0,
               "ep_beta": 1.0,
               "ep_dirty": true,
               "ep_dirty_at": 3,
-              "id": "1a1ec132f4a-197413b54f44",
+              "id": "1a1ec9c15b0-f9180220d210",
               "is_operator": false,
               "pointKind": "decision",
               "status": "live",
-              "updatedAt": "2026-11-18T00:34:02.698636+00:00"
+              "updatedAt": "2026-11-18T03:03:34.576716+00:00"
             }
           ]
         }
@@ -937,21 +937,21 @@
       "id": "Q4",
       "question": "Is the uptime goal met, and on what basis?",
       "verdict": "right",
-      "because": "It reports unmet with the basis given as the 99.72% November reading measured against the >=99.9 target (comparison false), not a bare status word.",
+      "because": "The judgement states 'unmet' with the basis: reading 99.72 against the >= 99.9 threshold, comparison false, as of 2026-11-15, i.e. a measurement rather than a bare status.",
       "cause": "",
-      "product_answer": "`read_entity` \u2192 {\"goalState\": \"unmet\", \"name\": \"Q4 uptime\", \"objectKind\": \"core:goal\", \"status\": \"live\"} \u00b7 `judge` \u2192 {\"state\": \"unmet\", \"reason\": \"state-unchanged\", \"comparator\": \">=\", \"threshold\": 99.9, \"readingValue\": 99.72, \"readingAsOf\": \"2026-11-15T23:59:00+00:00\", \"readingId\": \"1a1ec133692-fec0ad360937\", \"comparison\": false} \u00b7 `read_events` \u2192 2 events",
-      "evidence": "goalState='unmet' status='live'; judgement cites reading=99.72 vs >= 99.9 \u2192 unmet; NOT-SERVED: uptime_goal (1a1ec133371-de7dd1c1d98a)",
+      "product_answer": "`read_entity` \u2192 {\"goalState\": \"unmet\", \"name\": \"Q4 uptime\", \"objectKind\": \"core:goal\", \"status\": \"live\"} \u00b7 `judge` \u2192 {\"state\": \"unmet\", \"reason\": \"state-unchanged\", \"comparator\": \">=\", \"threshold\": 99.9, \"readingValue\": 99.72, \"readingAsOf\": \"2026-11-15T23:59:00+00:00\", \"readingId\": \"1a1ec9c34af-5eab3fa46b2c\", \"comparison\": false} \u00b7 `read_events` \u2192 2 events",
+      "evidence": "goalState='unmet' status='live'; judgement cites reading=99.72 vs >= 99.9 \u2192 unmet; NOT-SERVED: uptime_goal (1a1ec9c2d31-3deeb73050c0)",
       "wrong_means": "If the answer cites a status rather than the reading, achievement is being declared instead of measured.",
       "degraded": false,
       "answer_status": "answered",
       "signals": [
         "goalState='unmet' status='live'",
         "judgement cites reading=99.72 vs >= 99.9 \u2192 unmet",
-        "NOT-SERVED: uptime_goal (1a1ec133371-de7dd1c1d98a)"
+        "NOT-SERVED: uptime_goal (1a1ec9c2d31-3deeb73050c0)"
       ],
       "payload": {
         "the_goal_node": {
-          "id": "1a1ec133371-de7dd1c1d98a",
+          "id": "1a1ec9c2d31-3deeb73050c0",
           "name": "Q4 uptime",
           "goalState": "unmet",
           "status": "live"
@@ -963,12 +963,12 @@
           "threshold": 99.9,
           "readingValue": 99.72,
           "readingAsOf": "2026-11-15T23:59:00+00:00",
-          "readingId": "1a1ec133692-fec0ad360937",
+          "readingId": "1a1ec9c34af-5eab3fa46b2c",
           "comparison": false
         },
         "readings_in_the_graph": [
           {
-            "id": "1a1ec133692-fec0ad360937",
+            "id": "1a1ec9c34af-5eab3fa46b2c",
             "name": "Uptime reading 2026-11",
             "kind": "measurement",
             "value": 99.72,
@@ -976,7 +976,7 @@
             "asOf": "2026-11-15T23:59:00+00:00"
           },
           {
-            "id": "1a1ec1333ed-8f81460ac5cc",
+            "id": "1a1ec9c3073-e189d9673a20",
             "name": "Uptime reading 2026-10",
             "kind": "measurement",
             "value": 99.95,
@@ -991,7 +991,7 @@
           "role": "goal_node",
           "surface": "read_entity",
           "request": {
-            "id": "1a1ec133371-de7dd1c1d98a"
+            "id": "1a1ec9c2d31-3deeb73050c0"
           },
           "ok": true,
           "detail": "one node",
@@ -1001,9 +1001,9 @@
           "rows": [
             {
               "canonical_name": "q4 uptime",
-              "createdAt": "2026-11-18T00:34:03.834562+00:00",
+              "createdAt": "2026-11-18T03:03:41.051875+00:00",
               "goalState": "unmet",
-              "id": "1a1ec133371-de7dd1c1d98a",
+              "id": "1a1ec9c2d31-3deeb73050c0",
               "name": "Q4 uptime",
               "objectKind": "core:goal",
               "status": "live",
@@ -1015,9 +1015,9 @@
           "role": "judgement",
           "surface": "judge",
           "request": {
-            "goal": "1a1ec133371-de7dd1c1d98a",
-            "indicator": "1a1ec133371-de7dd1c1d98a",
-            "target": "1a1ec1333d5-fcfef6fdbf22"
+            "goal": "1a1ec9c2d31-3deeb73050c0",
+            "indicator": "1a1ec9c2d31-3deeb73050c0",
+            "target": "1a1ec9c304e-f1edb5ce0dec"
           },
           "ok": true,
           "detail": "state=unmet value=99.72 >= 99.9",
@@ -1032,7 +1032,7 @@
               "threshold": 99.9,
               "readingValue": 99.72,
               "readingAsOf": "2026-11-15T23:59:00+00:00",
-              "readingId": "1a1ec133692-fec0ad360937",
+              "readingId": "1a1ec9c34af-5eab3fa46b2c",
               "comparison": false
             }
           ]
@@ -1050,7 +1050,7 @@
           "overlap": {},
           "rows": [
             {
-              "id": "1a1ec133692-fec0ad360937",
+              "id": "1a1ec9c34af-5eab3fa46b2c",
               "name": "Uptime reading 2026-11",
               "kind": "measurement",
               "value": 99.72,
@@ -1058,7 +1058,7 @@
               "asOf": "2026-11-15T23:59:00+00:00"
             },
             {
-              "id": "1a1ec1333ed-8f81460ac5cc",
+              "id": "1a1ec9c3073-e189d9673a20",
               "name": "Uptime reading 2026-10",
               "kind": "measurement",
               "value": 99.95,
@@ -1073,23 +1073,23 @@
       "id": "Q5",
       "question": "What was planned and never happened?",
       "verdict": "right",
-      "because": "The ended scope serves the Thursday partner call \u2014 6 November as a closed plan with terminal stage 'cancelled', while the still-pending December launch is not reported as never happened.",
+      "because": "The ended-scope read serves the Thursday partner call of 6 November with stage 'cancelled', slot 'terminal' and isClosed=true, while the 12 December launch is correctly not listed as ended.",
       "cause": "",
-      "product_answer": "`search('what was planned and never happened', object)` \u2192 0 rows \u00b7 `search(None, object)` \u2192 2 rows: *Old onboarding flow* (kind=process, status=deprecated, rrf=None); *Thursday partner call \u2014 6 November* (kind=core:plan, status=None, rrf=None) \u00b7 `search('thursday partner call', object)` \u2192 0 rows \u00b7 `read_entity` \u2192 {\"isClosed\": true, \"name\": \"Thursday partner call \\u2014 6 November\", \"objectKind\": \"core:plan\", \"pipelineOutcome\": \"withdrawn\", \"pipelineSlot\": \"terminal\", \"pipelineStageId\": \"cancelled\"}",
-      "evidence": "search: read_status='degraded'; search: read_status='available'; search: read_status='degraded'; by-id read_entity: stage='cancelled' slot='terminal' isClosed=True; found: partner_call (1a1ec133272-64582e57791c); DEGRADED-READ: the product reported the read degraded (legs: fallback, vector) \u2014 rows may be the whole corpus ranked, not a match set",
+      "product_answer": "`search('what was planned and never happened', object)` \u2192 0 rows \u00b7 `search(None, object, ended_scope)` \u2192 2 rows: *Old onboarding flow* (kind=process, status=deprecated, rrf=None) [no linked event]; *Thursday partner call \u2014 6 November* (kind=core:plan, status=None, rrf=None) [stage=terminal/withdrawn, no linked event, endedAt=2026-11-18T03:03:39.643932+00:00] \u00b7 `search('thursday partner call', object)` \u2192 0 rows \u00b7 `read_entity` \u2192 {\"isClosed\": true, \"name\": \"Thursday partner call \\u2014 6 November\", \"objectKind\": \"core:plan\", \"pipelineOutcome\": \"withdrawn\", \"pipelineSlot\": \"terminal\", \"pipelineStageId\": \"cancelled\"}",
+      "evidence": "search: read_status='degraded'; search: read_status='available'; search: read_status='degraded'; by-id read_entity: stage='cancelled' slot='terminal' isClosed=True; found: partner_call (1a1ec9c289f-42df472d886d); DEGRADED-READ: the product reported the read degraded (legs: fallback, vector) \u2014 rows may be the whole corpus ranked, not a match set",
       "wrong_means": "If the cancelled partner call cannot be found, the product cannot answer the one question a mutable-event model loses.",
       "degraded": true,
       "answer_status": "answered",
       "signals": [
         "by-id read_entity: stage='cancelled' slot='terminal' isClosed=True",
-        "found: partner_call (1a1ec133272-64582e57791c)",
+        "found: partner_call (1a1ec9c289f-42df472d886d)",
         "DEGRADED-READ: the product reported the read degraded (legs: fallback, vector) \u2014 rows may be the whole corpus ranked, not a match set"
       ],
       "payload": {
         "served_for_the_question": [],
         "ended_objects": [
           {
-            "id": "1a1ec133130-eaeee588aab3",
+            "id": "1a1ec9c22d8-bc97b44a6085",
             "what": "Old onboarding flow",
             "kind": "process",
             "status": "deprecated",
@@ -1099,19 +1099,19 @@
             "linkedEvents": []
           },
           {
-            "id": "1a1ec133272-64582e57791c",
+            "id": "1a1ec9c289f-42df472d886d",
             "what": "Thursday partner call \u2014 6 November",
             "kind": "core:plan",
             "status": null,
             "score": null,
             "match": null,
             "supersedes": [],
-            "endedAt": "2026-11-18T00:34:03.537727+00:00",
+            "endedAt": "2026-11-18T03:03:39.643932+00:00",
             "stage": {
               "id": "cancelled",
               "slot": "terminal",
               "outcome": "withdrawn",
-              "since": "2026-11-18T00:34:03.537727+00:00"
+              "since": "2026-11-18T03:03:39.643932+00:00"
             },
             "isClosed": true,
             "linkedEvents": []
@@ -1119,7 +1119,7 @@
         ],
         "served_for_the_cancelled_call": [],
         "the_cancelled_plan": {
-          "id": "1a1ec133272-64582e57791c",
+          "id": "1a1ec9c289f-42df472d886d",
           "name": "Thursday partner call \u2014 6 November",
           "status": null,
           "pipelineStageId": "cancelled",
@@ -1204,7 +1204,7 @@
           "overlap": {},
           "rows": [
             {
-              "id": "1a1ec133130-eaeee588aab3",
+              "id": "1a1ec9c22d8-bc97b44a6085",
               "what": "Old onboarding flow",
               "kind": "process",
               "status": "deprecated",
@@ -1214,19 +1214,19 @@
               "linkedEvents": []
             },
             {
-              "id": "1a1ec133272-64582e57791c",
+              "id": "1a1ec9c289f-42df472d886d",
               "what": "Thursday partner call \u2014 6 November",
               "kind": "core:plan",
               "status": null,
               "score": null,
               "match": null,
               "supersedes": [],
-              "endedAt": "2026-11-18T00:34:03.537727+00:00",
+              "endedAt": "2026-11-18T03:03:39.643932+00:00",
               "stage": {
                 "id": "cancelled",
                 "slot": "terminal",
                 "outcome": "withdrawn",
-                "since": "2026-11-18T00:34:03.537727+00:00"
+                "since": "2026-11-18T03:03:39.643932+00:00"
               },
               "isClosed": true,
               "linkedEvents": []
@@ -1292,7 +1292,7 @@
           "role": "cancelled_plan",
           "surface": "read_entity",
           "request": {
-            "id": "1a1ec133272-64582e57791c"
+            "id": "1a1ec9c289f-42df472d886d"
           },
           "ok": true,
           "detail": "one node",
@@ -1302,8 +1302,8 @@
           "rows": [
             {
               "canonical_name": "thursday partner call 6 november",
-              "createdAt": "2026-11-18T00:34:03.506876+00:00",
-              "id": "1a1ec133272-64582e57791c",
+              "createdAt": "2026-11-18T03:03:39.424280+00:00",
+              "id": "1a1ec9c289f-42df472d886d",
               "isClosed": true,
               "name": "Thursday partner call \u2014 6 November",
               "objectKind": "core:plan",
@@ -1311,7 +1311,7 @@
               "pipelineSlot": "terminal",
               "pipelineStageId": "cancelled",
               "pipelineStageKey": "core:plan",
-              "pipelineStageSince": "2026-11-18T00:34:03.537727+00:00",
+              "pipelineStageSince": "2026-11-18T03:03:39.643932+00:00",
               "title": ""
             }
           ]
@@ -1322,17 +1322,17 @@
       "id": "Q6",
       "question": "Has anything we relied on been withdrawn?",
       "verdict": "right",
-      "because": "The retracted beach-club confirmation is excluded from default scope and served with status 'retracted' when terminal scope is included, so it both stops counting and can be reported as withdrawn.",
+      "because": "The retracted beach-club confirmation statement is served only in the terminal scope with status 'retracted' (and read by id), so it is excluded from the default scope and its withdrawal is stated.",
       "cause": "",
-      "product_answer": "`search('has anything we relied on been withdrawn', point)` \u2192 2 rows [related-to-question: 0/2]: *Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 dec\u2026* (kind=decision, status=live, rrf=0.0); *Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwel\u2026* (kind=statement, status=live, rrf=0.0) \u00b7 `search(None, point)` \u2192 2 rows: *The beach club confirmed our 12 December booking.* (kind=statement, status=retracted, rrf=None); *Q3 pricing: the entry tier is $29 per seat.* (kind=decision, status=superseded, rrf=None) \u00b7 `search('beach club confirmed booking', point)` \u2192 2 rows [related-to-question: 0/2]: *Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 dec\u2026* (kind=decision, status=live, rrf=0.0); *Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwel\u2026* (kind=statement, status=live, rrf=0.0) \u00b7 `search('beach club confirmed booking', point, include_terminal)` \u2192 1 rows [related-to-question: 1/1]: *The beach club confirmed our 12 December booking.* (kind=statement, status=retracted, rrf=0.857142857142857) \u00b7 `read_entity` \u2192 {\"content\": \"The beach club confirmed our 12 December booking.\", \"status\": \"retracted\"}",
-      "evidence": "search: read_status='degraded'; search: read_status='available'; search: read_status='degraded'; search: read_status='degraded'; claim status='retracted' (a by-id read_entity); the ended-scope read served 2 withdrawn record(s) without the id being supplied: ['1a1ec134353-a233c156731f', '1a1ec132aa6-07bdbef2b880']; found: beach_club_claim (1a1ec134353-a233c156731f); NO-RELATION-TO-QUESTION: all 2 rows served for 'has anything we relied on been withdrawn' share no word with it \u2014 a degraded read ranked the corpus rather than answering; NO-RELATION-TO-QUESTION: all 2 rows served for 'beach club confirmed booking' share no word with it \u2014 a degraded read ranked the corpus rather than answering; DEGRADED-READ: the product reported the read degraded (legs: fallback, vector) \u2014 rows may be the whole corpus ranked, not a match set",
+      "product_answer": "`search('has anything we relied on been withdrawn', point)` \u2192 2 rows [related-to-question: 0/2]: *Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 dec\u2026* (kind=decision, status=live, rrf=0.0); *Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwel\u2026* (kind=statement, status=live, rrf=0.0) \u00b7 `search(None, point, ended_scope)` \u2192 2 rows: *The beach club confirmed our 12 December booking.* (kind=statement, status=retracted, rrf=None) [no linked event, endedAt=2026-11-18T03:03:46.749869+00:00]; *Q3 pricing: the entry tier is $29 per seat.* (kind=decision, status=superseded, rrf=None) [successor=1a1ec9c15b0-f9180220d210, no linked event, endedAt=2026-11-18T03:03:34.576716+00:00] \u00b7 `search('beach club confirmed booking', point)` \u2192 2 rows [related-to-question: 0/2]: *Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 dec\u2026* (kind=decision, status=live, rrf=0.0); *Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwel\u2026* (kind=statement, status=live, rrf=0.0) \u00b7 `search('beach club confirmed booking', point, include_terminal)` \u2192 1 rows [related-to-question: 1/1]: *The beach club confirmed our 12 December booking.* (kind=statement, status=retracted, rrf=0.857142857142857) \u00b7 `read_entity` \u2192 {\"content\": \"The beach club confirmed our 12 December booking.\", \"status\": \"retracted\"}",
+      "evidence": "search: read_status='degraded'; search: read_status='available'; search: read_status='degraded'; search: read_status='degraded'; claim status='retracted' (a by-id read_entity); the ended-scope read served 2 ended record(s) without the id being supplied \u2014 each row states how it ended: 1a1ec9c4373-06032d7ab85b: retracted; 1a1ec9c0eba-f5af7bb71877: superseded; found: beach_club_claim (1a1ec9c4373-06032d7ab85b); NO-RELATION-TO-QUESTION: all 2 rows served for 'has anything we relied on been withdrawn' share no word with it \u2014 a degraded read ranked the corpus rather than answering; NO-RELATION-TO-QUESTION: all 2 rows served for 'beach club confirmed booking' share no word with it \u2014 a degraded read ranked the corpus rather than answering; DEGRADED-READ: the product reported the read degraded (legs: fallback, vector) \u2014 rows may be the whole corpus ranked, not a match set",
       "wrong_means": "If the withdrawn claim still counts, belief is contaminated by retired evidence \u2014 the agent will act on something we retracted.",
       "degraded": true,
       "answer_status": "answered",
       "signals": [
         "claim status='retracted' (a by-id read_entity)",
-        "the ended-scope read served 2 withdrawn record(s) without the id being supplied: ['1a1ec134353-a233c156731f', '1a1ec132aa6-07bdbef2b880']",
-        "found: beach_club_claim (1a1ec134353-a233c156731f)",
+        "the ended-scope read served 2 ended record(s) without the id being supplied \u2014 each row states how it ended: 1a1ec9c4373-06032d7ab85b: retracted; 1a1ec9c0eba-f5af7bb71877: superseded",
+        "found: beach_club_claim (1a1ec9c4373-06032d7ab85b)",
         "NO-RELATION-TO-QUESTION: all 2 rows served for 'has anything we relied on been withdrawn' share no word with it \u2014 a degraded read ranked the corpus rather than answering",
         "NO-RELATION-TO-QUESTION: all 2 rows served for 'beach club confirmed booking' share no word with it \u2014 a degraded read ranked the corpus rather than answering",
         "DEGRADED-READ: the product reported the read degraded (legs: fallback, vector) \u2014 rows may be the whole corpus ranked, not a match set"
@@ -1340,18 +1340,18 @@
       "payload": {
         "served_default_scope": [
           {
-            "id": "1a1ec132f4a-197413b54f44",
+            "id": "1a1ec9c15b0-f9180220d210",
             "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
             "kind": "decision",
             "status": "live",
             "score": 0.0,
             "match": "tfidf",
             "supersedes": [
-              "1a1ec132aa6-07bdbef2b880"
+              "1a1ec9c0eba-f5af7bb71877"
             ]
           },
           {
-            "id": "1a1ec1339bf-acd338f7fe2c",
+            "id": "1a1ec9c3bb8-e46508758603",
             "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
             "kind": "statement",
             "status": "live",
@@ -1362,43 +1362,46 @@
         ],
         "ended_points": [
           {
-            "id": "1a1ec134353-a233c156731f",
+            "id": "1a1ec9c4373-06032d7ab85b",
             "what": "The beach club confirmed our 12 December booking.",
             "kind": "statement",
             "status": "retracted",
             "score": null,
             "match": null,
             "supersedes": [],
-            "endedAt": "2026-11-18T00:34:07.858630+00:00",
+            "endedAt": "2026-11-18T03:03:46.749869+00:00",
             "linkedEvents": []
           },
           {
-            "id": "1a1ec132aa6-07bdbef2b880",
+            "id": "1a1ec9c0eba-f5af7bb71877",
             "what": "Q3 pricing: the entry tier is $29 per seat.",
             "kind": "decision",
             "status": "superseded",
             "score": null,
             "match": null,
             "supersedes": [],
-            "successorId": "1a1ec132f4a-197413b54f44",
-            "endedAt": "2026-11-18T00:34:02.698636+00:00",
+            "successorId": "1a1ec9c15b0-f9180220d210",
+            "endedAt": "2026-11-18T03:03:34.576716+00:00",
+            "allSuccessorIds": [
+              "1a1ec9c15b0-f9180220d210"
+            ],
             "linkedEvents": []
           }
         ],
         "served_for_the_claim_default_scope": [
           {
-            "id": "1a1ec132f4a-197413b54f44",
+            "id": "1a1ec9c15b0-f9180220d210",
             "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
             "kind": "decision",
             "status": "live",
             "score": 0.0,
             "match": "tfidf",
             "supersedes": [
-              "1a1ec132aa6-07bdbef2b880"
+              "1a1ec9c0eba-f5af7bb71877"
             ]
           },
           {
-            "id": "1a1ec1339bf-acd338f7fe2c",
+            "id": "1a1ec9c3bb8-e46508758603",
             "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
             "kind": "statement",
             "status": "live",
@@ -1409,7 +1412,7 @@
         ],
         "served_for_the_claim_include_terminal": [
           {
-            "id": "1a1ec134353-a233c156731f",
+            "id": "1a1ec9c4373-06032d7ab85b",
             "what": "The beach club confirmed our 12 December booking.",
             "kind": "statement",
             "status": "retracted",
@@ -1419,7 +1422,7 @@
           }
         ],
         "the_claim_node": {
-          "id": "1a1ec134353-a233c156731f",
+          "id": "1a1ec9c4373-06032d7ab85b",
           "content": "The beach club confirmed our 12 December booking.",
           "status": "retracted"
         }
@@ -1481,18 +1484,18 @@
           },
           "rows": [
             {
-              "id": "1a1ec132f4a-197413b54f44",
+              "id": "1a1ec9c15b0-f9180220d210",
               "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
               "kind": "decision",
               "status": "live",
               "score": 0.0,
               "match": "tfidf",
               "supersedes": [
-                "1a1ec132aa6-07bdbef2b880"
+                "1a1ec9c0eba-f5af7bb71877"
               ]
             },
             {
-              "id": "1a1ec1339bf-acd338f7fe2c",
+              "id": "1a1ec9c3bb8-e46508758603",
               "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
               "kind": "statement",
               "status": "live",
@@ -1521,26 +1524,29 @@
           "overlap": {},
           "rows": [
             {
-              "id": "1a1ec134353-a233c156731f",
+              "id": "1a1ec9c4373-06032d7ab85b",
               "what": "The beach club confirmed our 12 December booking.",
               "kind": "statement",
               "status": "retracted",
               "score": null,
               "match": null,
               "supersedes": [],
-              "endedAt": "2026-11-18T00:34:07.858630+00:00",
+              "endedAt": "2026-11-18T03:03:46.749869+00:00",
               "linkedEvents": []
             },
             {
-              "id": "1a1ec132aa6-07bdbef2b880",
+              "id": "1a1ec9c0eba-f5af7bb71877",
               "what": "Q3 pricing: the entry tier is $29 per seat.",
               "kind": "decision",
               "status": "superseded",
               "score": null,
               "match": null,
               "supersedes": [],
-              "successorId": "1a1ec132f4a-197413b54f44",
-              "endedAt": "2026-11-18T00:34:02.698636+00:00",
+              "successorId": "1a1ec9c15b0-f9180220d210",
+              "endedAt": "2026-11-18T03:03:34.576716+00:00",
+              "allSuccessorIds": [
+                "1a1ec9c15b0-f9180220d210"
+              ],
               "linkedEvents": []
             }
           ]
@@ -1601,18 +1607,18 @@
           },
           "rows": [
             {
-              "id": "1a1ec132f4a-197413b54f44",
+              "id": "1a1ec9c15b0-f9180220d210",
               "what": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
               "kind": "decision",
               "status": "live",
               "score": 0.0,
               "match": "tfidf",
               "supersedes": [
-                "1a1ec132aa6-07bdbef2b880"
+                "1a1ec9c0eba-f5af7bb71877"
               ]
             },
             {
-              "id": "1a1ec1339bf-acd338f7fe2c",
+              "id": "1a1ec9c3bb8-e46508758603",
               "what": "Q4 uptime: unmet \u2014 latest reading 99.72 percent against >= 99.9 (dwell 1, state-flipped as of 2026-11-15T23:59:00+00:00)",
               "kind": "statement",
               "status": "live",
@@ -1678,7 +1684,7 @@
           },
           "rows": [
             {
-              "id": "1a1ec134353-a233c156731f",
+              "id": "1a1ec9c4373-06032d7ab85b",
               "what": "The beach club confirmed our 12 December booking.",
               "kind": "statement",
               "status": "retracted",
@@ -1692,7 +1698,7 @@
           "role": "claim_node",
           "surface": "read_entity",
           "request": {
-            "id": "1a1ec134353-a233c156731f"
+            "id": "1a1ec9c4373-06032d7ab85b"
           },
           "ok": true,
           "detail": "one node",
@@ -1704,14 +1710,14 @@
               "confidence": 0.5,
               "content": "The beach club confirmed our 12 December booking.",
               "content_hash": "98a8ebb053fb3f5196f5a71f630ef221d99a785f5b22e1143ea9706fd8ea2071",
-              "createdAt": "2026-11-18T00:34:07.827358+00:00",
-              "id": "1a1ec134353-a233c156731f",
+              "createdAt": "2026-11-18T03:03:46.291367+00:00",
+              "id": "1a1ec9c4373-06032d7ab85b",
               "is_operator": false,
               "pointKind": "statement",
               "posterior_alpha": 1.0,
               "posterior_beta": 1.0,
               "status": "retracted",
-              "updatedAt": "2026-11-18T00:34:07.858630+00:00"
+              "updatedAt": "2026-11-18T03:03:46.749869+00:00"
             }
           ]
         }
@@ -1727,7 +1733,7 @@
   "judge": {
     "mode": "fresh",
     "ok": true,
-    "elapsed_s": 84.5,
+    "elapsed_s": 92.9,
     "judge_cmd": "pi -p --no-session --no-tools",
     "reason": ""
   }

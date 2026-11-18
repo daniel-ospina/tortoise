@@ -1159,6 +1159,16 @@ def test_no_redirect_stems_registry_exact():
         # THREE homes — config/ci-surfaces.yml `carve_out:`, TEST_NO_REDIRECT_STEMS and this
         # declaration — so the pin reding on the addition is the pin working as designed.
         "test_13224_cold_embedder_write_bound",
+        # #13528: the READ-side twin of the row above — a read must not spend its
+        # budget acquiring the COLD embedder (`EmbeddingModel.await_read_ready_reason`).
+        # Same load-bearing reason: every case builds a `TortoiseSDK(<tmp_path>)` path
+        # store, so a URI-set lane would discard the path and grade a graph this file
+        # never seeded, and the cold-window assertions would then measure the server's
+        # warm embedder instead of the decline they exist to observe. The module carries
+        # NO module-level `embedded_only` marker. Registered in all THREE homes —
+        # config/ci-surfaces.yml `carve_out:`, TEST_NO_REDIRECT_STEMS and this
+        # declaration.
+        "test_13528_read_never_blocks_on_embedder",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

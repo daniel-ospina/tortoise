@@ -2,11 +2,11 @@
 title: "#13436 P7 — the three write-path costs, measured (diagnosis only)"
 type: evidence
 domain: platform
-doc_status: live
-created: 2026-11-18
+doc_status: final
+created: 2026-11-17
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "#13436, #5475, #5444, tools/measure_13436_write_costs.py, projection._schema_is_current, pack_state.graph_installed_namespaces"
+aboutObjects: "#13436, #13445, #5475, #5444, tools/measure_13436_write_costs.py, projection._schema_is_current, pack_state.graph_installed_namespaces"
 ---
 
 # `#13436` P7 — the three write-path costs, measured (diagnosis only)
