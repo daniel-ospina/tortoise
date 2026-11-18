@@ -767,7 +767,7 @@ first one is a defect this cut REPAIRS:
 Re-measured on the merged tree with the predicates §1 states, NOT carried and NOT shifted by a delta:
 door **1,627 / 109**; verb **2,346 / 145** whole-text and **2,333 / 144** line-based (the 13-occurrence,
 one-file whole-text gap unchanged); bare `rg … tortoise/` door **1,633 / 110**; bare case-sensitive verb
-**2,066** and `-i` without the exclusion **2,405**; over the 298 product `.py` files **2,063 / 2,333**;
+**2,066** and `-i` without the exclusion **2,405**; over the 299 product `.py` files **2,063 / 2,333**;
 with `-t py` and the test-module exclusion dropped **2,065 / 2,336** (the 69-occurrence, six-file
 `.ts`/`.mjs`/`.sh` gap is unchanged, enumerated in §1); verb-at-end-of-line **178**. Appendix A is this
 tree's own `--markdown` output (**1314** rows), and `--check` reports **`25 pinned counts match`**.
