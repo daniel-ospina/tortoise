@@ -34,7 +34,7 @@ value is short.
 
 On `main` today, measured through that same consumer across `docs/research/**/*.md`:
 
-```
+```text
 103 files · 68 frontmatter blocks · 8 truncated values · all 8 are `aboutObjects`
   the truncated count matches the issue's 8 EXACTLY, derived independently;
   the block count is the issue's 67 plus one file that landed since (drift, not
@@ -93,6 +93,7 @@ merged dossier, so the mutant has to redden it.
 **Acceptance:** `0` truncated values across the population the arm globs; unquoting one
 `aboutObjects` reddens exactly this arm; `tests/test_file_indexer.py` unchanged and green.
 **Files:**
+
 - Modify: `docs/research/2026-09-24-2730-entity-attachment/research-brief.md`
 - Modify: `docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md`
 - Modify: `docs/research/2026-09-25-4503-edge-accounting/measurement.md`
@@ -105,10 +106,12 @@ merged dossier, so the mutant has to redden it.
 - Create: this plan doc
 
 **Steps:**
+
 1. Wrap each of the 8 `aboutObjects` values in one pair of double quotes. No other character of any
    value changes (verified by comparing the parsed value to the pre-fix raw text, not by eye).
    **Precisely:** the dossier's `aboutSubjects` is already quoted; the other seven `aboutSubjects` are
-   **plain and contain no ` #`, they parse correctly, and they are OUT OF SCOPE — do not quote them.**
+   **plain and contain no space-preceded `#`, they parse correctly, and they are OUT OF SCOPE — do
+   not quote them.**
    The precedent is the quoting *style*, not the field.
 2. Add `_values(fm)` -> `(key, kind, payload)` classifying each top-level value as `scalar`,
    `scalar_multiline`, `sequence`, `sequence_multiline` (a `key:` followed by `- item` lines, which may
@@ -137,8 +140,9 @@ merged dossier, so the mutant has to redden it.
      truncation through green (found in code review).
    - **(D) no silent omission.** `declared affiliation values == measured`, minus a deliberately empty
      `UNMEASURED` set. `aboutObjects: |`, `>`, `[...]`, `{...}` reach no comparison, so they **FAIL**
-     with both remedies named. `_KV` also accepts a **whitespace-only** value, so `aboutObjects:   `
-     cannot slip past enumeration either (that was a one-keystroke bypass of (D)).
+     with both remedies named. `_KV` also accepts a **whitespace-only** value — a key followed only by
+     spaces, e.g. `aboutObjects:` and then nothing — so it cannot slip past enumeration either (that
+     was a one-keystroke bypass of (D)).
    - **(E) sequences, item by item.** A `sequence` affiliation value was previously counted as
      "measured" while only (A) reached it — so a mid-item truncation
      (`- tortoise-hosted-platform, #4333 census, #5380`) and a quoted item cut at an inner quote were
@@ -227,6 +231,7 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
 — declared explicitly in §3).
 
 **Risk surface** — each with the check that would catch it:
+
 - **R1** the assertion is **vacuously green** — it skips what it means to measure, or reaches only
   shapes that are already correct → (A) is type-blind and unambiguous, (C) covers the quoted mangle,
   and **(D)** FAILS on any declared affiliation value that reached no check. Mutants
@@ -254,6 +259,7 @@ unreachable behind the escape branch** — both verified by measurement, fixed, 
 M16 / M18. The attestation for this PR is recorded at the FINAL head, after those fixes.
 
 **Out of scope — must NOT be raised** (note, file, do not chase):
+
 - the 2 pre-existing absence reds (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`,
   `docs/evidence/13038-capstone/README.md`) — separate defect, explicitly excluded by the issue;
 - `config/ci-surfaces.yml:13139` rationale drift (category B, no behavioural consequence);
