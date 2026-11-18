@@ -93,7 +93,7 @@ re-derive from a symbol.**
 **The drift is 122 of those 214.** ⚠️ **These counts are a parsing decision, and this header states which
 one it took**: the 214 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
 written as ONE token. The document also writes one pair as two code spans
-(`` `cache_projection.py` `:2464` ``, a `main`-set address listed above); it is resolved but not counted,
+(`` `cache_projection.py` `:2485` ``, a `main`-set address listed above); it is resolved but not counted,
 and counting that form gives **215 pairs and 123 drifters**. So the basis must travel with the figure —
 122 and 123 are one measurement under two counting decisions, not two findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
@@ -105,8 +105,8 @@ Sixteen superseded line-addresses did not open on the line their row quotes at `
 unit of that number is the ADDRESS, not the reader** — the re-derivation commit `f4fad2d8b027` records an
 `old -> new` mapping for each of the sixteen, so the figure is auditable there instead of remembered here.
 That is also why sixteen addresses are FIFTEEN cites below: the subject probe's four addresses
-(`:6711`, `:6710-6713`, `:6713`, `:6716-6729`) became three (`:7025-7028`, `:7028`, `:7031-7044`) — three of
-the four map onto the range `:7025-7028`, the fourth being that range's `Event` leg — and the third is cited
+(`:6711`, `:6710-6713`, `:6713`, `:6716-6729`) became three (`:7042-7045`, `:7028`, `:7048-7061`) — three of
+the four map onto the range `:7042-7045`, the fourth being that range's `Event` leg — and the third is cited
 elsewhere in this document too. They had been advanced
 by a line delta rather than re-opened: the `search_engine.py` ones (`:3064`, `:4477-4481`, `:6352`) name
 lines that hold something else at **every** recent `main` head — no commit ever carried the FTS call at
@@ -114,34 +114,38 @@ lines that hold something else at **every** recent `main` head — no commit eve
 read off. All sixteen were re-derived at `main` (`ae54df166d`) — ⚠️ **so they do NOT open at the pin
 above** — and each is named here by the cite it became, with its
 file — `search_engine.py` FTS
-`:3098`, walk `:4780-4784`, operator leg `:6667`, subject probe `:7025-7028` (plus its `Event` leg `:7028`, and
-`subject_binding_available()` at `:7031-7044`), label scan `:4708-4710`, HNSW
-`:4123`, label derivation `:3003`, index note `:3070`; `projection/__init__.py` `("Object", ["name"])`
-`:6869`; `sdk.py`'s second `capture_redactions` writer `:2877`; `audit.py`'s carrier probe `:2452`/`:2463`;
+`:3098`, walk `:4780-4784`, operator leg `:6667`, subject probe `:7042-7045` (plus its `Event` leg `:7028`, and
+`subject_binding_available()` at `:7048-7061`), label scan `:4708-4710`, HNSW
+`:4123`, label derivation `:3003`, index note `:3072`; `projection/__init__.py` `("Object", ["name"])`
+`:6869`; `sdk.py`'s second `capture_redactions` writer `:2882`; `audit.py`'s carrier probe `:2452`/`:2463`;
 and `mcp_server.py`'s `entity_type` passthrough `:5529` — and the drift figure
 above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the `main` set, and an earlier
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
-`cache_projection.py` `:2464`, `:2521`, `:2693-2660`, `:2693-2694`, `:2703-2705`, `:2755`, `:3778` and
+`cache_projection.py` `:2485`, `:2542`, `:2714`, `:2714-2715`, `:2724-2726`, `:2776`, `:3841` and
 `projection/entities.py` `:5666` — **eight addresses that open at `main` and not at the pin** (measured,
-`git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `ae54df166d`: the pin's `:3778` is
+`git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `ae54df166d`: the pin's `:3735` is
 `for prop in sorted(STORED_VECTOR_PROPS):` — the `MERGE (n:…) SET n += $props` this document quotes is the
-pin's `:3732` — and `:3778` carries the `cache_tier` arm at `main`; the pin's `:2755` is
-`if k not in tail_denied})` — the `tail_denied = forbidden | {` this document quotes is the pin's `:2710` —
-and `:2755` carries `tail_denied = forbidden | {` at `main`; `projection/entities.py`
-`:5666` is a comment at the pin and the `s.summary=coalesce($summary, s.summary, '')` write at `main`).
+pin's `:3732` — and that pair reads `:3837` / `:3834` at `main`, where the `cache_tier` arm is `:3735` (the
+pin's `:3633`); the pin's `:2715` is `if k not in tail_denied})` — the `tail_denied = forbidden | {` this
+document quotes is the pin's `:2710` — and `main` holds those two at `:2720` / `:2715`; and
+`projection/entities.py` `:5666` is a comment at the pin AND at `main` (the
+`s.summary=coalesce($summary, s.summary, '')` write sits at `:5598` there and `:5646` at `main`) and is
+the write on this tree — ⛔ every number in this clause was taken with `grep -n` on the tree that names
+it, never by applying a delta: the two states are DIFFERENT files at DIFFERENT offsets, so a single shift
+cannot describe the pair, and one applied here is what turns a pin-side description into a false one).
 Five of the eight are already asserted at `main` by `_PINS` in `tests/test_12184_shifted_cites.py`, and the
 test beside this paragraph pins all eight to the content they quote. They are listed here now. ⚠️ **So the
 enumeration is what has been RE-DERIVED, each entry carrying the head it was measured at — never a claim
 that nothing else is at `main`** — and a range entry spans every line it covers.
 ⚠️ **This revision adds its own entries to it**: `projection/__init__.py`'s fulltext declarations
 `:6923-6939` (the block), `:6933` (`Event`), `:6934` (`Subject`), `:6938` (`Object`), `:6939` (`Source`);
-`record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37051`/`:37074` (the whole-node pair, still 23 apart);
+`record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37056`/`:37079` (the whole-node pair, still 23 apart);
 `audit.py:817`; `mcp_server.py:5089`/`:8034`; `goal_judgement.py:1128`; and §2.1's own table, which carries
-two of this class as well — `sdk.py:24048` and `search_engine.py:6721`, both open at this revision and neither
+two of this class as well — `sdk.py:24053` and `search_engine.py:6738`, both open at this revision and neither
 open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at `main` but
 absent from this list, so the rule above was sending a reader to the pin, where three of them are a comment and the fourth
 (`:22919`) is unrelated code:
-`sdk.py:21734` (the capture writer) with its read-back `:21857`, and `hosted_api.py:22925` (the commit
+`sdk.py:21739` (the capture writer) with its read-back `:21862`, and `hosted_api.py:22925` (the commit
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:22737`. ⛔ **A `file:line` in NEITHER list has an UNDECLARED head: the pin
 `ccb49741b2ec` is where the census USUALLY wrote it, not where it provably IS.** Open it there first, but
 a hit at the pin is a hypothesis about the census's history, not a fact about the line. A review of this
@@ -166,7 +170,7 @@ no cite: the handle beside it then reads as corroboration of a line nobody read.
 individually correct at the pin they were written for, and the distance is **23** (`MATCH (s:Subject {id:$sid})
 RETURN properties(s)` and the walk `MATCH (s:Subject {id:$sid})-[r]->(n) …`, with the subject-chain composition
 between them). ⚠️ **That row's two ADDRESSES have since been re-derived twice — they are `:37051` and
-`:37074` now, both in this revision's `main` list above — and this paragraph is the record of the DISTANCE
+`:37079` now, both in this revision's `main` list above — and this paragraph is the record of the DISTANCE
 claim, so it quotes no address the row does not carry**: a number
 here that is not the number the row carries is the very defect it is warning about. So the rule above extends to the words
 **around** a cite: an adjective that fixes a position ("above", "beside", "in the same read") is a claim too, and
@@ -211,7 +215,7 @@ Two writers reach the graph, and both were read:
    rebuild materialises.
 
 The inventory below is the union. `d` = the label's record table in `cache_projection.NODE_TABLES` (a record
-HOME — ⚠️ **not a tier**: `cache_tier` is a column on `public.point` only, and `cache_projection.py:3778`
+HOME — ⚠️ **not a tier**: `cache_tier` is a column on `public.point` only, and `cache_projection.py:3841`
 applies the tier predicate `if table == "point"`, so a `record_only` row-tier is mechanically expressible for
 `:Point` alone and every other label needs its own migration — §5.3's third precondition); `—` = graph-only
 bookkeeping with **no record table** (relevant in §5.2).
@@ -298,14 +302,14 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/sdk.py:15659` | `MATCH (p:Point {id:$id})-[:extractedFrom]->` — provenance walk to the Source anchor | **traversal** |
 | `tortoise/mcp_server.py:11158` / `:11161` | `MATCH (new:Point {id:$n})-[r]->(t)` / `(t)-[r]->(new:Point)` — edge discovery | **adjacency** |
 | `tortoise/projection/edges.py:1888` | `(p:Point {id:$pid})-[:TAGGED]->(t:Tag)` | **traversal** |
-| `tortoise/sdk.py:24048` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
-| `tortoise/search_engine.py:4780-4784` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
-| `tortoise/search_engine.py:6667` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW | **adjacency** |
-| `tortoise/search_engine.py:6721` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's COUNT, the statement that follows `:6666` inside the same function | **adjacency** |
-| `tortoise/search_engine.py:7026` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:7025-7028`, consumed only by `subject_binding_available()` at `:7031-7044`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
-| `tortoise/search_engine.py:3098` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
-| `tortoise/search_engine.py:4708-4710` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
-| `tortoise/search_engine.py:4123` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
+| `tortoise/sdk.py:24053` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
+| `tortoise/search_engine.py:4797-4801` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
+| `tortoise/search_engine.py:6684` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW | **adjacency** |
+| `tortoise/search_engine.py:6738` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's COUNT, the statement that follows `:6666` inside the same function | **adjacency** |
+| `tortoise/search_engine.py:7043` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:7042-7045`, consumed only by `subject_binding_available()` at `:7048-7061`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
+| `tortoise/search_engine.py:3100` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
+| `tortoise/search_engine.py:4725-4727` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
+| `tortoise/search_engine.py:4140` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
 | `tortoise/domain_validators.py:105` (and the same property-join shape at `:174-182`, `:197-205`) | `MATCH (req) WHERE (req:Point OR req:Object) AND (req.pointKind IN $req_kinds OR req.objectKind IN $req_kinds)`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
 | `tortoise/domain_validators.py:153-158` (`orphan_use_case`) | `OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, op_type:'composedOf'})-[:hasPart]->(jtbd:Point)` — a **2-hop `hasPart` walk**, i.e. every parented use-case is found THROUGH the tree | **adjacency** |
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
@@ -336,7 +340,7 @@ prevent — recorded rather than quietly edited.
 | `tortoise/sdk.py:38818` | `MATCH (s:Source)-[:references]->(o:Source)` — source-to-source provenance | **traversal** |
 | `tortoise/sdk.py:52878` | `MATCH (s:Source {url:$url})-[:references]->(n)` | **traversal**. |
 | `tortoise/sdk.py:15659` (target side) | `(p:Point)-[:extractedFrom]->(s:Source)` — every claim must reach its source (§9.4 ①) | **traversal** |
-| `tortoise/search_engine.py:3098` | `CALL db.idx.fulltext.queryNodes('<label>', $query)` — the index `:3070`'s note says is built on **`Source._searchText` for every Source** | **fulltext index** |
+| `tortoise/search_engine.py:3100` | `CALL db.idx.fulltext.queryNodes('<label>', $query)` — the index `:3072`'s note says is built on **`Source._searchText` for every Source** | **fulltext index** |
 | `tortoise/session_source_migration.py:432-434` | `SET new.provenance_spans = CASE WHEN coalesce(size(new.provenance_spans),0)=0 THEN $spans ELSE new.provenance_spans END` — a **`SET` that READS the node**, i.e. a reader by §2's rule | **none** |
 
 ⚠️ **That last row is the rule that put it here.** §2's method statement says a `SET` expression that reads
@@ -349,7 +353,7 @@ mechanism, not a citation nicety.
 
 > ⚠️ **The fulltext index is declared on FIVE labels, not two.** This is the census's most easily missed
 > reader: `_FULLTEXT_INDEX_LABEL_FIELDS` (`projection/__init__.py:6923-6939`) declares `Point`, `Event`,
-> `Subject`, `Object` and `Source`, and the query is **label-parametric** (`search_engine.py:3003` derives
+> `Subject`, `Object` and `Source`, and the query is **label-parametric** (`search_engine.py:3005` derives
 > the label from `entity_type`), so ONE call site serves all five. The FTS row is carried for `:Point`
 > (§2.1) and `:Source` (§2.2) *and* for `:Event` (§2.3) and `:Object`/`:Subject` (§2.5); leaving it out of
 > the last three made them look adjacency-only. No verdict flips — all five are `graph` either way — but an
@@ -360,9 +364,9 @@ mechanism, not a citation nicety.
 | reader (`file:line`) | what it does | capability |
 |---|---|---|
 | `tortoise/goal_judgement.py:1128` | `MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator` | **adjacency** |
-| `tortoise/search_engine.py:7028` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
+| `tortoise/search_engine.py:7045` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
 | `tortoise/assembly.py:2629` | `MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event)` | **adjacency** |
-| `tortoise/search_engine.py:3098` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3003` derives the label from `entity_type`; `sdk.py:52011` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6933` | **fulltext index** |
+| `tortoise/search_engine.py:3100` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3003` derives the label from `entity_type`; `sdk.py:52011` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6933` | **fulltext index** |
 
 **Verdict: `graph`.** ⚠️ **Whole-node reads are absent from the table above and belong to it by §2's own rule —
 and this is a LOWER BOUND of eight, not a census of two.** The two the earlier draft found are
@@ -509,8 +513,8 @@ counter's: the read is
 | `tortoise/audit.py:817` (and `:2452`, `:2463`) | `OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy AND id(carrier) <> id(sup)` — **no relationship in the pattern**; a property-equality scan | **none** |
 | `tortoise/definite_description_backfill.py:434` | `MATCH (o:Object) OPTIONAL MATCH (o)<-[r]-() WITH o, count(r) …` — degree census | **adjacency** |
 | `tortoise/sdk.py:37074` | `MATCH (s:Subject {id:$sid})-[r]->(n)` | **adjacency** |
-| **the whole-node accessor family** — `tortoise/sdk.py:37051` (`_provenance`: `MATCH (s:Subject {id:$sid}) RETURN properties(s)`, and the walk it pairs with is **23 lines below** at `:37074`, not beside it — the subject-chain composition sits between them), `tortoise/onboarding/seed.py:259` (the same read, from the seeder) and the label-generic `tortoise/record_reconcile.py:533` (`MATCH (n:{label}) RETURN properties(n)`, which reads `:Object`/`:Subject` too) | the **whole node**, handed back as a dict — the class §2.1 gives its own row, and §2's rule (stated in §2.3 for `:Event`) makes it this table's obligation too | **none** |
-| `tortoise/search_engine.py:3098` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no **product** caller passes the literal `'subject'` (test modules do — `tests/test_search_engine_gaps.py:1395`, `:1559`, `tests/test_integration_search.py`) — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5089`, `:5529`, `:8034`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6934` and `("Object", ["name"])` at `:6938` | **fulltext index** |
+| **the whole-node accessor family** — `tortoise/sdk.py:37051` (`_provenance`: `MATCH (s:Subject {id:$sid}) RETURN properties(s)`, and the walk it pairs with is **23 lines below** at `:37079`, not beside it — the subject-chain composition sits between them), `tortoise/onboarding/seed.py:259` (the same read, from the seeder) and the label-generic `tortoise/record_reconcile.py:533` (`MATCH (n:{label}) RETURN properties(n)`, which reads `:Object`/`:Subject` too) | the **whole node**, handed back as a dict — the class §2.1 gives its own row, and §2's rule (stated in §2.3 for `:Event`) makes it this table's obligation too | **none** |
+| `tortoise/search_engine.py:3100` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no **product** caller passes the literal `'subject'` (test modules do — `tests/test_search_engine_gaps.py:1395`, `:1559`, `tests/test_integration_search.py`) — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5089`, `:5529`, `:8034`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6934` and `("Object", ["name"])` at `:6938` | **fulltext index** |
 
 `:Tag` belongs on this row too, and an earlier draft got it **wrong** by calling it bookkeeping: every tag
 read resolves the node **through the edge** — `sdk.py:28069`
@@ -619,11 +623,11 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 11c | `:OnboardingState` / `:OnboardingStep` | §2.7 | **yes** — `completed_steps()` walks `COMPLETED_STEP` | **graph** | the docstring is explicit: *"Canonical completed-step ids from the edge set (never a second store)"* — the edge IS the store |
 | 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
 | 12 | `_searchText` on a **non**-episodic `:Source` | FTS | **yes** | **graph** | the fulltext index's field set |
-| 13 | `Source.summary` on an **episodic** Source | **four WRITERS, and the record door refuses to carry it.** Writers: the **live capture writer** `sdk.py:21734` (`s.summary=CASE WHEN $sum <> '' THEN $sum ELSE coalesce(s.summary, '') END` — a `SET` whose ELSE arm READS the node, §2's rule) which reads it back into the journal at `:21857` (`… s.summary, s.topics, s._searchText`); `projection/entities.py:5666` (`s.summary=coalesce($summary, s.summary, '')` — inside **`_upsert_document`** (`:5301` at `main`), not `_upsert_source` (`:7025` at `main`; the pin's `_upsert_source` is `:6850`, and `:7025` there is the convergence-contract comment), whose own body contains no `summary` write at all); `session_source_prose_migration.py:277-279` (`_REPAIR_PAIR` — `AND coalesce(s.summary,'')=$old_sum … SET s.summary=$sum`); and the **live hosted commit door** `hosted_api.py:22925` (`_execute_commit_writes`, `:22737` — `MERGE (s:Source {url:$did}) … s.title=$title, s.summary=$summary, … s.is_episodic=true`: an **episodic** `:Source`, i.e. this row's population, written **unconditionally** — no `coalesce`, no `CASE` keep-arm, so unlike the capture writer it always overwrites). ⚠️ The fourth writer is the one that changes the row's entitlement argument: a lane that removes only the three named writers leaves this door live. Readers, all capability `none`: the record door **reads it as the WITNESS and never projects it** (`cache_projection.py:2521`, the `summary == f"{SESSION_SOURCE_SUMMARY_PREFIX}{joined}"` comparison inside `_episodic_source_search_text_is_the_lexicon` (`:2464`), whose answer the projection decision consumes at `:2703-2705` (the comment above it, `:2660-2702` at `main` (`:2660` is a `prose_columns` assignment at the pin, so the range is a comment only at `main`), explains the decline but decides nothing); the rule it implements is the `#10965`/`#10852` block at `cache_projection.py:2691-2702` at `main` (the `#10965` marker is its FIRST line; the `:2693-2660` this used to name carries `#10852` but not `#10965`), not the comment lines that restate it below); `session_source_prose_migration.py:218-223` (`_SOURCE_ROWS`, issued by `find_session_sources_carrying_prose` and run on every rebuild via `reconcile_after_replay`), `:1263-1268` (`_HITS_ROWS`), `:1292-1300` (`_CONTROL_LEXICON_ROWS`, `WHERE s.summary STARTS WITH $prefix … AND s.documentKind IS NULL` — exactly this episodic population) | **no** — property projections, a prefix predicate and a `SET` keep-arm | **`record_only`** ⛔ **NOT shipped** | ⚠️ **the record door DECLINING it is the opposite of a move**: nothing removes the graph copy, so it is still the only copy and the **live capture writer still writes it** — **98 B** of `:Source` payload in §4 (its own sub-row there, read from the committed `measurement-before.json` → `repr_bytes_by_label.Source.summary`). The move has **no mechanism at all** — not a refused one: it is a *property-level* placement on a non-`:Point` label, and the row-level `cache_tier` cannot express a property-level move (§6.1). §5.3's third precondition covers WHOLE-LABEL moves, which this is not, so it neither blocks nor unblocks row 13 (see the note under §5.3). End-to-end pins: `tests/test_10853_session_source_prose.py:203` (`test_the_drop_is_narrow_the_session_metadata_still_projects`) and `:373` (`test_the_record_row_is_not_mutated_by_the_projection`) |
-| 13b | `Source._searchText` on an **episodic** Source (BOTH derivations) | FTS — `CALL db.idx.fulltext.queryNodes('Source', $query)` (`search_engine.py:3098`) over the index declared for the WHOLE label (`projection/__init__.py:6939`), populated by both Source writers (`sdk.py:21692`, `#3518` — the capture path's `search_text = _source_search_text(topics=topics)`; `:19637` was a comment about provenance loss, not a writer) | **yes** — fulltext index | **`graph`** | ⚠️ The record door's per-ROW decline (`cache_projection.py:2703-2705`, the post-`#10000` lexicon rows) is a RECORD-projection decision, not a licence to drop the graph copy: whatever the graph holds, the index reads it, and dropping it "un-indexes a restored session" (`:2693-2694`). A pre-`#10000` row's value is prose derived FROM `summary` (`:2108-2112`) — prose, but still index input |
+| 13 | `Source.summary` on an **episodic** Source | **four WRITERS, and the record door refuses to carry it.** Writers: the **live capture writer** `sdk.py:21739` (`s.summary=CASE WHEN $sum <> '' THEN $sum ELSE coalesce(s.summary, '') END` — a `SET` whose ELSE arm READS the node, §2's rule) which reads it back into the journal at `:21862` (`… s.summary, s.topics, s._searchText`); `projection/entities.py:5666` (`s.summary=coalesce($summary, s.summary, '')` — inside **`_upsert_document`** (`:5301` at `main`), not `_upsert_source` (`:7025` at `main`; the pin's `_upsert_source` is `:6850`, and `:7025` there is the convergence-contract comment), whose own body contains no `summary` write at all); `session_source_prose_migration.py:277-279` (`_REPAIR_PAIR` — `AND coalesce(s.summary,'')=$old_sum … SET s.summary=$sum`); and the **live hosted commit door** `hosted_api.py:22925` (`_execute_commit_writes`, `:22737` — `MERGE (s:Source {url:$did}) … s.title=$title, s.summary=$summary, … s.is_episodic=true`: an **episodic** `:Source`, i.e. this row's population, written **unconditionally** — no `coalesce`, no `CASE` keep-arm, so unlike the capture writer it always overwrites). ⚠️ The fourth writer is the one that changes the row's entitlement argument: a lane that removes only the three named writers leaves this door live. Readers, all capability `none`: the record door **reads it as the WITNESS and never projects it** (`cache_projection.py:2542`, the `summary == f"{SESSION_SOURCE_SUMMARY_PREFIX}{joined}"` comparison inside `_episodic_source_search_text_is_the_lexicon` (`:2485`), whose answer the projection decision consumes at `:2724-2726` (the comment above it, `:2660-2702` at `main` (`:2660` is a `prose_columns` assignment at the pin, so the range is a comment only at `main`), explains the decline but decides nothing); the rule it implements is the `#10965`/`#10852` block at `cache_projection.py:2712-2723` at `main` (the `#10965` marker is its FIRST line; the `:2714` this used to name carries `#10852` but not `#10965`), not the comment lines that restate it below); `session_source_prose_migration.py:218-223` (`_SOURCE_ROWS`, issued by `find_session_sources_carrying_prose` and run on every rebuild via `reconcile_after_replay`), `:1263-1268` (`_HITS_ROWS`), `:1292-1300` (`_CONTROL_LEXICON_ROWS`, `WHERE s.summary STARTS WITH $prefix … AND s.documentKind IS NULL` — exactly this episodic population) | **no** — property projections, a prefix predicate and a `SET` keep-arm | **`record_only`** ⛔ **NOT shipped** | ⚠️ **the record door DECLINING it is the opposite of a move**: nothing removes the graph copy, so it is still the only copy and the **live capture writer still writes it** — **98 B** of `:Source` payload in §4 (its own sub-row there, read from the committed `measurement-before.json` → `repr_bytes_by_label.Source.summary`). The move has **no mechanism at all** — not a refused one: it is a *property-level* placement on a non-`:Point` label, and the row-level `cache_tier` cannot express a property-level move (§6.1). §5.3's third precondition covers WHOLE-LABEL moves, which this is not, so it neither blocks nor unblocks row 13 (see the note under §5.3). End-to-end pins: `tests/test_10853_session_source_prose.py:203` (`test_the_drop_is_narrow_the_session_metadata_still_projects`) and `:373` (`test_the_record_row_is_not_mutated_by_the_projection`) |
+| 13b | `Source._searchText` on an **episodic** Source (BOTH derivations) | FTS — `CALL db.idx.fulltext.queryNodes('Source', $query)` (`search_engine.py:3100`) over the index declared for the WHOLE label (`projection/__init__.py:6939`), populated by both Source writers (`sdk.py:21697`, `#3518` — the capture path's `search_text = _source_search_text(topics=topics)`; `:19637` was a comment about provenance loss, not a writer) | **yes** — fulltext index | **`graph`** | ⚠️ The record door's per-ROW decline (`cache_projection.py:2724-2726`, the post-`#10000` lexicon rows) is a RECORD-projection decision, not a licence to drop the graph copy: whatever the graph holds, the index reads it, and dropping it "un-indexes a restored session" (`:2714-2715`). A pre-`#10000` row's value is prose derived FROM `summary` (`:2108-2112`) — prose, but still index input |
 | 14 | `Point.mentions` (the held-phrase JSON tail prop, `projection/entities.py:1206`) | `sdk.py:27210` (`get_point` — *"Returns dict of all properties"*, the whole-node read); `projection/__init__.py:22118-22120` — a **write-only** fold (the branch is computed in Python at `:22109` from the journal payload, so the `SET` reads no node; `none`); `sdk.py:18841` is **not** a reader of the stored shape — it reads the extractor PAYLOAD dict, `pt` bound at `:18769` | **no** | **`record_only`** ⛔ gated — the two test pins refuse the declaration (§5.1) | nothing walks, filters or indexes it, and it is **not** an embedding input (`sdk.py:15975` composes from `quote`/`content` only) — but the move is blocked |
 
-⚠️ **Row 13 has now been corrected TWICE, in opposite directions, and the second correction is the one to remember.** Draft one said "no Cypher reader names it" — false. This revision found the OPPOSITE error: the row carried `✅ already shipped`, which reads as "the shape has moved", while in fact the only thing that shipped is a **projection DENY** (`cache_projection.py:2656-2660` is its own comment; the executable deny is `:2703-2705`, and the doors that actually refuse the value are `:2787-2789` (tail) and `:2795` (column) — a `+5` on this family. ⛔ The `cache_projection.py` deltas are NOT uniform, so do not extrapolate one: `+3` above the ~2100 insert (`:2108-2112`), `+5` below it (`:2464`, `:2521`, `:2693`, `:2705`, `:2755`, `:2787-2789`, `:2795`), and `:3778` re-derived on its own (+102). The `+3` block was applied to the `+5` family, which is the error this sentence exists to stop) — a decision NOT to put the value in the record. A deny is not a move: it leaves the byte in the graph, written by the live capture path (§3 row 13's writer column, and the 98 B the instrument measures). ⛔ **A lane reading "already shipped" would have skipped row 13 as done**; the honest state is `record_only` by capability, **unshipped** by mechanism, and the reason is §5.3's, not a missing census item.
+⚠️ **Row 13 has now been corrected TWICE, in opposite directions, and the second correction is the one to remember.** Draft one said "no Cypher reader names it" — false. This revision found the OPPOSITE error: the row carried `✅ already shipped`, which reads as "the shape has moved", while in fact the only thing that shipped is a **projection DENY** (`cache_projection.py:2656-2660` is its own comment; the executable deny is `:2724-2726`, and the doors that actually refuse the value are `:2787-2789` (tail) and `:2795` (column) — a `+5` on this family. ⛔ The `cache_projection.py` deltas are NOT uniform, so do not extrapolate one: `+3` above the ~2100 insert (`:2108-2112`), `+5` below it (`:2485`, `:2542`, `:2693`, `:2705`, `:2776`, `:2787-2789`, `:2795`), and `:3841` re-derived on its own (+102). The `+3` block was applied to the `+5` family, which is the error this sentence exists to stop) — a decision NOT to put the value in the record. A deny is not a move: it leaves the byte in the graph, written by the live capture path (§3 row 13's writer column, and the 98 B the instrument measures). ⛔ **A lane reading "already shipped" would have skipped row 13 as done**; the honest state is `record_only` by capability, **unshipped** by mechanism, and the reason is §5.3's, not a missing census item.
 ⚠️ **Row 13 has now been corrected THREE times, and the third is a count, not a verdict.** `three WRITERS` was one short: `hosted_api.py:22925` inside `_execute_commit_writes` (`:22737`) at `main` (`:22301`/`:22113` at the pin) writes the same episodic `:Source.summary` **unconditionally** (`s.title=$title, s.summary=$summary, … s.is_episodic=true`), so a lane removing the three named writers would leave it live; and `entities.py:5666`'s parent symbol was `_upsert_source`, which is `_upsert_document` (`:5301` at `main` `ae54df166d`; `:5282` at the pin `ccb49741b2ec`) — the line opened, the symbol did not, which is exactly the half that survives a drift (the header above). The reader column had the mirror defect: it cited `cache_projection.py:2656-2660`, five comment lines, for a READ that lives at `:2484-2521` (pin `2479-2485` plus this family's `+5`; `:2482-2488` is `+3` and lands on the previous check). Verdict, mechanism and the 98 B are unchanged.
 
 ⚠️ **Rows 2b–2f and 5b were added by the `#13095` follow-up, and their absence was a real hole rather than a
@@ -757,7 +761,7 @@ proof the key is a node property at all.
 
 **The mechanism reaches it — measured, not assumed.** `_props_from_row`'s tail filter is
 `tail_denied = forbidden | {placement spellings}`, i.e. it denies the **plain** forbidden set as well as its
-column-spelling widening (`cache_projection.py:2755`). So `CACHE_FORBIDDEN_COLUMNS["point"] = {"story_arc"}`
+column-spelling widening (`cache_projection.py:2776`). So `CACHE_FORBIDDEN_COLUMNS["point"] = {"story_arc"}`
 **does** drop the key from a point row's `props` tail. ⚠️ An earlier draft of this document claimed the
 opposite ("no declaration in the tree can name a tail-only key") — that was **wrong**, and it was wrong in the
 direction that matters: it told `#10429` the closure was impossible when it is one declaration plus a test
@@ -799,7 +803,7 @@ all: copy that prose out first, because the wipe destroys the only copy"* (`proj
 mitigate it. What does separate the two denies is **which payload the key arrives in**: the journal fold handles a
 payload key (`_POINT_DENY`, whose own comment at `:1826-1827` describes it as the list *"for payload keys the
 replay DELIBERATELY drops"*), while this route's key
-arrives in a **record row's `props` tail** and is denied by `_props_from_row`'s `tail_denied` (`cache_projection.py:2755`).
+arrives in a **record row's `props` tail** and is denied by `_props_from_row`'s `tail_denied` (`cache_projection.py:2776`).
 
 ⚠️ **And a graph-side clear DOES ship — scoped, and not to this population.** `update_point(<id>, story_arc=None)`
 is an in-place clear (`projection/entities.py:2337-2338` is its own comment, `#11325`) that applies **only where
@@ -849,7 +853,7 @@ The census's largest non-Point verdict (`:GraphEvent`, §2.6) and twelve bookkee
 `cache_tier`, and the reason is a **precondition of the mechanism**, not an oversight:
 
 > `cache_tier` is a column on **`public.point`**. `read_record_view` applies the tier predicate **only**
-> where `NODE_TABLES[label] == 'point'` (`cache_projection.py:3778`), and a `record_only` row only has
+> where `NODE_TABLES[label] == 'point'` (`cache_projection.py:3841`), and a `record_only` row only has
 > meaning because a **record table holds it**. A shape with **no record table** has nowhere for the row to
 > live once the graph refuses it.
 
@@ -868,7 +872,7 @@ eviction policy — that is `#13084` and P0-c.
 |---|---|---|
 | **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the eleven other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
 | **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` **and** `Point.mentions` (§3 row 14) — ONE precondition, TWO shapes | `#10429`: widen the completeness pin with a tail-only category (§5.1). ⚠️ What refuses any new entry regardless of label is the *exact-dict* pin, not the completeness pin (`tests/test_cache_projection.py:186-195` compares `{source, event}` to the WHOLE `CACHE_FORBIDDEN_COLUMNS`) — which is why it blocks both shapes and why naming only `story_arc` here was an error |
-| **a record table but no tier COLUMN** → having a row is not having a tier | every non-`:Point` label whose move is **whole-label** (none in this census — §3 rows 1/4/5/6/8 all read a capability and are all `graph`; §1's record-table column is NOT a move criterion, and reading it as one is the error this cell corrects) | a `cache_tier` column (one migration per label) **plus** the `if table == "point"` arm at `cache_projection.py:3778` widened; ⚠️ this does **not** unblock row 7b, which is a **property-level** move the row-level tier cannot express (§6.1) |
+| **a record table but no tier COLUMN** → having a row is not having a tier | every non-`:Point` label whose move is **whole-label** (none in this census — §3 rows 1/4/5/6/8 all read a capability and are all `graph`; §1's record-table column is NOT a move criterion, and reading it as one is the error this cell corrects) | a `cache_tier` column (one migration per label) **plus** the `if table == "point"` arm at `cache_projection.py:3841` widened; ⚠️ this does **not** unblock row 7b, which is a **property-level** move the row-level tier cannot express (§6.1) |
 
 None of these is a census failure. Each is the mechanism's **precondition**, named so the next slice is executable
 instead of another audit.
