@@ -5444,9 +5444,17 @@ def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
     import yaml
 
     runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
-    # A departure block is one PARAGRAPH carrying the marker — the page writes the justification
-    # across several wrapped lines, so splitting on a blank line is what keeps a block whole.
-    blocks = [p for p in re.split(r"\n[ \t]*\n", runbook) if "**OVERRIDES:**" in p]
+    # A departure block is one PARAGRAPH that OPENS with the marker — the page writes the
+    # justification across several wrapped lines, so splitting on a blank line is what keeps a block
+    # whole. ⛔ `**OVERRIDES:**` also appears MID-SENTENCE in prose this page carries (a reference
+    # bullet quoting the marker, `:566`): a paragraph merely CONTAINING the marker is not a departure
+    # record, and letting one count meant a pin named inside that prose read as recorded. A leading
+    # blockquote marker (`> **OVERRIDES:** …`) is still a record — that is how the page quotes the
+    # version-pin suspension.
+    def _opens_with_marker(paragraph: str) -> bool:
+        return paragraph.lstrip().lstrip(">").lstrip().startswith("**OVERRIDES:**")
+
+    blocks = [p for p in re.split(r"\n[ \t]*\n", runbook) if _opens_with_marker(p)]
     assert blocks, (
         "the runbook carries no `**OVERRIDES:**` departure block at all — every POOL-ONLY pin on "
         "this page is then unrecorded, and this pin has nothing to check them against"
@@ -5475,21 +5483,27 @@ def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
         "canary and the #13596 housekeeping pins were all removed, delete this pin in the same "
         "change rather than leaving a green scan over an empty population"
     )
-    def _recorded(block: str, pin: str) -> bool:
-        r"""Does ONE departure block name BOTH halves of this pin — the job as a NAME?
 
-        ⛔ A raw substring test makes the JOB leg IMPLIED by the FILE leg for every job whose
-        name is its file's stem, and the two pins this pin exists for are exactly that shape:
-        `closes-coherence` ⊂ `closes-coherence.yml`, `redis-guard` ⊂ `redis-guard.yml`. Under a
-        plain `in` test a block naming ONLY the two files read as recorded, and so did a block
-        naming a job that does not exist — the guard's stated property ("named, TOGETHER with its
-        workflow file") was unenforced for the only pins it guards. So the JOB leg is matched on
-        `[\w.-]` boundaries: the occurrence inside `<job>.yml` does not count, ``` `job` job ``` does.
+    def _recorded(block: str, pin: str) -> bool:
+        r"""Does ONE departure block name BOTH halves of this pin, each as a NAME?
+
+        ⛔ A raw substring test makes one leg IMPLIED by the other wherever a name is a substring of
+        a sibling name, and the tree has both shapes live:
+
+        * JOB inside its own FILE — `closes-coherence` ⊂ `closes-coherence.yml`, `redis-guard` ⊂
+          `redis-guard.yml`: the two pins this pin exists for. A block naming ONLY the files read as
+          recorded, and so did a block naming a job that does not exist.
+        * FILE inside a LONGER FILE — `ci.yml` ⊂ `python-ci.yml`: a block naming only
+          `python-ci.yml` read as recording `ci.yml::repo-harnesses`, the #10237 canary's pin.
+
+        So BOTH halves are matched on `[\w.-]` boundaries: the occurrence inside `<name>.yml` does
+        not count, while ``` `closes-coherence` job ``` and `(`ci.yml:1556`)` do.
         """
         workflow, job = pin.split("::")
-        if workflow not in block:
-            return False
-        return re.search(rf"(?<![\w.-]){re.escape(job)}(?![\w.-])", block) is not None
+        return all(
+            re.search(rf"(?<![\w.-]){re.escape(part)}(?![\w.-])", block) is not None
+            for part in (workflow, job)
+        )
 
     unrecorded = [pin for pin in pins if not any(_recorded(block, pin) for block in blocks)]
     assert not unrecorded, (

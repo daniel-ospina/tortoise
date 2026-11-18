@@ -22,7 +22,7 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 78 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool — was 76 until `release-artifact-canary` added its `canary` + `report` jobs (#12422, which did not re-derive this row: 78), then the `consent-key-drift` scheduled job (#12464), then `cypher-diff.yml`'s `differential` job (#13098), and now `closes-coherence.yml`'s `closes-coherence` and `redis-guard.yml`'s `redis-guard` have LEFT this row for the fleet's x64 pool (#13596, departure 3 below) |
+| `ubuntu-latest` | 78 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool — was 76 until `release-artifact-canary` added its `canary` + `report` jobs (#12422, which did not re-derive this row: 78), then the `consent-key-drift` scheduled job (#12464), then `cypher-diff.yml`'s `differential` job (#13098), and now `closes-coherence.yml`'s `closes-coherence` and `redis-guard.yml`'s `redis-guard` have LEFT this row for the fleet's x64 pool (#13596, departures 3 and 4 below) |
 | `ubuntu-24.04` | 10 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
 Counts are JOBS (not files), re-measured 2026-11-18 at this head (`yaml.safe_load` each workflow,
@@ -987,8 +987,10 @@ job itself:
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to NON-REQUIRED jobs whose red
 costs a re-run before that head can land — `repo-harnesses` here, and the two #13596 housekeeping
 pins recorded at the foot of this page. A required leg's red also reddens the aggregate, which is why
-no required leg is pinned. It bypasses the label attachment `scripts/ci_runner_gate.sh` performs, so
-it has no hosted fallback at all.
+no required leg is pinned **by default**: the one exception is `pool-split`, which pins the ODD rows
+of a REQUIRED shard (`test (b)`, `(d)`, `(f)`, `(h)`), is OPT-IN and off by default, and records its
+own cost under its `OVERRIDES:` block above (`:905-922`). It bypasses the label attachment
+`scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
 
 ### Scope of the #10237 canary's proof — scheduling only; the ask's proof list is NOT discharged
 
@@ -1149,7 +1151,7 @@ tools/install-ci-runner-x64.sh --repair-labels --count 8
   until the gate attaches it again. It cannot *detach* either — an explicit `--fallback off` is
   refused (exit 2) precisely because a repair cannot remove a label.
 
-### Residual: the two #13596 housekeeping pins are POOL-ONLY too — departure 3
+### Residual: the two #13596 housekeeping pins are POOL-ONLY too — departures 3 and 4
 
 **OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `closes-coherence.yml`'s
 `closes-coherence` job and `redis-guard.yml`'s `redis-guard` job now read
@@ -1161,12 +1163,22 @@ runners were idle while the hosted pool backed up. Neither is a required context
 them; `redis-guard.yml`'s own header records the same), so the departure is scoped exactly like
 the #10237 canary above: a pin whose red costs a WAIT and a re-run, never a required leg.
 
-What it costs, stated rather than inherited: **a WAIT with no hosted half.** A pool-only pin has no
-degraded mode — while the pool is down or the label is detached, `closes-coherence` never advises on
-**any** PR (that workflow carries no `paths:` filter) and `redis-guard`'s `push: main` run never
-measures, both as a QUEUED job with no red and no annotation. That is the same accepted cost the
-canary records above, and the same one `pool-split` records under its own `OVERRIDES:` block; it is
-non-required work, so the failure mode is a missing measurement rather than a stuck merge.
+What it costs, stated rather than inherited, in the three modes the canary records above. A "WAIT
+with no hosted half" is only the first: while the pool is down or the label is detached,
+`closes-coherence` never advises on **any** PR (that workflow carries no `paths:` filter) and
+`redis-guard`'s `push: main` run never measures — a QUEUED job with no red and no annotation.
+
+⛔ Two of those modes are not only a missing measurement, which is why this pin is not free: a pool
+box without `gh` reds `closes-coherence` by design (the #9018 contract below fails closed), and a
+runner that claims the job and drops it reports ZERO steps (the canary's recorded mode above,
+`:977-985`). `closes-coherence` is unfiltered, so either red sits on every PR's tree, and the rail
+merges with `--admin` — required-ness decides nothing, so any red on that tree blocks the head's
+landing until someone re-runs it (`:959-961`). Non-required is what keeps this work out of the
+aggregate; it is NOT what makes its red free.
+
+`redis-guard` is the cheaper half: it is filtered both ways (`paths:` on `pull_request` and on
+`push: main`, `redis-guard.yml:19,26`), so its red can only reach a PR that touches `tortoise/**`,
+`graph-scripts/**`, the guard itself, or that workflow.
 
 Two things this pin keeps TRUE, which is why it is safe on a pool runner:
 
