@@ -294,3 +294,108 @@ class TestTheRetiredNamesStillAnswer:
             "`goalState` did not survive the container: `tortoise_create_point` "
             "declared it as a parameter (#13110), so a migrating caller's goal "
             "state would be silently dropped by the arm")
+
+
+class TestTheCompletionSignalMovedWithTheDoor:
+    """`tortoise_create_point` carried TWO things, and only one was the node.
+
+    The door's handler also fired `_maybe_onboarding_auto_complete(...)` — the
+    server-side signal that flips the dashboard's connect step to *Connected* on a
+    first write (`tortoise/onboarding/SKILL.md` says so, and the wizard copy's
+    "file my first memory" step relies on it). `tortoise_create_entity` did not
+    have it, so retiring the door without moving this block would have absorbed
+    the write and DROPPED the completion — a silent capability loss of exactly the
+    shape #394 recorded when `create_document`'s `_linkSource` half was left
+    behind in the move.
+
+    ⛔ These are HANDLER pins, not SDK pins: the observation lives in
+    `tortoise/mcp_server.py`, one level above everything `TestTheArmStoresWhatTheDoorStored`
+    can see, which is precisely why it was invisible to the arm's own tests.
+    """
+
+    @pytest.fixture()
+    def observed(self, monkeypatch):
+        """Record every observation, and stub the SDK the handler builds.
+
+        `_transport_mode` is set to `http` so `_safe`'s transport gate passes, and
+        no org context is set so the quota pre-write short-circuits — the pin is
+        about the OBSERVATION, and a quota fixture would hide it behind infra.
+        """
+        import contextlib
+
+        from tortoise.mcp_auth import _transport_mode
+
+        calls: list[dict] = []
+        monkeypatch.setattr(mcp_server, "_maybe_onboarding_auto_complete",
+                            lambda **kw: calls.append(kw))
+
+        class _FakeSDK:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def create_entity(self, *_a, **_k):
+                if isinstance(self.payload, BaseException):
+                    raise self.payload
+                return self.payload
+
+        def _install(payload):
+            monkeypatch.setattr(mcp_server, "_get_org_sdk",
+                                lambda: _FakeSDK(payload))
+
+        token = _transport_mode.set("http")
+        try:
+            yield calls, _install
+        finally:
+            _transport_mode.reset(token)
+
+    def test_the_point_arm_observes_a_completed_first_write(self, observed):
+        calls, install = observed
+        install({"node": {"id": "p1", "pointKind": "statement"}, "nudges": []})
+        result = mcp_server.tortoise_create_entity(
+            type="point", name="a first memory")
+        assert result["node"]["id"] == "p1"
+        assert calls == [{"decision_observed": False}], (
+            "the point arm did not record the onboarding observation, so a user "
+            "who files their first memory through the ADVERTISED call never sees "
+            "the dashboard flip to Connected")
+
+    def test_the_diary_arm_observes_too(self, observed):
+        calls, install = observed
+        install({"node": {"id": "d1", "pointKind": "diary"}, "nudges": []})
+        mcp_server.tortoise_create_entity(
+            type="diary", name="a first entry",
+            props={"authoredBy": "agent-1"})
+        assert calls == [{"decision_observed": False}], calls
+
+    def test_the_persisted_kind_is_what_observes(self, observed):
+        """Asked `option`, stored `statement` — the STORED kind decides (#9287).
+
+        The kind guard can re-route and rewrite a kind, so a handler that observed
+        what it ASKED for would record a decision the graph does not hold.
+        """
+        calls, install = observed
+        install({"node": {"id": "p2", "pointKind": "statement"}, "nudges": []})
+        mcp_server.tortoise_create_entity(
+            type="point", name="not really a decision",
+            props={"pointKind": "option"})
+        assert calls == [{"decision_observed": False}], (
+            "the observation read the REQUESTED kind instead of the persisted one")
+
+    def test_a_non_point_arm_never_observes(self, observed):
+        """A retirement may not widen the observation as a side effect."""
+        calls, install = observed
+        install({"node": {"id": "s1", "subjectKind": "core:product"},
+                 "nudges": []})
+        for t in ("subject", "object", "event", "document"):
+            mcp_server.tortoise_create_entity(type=t, name=f"a {t}")
+        assert calls == [], (
+            f"a non-point arm recorded an onboarding observation: {calls} — "
+            "`tortoise_create_point` observed, `create_subject` never did, and the "
+            "container must not flatten that difference")
+
+    def test_a_failed_write_never_observes(self, observed):
+        calls, install = observed
+        install(RuntimeError("the graph refused the write"))
+        result = mcp_server.tortoise_create_entity(type="point", name="doomed")
+        assert isinstance(result, mcp_server._SafeError), result
+        assert calls == [], "a failed write must never record an observation (#3926)"

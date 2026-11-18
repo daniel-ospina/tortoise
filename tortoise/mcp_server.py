@@ -6831,8 +6831,37 @@ def tortoise_create_entity(type: str, name: str, props: Any = None,
         return _SafeError({"error": _reject, "code": ERR_INVALID})
     if goalState is not None:
         props = {**(props or {}), "goalState": goalState}
-    return _safe(_quota_gated(_get_org_sdk().create_entity, "points"),
-                 type, name, **(props or {}))
+    result = _safe(_quota_gated(_get_org_sdk().create_entity, "points"),
+                   type, name, **(props or {}))
+    # ⛔ THE ONBOARDING OBSERVATION MOVED WITH THE DOOR (#11609 lane P1).
+    # `tortoise_create_point` carried TWO things: the node write and the
+    # server-side completion signal (`_maybe_onboarding_auto_complete`). This
+    # container had only the first, so retiring the door without this block
+    # would have absorbed the node and DROPPED the signal — "file your first
+    # memory" would stop flipping the dashboard to Connected for every harness
+    # that follows the ADVERTISED call, which is now the only call a grant-based
+    # client can make. It is #394's lesson exactly (`create_document`'s
+    # `_link_source` half was lost in the move and had to be restored): a
+    # retirement is legal when the container does EVERYTHING the door did.
+    #
+    # POINT-SHAPED ARMS ONLY. `subject`/`object`/`event`/`document` never
+    # observed an onboarding step and must not start: that would be a product
+    # behaviour change smuggled into a retirement.
+    #
+    # #3926: gate on the typed failure result, never on key presence — a user
+    # prop named "error" must not suppress the observation.
+    if (not isinstance(result, _SafeError)
+            and str(type or "").strip().lower() in _POINT_SHAPED_ENTITY_TYPES):
+        # Read the PERSISTED kind (the arm returns the node it wrote), never the
+        # one that was asked for — the same rule `tortoise_create_point` applies
+        # two hundred lines up, because the kind guard can re-route it (#9287).
+        _node = result.get("node") if isinstance(result, dict) else None
+        _recorded_kind = (_node.get("pointKind")
+                          if isinstance(_node, dict) else None)
+        _maybe_onboarding_auto_complete(
+            decision_observed=(str(_recorded_kind or "").strip().lower()
+                               in DECISION_SHAPED_POINT_KINDS))
+    return result
 
 
 def tortoise_update(id: str, props: Any = None) -> dict:
@@ -8896,6 +8925,15 @@ _ONBOARDING_STATE_TTL = 60.0
 # label, not of the evidence. `criterion`/`evidence` are deliberately NOT in the
 # set: both protocols file them as REASONS, and a bare reason is no decision.
 DECISION_SHAPED_POINT_KINDS = frozenset({"decision", "option"})
+
+#: The `create_entity` discriminators that are POINT-SHAPED — i.e. the arms that
+#: relay to `create_point` (#11609 lane P1). They carry the point write's
+#: obligations, which is why `tortoise_create_entity` observes the onboarding
+#: completion signal for exactly these and no others: `subject`/`object`/`event`/
+#: `document` never observed one, and a retirement must not widen the observation
+#: as a side effect. Kept as a named set, not an inline tuple, so the handler's
+#: guard and its tests read the SAME list.
+_POINT_SHAPED_ENTITY_TYPES = frozenset({"point", "diary"})
 
 #: In-flight gate resolutions, keyed by org (#2924 review). The gate now AWAITS
 #: between the cache lookup and the fill, so without this N concurrent

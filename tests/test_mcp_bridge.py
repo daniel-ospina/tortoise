@@ -1537,6 +1537,9 @@ def test_against_the_real_mcp_daemon(tmp_path, home, monkeypatch):
             assert "serverInfo" in bridge.read()["result"]
             bridge.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
             names = [tool["name"] for tool in bridge.read()["result"]["tools"]]
-            assert "tortoise_create_point" in names, names[:5]
+            # #11609 lane P1: `tortoise_create_point` retired into
+            # `create_entity`'s `type="point"` arm and is no longer advertised, so
+            # the "the daemon serves the real registry" probe names a live door.
+            assert "tortoise_create_entity" in names, names[:5]
         finally:
             bridge.close()

@@ -139,9 +139,19 @@ def test_the_guard_reds_when_a_public_method_is_added(tmp_path):
 
 
 def test_an_exemption_cannot_outlive_the_fact_it_records(tmp_path):
-    """A method marked exempt that has since become reachable must be un-exempted."""
+    """A method marked exempt that has since become reachable must be un-exempted.
+
+    ⛔ THE REPRESENTATIVE CANNOT BE A METHOD NOTHING REACHES, and `create_point`
+    became exactly that in #11609 lane P1: `tortoise_create_point` carried the
+    `sdk_method: create_point` binding, so when the door retired nothing bound the
+    method any more and `exemption: True` stopped being a lie. The guard was right
+    to stay silent — the TEST was reading a fact that had expired. `create_entity`
+    is bound by the live `tortoise_create_entity`, so the property still holds.
+    """
     doc = _manifest()
-    target = next(r for r in doc["rows"] if r.get("method") == "create_point")
+    target = next(r for r in doc["rows"] if r.get("method") == "create_entity")
+    assert target.get("exemption") is False, (
+        "the representative must START unexempted — otherwise this case proves nothing")
     target["exemption"] = True
     modified = tmp_path / "exempt.yml"
     modified.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
@@ -383,10 +393,20 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "canonical-mcp-tools.md's parenthetical stopped stating the door wave's subtraction and "
         "its result; that is half the movement this container's own arithmetic records"
     )
-    assert int(door_wave.group(2)) == live, (
-        f"canonical-mcp-tools.md says the door wave lands the surface on {door_wave.group(2)} "
-        f"advertised tools; the manifest derives {live}"
-    )
+    # ⛔ A WAVE'S OWN RESULT IS HISTORY; THE HEAD IS THE LAST WAVE'S RESULT. #11609 lane P1
+    # appended a second door-retirement wave (`create_point`/`diary_write` -> the new
+    # `type="point"`/`type="diary"` arms), so `door_wave`'s 48 is now an intermediate
+    # figure and binding it to `live` is a false RED on a correct record. The wave after
+    # it is bound instead, by its own sentence, and `door_wave` stays asserted as the
+    # arithmetic it is (the generic equation check above already evaluates `48 − 2 = 46`).
+    p1_wave = re.search(r"#11609 lane P1's\s*−(\d+)\s*=\s*(\d+)", arithmetic)
+    assert p1_wave, (
+        "canonical-mcp-tools.md's parenthetical no longer states the #11609 lane P1 "
+        "subtraction and its result; that is the wave that lands the surface on THIS "
+        "head, so without it the block above binds an intermediate figure")
+    assert int(p1_wave.group(2)) == live, (
+        f"canonical-mcp-tools.md says the last door wave lands the surface on "
+        f"{p1_wave.group(2)} advertised tools; the manifest derives {live}")
     # ⛔ NEITHER SIDE IS FOUND BY POSITION (#13052 review at 0881a403, then at 7a61cde, both
     # P3). The parenthetical is a RUNNING record that has already grown twice, so an index into
     # `equations` retargets on the next append, and a first-match regex retargets on the next
@@ -417,9 +437,14 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "match a plus-chain at all, so it reds here. If the record grows, extend this pin "
         "in the same change rather than reshaping the sentence to fit it"
     )
-    assert int(advertised_eq.group(2)) - int(door_wave.group(1)) == live, (
+    # Both door waves subtract now, so the composition needs BOTH terms: the first one
+    # (`door_wave`) is the intermediate result the advertised equation stops at, and the
+    # second (`p1_wave`) is the head.
+    assert (int(advertised_eq.group(2)) - int(door_wave.group(1))
+            - int(p1_wave.group(1))) == live, (
         f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
-        f"{door_wave.group(1)} = {int(advertised_eq.group(2)) - int(door_wave.group(1))}, "
+        f"{door_wave.group(1)} − {p1_wave.group(1)} = "
+        f"{int(advertised_eq.group(2)) - int(door_wave.group(1)) - int(p1_wave.group(1))}, "
         f"not {live}"
     )
     assert int(retired_eq.group(2)) == retired, (
@@ -5255,7 +5280,11 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # and there is no `+ n` term. No container row arrives here, the SDK pin does not move
     # (94, inherited from `main`), and no row is archived: `archive/mcp-tools/` is for doors
     # with NO destination.
-    assert live["mcp"] == manifest["counts"]["tools"] == 48
+    # #11609 lane P1 (THIS PR): 48 -> 46. The two POINT-shaped doors retire FORWARD into
+    # `create_entity`'s new `type="point"`/`type="diary"` ARMS, i.e. onto a container that
+    # was already advertised, so the live delta is exactly −2 with no `+ n` term and the
+    # SDK pin does not move (94 — only MCP names retire here).
+    assert live["mcp"] == manifest["counts"]["tools"] == 46
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

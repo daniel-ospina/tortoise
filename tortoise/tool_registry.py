@@ -1432,12 +1432,20 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "For type='document', declaring extractedFrom materializes "
                     "the :Source (#8171); on subject/object/event it is inert "
                     "and an extracted_from_inert advisory is returned. "
-                    "type='point' absorbs tortoise_create_point: `name` is the "
-                    "claim's content and props={\"pointKind\": ...} is the kind "
-                    "(default 'statement'); dedup defaults to True as that door "
-                    "declared. type='diary' absorbs tortoise_diary_write: `name` "
-                    "is the entry and props carries authoredBy (required), "
-                    "topic and wing.",
+                    # ⛔ A LIVE DESCRIPTION MAY NOT NAME A RETIRED DOOR — a grant-based
+                    # client builds its tool grant from `tools/list`, so a retired
+                    # name here is a call it can never make
+                    # (`tests/test_9664_capstone_connector_to_record.py` is the pin,
+                    # and it caught exactly this when the arms landed). The
+                    # ABSORPTION is recorded where a reader looks it up — the retired
+                    # name's own `RETIRED_USE_INSTEAD` pointer, served by the shim —
+                    # while this description states what the arm DOES.
+                    "type='point' writes a belief: `name` is the claim's "
+                    "content and props={\"pointKind\": ...} is the kind "
+                    "(default 'statement'); dedup defaults to True, so a repeat "
+                    "folds into the existing point by content. type='diary' writes "
+                    "a journal entry pinned to kind 'diary': `name` is the entry "
+                    "and props carries authoredBy (required), topic and wing.",
         risk="destructive",  # a repeat call re-applies caller props ON MATCH (#9572)
         http_policy=True,
         sdk_method="create_entity",
