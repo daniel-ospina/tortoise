@@ -6131,7 +6131,7 @@ def _declared_mutations(
             # #13220 — the values the RECORD computes that the JOURNAL does not
             # carry (`object`/`subject` fingerprints, an event's composed vector,
             # a SOURCE row's text vector — a document's `_searchText` and a
-            # plain `:Source`'s `_searchText or title`, `#13412`/`#13418`). Bound
+            # plain `:Source`'s `_searchText`, `#13412`/`#13418`). Bound
             # AFTER the split and not merged into `props`, so one name cannot
             # behave differently depending on who supplied it in the same dict —
             # the rule nobody could read.
@@ -6140,12 +6140,15 @@ def _declared_mutations(
             # are served from the record (`record_vector.LABEL_SERVED`) and their
             # payloads DO carry `embedding` (a caller's passthrough, e.g.
             # `_SOURCE_EXTRA_PROPS`), so on those three the payload may write the
-            # column through the ordinary split and the derivation simply
-            # overwrites it. `DERIVED_COLUMNS` still names the labels where a
-            # payload value is REFUSED (`object`/`subject`) — so what is enforced
-            # here is "the record's derivation is the LAST writer", not "the
-            # payload may not write it", which is what this comment said and it
-            # was false for three of the five labels.
+            # column through the ordinary split. What is enforced here is "the
+            # record's derivation is the LAST writer WHERE IT WRITES", not "the
+            # payload may not write it" (which is what this comment said, and it
+            # was false for three of the five labels) and not "a carried value is
+            # always overwritten": `event` and `source` derive NOTHING when the
+            # record carries a vector, so there the payload's own value is the one
+            # that stands (see the `source` paragraph on `DERIVED_COLUMNS`).
+            # `DERIVED_COLUMNS` still names the two labels where a payload value is
+            # REFUSED (`object`/`subject`).
             for column, value in derived.items():
                 if column in GENERATED_COLUMNS or column in _BOOKKEEPING_COLUMNS:
                     # Postgres computes it / the payload may not write it: the

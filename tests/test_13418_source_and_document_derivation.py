@@ -274,6 +274,28 @@ def test_a_session_source_derives_NOTHING_and_says_why(encoder):
         f"(got {out.skipped!r})")
 
 
+def test_a_session_source_KEYED_BY_ID_is_still_a_session_source(encoder):
+    """The skip must resolve the identity the way the record and the fold do.
+
+    `is_episodic_source_node` reads `props["url"]` (the cache side's vocabulary),
+    while a `:Source` key is `url OR id` on both other layers —
+    `record_projection._key_value` ("`add_document` emits `id` and no `url` at
+    all") and `projection/entities.py:7081` (`raw_key = url or sid`). A payload
+    that carries the identity in `id` therefore reached the predicate with no `url`
+    and was classified as a PLAIN source: `public.source.embedding` would then hold
+    the topic LEXICON, which is the one text §9.4 forbids for a session `:Source`.
+    Latent today (both in-tree emitters pass `url=`), closed here.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceCreated", "id": "session:abc123",
+        "sourceKind": "agentSession",
+        "_searchText": "pricing, discount, renewal",
+    })
+    assert out.columns == {} and encoder.calls == [], (
+        "an `id`-keyed session source must be skipped like a `url`-keyed one")
+    assert "session :Source" in out.skipped, out.skipped
+
+
 def test_a_carried_source_vector_is_HONOURED_and_not_recomputed(encoder):
     """`_upsert_source` computes none, so a carried vector is the node's own.
 

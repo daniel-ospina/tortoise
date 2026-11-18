@@ -1701,12 +1701,16 @@ def _release_pooled_connections() -> None:
 
 #: One record type's embedding text, as the `(name, value)` parts the text is
 #: composed from, in composition order. A table of CALLABLES rather than of field
-#: names: every composition here has its own shape (`SourceCreated` takes an `or`,
-#: `DocumentCreated` calls a function whose third argument is a LIST), so a
-#: field-name list would describe the datum without being able to produce it — and
-#: a seam that joined such a list (`#13447`) would double a source's text and
-#: stringify a document's topics. The callable IS the plug point: a shared encoder
-#: calls it and gets exactly the text this record derives from.
+#: names: every composition here has its own shape (`DocumentCreated` calls a
+#: function whose third argument is a LIST, `EventRecorded` joins three parts with
+#: falsy ones dropped), so a field-name list would describe the datum without being
+#: able to produce it — and a seam that joined such a list (`#13447`) would
+#: stringify a document's topics and keep an event's empty ones. The callable IS
+#: the plug point, and it returns the COMPOSITION and nothing else: the arms that
+#: REFUSE to derive (a carried vector, a session `:Source`, a source record that
+#: states no text — `derived_embedding_columns` below) are the CALLER's, so a
+#: consumer of this table must apply them too, or it will embed a session source's
+#: topic lexicon.
 _EmbeddingTextParts = Callable[[Mapping[str, Any]], Sequence[tuple[str, Any]]]
 
 
@@ -1815,10 +1819,24 @@ def _session_source_skip(payload: Mapping[str, Any]) -> str:
     for the `:Source` label does not require inventing one out of the wrong text
     — `#13418`'s indicator 1 allows a documented skip in exactly this shape.
     """
+    # ⛔ THE IDENTITY IS RESOLVED THE WAY BOTH LAYERS RESOLVE IT, before the
+    # predicate sees it. `is_episodic_source_node` reads `props["url"]` (its own
+    # docstring: it is the CACHE side's vocabulary), while the record resolves a
+    # `:Source` key as `url OR id` (`record_projection._key_value`: "Absence is the
+    # one shape that is a real producer — `add_document` emits `id` and no `url` at
+    # all") and the fold does the same (`projection/entities.py:7081`, `raw_key =
+    # url or sid`). Handing the payload over VERBATIM meant an `id`-keyed
+    # `session:…` source was classified as a plain one and got the topic lexicon
+    # embedded — the exact text §9.4 forbids, on the row `document_kind IS NULL`
+    # routes to the `source` dense leg. Latent today (both in-tree emitters pass
+    # `url=`), and free to close here.
+    resolved = payload
+    if payload.get("url") is None and payload.get("id") is not None:
+        resolved = {**payload, "url": payload.get("id")}
     try:
         from .cache_projection import is_episodic_source_node
 
-        episodic = is_episodic_source_node(payload)
+        episodic = is_episodic_source_node(resolved)
     except Exception:  # noqa: BLE001, RUF100 — unclassifiable ⇒ derive nothing
         return ("the episodic-source predicate is unreadable, so the session "
                 "narrative rule (STORAGE §9.4) cannot be ruled out")
@@ -1863,10 +1881,10 @@ def _session_source_skip(payload: Mapping[str, Any]) -> str:
 #: second copy), and the owner's 2026-11-18 ruling puts `:Event`/`:Source` on the
 #: same treatment as `:Object`/`:Subject`. The consequence is the opposite of the
 #: old note's: the record having the vector while the graph does not IS the
-#: intended direction — the graph copy is the thing D-b retires, not the thing the
-#: record must match.
+#: intended direction: the graph copy is what `#13220` retires (record-first
+#: sequencing), not the thing the record must match.
 #:
-#: ⚠️ Two `:Source` populations derive NOTHING, each for a stated reason:
+#: ⚠️ Three `:Source` populations derive NOTHING, each for a stated reason:
 #:   * a **session** `:Source` (its `_searchText` is the topic lexicon) — §9.4
 #:     fixes its vector text as the S1 narrative read from
 #:     `public.session_narrative`, which the journal line this fold reads does not
