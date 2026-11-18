@@ -213,8 +213,7 @@ from enum import StrEnum
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from . import derived_embedding as _derived_embedding
-from . import postgres_bytes, record_projection, status_vocabulary
+from . import derived_embedding, postgres_bytes, record_projection, status_vocabulary
 from .env_truthy import env_flag
 
 _logger = logging.getLogger(__name__)
@@ -1707,7 +1706,7 @@ def _release_pooled_connections() -> None:
 #: The name is kept as an alias because the record's own docs and the parity test
 #: (`tests/test_13220_record_label_embeddings.py`) cite it: same dict, one owner.
 _RECORD_EMBEDDING_TEXT: dict[str, tuple[str, ...]] = (
-    _derived_embedding.TEXT_PARTS_BY_RECORD_TYPE)
+    derived_embedding.TEXT_PARTS_BY_RECORD_TYPE)
 
 
 @dataclass(frozen=True)
@@ -1868,7 +1867,7 @@ def derived_embedding_columns(
     # `derived_embedding.TEXT_PARTS_BY_RECORD_TYPE`. The falsy/non-string arms and
     # their reasons ride back on `ComposedText` and are re-tagged below as this
     # function's own vocabulary, which the DEBUG log reads.
-    composed = _derived_embedding.compose(record_type, payload)
+    composed = derived_embedding.compose(record_type, payload)
     if not composed.text:
         return _DerivedEmbedding(skipped=composed.skipped)
     try:
@@ -1913,7 +1912,7 @@ def derived_embedding_columns(
         # live doors open it), so the second one costs no model call. That is a
         # change in HOW MANY TIMES the text is encoded, never in whether a decline
         # may drop a vector — the `bounded` flag is exactly what it was.
-        vec = _derived_embedding.encode(
+        vec = derived_embedding.encode(
             composed.text, None, bounded=True,
             bounded_scope=BOUNDED_SCOPE_RECORD_DERIVATION,
         )

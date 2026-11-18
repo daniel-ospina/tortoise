@@ -24,6 +24,13 @@ from datetime import datetime, timezone
 # registers, or a node's IDENTITY is not a pure function of the journal (a
 # random stub id moved on every replay) and the reference fold cannot model
 # the stub at all.
+# ⛔ THE ONE DERIVE-AND-ENCODE SEAM (#13447). Imported at MODULE scope on
+# purpose: it is stdlib-only (`functools`/`contextvars`/`dataclasses`), so it
+# cannot cycle and cannot make the embeddings extra a hard import — and a
+# writer-scope `from tortoise import derived_embedding` would be read by the
+# embed-writer census as a LOCAL REBIND of that name, which would drop these
+# four folds out of the `gated` population (`tools/dod_5090_probe.py`).
+from tortoise import derived_embedding
 from tortoise.ids import content_hash as _content_hash
 from tortoise.live import (
     decay_clause,  # #2490: rebuild folds decay terminal posteriors
@@ -4855,7 +4862,9 @@ class _EntityHandlers:
         # Compute embedding for Subject name (#7845)
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
         embedding = None
-        try:
+        try:  # noqa: SIM105 — the seam is best-effort for a DERIVED vector, and an
+            # `except Exception: pass` is the shape every sibling arm already uses
+            # (a cold/broken embedder must never abort a fold). #13447.
             # ⛔ THE SEAM (#13447), not `embeddings.encode_for_row` directly:
             # `derived_embedding.encode` IS that call — same #5008 gate, same
             # #13224 `bounded`, same #4280 width — plus the per-write memo that
@@ -4863,7 +4872,6 @@ class _EntityHandlers:
             # derived_embedding_columns`, #13220) a second FREE call instead of a
             # second model call. Both halves run inside one
             # `derived_embedding.write_scope()` opened by the live door.
-            from tortoise import derived_embedding
             # #13224: `bounded=True` — a DERIVED entity vector, recomputed from
             # the payload text on replay, so it is repairable from the graph and
             # a live request may decline to wait for a cold embedder. Scoped
@@ -5055,10 +5063,9 @@ class _EntityHandlers:
         # Compute embedding from name (#7845)
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
         embedding = None
-        try:
+        try:  # noqa: SIM105 — best-effort for a DERIVED vector (#13447)
             # ⛔ THE SEAM (#13447) — see `_upsert_subject` for the scope and for
             # why the record's identical encode is free rather than a second call.
-            from tortoise import derived_embedding
             # #13224: DERIVED vector — see `_upsert_subject` for the scope.
             embedding = derived_embedding.encode(
                 name, self.required_embedding_dim, bounded=True)
@@ -5451,14 +5458,13 @@ class _EntityHandlers:
         #     code path, so no test on either side pins `bounded` on `st`.
         if not ev.get("suppress_embedding") and st and st.strip():
             # #5008: through the EMBED gate — an identifier-only text earns no vector.
-            try:
+            try:  # noqa: SIM105 — best-effort for a DERIVED vector (#13447)
                 # ⛔ THE SEAM (#13447) — see `_upsert_subject`. ⚠️ The TEXT here
                 # is `st` (`_build_search_text(title, summary, topics)`), which is
                 # NOT the record's `title`+`content` rule: that divergence is
                 # #13412's, and until it lands the two callers encode DIFFERENT
                 # strings, so the memo cannot dedupe a document write (stated in
                 # `derived_embedding.TEXT_PARTS_BY_RECORD_TYPE`).
-                from tortoise import derived_embedding
                 # #13224: DERIVED vector — see `_upsert_subject` for the scope.
                 embedding = derived_embedding.encode(
                     st, self.required_embedding_dim, bounded=True)
@@ -5822,12 +5828,11 @@ class _EntityHandlers:
             ]))
             if event_content.strip():
                 # #5008: through the EMBED gate — an identifier-only text earns no vector.
-                try:
+                try:  # noqa: SIM105 — best-effort for a DERIVED vector (#13447)
                     # ⛔ THE SEAM (#13447) — see `_upsert_subject`. The text is
                     # this fold's own `" ".join(filter(None, [...]))`, which is
                     # byte-identical to the record's `EventRecorded` rule, so a
                     # live event write dedupes (1 model call, measured).
-                    from tortoise import derived_embedding
                     # #13224: DERIVED vector — see `_upsert_subject` for the scope.
                     embedding = derived_embedding.encode(
                         event_content, self.required_embedding_dim, bounded=True)

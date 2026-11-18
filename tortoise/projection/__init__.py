@@ -19461,6 +19461,17 @@ class FalkorProjection(
                 if (r.src_label, r.src_key) not in refused
                 and (r.tgt_label, r.tgt_key) not in refused)
 
+
+        # ⛔ THE GUARDS RUN BEFORE THE VECTOR FILL (`#13456` review, P2). Both are
+        # PRE-WIPE refusals, so moving them above the derivation cannot change what
+        # is accepted — but the OTHER order made a REFUSED rebuild (a
+        # production-named graph, an unauthorized wipe) pay a model call for every
+        # NULL-vector `:Object`/`:Subject` row before being refused. The `#11747`
+        # note below was moved out of that window for the same reason.
+        self._assert_destructive_confirmed(confirm_destructive,
+                                          "rebuild_from_record")
+        self._assert_test_graph(
+            "REFUSING to run bulk DETACH DELETE on non-test graph")
         # ⛔ THE REBUILD HALF OF THE ONE SEAM (#13447). `node_from_row` may not
         # encode — it is also the map `record_serve.read_node` answers a
         # graph-engine-down READ from, and a read must never pay a model call — so
@@ -19472,11 +19483,6 @@ class FalkorProjection(
         nodes = fill_missing_row_vectors(
             nodes, width=getattr(self, "required_embedding_dim", None))
         plan = record_plan(nodes, relations)  # raises BEFORE any wipe
-
-        self._assert_destructive_confirmed(confirm_destructive,
-                                          "rebuild_from_record")
-        self._assert_test_graph(
-            "REFUSING to run bulk DETACH DELETE on non-test graph")
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_from_record")
         # ⛔ Everything from here to the declaration write is POST-WIPE, and a

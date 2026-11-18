@@ -400,17 +400,22 @@ def test_a_derived_column_on_a_record_row_projects_nothing():
         if column not in TABLE_COLUMNS.get(table, ()):
             continue  # no column exists — covered by the test above
         if column in cp.RECORD_HELD_VECTOR_COLUMNS.get(table, frozenset()):
-            # ⛔ THE ONE DECLARED EXCEPTION (#13447), and it is not a relaxation of
-            # the rule above. #13220 gave these two labels a real COLUMN for a
-            # DERIVED name because the owner requires the vector INDEXED in
-            # Postgres; a value the record HOLDS must come BACK on the way out, or
-            # `record-restore` lands `:Object`/`:Subject` silently vectorless. The
-            # projection writes it in its OWN clause (`vecf32($embedding)`, via
-            # `stored_form.STORED_VECTOR_PROPS`) — never as a `$props` claim — so
-            # the property this test owns ("a recomputed value does not become a
-            # node property with a PRIMARY claim from the props bag") is intact;
-            # `test_13447_derived_embedding_seam.py` pins the clause AND pins that
-            # the `props` tail still refuses the name.
+            # ⛔ THE ONE DECLARED EXCEPTION (#13447), and it is NOT a relaxation of the
+            # rule this test owns. #13220 gave these two labels a real COLUMN for a
+            # DERIVED name because the owner requires the vector indexed in Postgres;
+            # a value the record HOLDS must therefore come BACK on the way out, or
+            # `record-restore` lands `:Object`/`:Subject` silently vectorless — the
+            # RESTORE half that migration header says it does not close.
+            # ⚠️ The reason the rule survives: the projection does NOT write it as a
+            # `$props` claim. `node_statement` pops it out of the props bag and emits
+            # its own `n.embedding = vecf32($embedding)` clause (a STORED VECTOR
+            # property, `stored_form.STORED_VECTOR_PROPS`), which is a different claim
+            # from "a recomputed value became PRIMARY authority". And it is
+            # deliberately NOT in `projected_columns` — the reconciler's comparison set
+            # — so a cache node holding a vector over a NULL column stays the declared
+            # `graph_only` rather than a permanent `divergent` (#13456 review, P1).
+            # `tests/test_13447_derived_embedding_seam.py` pins both halves: the
+            # `vecf32` clause, and that the `props` TAIL still refuses the name.
             continue
         label = next((k for k, v in cp.NODE_TABLES.items() if v == table), None)
         if label is None:

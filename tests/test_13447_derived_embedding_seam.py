@@ -321,3 +321,194 @@ def test_both_labels_are_SERVED_so_the_vector_is_readable():
 def test_the_record_side_table_is_the_seams_ONE_copy():
     """No second text rule: the name the docs cite IS the seam's dict."""
     assert rw._RECORD_EMBEDDING_TEXT is de.TEXT_PARTS_BY_RECORD_TYPE
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 4. The comparison set keeps its meaning (review of #13456, P1)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# ⛔ THE RESTORE DOOR IS DELIBERATELY NOT `projected_columns`. That set is
+# `record_reconcile`'s `placeable` — the fields the two stores are COMPARED on —
+# and widening it made a cache node that holds a vector over a record row whose
+# column is NULL report `divergent` (`field_mismatches: 1`) where the same pair
+# reported `clean` before, while the sibling instrument
+# (`record_serve.parity_difference`) EXPLAINS that exact asymmetry. Two instruments
+# disagreeing about one node is the class `record_serve`'s enumeration exists to
+# refuse, and the population is every `:Object`/`:Subject` written before the
+# #13220 migration (nothing backfills that column). These two tests are the
+# witnesses: one pins the set, one pins the verdict.
+
+
+def test_the_comparison_set_does_not_gain_the_vector():
+    """`projected_columns` is the reconciler's `placeable` — it must not widen."""
+    from tortoise.cache_projection import projected_columns, projected_properties
+
+    for table in ("object", "subject"):
+        assert "embedding" not in projected_columns(table), (
+            f"{table}: the vector entered the reconciler's comparison set — a "
+            f"cache-held vector over a NULL record column then reads `divergent` "
+            f"forever (#13456 review, P1)")
+        assert "embedding" not in projected_properties(table)
+
+
+def test_a_cache_held_vector_over_a_null_column_is_not_a_divergence():
+    """The measured P1, end to end through the PRODUCTION `placed` derivation.
+
+    `scan_cache_view` fills `placed[key]` with `projected_properties(label) | {key
+    property}` — so a vector that re-enters `projected_columns` re-enters `placed`,
+    and the reconciler stops calling it `graph_only` and starts calling it a FIELD
+    MISMATCH on every `:Object`/`:Subject` written before #13220 (nothing backfills
+    the column). Passing a hand-built `placed` would test my own arithmetic instead
+    of the derivation, so this one asks the real function.
+    """
+    from tortoise.cache_projection import projected_properties
+    from tortoise.record_reconcile import reconcile_record_and_cache
+
+    record = {("Object", "o-1"): {"name": "Acme Corp"}}
+    cache = {("Object", "o-1"): {"name": "Acme Corp", "embedding": [0.5] * 4}}
+    placed = {("Object", "o-1"): projected_properties("Object") | {"objectId"}}
+
+    report = reconcile_record_and_cache(record, cache, placed=placed).as_dict()
+    assert report["field_mismatches"] == 0, report
+    assert report["divergent"] == 0, (
+        f"a cache-held vector over a NULL record column reads as divergence: {report}")
+    assert report["verdict"] == "clean", report
+    assert report["graph_only"].get("embedding") == 1, report
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 5. The restore answers the store's width rule (review of #13456, P2)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_a_HELD_vector_is_degraded_to_the_store_width(model_calls):
+    """A held vector of the wrong width is DROPPED, exactly as the fold drops it.
+
+    `#4280`: a store declaring a width cannot hold another, and the live fold
+    answers `None` for a mismatched width. Writing a rotated-embedder row's wider
+    vector straight through would store bytes the fold would have dropped — and can
+    raise on the `vector(384)` index POST-WIPE, the one window a rebuild must not
+    fail in. Nothing is lost: the RECORD still holds it.
+    """
+    node = node_from_row("Object", _row("Object", embedding=[0.1, 0.2]))
+    (kept,) = fill_missing_row_vectors((node,), width=2)
+    assert kept.props.get("embedding") == [0.1, 0.2], "a fitting vector must survive"
+
+    (dropped,) = fill_missing_row_vectors((node,), width=_DIM)
+    assert dropped.props.get("embedding") is None, (
+        "a 2-wide held vector was written into a store declaring 384 — the fold "
+        "would have dropped it (#4280)")
+    assert model_calls == [], "width handling must not encode anything"
+
+
+def test_a_raising_encode_does_not_abort_the_restore(monkeypatch):
+    """One bad row must not take the whole rebuild down with it (P2).
+
+    Every other caller of this seam treats it as raisable and degrades to "no
+    vector" (`record_writer.derived_embedding_columns`, the four fold arms). A
+    restore that raised mid-materialisation would leave a half-written graph —
+    strictly worse than a vectorless node, which is the state it is repairing.
+    """
+    def boom(text, **kw):
+        raise TypeError("a replacement double with the wrong arity")
+
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", boom)
+    node = node_from_row("Object", _row("Object"))
+    (survived,) = fill_missing_row_vectors((node,), width=None)
+    assert survived.props.get("embedding") is None
+    # …and the node itself is still there, ready to be written.
+    assert survived.key == node.key
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 6. The Event text parity OF the dedupe (review of #13456, P2)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_fold_encodes_EXACTLY_the_text_the_record_composes(model_calls,
+                                                              monkeypatch):
+    """The dedupe is value-equality of two expressions; pin it BEHAVIOURALLY.
+
+    Without this, one edit either side silently restores two model calls on every
+    event write and every suite stays green — the `ObjectRegistered` case cannot
+    detect it because there the "text" is literally the `name` both callers pass.
+    Here the REAL fold runs and the assertion is on the TEXT THE MODEL RECEIVED.
+    """
+    from tortoise.projection.entities import _EntityHandlers
+
+    payload = {"subject": "Ada", "eventKind": "email", "object": "Bob",
+               "eventId": "e-1"}
+    record = {"type": "EventRecorded", "event": payload}
+
+    class _Graph:
+        def query(self, *a, **k):
+            class _R:
+                result_set = ()
+            return _R()
+
+    class _Self(_EntityHandlers):
+        g = _Graph()
+        required_embedding_dim = None
+
+    # The record side first (what `write_live_record` does), then the fold — the
+    # pair a live event write pays, inside one scope.
+    with de.write_scope("test"):
+        assert rw.derived_embedding_columns(record).columns, "the record derived nothing"
+        _Self()._upsert_event(record)
+
+    assert len(model_calls) == 1, (
+        f"the fold encoded a DIFFERENT text than the record ({model_calls}) — the "
+        f"two compositions must be byte-identical for the memo to dedupe (#13447)")
+    assert model_calls[0] == de.compose("EventRecorded", payload).text
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 7. The census credits the SEAM, and only the seam (review of #13456, P2)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# `tools/dod_5090_probe.py` decides which writers reach the embed gate. Two ways it
+# could lie, both measured in review: a SUBSTRING match would credit any receiver
+# whose name merely contains the seam (`derived_embedding_columns(…)`,
+# `my_derived_embedding.encode(…)`), and an unresolved alias would credit a call
+# that never reaches the gate at all. Both are "a false GATED", which stops a
+# writer owing the declaration it actually needs.
+
+
+def _gate(source: str) -> str:
+    """Classify `source` with the real probe — no re-implementation in the test."""
+    import ast
+
+    from tools.dod_5090_probe import _import_aliases, _seam_module_calls
+
+    tree = ast.parse(source)
+    fn = tree.body[-1]
+    aliases = dict(_import_aliases(tree))
+    aliases.update(_import_aliases(fn))
+    calls = _seam_module_calls(fn, aliases)
+    return "gated" if calls else "unresolved"
+
+
+def test_the_census_credits_the_seam_module_call():
+    assert _gate(
+        "from .. import derived_embedding\n"
+        "def w(q, t):\n"
+        "    return derived_embedding.encode(t)\n") == "gated"
+
+
+def test_the_census_does_NOT_credit_a_receiver_that_MERELY_CONTAINS_the_name():
+    """The measured false credit: `derived_embedding_columns(…)` is not the seam."""
+    assert _gate(
+        "def w(q, t):\n"
+        "    return derived_embedding_columns(t)\n") == "unresolved"
+    assert _gate(
+        "def w(q, t):\n"
+        "    return my_derived_embedding.encode(t)\n") == "unresolved"
+
+
+def test_the_census_does_NOT_credit_a_locally_REBOUND_receiver():
+    """A local rebind means the call does not reach the gate — so it must not pass."""
+    assert _gate(
+        "from .. import derived_embedding\n"
+        "def w(q, t):\n"
+        "    derived_embedding = object()\n"
+        "    return derived_embedding.encode(t)\n") == "unresolved"

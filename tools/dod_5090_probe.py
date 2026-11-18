@@ -1062,12 +1062,24 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     Returns the matched call names (empty when the writer does not reach it). The
     receiver is resolved through the writer's own aliases AND by the module's own
     spelling, so `_derived_embedding.encode(...)` (a module aliased on import),
-    `derived_embedding.encode(...)` and `de.derive_row(...)`-style spellings that
-    keep the module name are the same reach, while `client.encode(...)` — same
-    attribute, a different object — is not a reach at all.
+    `derived_embedding.encode(...)` are the same reach, while `client.encode(...)`
+    — same attribute, a different object — is not a reach at all.
+
+    ⛔ THE RECEIVER MUST BE THE MODULE'S OWN NAME — `derived_embedding.encode(...)`
+    or `_derived_embedding.encode(...)` (the private-alias convention this tree
+    uses for a module imported for one purpose). Two shapes are deliberately NOT
+    credited, and both were measured as false credits (`#13456` review, P2):
+
+      * `client.encode(...)` / `my_derived_embedding.encode(...)` — a different
+        object with the same attribute (containment missed the second, and so did
+        an open `endswith("_derived_embedding")` rule, which credits ANY
+        `*_derived_embedding` client; only the module's own two spellings count);
+      * a receiver the writer REBINDS locally (`derived_embedding = client`) — the
+        same `_locally_bound` shadow check the alias path uses, because a binding
+        that fresh is not that module.
 
     ⚠️ RESIDUAL, stated rather than implied: a SHORT alias that drops the module
-    name (`import tortoise.derived_embedding as de`) is not resolved here, because
+    name (`import tortoise.derived_embedding as de`) is not resolved, because
     `_import_aliases` keeps only the canonical names it is taught and this tool has
     no import-graph resolver. Such a caller is reported the pre-#13447 way
     (`unresolved_write`, i.e. it owes a declaration) rather than silently credited
@@ -1084,6 +1096,7 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     import ast
 
     out: set[str] = set()
+    shadowed = _locally_bound(node)
     for call in ast.walk(node):
         if not isinstance(call, ast.Call):
             continue
@@ -1092,24 +1105,25 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
             continue
         receiver = func.value
         name = getattr(receiver, "id", None)
-        if name is None:
+        if name is None or name in shadowed:
             continue
         canonical = aliases.get(name, name)
         # ⛔ The LOCAL spelling is matched by NAME, never by substring containment
-        # (`#13447` review cycle 3, issue 7). `SEAM_MODULE in name` credited a
-        # receiver that merely CONTAINS the module name — `derived_embedding_client`,
-        # `my_derived_embedding` — as a gated reach of `encode_for_row`, contradicting
-        # this function's own promise that `client.encode(...)` (same attribute, a
-        # DIFFERENT object) is not a reach at all. That is the fail-open direction on
-        # the census that decides which writers owe a declaration.
+        # (`#13447` review cycle 3, issue 7; tightened in `#13456` review, P2). Both
+        # `SEAM_MODULE in name` and an open `name.endswith("_" + SEAM_MODULE)` rule
+        # credit a receiver that merely CONTAINS the module's name —
+        # `derived_embedding_client`, `my_derived_embedding` — as a gated reach of
+        # `encode_for_row`, contradicting this function's own promise that
+        # `client.encode(...)` (same attribute, a DIFFERENT object) is not a reach at
+        # all. That is the fail-open direction on the census that decides which
+        # writers owe a declaration.
         #
-        # The two real spellings are the bare module name and its underscore-alias form
-        # (`derived_embedding`, `_derived_embedding`), so the test is EQUALITY or a
-        # `"_" + SEAM_MODULE` suffix — a bounded set, not an open one. Pinned by
-        # `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`.
-        if (canonical.split(".")[-1] == SEAM_MODULE
-                or name == SEAM_MODULE
-                or name.endswith("_" + SEAM_MODULE)):
+        # The receiver's own spellings are exactly two: the module name and the
+        # private-alias form `_<module>` (the convention every caller in this tree
+        # uses). `lstrip("_")` names that bounded pair, and nothing wider. Pinned by
+        # `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`
+        # and `tests/test_13447_derived_embedding_seam.py::test_the_census_does_NOT_credit_a_receiver_that_MERELY_CONTAINS_the_name`.
+        if canonical.split(".")[-1] == SEAM_MODULE or name.lstrip("_") == SEAM_MODULE:
             out.add(func.attr)
     return out
 
@@ -1728,6 +1742,18 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.record_writer::derived_embedding_columns": (
         ("tortoise/record_writer.py", "derived_embedding_columns",
          'columns={"embedding": list(vec)}'),),
+    # `#13447` — the same disposition, one layer down: the seam itself, and the
+    # rebuild's fill. Both are `gated` (they reach `encode_for_row` through
+    # `derived_embedding.encode`) and neither names a label in its own body, because
+    # neither issues Cypher: the seam RETURNS a vector and the fill assigns it to a
+    # `RecordNode` that `cache_projection.node_statement` writes. The needles are the
+    # symbol-level evidence that each really produces a vector and stores nothing.
+    "tortoise.derived_embedding::encode": (
+        ("tortoise/derived_embedding.py", "encode",
+         'vector = embeddings.encode_for_row(text, width, bounded=bounded'),),
+    "tortoise.cache_projection::fill_missing_row_vectors": (
+        ("tortoise/cache_projection.py", "fill_missing_row_vectors",
+         'vector = derived_embedding.derive_row(node.label, props, width=width)'),),
 }
 
 
@@ -1849,6 +1875,18 @@ WRITER_LABEL_OVERRIDES: dict[str, str] = {
     # it, so this is the SECOND entry. The ordering carries no meaning at all; the
     # claim was merely wrong and is struck rather than reworded.)
     "tortoise.record_writer::derived_embedding_columns": "Object",
+    # `#13447` — the two writers the seam added, with the SAME disposition and for the
+    # same reason: `gated` (they reach the gate), no Cypher in their own body, so the
+    # label has to be declared or row 2 holds at PARTIAL naming them.
+    #
+    # ⛔ The single-valued field is the documented limitation, not an accident: the
+    # seam's vector lands in the record's `object`/`subject` column and, on the graph
+    # side, on the labels its CALLERS store — all of which are separately visible in
+    # this population (`projection.entities::_upsert_object` = `Object`,
+    # `::_upsert_subject` = `Subject`, `::_event_plain_merge` = `Event`, the document
+    # path = `Source`), so no unserved label can hide behind either entry.
+    "tortoise.derived_embedding::encode": "Object",
+    "tortoise.cache_projection::fill_missing_row_vectors": "Object",
 }
 
 

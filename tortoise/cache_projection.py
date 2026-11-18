@@ -213,6 +213,7 @@ WHAT THIS MODULE DELIBERATELY IS NOT
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -220,6 +221,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+# ⛔ THE ONE DERIVE-AND-ENCODE SEAM (#13447) — module scope, stdlib-only, and
+# NOT a function-local import: the embed-writer census reads a local import of
+# this name as a REBIND, which would class the rebuild's fill `unresolved_write`
+# (`tools/dod_5090_probe.py::_imports_that_REBIND`).
+from . import derived_embedding
 from . import record_projection as _rp
 from . import vector_write as _vector_write
 from .residency import (
@@ -231,6 +237,8 @@ from .residency import (
 from .security import validate_rel_type
 from .session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
 from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
+
+_logger = logging.getLogger(__name__)
 
 #: Columns POSTGRES computes, so a record→cache read must skip them (#11642).
 #: ⛔ ALIASED from `record_projection`, never re-listed: `GENERATED_COLUMNS` is
@@ -1876,6 +1884,23 @@ def canonical_property(table: str, column: str) -> str:
 #: ⚠️ The two doors stay distinct, which is the whole point: the COLUMN door reads
 #: this map and lets the value through, while the TAIL door keeps reading the raw
 #: `_refused` set. Collapsing them would let a payload write the record's authority.
+#:
+#: ⛔ AND IT IS DELIBERATELY **NOT** IN :func:`projected_columns`, which is a
+#: different question with a different consumer (`#13456` review, P1 — measured).
+#: `projected_columns`/`projected_properties` are `record_reconcile`'s
+#: `placeable` set, i.e. the fields the two stores are COMPARED on; promoting
+#: `embedding` there made a cache node that holds a vector and a record row whose
+#: column is NULL report `divergent` (`field_mismatches: 1`) where the same pair
+#: reported `clean` before — while the sibling instrument,
+#: `record_serve.parity_difference`, explains the very same asymmetry
+#: (`embedding` is a refused name, so a cache-held vector with no record-side value
+#: is `explained_missing`). Two instruments disagreeing about one node is the
+#: asymmetry `record_serve`'s own enumeration exists to refuse, and the population
+#: it would redden is every `:Object`/`:Subject` written before `20261117000001`
+#: (nothing backfills that column) plus every write where the record leg declined
+#: and the fold did not — a permanent, unrepairable red on the recovery path.
+#: So the RESTORE door reads this map directly in :func:`_props_from_row` and the
+#: comparison set keeps its pre-change meaning.
 RECORD_HELD_VECTOR_COLUMNS: dict[str, frozenset[str]] = {
     "object": frozenset({"embedding"}),
     "subject": frozenset({"embedding"}),
@@ -1910,10 +1935,7 @@ def projected_columns(table: str) -> frozenset[str]:
     from .record_projection import table_columns
 
     columns = table_columns().get(table, frozenset())
-    # #13447: a column the record HOLDS as a derived vector (#13220) is
-    # projected — see RECORD_HELD_VECTOR_COLUMNS for why this is not a
-    # relaxation of the schema's `props`-tail refusal.
-    refused = _refused(table) - RECORD_HELD_VECTOR_COLUMNS.get(table, frozenset())
+    refused = _refused(table)
     forbidden = cache_forbidden_columns(table)
     placed = placement_columns().get(table, {})
     extra = ADDITIONAL_PRIMARY_COLUMNS.get(table, {})
@@ -2795,12 +2817,23 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             # the column's name (#10965). See `_EPISODIC_SOURCE_PROSE_COLUMNS` for
             # the rule, its pre-existing-capture cost, and its bound.
             continue
+        if column in RECORD_HELD_VECTOR_COLUMNS.get(table, frozenset()):
+            # ⛔ THE RESTORE HALF OF #13220 (#13447), and it is HERE rather than in
+            # `projected_columns` on purpose — see RECORD_HELD_VECTOR_COLUMNS for
+            # the measured reason (the reconciler's comparison set must keep its
+            # pre-change meaning). The record HOLDS this vector; the node gets it
+            # back, through the writer's own `vecf32` clause (`node_statement`).
+            if column_refused and column in _refused(table) and value is None:
+                # A NULL column overrides nothing: leaving the name out is what
+                # makes `fill_missing_row_vectors` (the rebuild's seam caller) the
+                # one place a missing vector is derived.
+                continue
+            if value is not None:
+                out[canonical_property(table, column)] = _scalar(value)
+            continue
         if column in column_refused:
             # The EP carve-out and the projection-owned caches. Dropped BY NAME
             # rather than by the CHECK's later refusal (S3's contract clause).
-            # ⛔ `column_refused`, not `refused` (#13447): a column the record holds
-            # as a DERIVED vector is not dropped here — see
-            # RECORD_HELD_VECTOR_COLUMNS.
             continue
         if column in forbidden:
             # Authoritative in the RECORD, forbidden in the CACHE (§9.1/D1: text
@@ -4062,18 +4095,46 @@ def fill_missing_row_vectors(
     a different change with its own evidence, and it is named rather than
     smuggled in.
     """
-    from . import derived_embedding
+    from .embeddings import _degrade_to_width
 
     out: list[RecordNode] = []
     for node in nodes:
         props = dict(node.props)
-        if (node.label in derived_embedding.ROW_TEXT_PARTS
-                and props.get("embedding") is None
+        held = props.get("embedding")
+        if held is not None:
+            # ⛔ A HELD VECTOR IS WIDTH-CHECKED TOO (`#13456` review, P2). The
+            # restore must answer the question the live fold answers, and `#4280`'s
+            # rule is that a store declaring a width cannot hold another: writing a
+            # rotated-embedder row's wider vector straight through would store bytes
+            # the fold would have dropped, and can RAISE on the `vector(384)` index
+            # — POST-WIPE, the one window a rebuild must not fail in. Nothing is
+            # lost: the RECORD still holds that vector, and a re-encode repairs it
+            # (the same repair the fold's drop names, `embeddings._degrade_to_width`).
+            kept = _degrade_to_width([list(held)], width)[0]
+            if kept is None:
+                props.pop("embedding", None)
+            elif kept is not held:
+                props["embedding"] = kept
+        elif (node.label in derived_embedding.ROW_TEXT_PARTS
                 and node.dropped_vectors.get("embedding") is None):
             # `props` carries the same `name` the ROW does — it is a PRIMARY
             # column, projected under its own name — so the row-shaped text rule
             # reads this map directly.
-            vector = derived_embedding.derive_row(node.label, props, width=width)
+            #
+            # ⛔ A RAISING ENCODE MUST NOT ABORT THE RESTORE (`#13456` review, P2):
+            # every other caller of this seam treats it as raisable and degrades to
+            # "no vector" (`record_writer.derived_embedding_columns`, the four
+            # graph-fold arms). A restore that died on one row would leave a
+            # half-materialised graph — worse than a vectorless node, which is the
+            # state the restore is repairing.
+            try:
+                vector = derived_embedding.derive_row(node.label, props, width=width)
+            except Exception as exc:
+                _logger.warning(
+                    "record rebuild: deriving the %s %r vector raised (%s) — the "
+                    "node is written WITHOUT it, as the live write does",
+                    node.label, node.key, type(exc).__name__)
+                vector = None
             if vector:
                 props["embedding"] = list(vector)
         out.append(node if props == dict(node.props) else replace(node, props=props))
