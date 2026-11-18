@@ -643,8 +643,8 @@ class RecordReconcileResult:
     #: columns (``cache_projection.RECORD_HELD_VECTOR_COLUMNS`` — the record's
     #: TABLE holds them, the ROW may legitimately hold ``NULL`` because the vector
     #: is DERIVED from the text, `#13447`, and the repair is NONE), PLUS one
-    #: population no
-    #: declaration names — a property a SECOND WRITER put on a placed node the
+    #: population no declaration names — a property a SECOND WRITER put on a
+    #: placed node the
     #: record does not carry, or on a node the record does not own at
     #: all (``#11221``; the bucket is partitioned OUT of ``field_mismatches``, so
     #: the placed-node case reads `clean` while a node the record does not own is
