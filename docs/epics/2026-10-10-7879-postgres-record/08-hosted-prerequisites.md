@@ -1223,7 +1223,7 @@ The block's `grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/ → 0
 pre-R6 reading. R6's tenancy boundary now ships the GUC, so the same grep returns
 **2 lines at `ff6379eb2`** — `tortoise/record_projection.py:227` (`TENANT_GUC =
 "app.current_org_id"`) and its docstring at `:3269`, the offsets `c5cbcbb4f` (R6's tenancy boundary)
-introduced — and **19 lines at this head** (#11642's `tortoise/record_vector.py` added the thirteenth:
+introduced — and **20 lines at this head** (#11642's `tortoise/record_vector.py` added the thirteenth:
 its module docstring names the GUC when it explains why the searcher can never invent a tenant — the
 tripwire doing its job; and #12894 stage C's new `tortoise/record_allocator.py` added the last three,
 13 → 16 — its `seed()` and `read_cursor()` docstrings and a comment inside `execute_allocation` each
@@ -1254,6 +1254,13 @@ introduced — not in `seed()`. `git log -L` puts all three delta lines in that 
 The number is re-derived on every run by
 `tests/test_deploy_workflow.py::test_the_census_freshness_claim_is_scoped_to_the_lines_it_actually_re_measured`,
 so the next main-side edit reds THAT test rather than silently ageing this sentence.
+
+⚠️ **Re-measured 2026-11-18 (#13331's lane): 20** — `19 → 20` because
+`tortoise/record_projection.py` gained a READER that names the GUC: `journal_coverage`'s docstring
+states that `journal_event`'s policy filters on it, so an unscoped read returns ZERO rows and would
+report a fully-consumed journal as fully unprojected (the same silent-zero-row shape #9600 cycle 1
+closed for UPDATE-only plans, reintroduced in a reader). The reader is new; the GUC name is not —
+the tripwire fired exactly as it is meant to, which is why this line moved and no other row did.
 
 ⛔ The sites are named by CONTENT and NOT by offset: the projection's two have moved on every
 change that touched that file (this note
