@@ -409,7 +409,7 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where THESE numbers were cut (the current cut — the `origin/main` `340d500491` re-cut into this
+**Where THESE numbers were cut (the current cut — `origin/main` **`2bf568cf29`** merged into this
 branch):** re-derived by RUNNING the tool on the merged tree, never by arithmetic on either parent's
 markers. The two parents moved DIFFERENT counters, and neither parent's set is the answer:
 `main`'s cuts move `sites` 1311→**1313**, `plain` 859→**860** (read 578→**579**), `candidates`
@@ -430,6 +430,22 @@ two different sums — is retired here. §1's reconciliation is re-measured on t
 **1,627 / 108** whole-text, bare **1,633 / 109**, verb **2,330 / 143** against the tool's
 **2,343 / 144**), the `--all-surface` row is re-run (**9,058 / 820**), Appendix A is regenerated with
 `--markdown`, and `--check` then reports **`25 pinned counts match`**.
+
+**Appendix A is a `file:line` table, so it moves whenever ANY commit inserts lines — and the pins are
+green over a stale one.** `main`'s own regeneration at **`340d500491`** found **226 of its 1,313 rows
+stale**, across three files, **all 226 from ONE commit** — `main`'s **`c51afee5a8`** (`#13392`), which
+inserted lines above hundreds of statement sites. Each file's shift was one hunk, read off the commit
+rather than inferred:
+
+| file | stale rows | shift | the single hunk that moved them |
+|---|---|---|---|
+| `tortoise/hosted_api.py` | 220 | all **+22** | `@@ -14402,16 +14402,38 @@` (16 → 38 lines) |
+| `tortoise/sdk.py` | 4 | all **+17** | `@@ -59275,9 +59275,26 @@` (9 → 26 lines) |
+| `tortoise/cache_projection.py` | 2 | all **+3** | `@@ -719,9 +719,12 @@` (9 → 12 lines) |
+
+Regenerated again here, at this branch's merged tree, with `uv run python tools/cypher_inventory.py
+--markdown` — that is the `file:line`-versus-SCALAR gap reached from the other side: the pins were
+GREEN over the stale appendix, and only re-running the generator shows it.
 
 **Where these numbers were last cut:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
 forward merges (`0774035055`, then `9d13dc1bf7`) — re-derived by RUNNING the tool on the FINAL
@@ -535,13 +551,31 @@ conversions land in a file that already carries sites. The `rg` reconciliation i
 this tree (1,622 / 2,330 / 1,628 bare / 2,064 / 2,402), Appendix A is regenerated with `--markdown`,
 and `--check` reports **`25 pinned counts match`**.
 
-⚠️ Those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
+⚠️ THREE of those `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
 below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
 `MERGE (s:Source {url:$id})`, and this census counts LINES — so AT THAT HEAD the tool read 2,343 / 143
 where it read 2,342 / 142, and `rg` read 2,330 / 142, 2,064 and 2,402 where it read 2,329 / 141, 2,063
-and 2,401. The 13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED
-(the added match is single-line, not cross-line), and §1's `record_projection.py:4777` citation is
-corrected to `:4830` because that same commit moved it.
+and 2,401. ⛔ The other TWO did NOT move, and the reason is the predicate, not the commit: the DOOR
+figure (`1,624` / `108` at `34bd33d22a`; `1,623` / `108` at `31bddb1dd9`) and the bare-door figure
+(`1,630` → `1,629`) are drawn from a predicate `#13265` did not touch — it added **0** door calls and
+exactly **1** verb occurrence (`git show 34bd33d22a -- tortoise/ | grep '^+' |
+grep -cE '\.(ro_)?(query|execute)\s*\('` → `0`; `… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`).
+The 13-occurrence one-file whole-text gap and the nine-prose/four-Cypher split are UNCHANGED by it
+(the added match is single-line, not cross-line, and §1 counts the same 13 sites — nine prose, four
+Cypher examples).
+⛔ **AND IT MOVED AGAIN, TWICE, BEFORE THIS PR COULD MERGE — each figure bound to the ONE tree it was
+measured on.** At `origin/main` **`31bddb1dd9`** the appendix `main` carried was stale in **96 of its
+1,311 rows** over exactly two files: `#13330` (`3bcb6c6531`) added `+438 / −47` to
+`tortoise/projection/__init__.py` (92 rows) and `#13353` (`8c03c0aab7`) added `+33` to
+`tortoise/sdk.py` (4 rows) — and the row SETS were identical keyed by `(fn, shape, statement)`, so
+that one was pure renumbering. At `origin/main` **`7b293004b9`**, the tree this appendix is re-cut on,
+`main`'s appendix is stale in **1 of its 1,313 rows** — `tortoise/record_projection.py` moved from
+`:7826` to `:7897` — and **`--check` reports `25 pinned counts match` on that tree too**. That is the
+whole point: the pins are 25 SCALARS, the appendix is 1,313 `file:line` rows, so neither staler head
+could be caught by a pin. Reproduce either with `git show <base>:docs/architecture/CYPHER-INVENTORY.md`
+versus a fresh `--markdown` **at that same base** — a cut taken at a later tree is a different pair
+and reproduces a different number.
+
 ⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
 inside files that already carried sites, so re-cutting the appendix moves ROWS while every SCALAR
 stays put. Measured at THIS merged tree against the appendix `origin/main` carried at `34bd33d22a`:
