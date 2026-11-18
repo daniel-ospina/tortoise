@@ -981,7 +981,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6256`, `excluded = _terminal_object_statuses()` at `:5922` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:54063-54072`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:54213-54222`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,7 +1100,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:54063-54072`) — so each poll minted another `-reopened`
+    `sdk.py:54213-54222`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6256`).
@@ -1110,10 +1110,17 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     projection refuses to move the row.
 
     ⛔ Only the LATCHED word is covered here. The WIDER terms (`status='outdated'`,
-    the legacy `outdated=true` flag) are NOT frozen by the fold and answer the
-    POSITION axis instead — round-4 finding 2 found that answering `None` for them
-    silently dropped a reopen the projection WOULD apply. That asymmetry, both
-    directions of it, is `test_an_outdated_row_answers_the_position_axis` below.
+    the legacy `outdated=true` flag) are NOT frozen by the fold: they answer from the
+    POSITION where the row HAS one — `"closed"` once that position is ENDED, `None`
+    while it is LIVE (nothing could ever close it) — and, where the row has NO
+    position, `"closed"` unless the word maps to `open`, which is withheld as `None`.
+    The cases are enumerated once, on `_object_state_to_issue_state`'s docstring;
+    ⛔ NOT "per DIRECTION — the POSITION where the row HAS one, the WORD where it has
+    none", which is one case short in BOTH halves. Round-4 finding 2 found that
+    answering `None` for them silently dropped a reopen the projection WOULD apply.
+    All three legs are `test_an_outdated_row_answers_the_position_axis` (the position
+    legs) and `test_a_POSITIONLESS_wide_term_row_answers_one_direction_only` (the
+    position-less one) below.
     """
     oid = "github-issue-acme/repo1-1"
     frozen = {
@@ -1188,12 +1195,21 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
       bypasses the live-holder requirement for a single registered incarnation — so it
       IS dispatched, and it APPLIES, because the latch is that narrower set.
 
-    So the answer is the POSITION axis: `None` while the position is live (nothing
-    could ever close it), the position-derived state once it is ended (so the reopen
-    the projection WOULD apply is actually minted). Answering `None` for both — the
-    round-3 shape — made every assertion about the closed direction pass while
-    silently DROPPING that reopen: measured `[0, 0]` and the row left at
-    `done`/`terminal`/`isClosed=true`.
+    So the answer is taken from the POSITION where the row HAS one: `None` while the
+    position is live (nothing could ever close it), the position-derived state once
+    it is ended (so the reopen the projection WOULD apply is actually minted). A
+    POSITION-LESS row is the same asymmetry one dimension down — and it is NOT simply
+    "the WORD": the word is answered only where it says `closed`. Where it maps to
+    `open` (`_STATUS_TO_STATE`: `in_progress`, `live`, `open`) the answer is `None`,
+    withheld, because a close against a row with no live holder re-fires for ever;
+    where it maps to NOTHING (`outdated`, or a NULL status carrying the flag) it is
+    `"closed"`, since only a reopen can be minted there and that fold applies. That
+    third leg is the subject of
+    `test_a_POSITIONLESS_wide_term_row_answers_one_direction_only` below (the
+    `status='in_progress'` + flag shape, asserted `None` against a closed issue).
+    Answering `None` for both — the round-3 shape — made every assertion about the
+    closed direction pass while silently DROPPING that reopen: measured `[0, 0]` and
+    the row left at `done`/`terminal`/`isClosed=true`.
     """
     oid = "github-issue-acme/repo1-1"
 
@@ -1435,7 +1451,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:53911-53913`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:54061-54063`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3200,11 +3216,19 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("cache_projection.py", 807, 807): (
         "NOT MONOTONE — the carriers CAN be cleared", None),
     # sdk.py — the non-scalar refusal and the coherent un-supersede admission arm
-    ("sdk.py", 53911, 53913): (
+    # ⛔ RE-DERIVED, never carried (`#13348` post-merge review): `main` inserted a
+    # uniform +150 lines above this arm (`#13416` (`e52460b55e`), the `ended_scope`
+    # read — `git show --numstat e52460b55e -- tortoise/sdk.py` → `150 0`), so the
+    # three addresses below moved together and the pin was RED on `main` before
+    # this change. The shift was MEASURED, not inferred from a diff stat: the
+    # expected FIRST-line text of each pin was searched for at the current tree and
+    # each resolved at exactly +150 (53911→54061, 54063→54213, 54512→54662). A pin
+    # resolved by arithmetic on a number you did not measure is how these rot.
+    ("sdk.py", 54061, 54063): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 54063, 54072): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 54213, 54222): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
     ("sdk.py", 22388, 22563): ("def update_knowledge(", None),
-    ("sdk.py", 54512, 54512): ("SET n += $props", None),
+    ("sdk.py", 54662, 54662): ("SET n += $props", None),
 }
 
 
