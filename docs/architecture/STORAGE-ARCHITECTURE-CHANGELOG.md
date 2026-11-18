@@ -2524,11 +2524,17 @@ about today rather than by the one that agrees.
 
 **⚠️ One attribution in the finding was corrected before landing, by re-deriving it.** The finding's ready-made patch
 attributed the ≈58 % pricing to **§12.1b** (`"§12.1b, which prices the two refused queryNodes round trips at ≈58 %…"`).
-`git show origin/main:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returns exactly **one** hit — §14.3
+`git show 6264dc670c:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returns exactly **one** hit — §14.3
 V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that ≈58 % of the unindexed read's
 store time was two REFUSED queryNodes round trips"* — and §12.1b (*"Where the vectors actually sit"*) carries the
 `16.96 / 13.40 / 4.97 ms` pair with **no** round-trip pricing. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which
 is where it is measured. The correction moves a citation, not a number.
+
+⚠️ **And the count is pinned to that base on purpose, which is this entry's own subject.** Run against `main` *after*
+this entry's PR landed (`ae54df166d`), the same command returns **two** hits — §14.3 V3's row and §12.1c's own
+attribution sentence, which `ae54df166d` added — so *"grep returns exactly one hit"* would be a true measurement of
+one state written as though it were a fact about `main`: precisely the defect above. The **substance** is unchanged by
+the count (neither hit is §12.1b), and the base is named so a reader can reproduce it.
 
 **⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
 as **§12.2**'s. The paragraph is inside **§12.1c** — `### 12.1c ⭐ DECISION (RESOLVED 2026-11-07) — should the vector
