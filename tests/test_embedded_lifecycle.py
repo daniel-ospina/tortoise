@@ -258,6 +258,12 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_rebuild_config_preservation.py",
     "fixtures/redis-guard/good_absolute_path.py",  # redis-guard fixture — embedded path resolution input
     "repro/reproduce_redislite_leak.py",  # repro — deliberate embedded leak reproduction
+    # #13417: the `proj` fixture opens its own embedded `FalkorProjection` on a
+    # `tempfile.mkdtemp` scratch path (graph_name="tortoise") as the
+    # under-test input, so it is carve-out by its `carve_out:` row and needs
+    # this entry — a redirected construction would count a vectorless row
+    # against the server instead of the embedded file the case is about.
+    "test_13417_vectorless_rows.py",
     "test_backup_e2e.py",
     # #13417: carve-out member (`tests/_embedded.py::TEST_NO_REDIRECT_STEMS` and its
     # `carve_out` row in `config/ci-surfaces.yml`) that drives real DERIVED-entity

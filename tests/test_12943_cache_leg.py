@@ -947,3 +947,427 @@ def test_an_UNREADABLE_target_registry_is_NULL_and_never_an_empty_map(monkeypatc
     assert payload["cache_write_targets"] is None, (
         "an unreadable registry must be null, never {} — {} means 'this "
         f"process took no live write' — got {payload['cache_write_targets']!r}")
+
+
+def test_a_SKIPPED_fold_is_not_recorded_as_a_landed_write(monkeypatch, tmp_path):
+    """The registry counts folds that RETURNED and that no `_skip()` mark covered.
+
+    A STATEMENT test, not a landed-row test: not folds that merely started (an
+    interrupted fold is a landed write the registry does not count — `_skip`'s
+    bound), not folds a mark covers (they return and are deliberately not
+    counted), and equally not "only folds that wrote" — an unmarked no-count arm
+    is counted even when it issued nothing (`_skip`'s bound states that
+    direction too).
+
+    A malformed event is logged and skipped (`FalkorProjection.apply`'s own type
+    guard) — nothing is written — so counting it would tell an operator the cache
+    holds a write it never made, which is the wrong direction for a number read
+    beside `record_writes_applied` (#12943 review cycle 2, finding 1: the hook
+    used to sit ABOVE that guard).
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    reset_cache_write_targets()
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        proj.apply({"event_id": "ev-skip", "type": 123})     # skipped, no write
+        assert cache_write_targets() == {}, (
+            "a skipped fold must not be counted as a landed write — got "
+            f"{cache_write_targets()!r}")
+        sdk.create_object("landed-after-skip", objectKind="goal")
+        assert sum(cache_write_targets().values()) == 1, cache_write_targets()
+    finally:
+        sdk.close()
+
+
+def test_the_structural_edge_lane_records_its_target_too(monkeypatch, tmp_path):
+    """`create_edge` raw-MERGEs without passing `apply` — so it needs the hook.
+
+    Without it a process whose writes are edges registers NO target, and
+    `metrics()['cache_write_targets']` reads `{}` — byte-identical to "this
+    process took no live cache write", the illusion the key exists to end
+    (#12943 review cycle 2, finding 2).
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    reset_cache_write_targets()
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        a = sdk.create_object("edge-source", objectKind="goal")
+        b = sdk.create_object("edge-target", objectKind="goal")
+        reset_cache_write_targets()      # only the EDGE is under test
+        created = sdk._get_proj().create_edge(a["id"], b["id"], "related")
+        assert created is True
+        assert sum(cache_write_targets().values()) == 1, cache_write_targets()
+    finally:
+        sdk.close()
+
+
+def test_a_malformed_uri_does_not_turn_binding_a_tenant_into_a_failure(
+        monkeypatch, tmp_path):
+    """#5148 protects the CALL, not its argument (#12943 review cycle 2, finding 4).
+
+    `_cache_graph_name` parses the URI, and `urlparse('docker://[::1/db')` raises
+    `ValueError: Invalid IPv6 URL`. Evaluated outside the guard, that turned a
+    tenant bind on the hosted per-request path into a 500 for a write that could
+    have been served — the exact class `cache_leg`'s "observability must never
+    deny a caller a graph it can use" rule forbids.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://[::1/db")
+    _arm_record(monkeypatch)
+    from tortoise.sdk import TortoiseSDK
+
+    before = dict(monitoring.cache_leg_failure_counts())
+    sdk = TortoiseSDK()
+    try:
+        sdk._bind_record_tenant("orgA", "g_B")     # must not raise
+        # The derivation itself is still as strict as it always was — the point
+        # is only that BINDING never depends on it succeeding.
+        with pytest.raises(ValueError):
+            sdk._cache_graph_name()
+        assert dict(monitoring.cache_leg_failure_counts()) == before, (
+            "binding a tenant must not add a cache-leg failure of any kind")
+    finally:
+        sdk.close()
+
+
+def test_apply_still_RETURNS_the_fold_result(monkeypatch, tmp_path):
+    """`apply`'s return value is consumed — a wrapper that drops it loses records.
+
+    `create_source`'s `_return_apply_result` path feeds
+    `apply_result.result_set[0][0]` into the #5024 (T6) `SourceVersioned`
+    decision. The registry wrapper's first draft returned `None` instead, and the
+    record stopped carrying source version transitions **permanently** — the
+    journal is append-only. Measured then: `test_source_rematerialisation_5024`
+    12 failed, `test_source_version_window_3644` 5 failed. This is the cheap pin
+    that makes the same silent loss impossible to re-introduce.
+    """
+    _drop_uri(monkeypatch)
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        out = proj.apply({"event_id": "ev-src", "type": "SourceCreated",
+                          "url": "https://example.test/a", "sourceId": "src-1"})
+        assert out is not None, (
+            "apply() must return the fold's own result — `create_source` reads "
+            "it to decide whether a SourceVersioned record is owed")
+    finally:
+        sdk.close()
+
+
+def test_apply_returns_the_PRE_WRITE_row_create_source_actually_decides_on(
+        monkeypatch, tmp_path):
+    """`is not None` is not the contract — the ROW is (#12943 review c3, ISSUE 1).
+
+    `_create_source` does not test for a result; it reads
+    `apply_result.result_set[0][0]` — "the node's properties AS THE STATEMENT
+    FOUND THEM" (`_upsert_source`'s docstring, #5024 P1-A) — and a null row is
+    the CREATE shape. So a wrapper that forwards a `QueryResult` with a null or
+    empty row passes the sibling test above while leaving both #3644 arms
+    unreachable: the row is what decides CREATE vs `SourceVersioned` vs no-op.
+    Pre-fix (any discard, and equally a forwarded-but-empty result) this is RED.
+    """
+    _drop_uri(monkeypatch)
+
+    url = "https://example.test/pre-write-row"
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        first = proj.apply({"event_id": "ev-pw-1", "type": "SourceCreated",
+                            "url": url, "sourceKind": "document",
+                            "title": "v0", "contentHash": "h-0"})
+        second = proj.apply({"event_id": "ev-pw-2", "type": "SourceCreated",
+                             "url": url, "sourceKind": "document",
+                             "title": "v1", "contentHash": "h-1"})
+        assert first is not None and first.result_set, (
+            "the CREATE write must still report a row (its `previousProps` is "
+            "null, which is the CREATE discriminator)")
+        assert first.result_set[0][0] is None, (
+            "a first write found NO node — a non-null row here would tell "
+            f"`create_source` a node already existed: {first.result_set!r}")
+        assert second is not None and second.result_set, (
+            "the SECOND write's row was dropped — `create_source` cannot see "
+            "the pre-write state and takes the CREATE arm again (#3644)")
+        previous = second.result_set[0][0]
+        assert previous is not None, (
+            "a re-write of an existing Source must report the props the "
+            "statement FOUND; a null row is the CREATE shape, so the "
+            "`SourceVersioned` arm becomes unreachable")
+        assert previous.get("contentHash") == "h-0", (
+            "`previousProps` must be the PRE-write hash — it is the value the "
+            f"journal arm is chosen from — got {previous!r}")
+    finally:
+        sdk.close()
+
+
+def test_apply_keeps_the_signature_the_replay_engines_introspect(
+        monkeypatch, tmp_path):
+    """The journal-context keywords are a CONTRACT, not cosmetics.
+
+    `consistency.recover_from_log` and `backup.restore` read
+    `inspect.signature(proj.apply).parameters` to decide whether this engine can
+    be handed the journal's own context. A `**kwargs` wrapper erases all four
+    names, so both engines silently stop threading it — measured on that draft:
+    `test_rebuild_parity_fail_loud_3585` 8 failed (the whole journal-context
+    class: forward references, absent-target supersedes, restore refusals).
+    """
+    import inspect
+
+    _drop_uri(monkeypatch)
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        params = inspect.signature(sdk._get_proj().apply).parameters
+        for name in ("journal_object_surviving", "journal_object_deleted",
+                     "journal_first_materialized", "journal_seq",
+                     "journal_existence", "journal_object_established",
+                     "about_links_deferred"):
+            assert name in params, (
+                f"apply() lost the {name!r} parameter the replay engines "
+                "introspect — they will stop threading the journal context")
+        assert not any(p.kind is inspect.Parameter.VAR_KEYWORD
+                       for p in params.values()), (
+            "apply() must name its keywords explicitly; **kwargs erases them")
+    finally:
+        sdk.close()
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "PointsMerged"},                            # no merge_ids
+    # Review cycle 3, ISSUE 2 — the residual the truthiness test leaves: a
+    # NON-EMPTY `merge_ids` whose entries are all unusable issues no statement
+    # either (`_delete` is gated on `isinstance(mid, str)`), so the fold writes
+    # nothing and must not be counted.
+    {"type": "PointsMerged", "merge_ids": [None, 7]},
+    {"type": "ObjectSuperseded", "id": "no-such-object"},  # matched nothing
+    {"type": "PointPromoted", "point": {"id": "\x00bad"}},  # unwritable id
+    # Review cycle 5, P2: the two arms that issue no statement for an
+    # unwritable identity but were still counted.
+    {"type": "PointRevised", "id": None, "new_content": "y"},
+    {"type": "SourceCreated"},
+    # No `point` payload AT ALL: no statement is issued, so nothing is written.
+    # Covered by the arm's own `if not isinstance(p, dict)` branch — measured
+    # (review cycle 5, P3): removing THAT branch reds this row, and the `else`
+    # a previous commit added was unreachable, so it was deleted rather than
+    # left to look like the guard.
+    {"type": "PointPromoted"},
+    # ── review cycle 4, P2: the DELEGATED folds that report their own
+    # 0-row count straight through `_apply_event`, none of which called
+    # `_skip()`. Measured on the head before this cycle: every one of these
+    # left `{'embedded:…|tortoise': 1}` in the registry while its fold logged
+    # (or silently counted) zero rows.
+    {"type": "OperatorAnnotated", "id": "no-such-operator", "bias": 0.4},
+    {"type": "PointRetracted", "id": "no-such-retract"},
+    {"type": "ConfidenceChanged", "id": "no-such-cc", "confidence": 0.5},
+    {"type": "EdgeMessageChanged", "op": "set", "src": "a", "tgt": "b",
+     "rel": "IMPL", "msg_alpha": 0.5},
+    {"type": "EdgeMessageChanged", "op": "clear", "scope": "all"},
+    {"type": "EntityLinked", "source_id": "s-missing",
+     "source_label": "Session", "target_id": "o-missing",
+     "target_label": "Object", "edge_type": "aboutObject"},
+    {"type": "SessionRecorded"},                        # malformed: no id
+    # Adopted from the bg-rescue snapshot `c9aefaaa` (a lane that ended before
+    # committing): two more arms whose fold returns its own 0-row count, so
+    # nothing translated it into `_skip()` — measured on the head before this
+    # change, each left `{'embedded:…|tortoise': 1}` behind.
+    {"type": "EntityMutated"},                            # no id -> no statement
+    {"type": "EventRecorded"},                            # no eventId, no links
+    # Review cycle 6, P3: nine `_skip()` sites this list did not pin, each
+    # measured (per-site mutation) as removable with the suite still green.
+    {"type": "PointAdded", "point": "not-a-dict"},
+    {"type": "PointAdded", "point": {"id": "\x00bad"}},
+    {"type": "OperatorPromoted", "event_id": None},      # no id AND no eventId
+    {"type": "PointSuperseded", "id": "never-created"},   # 0-row re-stamp
+    {"type": "SessionDeleted"},                          # no id
+    {"type": "SourceVersioned"},                         # no identity
+    {"type": "BatchIdStamped"},                          # _NO_PROJECTION_FOLD
+    {"type": "DirectEdgeRepoint"},                       # _APPLY_WARN_ONLY_TYPES
+    {"type": "NotARealEvent"},                           # unknown type
+])
+def test_the_OTHER_writing_nothing_exits_are_not_counted(
+        monkeypatch, tmp_path, event):
+    """`_skip()` must cover every exit whose OWN return says nothing was written.
+
+    Not "every exit that issues no write": the arms whose folds return NO COUNT
+    (`_upsert_subject` / `_upsert_object` / `_upsert_document`) are deliberately
+    unmarked — marking them would need an invented predicate and would produce
+    the UNDER-report direction `_skip`'s bound forbids. So the corpus here is the
+    DECIDABLE population, and `test_the_0_row_capable_arms_STILL_count_a_fold_that_LANDED`
+    is the other half of it.
+
+    Review cycle 3 measured the draft counting all three of these (registry
+    `{'embedded:…|tortoise': 1}`) while the fold logged that the record was
+    dropped, and counted `ObjectSuperseded` on the LIVE path because its `_skip()`
+    was nested inside the journal-context gate — the one path this instrument
+    exists to serve.
+
+    Review cycle 4 found the same defect one layer down: the folds that RETURN
+    their matched-row count (annotator, retract, belief, edge-message) and the
+    two delegated arms (`EntityLinked`, `SessionRecorded`) hand `_apply_event` a
+    0 that nothing translated into `_skip()`. Six more rows came from that.
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        reset_cache_write_targets()
+        # `setdefault`, not an override: a row that needs NO identity at all
+        # (e.g. `OperatorPromoted` with neither id nor eventId) must be able to
+        # say so, or the arm it pins is unreachable from this test.
+        payload = dict(event)
+        payload.setdefault("event_id", f"ev-{event['type']}")
+        sdk._get_proj().apply(payload)
+        assert cache_write_targets() == {}, (
+            f"{event['type']} wrote nothing but was counted as a landed cache "
+            f"write — got {cache_write_targets()!r}")
+    finally:
+        sdk.close()
+
+
+def test_the_0_row_capable_arms_STILL_count_a_fold_that_LANDED(
+        monkeypatch, tmp_path):
+    """The `_skip()` on those arms must not swallow a fold that DID write.
+
+    A blanket "never count these event types" mutant would pass the sibling
+    test above while inverting the instrument's polarity (under-reporting
+    instead of over-reporting), so each arm is driven twice: once against a
+    target that does not exist, once against one that does.
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        point = sdk.create_point("fact", "a landed fold")
+        # Every arm below MATCHes an existing target, so each must count 1.
+        for event in (
+            {"type": "OperatorAnnotated", "id": point["id"], "bias": 0.4},
+            {"type": "ConfidenceChanged", "id": point["id"],
+             "confidence": 0.6},
+            {"type": "PointRetracted", "id": point["id"]},
+            {"type": "SessionRecorded", "id": "sess-landed-1"},
+            # #12943 (review cycle 6, P1): the arm whose write signal was the
+            # RETURN VALUE. `_upsert_event`'s plain path returns `None` AFTER
+            # it MERGEd, so this fold counted 0 while landing a real Event —
+            # the one polarity hole the four cases above did not cover
+            # (measured at `3e1e582468`: `EventRecorded landed -> {}`).
+            {"type": "EventRecorded", "event_id": "ev-landed-EventRecorded",
+             "event": {"eventId": "ev-landed-1", "eventKind": "meeting",
+                       "subject": "s", "object": "o"}},
+        ):
+            reset_cache_write_targets()
+            proj.apply(dict(event, event_id=event.get("event_id")
+                            or f"ev-landed-{event['type']}"))
+            assert sum(cache_write_targets().values()) == 1, (
+                f"{event['type']} folded a real target and must count exactly "
+                f"one landed write — got {cache_write_targets()!r}")
+    finally:
+        sdk.close()
+
+
+_GATEWAYS = ("why_snapshot", "webhook_delivery", "onboarding")
+
+
+def _gateway_run(door: str, proj, cypher: str, params: dict):
+    """Call one of the three declared live gateways by name."""
+    if door == "why_snapshot":
+        from tortoise import why_snapshot
+
+        return why_snapshot._run(proj, cypher, params)
+    if door == "webhook_delivery":
+        from tortoise import webhook_delivery
+
+        return webhook_delivery._run(proj, cypher, params)
+    from tortoise.onboarding import state as onboarding_state
+
+    return onboarding_state._run(proj, cypher, params)
+
+
+@pytest.mark.parametrize("door", _GATEWAYS)
+def test_a_declared_gateway_lane_records_its_target(monkeypatch, tmp_path, door):
+    """`why_snapshot` / `webhook_delivery` / onboarding write WITHOUT folding.
+
+    All THREE are pinned, not just the one that was convenient: deleting the
+    `note_live_write_target` call from any of them must red this suite (measured —
+    the single-door version left two of the three unpinned, review cycle 4, P2).
+    Each issues its own statement through the projection's handle under a declared
+    lane, so a process whose live traffic is those lanes would otherwise register
+    no target at all — the same "{} means healthy" illusion, one lane over.
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        reset_cache_write_targets()
+        _gateway_run(door, proj, "CREATE (:GatewayProbe {id: $id})", {"id": "w-1"})
+        assert sum(cache_write_targets().values()) == 1, (
+            f"{door}'s live write was not recorded: {cache_write_targets()!r}")
+        # A READ through the same gateway is not a cache write.
+        _gateway_run(door, proj, "MATCH (n:GatewayProbe) RETURN count(n)", None)
+        assert sum(cache_write_targets().values()) == 1, (
+            f"{door}'s read was counted as a write: {cache_write_targets()!r}")
+    finally:
+        sdk.close()
+
+
+def test_hosted_session_delete_records_its_target(monkeypatch, tmp_path):
+    """A raw `DETACH DELETE` lane that CHOOSES its graph must record it.
+
+    `hosted_api.delete_session` removes the session's Points, Events, Source stub
+    and container with four raw statements the fold never sees, in the graph the
+    credential opened. Without the recorder a process whose live traffic is
+    session deletes reads `cache_write_targets == {}` — byte-identical to "this
+    process took no live cache write" — which is the illusion the registry exists
+    to end (#12943 review cycle 6, P2: the call site was unpinned, so it could be
+    deleted with the whole repo still green).
+
+    Driven through the real route handler with the SDK open stubbed, so the lane's
+    own statements run against a real embedded graph. Measured: with the recorder
+    call removed from `delete_session`, this test reds; with only the sibling
+    `_capture_session_impl` call removed, it stays green (that lane also folds,
+    so its target is recorded by the fold hook regardless). ⚠️ That green is not
+    coverage: the sibling recorder is pinned by its OWN test,
+    `test_7951_delete_resurrection.py::TestOrphanedWriteSweepIsJournaled::
+    test_sweep_records_its_cache_write_target`, which resets the registry at the
+    sweep's last statement so no fold can mask it (#12943 review cycle 7, F1).
+    """
+    import asyncio
+
+    from tortoise import hosted_api
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    _drop_uri(monkeypatch)
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("CREATE (:Session {id:$sid, harness:'test'})",
+                     params={"sid": "sess-12943"})
+
+        class _StubSDK:
+            def _get_proj(self):
+                return proj
+
+            def _journal_entity_mutation(self, *a, **k):
+                return None
+
+            def _emit_event(self, *a, **k):
+                return None
+
+        async def _stub_offloaded(org):
+            return _StubSDK()
+
+        monkeypatch.setattr(hosted_api, "_data_sdk_offloaded", _stub_offloaded)
+        org = {"org_id": "org12943", "key_id": None, "scopes": []}
+        reset_cache_write_targets()
+        asyncio.run(hosted_api.delete_session("sess-12943", org))
+        assert sum(cache_write_targets().values()) >= 1, (
+            "the session-delete lane wrote the graph and recorded no target: "
+            f"{cache_write_targets()!r}")
+    finally:
+        sdk.close()

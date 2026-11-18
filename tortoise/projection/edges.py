@@ -1544,6 +1544,32 @@ class _EdgeHandlers:
         that let R5 sit. That seam also RECORDS the skip, so a run boundary can
         count what a rebuild will not restore instead of reading a log.
         """
+        # #12943 (reopened, review cycle 2): RECORD THIS LANE'S TARGET TOO.
+        # A structural edge is a live cache write that does NOT pass
+        # `FalkorProjection.apply` — both mints (`create_edge` and the
+        # about-lane) raw-`MERGE` under `_structural_edge_write_scope` — so
+        # without this a process whose writes are edges registers NO target and
+        # `metrics()['cache_write_targets']` reads `{}`, byte-identical to "this
+        # process took no live cache write": the same illusion the registry
+        # exists to end. This is the ONE producer both mints call, after the
+        # MERGE, so it is the point where a write has LANDED rather than an
+        # attempt. ⚠️ Read that precisely: the callers gate on `created`, and
+        # `created` comes from `MERGE … RETURN count(*) > 0` — TRUE for an
+        # idempotent re-MERGE of an edge that already existed (`create_edge`
+        # says it itself: "there is no created-only gate"). So a repeated
+        # `create_edge` is counted once per mint, which is defensible (a write
+        # was issued and landed) but is NOT the stronger "only a genuinely new
+        # row" claim this comment used to make (#12943 review cycle 3, P3).
+        # Replay is excluded by the helper ITSELF, before any target is recorded
+        # (a projection with no recorder still WROTE the cache, so the count must
+        # not depend on the recorder gate below). The local `replay_window_open()`
+        # check further down is the RECORDER's, and it sits AFTER that gate.
+        # Lazy import: `tortoise.projection` imports THIS module, and this
+        # mixin's `self` IS the projection. The helper is total and excludes a
+        # replay itself.
+        from tortoise.projection import note_live_write_target
+
+        note_live_write_target(self)
         recorder = getattr(self, "_structural_edge_recorder", None)
         if recorder is None:
             return

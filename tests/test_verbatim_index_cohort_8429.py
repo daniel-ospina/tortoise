@@ -480,6 +480,89 @@ def _cohort_sdk():
         sdk.close()
 
 
+def _binding_parts(node):
+    """(targets, value) for the node kinds that can bind a name; None otherwise.
+
+    `value` is the bound VALUE where the syntax carries one. It is None for the
+    two kinds that bind without a visible value — a bare declaration (`x: str`,
+    which binds nothing) and a binding whose value is produced by a construct
+    (`for` / `with … as` / `except … as` / an import alias) — and the pin treats
+    those differently, so the distinction is carried rather than lost.
+    ⛔ `NamedExpr` returns its VALUE: a walrus binds exactly what the expression
+    evaluates to, so `(x := mint())` is a minted binding, not an unprovable one.
+    """
+    if isinstance(node, ast.Assign):
+        return node.targets, node.value
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        return [node.target], node.value
+    if isinstance(node, ast.NamedExpr):
+        return [node.target], node.value
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return [node.target], None
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return [i.optional_vars for i in node.items
+                if i.optional_vars is not None], None
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return [ast.Name(id=node.name, ctx=ast.Store())], None
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return [ast.Name(id=a.asname, ctx=ast.Store())
+                for a in node.names if a.asname], None
+    return None
+
+
+def _probe_binding_errors(tree: ast.Module, name: str) -> list:
+    """Every assignment to `name` must CONTAIN a call to the minting helper.
+
+    ⛔ That single rule is what the earlier cuts lacked, each one measured: "at
+    least one mint assignment exists somewhere" let a literal sit IN USE beside a
+    decoy mint (review pass 4), and "exactly one binding" false-REDDED a bare
+    declaration and a legitimate re-mint (review pass 5). Requiring the mint in
+    EVERY assigned value also closes the static escapes a value-SHAPE test left
+    open — a tuple target, a string concatenation, and an indirect helper that
+    returns a fixed name are all RED, because none of them contains the call.
+    Targets are walked, so `a, b = …` cannot hide the name either.
+
+    RESIDUAL, stated rather than implied: this is a STATIC scan of WRITTEN
+    bindings. A DYNAMIC binding (`globals()[name] = …`, `setattr`) escapes it, and
+    an expression that CONTAINS the mint can still evaluate to a fixed name
+    (`mint() if False else "tortoise_probe_8429"`) — no static scan can decide a
+    value.
+    """
+    errors = []
+    minted = 0
+    for node in ast.walk(tree):
+        parts = _binding_parts(node)
+        if parts is None:
+            continue
+        targets, value = parts
+        if not any(isinstance(n, ast.Name) and n.id == name
+                   for t in targets for n in ast.walk(t)):
+            continue
+        if value is None:
+            if isinstance(node, ast.AnnAssign):
+                continue          # bare declaration: binds nothing
+            errors.append("bound by a construct whose value this scan cannot "
+                          "read (for / with / except / import alias)")
+            continue
+        if any(isinstance(n, ast.Call)
+               and getattr(n.func, "id", None) == "_probe_graph_name"
+               for n in ast.walk(value)):
+            minted += 1
+        else:
+            errors.append("assigned a value that never calls "
+                          "`_probe_graph_name()`")
+    # ⛔ Only a READ name needs a minted BINDING (#13468 pass 7, P2): the call
+    # site may legitimately pass `graph_name=_probe_graph_name()` INLINE with no
+    # variable at all, and the call-site half of the pin accepts that. Demanding a
+    # binding for a name nothing reads redded that correct shape with a false
+    # message ("never assigned from …").
+    if minted == 0 and any(isinstance(n, ast.Name) and n.id == name
+                           and isinstance(n.ctx, ast.Load)
+                           for n in ast.walk(tree)):
+        errors.append("is READ but never assigned from `_probe_graph_name()`")
+    return errors
+
+
 def test_the_cohort_graph_name_is_one_this_tree_can_reap():
     """#13290 review F1 — a FIXED name is invisible to BOTH cleanup arms.
 
@@ -545,35 +628,42 @@ def test_the_probe_graph_name_is_one_this_tree_can_reap():
     # literal this change removes — leaving `_probe_graph` untouched. The pin
     # passed and the census stayed `[]` (it only sees the PRESENCE of
     # `graph_name=`), i.e. the leak could return with every gate green. So the
-    # call is read statically here: the ONE `from_uri` call in this module must
-    # take `graph_name=` AS the minted name, and that name must come from the
-    # minting helper.
+    # call is read statically here: EVERY `from_uri` call in this module must take
+    # `graph_name=` AS the minted name (or as a direct `_probe_graph_name()` call),
+    # and every assignment that name receives must contain the mint.
+    # ⛔ THE CALL SITE AND THE NAME IT CARRIES (review passes 3-6, each one
+    # measured). pass 3: the pin read a fresh call and the global, so a call-site
+    # literal stayed GREEN. pass 4: "a mint assignment exists somewhere" let a
+    # DECOY mint sit beside the literal IN USE. pass 5: "exactly one binding"
+    # false-REDDED a bare declaration and a legitimate re-mint, and missed `:=`.
+    # pass 6: a tuple target, a string concatenation and an indirect helper all
+    # escaped a value-SHAPE test. So the pin now asserts the property itself —
+    # EVERY assignment to the name contains the mint — and EVERY `from_uri(` call
+    # passes it.
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    errors = _probe_binding_errors(tree, "_probe_graph")
     from_uri_calls = [node for node in ast.walk(tree)
                       if isinstance(node, ast.Call)
                       and getattr(node.func, "attr", None) == "from_uri"]
-    assert len(from_uri_calls) == 1, (
-        f"expected ONE `from_uri(` call in this module, found "
-        f"{len(from_uri_calls)} — this pin reads that one site (#13290)")
-    kw = {k.arg: k.value for k in from_uri_calls[0].keywords}
-    assert "graph_name" in kw, (
-        "the probe's `from_uri(` passes no `graph_name=` — the census reds and "
-        "the graph its schema DDL creates belongs to nobody (#13290)")
-    assert isinstance(kw["graph_name"], ast.Name) and \
-        kw["graph_name"].id == "_probe_graph", (
-        "the call site's `graph_name=` is not the MINTED `_probe_graph` — a "
-        "literal there feeds `ensure_indexes`' DDL into ONE graph shared by "
-        "every lane and CI run, and the census still passes because it only "
-        "sees the keyword (#13290)")
-    minted = [n for n in ast.walk(tree)
-              if isinstance(n, ast.Assign)
-              and any(isinstance(t, ast.Name) and t.id == "_probe_graph"
-                      for t in n.targets)]
-    assert any(isinstance(n.value, ast.Call)
-               and getattr(n.value.func, "id", None) == "_probe_graph_name"
-               for n in minted), (
-        "`_probe_graph` is not assigned from `_probe_graph_name()` — the call "
-        "site is wired to something other than the per-run mint (#13290)")
+    assert from_uri_calls, "no `from_uri(` call in this module — nothing to pin"
+    for call in from_uri_calls:
+        kw = {k.arg: k.value for k in call.keywords}
+        assert "graph_name" in kw, (
+            "a `from_uri(` call here passes no `graph_name=` — the census reds "
+            "and the graph its schema DDL creates belongs to nobody (#13290)")
+        passed = kw["graph_name"]
+        ok = ((isinstance(passed, ast.Name) and passed.id == "_probe_graph")
+              or (isinstance(passed, ast.Call)
+                  and getattr(passed.func, "id", None) == "_probe_graph_name"))
+        assert ok, (
+            "a `from_uri(` call passes `graph_name=` as something other than the "
+            "MINTED name — a literal there feeds `ensure_indexes`' DDL into ONE "
+            "graph shared by every lane and CI run, and the census still passes "
+            "because it only sees the keyword (#13290)")
+    assert not errors, (
+        "the probe's graph name is not a per-run mint: " + "; ".join(errors)
+        + " (#13290)")
+
 
 
 def test_the_live_fixture_teardown_drops_its_own_graph(monkeypatch):

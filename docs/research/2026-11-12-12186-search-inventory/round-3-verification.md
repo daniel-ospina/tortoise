@@ -7,7 +7,7 @@ created: 2026-11-12
 subjects.team: epistemic-team
 issue: "#12186"
 aboutSubjects: Tortoise entity resolution (S3 RESOLVE / dedup queue), candidate generation, text ranking
-aboutObjects: research-brief.md (rounds 1–2), SEARCH-ARCHITECTURE.md §6.2, STORAGE-ARCHITECTURE.md §12.2c, #11901, #12244
+aboutObjects: "research-brief.md (rounds 1–2), SEARCH-ARCHITECTURE.md §6.2, STORAGE-ARCHITECTURE.md §12.2c, #11901, #12244"
 ---
 
 # Round 3 — the four falsifications re-tested against OUR tree, and how the top performers actually build the signal
