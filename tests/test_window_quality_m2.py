@@ -3317,3 +3317,63 @@ def test_the_claim_ceiling_pair_and_both_found_deep_series_are_bound(artifact):
     # random one there too, not the tail series repeated.
     assert f"The `random` arms read {rand_s}" in readme
     assert f"the `random` arms read their **own** shares {rand_s}" in changelog
+
+
+#: The flags that change WHICH rows a read returns. `include_terminal` is one of
+#: them but it is derived per leg rather than fixed, so it is compared separately
+#: by the caller below; these three are the ones the mirror must copy verbatim.
+_LEVER_FLAGS = ("_record_reads", "_valid_time_rerank", "_rerank_candidates")
+
+
+def _lever_flags(path: Path, func: str) -> dict[str, object]:
+    """`{flag: literal}` for the ONE `tortoise_fts_query` call inside `func`.
+
+    ABSENT is a value: `_rerank_candidates` absent means the call INHERITS the
+    default (armed), which is exactly the state the mirror's comment claims.
+    """
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    owners = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == func]
+    assert len(owners) == 1, (path, func, "expected exactly one definition")
+    calls = [n for n in ast.walk(owners[0])
+             if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", None) == "tortoise_fts_query"]
+    assert len(calls) == 1, (path, func, f"expected one call, found {len(calls)}")
+    out: dict[str, object] = {}
+    for kw in calls[0].keywords:
+        if kw.arg not in _LEVER_FLAGS:
+            continue
+        try:
+            out[kw.arg] = ast.literal_eval(kw.value)
+        except (ValueError, SyntaxError):
+            out[kw.arg] = f"<not a literal: {ast.dump(kw.value)[:60]}>"
+    return out
+
+
+def test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does():
+    """`window_quality_m2.query()` is a MIRROR of `extractor_v2._fts_rows`.
+
+    `tests/test_rerank_pool.py`'s `intentional_keep` row for this file exists on
+    the stated ground that opting the rerank out "would make the recall figures
+    it prints describe a reader `_fts_rows` does not run — the mirror would be
+    broken by the fix, not by the gate". That row exempts the FILE, so nothing
+    in the census can see the mirror's own flags move: measured before this pin,
+    flipping `query()` to `_rerank_candidates=False` left the census green, and
+    the only thing that reddened was the artifact's `tool_sha256` pin — which any
+    artifact re-cut clears. So the contract the row cites is asserted HERE,
+    against the leg it names, instead of being assumed from one site's presence.
+    """
+    mirror = _lever_flags(ROOT / "tools" / "window_quality_m2.py", "query")
+    reference = _lever_flags(ROOT / "tortoise" / "extractor_v2.py", "_fts_rows")
+    assert mirror == reference, (
+        "tools/window_quality_m2.py::query() no longer reads the flag set "
+        f"extractor_v2._fts_rows() reads: mirror={mirror} reference={reference} "
+        "— the instrument's recall figures would describe a reader that ships "
+        "does not run")
+    # …and the shared flag set is the one the row's comment describes: the fused
+    # rerank is INHERITED (armed), the valid-time selection opts out.
+    assert reference.get("_rerank_candidates") is None, reference
+    assert reference.get("_valid_time_rerank") is False, reference

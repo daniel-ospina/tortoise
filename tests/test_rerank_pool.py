@@ -1373,6 +1373,16 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     def _sites(path: _pl.Path) -> list[tuple[str, bool]]:
         """(enclosing function, opted-out?) for every mention of the read."""
         tree = _ast.parse(path.read_text())
+        # ⛔ THE DEEPEST enclosing function, not the first one the walk reaches.
+        # ``window_quality_m2.query`` is NESTED inside ``run``, and the walk
+        # reaches the outer def first — so every nested site reported its OUTER
+        # owner (measured: `query()`'s read reported ``run``), which made an
+        # owner-named grant name the wrong function and let any sibling site
+        # under the same outer def inherit it.
+        parents: dict[int, _ast.AST] = {}
+        for n in _ast.walk(tree):
+            for child in _ast.iter_child_nodes(n):
+                parents[id(child)] = n
         out: list[tuple[str, bool]] = []
         for node in _ast.walk(tree):
             if not (isinstance(node, _ast.Attribute)
@@ -1418,11 +1428,12 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                         opted_out = True
                         break
             owner = ""
-            for fn in _ast.walk(tree):
-                if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and any(
-                        m is node for m in _ast.walk(fn)):
-                    owner = fn.name
+            parent = parents.get(id(node))
+            while parent is not None:
+                if isinstance(parent, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    owner = parent.name
                     break
+                parent = parents.get(id(parent))
             out.append((owner, opted_out))
         return out
 
@@ -1503,11 +1514,20 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # RUN to be calibrated (the two ask mirrors, the two calibration tools). A new
     # caller that does neither reds here, which is what a literal tuple could
     # never do.
+    # ⛔ SITE-GRANULAR ON PURPOSE. The value is the set of FUNCTIONS in that
+    # file whose read runs the lever; a bare file name granted every present and
+    # future site in it, so a new armed read inherited the grant silently
+    # (measured: adding one to `tools/window_quality_m2.py` left this census
+    # green). A site outside its file's named owners now has to justify itself
+    # like every other caller.
     intentional_keep = {
-        "tools/ask_recall_bench.py",        # an ask MIRROR: must measure the
-        "tools/gen_ask_transcripts.py",     # shipped reader, i.e. the lever ON
-        "tools/candidate_recall_11901.py",  # measures the rerank itself
-        "tools/rerank_calibration_12297.py",  # ditto
+        # an ask MIRROR: must measure the shipped reader, i.e. the lever ON
+        "tools/ask_recall_bench.py": frozenset({
+            "_retrieve_pipeline", "_measure_question", "_scan_for_failures"}),
+        "tools/gen_ask_transcripts.py": frozenset({"_render_user_message"}),
+        # measures the rerank itself
+        "tools/candidate_recall_11901.py": frozenset({"run", "window"}),
+        "tools/rerank_calibration_12297.py": frozenset({"run"}),
         # ⛔ A MIRROR of `extractor_v2._fts_rows`, which keeps the rerank ON
         # DELIBERATELY: `sdk.py`'s `_rerank_candidates` docstring records the
         # departure verbatim — "the capture path (`extractor_v2._fts_rows`)
@@ -1518,7 +1538,12 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # helper's entire contract is to run EXACTLY that leg, so opting it out
         # would make the recall figures it prints describe a reader `_fts_rows`
         # does not run — the mirror would be broken by the fix, not by the gate.
-        "tools/window_quality_m2.py",
+        # That contract is ASSERTED, not assumed, in
+        # `tests/test_window_quality_m2.py::
+        # test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does`:
+        # this list can only say the file is ALLOWED to run the lever, so the
+        # flags it actually passes are pinned against `_fts_rows`'s own.
+        "tools/window_quality_m2.py": frozenset({"query"}),
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
@@ -1534,13 +1559,18 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
             if not found:
                 continue
             seen_external.add(rel)
-            if rel in intentional_keep:
-                continue
+            kept_owners = intentional_keep.get(rel, frozenset())
             for owner, opted_out in found:
+                if owner in kept_owners:
+                    continue
                 assert opted_out, (
                     f"{rel}:{owner} reads the rerankable page and neither opts "
                     "out nor is on the intentional-keep list — with the gate "
-                    "armed it re-picks which rows survive limit, undisclosed")
+                    "armed it re-picks which rows survive limit, undisclosed"
+                    + (f" ({rel} IS on that list, but only for "
+                       f"{sorted(kept_owners)}: a site outside those owners "
+                       "inherits a grant with no recorded reason, so name it "
+                       "or opt it out)" if kept_owners else ""))
     # Below the population on purpose (consolidation is legitimate; the NAMED
     # rows above are what makes a file's loss red).
     assert len(seen_external) >= 12, (
