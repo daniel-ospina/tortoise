@@ -33,6 +33,14 @@ from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.graph_delete_guard import graph_exists, safe_graph_delete
 from tortoise.projection import FalkorProjection
 
+# #13205: the TENANT-graph family is DECLARED ONCE, in the composer that strips
+# it (`tortoise/sdk.py::bare_tenant_id`). This file CONSUMES it (as
+# `_PRODUCT_GRAPH_PREFIXES` below) instead of restating the tuple: a second
+# declaration could drift from the composer in the fail-OPEN direction — the
+# sweep deletes every graph the family names, so a copy that kept a spelling
+# the composer had dropped would delete a family nothing mints any more.
+from tortoise.sdk import _TENANT_GRAPH_PREFIXES
+
 # ── #4439: no RDB snapshot storm from ephemeral harness fixtures ──────────
 #
 # redislite ships a periodic save schedule in
@@ -1359,7 +1367,14 @@ _SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
 #   input: opt-in via `_sweep_team_strays`; these are REAL tenant graphs (the
 #   product's own mint namespace — `org_` current since the #3543 rename,
 #   `team_` retained for graphs minted before it).
-_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
+#
+# ⛔ ONE declaration, and it is NOT here (see the import above): the family is
+# stated by the composer that strips it, `tortoise/sdk.py::bare_tenant_id`
+# (#13205). This name is an ALIAS, kept because the sweep's own prose and its
+# opt-in predicate read better as "the product's graphs" than as the composer's
+# spelling list — and registered as such, so the drift guard still demands a
+# reason for every member of the family.
+_PRODUCT_GRAPH_PREFIXES = _TENANT_GRAPH_PREFIXES
 #   input: GRAPH.LIST, OPT-IN ONLY. THE #3634 CENSUS COHORT, as recorded on
 #   issue #3634: each entry below is a name verified present in that census,
 #   except `registry_test_` — the ONE deliberate stem (723 census names, so a
@@ -1402,6 +1417,12 @@ _DIVERGENCE_REGISTER = {
                               "reason": "#7795 fail-closed: GRAPH.LIST has no attribution."},
     "_PRODUCT_GRAPH_PREFIXES": {"set": _PRODUCT_GRAPH_PREFIXES,
                                 "reason": "real tenant graphs; opt-in via _sweep_team_strays."},
+    "_TENANT_GRAPH_PREFIXES": {"set": _TENANT_GRAPH_PREFIXES,
+                               "reason": ("#13205: the composer's own list "
+                                          "(`sdk.bare_tenant_id`) — the ONE "
+                                          "declaration; `_PRODUCT_GRAPH_PREFIXES` "
+                                          "is its alias, so the sweep and the "
+                                          "composer cannot drift.")},
     "_LEGACY_RESIDUE_PREFIXES": {"set": _LEGACY_RESIDUE_PREFIXES,
                                  "reason": "#3634 journal-blind residue; opt-in only via _sweep_legacy_strays."},
 }
