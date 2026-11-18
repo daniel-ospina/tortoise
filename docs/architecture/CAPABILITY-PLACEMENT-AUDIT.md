@@ -52,10 +52,19 @@ squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/
 ⚠️ **That is no longer true of EVERY cite below, and the honest fix is to name both heads rather than to
 pick one.** A later pass has re-derived a **named** set of addresses at `main`; they are enumerated in one
 place in this header (the sixteen, below, plus this revision's own group and the eight the `#13124` review
-found outside it) and they open at **`ae54df166d`**, the `main` this revision was integrated onto — `.py`
+found outside it) and they open at **`ae54df166d`** — the `main` this revision was integrated onto — `.py`
 lines DID move under it (`#13290` re-derived the `search_engine.py` group), so the head is named here rather
-than inferred, and every entry below was re-opened AT IT. **The rule a reader applies is mechanical, and it
-is exact for the addresses IN that enumeration: an address in it opens at `main` `ae54df166d`.** ⛔ **There
+than inferred, and every entry below was re-opened at the head it names. ⚠️ **Except three of the sixteen,
+which name THIS tree instead** (below): the head is per-ENTRY, not per-list. **The rule a reader applies is mechanical, and it
+is exact for the addresses IN that enumeration — but the enumeration carries MORE THAN ONE head, and it
+names each entry's head rather than implying one.** Three of the sixteen are stated at THIS tree, because
+the pass that re-derived them was the last one to move them: `sdk.py`'s second `capture_redactions` writer
+is `:2882` here (`:2876` at `ae54df166d`), and the subject probe is `:7042-7045` here with
+`subject_binding_available()` at `:7048-7061` (at `ae54df166d` those are `:7025-7028` and `:7031-7044`,
+whose `Event` leg `:7028` is the one number in that parenthetical that is still `ae54df166d`'s). ⛔ **Naming
+the head is the fix for that mixing — re-pointing an entry to the working tree WITHOUT naming it is not**,
+and `tests/test_12184_shifted_cites.py::test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree`
+is the arm that refuses the silent form. ⛔ **There
 is no rule for an address OUTSIDE it — open the line, never infer its head.** Such an address was *written*
 at the pin `ccb49741b2ec`, and that is where
 the census read it; it is not a promise that the line still carries what the row quotes. `#13083` found
@@ -112,12 +121,13 @@ by a line delta rather than re-opened: the `search_engine.py` ones (`:3064`, `:4
 lines that hold something else at **every** recent `main` head — no commit ever carried the FTS call at
 `:3064`, the walk at `:4477` or the operator leg at `:6352` — so the number was drifted forward, not
 read off. All sixteen were re-derived at `main` (`ae54df166d`) — ⚠️ **so they do NOT open at the pin
-above** — and each is named here by the cite it became, with its
-file — `search_engine.py` FTS
-`:3098`, walk `:4780-4784`, operator leg `:6667`, subject probe `:7042-7045` (plus its `Event` leg `:7028`, and
-`subject_binding_available()` at `:7048-7061`), label scan `:4708-4710`, HNSW
+above** — and each is named here by the cite it became, with its head named beside it where it is not
+`ae54df166d`'s, and with its file — `search_engine.py` FTS
+`:3098`, walk `:4780-4784`, operator leg `:6667`, subject probe `:7042-7045` (THIS tree; `:7025-7028`
+at `ae54df166d`, which is also where the `Event` leg `:7028` below is read) and
+`subject_binding_available()` at `:7048-7061` (this tree; `:7031-7044` at `ae54df166d`), label scan `:4708-4710`, HNSW
 `:4123`, label derivation `:3003`, index note `:3072`; `projection/__init__.py` `("Object", ["name"])`
-`:6869`; `sdk.py`'s second `capture_redactions` writer `:2882`; `audit.py`'s carrier probe `:2452`/`:2463`;
+`:6869`; `sdk.py`'s second `capture_redactions` writer `:2882` (this tree; `:2876` at `ae54df166d`); `audit.py`'s carrier probe `:2452`/`:2463`;
 and `mcp_server.py`'s `entity_type` passthrough `:5529` — and the drift figure
 above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the `main` set, and an earlier
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —

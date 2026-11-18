@@ -136,7 +136,7 @@ and the number is not a second version of the 13: **13** of those lines are the 
 enumerated, and the other **165** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, …) with nothing following,
 which the case-insensitive predicate counts and which is why the predicate has to be stated
-the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
+— and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,066, and `-i` without the exclusion 2,405 — ⛔ both over

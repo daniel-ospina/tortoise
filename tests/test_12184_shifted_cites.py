@@ -216,8 +216,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6684'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7043'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7045'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7042-7045`'): 4,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7048-7061`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7042-7045`'): 5,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7048-7061`'): 4,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3100'): 5,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/search_engine.py:4725-4727` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4140'): 1,
@@ -229,7 +229,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/00_index.md', 'sdk.py:28039'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2882`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2882`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37087`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37110`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
@@ -368,7 +368,12 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         "326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
-        "an address in it opens at `main` `ae54df166d`",
+        # ⛔ The rule is TWO-headed since the `#13574` review measured the enumeration's mixing: three of the
+        # sixteen are stated at THIS tree (`:2882`, `:7042-7045`, `:7048-7061`) while the rest are
+        # `ae54df166d`'s, so the single-head absolute this string used to assert was itself false. The guard
+        # moves with the correction, and it still names the sentence a revert would restore.
+        "is exact for the addresses IN that enumeration — but the enumeration carries MORE THAN ONE head",
+        "re-pointing an entry to the working tree WITHOUT naming it is not",
         "the pin's `:3778` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
