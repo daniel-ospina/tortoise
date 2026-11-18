@@ -2146,3 +2146,68 @@ def test_the_pin_relative_cites_are_not_swept_with_a_main_to_head_delta():
         "carry a `main` number into a passage that names a pin:\n  "
         + "\n  ".join(moved)
     )
+
+
+# ── §17.2's blind-spot paragraph — merged work a rebase reverted (#13454) ────
+
+#: §17.2's `derived_embed_declines` bullet is the ONE place a reader is told that
+#: the repair's own reading (`backfill_embeddings.py --dry-run` /
+#: `_residual_missing`) cannot see a whole class of loss: a fold that rewrites
+#: the encoded text on match while PRESERVING the stored vector leaves a STALE
+#: vector on CHANGED text, and the null-only residual reads CLEAN over it.
+#:
+#: `#13454` (`1afeab3763`, an ancestor of `#13445`'s merge base) merged that
+#: paragraph. A `--ours` re-application dropped it: the pre-fix head kept the
+#: sentence that says the reading is authoritative and deleted the sentence that
+#: BOUNDS it, which inverts the bullet — the reader is told to trust a reading
+#: that is blind to this class. `#13451`, the open defect the paragraph
+#: documents, then appeared in no `docs/` file at all.
+#:
+#: Every probe below was measured against that pre-fix text: the bullet carried
+#: `_residual_missing` and dropped the other four, so this pin is red on it.
+_OMITTED_VECTOR_BLIND_SPOT = (
+    "`Event`/`Document` can",
+    "STALE",
+    "--force-re-embed",
+    "blind to staleness",
+    "#13451",
+)
+
+
+def test_the_omitted_vector_blind_spot_keeps_its_paragraph():
+    """§17.2 still states what the omitted-vector count cannot see (#13454).
+
+    The bullet is a SINGLE line (4 KB at this head), so the probe is per-line on
+    the line that carries `derived_embed_declines` — an arm that merely searched
+    the whole document would be satisfied by any other passage, which is the
+    shape that let the deletion land silently the first time.
+
+    The bullet going MISSING is its own failure and is checked first: an empty
+    candidate list would make every probe below pass vacuously.
+    """
+    bullets = [
+        (n, line)
+        for n, line in enumerate(STORAGE.read_text(encoding="utf-8").splitlines(), 1)
+        if "derived_embed_declines" in line
+    ]
+    assert bullets, (
+        "§17.2's `derived_embed_declines` bullet is gone — the counter's own "
+        "documentation moved, so re-point this guard at its new home rather "
+        "than letting it scan nothing and pass"
+    )
+    missing = [
+        f"line {n}: {probe!r}"
+        for n, line in bullets
+        for probe in _OMITTED_VECTOR_BLIND_SPOT
+        if probe not in line
+    ]
+    assert not missing, (
+        "§17.2's omitted-vector bullet no longer states what the residual count "
+        "is blind to. `#13454` merged the limitation (the folded-text STALE "
+        "class, `#13451`, open) and a rebase reverted it here, leaving the "
+        "bullet telling a reader the repair's own reading settles the number "
+        "while deleting the sentence that bounds it — so the count reads as a "
+        "complete answer over a class it cannot collect. Re-apply this branch's "
+        "hunks onto `origin/main`'s document instead of re-stating the "
+        "pre-merge text:\n  - " + "\n  - ".join(missing)
+    )

@@ -141,7 +141,7 @@ Interface A states four properties, and the failure each one prevents:
 * **The write chokepoint** (Interface C, `#7951`) — this module is the *second*
   step of that path, not the path. It does not route live writes.
 * **The cache projection** (Interface B, `#7971`) — record → FalkorDB.
-* **The read path** (`#7970`, deferred by §2.0).
+* **The read path** (`#7970` — **ARMED** since the §2.0 deferral was rescinded, 2026-11-18; sequenced, not deferred).
 * **Normalising the ~9,700 legacy ids** (`#7955` second half).
 
 ---

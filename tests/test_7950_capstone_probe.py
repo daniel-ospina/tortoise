@@ -544,6 +544,40 @@ def test_the_s2_census_quote_matches_the_log():
         + "\n".join(missing))
 
 
+def test_the_7970_correction_note_does_not_call_the_deferral_half_stale_when_written():
+    """The note corrects a row that was HALF stale at the census, not wholly stale.
+
+    Pre-fix (PR #13472 @ `d585812b96`) the note said *"both halves were stale"*.
+    At the census's own measurement date — **2026-11-17**, the provenance header
+    at `s2-wiring-census.log:4` — only the `OPEN` half was stale: `#7970`
+    closed 2026-10-25. The *"deferred by §2.0"* half was **current then**: the
+    deferral was recorded by the 2026-11-07 split and rescinded by the owner
+    only on **2026-11-18** (`#7970` comment `6965853268`).
+
+    Calling that half stale-when-written mis-dates the very decision this PR
+    reconciles to, and it is the failure shape the repo names for correction
+    notes: a note that asserts the previous text was wrong steers the next
+    reader to the falsehood, and the previous text here was right. The two
+    neighbouring files keep the distinction (`2026-11-15-issue-12894-storage-shape.md:165`
+    — *"this row records the 2026-11-15 read, not the current status"*;
+    `11-residual-plan-and-decomposition.md:229` — *"Superseded on the deferral,
+    not on the verdict (2026-11-18)"*), so the note must agree with them.
+    """
+    readme = _readme_text()
+    assert "both halves were stale" not in readme, (
+        "the #7970 correction note calls BOTH halves stale at the census; only the "
+        "OPEN half was (`#7970` closed 2026-10-25, before the 2026-11-17 census) — "
+        "the §2.0 deferral was in force until the 2026-11-18 rescission")
+    start = readme.index("⚠️ this row")
+    note = readme[start:readme.index("\n\n", start)]
+    for fact, why in (
+        ("2026-10-25", "the OPEN half's staleness (`#7970` closed 2026-10-25)"),
+        ("2026-11-17", "the census's own measurement date"),
+        ("2026-11-18", "the deferral half's supersession (the owner's rescission)"),
+    ):
+        assert fact in note, f"the #7970 correction note must date {why}: {note}"
+
+
 # --------------------------------------------------------------------------
 # #9189 review (the re-cut census): the log is a MEASUREMENT, and the pattern
 # must see every spelling a wired caller can use. Two ways the deciding
