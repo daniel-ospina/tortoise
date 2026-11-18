@@ -225,11 +225,19 @@ def _run(proj, cypher: str, params: dict | None = None):
     `delivered=1` with `cursor == 0`, re-POSTing the same event on every pass
     forever).
     """
-    from tortoise.projection import _cache_write_authorized, _statement_writes
+    from tortoise.projection import (
+        _cache_write_authorized,
+        _statement_writes,
+        note_live_write_target,
+    )
 
     if _statement_writes(cypher):
         with _cache_write_authorized(WEBHOOK_WRITE_LANE):
-            return proj.g.query(cypher, params=params)
+            result = proj.g.query(cypher, params=params)
+        # #12943: this gateway writes the cache without folding a record, so it
+        # is one of the lanes the write-target registry would otherwise miss.
+        note_live_write_target(proj)
+        return result
     return proj.g.query(cypher, params=params)
 
 
