@@ -52,7 +52,13 @@ export const WIZARD_STEP2_TEXT = `Call tortoise_health to verify the connection,
 // below gets the call every client can actually make, and the JS guard reds
 // until someone classifies it. The other polarity (default = legacy) would hand
 // a future grant-based harness a retired name silently, which is this very bug.
-export const ADVERTISED_VERIFY_FILE_STEP_TEXT = `Call tortoise_graph_overview(section="health") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://premiselabs.co/tortoise/docs`
+// ⛔ THE FILE HALF IS A GRANT-BASED CALL TOO (#11609 lane P1). `tortoise_health` was
+// this constant's reported half and `tortoise_create_point` was the other one: the
+// point door is now RETIRED as well — it retires FORWARD into `create_entity`'s
+// `type="point"` arm — so a grant-based client cannot call it either. Both halves
+// therefore have to name an ADVERTISED tool, which is the property the whole
+// constant exists for; the legacy body stays the exception for `get_tool` clients.
+export const ADVERTISED_VERIFY_FILE_STEP_TEXT = `Call tortoise_graph_overview(section="health") to verify the connection, then tortoise_create_entity(type="point", name="my first memory") to file my first memory.\nDocs: https://premiselabs.co/tortoise/docs`
 
 //: The leaves that write a config file (or run the installer) and therefore see
 //: the RETIRED name answered on `get_tool`. #2827's shared body is correct for
