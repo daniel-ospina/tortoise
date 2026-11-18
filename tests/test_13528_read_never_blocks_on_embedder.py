@@ -225,6 +225,13 @@ def test_a_read_does_not_block_on_a_cold_embedder(sdk, cold_embedder):
     under, because it never waits. That comparison cannot be satisfied by a
     fast host and cannot fail on a slow one — it fails only if the read path
     waits on the load, which is the defect.
+
+    ⛔ THE BAR IS HALF THE LOAD, NOT THE WHOLE LOAD (#13528 review P2-3).
+    ``elapsed < _LOAD_S`` left 0.6 ms of margin against the pre-fix figure this
+    change's own title quotes (``embed_get`` 7999.4 ms of an 8000 ms load), so
+    the pre-fix code could pass it. Half the load is unambiguous in both
+    directions: a read that waits is ~the whole load, a read that declines is
+    ~the budget (measured 251.0 ms).
     """
     assert not EmbeddingModel.loaded(), (
         "precondition: the embedder must be COLD when the read arrives")
@@ -236,21 +243,24 @@ def test_a_read_does_not_block_on_a_cold_embedder(sdk, cold_embedder):
     assert not EmbeddingModel.loaded(), (
         f"the {_LOAD_S:.1f}s load must still be IN FLIGHT — if it finished, this "
         f"run measured the warm path and proves nothing about the cold one")
-    assert elapsed < _LOAD_S, (
-        f"a read inside a {_LOAD_S:.1f}s cold window took {elapsed:.2f}s — the "
-        f"read path is waiting on the model load again (#13528: production "
-        f"measured stage=embed_get at HTTP=504, t=11.52s)")
+    assert elapsed < _LOAD_S / 2, (
+        f"a read inside a {_LOAD_S:.1f}s cold window took {elapsed:.2f}s (bar: "
+        f"{_LOAD_S / 2:.1f}s) — the read path is waiting on the model load again "
+        f"(#13528: production measured stage=embed_get at HTTP=504, t=11.52s; "
+        f"pre-fix this read was 7999.4 ms of the load)")
 
 
 def test_the_cold_read_records_its_absent_reason(sdk, cold_embedder):
-    """The degrade must be DECLARED, not silent.
+    """The degrade must be DECLARED, and the declaration must not lie.
 
     A read that answered without its dense leg is not hybrid retrieval. The leg
-    trace is where that is said, and the reason must name the CAUSE — a load the
-    read declined to wait for is ``load_timeout``, never the designed-absence
-    term ``no_embedder`` (the conflation #5275/#1542 exist to forbid: "the extra
-    was never installed" and "the embedder is loading RIGHT NOW" need opposite
-    operator responses).
+    trace is where that is said, and the reason must name THIS state — a load
+    is running and the read declined to wait. It is deliberately **not**
+    ``no_embedder`` (that is the designed absence, the conflation #5275/#1542
+    forbid) and deliberately not ``load_timeout`` either: that term already means
+    the load ATTEMPT ran out of its ``_LOAD_TIMEOUT_S`` and BROKE (#13528 review
+    P2-1), which needs the opposite operator response — repair the load, not
+    read again in a moment.
     """
     trace: list[dict] = []
     _read(sdk, trace=trace)
@@ -259,9 +269,9 @@ def test_the_cold_read_records_its_absent_reason(sdk, cold_embedder):
     assert entry["ran"] is False, "the vector leg cannot have run on a cold embedder"
     assert entry["degraded"] is True, (
         "an absent vector leg is a degraded read, and must be published as one")
-    assert entry["reason"] == "load_timeout", (
-        f"the recorded reason must name the cause (a load the read declined to "
-        f"wait for), got {entry['reason']!r}")
+    assert entry["reason"] == "load_in_flight", (
+        f"the recorded reason must name the cause (a load still RUNNING that the "
+        f"read declined to wait for), got {entry['reason']!r}")
 
 
 def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
@@ -337,18 +347,66 @@ def test_the_required_flag_still_fails_loud(sdk, cold_embedder, monkeypatch):
     silent single-leg degrade into a named refusal. A bounded acquire must not
     quietly convert it back — the decline has to go through the SAME single exit
     every other ``None`` arm uses, or the flag's contract dies with the wait.
+
+    ⛔ THE KIND IS ASSERTED, NOT JUST THE CLASS (#13528 review P1-2). Asserting
+    only ``pytest.raises(EmbedderUnavailableError)`` passed on a refusal carrying
+    ANY cause — which is exactly how ``failure_kind="no_embedder"`` shipped: the
+    trace term was handed straight to a field that only accepts
+    ``not_installed`` / ``load_failed`` / ``load_timeout`` / ``model_unavailable``.
+    A refusal that names the wrong dependency is the defect #5275 exists to
+    prevent, so the name is the assertion.
     """
     monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
     assert not EmbeddingModel.loaded(), "precondition: cold embedder"
 
     t0 = time.perf_counter()
-    with pytest.raises(EmbedderUnavailableError):
+    with pytest.raises(EmbedderUnavailableError) as excinfo:
         _read(sdk)
     elapsed = time.perf_counter() - t0
 
-    assert elapsed < _LOAD_S, (
-        f"the armed refusal took {elapsed:.2f}s — it waited for the load instead "
-        f"of failing fast with its recorded reason")
+    assert excinfo.value.failure_kind == "model_unavailable", (
+        f"a load still IN FLIGHT is not a broken load and not a designed "
+        f"absence — the refusal must carry model_unavailable, got "
+        f"{excinfo.value.failure_kind!r}")
+    assert elapsed < _LOAD_S / 2, (
+        f"the armed refusal took {elapsed:.2f}s (bar: {_LOAD_S / 2:.1f}s) — it "
+        f"waited for the load instead of failing fast with its recorded reason")
+
+
+def test_a_designed_absence_is_refused_with_not_installed(sdk, monkeypatch):
+    """⛔ THE P1-1 REGRESSION — two vocabularies, one translation.
+
+    ``absent_reason()`` publishes the LEG-TRACE term ``no_embedder`` for a
+    designed absence, and ``EmbedderUnavailableError.failure_kind`` is a CLOSED
+    set whose member for that state is ``not_installed``. ``no_embedder`` is not
+    IN that set, and #5275 explicitly forbids an armed refusal from carrying the
+    designed-absence term — so passing the trace term through by hand both broke
+    the closed set and said the forbidden thing. This pins both halves at once:
+    the TRACE gets ``no_embedder``, the REFUSAL gets ``not_installed``.
+
+    Driven directly on the predicate + ``_unavailable`` (the two halves of the
+    seam) rather than through a read: a process without the ``embeddings`` extra
+    cannot be simulated at runtime, and the mapping is what is under test.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "not_installed")
+    try:
+        decline = EmbeddingModel.await_read_ready_reason(READ_EMBED_BUDGET_S)
+        assert decline == "no_embedder", (
+            f"the TRACE must keep the designed-absence term, got {decline!r}")
+
+        monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+        with pytest.raises(EmbedderUnavailableError) as excinfo:
+            EmbeddingModel._unavailable(context="read: designed absence",
+                                       kind=decline)
+        assert excinfo.value.failure_kind == "not_installed", (
+            f"#5275 forbids an armed refusal from carrying the designed-absence "
+            f"term — failure_kind must be not_installed, got "
+            f"{excinfo.value.failure_kind!r}")
+    finally:
+        monkeypatch.undo()
+        EmbeddingModel._reset()
 
 
 # ── the budget itself ─────────────────────────────────────────────────────
@@ -356,6 +414,10 @@ def test_the_required_flag_still_fails_loud(sdk, cold_embedder, monkeypatch):
 
 def test_the_read_budget_is_bounded_and_far_below_the_read_bound():
     """The budget is a constant, and small against the bound it sits inside.
+
+    ⛔ A PIN, NOT A DISCRIMINATOR (#13528 review P2-3): it holds on the
+    pre-change tree too, and is here to stop the number drifting, not to catch
+    the defect. The behaviour tests are what redden.
 
     The read lane's wait bound is 8 s (``CONTROL_PLANE_READ_TIMEOUT_S``,
     justified by a 41–80 ms measured graph answer). A budget near that would
@@ -367,6 +429,10 @@ def test_the_read_budget_is_bounded_and_far_below_the_read_bound():
 
 
 def test_the_two_stage_names_are_still_distinct():
-    """Indicator 5, stated as the vocabulary property rather than the marks."""
+    """Indicator 5, stated as the vocabulary property rather than the marks.
+
+    ⛔ A PIN, NOT A DISCRIMINATOR (#13528 review P2-3) — see the budget pin
+    above; the cold-read stage assertions carry the discriminating half.
+    """
     assert STAGE_EMBED_GET != STAGE_EMBED_ENCODE
     assert {STAGE_EMBED_GET, STAGE_EMBED_ENCODE} <= read_stages.STAGE_SET
