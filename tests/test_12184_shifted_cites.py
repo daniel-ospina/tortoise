@@ -55,6 +55,7 @@ _SUBSTRATE = "docs/architecture/SUBSTRATE-REBUILD-MAP.md"
 _M3_BRIEF = "docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md"
 _CENSUS = "docs/evidence/13083-capability-census/README.md"
 _EVIDENCE = "docs/architecture/ENTITY-VERDICT-BANDS.md"
+_INDEX = "docs/00_index.md"
 _SE = "tortoise/search_engine.py"
 _CP = "tortoise/cache_projection.py"
 _AU = "tortoise/audit.py"
@@ -161,8 +162,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # exists for, and the reason row 13's parenthetical and §2.1's count marker survived three passes.
     (_AUDIT, '`:5310` at this head', 'tortoise/projection/entities.py', 5310, 'def _upsert_document(self, ev: dict) -> None:'),
     (_AUDIT, '`:7061` at this head', 'tortoise/projection/entities.py', 7061, 'def _upsert_source('),
-    (_AUDIT, '`:6681`', _SE, 6681, 'if expand_ops:'),
+    # ⚠️ Widened from the bare `` `:6681` `` this pass first wrote (review cycle 6, F5): a bare `:NNNN`
+    # is exactly the shape the comment above says is excluded — it is satisfied by any sibling spelling
+    # of the same digits — and this row was the one of the four that carried it.
+    (_AUDIT, '`:6681` inside the same function', _SE, 6681, 'if expand_ops:'),
     (_AUDIT, '`:3005` derives the label', _SE, 3005, 'label = "Source" if entity_type =='),
+    # --- three re-derived addresses that had NO pin at all, so a `+1` mutation left 441 tests green
+    # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
+    # the guard set is per-token, and an unlisted token is coverage the file only APPEARED to have.
+    (_INDEX, '`sdk.py:28008` at this head', _SDK, 28008, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
+    (_EVIDENCE, '(`sdk.py:28008`), so any non-NULL', _SDK, 28008, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
+    (_EVIDENCE, 'called at `sdk.py:28372`', _SDK, 28372, 'result = apply_entity_merge('),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -260,8 +270,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33601`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5310` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7061` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6681`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6681` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3005` derives the label'): 1,
+    ('docs/00_index.md', '`sdk.py:28008` at this head'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28008`), so any non-NULL'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28372`'): 1,
 }
 
 
@@ -295,7 +308,8 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """REVERT GUARD, not a re-measurement — say what this does NOT prove.
 
     The drift figures and the two pin-side descriptions below were each corrected by the `#13083` review:
-    the counts still read `322`/`216`/`106` for a file that measures `326`/`214`/`112`, and the pin-side
+    the counts still read `322`/`216`/`106` for a file that measured `326`/`214`/`112` at that review (`326`/`215`/
+    `111`/`123` at the head that re-measured them), and the pin-side
     prose described `:3778` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; the
     `for prop in sorted(STORED_VECTOR_PROPS):` line is the pin's `:3735`, and `:3778` names neither — ⛔
     measured with `grep -n` on `ccb49741b2ec`, because the `:3778` in this sentence is the address the
@@ -309,9 +323,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "122 of this document's 214",
-        "dedupes the 326 as-written spellings to 214 — 112",
-        "326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable",
+        "123 of this document's 215",
+        "dedupes the 326 as-written spellings to 215 — 111",
+        "326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 215 comparable",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -411,7 +425,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     count both move together only when a row is added on purpose.
     """
     docs = {row[0] for row in _PINS}
-    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
+    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX}
     # 48: `#13489`'s review added the `:6938` row (`("Object", ["name"])`, the §2.5 address that
     # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6933`/`:6934`/`:6939`
     # sit 64/65/70 lines below `:6869`, while `:6938`, the row that had no pin, is the 69th), and row
@@ -419,8 +433,11 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # same shape added again, for the same reason.
     # 48 -> 52 at review cycle 3: four rows added for corrections whose sites had NO pin at all
     # (row 13's `entities.py` pair, §2.1's count marker, the Event row's label-derivation cite).
+    # 52 -> 55 at review cycle 6: the three addresses review P2-2 measured as pinned NOWHERE —
+    # `sdk.py:28008` in `00_index.md` and in `ENTITY-VERDICT-BANDS.md`, and `sdk.py:28372` there too —
+    # where a `+1` mutation on all three left 441 tests green. Same shape, same reason.
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
-    assert len(_PINS) == 52
+    assert len(_PINS) == 55
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
@@ -662,8 +679,12 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     # ⛔ THE WHOLE ENUMERATION, not one entry (review cycle 3, F1). `#13466` re-pointed FOUR of its
     # entries to working-tree values and NOTHING red, because this arm asserted only the Object entry.
     # ⚠️ This comment said "three" while the failure message below said "FOUR" (review cycle 5): the
-    # measured set is `:7025-7028`, `:7031-7044`, `:3070` and `:2876` — `git diff b64290529b^ b64290529b
-    # -- docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` prints exactly those four moves.
+    # measured set is `:7025-7028`, `:7031-7044`, `:3070` and `:2877`->`:2882` — `git diff b64290529b^
+    # b64290529b -- docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` prints exactly those four moves.
+    # ⚠️ `:2876` is that entry's address at `ae54df166d` (the value the loop below pins), NOT the value
+    # that commit moved: the header already read `:2877` at `b64290529b^`, one line stale before it was
+    # touched — which is this file's own thesis, so the two numbers are named with their heads instead
+    # of one token standing for both (review cycle 6, P3).
     # Each value below is measured AT `ae54df166d` — `git show ae54df166d:tortoise/search_engine.py |
     # grep -nF '<fragment>'` — and each is the reading this arm protects. The dual-head form for the one
     # entry that had drifted at EVERY pass (`sdk.py`'s second `capture_redactions` writer) is the shape
