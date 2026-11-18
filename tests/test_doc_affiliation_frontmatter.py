@@ -304,7 +304,7 @@ def _split_comment(raw: str) -> str:
         # is a quote and every ` #` sits at `i >= 1`, so
         # `len(raw[:i].rstrip()) - 1` can never be `-1`: the loop below cannot match
         # and falls through to the same `return raw`. Deleting this branch leaves
-        # the file at `2 failed, 13 passed` (measured), so no test CAN pin it. The
+        # the file at `2 failed, 14 passed` (measured), so no test CAN pin it. The
         # caller is unaffected either way — `_quoted_style` re-runs the same parity
         # scan and reports `malformed` for a value with no close, rather than
         # trusting `endswith`, since a body whose last character is an ESCAPED
