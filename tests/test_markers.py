@@ -774,6 +774,10 @@ def test_no_redirect_stems_registry_exact():
         # Mirrors config/ci-surfaces.yml `carve_out:` and
         # tests/_embedded.TEST_NO_REDIRECT_STEMS — the three-way mirror.
         "test_13417_vectorless_rows",
+        # #13447: the DB-free seam half (a lambda encodes), so it rides the URI-unset
+        # carve-out job. Mirrors config/ci-surfaces.yml `carve_out:` and
+        # tests/_embedded.TEST_NO_REDIRECT_STEMS — the three-way mirror.
+        "test_13447_derived_embedding_seam",
         "test_config",
         "test_embedded_concurrency",
         # #2879: embedded AOF durability drift pin (carve-out — the docker
