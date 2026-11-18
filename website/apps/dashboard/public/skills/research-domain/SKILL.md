@@ -83,7 +83,7 @@ claim:
 support:
 
 ```text
-tortoise_recall(mode="gaps", query="<domain label>")
+tortoise_check_confidence(recall=True, mode="gaps", query="<domain label>")
 ```
 
 Returns the claims that carry epistemic **load** (outgoing IMPL + NAND — other
@@ -161,7 +161,8 @@ Contradictions found: <n> (see analyse-for-contradictions)
 
 - If a research call fails, report it and **do not** mine fabricated claims in
   its place — an empty round is a fine outcome, an invented source is not.
-- If `tortoise_recall(mode="gaps")` returns nothing on the *first* cycle, the
+- If `tortoise_check_confidence(recall=True, mode="gaps")` returns nothing on the
+  *first* cycle, the
   problem is usually upstream: nothing was wired with load. Check that the mined
   claims have outgoing IMPL/NAND edges before concluding the domain is
   well-supported.

@@ -350,6 +350,26 @@ tools with 30 retired-forward entries — every one of the seven still ANSWERS
 on its retired name (#3883), which is why the advertised count falls while the served count does
 not, and **none of them is archived** — a name with a destination keeps its shim.
 
+**Amended 2026-11-18** (execution record, #11609 P2 — the CONFIDENCE-ARMS wave):
+`tortoise_check_confidence` (row 5) grew the two arms its targeted doors were held for, and
+they retire INTO it rather than beside it — `tortoise_compute_confidence` becomes
+`recompute=True` (factors / evidence / anchors / max_hops / rel_filter / direction) and
+`tortoise_recall` becomes `recall=True` (query / mode / kind / limit / min_confidence and the
+rest of the four-intent argument set). **No container ROW arrives**: both are PARAMETERS on a
+tool that was already advertised and already derived the `check` keyword, so the arithmetic is
+48 → 46 advertised and 60 → 62 retired-forward with nothing added — the −2/+2 pair, and the
+served population stays **108** (46 + 62), which is what makes this a consolidation rather
+than a removal. Only `fetch` 10 → 9 and `check` 6 → 5 move in `config/surface-order.yml`.
+⛔ Two properties this wave commits to, recorded here because a later lane will be tempted to
+"simplify" them: (a) ONE ARM PER CALL — `recompute`/`recall` together, or either beside
+`claim_id`/`topic`/`session`/`calibrate`, is REFUSED at both layers rather than partly
+answered, and an arm-only ARGUMENT with no arm named is refused too (a call that copied
+`query=` but lost `recall=True` would otherwise have returned the calibration audit and read
+as a successful migration); (b) `limit` is resolved PER ARM — the `topic` arm keeps 50 and the
+recall arm keeps `recall_state`'s 10 — because one shared default would have widened every
+migrating recall caller's answer 5× with no error. SDK stays **94**: the arms are parameters,
+not methods.
+
 **Composed at this head — ALL THREE waves.** The records above describe waves that are now on the
 SAME tree, so they COMPOSE rather than replace one another, and no single wave's number is the
 answer (each was measured on its own base). They retire DISJOINT door sets — the READ/QUERY
