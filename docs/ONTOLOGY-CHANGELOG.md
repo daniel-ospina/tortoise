@@ -33,6 +33,33 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.38 (2026-11-18 — `confidence` is EP's output, not an input; "Facts = confidence 1.0" withdrawn):**
+>
+> **Owner approval of the exact change:** 2026-11-18, given in-session, after the EP-across-entities audit
+> (#13563) measured the behaviour. The artifact is the text itself.
+>
+> **What was wrong.** §3's Principle ended with *"Facts = confidence 1.0."* The audit measured the opposite:
+> an `:Object` created `confidence=1.0` is **served** at 1.0, **seeded** at `Beta(1,1)` = 0.5 (EP reads
+> `coalesce(n.ep_alpha, 1.0)` / `ep_beta`, never `confidence`), and has its 1.0 **overwritten** by the run
+> (`ep.py:632`, `:822`). `n.confidence` appears in `ep.py` only inside `SET` clauses.
+>
+> **The overlap that made the old sentence plausible.** `confidence` is EP's **output** and **ranking's
+> input** (`ranking.py`: *"graph_boost for Points uses the persisted EP confidence"*). The loop looks closed
+> and is not: a fact authored at 1.0 is *ranked* as if certain while *computed* from 0.5, and any authored
+> value is silently erased by the next propagation.
+>
+> **What the model now says:** `confidence` is EP's output, not an input — EP seeds from its own priors and
+> overwrites it every run, ranking reads the persisted value, and a caller who writes `confidence` asserts
+> nothing about belief.
+>
+> **What did NOT change:** every other §3 statement, the §4 metadata rows (which already described
+> `confidence` as the posterior mean — they were right, this sentence disagreed with them), and every
+> stored value. Whether entity declared priors should exist at all remains open (#9063).
+>
+> **Residue, named not absorbed:** the audit also measured that an ended node still **votes** when it is an
+> operator *input* (`ep.py:2258` reads `status` + the `outdated` flag only, while the predicate it mirrors
+> reads four conditions). That is a code defect with its own issue; it is not a sentence to rewrite.
+>
 > **Changelog v3.37 (2026-11-17 — §5's vocabulary table states the model, not the code; the last six-word restatements go):**
 >
 > **Owner approval of the exact changes:** the owner approved the exact text on **2026-11-17, in-session**
