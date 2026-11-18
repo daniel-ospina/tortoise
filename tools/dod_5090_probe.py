@@ -1074,12 +1074,14 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     — the false-BLOCK direction, chosen because the other one makes the census
     blind to a gate reach (`#12020`).
 
-    ⛔ The local spelling is matched by NAME, not by substring containment
-    (`name == SEAM_MODULE` or `name.endswith("_" + SEAM_MODULE)`): containment
-    credited `derived_embedding_client.encode(...)` — a different object with the same
+    ⛔ The local spelling is matched against the TWO bound spellings and nothing else
+    (`name in (SEAM_MODULE, "_" + SEAM_MODULE)`): containment credited
+    `derived_embedding_client.encode(...)` — a different object with the same
     attribute — which is exactly the reach this docstring says does not count, i.e. the
     fail-open direction on the instrument that decides which writers owe a declaration
-    (`#13447` review cycle 3, issue 7).
+    (`#13447` review cycle 3, issue 7). A `"_" + SEAM_MODULE` SUFFIX is not that bounded
+    set either: it credits every `*_derived_embedding` receiver (`my_derived_embedding`),
+    so the suffix arm was replaced by membership at review cycle 6, issue 1.
     """
     import ast
 
@@ -1104,12 +1106,16 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
         # the census that decides which writers owe a declaration.
         #
         # The two real spellings are the bare module name and its underscore-alias form
-        # (`derived_embedding`, `_derived_embedding`), so the test is EQUALITY or a
-        # `"_" + SEAM_MODULE` suffix — a bounded set, not an open one. Pinned by
-        # `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`.
+        # (`derived_embedding`, `_derived_embedding`), so the test is MEMBERSHIP in that
+        # two-element set — a bounded set, not an open one. ⛔ It was written as
+        # `name.endswith("_" + SEAM_MODULE)`, which is NOT bounded: any receiver named
+        # `*_derived_embedding` — `my_derived_embedding`, the very spelling this comment
+        # names as rejected — was credited (`#13447` review cycle 6, issue 1, measured).
+        # Pinned by
+        # `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`,
+        # whose negative tree carries `my_derived_embedding` so the suffix arm cannot return.
         if (canonical.split(".")[-1] == SEAM_MODULE
-                or name == SEAM_MODULE
-                or name.endswith("_" + SEAM_MODULE)):
+                or name in (SEAM_MODULE, "_" + SEAM_MODULE)):
             out.add(func.attr)
     return out
 
@@ -1728,6 +1734,18 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.record_writer::derived_embedding_columns": (
         ("tortoise/record_writer.py", "derived_embedding_columns",
          'columns={"embedding": list(vec)}'),),
+    # `#13447` — the two seam helpers `WRITER_LABEL_OVERRIDES` names, each cited at the
+    # call that makes it a WRITE path for the derivation: `encode` IS the gate reach
+    # (it forwards to `embeddings.encode_for_row`), and `fill_missing_row_vectors`
+    # reaches it through `derive_row`. Delete either call and the writer leaves the
+    # population, taking its override with it — which is why the needle is the call,
+    # not an import or a docstring sentence.
+    "tortoise.derived_embedding::encode": (
+        ("tortoise/derived_embedding.py", "encode",
+         "embeddings.encode_for_row(text, width, bounded=bounded, **extra)"),),
+    "tortoise.cache_projection::fill_missing_row_vectors": (
+        ("tortoise/cache_projection.py", "fill_missing_row_vectors",
+         "derived_embedding.derive_row(node.label, props, width=width)"),),
 }
 
 
@@ -1849,6 +1867,28 @@ WRITER_LABEL_OVERRIDES: dict[str, str] = {
     # it, so this is the SECOND entry. The ordering carries no meaning at all; the
     # claim was merely wrong and is struck rather than reworded.)
     "tortoise.record_writer::derived_embedding_columns": "Object",
+    # `#13447` — the SEAM itself (`tortoise/derived_embedding.py::encode`) and the
+    # rebuild fill (`tortoise/cache_projection.py::fill_missing_row_vectors`) are the
+    # two helpers the seam PR added BETWEEN a gate reach and the store. Both reach the
+    # gated seam (`encode` is `embeddings.encode_for_row` plus the per-write memo;
+    # `fill_missing_row_vectors` derives through `derive_row`), neither issues any Cypher
+    # at all, so the derivation classes each a WRITE path whose label no Cypher names —
+    # correctly, because the vector they produce is handed to a CALLER (`encode` returns
+    # it to `record_writer.derived_embedding_columns` and the graph folds;
+    # `fill_missing_row_vectors` returns rows whose `embedding` column the projection
+    # stores), and row 2 held PARTIAL on the two of them rather than naming a label.
+    #
+    # ⛔ SAME SHAPE AS THE ENTRY DIRECTLY ABOVE, so it is falsified the same way: the
+    # field is SINGLE-VALUED, and the choice is representative rather than exhaustive —
+    # every other label these two feed is separately visible in this population through
+    # the writer that stores it on a node (`projection.entities::_upsert_object` →
+    # `Object`, `::_upsert_subject` → `Subject`, the Event fold → `Event`, the document
+    # path via `set_embedding_clause("s")` → `Source`, and the record rows' own
+    # projection through `cache_projection_store_labels()`), so an unserved label cannot
+    # hide behind either entry. What an override must NOT do is name a label the function
+    # never touches: `Object` is the derived-entity label both of them feed.
+    "tortoise.derived_embedding::encode": "Object",
+    "tortoise.cache_projection::fill_missing_row_vectors": "Object",
 }
 
 

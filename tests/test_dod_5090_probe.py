@@ -66,7 +66,7 @@ claims:
 | `test_a_workflow_prose_block_is_still_documentation` | the same fix must not call every workflow block a command | a `note: >-` body (text) inside a workflow starts voting on `on_by_default` |
 | `test_a_run_key_outside_the_workflow_surface_is_not_executed` | the executed-key rule is SCOPED to the surface that runs it | any `.yml` with a `run:` block is scanned as shell, so a config tool's own field completes a DoD row |
 | `test_a_MATCH_label_is_not_credited_as_the_writers_label` | the writer map credits the label the WRITE names | a read's `MATCH (n:Point)` resolves a writer's stored label — how a label the writer never writes can read as "covered" |
-| `test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach` | `_seam_module_calls`'s own promise that `client.encode(...)` — same attribute, a different object — is not a reach (`#13447`) | the receiver is matched by substring CONTAINMENT, so `derived_embedding_client.encode(...)` is credited as a gated reach and the writer owes no declaration (the fail-OPEN direction on the census) |
+| `test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach` | `_seam_module_calls`'s own promise that `client.encode(...)` — same attribute, a different object — is not a reach (`#13447`) | the receiver is matched by substring CONTAINMENT or by any `*_derived_embedding` SUFFIX, so `derived_embedding_client.encode(...)` / `my_derived_embedding.encode(...)` is credited as a gated reach and the writer owes no declaration (the fail-OPEN direction on the census) |
 | `test_a_refusal_with_TWO_causes_names_BOTH_of_them` | `#11337`: a refusal must not repair one cause and hide the other | a covering index with an unreadable `dimension` over a mixed-width label refuses naming only the width, so the dimension cause is silently dropped and a reader who fixes the width is refused again with new text |
 | `test_the_width_probe_report_says_the_rows_were_ENGINE_CHOSEN` | `#11337`: the probe query has no `ORDER BY`, so "the first 5" is not a property it has — asserted against the ISSUED statement, not the prose | `how` counts the sampled rows but says nothing about which rows they were, so `derived_payload_B` can move between two runs of the same graph with no explanation in the report — or the probe silently GAINS an `ORDER BY` while the report and the census doc keep asserting a bound the query no longer has |
 | `test_the_census_doc_states_the_same_probe_bound_the_report_does` | the doc must state the bound the CODE emits, not a parallel wording that agrees only with a deterministic test fake | the doc keeps claiming an order the query does not impose, or the doc and `how` drift apart with neither failing (the positive assertion is derived from the emitted fragment, so a rewording has to move both) |
@@ -11156,7 +11156,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `275 + 1` and `274 + 2` at THIS tree, both equal to the `276` the pin re-derives
+    count: `276 + 1` and `275 + 2` at THIS tree, both equal to the `277` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as lane-bound: a carve-out run must not
     "correct" the docker lane's figure.
@@ -14110,7 +14110,10 @@ def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
     direction on the instrument — the false-MET side, not the false-block one.
 
     Non-vacuity: on the pre-fix code (`SEAM_MODULE in name`) the negative tree
-    returns `{"encode"}`, so the `== set()` assertion is the row that reds.
+    returns `{"encode"}`, so the `== set()` assertion is the row that reds. And on the
+    cycle-3-fix spelling (`name.endswith("_" + SEAM_MODULE)`) the negative tree returns
+    `{"encode", "derive_row"}` — from the two `my_derived_embedding.*` rows added at
+    review cycle 6, issue 1 — so the suffix arm cannot come back unnoticed either.
     """
     positive = ast.parse(
         "derived_embedding.encode('Acme')\n"
@@ -14124,12 +14127,16 @@ def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
     assert probe._seam_module_calls(
         aliased, {"de": "tortoise.derived_embedding"}) == {"encode"}
 
-    # …and these three are NOT: each merely CONTAINS the module name, or is a
-    # different object carrying the same attribute.
+    # …and these are NOT: each merely CONTAINS the module name, or is a
+    # different object carrying the same attribute. The two `my_derived_embedding`
+    # rows are the cycle-6, issue-1 witnesses: a `"_" + SEAM_MODULE` SUFFIX rule
+    # credits them, so the arm has to be membership in the two real spellings.
     negative = ast.parse(
         "derived_embedding_client.encode('Acme')\n"
         "embeds.derived_embedding_client.derive_row('Object', {})\n"
         "client.encode('Acme')\n"
+        "my_derived_embedding.encode('Acme')\n"
+        "my_derived_embedding.derive_row('Object', {})\n"
     )
     assert probe._seam_module_calls(negative, {}) == set(), (
         "a receiver that only CONTAINS the seam module's name was credited as a "
