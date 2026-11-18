@@ -9,7 +9,12 @@ sentence in a design doc:
    (``record_projection.TENANT_GUC_SQL``, one statement, R6) followed by
    ``record_projection.replay_plan(records, …)``. That equality is also the
    duplication pin: a second, hand-written Postgres writer would drift from the
-   fold, and it would show up here as an extra or missing statement. The seam
+   fold, and it would show up here as an extra or missing statement. The
+   expectation is built with the SAME ``derived`` map the seam threads
+   (#13220), and the derivation is STUBBED — see `_derivation_pinned_off`, which
+   also records why: with the real derivation in play the statement set followed
+   the runner's embedder cache, so this file read as green on a cold box and red
+   on a warm one. The seam
    issues TWO statements outside the plan — the prologue, and the
    ``TENANT_SCOPE_SQL`` verify that reads the GUC back and the connecting role's
    posture; ``FakeConnection.statements()`` filters the latter because it is a
@@ -225,9 +230,89 @@ def _no_ambient_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(rw.RECORD_DSN_ENV, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _derivation_pinned_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The record's DERIVED embeddings are pinned OFF for this file. Why:
+
+    `record_writer.write` asks `derived_embedding_columns` for the values the
+    RECORD computes and the journal does not carry (#13220) and threads them
+    into the plan as ``derived`` — so the statement set this file compares
+    changes shape with the EMBEDDER'S state: with a cached, warm model the
+    `object` upsert gains an ``embedding`` column and a 384-float bind, while
+    ``replay_plan(records, …)`` — the expectation every test here builds — is
+    called with no ``derived`` and yields the column-less shape. The same file
+    was then GREEN on a cold box and RED on a warm one (5 failures), which is
+    the one thing a contract pin must never be: a verdict about the runner's
+    model cache rather than about the seam.
+
+    Pinned at the SEAM the seam itself calls (pytest's own rule — patch the
+    reference the system under test resolves, not the real dependency), so the
+    comparison is exact and deterministic in every lane. The threading itself is
+    pinned by `test_the_derived_columns_are_the_plans_own_binding` below, with a
+    STUBBED derivation — the real encoder's values are
+    `tests/test_13220_record_label_embeddings.py`'s subject, not this file's.
+    """
+    monkeypatch.setattr(rw, "derived_embedding_columns",
+                        lambda record: rw._DerivedEmbedding())
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 1. THE SEAM EMITS THE RECORD'S PLAN — exactly, and nothing of its own
 # ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_derived_columns_are_the_plans_own_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value the RECORD derives rides the PLAN — it is not a second writer.
+
+    `record_writer.write` computes the values the journal cannot carry (#13220:
+    an `object` row's vector) and passes them to the plan as ``derived``. Two
+    ways that can be wrong, and both are silent: the seam can STOP threading
+    them (the row lands with a NULL/graph-only vector — the #13220 gap this
+    table exists to document) or it can write them itself, as an extra statement
+    (the second fold this whole file refuses). One assertion rules out both,
+    because the comparison is equality against `replay_plan` FED THE SAME MAP in
+    the same position order.
+
+    The derivation is STUBBED, so the expected column belongs to this test and
+    not to whatever embedder the runner happens to have cached: the real
+    encoder's values are `tests/test_13220_record_label_embeddings.py`'s
+    subject.
+    """
+    vector = "[0.125, -0.5, 1.0]"
+
+    def _stub(record: dict[str, Any]) -> Any:
+        if record.get("type") == "ObjectRegistered":
+            return rw._DerivedEmbedding(columns={"embedding": vector})
+        return rw._DerivedEmbedding()
+
+    monkeypatch.setattr(rw, "derived_embedding_columns", _stub)
+    conn = FakeConnection()
+    _armed(conn).write(RECORDS, org_id=ORG, graph_id=GRAPH)
+
+    object_index = next(
+        i for i, record in enumerate(RECORDS)
+        if record["type"] == "ObjectRegistered")
+    derived = {object_index: {"embedding": vector}}
+    expected = [
+        _tenant_statement(),
+        *[(s.sql, list(s.params)) for s in rp.replay_plan(
+            RECORDS, org_id=ORG, graph_id=GRAPH, start_seq=1, derived=derived)],
+    ]
+    assert conn.statements() == expected
+
+    # …and the derived value really reached the object's own row, in its own
+    # column: without this, an equality against a plan that ALSO dropped the
+    # column would pass while the vector was lost.
+    object_upsert = next(
+        (sql, params) for sql, params in conn.statements()
+        if sql.startswith("INSERT INTO public.object"))
+    assert "object_kind, embedding, props" in object_upsert[0]
+    assert object_upsert[1][-2] is not None
+    # …and it is NOT merged into `props` (record_projection's "bound AFTER the
+    # split" rule): the column carries it, the snapshot does not.
+    assert object_upsert[1][-1] == "{}"
 
 
 def test_the_seam_emits_exactly_the_record_plan() -> None:
