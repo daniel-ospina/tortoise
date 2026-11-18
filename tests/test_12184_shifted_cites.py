@@ -681,7 +681,8 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
             f"the header enumeration no longer carries {bound!r} — those are its addresses AT `main` "
             "`ae54df166d`, the head the paragraph announces twice. A working-tree value here re-points a "
             "history cite, the `⚠️ CORRECTED` failure this file exists to stop (`#13466` did exactly that "
-            "to three of these entries and nothing red). Re-derive at `ae54df166d`, never at the tree."
+            "to FOUR of these entries — the probe range, the binding range, the index note and the writer — "
+            "and nothing red). Re-derive at `ae54df166d`, never at the tree."
         )
     assert '`("Object", ["name"])`\n`:6869`;' in text, (
         "the header enumeration no longer names the Object declaration at `:6869` — the address it holds "
