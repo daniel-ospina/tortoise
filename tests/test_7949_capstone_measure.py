@@ -16308,3 +16308,217 @@ def test_the_D5_row_is_still_one_table_row():
         "that edits the row); one unescaped `|` splits it and reds the REQUIRED `docs` check "
         "with ~178 findings (#13489). Escape a pipe in a cell as `\\|`")
 
+
+
+#: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
+#: below had NO reader before this pin, which is why it rotted while the suite was green
+#: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying ~50 numbers, so any
+#: occurrence satisfied every row — including the historical ones — and a number asserted
+#: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
+#: rows bind the ANCHOR PROSE to the tree instead of the number to the line, so a
+#: stale-current claim reds here. Each entry is
+#: (the claim's own binding label, its regex with a named `n` group,
+#:  the `_EPIC_CITE_SOURCES` key, the fragment the cited line must carry).
+#:
+#: ⛔ SCOPE, stated because an over-claim here was CAUGHT BY REVIEW (#13602, cycle 2): the
+#: `_honours` clauses are NOT repeated here. D5 states that symbol FOUR times, in four
+#: currency spellings, and ALL FOUR already have readers — the derived-literal arm at
+#: `:6729`-`:6733` asserts each of the four against `_honours_line`, and the `05-verify.md`
+#: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
+#: failure mode and would leave this file asserting twice, in contradictory terms, whether
+#: that clause ever had a reader. Only the `dedup_reviewed IS NULL` clause below, and the
+#: three-anchor sentence in `_D5_TRIPLE_RE` (whose distinct failure mode is a number
+#: swapped onto ANOTHER anchor's slot, which no per-line row can see), are new coverage.
+_D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "the file's ONLY `dedup_reviewed IS NULL`",
+        r"the file's ONLY `dedup_reviewed IS NULL`, at `:(?P<n>\d+)` at THIS head",
+        "sdk",
+        "n.dedup_reviewed IS NULL",
+    ),
+)
+
+#: The one D5 clause that states THREE current anchors in one sentence. Kept separate
+#: because its shape (three numbers, three named anchors) is what makes it checkable: the
+#: number and the anchor it is attached to are read by the SAME regex, so a re-point that
+#: moves one number onto another anchor's slot reds.
+_D5_TRIPLE_RE = re.compile(
+    r"`:(?P<a>\d+)` / `:(?P<b>\d+)` / `:(?P<c>\d+)` at THIS head — the three anchors "
+    r"`(?P<fa>[^`]+)`, `(?P<fb>[^`]+)` and `(?P<fc>[^`]+)` respectively")
+
+
+def test_the_D5_current_head_anchors_are_the_lines_they_name():
+    """D5 asserts numbers as CURRENT, and until this pin NOTHING read them (#13602).
+
+    ⛔ MEASURED ON THE PRE-FIX TREE (`c4451dcd03`), which is why this exists: D5 said the
+    content-review filter was "at `:27998` at THIS head" while its own stated command
+    (`grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py`) printed `28067` — and `:27998` is
+    `"MATCH (n:Point {id:$id}) SET n.dedup_candidate = true, "`, a DIFFERENT statement. The
+    same line carried `:22291` for `_honours` (the tree's line is `:22355`; `:22291` is
+    `the caller does not ask for the anchor.`) and the anchor triple `:21540`/`:21498`/
+    `:28543` (the tree's are `:21604`/`:21562`/`:28607`; those three are `proj, self,`,
+    a comment, and prose). Every one of them was GREEN here, because no row could see a
+    number that shared a line with ~50 others.
+
+    ⛔ A reader who re-verifies the way the document instructs is what this protects: the
+    document handed them two different answers for ONE statement on the SAME line.
+    """
+    d5 = [
+        line for line in
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("| **D5** |")
+    ]
+    assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    text = d5[0]
+    sources = {key: path.read_text(encoding="utf-8").splitlines()
+               for key, path in _EPIC_CITE_SOURCES.items()}
+
+    failures: list[str] = []
+    for label, pattern, source_key, needle in _D5_CURRENT_CLAIMS:
+        # The phrase is the claim's own binding text; if it is gone the pin no longer reads
+        # the sentence it was written for, which is a red here, not a silent skip.
+        found = re.search(pattern, text)
+        if found is None:
+            failures.append(
+                f"D5 no longer states {label!r} in the shape this pin reads "
+                f"({pattern!r}) — re-derive the sentence and update the row, do not "
+                "drop it: an unread present-tense number is what rotted here")
+            continue
+        number = int(found.group("n"))
+        lines = sources[source_key]
+        actual = lines[number - 1] if 0 < number <= len(lines) else ""
+        if needle not in actual:
+            hits = [n for n, line in enumerate(lines, 1) if needle in line]
+            failures.append(
+                f"D5 states {label} at `:{number}` as CURRENT, but "
+                f"`{source_key}`'s `{number}` is {actual.strip()[:90]!r} — the fragment "
+                f"{needle!r} is at {hits}. Re-derive by CONTENT "
+                "(`grep -n`), never by carrying the number forward")
+
+    triple = _D5_TRIPLE_RE.search(text)
+    if triple is None:
+        failures.append(
+            "D5 no longer states the three-anchor clause in the shape this pin reads "
+            f"({_D5_TRIPLE_RE.pattern!r}) — re-derive it and update the row")
+    else:
+        sdk = sources["sdk"]
+        for slot in ("a", "b", "c"):
+            number = int(triple.group(slot))
+            anchor = triple.group(f"f{slot}")
+            actual = sdk[number - 1] if 0 < number <= len(sdk) else ""
+            if anchor not in actual:
+                hits = [n for n, line in enumerate(sdk, 1) if anchor in line]
+                failures.append(
+                    f"D5 states anchor `{anchor}` at `:{number}` as CURRENT, but "
+                    f"`sdk.py`'s `{number}` is {actual.strip()[:90]!r} — the anchor is "
+                    f"at {hits}")
+
+    # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
+    # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
+    # re-point — `sdk.py:28559` → `:28592`", while after the rebase that file is not in
+    # this diff at all (`git diff --name-only origin/main...HEAD` does not list it) and the
+    # document's own row reads `sdk.py:28607`. A phrase-only assertion was green over that,
+    # re-landed, and was green again: that is the class this pin exists to close. No count
+    # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
+    for stale in ("carries TWO numeric re-points", "a document that carries two"):
+        assert stale not in text, (
+            f"D5 states `{stale}` about `04-plan.md`. The `hosted_api.py` "
+            "`:15202-15279` -> `:15225-15302` move it is paired with is `origin/main`'s "
+            "own and is INHERITED, not contributed (`git show origin/main:docs/epics/"
+            "2026-11-04-7949-extractor-v4-capstone/04-plan.md` already carries "
+            "`:15225-15302`). Do not re-inflate the count")
+    assert "carries ONE numeric re-point" not in text, (
+        "D5 states that `04-plan.md` carries a numeric re-point in this PR's diff. "
+        "Measured after the rebase: that file is not in `git diff --name-only "
+        "origin/main...HEAD` at all, so this diff contributes NO re-point there — and the "
+        "pair the clause used to name (`sdk.py:28559` -> `:28592`) does not describe the "
+        "document either, whose row reads `sdk.py:28607`")
+    assert "sdk.py:28607" in text, (
+        "D5 no longer names `sdk.py:28607`, the value `04-plan.md`'s own row carries at "
+        "this head (`grep -n 'declared_relation_predicates()' "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md`). Re-derive the "
+        "address; do not drop it")
+
+    assert not failures, (
+        "D5's present-tense anchors are not the lines they name "
+        "(the class #13602 review findings 1 and 2 measured):\n  - "
+        + "\n  - ".join(failures))
+
+
+def test_one_markdown_line_carries_one_pair_for_one_cite():
+    """`03-test-design.md:142` stated TWO different pairs for ONE `sdk.py` cite (#13602 F2).
+
+    ⛔ MEASURED ON THE PRE-FIX TREE (`c4451dcd03`), and why this is a pin and not a
+    tidy-up: the SAME markdown line said `subject_binding_available` is "consumed
+    `sdk.py:12136`/`:12189`" and, ~1,270 characters later, that "the sibling `sdk.py`
+    cites … are `12110`/`12163` here". `12110` is `_registry_cache.load_all()` (the
+    assignment an earlier cut of this docstring named is `:12109`) and `12163` is
+    `r[key] = st[key]` — neither line carries the symbol, so a reader
+    following the second pair landed on unrelated code. It was green because the two
+    `_pin_row_failures` rows scoped to that line carry ONLY the opening pair's numbers
+    (`:6167`-`:6176` name `7048`, `12136`, `12189`) and NO row anywhere names `12110` or
+    `12163` (`grep -nE '12110|12163'` finds comment lines and this docstring only) — so
+    the trailing pair was read by nothing at all, which is why it could sit there
+    contradicting the opening pair indefinitely. A row proves ITS OWN number is somewhere
+    on the line; it cannot be "satisfied" by a different, unregistered pair. That is the
+    same shape the D5 pin above closes.
+
+    The rule this holds to: where one line names a pair twice, the two namings must be the
+    same pair, and BOTH numbers must open on the symbol the sentence is about. A legal
+    alternative is to delete the second naming — the assertion below only refuses a line
+    that names two DIFFERENT pairs, and one that names a pair which does not resolve.
+    """
+    # ⛔ Scoped by PHRASE, never by a markdown line INDEX: this module's own rule
+    # (`_pin_row_failures`' docstring) is that a row finds its line by `phrase`, because a
+    # line number rots exactly as fast as the cites do — and an insertion above it would
+    # make this pin read a DIFFERENT sentence while still claiming to guard this one
+    # (#13602 review, cycle 4).
+    rows = [
+        candidate for candidate in _EPIC_CITE_DOCS["03-test-design.md"]
+        .read_text(encoding="utf-8").splitlines()
+        if "is a **fail-OPEN** probe (`search_engine.py:" in candidate
+        and "consumed `sdk.py:" in candidate
+    ]
+    assert len(rows) == 1, (
+        "expected exactly ONE `03-test-design.md` row naming the fail-OPEN probe AND its "
+        f"consume pair, found {len(rows)} — an ambiguous phrase is a failure, not a "
+        "silent bind to the easier of two matches")
+    line = rows[0]
+    opening = re.search(r"consumed `sdk\.py:(\d+)`/`:(\d+)`", line)
+    # ⛔ ONE spelling was not enough (#13602 review, cycle 3): the first cut matched only
+    # the bare `are `N`/`M` here` shape, so re-introducing the duplicate in the document's
+    # OWN prevailing style (`sdk.py:N`/`:M`) stayed GREEN — measured by a fresh reviewer:
+    # appending "the sibling cites are `sdk.py:12110`/`:12163` here" gave
+    # `2 passed, 420 deselected`. What the rule forbids is a SECOND pair asserted as
+    # CURRENT, and the marker of a CURRENT assertion is the word `here` — so read it in
+    # ANY spelling. A pair stated as HISTORY names the head/delta that moved it and
+    # carries no `here`, so it stays exempt.
+    assert opening is not None, (
+        "03-test-design.md's `subject_binding_available` row no longer states its "
+        "`consumed sdk.py:N/M` pair in the shape this pin reads — re-derive it and "
+        "update this pin rather than dropping it")
+    first = (int(opening.group(1)), int(opening.group(2)))
+    for current in re.finditer(r"`(?:sdk\.py:)?(\d+)`/`:?(\d+)`\s+here", line):
+        second = (int(current.group(1)), int(current.group(2)))
+        assert second == first, (
+            f"this ONE markdown line names two different pairs for the same cite: "
+            f"{first} in its opening clause and {second} in another, asserted as CURRENT "
+            f"({current.group(0).strip()}). That is the false-verification shape #13602 "
+            "finding 2 measured — a reader who follows the second pair lands on unrelated "
+            "code. Name the SAME pair, or state the other one as HISTORY (with the head "
+            "or delta that moved it), or delete it")
+
+    sdk = _EPIC_CITE_SOURCES["sdk"].read_text(encoding="utf-8").splitlines()
+    failures = []
+    for number in first:
+        actual = sdk[number - 1] if 0 < number <= len(sdk) else ""
+        if "subject_binding_available" not in actual:
+            hits = [n for n, text in enumerate(sdk, 1)
+                    if "subject_binding_available" in text]
+            failures.append(
+                f"`sdk.py:{number}` is {actual.strip()[:90]!r}, which does not carry "
+                f"`subject_binding_available` (the symbol is at {hits})")
+    assert not failures, (
+        "the pair this row names does not open on the symbol the row is about:\n  - "
+        + "\n  - ".join(failures))
