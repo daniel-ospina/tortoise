@@ -960,7 +960,7 @@ holds for a label named there. Re-measure `actions/runners` before pinning anyth
 ### Residual: the #10237 canary is a POOL-ONLY pin — and it is non-required on purpose
 
 **OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `repo-harnesses`
-(`ci.yml:1556`) now reads `runs-on: [self-hosted, self-hosted-x64]`. Its accepted cost is a WAIT with
+(`ci.yml:1623`) now reads `runs-on: [self-hosted, self-hosted-x64]`. Its accepted cost is a WAIT with
 no hosted half — and ⛔ that IS a landing cost: the rail (`admin-merge.sh`) merges with `--admin`, so
 required-ness decides nothing, every code-measuring red on the PR's tree BLOCKS, and this job is on
 that tree. `.mergify.yml` names it in neither `queue_conditions` nor `merge_conditions` and
@@ -991,7 +991,8 @@ job itself:
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to NON-REQUIRED jobs whose red
 costs a re-run before that head can land — `repo-harnesses` here, and the two #13596 housekeeping
-pins recorded at the foot of this page. A required leg's red also reddens the aggregate, which is why
+pins recorded in *Residual: the two #13596 housekeeping pins* below. A required leg's red also
+reddens the aggregate, which is why
 no required leg is pinned **by default**: the one exception is `pool-split`, which pins the ODD rows
 of a REQUIRED shard (`test (b)`, `(d)`, `(f)`, `(h)`), is OPT-IN and off by default, and records its
 own cost under its `OVERRIDES:` block above (`:910-927`). It bypasses the label attachment
@@ -1077,9 +1078,10 @@ Two things this pin keeps TRUE, which is why it is safe on a pool runner:
   leg instead of silently reporting the advisory as measured — the property
   `tests/test_runner_tool_contract.py` pins for the `gh`-using jobs that can land on the pool (its
   `GH_JOBS` literal, **19 jobs across 17 workflows** — count it from the literal), and DECLARES the
-  rest as gaps in `KNOWN_UNCOVERED` with a reason and an owning issue (`ai-review-gate` is one,
-  #9942) rather than certifying a gap-free population. A job that calls no `gh` is outside the sweep
-  by construction, which is why `redis-guard` needs no step.
+  rest as gaps in `KNOWN_UNCOVERED` — each with a stated reason, and only the oldest with an owning
+  issue (`ai-review-gate`, #9942; the other three name a reason and no owner, so a green run does
+  NOT certify an owner for the population) rather than pretending to a gap-free population. A job
+  that calls no `gh` is outside the sweep by construction, which is why `redis-guard` needs no step.
 - `redis-guard` needs no contract step: its only `run:` is `python3 tools/redis-guard.py`, whose only
   subprocess is `git rev-parse --show-toplevel`, and the job pins `actions/setup-python@v5` / `3.12`
   itself, so moving off `ubuntu-latest` cannot change the interpreter.
