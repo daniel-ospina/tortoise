@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+import tortoise.derived_embedding as derived_embedding
 import tortoise.record_projection as rp
 import tortoise.record_vector as rv
 import tortoise.record_writer as rw
@@ -675,11 +676,26 @@ def test_the_graph_still_writes_object_and_subject_embeddings():
     for fn in ("def _upsert_object", "def _upsert_subject"):
         start = entities.index(fn)
         body = entities[start:start + 6000]
-        assert "encode_for_row(" in body, (
+        # ⚠️ TWO ACCEPTED SPELLINGS, and the second one is a NARROWING, not a
+        # relaxation (#13447). The folds now call `derived_embedding.encode(...)`
+        # — the ONE seam, which IS `embeddings.encode_for_row(content, width,
+        # bounded=…)` plus the per-write memo that makes the record's identical
+        # encode (#13220) free. The ruling is about the WRITE EXISTING, so the
+        # assertion below re-proves the delegation rather than trusting a name:
+        # a stub called `encode` that stopped encoding would red HERE.
+        called = ("derived_embedding.encode(" in body
+                  or "encode_for_row(" in body)
+        assert called, (
             f"{fn} no longer encodes a vector — the 2026-11-10 KEEP ruling "
             "(#11395 comment 6781921075) forbids removing `:Object`/`:Subject` "
             "embeddings or stopping their write; this needs an explicit reopen, "
             "not a refactor")
+    import inspect
+    seam = inspect.getsource(derived_embedding.encode)
+    assert "embeddings.encode_for_row(" in seam, (
+        "`derived_embedding.encode` no longer delegates to "
+        "`embeddings.encode_for_row` — the folds' encode would no longer be the "
+        "#5008-gated submission step, which is the write the KEEP ruling protects")
 
 
 def test_a_document_backed_source_DOES_carry_a_vector_while_a_plain_one_does_not():

@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest import mock
@@ -60,7 +61,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise import read_stages
+from tortoise import embeddings, read_stages
 from tortoise.embeddings import (
     READ_EMBED_BUDGET_S,
     EmbeddingModel,
@@ -158,6 +159,14 @@ def warm_embedder(monkeypatch):
 def sdk(tmp_path):
     sdk = TortoiseSDK(db_path=str(tmp_path / "read13528.db"))
     try:
+        # ⛔ The embedder state is made DETERMINISTIC before anything else. In a
+        # single-file run the singleton starts cold, but the carve-out lane runs
+        # this file in one process with ~17 others, several of which leave a REAL
+        # model loaded — so "cold" is not a property of the process here, it is a
+        # property this fixture has to establish. (Measured on `test-carve-out`
+        # for PR #13531: the precondition below fired on all four cases because a
+        # previous file's warm singleton survived into this one.)
+        EmbeddingModel._reset()
         # PRIME the one-time cost OUTSIDE the cold window. The first read in a
         # process pays start-up that has nothing to do with the embedder — the
         # projection open, `kind_layers.section_of`'s spec compile (measured
@@ -170,8 +179,13 @@ def sdk(tmp_path):
         # ⛔ The fixtures are ORDER DEPENDENT on purpose: every test lists `sdk`
         # BEFORE `cold_embedder` / `warm_embedder`, so this runs while the
         # simulated load has not started. `get` is patched to the absent answer so
-        # priming cannot trigger a REAL load into the window either.
-        with mock.patch.object(EmbeddingModel, "get", lambda *_a, **_k: None):
+        # priming cannot trigger a REAL load into the window either — and
+        # `await_read_ready_reason` is patched to the same answer for the same
+        # reason: with `TORTOISE_EMBEDDER_WARMUP` restored to 1 it would otherwise
+        # kick a background load and leave the embedder warm for the cold tests.
+        with mock.patch.object(EmbeddingModel, "get", lambda *_a, **_k: None), \
+                mock.patch.object(EmbeddingModel, "await_read_ready_reason",
+                                  classmethod(lambda _cls, _budget: None)):
             sdk.tortoise_fts_query(_QUERY, limit=3)
         assert not EmbeddingModel.loaded(), (
             "priming must not load the embedder — the cold-window tests need it COLD")
@@ -207,16 +221,18 @@ def test_a_read_does_not_block_on_a_cold_embedder(sdk, cold_embedder):
     production measured ``stage=embed_get`` at 11.52 s against an 8 s bound.
 
     The discriminator is stated against the LOAD, not a stopwatch constant:
-    **a read issued inside a cold window must cost less than HALF the load it
-    overlaps.** Pre-fix the read is AT LEAST the load; post-fix it declines
-    inside ``READ_EMBED_BUDGET_S`` (0.25 s), two orders of magnitude under. The
-    bar is deliberately half rather than the whole load (#13528 review P2-3):
-    the PR's own pre-fix figure was 7999.4 ms against a 8000 ms load, so a
-    whole-load bar leaves ~0.6 ms of margin and the pre-fix read can pass on a
-    fast box — a discriminator with no margin is not a discriminator. Half the
-    load is still ~16× the budget, so the comparison cannot be satisfied by a
+    **a read issued inside a cold window must cost less than the load it
+    overlaps.** Pre-fix the read is AT LEAST the load; post-fix it is well
+    under, because it never waits. That comparison cannot be satisfied by a
     fast host and cannot fail on a slow one — it fails only if the read path
     waits on the load, which is the defect.
+
+    ⛔ THE BAR IS HALF THE LOAD, NOT THE WHOLE LOAD (#13528 review P2-3).
+    ``elapsed < _LOAD_S`` left 0.6 ms of margin against the pre-fix figure this
+    change's own title quotes (``embed_get`` 7999.4 ms of an 8000 ms load), so
+    the pre-fix code could pass it. Half the load is unambiguous in both
+    directions: a read that waits is ~the whole load, a read that declines is
+    ~the budget (measured 251.0 ms).
     """
     assert not EmbeddingModel.loaded(), (
         "precondition: the embedder must be COLD when the read arrives")
@@ -229,23 +245,23 @@ def test_a_read_does_not_block_on_a_cold_embedder(sdk, cold_embedder):
         f"the {_LOAD_S:.1f}s load must still be IN FLIGHT — if it finished, this "
         f"run measured the warm path and proves nothing about the cold one")
     assert elapsed < _LOAD_S / 2, (
-        f"a read inside a {_LOAD_S:.1f}s cold window took {elapsed:.2f}s — more "
-        f"than half the load it overlaps, so the read path is waiting on the "
-        f"model load again (#13528: production measured stage=embed_get at "
-        f"HTTP=504, t=11.52s; the budget is {READ_EMBED_BUDGET_S * 1000:.0f} ms)")
+        f"a read inside a {_LOAD_S:.1f}s cold window took {elapsed:.2f}s (bar: "
+        f"{_LOAD_S / 2:.1f}s) — the read path is waiting on the model load again "
+        f"(#13528: production measured stage=embed_get at HTTP=504, t=11.52s; "
+        f"pre-fix this read was 7999.4 ms of the load)")
 
 
 def test_the_cold_read_records_its_absent_reason(sdk, cold_embedder):
-    """The degrade must be DECLARED, not silent, and it must name WHY.
+    """The degrade must be DECLARED, and the declaration must not lie.
 
     A read that answered without its dense leg is not hybrid retrieval. The leg
-    trace is where that is said, and the reason must name WHY the leg did not
-    run — a load the read declined to wait for is ``load_in_flight`` (#13528
-    review P2-1), never the designed-absence term ``no_embedder`` (the
-    conflation #5275/#1542 exist to forbid: "the extra was never installed" and
-    "the embedder is loading RIGHT NOW" need opposite operator responses) and
-    never ``load_timeout``, which ``absent_reason`` already publishes for a load
-    that actually TIMED OUT — a recorded failure with a different response again.
+    trace is where that is said, and the reason must name THIS state — a load
+    is running and the read declined to wait. It is deliberately **not**
+    ``no_embedder`` (that is the designed absence, the conflation #5275/#1542
+    forbid) and deliberately not ``load_timeout`` either: that term already means
+    the load ATTEMPT ran out of its ``_LOAD_TIMEOUT_S`` and BROKE (#13528 review
+    P2-1), which needs the opposite operator response — repair the load, not
+    read again in a moment.
     """
     trace: list[dict] = []
     _read(sdk, trace=trace)
@@ -255,115 +271,8 @@ def test_the_cold_read_records_its_absent_reason(sdk, cold_embedder):
     assert entry["degraded"] is True, (
         "an absent vector leg is a degraded read, and must be published as one")
     assert entry["reason"] == "load_in_flight", (
-        f"the recorded reason must say WHY the leg did not run (a load the read "
-        f"declined to wait for) and not borrow the load-failure or "
-        f"designed-absence terms, got {entry['reason']!r}")
-
-
-def test_the_re_armed_read_reports_load_in_flight(monkeypatch):
-    """P2-2's OWN row — the RE-ARM arm must not answer the designed-absence word.
-
-    The row above reaches the deadline-expiry arm (a load thread is ALIVE, so the
-    poll loop runs). The other arm that returns ``load_in_flight`` is the RE-ARM
-    one: ``start_warm_up()`` returns ``None`` because the once-per-process
-    attempt is spent and no thread is alive, so the read re-arms one attempt and
-    declines. Nothing has failed there either, so the answer must be
-    ``load_in_flight`` — an unconditional ``absent_reason()`` answers
-    ``no_embedder`` (``_last_failed_at`` is unset), telling the operator the extra
-    was never installed while a retry is starting. That was the pre-review shape,
-    and nothing in this file isolated it until this row.
-    """
-    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
-    EmbeddingModel._reset()
-    try:
-        # The spent-attempt state, built directly: the latch is SET and no load
-        # thread is alive, which is exactly what `start_warm_up` answers `None`
-        # for — it returns the thread when it IS alive, and the latch then no
-        # longer re-arms (`tortoise/embeddings.py`, `start_warm_up`'s
-        # `_warm_up_started` branch).
-        monkeypatch.setattr(EmbeddingModel, "_instance", None)
-        monkeypatch.setattr(EmbeddingModel, "_last_failed_at", None)
-        monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", None)
-        monkeypatch.setattr(EmbeddingModel, "_warm_up_started", True)
-        monkeypatch.setattr(EmbeddingModel, "_warm_up_thread", None)
-
-        assert EmbeddingModel.start_warm_up() is None, (
-            "precondition: the once-per-process attempt must be SPENT with "
-            "nothing in flight, or this test does not reach the re-arm arm")
-
-        assert EmbeddingModel.await_read_ready_reason(0.0) == "load_in_flight", (
-            "a read that just RE-ARMED an attempt has recorded no failure, so it "
-            "must not publish the designed-absence term — `no_embedder` says the "
-            "extra was never installed (#5275 conflation, one arm over)")
-        assert EmbeddingModel._warm_up_started is False, (
-            "the read must have RE-ARMED exactly one background attempt; "
-            "latching it off is what makes the retry reachable at all")
-    finally:
-        EmbeddingModel._reset()
-
-
-def test_the_re_armed_read_reports_a_recorded_failure(monkeypatch):
-    """COUNTER-TEST to the row above: a RECORDED failure still wins (P2-2).
-
-    The re-arm arm must not solve the conflation by hiding a real cause: when a
-    load attempt failed long enough ago that the cooldown has expired, the arm is
-    still reachable, and the operator's answer is the failure that was recorded —
-    not "a retry is starting".
-    """
-    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
-    EmbeddingModel._reset()
-    try:
-        monkeypatch.setattr(EmbeddingModel, "_instance", None)
-        # Outside the negative-cache cooldown, so the arm is reachable.
-        monkeypatch.setattr(
-            EmbeddingModel, "_last_failed_at",
-            time.monotonic() - (EmbeddingModel._FAIL_COOLDOWN_S + 1.0))
-        monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "load_failed")
-        monkeypatch.setattr(EmbeddingModel, "_warm_up_started", True)
-        monkeypatch.setattr(EmbeddingModel, "_warm_up_thread", None)
-
-        assert EmbeddingModel.await_read_ready_reason(0.0) == "load_failed", (
-            "a recorded load failure must be reported even on the re-arm arm — "
-            "`load_in_flight` here would hide the failure the operator has to fix")
-    finally:
-        EmbeddingModel._reset()
-
-
-def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
-    """The translator's recorded-cause arm, pinned directly (round-1 P2).
-
-    ``load_in_flight`` names no failure, but a load CAN fail between the read's
-    decline and the raise that carries it, and ``_last_failure_kind`` then holds
-    the operator's real answer. The earlier shape special-cased ``no_embedder``
-    and returned the ``model_unavailable`` fallback for everything else, so that
-    recorded cause was discarded. No cold-window ROW in this suite reaches that
-    state (each leaves nothing recorded), but the READ PATH does: a failure older
-    than ``_FAIL_COOLDOWN_S`` leaves ``load_in_flight`` on the trace with a
-    recorded kind, and ``_as_failure_kind`` then reports that kind. It is pinned
-    at the seam because no fixture reproduces that staleness — not because the
-    arm is unreachable.
-    """
-    EmbeddingModel._reset()
-    try:
-        assert EmbeddingModel._as_failure_kind("load_in_flight") == \
-            "model_unavailable", (
-            "with nothing recorded the contract's documented fallback is the "
-            "honest answer — the load was in flight, nothing broke")
-
-        EmbeddingModel._last_failure_kind = "load_failed"
-        assert EmbeddingModel._as_failure_kind("load_in_flight") == "load_failed", (
-            "a cause recorded by the time the refusal is raised must be named, "
-            "not replaced by the fallback")
-
-        EmbeddingModel._last_failure_kind = "not_installed"
-        assert EmbeddingModel._as_failure_kind("load_in_flight") == "not_installed", (
-            "the recorded kind is the answer whatever it is, not only for "
-            "`no_embedder` — the special-case shape this replaces")
-
-        assert EmbeddingModel._as_failure_kind("load_timeout") == "load_timeout", (
-            "a reason already in the refusal's vocabulary is passed through")
-    finally:
-        EmbeddingModel._reset()
+        f"the recorded reason must name the cause (a load still RUNNING that the "
+        f"read declined to wait for), got {entry['reason']!r}")
 
 
 def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
@@ -389,8 +298,14 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
         f"embed_get took {spent[STAGE_EMBED_GET]} ms of a {_LOAD_S * 1000:.0f} ms "
         f"load — the read is waiting on it again instead of declining inside its "
         f"{READ_EMBED_BUDGET_S * 1000:.0f} ms budget (measured pre-fix: 7857.3 ms)")
-    assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2, (
-        f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms — a read must not "
+    # ⛔ ``spent_ms()`` IS MILLISECONDS (``read_stages.Timeline.spent_ms``), so
+    # the bar needs the same ``* 1000.0`` the frame above it carries. Without it
+    # this compares against 4 ms rather than 4 000 ms — a bar the message two
+    # lines down says is the wrong number, and a flake door on the contended
+    # 4-worker carve-out lane (#13528 review F2, pre-existing).
+    assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
+        f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms of a "
+        f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a read must not "
         f"queue behind workers parked in the embedder load")
 
 
@@ -440,34 +355,65 @@ def test_the_required_flag_still_fails_loud(sdk, cold_embedder, monkeypatch):
     quietly convert it back — the decline has to go through the SAME single exit
     every other ``None`` arm uses, or the flag's contract dies with the wait.
 
-    ⛔ THE REFUSAL MUST NAME ITS CAUSE (#13528 review P1-2). Asserting only the
-    exception class let a wrong attribution through: the trace word
-    ``load_timeout`` — a FAILURE term — was handed to the refusal as its
-    ``failure_kind`` for a load that had never failed. This row now pins the
-    KIND, so restoring that conflation reds here. Nothing has FAILED in this
-    scenario — the load is in flight — so the honest cause is the contract's
-    ``model_unavailable`` fallback, never a fabricated failure term.
-
-    (The designed-absence half of the same class — an ARMED missing-extra
-    process told ``no_embedder`` — is pinned by
-    :func:`test_the_required_flag_with_no_extra_reports_not_installed`.)
+    ⛔ THE KIND IS ASSERTED, NOT JUST THE CLASS (#13528 review P1-2). Asserting
+    only ``pytest.raises(EmbedderUnavailableError)`` passed on a refusal carrying
+    ANY cause — which is exactly how ``failure_kind="no_embedder"`` shipped: the
+    trace term was handed straight to a field that only accepts
+    ``not_installed`` / ``load_failed`` / ``load_timeout`` / ``model_unavailable``.
+    A refusal that names the wrong dependency is the defect #5275 exists to
+    prevent, so the name is the assertion.
     """
     monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
     assert not EmbeddingModel.loaded(), "precondition: cold embedder"
 
     t0 = time.perf_counter()
-    with pytest.raises(EmbedderUnavailableError) as ei:
+    with pytest.raises(EmbedderUnavailableError) as excinfo:
         _read(sdk)
     elapsed = time.perf_counter() - t0
 
-    assert ei.value.failure_kind == "model_unavailable", (
-        f"the armed refusal must name the cause it actually resolved — a load "
-        f"still in flight has recorded no failure — got "
-        f"{ei.value.failure_kind!r}; ``no_embedder`` would tell the operator the "
-        f"extra is not installed, which is the #5275 conflation")
+    assert excinfo.value.failure_kind == "model_unavailable", (
+        f"a load still IN FLIGHT is not a broken load and not a designed "
+        f"absence — the refusal must carry model_unavailable, got "
+        f"{excinfo.value.failure_kind!r}")
     assert elapsed < _LOAD_S / 2, (
-        f"the armed refusal took {elapsed:.2f}s — it waited for the load instead "
-        f"of failing fast with its recorded reason")
+        f"the armed refusal took {elapsed:.2f}s (bar: {_LOAD_S / 2:.1f}s) — it "
+        f"waited for the load instead of failing fast with its recorded reason")
+
+
+def test_a_designed_absence_is_refused_with_not_installed(sdk, monkeypatch):
+    """⛔ THE P1-1 REGRESSION — two vocabularies, one translation.
+
+    ``absent_reason()`` publishes the LEG-TRACE term ``no_embedder`` for a
+    designed absence, and ``EmbedderUnavailableError.failure_kind`` is a CLOSED
+    set whose member for that state is ``not_installed``. ``no_embedder`` is not
+    IN that set, and #5275 explicitly forbids an armed refusal from carrying the
+    designed-absence term — so passing the trace term through by hand both broke
+    the closed set and said the forbidden thing. This pins both halves at once:
+    the TRACE gets ``no_embedder``, the REFUSAL gets ``not_installed``.
+
+    Driven directly on the predicate + ``_unavailable`` (the two halves of the
+    seam) rather than through a read: a process without the ``embeddings`` extra
+    cannot be simulated at runtime, and the mapping is what is under test.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "not_installed")
+    try:
+        decline = EmbeddingModel.await_read_ready_reason(READ_EMBED_BUDGET_S)
+        assert decline == "no_embedder", (
+            f"the TRACE must keep the designed-absence term, got {decline!r}")
+
+        monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+        with pytest.raises(EmbedderUnavailableError) as excinfo:
+            EmbeddingModel._unavailable(context="read: designed absence",
+                                       kind=decline)
+        assert excinfo.value.failure_kind == "not_installed", (
+            f"#5275 forbids an armed refusal from carrying the designed-absence "
+            f"term — failure_kind must be not_installed, got "
+            f"{excinfo.value.failure_kind!r}")
+    finally:
+        monkeypatch.undo()
+        EmbeddingModel._reset()
 
 
 def test_the_required_flag_with_no_extra_reports_not_installed(
@@ -514,11 +460,206 @@ def test_the_required_flag_with_no_extra_reports_not_installed(
         EmbeddingModel._reset()
 
 
+# ── the re-arm arm: a SPENT attempt is RESTARTED, not reported absent ────
+
+
+def test_a_spent_read_attempt_is_rearmed_and_spawned(monkeypatch):
+    """#13528 review P2-2 — a SPENT load attempt is re-armed **and spawned**.
+
+    ``start_warm_up`` latches once per process, so a read that finds the attempt
+    spent re-arms exactly one background attempt and STARTS it before answering.
+    Answering ``absent_reason()`` there named a designed absence (or a broken
+    load) for a state where nothing was ever absent — a load was merely not
+    running — and it never kicked the retry that recovers the embedder.
+
+    ⛔ THE ROW THIS ARM DID NOT HAVE (#13528 review F1). Mutating the block back
+    to ``cls._rearm_warm_up(); return cls.absent_reason()`` left every row in
+    this file — and every row in ``test_13224_cold_embedder_write_bound.py``,
+    whose ``attempt_spent`` arm covers the WRITE twin only — GREEN. Both
+    behaviours the block adds (the spawn, and ``load_in_flight`` instead of the
+    absence term) were unpinned, so a revert was invisible.
+
+    ``_warm_up_worker`` — the thread BODY — is stubbed so the re-armed attempt
+    cannot start a REAL load (~57 s cold, and it would leave the singleton warm
+    for the rows after this one). The SPAWN is real: ``start_warm_up`` creates
+    and starts the thread, which is what the assertions below read.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    release = threading.Event()
+    try:
+        EmbeddingModel._reset()
+        EmbeddingModel._last_failure_kind = "load_failed"
+        EmbeddingModel._last_failed_at = (
+            time.monotonic() - EmbeddingModel._FAIL_COOLDOWN_S - 1)
+        # The once-per-process latch SPENT with nothing in flight — the exact
+        # state ``start_warm_up`` answers ``None`` for.
+        EmbeddingModel._warm_up_started = True
+        EmbeddingModel._warm_up_thread = None
+
+        with mock.patch.object(EmbeddingModel, "_warm_up_worker",
+                               classmethod(lambda _cls, _lt=None: release.wait(30))):
+            t0 = time.perf_counter()
+            decline = EmbeddingModel.await_read_ready_reason(
+                READ_EMBED_BUDGET_S)
+            elapsed = time.perf_counter() - t0
+
+        assert decline == "load_in_flight", (
+            f"a read that finds the attempt SPENT must re-arm and answer "
+            f"load_in_flight — got {decline!r}, which names a designed absence "
+            f"or a broken load for a load that was never absent")
+        assert elapsed < READ_EMBED_BUDGET_S, (
+            f"the re-armed read waited {elapsed:.2f}s (budget "
+            f"{READ_EMBED_BUDGET_S}s) — it must SPAWN the retry and decline, "
+            f"not sit out the budget for the attempt it just restarted")
+        assert EmbeddingModel._warm_up_started is True, (
+            "the re-arm must SPAWN the retry before answering, or the answer "
+            "is a claim about a load that does not exist")
+        spawned = EmbeddingModel._warm_up_thread
+        assert spawned is not None and spawned.is_alive(), (
+            "the re-armed attempt must be a LIVE thread, not just a cleared latch")
+    finally:
+        release.set()
+        t = EmbeddingModel._warm_up_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=30)
+        EmbeddingModel._reset()
+
+
+def test_a_rearm_that_cannot_spawn_answers_absent(monkeypatch):
+    """The honesty half: no spawn ⇒ the answer must NOT claim a load in flight.
+
+    The fallback is reachable only when the warm-up flag is switched off between
+    the predicate's first check and ``start_warm_up``'s own (it is the same
+    process-wide flag, read twice), so the flag is driven from a two-value
+    sequence. Delete the fallback and the read answers ``load_in_flight`` for a
+    lane that has just opted out — the same false claim, one state over.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    try:
+        EmbeddingModel._last_failure_kind = "load_failed"
+        EmbeddingModel._last_failed_at = (
+            time.monotonic() - EmbeddingModel._FAIL_COOLDOWN_S - 1)
+        EmbeddingModel._warm_up_started = True
+        EmbeddingModel._warm_up_thread = None
+        states = iter((True, False))
+        monkeypatch.setattr(embeddings, "_embedder_warmup_enabled",
+                            lambda: next(states, False))
+
+        assert EmbeddingModel.await_read_ready_reason(
+            READ_EMBED_BUDGET_S) == "load_failed", (
+            "with the warm-up switched off underneath the read, nothing was "
+            "spawned — so the answer must be absent_reason() (here the recorded "
+            "load_failed), never a claim that a load is in flight")
+        assert EmbeddingModel._warm_up_started is False, (
+            "a lane that cannot spawn must not leave the latch set — a later "
+            "read would read it as an attempt in flight")
+    finally:
+        monkeypatch.undo()
+        EmbeddingModel._reset()
+
+
+def test_the_re_armed_read_names_a_recorded_failure_on_the_refusal(monkeypatch):
+    """COUNTER-TEST to the row above: a RECORDED failure still reaches the operator.
+
+    The re-arm arm must not solve the conflation by hiding a real cause. When a
+    load attempt failed long enough ago that the cooldown has expired, the arm is
+    reachable again — and the two fields answer their own questions: the TRACE
+    says ``load_in_flight`` (a load really was just started, which is why the arm
+    SPAWNS before answering), and the REFUSAL names the failure that was
+    recorded, through ``_as_failure_kind``. That is the seam an operator reads.
+
+    ⛔ THIS ROW IS THE DELTA OVER ``main``'s FIXED DICT (#13534 review round 5).
+    ``_READ_DECLINE_FAILURE_KIND`` maps ``load_in_flight → model_unavailable``
+    unconditionally, so a recorded ``load_failed`` is DISCARDED and the refusal is
+    indistinguishable from "nothing was ever recorded". Restore that dict and this
+    row reds on the refusal assertion while the trace assertion above it still
+    passes — the failure is attributed to the translation, not to the arm.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    release = threading.Event()
+    try:
+        EmbeddingModel._reset()
+        monkeypatch.setattr(EmbeddingModel, "_instance", None)
+        # Outside the negative-cache cooldown, so the arm is reachable.
+        monkeypatch.setattr(
+            EmbeddingModel, "_last_failed_at",
+            time.monotonic() - (EmbeddingModel._FAIL_COOLDOWN_S + 1.0))
+        monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "load_failed")
+        monkeypatch.setattr(EmbeddingModel, "_warm_up_started", True)
+        monkeypatch.setattr(EmbeddingModel, "_warm_up_thread", None)
+
+        # The spawned worker is stubbed and held, so the SPAWN is real while no
+        # ~57 s load starts underneath the rows after this one.
+        with mock.patch.object(EmbeddingModel, "_warm_up_worker",
+                               classmethod(lambda _cls, _lt=None: release.wait(30))):
+            decline = EmbeddingModel.await_read_ready_reason(0.0)
+
+            assert decline == "load_in_flight", (
+                f"the TRACE answers what just happened — a load was SPAWNED — so "
+                f"it cannot borrow the record of an earlier failure, got {decline!r}")
+
+            monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+            with pytest.raises(EmbedderUnavailableError) as ei:
+                EmbeddingModel._unavailable(context="read: re-armed", kind=decline)
+        assert ei.value.failure_kind == "load_failed", (
+            f"the recorded failure must reach the operator on the refusal — "
+            f"`model_unavailable` here hides the cause they have to fix, got "
+            f"{ei.value.failure_kind!r}")
+    finally:
+        release.set()
+        t = EmbeddingModel._warm_up_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=30)
+        EmbeddingModel._reset()
+
+
+def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
+    """The translator's recorded-cause arm, pinned directly (round-1 P2).
+
+    ``load_in_flight`` names no failure, but a load CAN fail between the read's
+    decline and the raise that carries it, and ``_last_failure_kind`` then holds
+    the operator's real answer. The earlier shape special-cased ``no_embedder``
+    and returned the ``model_unavailable`` fallback for everything else, so that
+    recorded cause was discarded. No cold-window ROW in this suite reaches that
+    state (each leaves nothing recorded), but the READ PATH does: a failure older
+    than ``_FAIL_COOLDOWN_S`` leaves ``load_in_flight`` on the trace with a
+    recorded kind, and ``_as_failure_kind`` then reports that kind. It is pinned
+    at the seam because no fixture reproduces that staleness — not because the
+    arm is unreachable.
+    """
+    EmbeddingModel._reset()
+    try:
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == \
+            "model_unavailable", (
+            "with nothing recorded the contract's documented fallback is the "
+            "honest answer — the load was in flight, nothing broke")
+
+        EmbeddingModel._last_failure_kind = "load_failed"
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == "load_failed", (
+            "a cause recorded by the time the refusal is raised must be named, "
+            "not replaced by the fallback")
+
+        EmbeddingModel._last_failure_kind = "not_installed"
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == "not_installed", (
+            "the recorded kind is the answer whatever it is, not only for "
+            "`no_embedder` — the special-case shape this replaces")
+
+        assert EmbeddingModel._as_failure_kind("load_timeout") == "load_timeout", (
+            "a reason already in the refusal's vocabulary is passed through")
+    finally:
+        EmbeddingModel._reset()
+
+
 # ── the budget itself ─────────────────────────────────────────────────────
 
 
 def test_the_read_budget_is_bounded_and_far_below_the_read_bound():
     """The budget is a constant, and small against the bound it sits inside.
+
+    ⛔ A PIN, NOT A DISCRIMINATOR (#13528 review P2-3): it holds on the
+    pre-change tree too, and is here to stop the number drifting, not to catch
+    the defect. The behaviour tests are what redden.
 
     The read lane's wait bound is 8 s (``CONTROL_PLANE_READ_TIMEOUT_S``,
     justified by a 41–80 ms measured graph answer). A budget near that would
@@ -530,6 +671,10 @@ def test_the_read_budget_is_bounded_and_far_below_the_read_bound():
 
 
 def test_the_two_stage_names_are_still_distinct():
-    """Indicator 5, stated as the vocabulary property rather than the marks."""
+    """Indicator 5, stated as the vocabulary property rather than the marks.
+
+    ⛔ A PIN, NOT A DISCRIMINATOR (#13528 review P2-3) — see the budget pin
+    above; the cold-read stage assertions carry the discriminating half.
+    """
     assert STAGE_EMBED_GET != STAGE_EMBED_ENCODE
     assert {STAGE_EMBED_GET, STAGE_EMBED_ENCODE} <= read_stages.STAGE_SET

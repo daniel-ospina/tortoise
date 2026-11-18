@@ -948,10 +948,15 @@ class EmbeddingModel:
         """
         if not cls._embedder_required():
             return None
+        # #13534 review (round 5): the translation is `_as_failure_kind` — the
+        # rule, not a fixed dict — so an unrecognised term cannot be passed
+        # through into the closed set and a recorded cause is never discarded.
+        failure_kind = None
         if kind is not None:
-            kind = cls._as_failure_kind(kind)
+            failure_kind = cls._as_failure_kind(kind)
         raise EmbedderUnavailableError(
-            failure_kind=kind or cls._last_failure_kind or "model_unavailable",
+            failure_kind=(failure_kind or cls._last_failure_kind
+                          or "model_unavailable"),
             model=EMBEDDING_MODEL,
             revision=EMBEDDING_MODEL_REVISION,
             last_error=cls._last_error,
@@ -981,7 +986,8 @@ class EmbeddingModel:
         if reason in FAILURE_KINDS:
             return reason
         # A reason outside the vocabulary — ``no_embedder`` (the designed absence)
-        # or ``load_in_flight`` (no failure inside the cooldown window) — is not
+        # or ``load_in_flight`` (the read's own decline: nothing is failing right
+        # now, and on the re-arm arm an attempt has just been STARTED) — is not
         # itself a cause, so the answer is the kind that WAS recorded:
         # ``not_installed`` in the missing-extra state ``no_embedder`` is published
         # for, and the operator's real answer if a load failed while this read was
@@ -1419,20 +1425,33 @@ class EmbeddingModel:
             # Nothing is in flight and the once-per-process attempt is spent
             # (``start_warm_up`` latches). Re-arm ONE background attempt — the
             # same arm the write path takes — so a load that failed for a
-            # transient reason is retried without every read paying this budget
-            # forever, and decline without waiting: nothing can make progress
-            # inside the budget.
+            # transient reason is retried, and SPAWN it before answering, which
+            # is what makes the answer honest (#13528 review P2-2).
+            #
+            # ⛔ Answering ``absent_reason()`` here was wrong: with
+            # ``_last_failed_at`` unset that returns ``no_embedder``, the
+            # DESIGNED-ABSENCE term, for a state where nothing was ever absent —
+            # a load was merely not running and is now restarting. That is the
+            # same conflation this whole method exists to close, one arm over.
+            # With the attempt re-armed and started the truthful term is
+            # ``load_in_flight``; only a lane that cannot start one at all (the
+            # warm-up switched off underneath us) falls back to
+            # ``absent_reason()``.
             cls._rearm_warm_up()
-            # ⛔ NOT unconditionally ``absent_reason()`` (#13528 review P2-2):
-            # the attempt was just RE-ARMED, so a load is about to be in flight
-            # and there is nothing absent to report. ``absent_reason`` answers
-            # ``no_embedder`` whenever no attempt has recorded a failure, which
-            # here would label a retry-in-progress "the extra was never
-            # installed" — the conflation this very fix exists to close, one arm
-            # over. A RECORDED failure still wins: it is the operator's answer.
-            if cls._last_failed_at is not None:
-                return cls.absent_reason()
-            return _READ_DECLINE_LOAD_IN_FLIGHT
+            # #13534 review (round 5) — the arm SPAWNS before answering, which is
+            # what makes the answer honest: a re-armed attempt that was never
+            # started is a claim about a load that does not exist. (The earlier
+            # shape here answered from ``_last_failed_at`` WITHOUT spawning.)
+            #
+            # ⛔ A RECORDED failure is NOT lost by answering ``load_in_flight`` on
+            # the TRACE: the refusal translates the term through
+            # :meth:`_as_failure_kind`, which names the recorded kind whenever one
+            # exists — so the operator still gets ``load_failed`` in
+            # ``failure_kind``, at the seam that answers operators. The trace states
+            # the fact (a load was just started); the refusal names the cause.
+            if cls.start_warm_up() is not None:
+                return _READ_DECLINE_LOAD_IN_FLIGHT
+            return cls.absent_reason()
         deadline = now + max(0.0, budget)
         while True:
             inst = cls._instance
@@ -1942,6 +1961,14 @@ _READ_DECLINE_LOAD_IN_FLIGHT = "load_in_flight"
 #: owner (``exceptions.FAILURE_KINDS``) and imported above — never re-typed here,
 #: or this module becomes the second hand copy of a vocabulary it translates into
 #: (the drift class ``MEMORY.md`` records under ``[vocab]``).
+#:
+#: #13534 review (round 5) — this is why ``main``'s ``_READ_DECLINE_FAILURE_KIND``
+#: (shipped on #13535) is NOT kept here: a fixed dict answers only the terms it
+#: was written for and passes anything else through unchanged (publishing a word
+#: outside the closed set), and its unconditional ``load_in_flight →
+#: model_unavailable`` DISCARDS a recorded ``load_failed``. :meth:`_as_failure_kind`
+#: answers both: in-vocabulary passes through, else the RECORDED kind, else the
+#: documented ``model_unavailable``.
 
 def _in_replay_scope() -> bool:
     """True when this fold is a journal REPLAY, not a live door (#13224).

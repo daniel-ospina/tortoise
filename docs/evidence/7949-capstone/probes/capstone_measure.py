@@ -70,7 +70,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:15701-15707`` and
 ``result["vet"]`` at ``:15711-15715``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:21474``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:21540``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -276,9 +276,9 @@ ANCHOR_OUT = ("extractedFrom",)
 
 #: The relationship type that points AT a derived node: ``(Source)-[:references]
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
-#: (``tortoise/projection/edges.py:3032-3057``, ``MERGE (s)-[r:references]->(e)
+#: (``tortoise/projection/edges.py:3058-3083``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:21872`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:21938`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -293,7 +293,7 @@ E3_RULE = (
     "interchangeable: extractedFrom points FROM the derived node at its source "
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
-    "tortoise/projection/edges.py:3032-3057 link_source_to_event, reached from "
+    "tortoise/projection/edges.py:3058-3083 link_source_to_event, reached from "
     f"the capture path at {LINK_SOURCE_CITE} "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
@@ -553,7 +553,7 @@ SEAM_LEDGER = (
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2801`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2802`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -2889,7 +2889,7 @@ def _a1_object_edges(projection) -> dict:
          "edges": int(row[3] or 0)}
         for row in projection.g.query(
             # ⛔ `objectKind`, NOT `kind`: the writer stamps `o.objectKind=coalesce($ok,'other')`
-            # (tortoise/projection/entities.py:5105) and the pack declares `fromKind`/`toKind`
+            # (tortoise/projection/entities.py:5114) and the pack declares `fromKind`/`toKind`
             # (packs/dev/manifest.yaml:144-149). Reading `a.kind` returned NULL on every real graph
             # — the "by endpoint kind" half reported as measured while measuring nothing (#10982
             # review, finding 3).
@@ -3314,12 +3314,12 @@ def _a4_pointkind(projection) -> dict:
 
     ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
-    with no kind — `tortoise/projection/__init__.py:14389-14391`, `# Ensure pointKind is present
+    with no kind — `tortoise/projection/__init__.py:14669-14671`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
     `projection/entities.py:2979`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
     not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
-    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2801`)
+    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2802`)
     inside `_write_capture_turns` — and 159 of
     the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
     them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
