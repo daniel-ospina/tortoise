@@ -964,9 +964,12 @@ class EmbeddingModel:
         the only place that knows both vocabularies. ``no_embedder`` is the
         trace word for the designed absence, so the CAUSE is whatever kind was
         recorded — ``not_installed`` in the missing-extra state the word is
-        published for. A reason that names no recorded failure at all (a load
-        still IN FLIGHT, which is the read's own decline) has no cause to
-        report, and the contract's documented fallback is the honest answer.
+        published for. A reason outside the vocabulary names no cause OF ITS OWN
+        (``load_in_flight`` is the read's own decline, not a failure), so the
+        kind that WAS recorded is the operator's answer whenever there is one —
+        a load that broke since the decline is exactly that case — and only when
+        nothing was recorded is the contract's documented ``model_unavailable``
+        fallback the honest answer.
 
         A reason already IN the vocabulary is returned unchanged (no translation
         needed). The ``get()`` exits are preserved by a different mechanism:
