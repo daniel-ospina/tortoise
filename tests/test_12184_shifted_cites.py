@@ -117,7 +117,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # siblings (`:6923-6939`, `:6933`, `:6934`, `:6939`) moved to — `:6869` opens on `"pointKind",`,
     # an unrelated property list, so the cite read exactly like a correct one. An absent pin is not
     # coverage. ⚠️ That `:6869` was wrong AT THIS TREE and right at `main` (`ae54df166d`), which is
-    # why §1's enumeration keeps `:6869` (its paragraph announces that head, not this one) and why
+    # why the header's enumeration keeps `:6869` (its paragraph announces that head, not this one) and why
     # this row — the working-tree site — carries `:6938`.
     (_AUDIT, "`:6938`", _PI, 6938, '("Object", ["name"])'),
     (_AUDIT, "`:6939`", _PI, 6939, '("Source", ["_searchText"])'),
@@ -220,9 +220,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6933`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6934`'): 1,
     # 1, not 2: `:6938` is the Object declaration at THIS tree, and only §2.5's row cites it. The
-    # site §1's enumeration names is `:6869` — that paragraph is bound to `main` (`ae54df166d`),
+    # site the header's enumeration names is `:6869` — that paragraph is bound to `main` (`ae54df166d`),
     # where the declaration IS `:6869` (`:6938` there is `# background RDB/AOF child in the fork
-    # slot…`). `#13489`'s first cut re-pointed §1 too, which made a history cite claim a
+    # slot…`). `#13489`'s first cut re-pointed the header too, which made a history cite claim a
     # working-tree address: the FALSE CORRECTION this file exists to stop, one level up.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6939`'): 1,
@@ -535,12 +535,18 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
         )
 
 
-def test_section_1s_enumeration_is_never_re_pointed_to_the_working_tree() -> None:
-    """§1's numbers are bound to the `main` head the paragraph announces — `:6869` is that head's cite.
+def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> None:
+    """The header enumeration's numbers are bound to the `main` head the paragraph announces — `:6869` is
+    that head's cite.
 
-    §1 opens with its own binding: *"All sixteen were re-derived at `main` (`ae54df166d`) — ⚠️ **so they
-    do NOT open at the pin above** — and each is named here by the cite it became"*. Every number in that
-    sentence is therefore an address AT `ae54df166d`, not at this tree.
+    ⚠️ This region is the HEADER, not §1: the binding sentence sits at doc line 113, and `## 1.` starts at
+    line 209. The file's own name for it is "the header region — every line before `## 1.`" (see
+    `test_the_main_set_enumeration_names_the_group_it_was_missing`), and §1 is 18 rows of writers, which
+    carries no enumeration of cites at all.
+
+    The header paragraph opens with its own binding: *"All sixteen were re-derived at `main` (`ae54df166d`)
+    — ⚠️ **so they do NOT open at the pin above** — and each is named here by the cite it became"*. Every
+    number in that sentence is therefore an address AT `ae54df166d`, not at this tree.
 
     `#13489`'s first cut re-pointed the Object entry from `:6869` to `:6938` — this tree's value, correct
     for §2.5's row 69 lines lower and WRONG under a sentence that announces the other head. A
@@ -548,19 +554,19 @@ def test_section_1s_enumeration_is_never_re_pointed_to_the_working_tree() -> Non
     FALSE CORRECTION this file's own docstring is built around, one head over.
 
     NON-VACUOUS on the pre-fix document (`git show 26a68370b327:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`):
-    §1 carries `:6938` after the fragment and `:6869` nowhere, so this assertion reds there. The
+    the header carries `:6938` after the fragment and `:6869` nowhere, so this assertion reds there. The
     measurement that settles which number belongs to the announced head is
     `git show ae54df166d:tortoise/projection/__init__.py | sed -n '6869p;6938p'` ->
     `("Object", ["name"]),` and then `# background RDB/AOF child in the fork slot, and a hung un-reaped`.
 
-    ⚠️ It does NOT ban `:6938` from §1: naming BOTH heads — the shape `hosted_api.py:33583` already uses
-    one paragraph up (`:33583` there, `:33601` at this head) — keeps the sentence true and this arm
+    ⚠️ It does NOT ban `:6938` from the header: naming BOTH heads — the shape `hosted_api.py:33583` already
+    uses one paragraph up (`:33583` there, `:33601` at this head) — keeps the sentence true and this arm
     green, which is why the assertion is on the `:6869` adjacency rather than on a token count.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     assert '`("Object", ["name"])`\n`:6869`;' in text, (
-        "§1's enumeration no longer names the Object declaration at `:6869` — the address it holds at "
-        "the `main` head that paragraph announces (`ae54df166d`). `:6938` is THIS tree's value (and "
+        "the header enumeration no longer names the Object declaration at `:6869` — the address it holds "
+        "at the `main` head that paragraph announces (`ae54df166d`). `:6938` is THIS tree's value (and "
         "§2.5's row); putting it here re-points a history cite to a working-tree address, the "
         "`⚠️ CORRECTED` failure this file exists to stop. Either restore `:6869`, or name both heads "
         "(`:6869` there, `:6938` at this head) as `hosted_api.py:33583` does above."
