@@ -1472,13 +1472,25 @@ def test_an_unlexable_key_is_what_makes_the_fail_open_a_RED(
 #: shape — this change has cleared one shape per review round, and each round the
 #: NEXT shape was what red.
 _SHAPE_ALPHABET = ("'", '"', "\\", "#", " ", "a")
-#: Length bound, stated rather than discovered. At 6 the sweep starts finding a
-#: PRE-EXISTING mis-slice that this change neither causes nor clears — `''''#'`,
-#: where YAML keeps `'` and the arm's body is `''#`, because `body = value[1:-1]`
-#: is not sliced at the close. It is recorded in the plan doc §9 with the reason
-#: the one-line slice fix cannot land alone (slicing at the close turns `'a'x'`
-#: GREEN on input YAML REFUSES). Including it here would red this pin for a reason
-#: that is not this diff's.
+#: Length bound, stated rather than discovered. At 6 the sweep starts finding FIVE
+#: PRE-EXISTING discrepancies this change neither causes nor clears — all five
+#: reproduce IDENTICALLY through `origin/main`'s `_closing_quote` + `_split_comment`
+#: (measured shape by shape), so the exclusion is about ownership, not severity.
+#: ⛔ They are NOT all the same kind, and naming only the harmless one would tell a
+#: lane that raises this bound that 5→6 is safe for a reason it is not:
+#:
+#: * ONE is a mis-slice — `''''#'` is loadable YAML (`'`) and the arm's body is
+#:   `''#`, because `body = value[1:-1]` is not sliced at the close the parity scan
+#:   already located. False red → it fails CLOSED (see the plan doc §9 for why the
+#:   one-line slice fix cannot land alone).
+#: * FOUR are the pin's FIRST and most severe direction — REFUSED-BUT-GREEN, i.e.
+#:   a comparing verdict on input a real parser REJECTS — and all four are of the
+#:   `''''X'` form: `''''"'`, `''''\'`, `'''' '`, `''''a'`.
+#:
+#: None of the four is an END-TO-END fail-open, which is why this pin's bound is the
+#: right place to exclude them rather than the lexer: `parse_frontmatter` returns
+#: `{}` for every one of them, so the PARSE arm refuses the file before a comparing
+#: verdict is ever consumed (measured).
 _SHAPE_MAX_LEN = 5
 
 

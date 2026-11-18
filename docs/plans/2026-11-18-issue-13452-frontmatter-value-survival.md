@@ -644,13 +644,23 @@ the parser read. Measured: 277 shapes reach a comparing verdict, **0** refusals 
 reports as `single-quoted` with body `''` — and mutating this head's wholeness test back to main's
 `not value.endswith(q)` reds the new pin (`4 failed, 14 passed`, restored after the run).
 
-It stops at length 5 because at 6 the sweep finds a PRE-EXISTING mis-slice this change neither causes
-nor clears: `''''#'` is loadable YAML (`'`) and the arm's body is `''#`, because
-`body = value[1:-1]` is never sliced at the close the parity scan already located. Recorded, not
-fixed, because the one-line fix — `body = value[1:close]` — CANNOT land alone: it would make `'a'x'`
-GREEN with body `a` on input YAML REFUSES (a `ParserError`), i.e. it converts a fail-closed false
-block into a fail-open. It has to land WITH the lexer widening above, and the length bound in the pin
-names it rather than leaving it to be rediscovered.
+It stops at length 5 because at 6 the sweep finds FIVE PRE-EXISTING discrepancies this change
+neither causes nor clears — and they are NOT all one kind, so naming only the harmless one would
+mis-describe the bound. All five reproduce IDENTICALLY through `origin/main`'s `_closing_quote` +
+`_split_comment` (measured shape by shape), so the exclusion is about ownership, not severity.
+
+* FOUR are the pin's FIRST and most severe direction — **refused-but-green**, a comparing verdict
+  on input a real parser REJECTS — all of the `''''X'` form: `''''"'`, `''''\'`, `'''' '`,
+  `''''a'`. None is an end-to-end fail-open: `parse_frontmatter` returns `{}` for every one, so the
+  PARSE arm refuses the file before a comparing verdict is consumed (measured at `f43f4971`).
+* ONE is a mis-slice of the harmless direction — `''''#'` is loadable YAML (`'`) and the arm's body
+  is `''#`, because `body = value[1:-1]` is never sliced at the close the parity scan already
+  located. False red, so it fails CLOSED. Recorded, not fixed, because the one-line fix —
+  `body = value[1:close]` — CANNOT land alone: it would make `'a'x'` GREEN with body `a` on input
+  YAML REFUSES (a `ParserError`), converting a fail-closed false block into a fail-open. It has to
+  land WITH the lexer widening above.
+
+The length bound in the pin names the whole residual rather than leaving it to be rediscovered.
 
 **Recorded, not fixed (the VERDICT) — a MULTI-LINE QUOTED scalar is refused; the remedy it prints is no longer mis-worded.**
 Found by the second fresh-context review at `ae275460df` and re-measured there. A quoted scalar may
