@@ -393,7 +393,8 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
     # 47: `#13489`'s review added the `:6938` row (`("Object", ["name"])`, the §2.5 address that
-    # had NO pin at all, which is how `:6869` stayed 69 lines behind its three siblings).
+    # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6933`/`:6934`/`:6939`
+    # sit 64/65/70 lines below `:6869`, while `:6938`, the row that had no pin, is the 69th).
     assert len(_PINS) == 47
 
 
@@ -576,3 +577,55 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "`⚠️ CORRECTED` failure this file exists to stop. Either restore `:6869`, or name both heads "
         "(`:6869` there, `:6938` at this head) as the `hosted_api.py:33583`/`:33601` pair does."
     )
+
+
+#: The `main`-head figures the header enumerates beside this tree's — one number per moved site, each
+#: re-opened at `ae54df166d`. They are NOT in `_PINS`: a pin resolves against the WORKING TREE, and a
+#: `main`-head address has no working-tree line to resolve to, so `declared == pinned` would force them
+#: out of `_TOKEN_OCCURRENCES` too — which is exactly what happened when this revision re-pointed the
+#: document and took the counts with the old spellings. Measured on `origin/main`: the same figures DID
+#: carry counts (`':6854-6870'`: 1, `'sdk.py:36985'`: 1), so losing them was a REGRESSION in coverage,
+#: not a pre-existing gap. Counting the spelling here restores it without touching the pin contract.
+#:
+#: ⛔ This is a count guard, not a head guard: it catches a re-point that changes how many sites carry
+#: the figure (the `:4549`→`:4552` double-shift, and every `⚠️ CORRECTED` edit that moves one), and
+#: nothing more. Proving each figure OPENS on its content at `ae54df166d` needs a head-selecting arm —
+#: `git show <head>:<path> | sed -n '<N>p'` — which is #13508, deliberately not solved by a test that
+#: would need full history in a shallow CI checkout.
+_MAIN_HEAD_FIGURES: dict[str, int] = {
+    '`:6854-6870`': 1,
+    '`:6864`': 1,
+    '`:6865`': 1,
+    '`:6870`': 1,
+    '`:36985`': 2,
+    '`:37008`': 2,
+    '`:23982`': 1,
+    '`:21668`': 1,
+    '`:21791`': 1,
+    '`:22919`': 2,
+    '`:22731`': 2,
+    '`:33583`': 1,
+}
+
+
+def test_the_main_head_figures_the_header_names_are_still_counted() -> None:
+    """A `main`-head figure cannot be pinned to the tree, so count it — that is what caught it before.
+
+    Every one of these twelve is an address AT `ae54df166d`, written beside this tree's figure for the
+    same site. Re-pointing one while the `main` label stays is this document's core defect (a
+    `⚠️ CORRECTED` marker records that the text changed, never that the change was right), and it moves
+    a count: the token stops appearing where it was, or starts appearing where it was not.
+
+    ⛔ What this does NOT prove: that the figure is the RIGHT line at `ae54df166d`. It proves the figure
+    written is the figure this file last measured. A wrong-but-stable number passes; #13508 carries the
+    head-selecting arm that would actually open it.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    for token, expected in _MAIN_HEAD_FIGURES.items():
+        actual = text.count(token)
+        assert actual == expected, (
+            f"{_AUDIT} carries `{token}` {actual}x, not {expected}x. These are the `main`-head figures "
+            "(`ae54df166d`); a changed count means one was re-pointed, which is the false correction "
+            "this document is built around. Re-open the site by CONTENT — "
+            "`git show ae54df166d:<path> | sed -n '<N>p'` — and fix the figure, not the count."
+        )
