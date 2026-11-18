@@ -131,9 +131,12 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > only, where an unreachable record raises instead of reading as an absence). It is parsed once in
 > `tortoise/record_serve.py::serve_mode` and consumed at every door that serves an anchored read — `GET /v1/points/{id}`
 > and `TortoiseSDK.get_point`'s `served_out` form (which is what the MCP `tortoise_get_point` door calls), the bare
-> by-id entity door (`tortoise_get_entity` → `TortoiseSDK.get_entity`, `#13093`), and the residency router's
-> `node-by-key` repair — each through `record_serve`. The set is enumerated in `record_serve.ANCHORED_READS`, with its
-> exclusions and their reasons beside them, so this paragraph names no door the module does not. **`prefer` is the mode
+> by-id entity door (`tortoise_get_entity` → `TortoiseSDK.get_entity`, `#13093`) — each through `record_serve`.
+> `node-by-key` sits in the same registry as a served CAPABILITY with **no consumer wired yet**: it answers any record
+> label by its interface-E coordinate, which is the shape the residency router's `fetch-record` repair is handed, and
+> the router that mints that coordinate (`residency_router.route_for_coordinate`) has no non-test caller today — so it
+> serves no door, and it does not consult the switch. The registry is `record_serve.ANCHORED_READS`, with each
+> exclusion and its reason beside it. **`prefer` is the mode
 > that MEASURES the migration** — every answer names the store that produced it (`servedFrom` / `fallbackReason`) — and
 > it is the mode armed in production; **`record` follows that count**, never a date. The epic's
 > `08-hosted-prerequisites.md` §0.1 and N1 state the same, and `docs/architecture/SEARCH-ARCHITECTURE.md` also
