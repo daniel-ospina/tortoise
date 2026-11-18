@@ -1818,8 +1818,10 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
     """F2 (P3) — the `abandoned` arm first-named `status='archived'`, which a
     `:Point` goal's own door REFUSES, so the repair was a circle.
 
-    ``_ALLOWED_TRANSITIONS`` is ``live -> {retracted, superseded}`` and annotates
-    ``archived`` as *"terminal (reserved — no v1 write path)"* (ONTOLOGY §5);
+    ``_ALLOWED_TRANSITIONS`` is ``live -> {deprecated, superseded}`` and declares
+    no route to ``archived`` (§5 v3.37's four rows name those two targets and
+    deleted the *"reserved — no v1 write path"* row, which survives only as
+    ``deprecated``'s write-side synonym);
     ``_update_entity``'s Point status arm enforces it. This PR already made the
     SIBLING `superseded` arm carrier-aware and pinned it
     (``test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT``) — the

@@ -4812,12 +4812,14 @@ CROSS_LENS_ANN_TOP_K = 20
 CROSS_LENS_ANN_TOP_K_MAX = 100
 
 # #432: declarative spec for the Point lifecycle — ONTOLOGY §5's transition
-# table in code, PLUS one code-review decision the doc does not carry: a DRAFT
-# may terminalize before it is ever live (``draft -> deprecated/superseded``), so
-# the map is a SUPERSET of §5's `draft` row and an exact match of its `live`
-# row. ``tests/test_claim_lifecycle.py`` cross-checks the terminal words and the
-# doc's declared transitions; the `draft` widening is pinned there as the #432
-# decision, not as doc↔map equality.
+# table in code, ROW FOR ROW since v3.37. A DRAFT may terminalize before it is
+# ever live (``draft -> deprecated/superseded``), and §5's `draft` row now STATES
+# those three targets, so this map is the doc's table and not a superset of it.
+# ⛔ THAT EQUALITY IS PINNED:
+# ``tests/test_claim_lifecycle.py::test_ontology_transitions_column_matches_the_
+# guard_map`` compares every row's ``Transitions to`` cell against this map, so
+# narrowing §5's `draft` cell back to ``live`` reds a test — do not "restore" the
+# doc to a subset of the map believing the widening is code-only.
 # NOT consulted by update_point per-call (update_point only promotes
 # draft→live; every claim transition is observable via a Task 3 emit hook, and
 # no transition can slip through update_point unemitted).
@@ -6643,9 +6645,10 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                     # `superseded` arm was made carrier-aware in an earlier
                     # round and the `abandoned` arm was left carrier-BLIND, so
                     # its first-named repair was `status='archived'` — which
-                    # `_ALLOWED_TRANSITIONS` REFUSES on a `:Point` (*"terminal
-                    # (reserved — no v1 write path)"*, ONTOLOGY §5), i.e. the
-                    # first thing this message told a Point caller to do, the
+                    # `_ALLOWED_TRANSITIONS` REFUSES on a `:Point` (no declared
+                    # route to it; §5 v3.37 deleted the "reserved — no v1 write
+                    # path" row and made `archived` only `deprecated`'s synonym),
+                    # i.e. the first thing this message told a Point caller to do, the
                     # same door then refused. Measured in the new suite
                     # (`test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal`):
                     # the pre-fix text raised `update_entity refused the status
@@ -12568,8 +12571,11 @@ _GUARDED_LIFECYCLE_PROPS = frozenset({"status"}) | _TEMPORAL_RESTAMP_PROPS
 #: this arm is the door a caller promotes one through.
 #:
 #: The SECOND conjunct is the fix. The legacy ``outdated=true`` flag is a
-#: TERMINALITY signal — §5's ``outdated`` row: "Terminal on every read surface
-#: and for every lifecycle transition" — and ``update_entity``'s guard already
+#: TERMINALITY signal — the row that used to say so ("Terminal on every read
+#: surface and for every lifecycle transition") was deleted from §5 in v3.37, and
+#: it now says the same thing as a note: the boolean "remains a second, flag-based
+#: dead marker (#2498) that readers — including EP's currency predicate — must
+#: continue to honour" — and ``update_entity``'s guard already
 #: read it, so without this conjunct this door ACCEPTED a flag-dead point and
 #: stored ``status='live'`` beside the flag: a claim that reads terminal to
 #: every reader while carrying a live status. That is the two-facts-disagree
@@ -52405,15 +52411,19 @@ class TortoiseSDK:
         # explicit pair is what a caller who knows only the successor's NAME can
         # send; and the successorless retirement is named with the word the model
         # gives it — `archived` for an Object/Subject (§4.3/§4.2), and for a
-        # Point `retract_point`, because §5 declares `archived` RESERVED on
-        # Points ("no v1 write path") and naming it there would advertise a
-        # write the model does not offer.
+        # Point `retract_point`. ⛔ NOT because §5 reserves `archived` on Points:
+        # that row was deleted in v3.37, and `archived` is a declared SYNONYM of
+        # `deprecated` on every kind (`lifecycle_vocabulary.py:95`). What makes it
+        # the wrong word to name HERE is this door's own map: `_ALLOWED_TRANSITIONS`
+        # declares no route to it, so the repair would be refused by the very call
+        # that prescribed it (AX rule 2).
         if first == "Point":
             model_clause = (
                 "That is not a supersession at all: a Point retired with no "
                 "successor is 'retracted' (`retract_point`), and 'deprecated' is "
-                "an independent terminal state that needs none (`archived` is "
-                "RESERVED on Points — ONTOLOGY §5: no v1 write path). ")
+                "an independent terminal state that needs none (`archived` is only "
+                "its write-side synonym, and ONTOLOGY §5 declares no transition to "
+                "it). ")
             retirement_word = f"`retract_point({_refusal_repr(id_val)})`"
             retirement = f"or, if nothing replaced it, {retirement_word}."
             # ⛔ THE CARRIER CLAUSE IS LABEL-CONDITIONAL, because the carrier IS.
@@ -53594,9 +53604,11 @@ class TortoiseSDK:
                     # verbs that reach them are named where they exist, and the
                     # mint-and-supersede route covers the case the status itself
                     # was wrong. `archived` gets its own sentence because it is
-                    # *"reserved — no v1 write path"* on a Point (ONTOLOGY §5),
+                    # is not a DECLARED transition on a Point (§5's four rows
+                    # name `deprecated`/`superseded` as `live`'s targets; the
+                    # "reserved — no v1 write path" row was deleted in v3.37),
                     # so naming it in a transition list would advertise a write
-                    # the model does not offer. For a declared target the verbs
+                    # this door refuses. For a declared target the verbs
                     # are named too (`retract_point` / `supersede_point`) even
                     # though this door would accept the status: they are the
                     # routes that also journal the transition and, for

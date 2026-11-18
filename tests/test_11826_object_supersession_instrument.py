@@ -2551,8 +2551,9 @@ def test_a_dead_SOURCE_is_not_an_active_edge(sdk):
         "fixture drifted: the live edge must build a factor"
     # EP-dead source BEFORE the supersession: the factor is already gone.
     # #9649: this ARCHIVE is a PRE-#9649 shape — `live -> archived` is not a
-    # declared Point transition (ONTOLOGY §5 keeps `archived` reserved on
-    # Points), so the generic door refuses it now. The subject here is the audit
+    # declared Point transition (§5 v3.37 declares `deprecated`/`superseded` and
+    # deleted the "reserved on Points" row; `archived` survives only as
+    # `deprecated`'s write-side synonym), so the generic door refuses it now. The subject here is the audit
     # instrument comparing `status` rather than the node, not the door, so the
     # dead state is seeded the way a pre-#9649 writer left it (the same treatment
     # `test_3311` / `test_6239` got in that change). `retract_point` is NOT a
