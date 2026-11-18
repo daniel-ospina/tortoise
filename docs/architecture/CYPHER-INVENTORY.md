@@ -557,8 +557,7 @@ this branch *removes* two door calls, landing the merge on 1569 / 258 — was tr
 of this branch and is **retired**: measured at this head, `main` reads **258** door calls and this
 merged tree reads **260**, so the chokepoint ADDS two and the merge lands on 1573.
 
-
-**The cut before that:** `origin/main` **`34bd33d22a`**, forward-merged into the branchfor the third time (`54682177bc`, then `34bd33d22a`) — neither merge moved a count: they add no Cypher
+**The cut before that:** `origin/main` **`34bd33d22a`**, forward-merged into the branch for the third time (`54682177bc`, then `34bd33d22a`) — neither merge moved a count: they add no Cypher
 statement site, so every scalar is unchanged from the `a218f8867b` cut and only Appendix A's
 `file:line` rows move, which is why Appendix A is regenerated at each merge rather than trusted.
 
