@@ -253,6 +253,21 @@ def test_docs_scanning_gates_stay_in_tier1():
         "needs no tier1 row (#5086 review P3, cycle 6)"
     )
 
+    assert "test_12184_shifted_cites.py" in tier1, (
+        "#12184: the evidence-cite pin binds `file:line` citations in "
+        "docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md, "
+        "docs/architecture/SUBSTRATE-REBUILD-MAP.md, the #12298 M3 recall brief "
+        "and the #13083 census README, and `docs/` is in NON_PYTHON_PREFIXES "
+        "while none of those documents matches a SOURCE_PATTERNS entry — so a "
+        "docs-only diff takes the tier1-only early return and a `core`-only row "
+        "ran the pin ZERO times on exactly the change class that re-points a "
+        "cite (measured: `--changed-files "
+        "docs/architecture/SUBSTRATE-REBUILD-MAP.md` -> `surfaces: []` and the "
+        "file ABSENT from `test_files`). It shipped `core`-only with a comment "
+        "claiming the opposite, which is the #4309/#11739/#11810 silent-drop "
+        "class — same dual registration as the sibling doc guards above"
+    )
+
 
 def test_v4_membership_gate_runs_on_both_architecture_docs():
     """#9778 review (P2): pin the SELECTION, not just the manifest string.
@@ -265,15 +280,15 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured at this head: 165 files for the STORAGE diff, 84 for the EXTRACTOR
+    Measured at this head: 182 files for the STORAGE diff, 100 for the EXTRACTOR
     diff (empty surfaces, the early return); the gate is in the selected set in
     both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
     measurements, not constants, and they move for DIFFERENT reasons:
 
-    * the **165** is `onboarding` ∪ `tier1` **minus 14** — the union is 179 at
-      this head (101 + 84 − 6 shared) and `select()` drops 3 `carve_out` and 11
+    * the **182** is `onboarding` ∪ `tier1` **minus 14** — the union is 196 at
+      this head (102 + 100 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
-    * the **84** is `tier1`'s own size — the entire set an empty-surface diff
+    * the **100** is `tier1`'s own size — the entire set an empty-surface diff
       selects. It is NOT "the whole `full`-less fast pool" — that is a
       DIFFERENT measurement, `len(fast_pool(manifest))`, and this bullet
       deliberately carries no figure for it: these three registrations do not
@@ -285,11 +300,15 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
       code that produced it (#11064 review r15, P3).
       The `60` this sentence carried was that same `tier1` set **as it stood when
       the line was written** (measured: `len(tier1)` is 60 at `609eb72d3`, the
-      commit that wrote it, and 84 here), i.e. the very "a past state quoted as a
+      commit that wrote it), i.e. the very "a past state quoted as a
       current one"
       defect the line below warns about — and the constant it used to publish
       decayed in three consecutive commits, which is why the figure is gone
-      rather than corrected again (#11064 review r15, r16 P2, r17 P2).
+      rather than corrected again (#11064 review r15, r16 P2, r17 P2). The
+      `84` this sentence named had decayed the same way before #12184 reached
+      it — the `tier1` set was already larger than the number the sentence
+      stated — which is what makes re-measuring, and not correcting again, the
+      rule here.
 
     Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
     trusting either — the assertions below are the pin, this
@@ -626,6 +645,33 @@ def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
         "that bind its prose (test_definite_description_backfill_5059.py) — "
         "otherwise the passage can be re-inverted and merge green (#5333 "
         "review P1, #4309 class)"
+    )
+
+
+def test_the_shifted_cite_pin_runs_on_a_docs_only_diff():
+    """#12184: the cite pin must run on the DIFF that re-points a cite.
+
+    `tests/test_12184_shifted_cites.py` binds `file:line` citations in four living
+    documents (`docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`,
+    `docs/architecture/SUBSTRATE-REBUILD-MAP.md`, the #12298 M3 recall brief and
+    the #13083 census README) to the CONTENT of the line each names — the defect it
+    was written for was a FALSE CORRECTION (a correct `:4549` re-pointed to `:4552`
+    by applying the branch's `+3` twice), and no delta or marker can prove a number
+    right. The file shipped registered on `core` only, whose comment stated the
+    mechanism backwards: a docs-only diff selects NO surface and runs `tier1` ONLY,
+    so the pin ran zero times on the one edit class that can re-point a citation.
+
+    Measured before the fix: `select(["docs/architecture/SUBSTRATE-REBUILD-"
+    "MAP.md"], "pull_request", …)["test_files"]` did not contain this file, while
+    the sibling `test_substrate_map.py` (dual-registered for the same map) did.
+    Dropping the `tier1` row re-opens that hole (#4309 silent-drop class).
+    """
+    r = _sel(["docs/architecture/SUBSTRATE-REBUILD-MAP.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == [], r["surfaces"]
+    assert "test_12184_shifted_cites.py" in r["test_files"], (
+        "a docs-only edit of a document this pin guards must select the pin — "
+        "otherwise a cite can be re-pointed and merge green (#12184, #4309 class)"
     )
 
 
@@ -22616,6 +22662,52 @@ def test_rewrite_object_status_suite_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_12855_outdated_rewrite.py" in r["test_files"], r
+
+
+def test_the_residency_gate_runs_on_a_migration_only_diff():
+    """#13352 review finding (P2): the gate must RUN on the diff that can break it.
+
+    `tests/test_9559_blocked_release_conditions.py` is the only thing that
+    measures whether `postgres_residency_snapshot()` still carries its
+    fail-closed arm (`IF jsonb_array_length(v_audit->'orgs') > 0`) AND its
+    `RAISE WARNING` arm. It was registered in `api` and `core`, and NEITHER
+    reaches a migration-only diff: `supabase/` is a flat NON_PYTHON_PREFIXES
+    entry, so such a diff filters to `changed == []` and takes `select()`'s
+    docs-only early return, which emits tier1 ONLY.
+
+    The split of coverage is exact, which is why this is a finding and not a nit:
+    `schema-drill` executes the SQL through PGlite, so DELETING the guard is
+    data-visible there; the `RAISE WARNING` arm and the `v_written + v_zeroed`
+    accounting are precisely what that harness cannot see (pglite 0.5.4 exposes no
+    notice channel — the suite's own docstring records that, and reviewer round 9
+    measured that deleting the whole warning arm left the suite green). So a
+    corrective migration keeping the guard and dropping the warning merged GREEN
+    on every leg.
+
+    ⛔ The subject is read from disk (`supabase/migrations`), so this row cannot go
+    vacuous on a renamed fixture: it asserts on a REAL migration from the tree, and
+    on the ABSENCE of a surface (which is what puts the diff on the tier1 early
+    return) — so if a SOURCE_PATTERNS row ever starts matching `supabase/`, this
+    pin's premise changed and it says so rather than silently passing.
+    """
+    migrations = sorted((REPO / "supabase" / "migrations").glob("*.sql"))
+    assert migrations, "no migrations under supabase/ — this pin has lost its subject"
+    # The gate's own subject, plus one that is not the object of the exercise: a
+    # migration-only diff must reach the file whichever migration moves.
+    for changed in (migrations[-1].relative_to(REPO).as_posix(),
+                    "supabase/migrations/20990101000001_a_future_correction.sql"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == [], (
+            f"{changed} is expected to select NO surface — that is what puts a "
+            "migration-only diff on the tier1 early return. If a SOURCE_PATTERNS "
+            "row now matches `supabase/`, re-derive this pin rather than "
+            "deleting it")
+        assert "test_9559_blocked_release_conditions.py" in r["test_files"], (
+            f"a {changed}-only diff must select "
+            "`test_9559_blocked_release_conditions.py` — it is the only leg that "
+            "reads the `RAISE WARNING` arm and the zeroed-row accounting, and "
+            "PGlite cannot see either (#13352 review, the no-op-gate class)")
 
 
 def test_journal_growth_guard_runs_on_a_tool_or_probe_change():

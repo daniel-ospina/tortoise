@@ -179,12 +179,40 @@ def test_the_registry_serves_the_anchored_surface_and_nothing_else():
     }
 
 
+#: A served read whose boundary is a UNION over labels has no ONE
+#: ``(label, property)`` coordinate, and minting a placeholder pair for it would
+#: hand `declared_key(*coordinate)` a coordinate no store can resolve. These reads
+#: carry ``coordinate=None`` and state their shape in ``cypher``/``reason`` instead
+#: — pinned below, so an exception cannot be claimed silently.
+MULTI_COORDINATE_READS: frozenset[str] = frozenset({rs.READ_ENTITY_UNION_BY_ID})
+
+#: A read that IS a template over labels carries a template coordinate on
+#: purpose: ``node-by-key`` answers ANY record label by its interface-E
+#: coordinate, so ``("Label", "interface-E key")`` is its real shape, not a
+#: placeholder standing where a name should be. Named here so the distinction from
+#: the union's ``None`` is explicit rather than asserted away.
+TEMPLATE_COORDINATE_READS: frozenset[str] = frozenset({rs.READ_NODE_BY_KEY})
+
+
 def test_every_served_read_carries_its_parity_rule_and_its_coordinate():
     for name in rs.served_reads():
         read = rs.ANCHORED_READS[name]
         assert read.parity, name
-        assert read.coordinate, name
         assert read.cypher, name
+        if read.coordinate is None:
+            assert name in MULTI_COORDINATE_READS, (
+                f"{name} declares no coordinate and is not a declared union read — "
+                f"every served read either carries a real (label, property) pair "
+                f"or says here why it cannot")
+            assert "union" in read.cypher.lower(), name
+        else:
+            label, prop = read.coordinate
+            assert label and prop, name
+            assert label not in {"Label", "union"} or name in TEMPLATE_COORDINATE_READS, (
+                f"{name}'s coordinate label {label!r} is a PLACEHOLDER — it names "
+                f"no stored label, so declared_key(*coordinate) mints a coordinate "
+                f"nobody can resolve (#13353 review, finding 6). A read that really "
+                f"IS a template over labels says so in TEMPLATE_COORDINATE_READS.")
 
 
 def test_every_exclusion_names_who_else_answers_the_same_read():
