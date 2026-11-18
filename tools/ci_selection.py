@@ -1934,6 +1934,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # with every pin that catches it asleep. Pinned by
              # tests/test_dense_leg_probe_13108.py::test_a_tool_only_diff_selects_this_pin.
              "tools/dense_leg_probe_13108.py",
+             # #13629: the entity-vector retirement pair — the parity census and the
+             # preview-by-default stripper — own tests/test_13629_entity_vector_retire.py
+             # (registered `core`). The same flat `tools/` swallow applies: a diff confined
+             # to either file filters to `changed == []`, takes the docs-only early return
+             # and runs tier-1 smoke, where that file is not registered. That matters MORE
+             # here than for the two entries above, because one of these tools DELETES a
+             # stored property: a diff that drops the parity re-check, the exact-set digest
+             # comparison, or the write-gate refusal would merge with every falsifier that
+             # catches those asleep. ⛔ TWO entries, not one — the pair is imported in one
+             # direction only (`strip` imports `parity`), so a fix confined to the census
+             # must select the pins that cover the STRIPPER's use of it as well. Pinned by
+             # tests/test_13629_entity_vector_retire.py::test_a_tools_only_diff_selects_this_pin.
+             "tools/entity_vector_parity_census.py",
+             "tools/strip_graph_entity_vectors.py",
              # #12926: the pre-merge deployment-config check. `tools/` is in
              # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a
              # tool-only diff answers with `surfaces: []` — measured before this entry:
