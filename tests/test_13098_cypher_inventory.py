@@ -160,7 +160,7 @@ NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
 # revert-to-`re.search` any test could redden, while two docstrings said "any arm". One row
 # per arm — 7 rows for 7 `_exactly_one` arms — makes that claim executable. A deleted row, a
 # DUPLICATED row and a row whose `what=` matches nothing are all reds
-# (`test_every_graded_lookup_has_a_coverage_row`); a deleted row alone would not be, which is
+# (`test_every_graded_lookup_has_a_coverage_row`); a DUPLICATED row alone would not be, which is
 # why that test asserts multiplicity and arm-id uniqueness on top of set equality.
 #
 # A row whose pattern no longer matches its section fails loudly ("no line in the scoped
