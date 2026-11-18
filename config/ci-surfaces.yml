@@ -1717,15 +1717,16 @@ surfaces:
   # other two arms of the same ownership; cross-surface registration is deliberate, while a
   # SECOND row within one surface is what `--integrity` reds.
   - test_13224_cold_embedder_write_bound.py
-  # #13417: the DERIVED-entity write's own omission counter
-  # (`tortoise/monitoring.py`) and the backfill that repairs it
-  # (`graph-scripts/backfill_embeddings.py`, a file that matches no named
-  # SOURCE_PATTERN and therefore selects `core` by fallback — the same shape the
-  # #13224 row above records). The file is a `carve_out:` member, so this row is
-  # the CLASSIFICATION record, not the leg trigger: `select()` subtracts a
-  # carve-out member from `test_files` and the carve-out job runs it.
-  # Cross-surface registration is deliberate (the `eval` row is the
-  # `tortoise/embeddings.py` arm); a SECOND row within one surface is what
+  # #13417: the DERIVED-entity write's own omission counter. This is the `api`
+  # OWNERSHIP record, in the same shape as the #13224 row above: the loop drives
+  # a real fold through the public boundary and asserts what a caller-visible
+  # write stores, which is the door #13417 was filed on. ⛔ It does NOT decide the
+  # leg — the file is a `carve_out:` member, so `select()` subtracts it from
+  # `test_files` and the carve-out job runs it. The remaining arms of the same
+  # ownership are `core` (the `tortoise/monitoring.py` fallback that owns the
+  # counter's family name and `metrics()` publication) and `eval`
+  # (`tortoise/embeddings.py`, the seam the count is emitted from); cross-surface
+  # registration is deliberate, while a SECOND row within one surface is what
   # `--integrity` reds.
   - test_13417_vectorless_rows.py
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
