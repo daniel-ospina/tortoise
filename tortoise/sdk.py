@@ -44776,7 +44776,11 @@ class TortoiseSDK:
         status set, slot literal or per-family deny-list lives here — served
         newest ending first, each row carrying the ending the record itself
         holds: its lifecycle `status` (``deprecated`` = nothing replaced it,
-        ``superseded`` = see `successorId`), the `stage` block (`slot` +
+        ``superseded`` = see the successor), the successor as the TWO facts the
+        model records — `successorId`/`allSuccessorIds` from a Point's `CORRECTS`
+        edge and `successorName` from the `supersededBy` carrier (an
+        Object/Subject names its successor; the carrier holds a NAME, so it is
+        never served under an `…Id` key) — the `stage` block (`slot` +
         `outcome`) for a record ended on the POSITION axis, and `endedAt`.
         `linkedEvents` carries the events wired to the record, which is what
         makes "planned and never happened" answerable without knowing a kind's
@@ -45119,8 +45123,8 @@ class TortoiseSDK:
                     f"so it cannot apply {', '.join(_refused_ended)}. It answers "
                     f"\"what ended, and how\" from the records' own state: omit "
                     f"{', '.join(_refused_ended)} and read the returned rows' "
-                    f"`status` / `successorId` / `stage` (with its `slot` and "
-                    f"`outcome`) / `endedAt`. Narrow the population with "
+                    f"`status` / `successorId`+`successorName` / `stage` (with its "
+                    f"`slot` and `outcome`) / `endedAt`. Narrow the population with "
                     f"entity_type= and kind=, and bound the page with limit=; "
                     f"for a relevance read of what is still CURRENT, drop "
                     f"ended_scope and search as before."
@@ -45498,7 +45502,11 @@ class TortoiseSDK:
             # full page as complete (the #8447 defect) or an unfilled one as cut.
             _fatter = enumerate_ended(
                 graph, entity_type=entity_type, kind=kind,
-                kinds=expanded_kinds, limit=limit + 1)
+                kinds=expanded_kinds, limit=limit + 1,
+                # BOUNDED like every other statement this read issues: the
+                # caller's own budget (the capstone's `_elevated_timeout_ms`) or
+                # the shipped read budget, never an unbounded query.
+                timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS))
             _ended_rows = _fatter[:limit]
             # ``candidates`` is what this read could SEE and it may be BOUNDED
             # (exactly the hosted ``GET /v1/points`` ``limit+1`` probe shape), which

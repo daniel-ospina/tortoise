@@ -456,9 +456,11 @@ def _ended_fields(r: dict) -> dict:
     other half). Dropping it as falsy would delete exactly that evidence.
     """
     out: dict = {}
-    for key in ("successorId", "endedAt"):
+    for key in ("successorId", "successorName", "endedAt"):
         if r.get(key) is not None:
             out[key] = r[key]
+    if r.get("allSuccessorIds"):
+        out["allSuccessorIds"] = r["allSuccessorIds"]
     if r.get("stage"):
         out["stage"] = r["stage"]
     if r.get("isClosed"):
@@ -1366,11 +1368,27 @@ def recipe_withdrawn(target: LocalTarget, refs: dict[str, str], spec: dict) -> A
     if node:
         ans.signals.append(f"claim status={node.get('status')!r} (a by-id read_entity)")
     if ans.rows("ended"):
-        ended_ids = [r.get("id") for r in ans.rows("ended")]
+        # ⛔ "withdrawn record(s)" would be a claim the product never made: the ended
+        # population is EVERY ending (a `superseded` decision is in it too), and this
+        # line is the one field a reader uses to attribute a failure. The row's own
+        # `status`/`stage.outcome` is where "how it ended" is stated.
+        ended_rows = ans.rows("ended")
+
+        def _how(row: dict) -> str:
+            """The row's own "how it ended", never a claim invented here."""
+            word = row.get("status")
+            if word:
+                return str(word)
+            stage = row.get("stage") or {}
+            if stage:
+                return f"{stage.get('slot')}/{stage.get('outcome')}"
+            return "(no word served)"
+
         ans.signals.append(
             "the ended-scope read served "
-            f"{len(ended_ids)} withdrawn record(s) without the id being supplied: "
-            f"{ended_ids}"
+            f"{len(ended_rows)} ended record(s) without the id being supplied — "
+            "each row states how it ended: "
+            + "; ".join(f"{r.get('id')}: {_how(r)}" for r in ended_rows)
         )
     if not ans.rows("by_name"):
         ans.signals.append(
@@ -1667,6 +1685,54 @@ def shlex_split(cmd: str) -> list[str]:
 # ── scoreboard ───────────────────────────────────────────────────────────────────
 
 
+def _search_label(request: dict, *, tick: bool = True) -> str:
+    """`search(<query>, <type>[, <flags>])` — ONE spelling for BOTH renderers.
+
+    A DICT, not a `Call`, because the top table renders from the recorded request
+    (`_calls_summary`) while the detail sections hold a live `Call` — and two
+    builders for one call meant the same read rendered two ways in one document
+    (the top table dropped `entity_type` and spelled the flag `+terminal`).
+
+    `ended_scope` MUST be in it (#13302): without the marker an ended-scope
+    enumeration renders exactly like a query-less default-scope search, i.e. the
+    committed evidence would show a retired object served as `status=deprecated`
+    from a plain read — which is the trust failure the scoreboard EXISTS to catch.
+    A reader must never have to guess which call produced a row.
+    """
+    flags = ""
+    if request.get("include_terminal"):
+        flags += ", include_terminal"
+    if request.get("ended_scope"):
+        flags += ", ended_scope"
+    label = (
+        f"search({request.get('query')!r}, "
+        f"{request.get('entity_type')}{flags})"
+    )
+    return f"`{label}`" if tick else label
+
+
+def _ended_suffix(row: dict) -> str:
+    """How a served row ended, in one bracket — empty for a current-scope row.
+
+    The scoreboard's job is to let a human see WHY a row is the answer. A row that
+    merely prints `status=None` for a plan says nothing; `[stage=terminal/withdrawn,
+    no linked event]` is the answer to "planned and never happened" on its face.
+    """
+    bits: list[str] = []
+    stage = row.get("stage") or {}
+    if stage:
+        bits.append(f"stage={stage.get('slot')}/{stage.get('outcome')}")
+    if row.get("successorId"):
+        bits.append(f"successor={row['successorId']}")
+    elif row.get("successorName"):
+        bits.append(f"successor={row['successorName']}")
+    if "linkedEvents" in row and not row["linkedEvents"]:
+        bits.append("no linked event")
+    if row.get("endedAt"):
+        bits.append(f"endedAt={row['endedAt']}")
+    return f" [{', '.join(bits)}]" if bits else ""
+
+
 def _answer_text(answer: Answer) -> str:
     """One human paragraph of what the product actually served."""
     bits: list[str] = []
@@ -1676,16 +1742,12 @@ def _answer_text(answer: Answer) -> str:
             continue
         if call.surface == "search":
             if not call.rows:
-                bits.append(
-                    f"`search({call.request.get('query')!r}, "
-                    f"{call.request.get('entity_type')}"
-                    f"{', include_terminal' if call.request.get('include_terminal') else ''})`"
-                    f" → 0 rows"
-                )
+                bits.append(f"{_search_label(call.request)} → 0 rows")
                 continue
             shown = "; ".join(
                 f"*{_cut(r.get('what'), 70, redact=False)}* (kind={r.get('kind')}, "
                 f"status={r.get('status')}, rrf={r.get('score')})"
+                f"{_ended_suffix(r)}"
                 for r in call.rows[:4]
             )
             more = "" if len(call.rows) <= 4 else f"; +{len(call.rows) - 4} more"
@@ -1697,9 +1759,7 @@ def _answer_text(answer: Answer) -> str:
                     f"{ov['rows'] - ov.get('zero_overlap_rows', 0)}/{ov['rows']}]"
                 )
             bits.append(
-                f"`search({call.request.get('query')!r}, "
-                f"{call.request.get('entity_type')}"
-                f"{', include_terminal' if call.request.get('include_terminal') else ''})`"
+                f"{_search_label(call.request)}"
                 f" → {len(call.rows)} rows{rel}: {shown}{more}"
             )
         elif call.surface == "read_entity":
@@ -1748,7 +1808,7 @@ def _calls_summary(calls: list[dict]) -> str:
                 else ""
             )
             bits.append(
-                f"search({req.get('query')!r}{', +terminal' if req.get('include_terminal') else ''})"
+                f"{_search_label(req, tick=False)}"
                 f" → {len(c.get('rows') or [])} rows{rel}"
             )
         elif surf == "read_entity":

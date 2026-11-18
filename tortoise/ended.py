@@ -170,19 +170,31 @@ def build_cypher(entity_type: str, *, narrow_kinds: bool) -> str:
     )
 
 
-def _successor(row_successor_ids, named) -> str | None:
-    """The ONE successor a row names, or ``None`` when it names none.
+def _successor_ids(successor_ids) -> list[str]:
+    """The successor ids a row's CARRIER EDGE names, sorted and deduped.
 
-    The CORRECTS edge wins where both carriers exist: it is the fact
-    ``supersede_point`` writes, while the property is only ever a caller's
-    label. A row recording SEVERAL successors (a Point corrected twice — the
-    edge is a MERGE on its endpoints, so this is reachable) is reported by its
-    first id in id order rather than by picking one silently: ``allSuccessors``
-    below carries the full set, so the singular key never claims to be complete.
+    ⛔ The CORRECTS edge is the ONLY carrier that holds an ID. The
+    ``supersededBy`` property is a **NAME** by the model's own definition (§4.2 /
+    §4.3: *"successor NAME (stored verbatim)"*, and ``_supersede_entity`` writes
+    the successor's name into it), so serving it under an ``…Id`` key would hand a
+    caller a value it cannot resolve — and unioning the two would mix a name with
+    ids in one list. That is why the two spellings are served under two keys
+    (:func:`_successor_name` owns the other), and why only this list is
+    ``successorId``.
     """
-    ids = [i for i in (row_successor_ids or []) if isinstance(i, str) and i]
-    if ids:
-        return sorted(ids)[0]
+    return sorted({i for i in (successor_ids or []) if isinstance(i, str) and i})
+
+
+def _successor_name(named) -> str | None:
+    """The successor NAME the record carries, verbatim, or ``None``.
+
+    Read from BOTH spellings of the carrier: ``supersededBy`` is the field the
+    Object/Subject doors write, and ``superseded_by`` is the shadow SNAKE spelling
+    a generic ``update_entity`` accepts and which lands a DIFFERENT property
+    (``sdk.py``'s ``_SUCCESSOR_COLUMN`` note), so a read that looked at one of them
+    would report "nothing replaced it" for a record whose other spelling names a
+    successor.
+    """
     return named if isinstance(named, str) and named else None
 
 
@@ -198,6 +210,7 @@ def _ended_row(raw: tuple, entity_type: str) -> dict:
      named_successor, stage_id, slot, outcome, ended_at, *times) = raw
     raw_times = dict(zip(_TIME_FIELDS, times, strict=False))
     is_closed, outdated = times[len(_TIME_FIELDS):][:2]
+    id_list = _successor_ids(successor_ids)
     return {
         "id": node_id,
         f"{entity_type}Kind": kind,
@@ -209,11 +222,14 @@ def _ended_row(raw: tuple, entity_type: str) -> dict:
         "goalState": goal_state,
         # ── how it ended, in the record's own fields ──────────────────────
         # The lifecycle word is served verbatim (`superseded`, `deprecated`, …);
-        # `successorId` answers "replaced by what"; the stage block answers it
-        # for a record that ended on the POSITION axis.
-        "successorId": _successor(successor_ids, named_successor),
-        "allSuccessorIds": sorted(
-            {i for i in (successor_ids or []) if isinstance(i, str) and i}),
+        # the successor is TWO facts, never one: an ID (the CORRECTS edge — a
+        # Point's successor) and a NAME (the `supersededBy` carrier — an
+        # Object/Subject's, and a Point's if a caller wrote the property).
+        # Serving the carrier under `successorId` would hand back a value no node
+        # carries, which is worse than serving nothing.
+        "successorId": id_list[0] if id_list else None,
+        "allSuccessorIds": id_list,
+        "successorName": _successor_name(named_successor),
         "stage": (
             {
                 "id": stage_id,
@@ -239,7 +255,8 @@ def _ended_row(raw: tuple, entity_type: str) -> dict:
 
 
 def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = None,
-                    kinds: list[str] | None = None, limit: int = 50) -> list[dict]:
+                    kinds: list[str] | None = None, limit: int = 50,
+                    timeout_ms: int | None = None) -> list[dict]:
     """Every record of this family that has ENDED, newest ending first.
 
     ``graph`` is the live graph handle the read path already holds, so this costs
@@ -254,6 +271,13 @@ def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = Non
     EXPANDED form) wins: it is the set the read path's own filter would have
     matched, and ``_read_filter_kinds(kind)`` always contains ``kind`` itself, so
     the two agree rather than conflict for every SDK caller.
+
+    ``timeout_ms`` BOUNDS the statement, and the read path always passes its own
+    budget. It is not optional-in-spirit: this is a family-wide
+    ``MATCH … OPTIONAL MATCH … collect() … ORDER BY … LIMIT``, i.e. the most
+    expensive single statement the read issues, and every other statement on that
+    path is bounded for exactly this reason — an unbounded one hangs on a wedged
+    store instead of degrading.
 
     The read is BOUNDED (``LIMIT $limit``) and ordered by the record's own
     ending time, so the caller gets the most recent endings rather than an
@@ -284,6 +308,10 @@ def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = Non
     params: dict = {"limit": int(limit)}
     if where_kinds:
         params["kinds"] = list(kinds or [])
-    rows = graph.query(cypher, params=params).result_set
+    # ONE door call, so this read is ONE statement site (the census counts sites, and
+    # two spellings of the same query would read as two queries). A caller that named
+    # no budget keeps the door's own; the read path always passes one.
+    kwargs = {} if timeout_ms is None else {"timeout": int(timeout_ms)}
+    rows = graph.query(cypher, params=params, **kwargs).result_set
     return [_ended_row(tuple(r), entity_type) for r in rows
             if r and isinstance(r[0], str)]

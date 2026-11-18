@@ -194,7 +194,7 @@ def test_a_plan_that_happened_carries_its_occurrence(sdk):
 
 
 @_docker_only
-def test_a_superseded_record_names_its_successor(sdk):
+def test_a_superseded_point_names_its_successor_by_id(sdk):
     old = sdk.create_point(kind="decision", content="the entry tier is 29")
     new = sdk.create_point(kind="decision", content="the entry tier is 39")
     sdk.supersede_point(old["id"], new["id"])
@@ -203,6 +203,54 @@ def test_a_superseded_record_names_its_successor(sdk):
     assert row["status"] == "superseded"
     # A Point names its successor by the CORRECTS edge, NOT by a property.
     assert row["successorId"] == new["id"]
+    assert row["allSuccessorIds"] == [new["id"]]
+    assert row["successorName"] is None
+
+
+@_docker_only
+def test_a_superseded_object_names_its_successor_by_NAME_not_by_id(sdk):
+    """`supersededBy` holds the successor's NAME (§4.2/§4.3) — never an id.
+
+    Serving that carrier under `successorId` would hand a caller a value no node
+    carries (review finding, #13302): a caller resolving it finds nothing, and one
+    unioning it with `allSuccessorIds` mixes a name with ids. The two facts are two
+    keys, and this test fails if they are ever collapsed.
+    """
+    new = sdk.create_object("Onboarding flow v2", objectKind="process")
+    old = sdk.create_object("Onboarding flow", objectKind="process")
+    sdk.supersede_knowledge(old["id"], new["id"])
+
+    row = {r["id"]: r for r in _ended(sdk, entity_type="object")}[old["id"]]
+    assert row["status"] == "superseded"
+    assert row["successorId"] is None, "an Object has no CORRECTS edge, so no id"
+    assert row["allSuccessorIds"] == []
+    assert row["successorName"] == "Onboarding flow v2", (
+        "the Object/Subject successor carrier holds a NAME; a name served as an id "
+        "is worse than serving nothing"
+    )
+
+
+@_docker_only
+def test_a_record_carrying_BOTH_successor_facts_serves_both(sdk):
+    """The case that pins the split itself — and the one a collapse still passed.
+
+    `supersede_point` writes the CORRECTS edge and NO carrier, and an
+    Object/Subject writes the carrier and no edge, so each family's own test is
+    green under a collapse that keeps one fact and drops the other. A Point whose
+    carrier was ALSO written (`update_knowledge` accepts `supersededBy` on a Point)
+    carries both, and only a row that serves BOTH can pass this.
+    """
+    new = sdk.create_point(kind="decision", content="the entry tier is 39")
+    old = sdk.create_point(kind="decision", content="the entry tier is 29")
+    sdk.supersede_point(old["id"], new["id"])
+    sdk.update_knowledge(old["id"], supersededBy="the entry tier is 39")
+
+    row = {r["id"]: r for r in _ended(sdk, entity_type="point")}[old["id"]]
+    assert row["successorId"] == new["id"], "the CORRECTS edge is the ID fact"
+    assert row["successorName"] == "the entry tier is 39", (
+        "the carrier is the NAME fact; dropping it when an id is present serves "
+        "half of what the record says"
+    )
 
 
 @_docker_only
@@ -295,10 +343,16 @@ def test_the_snake_successor_spelling_is_read_too(sdk):
 
     row = {r["id"]: r for r in _ended(sdk, entity_type="object")}[gone["id"]]
     assert row["status"] == "deprecated"
-    assert row["successorId"] == "row-v2", (
+    # ⛔ `successorName`, not `successorId`: the carrier holds a NAME by the model's
+    # definition (§4.2/§4.3), so a value read from EITHER spelling of it is served
+    # under the name key. Asserting an id here is what let the two facts collapse.
+    assert row["successorName"] == "row-v2", (
         "a successor recorded under the snake spelling must be reported — a read "
         "that looked at `supersededBy` alone would say 'nothing replaced it' for "
         "a record that names one"
+    )
+    assert row["successorId"] is None, (
+        "no CORRECTS edge exists here, so no ID may be claimed"
     )
 
 
@@ -387,7 +441,11 @@ def test_a_subject_is_served_by_its_own_carriers(sdk):
     assert subj["id"] in rows
     assert rows[subj["id"]]["name"] == "Acme"
     assert rows[subj["id"]]["status"] == "superseded"
-    assert rows[subj["id"]]["successorId"]
+    # ⛔ NOT `successorId`: a Subject's successor is a NAME on the carrier. The
+    # earlier form of this assertion accepted either ("truthy"), which is how a
+    # name could pass for an id.
+    assert rows[subj["id"]]["successorName"] == "Acme Corp"
+    assert rows[subj["id"]]["successorId"] is None
 
 
 # ── refusals: a state question is not a relevance read ─────────────────────────
@@ -404,6 +462,78 @@ def test_a_query_beside_ended_scope_is_refused_rather_than_dropped(sdk):
     assert "query" in message
     # The repair is named (AX §5): an admissible refusal leaves a writable way out.
     assert "omit" in message
+
+
+@_docker_only
+def test_every_knob_that_would_change_the_rows_or_their_order_is_refused(sdk):
+    """The refusal is a RULE, not the three knobs a first draft thought of.
+
+    A filter this read ignores (a pre-truncation exclusion, a recency ordering, a
+    hop traversal) does not merely go unused: it answers a narrower/differently
+    ordered question with the whole population. One parametrized case per knob, so
+    a knob added to the signature later fails here rather than silently.
+    """
+    knobs = {
+        "threshold": 0.5,
+        "min_confidence": 0.2,
+        "order_by": "confidence",
+        "relationship_filter": "addresses:x",
+        "traversal_path": "Product→Feature",
+        "claim_class": "asserted",
+        "exclude_status": ["live"],
+        "exclude_turn_echo_session": "sess-1",
+        "structural_kind": "decision",
+        "structural_hops": 1,
+        "recency_field": "createdAt",
+        "recency_boost": 0.5,
+        "graph_ranker": object(),
+        # The retrieval-DEPTH and SCORING weights are in the same class: they size or
+        # re-score a candidate set this read never builds, so accepting one would be a
+        # silent drop rather than an answer (the merged refusal list names them all).
+        "pool_size": 200,
+        "fusion_weights": {"vector": 2.0},
+        "fusion_k": 30,
+        "w4_enrich": False,
+        "keep_numeric": True,
+        "search_keys_prf": True,
+        "entity_key_expansion": True,
+        "time_aware": True,
+        "query_date": "2026-11-01",
+    }
+    for knob, value in knobs.items():
+        with pytest.raises(ValueError) as exc:
+            sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+                                  **{knob: value})
+        assert knob in str(exc.value), f"{knob} was dropped, not refused"
+
+
+@_docker_only
+def test_the_only_keyword_accepted_beside_ended_scope_is_the_one_that_is_a_no_op(sdk):
+    """`include_terminal` is admitted BY CONSTRUCTION, everything else is refused.
+
+    The ended population is already the terminal one, so `include_terminal` can
+    neither add nor remove a row — refusing it would refuse a caller for asking for
+    what they are getting. The retrieval-depth and scoring weights are NOT in that
+    class (they size/re-score a candidate set this read never builds, so dropping
+    them silently is still a silent drop): the merged refusal list names every one
+    of them, which is why the population below must be identical under the admitted
+    flag and the call must still be refused for the rest.
+    """
+    pid = sdk.create_point(kind="statement", content="the venue booked the beach club")
+    sdk.retract_point(pid["id"])
+
+    plain = _ids(_ended(sdk, entity_type="point"))
+    with_flag = _ids(sdk.tortoise_fts_query(
+        None, entity_type="point", ended_scope=True, limit=50, include_terminal=True))
+    assert plain == with_flag
+
+    for knob, value in (("pool_size", 200), ("fusion_weights", {"vector": 2.0}),
+                        ("w4_enrich", False), ("keep_numeric", True),
+                        ("time_aware", True), ("query_date", "2026-11-01")):
+        with pytest.raises(ValueError) as exc:
+            sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+                                  **{knob: value})
+        assert knob in str(exc.value), f"{knob} was dropped, not refused"
 
 
 @_docker_only
