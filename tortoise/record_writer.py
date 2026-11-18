@@ -1704,7 +1704,15 @@ def _release_pooled_connections() -> None:
 #: expression over them (`parts`, `(name, value)` pairs in composition order).
 @dataclass(frozen=True)
 class _EmbeddingTextRule:
-    """`fields` DECLARES the datum; `parts` reproduces the fold's expression."""
+    """`fields` DECLARES the datum; `parts` reproduces the fold's expression.
+
+    ⛔ `fields` IS A DECLARATION, NOT A RECIPE — a seam that shares encoders
+    (`#13447`) must call `parts`, never join `fields`: `SourceCreated` composes
+    with an `or` (`_searchText`, else `title`) and joining the two would double
+    the text, while `DocumentCreated`'s third field is a LIST. `fields` exists so
+    that seam can key/memoise on the right datum, and so a reader can see what a
+    label's vector is about without reading the expression.
+    """
 
     fields: tuple[str, ...]
     parts: Callable[[Mapping[str, Any]], Sequence[tuple[str, Any]]]
@@ -1790,6 +1798,13 @@ def _session_source_skip(payload: Mapping[str, Any]) -> str:
     no vector) rather than fail-open: this function's answer decides WHICH TEXT
     a column encodes, and a wrong text is invisible where a missing vector is
     counted (`#13417`).
+
+    ⚠️ NO WRITER COMPUTES THE NARRATIVE VECTOR TODAY, so this arm does not take
+    a vector away from anyone: the encode calls on the capture path are the
+    Point/turn ones, and nothing reads `public.session_narrative` to embed it.
+    The population therefore has no vector on either side, and §14.3 V2's answer
+    for the `:Source` label does not require inventing one out of the wrong text
+    — `#13418`'s indicator 1 allows a documented skip in exactly this shape.
     """
     try:
         from .cache_projection import is_episodic_source_node
