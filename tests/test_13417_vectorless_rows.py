@@ -132,6 +132,17 @@ def warm_window(monkeypatch):
     return fake
 
 
+def _published_declines() -> dict[str, int]:
+    """The counter as ``monitoring.metrics()`` PUBLISHES it — the served surface.
+
+    Distinct from `_no_vector_counts()` on purpose: these tests assert that the
+    number reaches `metrics()`, and reading the accessor instead would leave the
+    publication seam untested.
+    """
+    published = monitoring.metrics().get("derived_embed_declines")
+    return dict(published) if isinstance(published, dict) else {}
+
+
 def _no_vector_counts() -> dict[str, int]:
     return monitoring.derived_embed_decline_counts()
 
@@ -147,6 +158,19 @@ def _load_backfill():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _subject_vector(g, subject_id: str, name: str):
+    """The ``:Subject`` vector for ONE (id, name) pair — ids are not unique.
+
+    #12570's whole shape is two nodes sharing an id, so an id-only reader silently
+    returns whichever twin the engine lists first; every assertion about "the row
+    the sweep repaired" has to name the text as well.
+    """
+    rows = g.query(
+        "MATCH (n:Subject {id: $id}) WHERE n.name = $name RETURN n.embedding",
+        params={"id": subject_id, "name": name}).result_set
+    return rows[0][0] if rows else None
 
 
 def _stored_vector(g, label: str, id_prop: str, key: str):
@@ -242,7 +266,10 @@ def test_a_cold_re_write_of_an_embedded_row_counts_but_loses_nothing(
     """⛔ THE COUNTER'S OVER-STATEMENT, PINNED (#13417 review).
 
     The count is emitted at the SEAM, which knows the encoder declined and does
-    NOT know whether the row already held a vector. Every DERIVED fold's write
+    NOT know whether the row already held a vector. It is pinned here for the
+    SAME-text case; the changed-text case (Event/Document, whose folds rewrite
+    their text on match) leaves a STALE vector the null-only repair cannot see —
+    #13451, documented at the counter. Every DERIVED fold's write
     clause preserves a stored vector against a null incoming one
     (`vector_write.set_embedding_clause`, `preserve_on_null=True`), so a cold
     re-registration of an already-embedded entity — the ordinary ON MATCH path —
@@ -348,13 +375,32 @@ def test_the_embed_gate_stays_off_this_channel(monkeypatch):
     assert _delta(before, _no_vector_counts()) == {}
 
 
-def test_metrics_publishes_the_count():
-    """It lands on the surface the fleet serves, not on a log nobody watches."""
-    published = monitoring.metrics().get("derived_embed_declines")
+def test_metrics_publishes_the_count(cold_window):
+    """It lands on the surface the fleet serves, WITH the value that was recorded.
+
+    ⛔ `isinstance(published, dict)` alone is satisfied by `{}` — and with nothing
+    recorded, `{}` is exactly what the accessor returns, so a mutant publishing a
+    constant empty dict, or one wired to the wrong counter family, would pass. The
+    decline is therefore recorded FIRST and the published value asserted, which is
+    the claim the docstring makes ("it lands on the surface the fleet serves"):
+    the number has to travel from `record_derived_embed_decline` to `metrics()`.
+    """
+    before = _published_declines()
+    assert encode_for_row("published count probe", _DIM, bounded=True) is None
+    published = _published_declines()
     assert isinstance(published, dict), (
         "monitoring.metrics() must publish derived_embed_declines — §17.2 "
         f"requires the divergence be checkable, got {published!r}"
     )
+    # ⛔ A DELTA, not `>= 1`: the counters are process-global running totals, so
+    # in a whole-module run the key is already non-zero before this test starts,
+    # and `>= 1` would be satisfied with this test's own recording deleted. It
+    # would also be satisfied by a HARDCODED constant dict — measured, that
+    # mutant passed the `>= 1` form. The delta pins that THIS decline travelled
+    # from `record_derived_embed_decline` to `metrics()`.
+    assert _delta(before, published) == {f"{_GRAPH}:budget_expired": 1}, (
+        "the decline recorded by this test must appear in metrics() and only "
+        f"that one — got {_delta(before, published)} (all: {published!r})")
 
 
 # ── 2. the loop: cold write → count → backfill → repaired ──────────────────
@@ -368,10 +414,14 @@ def test_the_loop_cold_write_count_backfill_repairs_exactly_that_row(
     count says so in NUMBERS; the backfill repairs THAT row and leaves its
     neighbour alone; and a second run finds nothing left to repair.
 
-    The neighbour is deliberately a row that ALREADY has a vector: the damaged
-    row is the one that must gain one, and "the neighbour's vector is unchanged"
-    is the scoping half (#12570's "no collateral"). The duplicate-key collateral
-    case has its own tests in ``test_backfill_embeddings_force.py``.
+    The neighbour shares the damaged row's ID and holds a distinctive vector, and
+    that is deliberate: a distinct-id neighbour would make the "not touched"
+    assertion VACUOUS, because the NULL-only sweep never selects a row that
+    already has a vector — measured, this test passed unchanged against a
+    `_write_where` reverted to the pre-fix `n.id = row.id`. With the shared id the
+    pre-fix write matches BOTH twins and overwrites this one, so the assertion now
+    discriminates (#12570's collateral damage, exercised here rather than only in
+    ``test_backfill_embeddings_force.py``).
     """
     g = proj.db.select_graph(proj.graph_name)
     cold_name = "cold-window subject"
@@ -386,13 +436,14 @@ def test_the_loop_cold_write_count_backfill_repairs_exactly_that_row(
         "the cold-window row must be COUNTED as stored without a vector — a "
         f"silent omission is the defect: {counted}"
     )
-    assert _stored_vector(g, "Subject", "id", "s-cold") is None, (
+    assert _subject_vector(g, "s-cold", cold_name) is None, (
         "precondition: the cold row is written and carries NO vector")
 
-    # The neighbour, written warm (or by any other route) already holds one.
+    # The neighbour SHARES the id and already holds a vector — the shape #12570
+    # is about, and the only shape in which "not touched" is a claim with content.
     g.query(
         "CREATE (n:Subject {id: $id, name: $name, embedding: vecf32($emb)})",
-        params={"id": "s-warm", "name": warm_name, "emb": warm_vector})
+        params={"id": "s-cold", "name": warm_name, "emb": warm_vector})
 
     # ── the backfill repairs the row that lacked a vector ────────────────
     mod = _load_backfill()
@@ -404,13 +455,14 @@ def test_the_loop_cold_write_count_backfill_repairs_exactly_that_row(
     assert stats["updated"] == 1, (
         f"exactly the ONE vectorless row must be repaired, got {stats}")
     assert stats["per_label"]["Subject"] == 1, stats
-    repaired = _stored_vector(g, "Subject", "id", "s-cold")
+    repaired = _subject_vector(g, "s-cold", cold_name)
     assert repaired == pytest.approx(fake(cold_name)), (
         "the repaired row must carry the vector for ITS OWN text")
-    assert _stored_vector(g, "Subject", "id", "s-warm") == pytest.approx(
-        warm_vector), (
-        "the neighbour's vector must be UNTOUCHED — a repair that rewrote a "
-        "row it did not sweep is #12570's collateral damage")
+    twin = _subject_vector(g, "s-cold", warm_name)
+    assert twin is not None, "the twin must still exist"
+    assert twin == pytest.approx(warm_vector), (
+        "the twin sharing this id must be UNTOUCHED — a repair that addressed "
+        "the id alone would overwrite it (#12570's collateral damage)")
 
     # ── and the loop CONVERGES: nothing is left missing ──────────────────
     missing, keyless = mod._residual_missing(g, "Subject")
