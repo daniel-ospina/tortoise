@@ -111,8 +111,8 @@ merged dossier, so the mutant has to redden it.
    **plain and contain no ` #`, they parse correctly, and they are OUT OF SCOPE — do not quote them.**
    The precedent is the quoting *style*, not the field.
 2. Add `_values(fm)` -> `(key, kind, payload)` classifying each top-level value as `scalar`,
-   `scalar_multiline`, `sequence` (a `key:` followed by `- item` lines, which may sit at column 0),
-   or `other` (block scalar / flow collection / nested mapping). Add `_quoted_style(raw)` ->
+   `scalar_multiline`, `sequence`, `sequence_multiline` (a `key:` followed by `- item` lines, which may
+   sit at column 0), or `other` (block scalar / flow collection / nested mapping). Add `_quoted_style(raw)` ->
    `(style, body)` — `plain` / `double-quoted` / `single-quoted` / `broken` / `malformed` /
    `escaped` — de-quoting by hand, never via `yaml.safe_load`, plus `_split_comment(raw)` (which only
    splits a QUOTED value, so a quoted value may carry a trailing comment) and `_has_unescaped_dq`.
