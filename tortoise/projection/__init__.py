@@ -20605,9 +20605,9 @@ class FalkorProjection(
         the two identifiers above must be read as the history of the choice, never
         as an owner. Measured at two runs on docker 4.20.6 (`#13436`'s artifact
         `docs/evidence/13436-write-path-costs/`, the second recording `box.git_head`
-        so the tree it measured is checkable from the artifact): **≈0.19-0.24 us/point
-        marginal across the two runs** (a third read 0.26) with a **≈4.9-5.4 ms fixed
-        floor** — the slope BRACKETS the ≈0.2 us figure above (0.19 below it, 0.24
+        so the tree it measured is checkable from the artifact): **≈0.18-0.24 us/point
+        marginal across the two runs** (an earlier read 0.26) with a **≈5.3-5.4 ms fixed
+        floor** — the slope BRACKETS the ≈0.2 us figure above (0.18 below it, 0.24
         above), so the slope reproduces within host variation while the FLOOR is what
         this box adds; neither is corrected here. ⛔ The removal route is still a write-maintained signal, and it is
         still nobody's.

@@ -13,9 +13,9 @@
           "gate_reads_per_request": 0,
           "note": "control \u2014 names no pack",
           "request_ms": {
-            "max_ms": 13.035,
-            "median_ms": 11.378,
-            "min_ms": 10.751,
+            "max_ms": 14.266,
+            "median_ms": 11.952,
+            "min_ms": 11.052,
             "n": 7
           },
           "shape": "point_core"
@@ -26,74 +26,74 @@
           "gate_reads_per_request": 0,
           "note": "control \u2014 names no pack",
           "request_ms": {
-            "max_ms": 14.253,
-            "median_ms": 12.733,
-            "min_ms": 10.854,
+            "max_ms": 34.904,
+            "median_ms": 13.971,
+            "min_ms": 12.171,
             "n": 7
           },
           "shape": "point_bare"
         },
         {
           "expected_gate_reads": 1,
-          "gate_ms_per_request": 19.278,
+          "gate_ms_per_request": 16.888,
           "gate_reads_per_request": 1,
           "note": "names a pack",
           "request_ms": {
-            "max_ms": 37.958,
-            "median_ms": 34.548,
-            "min_ms": 31.464,
+            "max_ms": 45.23,
+            "median_ms": 31.886,
+            "min_ms": 31.218,
             "n": 7
           },
           "shape": "point_ns"
         },
         {
           "expected_gate_reads": 1,
-          "gate_ms_per_request": 19.278,
+          "gate_ms_per_request": 16.888,
           "gate_reads_per_request": 1,
           "note": "names a pack through the props passthrough",
           "request_ms": {
-            "max_ms": 36.475,
-            "median_ms": 31.236,
-            "min_ms": 27.157,
+            "max_ms": 38.177,
+            "median_ms": 33.518,
+            "min_ms": 27.737,
             "n": 7
           },
           "shape": "point_ns_in_props"
         },
         {
           "expected_gate_reads": 1,
-          "gate_ms_per_request": 19.278,
+          "gate_ms_per_request": 16.888,
           "gate_reads_per_request": 1,
           "note": "names a pack",
           "request_ms": {
-            "max_ms": 43.96,
-            "median_ms": 40.179,
-            "min_ms": 37.538,
+            "max_ms": 43.678,
+            "median_ms": 38.728,
+            "min_ms": 36.551,
             "n": 7
           },
           "shape": "object_ns"
         },
         {
           "expected_gate_reads": 2,
-          "gate_ms_per_request": 38.556,
+          "gate_ms_per_request": 33.776,
           "gate_reads_per_request": 2,
           "note": "SAME pack named twice (positional + props)",
           "request_ms": {
-            "max_ms": 74.721,
-            "median_ms": 62.02,
-            "min_ms": 49.819,
+            "max_ms": 59.261,
+            "median_ms": 51.529,
+            "min_ms": 48.177,
             "n": 7
           },
           "shape": "point_ns_twice"
         },
         {
           "expected_gate_reads": 2,
-          "gate_ms_per_request": 38.556,
+          "gate_ms_per_request": 33.776,
           "gate_reads_per_request": 2,
           "note": "SAME pack named twice (camel + snake)",
           "request_ms": {
-            "max_ms": 88.3,
-            "median_ms": 75.282,
-            "min_ms": 56.579,
+            "max_ms": 67.137,
+            "median_ms": 61.701,
+            "min_ms": 55.035,
             "n": 7
           },
           "shape": "object_ns_twice"
@@ -112,9 +112,9 @@
       },
       "points": 5000,
       "single_gate_read": {
-        "max_ms": 20.341,
-        "median_ms": 19.278,
-        "min_ms": 17.406,
+        "max_ms": 18.604,
+        "median_ms": 16.888,
+        "min_ms": 14.676,
         "n": 7
       }
     },
@@ -122,42 +122,42 @@
       "arm": "nudges",
       "by_content_length": [
         {
-          "content_bytes_per_row": 59.84,
-          "content_bytes_returned": 23936,
-          "content_chars_per_row": 59.84,
+          "content_bytes_per_row": 60.0,
+          "content_bytes_returned": 24000,
+          "content_chars_per_row": 60.0,
           "content_chars_requested": 60,
           "nudge_call": {
-            "max_ms": 16.003,
-            "median_ms": 9.07,
-            "min_ms": 8.811,
+            "max_ms": 11.281,
+            "median_ms": 9.977,
+            "min_ms": 9.592,
             "n": 7
           },
           "points": 1000,
           "rows_returned": 400
         },
         {
-          "content_bytes_per_row": 299.812,
-          "content_bytes_returned": 119925,
-          "content_chars_per_row": 299.812,
+          "content_bytes_per_row": 300.0,
+          "content_bytes_returned": 120000,
+          "content_chars_per_row": 300.0,
           "content_chars_requested": 300,
           "nudge_call": {
-            "max_ms": 18.531,
-            "median_ms": 14.197,
-            "min_ms": 12.421,
+            "max_ms": 16.716,
+            "median_ms": 14.56,
+            "min_ms": 12.314,
             "n": 7
           },
           "points": 1000,
           "rows_returned": 400
         },
         {
-          "content_bytes_per_row": 1199.975,
-          "content_bytes_returned": 479990,
-          "content_chars_per_row": 1199.975,
+          "content_bytes_per_row": 1200.0,
+          "content_bytes_returned": 480000,
+          "content_chars_per_row": 1200.0,
           "content_chars_requested": 1200,
           "nudge_call": {
-            "max_ms": 23.873,
-            "median_ms": 23.201,
-            "min_ms": 22.319,
+            "max_ms": 23.944,
+            "median_ms": 23.417,
+            "min_ms": 21.925,
             "n": 7
           },
           "points": 1000,
@@ -167,32 +167,32 @@
       "by_size": [
         {
           "nudge_call": {
-            "max_ms": 13.022,
-            "median_ms": 12.735,
-            "min_ms": 12.555,
+            "max_ms": 18.133,
+            "median_ms": 13.24,
+            "min_ms": 12.381,
             "n": 7
           },
           "nudges_produced": 3,
           "object_create_ms": {
-            "delta_ms": 11.344,
+            "delta_ms": 12.279,
             "with_nudge": {
-              "max_ms": 18.41,
-              "median_ms": 16.564,
-              "min_ms": 16.187,
+              "max_ms": 19.782,
+              "median_ms": 17.971,
+              "min_ms": 16.287,
               "n": 7
             },
             "without_nudge": {
-              "max_ms": 5.441,
-              "median_ms": 5.22,
-              "min_ms": 5.102,
+              "max_ms": 6.283,
+              "median_ms": 5.692,
+              "min_ms": 5.088,
               "n": 7
             }
           },
           "points": 1000,
           "scan": {
-            "content_bytes_per_row": 299.8,
-            "content_bytes_returned": 119925,
-            "content_chars_returned": 119925,
+            "content_bytes_per_row": 300.0,
+            "content_bytes_returned": 120000,
+            "content_chars_returned": 120000,
             "name_bytes_returned": 5490,
             "row_cap": 400,
             "rows_returned": 400
@@ -200,32 +200,32 @@
         },
         {
           "nudge_call": {
-            "max_ms": 18.393,
-            "median_ms": 14.12,
-            "min_ms": 12.547,
+            "max_ms": 14.821,
+            "median_ms": 13.332,
+            "min_ms": 12.65,
             "n": 7
           },
           "nudges_produced": 3,
           "object_create_ms": {
-            "delta_ms": 13.019,
+            "delta_ms": 12.835,
             "with_nudge": {
-              "max_ms": 23.308,
-              "median_ms": 18.305,
-              "min_ms": 16.087,
+              "max_ms": 21.058,
+              "median_ms": 18.814,
+              "min_ms": 15.84,
               "n": 7
             },
             "without_nudge": {
-              "max_ms": 6.696,
-              "median_ms": 5.286,
-              "min_ms": 5.106,
+              "max_ms": 6.394,
+              "median_ms": 5.979,
+              "min_ms": 5.178,
               "n": 7
             }
           },
           "points": 5000,
           "scan": {
-            "content_bytes_per_row": 299.8,
-            "content_bytes_returned": 119925,
-            "content_chars_returned": 119925,
+            "content_bytes_per_row": 300.0,
+            "content_bytes_returned": 120000,
+            "content_chars_returned": 120000,
             "name_bytes_returned": 5490,
             "row_cap": 400,
             "rows_returned": 400
@@ -240,34 +240,34 @@
         {
           "points": 1000,
           "probe_ms": {
-            "max_ms": 5.408,
-            "median_ms": 4.914,
-            "min_ms": 4.869,
+            "max_ms": 6.382,
+            "median_ms": 5.297,
+            "min_ms": 4.874,
             "n": 7
           },
-          "us_per_point": 4.914,
+          "us_per_point": 5.297,
           "verdict": true
         },
         {
           "points": 5000,
           "probe_ms": {
-            "max_ms": 6.559,
-            "median_ms": 5.647,
-            "min_ms": 5.315,
+            "max_ms": 16.242,
+            "median_ms": 6.827,
+            "min_ms": 5.999,
             "n": 7
           },
-          "us_per_point": 1.129,
+          "us_per_point": 1.365,
           "verdict": true
         },
         {
           "points": 20000,
           "probe_ms": {
-            "max_ms": 13.424,
-            "median_ms": 8.554,
-            "min_ms": 8.172,
+            "max_ms": 9.436,
+            "median_ms": 8.757,
+            "min_ms": 8.25,
             "n": 7
           },
-          "us_per_point": 0.428,
+          "us_per_point": 0.438,
           "verdict": true
         }
       ],
@@ -278,35 +278,33 @@
     "db_uri_env": "docker://:@127.0.0.1:16402/tortoise_test_matrix",
     "engine": "graph ver 42006 (4.20.6)",
     "git_branch": "chore/13436-storage-followups",
-    "git_dirty": [
-      "ools/measure_13436_write_costs.py"
-    ],
-    "git_head": "41b5a7822f6b6c2565b133c5d1e239567032e827",
-    "git_head_short": "41b5a7822f",
+    "git_dirty": [],
+    "git_head": "3d73c09c1d85a787175063e970edd5157f0df9a9",
+    "git_head_short": "3d73c09c1d",
     "graphs_measured": [
-      "test_measure13436_version_0_3850245",
-      "test_measure13436_nudge_1000_3850245",
-      "test_measure13436_nudge_5000_3850245",
-      "test_measure13436_nudgec60_1000_3850245",
-      "test_measure13436_nudgec300_1000_3850245",
-      "test_measure13436_nudgec1200_1000_3850245",
-      "test_measure13436_kindgate_5000_3850245",
-      "test_measure13436_schema_1000_3850245",
-      "test_measure13436_schema_5000_3850245",
-      "test_measure13436_schema_20000_3850245"
+      "test_measure13436_version_0_4049250",
+      "test_measure13436_nudge_1000_4049250",
+      "test_measure13436_nudge_5000_4049250",
+      "test_measure13436_nudgec60_1000_4049250",
+      "test_measure13436_nudgec300_1000_4049250",
+      "test_measure13436_nudgec1200_1000_4049250",
+      "test_measure13436_kindgate_5000_4049250",
+      "test_measure13436_schema_1000_4049250",
+      "test_measure13436_schema_5000_4049250",
+      "test_measure13436_schema_20000_4049250"
     ],
     "loadavg_at_end": [
-      9.61,
-      10.27,
-      10.37
+      11.27,
+      9.82,
+      10.01
     ],
     "loadavg_at_start": [
-      9.54,
-      10.29,
-      10.38
+      9.59,
+      9.43,
+      9.89
     ],
     "python": "3.12.3"
   },
   "issue": 13436,
-  "measured_at": "2026-11-18T02:52:37Z"
+  "measured_at": "2026-11-18T03:01:16Z"
 }
