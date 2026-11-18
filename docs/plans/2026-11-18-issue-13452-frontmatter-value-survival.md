@@ -404,15 +404,39 @@ support, which is out of this issue's scope.
 
 **Recorded, not fixed — the guard's sanity counters can red on an empty population.** Two sites in
 `tests/test_doc_affiliation_frontmatter.py` report the same wrong diagnosis as round 5's escape
-finding, and neither is an escape: `:751-752` assert `measured` and `compared` BEFORE
-`assert not failures` (`:753`), so a tree the guard samples sparsely reds on *"measured no
+finding, and neither is an escape: `:828-829` assert `measured` and `compared` BEFORE
+`assert not failures` (`:830`), so a tree the guard samples sparsely reds on *"measured no
 affiliation value at all — re-point this guard"* — advice that points at the guard instead of at
-the value; and `:658` skips `escaped` before `compared += 1` (`:666`), so a tree whose affiliated
-values are all escaped leaves the counter legitimately empty and fires the same message. Both are
+the value; and `:733` skips `escaped` before `compared += 1` (`:743`), so a tree whose affiliated
+values are all escaped leaves the counter legitimately empty and fires the same message. (Line
+numbers are as of this head; the rebase onto `f6793959a2` moved them — `#13485` inserted ~109 lines
+above the arm — and an earlier revision of this section still cited the pre-rebase `:751-752`,
+`:753`, `:658`, `:666`, which after the rebase land on unrelated code. The sequence branch carries
+the same pair at `:699` / `:703`.) Both are
 false blocks of an author's tree, not fail-opens — nothing escapes measurement, they fail closed
 and name a remedy — and both live in the guard, not in the escape branch this PR fixes. Recorded
 here because a reader meets the message before the reason; fixing the ordering is a separate change
 to #13476's guard.
+
+**Recorded, not fixed — one legal shape is newly REFUSED (a narrow over-block this PR introduces).**
+Found by the fresh-context review at `7d4514f39e` and re-measured here. `aboutObjects: "\" #"# c`
+(raw `"\" #"# c`) is loadable YAML — `yaml.safe_load` returns `" #`, and `parse_frontmatter` agrees
+— but the arm now reports `('malformed', None)` where the pre-fix helper reported
+`('escaped', None)`. The cause is the fix's own predicate, working as designed on one half and
+meeting a lenient consumer on the other: the space-preceded `#` at index 3 sits INSIDE the scalar, so
+`_split_comment` correctly refuses to split there (the text before it does not end at the parity
+close, which is index 5), and with no space-separated `#` after that close nothing is stripped, so
+the raw text reaches `_quoted_style` with a trailing `# c` and `value.endswith(q)` fails. Note the
+arm is the SPEC-CORRECT side here (YAML 1.2.2 §6.6: *"Comments must be separated from other tokens
+by white space characters"*, so `"…"# c` is not a comment), and PyYAML is the lenient one — but
+PyYAML is the consumer this arm exists to model, so for that consumer it is a false block. It
+cannot ship a defect (it fails closed and names a remedy), and it is the same class as the (C)
+truncation case this PR deliberately keeps red, so clearing it means teaching the arm to accept a
+non-space-separated trailing comment after a close — a lexer widening, out of this issue's scope.
+Measured scale, so it is not read as larger than it is: differential over **15,548 YAML-parseable
+generated raws**, exactly **1** where the arm was green before and is red now; and **0** where the
+new predicate splits at a space-preceded `#` the old one refused — i.e. no fail-open was introduced on the path
+this PR touches.
 
 **Recorded, not fixed — #13476's `470 values compared` figure.** At this head the same probe
 prints **90 measured / 94 compared**; the counter now counts affiliation values only. The
