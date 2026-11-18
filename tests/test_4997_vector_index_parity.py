@@ -356,15 +356,15 @@ def _arm_the_record_leg(monkeypatch):
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
     monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "1")
-    # ⛔ AND A RECORD TENANT, which `#13610` made the third condition. Being armed
-    # stopped meaning "the record answers" the day the arm became the default: the
-    # record still has no backfill, so the gated READ declines every served label
-    # to the GRAPH until `record_vector.coverage` proves the record holds them. On a
-    # request that resolves no tenant the graph IS the answering leg, so it keeps its
-    # index — `vector_index_retired()` asks `record_vector.record_tenant_available()`
-    # for exactly that reason, and the pins below are about the ARM-AND-A-TENANT
-    # posture. The declaration is the documented single-tenant operator posture
-    # (`record_writer.single_tenant_declared`, #9192), not a test-only seam.
+    # ⛔ AND AN EXPLICIT ARM — `#13631` replaced the RECORD-TENANT condition this
+    # comment used to describe. Being armed stopped meaning "the record answers" the
+    # day the arm became the default: the record still has no backfill, so the gated
+    # READ declines every served label to the GRAPH until `record_vector.coverage`
+    # proves the record holds them — and the drop runs at setup, before any coverage
+    # can exist. So the DROP asks a store-scoped operator statement instead
+    # (`record_vector.arm_is_explicit`): an unset switch keeps the index and keeps
+    # `#4997`'s WARNING, and these pins spell `=1` because that is the posture in
+    # which the retirement is authorised at all.
     monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
     monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "test-org")
     monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "test_4997_bare")

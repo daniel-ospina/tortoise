@@ -826,16 +826,20 @@ def arm_is_explicit() -> bool:
 def record_tenant_available(carried: tuple[str, str] | None = None) -> bool:
     """Does a record TENANT resolve for this request? (#13610)
 
-    The third condition of :func:`tortoise.projection.vector_index_retired`, and the
-    one the default flip made necessary: the arm can no longer stand in for it. A
-    store whose dense read resolves no tenant serves every label from the GRAPH
-    (:func:`searcher` refuses without a scope, and :func:`coverage` cannot be taken),
-    so the graph's in-index is the one that must stay.
+    ⚠️ **NOT the third condition of :func:`tortoise.projection.vector_index_retired`
+    any more** (`#13631` removed it from that predicate, and the reason is recorded
+    there): the drop runs at SETUP, before any coverage can exist, and a tenant is
+    REQUEST-scoped while that decision is store-scoped — so a by-value-credential
+    lane would never retire while an ambient-tenant request on the same graph would.
+    The drop now asks :func:`arm_is_explicit` instead.
 
-    ⚠️ Ambient-only by design, and that is the CONSERVATIVE answer here: a request
-    that carries its tenant by value (the hosted lane) says ``False``, so the index is
-    kept rather than dropped — the cost is a stale index, the alternative is an
-    index-less leg on the store that is answering.
+    What remains here is the predicate itself: a store whose dense read resolves no
+    tenant serves every label from the GRAPH (:func:`searcher` refuses without a
+    scope, and :func:`coverage` cannot be taken).
+
+    ⚠️ Ambient-only by design, and that is the CONSERVATIVE answer: a request that
+    carries its tenant by value (the hosted lane) says ``False``. A caller that
+    needs the request's real answer passes ``carried``.
     """
     return _resolve_scope(carried) is not None
 

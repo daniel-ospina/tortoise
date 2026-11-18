@@ -1712,12 +1712,12 @@ AND read — until it does. Concretely, five facts a reader can hold against the
    `use_record_tenant` primitive the MCP lane installs per request. Without it the write gate would
    answer "no tenant" on every hosted write and keep the mirror for ever, while the read half of the
    same request cut over.
-5. **The index retirement needs a record TENANT, not just a DSN.** `vector_index_retired()` is
-   `VECTOR_INDEX_RETIRED ∧ DSN ∧ cutover_armed() ∧ a resolvable record tenant`, and with the arm
-   defaulting ON the tenant is the conjunct that decides it. ⚠️ Consequence, and it is a real
-   behaviour change on upgrade: on a store that RESOLVES a tenant, the next setup takes the DROP
-   branch (the in-graph `embedding` index is removed) and the `#4997` gap report is downgraded
-   WARNING→INFO; on a request that resolves NONE, the index is kept and `#4997` keeps its WARNING.
+5. **The in-graph index is retired only on an EXPLICIT arm.** `vector_index_retired()` is
+   `VECTOR_INDEX_RETIRED ∧ DSN ∧ an operator SPELLED the switch` (`record_vector.arm_is_explicit`,
+   `#13631`). An UNSET switch is armed for the READ and silent for the DROP, so a default-armed
+   store keeps its in-graph `embedding` index and `#4997` keeps its WARNING; only an explicit truthy
+   `TORTOISE_RECORD_VECTOR_LEG` takes the DROP branch (and downgrades `#4997` to INFO). See the
+   paragraph below for why the condition cannot be the request's tenant.
 
 ⚠️ **The ROLLBACK is complete only while coverage is UNVERIFIED.** `TORTOISE_RECORD_VECTOR_LEG=0`
 restores the pre-#13610 posture (the graph answers the dense read, the mirror is written) — but only
