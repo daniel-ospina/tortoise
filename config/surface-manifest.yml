@@ -986,6 +986,25 @@ response_fields:
     the reply is NON-EMPTY **and** that the call was not one whose reply is a no-op.'
   unchanged_when_off: not flag-gated — the key is ABSENT unless a shaping happened, and a write that shapes nothing
     returns byte-identical to before this field existed
+- response: sdk:tortoise_fts_query
+  field: successorId / successorName / allSuccessorIds / stage / endedAt / linkedEvents / the ended-row shape (the
+    ended_scope read) — each a separate row key, never a wrapper object
+  emitted_when: 'only for a call that passes ended_scope=True (#13302). Those rows are NOT match rows: they describe
+    an ENDED record and say how it ended, from the record''s own fields — `status` (the lifecycle word: `deprecated`
+    = nothing replaced it, `superseded` = see the successor), the successor as the TWO facts the model actually
+    records (**`successorId`/`allSuccessorIds` from a Point''s CORRECTS edge, and `successorName` from the
+    `supersededBy`/`superseded_by` carrier — that carrier holds a NAME by ONTOLOGY §4.2/§4.3, so it is never
+    served under an `…Id` key and an Object/Subject row has `successorId: null` beside its `successorName`**),
+    `stage` {id, slot, outcome, since} on a record ended on the POSITION axis, `isClosed`/`outdated`, `endedAt` plus
+    the raw `validTo`/`expiredAt`/`supersededAt`/`pipelineStageSince`/`updatedAt` it was resolved from, and
+    `linkedEvents` (the Events wired to the record — empty is the product''s own statement that no occurrence was
+    ever recorded, which with stage.slot == "terminal" IS the "planned and never happened" answer). Selection is
+    the shared currency predicate `live._terminal_expression` in the positive direction, so no status list, slot
+    literal or visibility field is added anywhere.'
+  unchanged_when_off: 'yes — ended_scope defaults to False and the branch returns before any retrieval runs, so with
+    the flag off the read is byte-identical to pre-#13302: same rows, same keys, same order. ⛔ Deliberately NOT exposed
+    on the MCP `tortoise_search` door yet: that is a served-declaration change needing owner approval (surface-guard),
+    and the implementation plan marks read-tool scope parameters (S6) not-gated-yet.'
 approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'

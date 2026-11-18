@@ -1,0 +1,39 @@
+{
+  "_provenance": {
+    "packet": "/private/tmp/capstone-r2/judge-packet.json",
+    "reader": "fresh",
+    "elapsed_s": 97.2,
+    "reason": "",
+    "note": "Written by this instrument. `--verdicts <this file>` re-scores the same packet without spawning a reader."
+  },
+  "Q1": {
+    "verdict": "right",
+    "because": "The current-commitment read served Q4 pricing ($39/seat, live, supersedes the Q3 id) and the Q4 uptime target/judgement as live, and the retired onboarding flow and superseded Q3 pricing were excluded from the current scope, so nothing retired is served as current.",
+    "cause": null
+  },
+  "Q2": {
+    "verdict": "right",
+    "because": "The launch event node is a core:plan with stage 'scheduled', slot 'entry', isClosed=false, and the only graph events are uptime measurements \u2014 no occurrence of the launch exists, so it is shown as planned, not as having happened.",
+    "cause": null
+  },
+  "Q3": {
+    "verdict": "right",
+    "because": "The Q3 node is served as superseded and the live Q4 node is served with content 'the entry tier becomes $39 per seat, replacing the Q3 decision' plus a supersedes link to the Q3 id, naming the successor without inventing any rationale.",
+    "cause": null
+  },
+  "Q4": {
+    "verdict": "right",
+    "because": "The judgement returns state=unmet with comparator '>=', threshold 99.9, reading 99.72 as of 2026-11-15, comparison=false, so the verdict rests on the reading versus the target rather than a status word.",
+    "cause": null
+  },
+  "Q5": {
+    "verdict": "right",
+    "because": "The Thursday partner call (6 November) is served as a plan in stage 'cancelled', slot 'terminal', outcome 'withdrawn', isClosed=true, while the 12 December launch remains scheduled rather than being reported as never having happened.",
+    "cause": null
+  },
+  "Q6": {
+    "verdict": "right",
+    "because": "The beach-club confirmation claim is served with status 'retracted' and an endedAt timestamp, and it is excluded from the default (current) scope, so the product both stops counting it and can say it was withdrawn.",
+    "cause": null
+  }
+}

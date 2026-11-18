@@ -2,11 +2,11 @@
 title: "The storage picture — where the layer is going, and where it hurts"
 type: engineering
 domain: platform
-doc_status: live
+doc_status: draft
 created: 2026-11-17
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "#13232, #13224, #7879, #4051, #13220, STORAGE-ARCHITECTURE.md, subject-write latency"
+aboutObjects: "#13232, #13247, #13224, STORAGE-ARCHITECTURE.md"
 ---
 
 # The storage picture — where the layer is going, and where it hurts

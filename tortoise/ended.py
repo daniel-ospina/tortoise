@@ -97,6 +97,37 @@ FAMILIES: dict[str, dict[str, str]] = {
     },
 }
 
+#: The budget a family-wide ended scan is given, in ms — what the read path uses
+#: when the caller supplied no budget of its own (#13302 review F1).
+#:
+#: ⛔ IT IS NOT ``VECTOR_LEG_BUDGET_MS`` (500 ms), and pointing that number at
+#: this statement was the F1 defect. That constant is the DENSE LEG's budget: its
+#: own docstring says it is one home so the legs of a fused read agree and "a leg
+#: on a different budget is a leg the cap cannot bound", and the other three
+#: call sites on this path are the reachability probe (``RETURN 1``),
+#: ``_read_declaration`` and the vector legs — every one of them single-hop and
+#: cheap. What THIS budget bounds is the statement this module calls the most
+#: expensive the read issues: ``MATCH … OPTIONAL MATCH … collect() … ORDER BY …
+#: LIMIT`` over ``live._terminal_expression`` — an OR across four status words,
+#: ``outdated``, ``isClosed`` and ``pipelineSlot = 'terminal'`` that no single
+#: index covers, ordered by ``coalesce(validTo, expiredAt, supersededAt,
+#: pipelineStageSince, updatedAt) DESC``, which forces the matched set to be
+#: materialised before the ``LIMIT``. Its cost grows with the family; 500 ms does
+#: not. Under that budget the read answered ``[]`` + ``incomplete`` on exactly the
+#: population it exists for, which is the shape this read was written to end.
+#:
+#: 10 000 ms is the VENDOR's own general-query default, not a guess: FalkorDB's
+#: GraphRAG client ships ``ConnectionConfig.query_timeout_ms = 10_000``, and
+#: ``GRAPH.QUERY`` takes its per-query ``TIMEOUT`` in milliseconds and terminates
+#: the statement on expiry (``Query timed out``). The scan stays BOUNDED — it
+#: never hangs this read: a wedged store degrades (zero rows, ``incomplete``, a
+#: ``degraded`` leg) when the caller supplied a sink to carry that marking, and
+#: otherwise raises the store's error rather than serving an unmarked empty
+#: (``tortoise_fts_query``'s ended arm, #13302 review round 2) — and a caller
+#: that supplies its own budget (the capstone's ``_elevated_timeout_ms``) always
+#: wins over this default.
+ENDED_SCAN_BUDGET_MS = 10_000
+
 #: The ending-time fields, in the order ``endedAt`` resolves them. Declared here
 #: (not in the Cypher) so the docstring above, the query and the row cannot
 #: drift, and so adding a carrier is one edit.
@@ -170,19 +201,31 @@ def build_cypher(entity_type: str, *, narrow_kinds: bool) -> str:
     )
 
 
-def _successor(row_successor_ids, named) -> str | None:
-    """The ONE successor a row names, or ``None`` when it names none.
+def _successor_ids(successor_ids) -> list[str]:
+    """The successor ids a row's CARRIER EDGE names, sorted and deduped.
 
-    The CORRECTS edge wins where both carriers exist: it is the fact
-    ``supersede_point`` writes, while the property is only ever a caller's
-    label. A row recording SEVERAL successors (a Point corrected twice — the
-    edge is a MERGE on its endpoints, so this is reachable) is reported by its
-    first id in id order rather than by picking one silently: ``allSuccessors``
-    below carries the full set, so the singular key never claims to be complete.
+    ⛔ The CORRECTS edge is the ONLY carrier that holds an ID. The
+    ``supersededBy`` property is a **NAME** by the model's own definition (§4.2 /
+    §4.3: *"successor NAME (stored verbatim)"*, and ``_supersede_entity`` writes
+    the successor's name into it), so serving it under an ``…Id`` key would hand a
+    caller a value it cannot resolve — and unioning the two would mix a name with
+    ids in one list. That is why the two spellings are served under two keys
+    (:func:`_successor_name` owns the other), and why only this list is
+    ``successorId``.
     """
-    ids = [i for i in (row_successor_ids or []) if isinstance(i, str) and i]
-    if ids:
-        return sorted(ids)[0]
+    return sorted({i for i in (successor_ids or []) if isinstance(i, str) and i})
+
+
+def _successor_name(named) -> str | None:
+    """The successor NAME the record carries, verbatim, or ``None``.
+
+    Read from BOTH spellings of the carrier: ``supersededBy`` is the field the
+    Object/Subject doors write, and ``superseded_by`` is the shadow SNAKE spelling
+    a generic ``update_entity`` accepts and which lands a DIFFERENT property
+    (``sdk.py``'s ``_SUCCESSOR_COLUMN`` note), so a read that looked at one of them
+    would report "nothing replaced it" for a record whose other spelling names a
+    successor.
+    """
     return named if isinstance(named, str) and named else None
 
 
@@ -198,6 +241,7 @@ def _ended_row(raw: tuple, entity_type: str) -> dict:
      named_successor, stage_id, slot, outcome, ended_at, *times) = raw
     raw_times = dict(zip(_TIME_FIELDS, times, strict=False))
     is_closed, outdated = times[len(_TIME_FIELDS):][:2]
+    id_list = _successor_ids(successor_ids)
     return {
         "id": node_id,
         f"{entity_type}Kind": kind,
@@ -209,11 +253,14 @@ def _ended_row(raw: tuple, entity_type: str) -> dict:
         "goalState": goal_state,
         # ── how it ended, in the record's own fields ──────────────────────
         # The lifecycle word is served verbatim (`superseded`, `deprecated`, …);
-        # `successorId` answers "replaced by what"; the stage block answers it
-        # for a record that ended on the POSITION axis.
-        "successorId": _successor(successor_ids, named_successor),
-        "allSuccessorIds": sorted(
-            {i for i in (successor_ids or []) if isinstance(i, str) and i}),
+        # the successor is TWO facts, never one: an ID (the CORRECTS edge — a
+        # Point's successor) and a NAME (the `supersededBy` carrier — an
+        # Object/Subject's, and a Point's if a caller wrote the property).
+        # Serving the carrier under `successorId` would hand back a value no node
+        # carries, which is worse than serving nothing.
+        "successorId": id_list[0] if id_list else None,
+        "allSuccessorIds": id_list,
+        "successorName": _successor_name(named_successor),
         "stage": (
             {
                 "id": stage_id,
@@ -239,7 +286,8 @@ def _ended_row(raw: tuple, entity_type: str) -> dict:
 
 
 def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = None,
-                    kinds: list[str] | None = None, limit: int = 50) -> list[dict]:
+                    kinds: list[str] | None = None, limit: int = 50,
+                    timeout_ms: int | None = None) -> list[dict]:
     """Every record of this family that has ENDED, newest ending first.
 
     ``graph`` is the live graph handle the read path already holds, so this costs
@@ -254,6 +302,25 @@ def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = Non
     EXPANDED form) wins: it is the set the read path's own filter would have
     matched, and ``_read_filter_kinds(kind)`` always contains ``kind`` itself, so
     the two agree rather than conflict for every SDK caller.
+
+    ``timeout_ms`` BOUNDS the statement, and the read path always passes its own
+    budget. It is not optional-in-spirit: this is a family-wide
+    ``MATCH … OPTIONAL MATCH … collect() … ORDER BY … LIMIT``, i.e. the most
+    expensive single statement the read issues, and every other statement on that
+    path is bounded for exactly this reason — an unbounded one hangs on a wedged
+    store instead of degrading.
+
+    A budget that is EXCEEDED is a store that could not answer: the server aborts
+    the statement and the driver raises. This function does not swallow that — a
+    direct caller gets the error rather than an empty list, because ``[]`` is the
+    factual claim "nothing of that family ever ended". The READ PATH, whose
+    answer is a graded status rather than an exception, wraps this call and
+    degrades (zero rows + ``incomplete`` truncation + ``degraded`` status),
+    exactly as it does for every other bounded statement it issues (#13302
+    review F1) — but only when the caller has a sink that can CARRY the
+    marking (``leg_trace``, ``read_status_out`` or ``_truncation_out``). With
+    none, the read serves no unmarked empty and raises the store's error
+    instead, because an undecorated ``[]`` is that same factual claim.
 
     The read is BOUNDED (``LIMIT $limit``) and ordered by the record's own
     ending time, so the caller gets the most recent endings rather than an
@@ -284,6 +351,10 @@ def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = Non
     params: dict = {"limit": int(limit)}
     if where_kinds:
         params["kinds"] = list(kinds or [])
-    rows = graph.query(cypher, params=params).result_set
+    # ONE door call, so this read is ONE statement site (the census counts sites, and
+    # two spellings of the same query would read as two queries). A caller that named
+    # no budget keeps the door's own; the read path always passes one.
+    kwargs = {} if timeout_ms is None else {"timeout": int(timeout_ms)}
+    rows = graph.query(cypher, params=params, **kwargs).result_set
     return [_ended_row(tuple(r), entity_type) for r in rows
             if r and isinstance(r[0], str)]
