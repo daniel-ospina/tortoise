@@ -7914,11 +7914,11 @@ def _record_health() -> dict:
     Never raises and never 5xxes — a health path must always answer.
     """
     try:
-        from tortoise import record_writer
         # #12943 (reopened): the live-write TARGET registry lives in
         # `cache_leg` (it is a bounded per-process map, not a Prometheus
         # counter — a per-graph label would be unbounded cardinality), so it is
         # imported with the counters and read in the SAME snapshot.
+        from tortoise import record_writer
         from tortoise.cache_leg import cache_write_targets as _cache_targets
         from tortoise.monitoring import (
             cache_leg_failure_counts,

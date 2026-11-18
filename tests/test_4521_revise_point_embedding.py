@@ -11,7 +11,8 @@ was named for: #8316 normalises a right-width ``List`` at the READ boundary
 (``stored_embedding_vector_expr``), so the ``Type mismatch: expected Null or
 Vectorf32 but was List`` abort the REAL dense leg
 (``search_engine.run_vector_query``) used to make no longer happens for a
-right-width stored value (a wrong WIDTH still aborts the MATCH — #8430). The raw
+right-width stored value (a stored value the read cannot consume is now DROPPED
+rather than aborting the MATCH — #8430). The raw
 probe in this file is deliberately STRICTER — it reads ``n.embedding`` rather
 than the seam — and still raises on a bare ``List``. What survives is that a
 bare ``List`` node is not in the HNSW index at all, so it is silently missing
@@ -110,8 +111,8 @@ def _assert_revised_vector(proj, path: str) -> None:
         "the index-served dense leg (#8429) — the write seam keeps "
         "server-owned vectors the typed shape. (#8316 normalises a right-width "
         "List at the READ boundary, so the abort this file was named for no "
-        "longer happens for a right-width value; a wrong width still aborts "
-        "the MATCH — #8430.) (#4521).")
+        "longer happens for a right-width value, and #8430 drops a value it "
+        "cannot consume rather than aborting the whole MATCH.) (#4521).")
 
     # VALUE, not just shape (#4520: an overwrite can be silently DISCARDED,
     # leaving typeof correct and the vector from the previous write).
