@@ -205,10 +205,16 @@ def test_a_document_derives_from_the_graphs_search_text_here_too(encoder):
     rw.derived_embedding_columns({
         "type": "DocumentCreated", "url": "https://example.com/a",
         "title": "Q3 pricing", "summary": "the memo", "topics": ["q3"],
-        "content": "the memo",
+        # ⛔ DISTINCT from `summary` on purpose (review of #13473, verified): when
+        # `content` repeated the summary, an absence assertion could not tell a
+        # `content` leak from the summary's own text — it read as a
+        # content-exclusion proof while proving nothing.
+        "content": "the long body text",
     })
     assert encoder.text == "Q3 pricing the memo q3"
-    assert "body" not in encoder.text
+    assert "body" not in encoder.text, (
+        "`content` reached the record's vector — the graph stopped embedding it in "
+        "#8419 and it is not a graph property post-D10")
 
 
 # ════════════════════════════════════════════════════════════════════════════
