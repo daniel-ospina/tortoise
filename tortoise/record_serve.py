@@ -522,8 +522,10 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "`FOLD_ON_CREATE_DEFAULTS` covers, plus `Point` — and ABSTAINS "
                "(`residency: \"not-hot\"`) for the rest rather than answering "
                "an absence it cannot establish: `Event` and `Source` carry the "
-               "OPEN parity gap in #9721 (a served `:Event` would lose `id` and "
-               "six other fold-written keys), and `Source` ALSO sits in "
+               "OPEN parity gap in #9721 (a served `:Event` would lose the "
+               "fold-written keys its row does not carry — per column, so the "
+               "count rides the row: up to eight, seven of them measured), and "
+               "`Source` ALSO sits in "
                ":data:`ENTITY_UNION_ADDRESS_RESIDUALS` (its record key is `url`, "
                "while the cache resolves one by `id` too — so a bare Source id "
                "names a node this read would miss). ⚠️ THE "
@@ -1321,8 +1323,11 @@ def read_entity(conn: Any, *, org_id: str, graph_id: str, id_val: str,
     caller can read ONE label's row — the tests use it, and it is how the
     per-label addressing is measured — and it deliberately does NOT re-check
     parity: a caller that names ``Event`` gets the Event ROW, which is missing the
-    seven fold-written keys (#9721, ``id`` among them; an eighth, ``eventKind``,
-    when the producer omitted it) that a served ``:Event`` must not lose. Only :func:`serve_entity` decides what may be SERVED, and it
+    fold-written keys ITS COLUMNS do not carry — per column, never a fixed count
+    (measured over every column subset: all optional columns NULL → 8 lost,
+    ``event_kind`` set and the rest NULL → the seven #9721 measured, every column
+    set → 0). See this module's ``Event`` bullet for why the count rides the row.
+    Only :func:`serve_entity` decides what may be SERVED, and it
     reads through this function with no ``labels`` argument. State this rather
     than let a future caller infer a parity guarantee from proximity.
 
