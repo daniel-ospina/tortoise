@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import fnmatch
 import importlib.util
 import json
@@ -2216,6 +2217,68 @@ def _record_db():
     return conn
 
 
+#: Postgres' DEADLOCK_DETECTED. Read off the exception's own `pgcode` rather
+#: than a driver class, so this module keeps working where psycopg2 is absent
+#: (every import of it here is a lazy `importorskip`).
+_DEADLOCK_SQLSTATE = "40P01"
+
+#: Attempts per migration FILE, not per call. Three: the server breaks a
+#: deadlock by aborting exactly ONE side, so a retry either wins outright or
+#: meets a second counterparty — a fourth attempt has been observed to add
+#: nothing but wall clock.
+_DDL_ATTEMPTS = 3
+
+
+def _execute_ddl(conn, cur, sql: str) -> None:
+    """Execute one migration file, re-trying a Postgres DEADLOCK (40P01).
+
+    ⛔ WHY THIS IS NOT A WORKAROUND (#13466). `_ensure_record_schema` re-applies
+    `RECORD_REAPPLY_STEPS` on a LIVE container: several record suites share one
+    server, and `autovacuum` runs on it, while the tenancy migration takes
+    `ACCESS EXCLUSIVE` on every record table one `CREATE POLICY` at a time. A
+    deadlock needs two counterparties and this re-apply has met two:
+
+      * a handle another suite PARKED in the record's pool with its transaction
+        still open — `record_writer._default_connect`'s `close()` returns the
+        handle to the idle set, and `_reset_parked_transaction` only rolls it
+        back at the NEXT borrow — holding `ACCESS SHARE` on the tables it read;
+      * `autovacuum: ANALYZE public.point`, woken by the rows the record suites
+        themselves insert.
+
+    MEASURED at `0f153899e8fc` on `pgvector/pgvector:pg16`, running the CI job's
+    own file list in the CI job's own order: the whole of
+    `tests/test_12894_record_cursor_live.py` ERRORed at its module `schema`
+    fixture — **43 nodeids, every one `DeadlockDetected`** — where the same list
+    on `origin/main`'s tree ran **372 passed, 0 errors**. The server log names
+    the cycle exactly (`Process 601 waits for AccessExclusiveLock on relation
+    20457` = `public.point`, `blocked by process 606`, `autovacuum: ANALYZE
+    public.point`).
+
+    What this does NOT do: it does not make the DDL cheaper and it does not
+    claim the lock order is ideal. It applies the server's own answer — retry
+    the aborted transaction — and every file in this set is re-appliable by
+    construction, which is the very reason it is in the set.
+
+    A NON-autocommit connection is rolled back first: a deadlock leaves it in an
+    ABORTED transaction, and re-executing there would raise
+    `InFailedSqlTransaction` instead of re-trying anything. Every caller here
+    hands in an autocommit connection (`_record_db`); this arm keeps a caller
+    who does not from being handed a confusing second error.
+    """
+    for attempt in range(1, _DDL_ATTEMPTS + 1):
+        try:
+            cur.execute(sql)
+            return
+        except Exception as e:  # the SQLSTATE is the test, not the exception type
+            if getattr(e, "pgcode", None) != _DEADLOCK_SQLSTATE:
+                raise
+            if attempt == _DDL_ATTEMPTS:
+                raise
+            if not getattr(conn, "autocommit", True):
+                with contextlib.suppress(Exception):
+                    conn.rollback()
+
+
 def _ensure_record_schema(conn) -> None:
     """Apply the record migrations if the database does not carry them yet.
 
@@ -2247,7 +2310,29 @@ def _ensure_record_schema(conn) -> None:
     A `creates`-bearing entry is applied only where its relation is ABSENT —
     that file's `CREATE POLICY`s are unguarded and it is append-only, so a
     re-apply over an existing table raises `42710`; see the list's own comment.
+
+    ⛔ THE PASS RELEASES THE PROCESS'S PARKED RECORD HANDLES FIRST, and that is a
+    correctness requirement rather than tidiness. The record pool parks the READ
+    door's handle IN TRANSACTION **on purpose** (its reset is at REUSE, not at
+    release — `record_writer._park_connection`), so a handle parked by any record
+    READ earlier in this process holds an `AccessShareLock` on every record table
+    that read touched. This pass issues `CREATE POLICY`/`ALTER TABLE`, which take
+    `AccessExclusiveLock` on the same tables — so the pass waits on a transaction
+    belonging to its OWN process. Measured at `0f153899` (#13466):
+    `test_12894_record_cursor_live.py`'s module fixture runs this pass straight
+    after `tests/test_11642_vector_move_live.py` has served `object`/`subject`
+    dense reads, and the `test-record-postgres` leg reds with
+    `psycopg2.errors.DeadlockDetected` at this function for ALL 43 of that
+    module's tests (CI run 44306051806, reproduced twice locally on a fresh
+    `pgvector/pgvector:pg16`; a clean `origin/main` tree on the same image passes
+    3/3 because those labels answered `None` before any statement ran).
+    `_release_pooled_connections` is the seam the pool already names as the TEST
+    suite's, and closing an IDLE handle costs this pass nothing: a BORROWED one is
+    untouched, and a fresh process simply has nothing to release.
     """
+    from tortoise.record_writer import _release_pooled_connections
+
+    _release_pooled_connections()
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.journal_event')")
         if cur.fetchone()[0] is not None:
@@ -2261,13 +2346,17 @@ def _ensure_record_schema(conn) -> None:
                     cur.execute(f"SELECT to_regclass('{creates}')")
                     if cur.fetchone()[0] is not None:
                         continue
-                cur.execute(path.read_text(encoding="utf-8"))
+                # `_execute_ddl`, not `cur.execute`: this is the arm the record
+                # suites' module fixtures hit on a SHARED, autovacuuming server,
+                # where a deadlock aborts the file and must be retired — see
+                # `_execute_ddl` for the measured cycle (#13466).
+                _execute_ddl(conn, cur, path.read_text(encoding="utf-8"))
             return
         # ONE statement: the preamble's role guards are `DO $$ … $$` blocks, and
         # splitting on ';' would shred them into unterminated dollar quotes.
-        cur.execute(_PREAMBLE)
+        _execute_ddl(conn, cur, _PREAMBLE)
         for path in RECORD_MIGRATION_FILES:
-            cur.execute(path.read_text(encoding="utf-8"))
+            _execute_ddl(conn, cur, path.read_text(encoding="utf-8"))
 
 
 def _ensure_metering_schema(conn) -> None:
@@ -3943,11 +4032,24 @@ class _StubCursor:
     (`public.journal_event`) while a table a later migration added is not.
     `fetchone` therefore answers whichever `to_regclass('…')` probe was just
     logged — the harness inlines the name for exactly that reason.
+
+    `deadlock_on` makes the stub DEADLOCK on the first `execute` whose SQL
+    satisfies the predicate (and only the first), which is how the retry in
+    `_execute_ddl` is pinned without a server: the SQLSTATE, not the driver
+    class, is what that helper reads.
     """
 
-    def __init__(self, log, present):
+    def __init__(self, log, present, deadlock_on=None, deadlocks=None,
+                 always_deadlock=False):
         self._log = log
         self._present = present
+        self._deadlock_on = deadlock_on
+        #: Shared with the connection so a test can read the count back.
+        self._deadlocks = deadlocks if deadlocks is not None else []
+        #: `False` models the measured shape (ONE transient cycle, retried
+        #: successfully); `True` models a PERMANENT cycle, which must reach the
+        #: caller after `_DDL_ATTEMPTS` rather than spin.
+        self._always_deadlock = always_deadlock
 
     def __enter__(self):
         return self
@@ -3957,6 +4059,11 @@ class _StubCursor:
 
     def execute(self, sql, *args):
         self._log.append(sql)
+        if self._deadlock_on is not None and self._deadlock_on(sql):
+            self._deadlocks.append(sql)
+            if self._always_deadlock or len(self._deadlocks) == 1:
+                raise _DeadlockDetected(
+                    "deadlock detected (a simulated 40P01 — see _execute_ddl)")
 
     def fetchone(self):
         probed = re.findall(r"to_regclass\('([^']+)'\)", self._log[-1])
@@ -3965,12 +4072,18 @@ class _StubCursor:
 
 
 class _StubConn:
-    def __init__(self, *present):
+    def __init__(self, *present, deadlock_on=None, always_deadlock=False):
         self.log = []
+        self.deadlocks = []
         self._present = set(present)
+        self._deadlock_on = deadlock_on
+        self._always_deadlock = always_deadlock
 
     def cursor(self):
-        return _StubCursor(self.log, self._present)
+        return _StubCursor(self.log, self._present,
+                           deadlock_on=self._deadlock_on,
+                           deadlocks=self.deadlocks,
+                           always_deadlock=self._always_deadlock)
 
 
 def test_ensure_record_schema_narrows_a_container_migrated_by_an_older_tree():
@@ -3992,6 +4105,70 @@ def test_ensure_record_schema_narrows_a_container_migrated_by_an_older_tree():
         "record write fails PrivilegeError on a container that is merely OLDER "
         "than this tree — the same \"migrated is not migrated-by-THIS-tree\" "
         "class as the narrowing above (#9600 review 8, P2)")
+
+
+class _DeadlockDetected(Exception):
+    """A DEADLOCK_DETECTED carrying the SQLSTATE `_execute_ddl` reads.
+
+    Deliberately NOT `psycopg2.errors.DeadlockDetected`: the helper keys on
+    `pgcode` so this module needs no driver import, and a stub that needed the
+    real class would only prove the stub can import psycopg2.
+    """
+
+    pgcode = _DEADLOCK_SQLSTATE
+
+
+def test_ensure_record_schema_retries_the_tenancy_migration_after_a_deadlock():
+    """⛔ ONE DEADLOCK MUST NOT KILL THE RE-APPLY — measured, it did (#13466).
+
+    The cycle the server reported at `0f153899e8fc` is `CREATE POLICY … ON
+    public.point` (ACCESS EXCLUSIVE) against `autovacuum: ANALYZE public.point`,
+    on a container several suites share. It aborted the tenancy migration and
+    took ALL 43 nodeids of `tests/test_12894_record_cursor_live.py` with it, at
+    that module's `schema` fixture, so the CI job's introduced-failure predicate
+    saw one nodeid absent from main's baseline and blocked the merge.
+
+    Pinned at the seam that carries the remedy: the file is ATTEMPTED TWICE and
+    the retry is what reaches the policies. Pre-fix this test ERRORS with the
+    simulated deadlock, which is the non-vacuity of the assertion below.
+    """
+    conn = _StubConn("public.journal_event",
+                     deadlock_on=lambda sql: "point_app_tenant" in sql)
+    _ensure_record_schema(conn)
+
+    tenancy = [sql for sql in conn.log if "point_app_tenant" in sql]
+    assert len(tenancy) == 2, (
+        "the tenancy migration must be attempted a SECOND time after the "
+        f"deadlock aborted it; it was attempted {len(tenancy)} time(s)")
+    # The retry must carry the WHOLE file, not a fragment: a partially re-sent
+    # migration would leave the policies on the later tables uncreated while
+    # reporting success.
+    retried = _strip_sql_comments(tenancy[-1])
+    assert "CREATE POLICY point_app_tenant ON public.point" in retried
+    assert "CREATE POLICY session_narrative_app_tenant" in retried, (
+        "the retry stopped short of the file's last policy set — every table "
+        "the tenancy migration names must be re-applied, not just the one that "
+        "happened to deadlock")
+
+
+def test_ensure_record_schema_gives_up_after_the_bounded_deadlock_attempts():
+    """The retry is BOUNDED, so a permanent cycle is still the caller's error.
+
+    A helper that retried for ever would turn a reproducible deadlock into a
+    hung CI leg, which is the failure class `test-record-postgres`'s 12m
+    watchdog exists to catch one layer up. The bound is asserted as attempts,
+    not as elapsed time.
+    """
+    conn = _StubConn("public.journal_event",
+                     deadlock_on=lambda sql: "point_app_tenant" in sql,
+                     always_deadlock=True)
+    with pytest.raises(_DeadlockDetected):
+        _ensure_record_schema(conn)
+
+    attempts = [sql for sql in conn.log if "point_app_tenant" in sql]
+    assert len(attempts) == _DDL_ATTEMPTS, (
+        "the deadlock retry is UNBOUNDED — a permanent cycle must reach the "
+        f"caller after {_DDL_ATTEMPTS} attempts, not {len(attempts)}")
 
 
 def test_ensure_record_schema_leaves_the_app_role_able_to_write():
