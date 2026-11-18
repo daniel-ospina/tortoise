@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-13404-1794963464-p3834418-623d99c1",
+  "_sha": "a1a984efe9ce95ca3a9108bd1fa498d1f5292463",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-13404.log"
+    },
+    {
+      "kind": "branch",
+      "value": "docs/ontology-11824-vocabulary"
+    },
+    {
+      "kind": "sha",
+      "value": "39528a8e345f8fe3386ecf486caf2194e6c36652"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/prd-13404"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 5332,
+  "ended_at": 1794968796,
+  "exit_code": 0,
+  "heartbeat_at": 1794968796,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-13404-1794963464-p3834418-623d99c1",
+  "lease_until": 1795005396,
+  "pid": 3834418,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1794963464,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-13404",
+  "worktree": "/home/cmux/tortoise/.worktrees/prd-13404"
+}
