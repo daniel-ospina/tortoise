@@ -994,7 +994,7 @@ costs a re-run before that head can land — `repo-harnesses` here, and the two 
 pins recorded at the foot of this page. A required leg's red also reddens the aggregate, which is why
 no required leg is pinned **by default**: the one exception is `pool-split`, which pins the ODD rows
 of a REQUIRED shard (`test (b)`, `(d)`, `(f)`, `(h)`), is OPT-IN and off by default, and records its
-own cost under its `OVERRIDES:` block above (`:905-922`). It bypasses the label attachment
+own cost under its `OVERRIDES:` block above (`:910-927`). It bypasses the label attachment
 `scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
 
 ### Scope of the #10237 canary's proof — scheduling only; the ask's proof list is NOT discharged
@@ -1051,18 +1051,19 @@ them; `redis-guard.yml`'s own header records the same), so the departure is scop
 the #10237 canary above: a pin whose red costs a WAIT and a re-run, never a required leg.
 
 What it costs, stated rather than inherited, in the three modes this page records. A "WAIT with no
-hosted half" is only the first (`:975` records it; the canary above measures TWO — QUEUED, and RED
-with ZERO steps at `:977-985`; the third, a red from a missing tool, is the #9018 mode recorded at
-`:269-272`). While the pool is down or the label is detached, `closes-coherence` never advises on
-**any** PR (that workflow carries no `paths:` filter) and `redis-guard`'s `push: main` run never
-measures — a QUEUED job with no red and no annotation.
+hosted half" is only the first (`:963` states it as the canary's accepted cost, and `:977` records
+it as "one of its two modes"; the canary measures TWO — QUEUED, and RED with ZERO steps
+`:982-990`; the third, a red from a missing tool, is the #9018 mode recorded at `:269-272`). While
+the pool is down or the label is detached, `closes-coherence` never advises on **any** PR (that
+workflow carries no `paths:` filter) and `redis-guard`'s `push: main` run never measures — a QUEUED
+job with no red and no annotation.
 
 ⛔ The other two modes are not a missing measurement, which is why this pin is not free: a pool box
 without `gh` reds `closes-coherence` by design (the `Ensure gh` bullet below fails closed), and a
 runner that claims the job and drops it reports ZERO steps (the canary's recorded mode above,
-`:977-985`). `closes-coherence` is unfiltered, so either red sits on every PR's tree, and the rail
+`:982-990`). `closes-coherence` is unfiltered, so either red sits on every PR's tree, and the rail
 merges with `--admin` — required-ness decides nothing, so any red on that tree blocks the head's
-landing until someone re-runs it (`:959-961`). Non-required is what keeps this work out of the
+landing until someone re-runs it (`:964-966`). Non-required is what keeps this work out of the
 aggregate; it is NOT what makes its red free.
 
 `redis-guard` is the cheaper half: it is filtered both ways (`paths:` on `pull_request` and on
@@ -1074,9 +1075,11 @@ Two things this pin keeps TRUE, which is why it is safe on a pool runner:
 - `closes-coherence` carries the #9018 tool contract (`Ensure gh` from
   `.github/scripts/runner-tools.sh`, no `continue-on-error`), so a pool box without `gh` REDS this
   leg instead of silently reporting the advisory as measured — the property
-  `tests/test_runner_tool_contract.py` pins for every `gh`-using job that can land on the pool (its
-  `GH_JOBS` literal, 18 jobs; a job that calls no `gh` is outside that sweep by construction, which
-  is why `redis-guard` needs no step).
+  `tests/test_runner_tool_contract.py` pins for the `gh`-using jobs that can land on the pool (its
+  `GH_JOBS` literal, **19 jobs across 17 workflows** — count it from the literal), and DECLARES the
+  rest as gaps in `KNOWN_UNCOVERED` with a reason and an owning issue (`ai-review-gate` is one,
+  #9942) rather than certifying a gap-free population. A job that calls no `gh` is outside the sweep
+  by construction, which is why `redis-guard` needs no step.
 - `redis-guard` needs no contract step: its only `run:` is `python3 tools/redis-guard.py`, whose only
   subprocess is `git rev-parse --show-toplevel`, and the job pins `actions/setup-python@v5` / `3.12`
   itself, so moving off `ubuntu-latest` cannot change the interpreter.
