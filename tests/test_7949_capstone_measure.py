@@ -6169,7 +6169,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
-        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12116`/`12169` pair the rows now carry.
+        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12136`/`12189` pair the rows now carry (`#13556` then added a further `+20`).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("12136", "subject_binding_available,"),
             ("12189", "and not subject_binding_available(graph):"),
@@ -6422,7 +6422,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("12109", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
-            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, so the live values are `12116`/`12169`.
+            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, so the live values are `12136`/`12189` (`#13556`'s own insert then added a further `+20`).
             ("12136", "subject_binding_available,"),
             ("12189", "and not subject_binding_available(graph):"),
         ), "sdk"),
@@ -7310,6 +7310,15 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
 
     NON-VACUITY, MEASURED on a box that holds the object: reds if the definition moves
     off `:20236` at that head (the value is read THERE, not here).
+
+    ⛔ AND THE SAME CLAIM FOR THE SECOND FIGURE D5 LABELS WITH A HEAD, added to THIS case
+    rather than a new one on purpose: this file's case count is stated by — and owned by —
+    `config/ci-surfaces.yml`'s `durations` row, so a hand-added `def test_` would force a
+    hand edit of a CI timing artefact this lane never measured. D5 states its promote/dedup
+    quartet as "their THIS-HEAD values" and labelled it `measured at `53fd57b9``, where the
+    same four anchors read `27222`/`27334`/`27245`/`27510` — so the label named a head at
+    which NOT ONE of the four resolves. Both figures are the same failure: a pin that reads
+    one side of a two-sided claim has nothing to disagree with.
     """
     head = "2584a86ec1"
     try:
@@ -7338,6 +7347,72 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
         f"`{head}:tortoise/sdk.py`, while 05-verify.md D5 names `:20236` for that "
         "head — re-derive the figure with `git show "
         f"{head}:tortoise/sdk.py | grep -n '_honours: dict'`, never carry it forward")
+
+    # ⛔ AND THE SAME CLAIM FOR THE OTHER FIGURE D5 LABELS WITH A HEAD (fixed here rather
+    # than in a new case, deliberately: this file's case count is stated, and owned, by
+    # `config/ci-surfaces.yml`'s `durations` row — hand-adding a `def test_` there would
+    # mean hand-editing a CI timing artefact this lane did not measure). D5 states its
+    # promote/dedup quartet as "their THIS-HEAD values" and labelled it `measured at
+    # `53fd57b9`` — and at `53fd57b9` the same four anchors read `:27222`/`:27334`,
+    # `_cas_witness` `:27245`, `_promote_incident_operators` `:27510`. So the label named a
+    # head at which NOT ONE of the four resolves, while the four numbers were right at the
+    # head being merged: the row that pins them (`05-verify.md` / "their THIS-HEAD values
+    # are") reads them against THIS tree, so the HEAD was the half of a two-sided claim
+    # with no reader — a pin that names one side has nothing to disagree with, which is the
+    # defect this function exists for, one figure over. Read BOTH sides out of the document
+    # and compare against the head's own blob.
+    _quartet = re.search(
+        r"their THIS-HEAD values are `:(?P<batch>\d+)`/`:(?P<dedup>\d+)`, "
+        r"`_cas_witness` `:(?P<witness>\d+)`, "
+        r"`_promote_incident_operators` `:(?P<promote>\d+)`, "
+        r"measured at[^\u2014]{0,140}?`(?P<head>[0-9a-f]{7,40})`",
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8"))
+    assert _quartet, (
+        "05-verify.md's promote/dedup clause no longer matches the form this arm reads: "
+        "`their THIS-HEAD values are `:N`/`:N`, `_cas_witness` `:N`, "
+        "`_promote_incident_operators` `:N`, measured at … `<sha>`` — if the wording moved, "
+        "re-derive the four anchors AND the head label together rather than dropping the "
+        "head, which is the half no other pin reads")
+    _q_head = _quartet.group("head")
+    _q_want = (
+        # The FIRST `if batch_id:` — the cited one; a second opens a different block.
+        ("the first `if batch_id:` (the cited one)",
+         int(_quartet.group("batch")), "if batch_id:", True),
+        ("`dedup_wired = False`", int(_quartet.group("dedup")), "dedup_wired = False", False),
+        ("`_cas_witness`", int(_quartet.group("witness")),
+         "def _cas_witness(result) -> bool:", False),
+        ("`_promote_incident_operators`", int(_quartet.group("promote")),
+         "def _promote_incident_operators(self, proj, point_id: str, now: str)", False),
+    )
+    try:
+        _q_shown = subprocess.run(
+            ["git", "show", f"{_q_head}:tortoise/sdk.py"],
+            cwd=_REPO, capture_output=True, text=True)
+    except FileNotFoundError:  # no `git` on this host at all
+        pytest.skip("`git` is not installed here, so no commit can be read")
+    if _q_shown.returncode != 0:
+        pytest.skip(
+            f"{_q_head} (the head D5 labels its promote/dedup quartet with) is not carried "
+            "by this clone, so the label is UNCHECKED here, not disproved — a fresh clone "
+            "and CI's `fetch-depth: 1` checkout lack it by construction. git: "
+            f"{_q_shown.stderr.strip()}")
+    _q_lines = _q_shown.stdout.splitlines()
+    _q_wrong = []
+    for _label, _want, _fragment, _first_only in _q_want:
+        _hits = [n for n, _text in enumerate(_q_lines, 1) if _fragment in _text]
+        if _first_only:
+            _hits = _hits[:1]
+        if _hits != [_want]:
+            _q_wrong.append(
+                f"{_label}: D5 says `:{_want}` at `{_q_head}`, the blob carries {_hits}")
+    assert not _q_wrong, (
+        f"05-verify.md D5 labels its promote/dedup quartet `measured at `{_q_head}``, and "
+        "that head does not carry them:\n  " + "\n  ".join(_q_wrong) +
+        "\nA label is a claim about a HEAD, not decoration: name the head the four anchors "
+        "were actually read at (`git show <sha>:tortoise/sdk.py | grep -n -e 'if "
+        "batch_id:' -e 'dedup_wired = False' -e 'def _cas_witness' -e 'def "
+        "_promote_incident_operators'`), and never move the numbers onto a head that was "
+        "not measured")
 
 
 @pytest.mark.parametrize("prose", [
