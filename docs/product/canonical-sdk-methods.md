@@ -310,7 +310,7 @@ Three rules, each of which caught a real error in this document.
 | # | Canonical | MCP tool | Members (current names) | Action |
 |---|---|---|---|---|
 | W1 | `create_entity` | #10 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document` | keep — `create_point` and `create_event` are **retired to a failing name that names `create_entity`**; there is no SDK alias layer (#3836 (c) ruling). The eval harness calls them by name, so its call sites migrate in Phase 2 |
-| W2 | `write_knowledge` | — | `ingest` | keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) |
+| W2 | `write_knowledge_batch` | #13 | `ingest`, `write_knowledge_batch` | keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. #11609 P3 landed `write_knowledge_batch` as the approved spelling of this capability (it delegates to `ingest`, so there is one implementation). Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) |
 | W3 | `register_source` | #11 | `register_source` | keep — **not foldable**: the URL is the node identity. `create_source` was retired into this name in #4282 Phase 2 (`#11609`): same signature, same body, one surface name |
 | W4 | `index_files` | #12 | `index_sources_from_directory`, `mine_knowledge_from_directory`, `ingest_corpus`, `reconcile_sessions`, `session_index_health` | keep — **1 self-declared DEPRECATED** (`ingest_corpus`; measured over the five members this row lists). `index_directory`, `index_sessions` and `mine_corpus` were retired in #4282 Phase 2 (`#11609`): the first into `index_sources_from_directory` (itself renamed), the second into that same name with `file_type='agent_session'`, the third into `mine_knowledge_from_directory` — the beta row's own split, since mining is not a kind of indexing. The two legacy names remain reachable through their RETIRED MCP tools |
 | W5 | `capture_knowledge` | #13 | `mine_knowledge_from_session`, `diary_write` | **superseded — see the amendment below the split table (owner ruling 2026-10-09)**; each member retires to its OWN destination, so they no longer share one. `checkpoint` was retired into `mine_knowledge_from_session` in #4282 Phase 2 (`#11609`) as that method's `items=` arm |
@@ -321,9 +321,9 @@ Three rules, each of which caught a real error in this document.
 | W10 | `record_decision` | #16 | `write_question`, `record_decision` | keep, collapse — `file_decision` and `file_human_approval` were retired on 2026-11-16 (#11609 Phase 2) into the two rows they now name |
 | W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `supersede_knowledge`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline` | keep, collapse — **the widest group; see Open items**. `update_entity` and `supersede` were retired on 2026-11-16 (#11609 Phase 2) into `update_knowledge` and `supersede_knowledge`; `quarantine_batch` left in `#12901` wave 1 |
 | W12 | `delete_knowledge` | #18 | `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
-| W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation` | keep — **`compute_confidence` mislabelled read** |
+| W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation`, `refresh_confidence` | keep — **`compute_confidence` mislabelled read**; `refresh_confidence` is the approved row-26 name for the recompute and delegates to it (#11609 P3) |
 | W14 | `approve_merge` | #20 | `approve_merge` | keep |
-| W15 | `adjust_relationship` | #21 | `mitigate_operator`, `annotate_operator` | keep, collapse |
+| W15 | `adjust_relationship` | #21 | `mitigate_operator`, `annotate_operator`, `adjust_relationship` | keep, collapse — the approved row-25 name landed in #11609 P3 and delegates to `annotate_operator` for the graded terms, so a partial adjust reads the current annotation instead of resetting it |
 | W16 | `manage_deployment` | #22 | `org_*`, `graph_*`, `membership_*`, `apikey_*`, `invitation_*`, `signup_token_*` | keep, **namespaced** |
 | W17 | utilities | — | `ulid`, `close` | `close` is core lifecycle; **`ulid` is a removal candidate** |
 
@@ -334,9 +334,9 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 | # | Namespace | Members |
 |---|---|---|
 | N1 | `org` | `org_create`, `get_organisation_account`, `check_connection` |
-| N2 | `graph` | `list_memory_graphs`, `restore_memory_graph`, `update_memory_graph` |
-| N3 | `membership` | — (every member left the surface; see the wave-2 removals below) |
-| N4 | `apikey` | — (every member left the surface; see the wave-2 removals below) |
+| N2 | `graph` | `list_memory_graphs`, `restore_memory_graph`, `update_memory_graph`, `create_memory_graph`, `delete_memory_graph` |
+| N3 | `membership` | `add_member`, `list_members`, `remove_member` — the three approved rows #11609 P3 landed. The wave-2 removals below are the OFF-SURFACE members, which stay private |
+| N4 | `apikey` | `create_key`, `list_keys`, `revoke_key` — the three approved rows #11609 P3 landed. Same note: the wave-2 removals below are the off-surface members |
 | N5 | `invitation` | — (every member left the surface; see the wave-2 removals below) |
 | N6 | `signup_token` | — (every member left the surface; see the wave-2 removals below) |
 

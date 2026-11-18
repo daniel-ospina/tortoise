@@ -339,7 +339,13 @@ def rendered_baseline(
         "Phase 2 implements them.",
         "",
     ]
-    lines += [f"- `{name}`" for name in approved_absent] or ["*(none)*"]
+    # ⛔ The empty-list placeholder is a LIST ITEM, not an emphasis-only paragraph.
+    # It shipped as `*(none)*`, which was invisible for as long as this list had members —
+    # #11609 P3 implemented all eleven approved-but-absent names, the fallback rendered for
+    # the first time, and markdownlint's MD036 ("emphasis used instead of a heading") redded
+    # the REQUIRED `docs` check on `docs/product/sdk-surface-baseline.md`. The rendered
+    # document is generated, so the fix belongs here and never in the `.md`.
+    lines += [f"- `{name}`" for name in approved_absent] or ["- (none)"]
     lines += [
         "",
         "## Live and NOT approved — the migration backlog",
@@ -348,7 +354,8 @@ def rendered_baseline(
         "the count above is the honest measure of the gap.",
         "",
     ]
-    lines += [f"- `{name}`" for name in backlog] or ["*(none)*"]
+    # Same MD036 rule as the fallback above: a list item, never a bare `*(none)*` paragraph.
+    lines += [f"- `{name}`" for name in backlog] or ["- (none)"]
     lines.append("")
     return "\n".join(lines)
 
