@@ -477,16 +477,22 @@ def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
     ⚠️ `no longer writable at all` is banned only UNQUALIFIED. Scoped to the
     STATUS word the sentence is TRUE ("as a status, `outdated` is no longer
     writable at all"), and a pin that banned the phrase outright would red on a
-    page more accurate than the one it protects — so the assertion demands a
-    `status` qualifier in the preceding window instead.
+    page more accurate than the one it protects.
+
+    The scope is checked per SENTENCE, not per character window: a backward
+    window both false-passes (a `status` token from the NEIGHBOURING sentence
+    qualifies an unqualified claim) and false-fails (English often puts the
+    qualifier AFTER the phrase, which a backward window never sees). Measured
+    on both bodies by the cycle-3 review before this was a sentence split.
     """
     html = _read(DOCS)
-    for _m in re.finditer("no longer writable at all", html):
-        window = html[max(0, _m.start() - 200):_m.start()]
-        assert "status" in window, (
-            "website/docs.html calls `outdated` no longer writable AT ALL "
-            "without naming the STATUS word. The *status* is refused "
-            "(`read_caller_status` raises with a repair naming "
+    for _sentence in re.split(r"(?<=[.!?])\s+", " ".join(html.split())):
+        if "no longer writable at all" not in _sentence:
+            continue
+        assert "status" in _sentence, (
+            "website/docs.html calls `outdated` no longer writable AT ALL in a "
+            "sentence that never names the STATUS word. The *status* is "
+            "refused (`read_caller_status` raises with a repair naming "
             "`deprecated`/`superseded`), but the *property* of the same name "
             "is live and server-stamped on supersede, on invalidate, and when "
             "a newer assessment of the same source is written by the same "
