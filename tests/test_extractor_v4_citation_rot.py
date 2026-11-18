@@ -1444,8 +1444,15 @@ def test_the_storage_document_does_not_defer_the_anchored_read_cutover():
         "cutover therefore stays DEFERRED by §2.0\"* — rescinded by the owner"
     ), "the pin no longer fires on the pre-fix §2.0 sentence it was written against"
     # …and in the other order, which `_STATUS_ADJACENT` also pins for its own class.
+    # ⛔ The fixture must put the STATE WORD FIRST, or it exercises the first
+    # alternative and leaves the second one with no row at all. Measured: the
+    # sentence that stood here (*"The cutover is DEFERRED until the record serves
+    # every label."*) is subject-first, so deleting the `DEFERRED … subject`
+    # alternative left this assert GREEN (16 passed) — an assert whose value
+    # cannot vary under the mutation it claims to cover (#3442 rule 3).
     assert _DEFERRED_CUTOVER.search(
-        "The cutover is DEFERRED until the record serves every label."
+        "DEFERRED until the record serves every label, the anchored-read cutover "
+        "is not safe to arm."
     ), "the pin does not fire on the state-word-first order"
 
     # NOT NOISY — the document's two legitimate deferrals, and the armed statement.
