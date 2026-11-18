@@ -6753,6 +6753,43 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "one a reviewer pointed at (`02-scope.md:61` was already correct at this head while "
         "both of these were stale: the half-done move)")
 
+    # ⛔ THE NUMBER'S HEAD-BINDING (#13489 review pass 6 — MEASURED, and this is the arm the
+    # pin above CANNOT supply). That clause used to read
+    #   "… `is at `:22247` at the MERGE head AND at this head`"
+    # — true of THIS head, FALSE of the MERGE head, where
+    # `git show 2584a86ec1:tortoise/sdk.py | grep -n '_honours: dict'` prints `20236` and that
+    # head's `:22247` is unrelated prose. So a reader who followed the clause (and its own
+    # `grep` instruction) landed on a plausible line naming nothing — D5's own stated failure,
+    # one head over. The three-statement pin above cannot see it: it compares every
+    # current-tense number to the WORKING TREE's line, so a statement that ALSO names another
+    # head in the same slot is graded against this head and passes.
+    # A test cannot check another head's line (CI resolves one commit, and a suite that needed
+    # `git show 2584a86ec1:…` would go red on every shallow checkout), so what it CAN hold is
+    # the invariant that would have caught the defect: a number in the `is at`/`measures` slot
+    # belongs to THIS head, and another head's value is stated with that head named, OUTSIDE
+    # the slot the resolver reads.
+    _honours_slot_on_another_head = re.findall(
+        r"`_honours: dict\[str, frozenset\[str\]\](?: = \{)?` (?:is at|measures) `:\d+` at the "
+        r"(?:MERGE|branch|PRE-PR) head", _d5)
+    assert not _honours_slot_on_another_head, (
+        "05-verify.md D5 puts an `_honours` line number in the `is at`/`measures` slot and "
+        f"labels it with a head that is not this tree ({_honours_slot_on_another_head!r}) — a "
+        "number belongs to the head it was read at, so state another head's value WITH that "
+        "head (`at the MERGE head `2584a86ec1` the same definition sits at `:20236`), never "
+        "in the slot the resolver reads")
+    # …and that other head's value is pinned WITH its head, so the re-wording cannot quietly
+    # drop the measurement it was re-worded to keep. `:20236` is the MERGE head's own value
+    # (`git show 2584a86ec1:tortoise/sdk.py | grep -n '_honours: dict'` -> 20236) while at THIS
+    # head `:20236` is an unrelated line — exactly why the number may not be carried across.
+    _honours_merge_head_value = re.findall(
+        r"at the MERGE head `2584a86ec1`[^(){]{0,80}`:(\d+)`", _d5)
+    assert _honours_merge_head_value == ["20236"], (
+        "05-verify.md D5 should state the MERGE head `2584a86ec1`'s own `_honours` line "
+        "(`:20236`, measured with `git show 2584a86ec1:tortoise/sdk.py | grep -n "
+        "'_honours: dict'`) immediately after naming that head, and this reads "
+        f"{_honours_merge_head_value!r} — re-derive it at that head rather than carrying this "
+        "head's number into it")
+
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3, RE-DERIVED for `#13363`).
     # The sentence cites `hosted_api.py:15225-15302`, and the END of that range is a BLANK
     # line — so the row above can only anchor the start, and a range that drifts by a line
