@@ -484,8 +484,13 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
         (`|`, `>`, `[...]`, `{...}`) is a failure, not a pass.
     (E) SEQUENCES, item by item: a `sequence` affiliation value is not covered
         by (A) alone, which sees only an item whose text BEGINS with `#`. Every
-        item NOT already named by (A) gets (C)'s quoting check and a (B)-style
-        value comparison, and a length mismatch fails — a mid-item truncation
+        item NOT already named by (A) is checked in turn — (C)'s quoting check,
+        then a (B)-style value comparison — and a length mismatch fails. Two
+        deliberate limits, stated so the sentence is not read as more than it is:
+        the item loop STOPS at the key's first defect (one value reports one
+        reason rather than a cascade), and an `escaped` item is cleared by (C)
+        and NOT compared, because the parser has already performed the transform
+        `_quoted_style` would have to undo. A mid-item truncation
         (`, #4333 census, #5380`) and a quoted item cut at an inner quote are
         both green under (A)-(D) alone (found in review; the population carries
         3 affiliation sequences).
