@@ -4,7 +4,8 @@ door-driven endings, the direct-edge position axis, per-label participation.
 
 See ../README.md §1 for how to run this. The port is NOT baked in: derive it
 (``uv run python tools/test_lane.py status`` prints ``uri=…:PORT/…``) and pass
-it as ``EP_AUDIT_DB_PORT``.
+it as ``EP_AUDIT_DB_PORT``. The variable is REQUIRED — there is no fallback,
+because a fallback port is exactly the bake-in this docstring forbids.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ sys.path.insert(0, ROOT)
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 SFX = uuid.uuid4().hex[:8]
-PORT = os.environ.get("EP_AUDIT_DB_PORT", "16416")
+PORT = os.environ["EP_AUDIT_DB_PORT"]
 os.environ["TORTOISE_DB_URI"] = f"docker://:@127.0.0.1:{PORT}/ep_audit2_{SFX}"
 sdk = TortoiseSDK(db_path=None, namespace=None)
 sdk._db_uri = os.environ["TORTOISE_DB_URI"]
@@ -51,15 +52,15 @@ def wire_and_run(src, tgt_kind="point"):
 print("=" * 96)
 print("1. An :Object's `isClosed` written through the DOOR — does the posterior decay?")
 print("=" * 96)
-O = sdk.create_object(f"o1-{SFX}", "core:goal")["id"]
+obj1 = sdk.create_object(f"o1-{SFX}", "core:goal")["id"]
 q("MATCH (n:Object {id:$id}) SET n.posterior_alpha=9.0, n.posterior_beta=1.0, "
-  "n.confidence=0.9", id=O)
-print("  before close:", belief(O))
-sdk.update_knowledge(O, isClosed=True)
-print("  after  close:", belief(O))
+  "n.confidence=0.9", id=obj1)
+print("  before close:", belief(obj1))
+sdk.update_knowledge(obj1, isClosed=True)
+print("  after  close:", belief(obj1))
 print("  stored shape:", q("MATCH (n:Object {id:$id}) RETURN n.status, "
                          "coalesce(n.isClosed,false), n.pipelineSlot, "
-                         "n.posterior_alpha, n.posterior_beta, n.confidence", id=O))
+                         "n.posterior_alpha, n.posterior_beta, n.confidence", id=obj1))
 
 print()
 print("=" * 96)
@@ -166,7 +167,7 @@ print("8. Does an ENTITY ever reach `_hydrate_evidence` (a persisted baseline)?"
 print("=" * 96)
 try:
     sdk.set_point_baseline(o_tgt, 5.0, 1.0)
-except Exception as exc:  # noqa: BLE001
+except Exception as exc:
     print("  set_point_baseline(Object):", type(exc).__name__, str(exc)[:140])
 sdk._evidence = {}
 sdk._hydrate_evidence()

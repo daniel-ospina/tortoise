@@ -24,7 +24,11 @@ GRAPH = f"ep_audit_{SFX}"
 #
 #     uv run python tools/test_lane.py status    # prints ``uri=…:PORT/…``
 #     EP_AUDIT_DB_PORT=<that PORT> uv run python <this file>
-PORT = os.environ.get("EP_AUDIT_DB_PORT", "16416")
+#
+# REQUIRED, not defaulted: a fallback port would BE the bake-in this comment
+# forbids — the run would succeed against a foreign container and print
+# ⟨measured⟩ rows that read as first-hand. An unset variable fails loudly.
+PORT = os.environ["EP_AUDIT_DB_PORT"]
 os.environ["TORTOISE_DB_URI"] = f"docker://:@127.0.0.1:{PORT}/{GRAPH}"
 
 sdk = TortoiseSDK(db_path=None, namespace=None)
@@ -65,9 +69,11 @@ P2 = sdk.create_point("statement", f"A-point-tgt-{SFX}", status="live")["id"]
 O1 = sdk.create_object(f"A-object-{SFX}", "core:goal")["id"]
 E1 = sdk.create_event(f"A-event-{SFX}", "decision")["id"]
 S1 = sdk.create_subject(f"A-subject-{SFX}", "naturalPerson")["id"]
+src_id = f"src-{SFX}"
 q("MERGE (s:Source {url:$u}) SET s.sourceKind='document', s.id=$i",
-  u=f"https://x/{SFX}", i=f"src-{SFX}")
-SRC_ID = q("MATCH (s:Source {url:$u}) RETURN s.url, s.id", u=f"https://x/{SFX}")
+  u=f"https://x/{SFX}", i=src_id)
+print("  :Source read back:", q("MATCH (s:Source {url:$u}) RETURN s.url, s.id",
+                               u=f"https://x/{SFX}"))
 for tag, nid in [("Point", P1), ("Object", O1), ("Event", E1),
                  ("Subject", S1)]:
     show(tag, nid)
@@ -86,15 +92,14 @@ for tag, src, tgt in [
         else:
             r = sdk.create_operator("IMPL", src, [tgt], direction="unidirectional")
         print(f"  {tag:<32} WROTE  op={str(r.get('id'))[-8:]}")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"  {tag:<32} REFUSED {type(exc).__name__}: {str(exc)[:110]}")
 
 print("\n  -- :Source endpoint (documented as NOT admitted) --")
 try:
-    sdk.create_operator("IMPL", SRC_ID[0][1] if SRC_ID[0][1] else SRC,
-                        [P1], direction="unidirectional")
+    sdk.create_operator("IMPL", src_id, [P1], direction="unidirectional")
     print("  Source -> Point                  WROTE")
-except Exception as exc:  # noqa: BLE001
+except Exception as exc:
     print(f"  Source -> Point                  REFUSED {type(exc).__name__}: {str(exc)[:150]}")
 
 print("\n  -- operational labels: does a :PipelineStage / :Batch resolve as epistemic? --")
@@ -121,7 +126,7 @@ print("    Point  posterior:", belief(P3))
 try:
     sdk.set_point_baseline(O2, 9.0, 1.0)
     print("  set_point_baseline on an OBJECT: no exception")
-except Exception as exc:  # noqa: BLE001
+except Exception as exc:
     print(f"  set_point_baseline on an OBJECT: {type(exc).__name__}: {str(exc)[:120]}")
 print("  Object ep_alpha after attempt:", q(
     "MATCH (n:Object {id:$id}) RETURN n.ep_alpha, n.baseline_set, "
@@ -233,10 +238,10 @@ print(f"  D3 goal goalState=met,status=live       -> target {b}")
 print("\n  -- what the currency predicate itself says about these shapes --")
 from tortoise.live import is_terminal_status  # noqa: E402
 
-for tag, st, od, closed, slot, gs in [
-    ("D1 goalState=abandoned, status=live", "live", False, False, None, "abandoned"),
-    ("D2 goalState=abandoned, status=deprecated", "deprecated", False, False, None, "abandoned"),
-    ("D3 goalState=met, status=live", "live", False, False, None, "met"),
+for tag, st, od, closed, slot in [
+    ("D1 goalState=abandoned, status=live", "live", False, False, None),
+    ("D2 goalState=abandoned, status=deprecated", "deprecated", False, False, None),
+    ("D3 goalState=met, status=live", "live", False, False, None),
 ]:
     print(f"    is_terminal_status({tag}) = "
           f"{is_terminal_status(st, od, is_closed=closed, stage_slot=slot)}")
@@ -288,14 +293,14 @@ print("F. CONTESTED / ANNOTATION SURFACES — per-label coverage")
 print("=" * 100)
 cont = sdk._ep.get_contested_claims() if hasattr(sdk, "_ep") else None
 try:
-    from tortoise.ep import TortoiseEP  # noqa: E402
+    from tortoise.ep import TortoiseEP
 
     ep = TortoiseEP(sdk._get_proj())
     rows = ep.get_contested_claims()
     print(f"  get_contested_claims() rows: {len(rows)}")
     for r in rows[:8]:
         print("   ", {k: r[k] for k in list(r)[:4]})
-except Exception as exc:  # noqa: BLE001
+except Exception as exc:
     print("  get_contested_claims raised:", type(exc).__name__, exc)
 
 print("\nDONE")

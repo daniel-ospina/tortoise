@@ -1,3 +1,14 @@
+---
+title: "EP across entity kinds — a measured audit of docs/ONTOLOGY.md"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-11-18
+subjects.team: epistemic-team
+aboutSubjects: EP belief propagation, entity kinds (Point, Operator, Object, Subject, Event), docs/ONTOLOGY.md
+aboutObjects: "#11824, docs/ONTOLOGY.md, tortoise/ep.py, tortoise/live.py, tortoise/sdk.py"
+---
+
 # EP across entity kinds — a measured audit of `docs/ONTOLOGY.md`
 
 **Branch:** `audit/ep-across-entities` · **Base measured:** `340d500491` · **Tracker:** #11824
@@ -57,7 +68,7 @@ evidence *hydrated* with the same filter a Point's is?
 |---|---|---|---|---|
 | **`:Point`** | **source ✅ / target ✅** — **⟨measured⟩** `Point -> Point WROTE`. **⟨code⟩** operator discovery is `MATCH (o:Point)-[r:IMPL\|NAND]->(c)` (`ep.py:2012`), with the far endpoint widened by a per-label `epistemic_label_queries` sweep (`ep.py:2007-2008`), and the input-assembly leg states the widening directly, `epistemic_disjunction('c')` (`ep.py:2220-2222`) — so an input may carry any of the four labels. | **propagates.** Seed = `coalesce(posterior_alpha, ep_alpha, 1.0)` on the direct read (**⟨code⟩** `ep.py:801`); on the warm batched load it is **only** `coalesce(ep_alpha, 1.0)` — no `posterior_alpha` arm (**⟨code⟩** `ep.py:507`; see §6.6). A **declared** prior is writable and immutable: `set_point_baseline` (`sdk.py:40833`, write at `:40982`), honoured by the `keep_prior` / `baseline_set` CASE in both write paths (**⟨code⟩** `ep.py:629-635`, `ep.py:822-826`). | **four conditions on every Cypher leg:** the 5-word status set ∪ the legacy `outdated` flag ∪ `isClosed` ∪ a `terminal` pipeline slot (**⟨code⟩** `live.py:114` for the words, `live.py:159` `_terminal_excluded`, `live.py:372` the Python mirror, `live.py:588` `_live_only`). **But only two of the four in the Python participation test for an operator *input*** — **⟨code⟩** `ep.py:2258`; **⟨measured⟩** §5 F1. `goalState` never excludes (see `:Object`). | **yes — and it is the only kind that is.** `_hydrate_evidence` is `MATCH (n:Point) WHERE n.baseline_set = true … AND {_terminal_excluded('n.status')}` (**⟨code⟩** `sdk.py:40757`), so it gets the *same* predicate as every other read. **⟨measured⟩** the hydrated evidence set held 4 ids and **no** non-Point. |
 | **`:Operator`** (`:Point {is_operator: true}`) | It **is** a Point, so it is addressable by an id — but an operator-shaped node is **stripped out of another operator's inputs**: `is_operator_shaped` is tested by identity against `None`/`False` and never participates, under **both** `include_draft` modes (**⟨code⟩** `ep.py:2257-2260`). **⟨measured⟩** every operator minted over an `:Object`/`:Event`/`:Subject` endpoint is `['Point'], is_operator=True, op_type=IMPL, status=live`. | **it holds no propagated belief of its own.** It supplies a *mechanism* and a *weight*: the factor potential is chosen from `op_type` (**⟨code⟩** `ep.py:47-52` → `quadrature.py:90`/`:124`/`:143`), and a mitigation scales the weight as `w_eff = w × (1 − strength)` (**⟨code⟩** `weights.py:232`, `weights.py:65`). Its **inputs'** beliefs are what move. | Same as `:Point` (it is one). Additionally the mechanism census counts live **and** draft operators (**⟨code⟩** `sdk.py:13555-13559`), so a draft operator still occupies its pair. | **n/a** — an operator is not evidence, and never enters `_hydrate_evidence` (it has no `baseline_set`). |
-| **`:Object`** | **source ✅ / target ✅** — **⟨measured⟩** `Object -> Point WROTE` and `Point -> Object WROTE`; as a target EP wrote `posterior_alpha 1.7769 / posterior_beta 0.9561 / confidence 0.6502` onto it. | **propagates, but the seed is vacuity.** With no prior of its own the seed is `Beta(1,1)` → mean **0.5**. The stored `confidence` property is **never an EP input** — `n.confidence` appears in `ep.py` only inside `SET` clauses (**⟨code⟩** `ep.py:632`, `:822`, `:2976`), and the one place it is read is that clause's own `THEN n.confidence` (`ep.py:2977`), which *preserves* the mirror rather than consuming it; neither posterior seed (`ep.py:507`, `:801`) mentions it. **⟨measured⟩** an Object created `confidence=1.0` was *served* at 1.0, **seeded at 0.5**, and then had its 1.0 **overwritten to 0.5** by the run. There is **no declared-prior writer**: `set_point_baseline` refuses a non-Point (**⟨code⟩** `sdk.py:40982` + refusal at `:41066-41070`), and the refusal names **#9063** as the open belief-model decision. | The **Point** vocabulary words ∪ `isClosed` ∪ terminal stage — but note the vocabulary mismatch: `completed` / `in_progress` are *not* endings for EP (**⟨measured⟩** a `status='completed'` Object **participated** at the live control's posterior). On the Cypher legs the position axis is read (**⟨measured⟩** direct-edge legs **dropped** an `isClosed` and a `terminal`-slot endpoint); in `ep.py:2258` it is **not** (**⟨measured⟩** a closed Object with a `(9,1)` posterior **contributed**). `goalState` **never** excludes (**⟨measured⟩** D1 below). | **no.** `_hydrate_evidence` is `:Point`-anchored (**⟨code⟩** `sdk.py:40757`), and `set_point_baseline` refuses (**⟨code⟩** above). An Object is filtered by a *different* population, not a looser one. |
+| **`:Object`** | **source ✅ / target ✅** — **⟨measured⟩** `Object -> Point WROTE` and `Point -> Object WROTE`; as a target EP wrote `posterior_alpha 1.7769 / posterior_beta 0.9561 / confidence 0.6502` onto it. | **propagates, but the seed is vacuity.** With no prior of its own the seed is `Beta(1,1)` → mean **0.5**. The stored `confidence` property is **never an EP input** — `n.confidence` appears in `ep.py` only inside `SET` clauses (**⟨code⟩** `ep.py:632`, `:822`, `:2976`), and the one place it is read is that clause's own `THEN n.confidence` (`ep.py:2977`), which *preserves* the mirror rather than consuming it; neither posterior seed (`ep.py:507`, `:801`) mentions it. **⟨measured⟩** an Object created `confidence=1.0` was *served* at 1.0, **seeded at 0.5**, and then had its 1.0 **overwritten to 0.5** by the run. There is **no declared-prior writer**: `set_point_baseline` refuses a non-Point (**⟨code⟩** `sdk.py:40982` + refusal at `:41066-41070`), and the refusal names **#9063** as the open belief-model decision. | The **Point** vocabulary words ∪ `isClosed` ∪ terminal stage — but note the vocabulary mismatch: `completed` / `in_progress` are *not* endings for EP (**⟨measured⟩** a `status='completed'` Object **participated** — the probe prints the target's posterior and a participated/dropped suffix, not a comparison against a control). On the Cypher legs the position axis is read (**⟨measured⟩** the direct-edge leg **dropped** an `isClosed` and a `terminal`-slot endpoint, `0.0 / 0.0`); in `ep.py:2258` it is **not** (**⟨measured⟩** a closed Object with a `(9,1)` posterior **contributed**). `goalState` **never** excludes (**⟨measured⟩** §2 consequence 3, and §5 F4). | **no.** `_hydrate_evidence` is `:Point`-anchored (**⟨code⟩** `sdk.py:40757`), and `set_point_baseline` refuses (**⟨code⟩** above). An Object is filtered by a *different* population, not a looser one. |
 | **`:Subject`** | **source ✅ / target ✅** — **⟨measured⟩** `Subject -> Point WROTE`; as a target it took `1.7769 / 0.9561`. | Same as `:Object` — **⟨measured⟩** as an operator input a Subject read `posterior [0.5, 1.0, 1.0]`, i.e. it participated from vacuity and was written. | Same as `:Object`. `SUBJECT_TERMINAL_STATUSES` is a subset of the Point set (**⟨code⟩** `live.py:654-658`). Both position arms apply on the Cypher legs; `ep.py:2258` omits them as for `:Object`. | **no** — `:Point`-anchored hydration; `set_point_baseline` refuses. |
 | **`:Event`** | **source ✅ / target ✅** — **⟨measured⟩** an `Event → Point` direct edge **wrote**, and an Event in the **target** slot took `1.7769 / 0.9561`. | Same as `:Object` — **⟨measured⟩** the Event's own belief after a run read `confidence 0.5 / posterior (1,1)`, i.e. seeded at vacuity and then written. | **nothing.** An Event has **no lifecycle at all**: the write door **refuses** a `status` on it (**⟨code⟩** `live.py:961` `refuse_event_lifecycle_state`, #13100) and `STATUS_CARRYING_EPISTEMIC_LABELS` is `{Point, Subject, Object}` (**⟨code⟩** `live.py:683`). The NULL-status arm of `_live_only` therefore reads it LIVE (**⟨code⟩** `live.py:588`). Its identity is `id`-or-`eventId` (**⟨code⟩** `live.py:1204`). `goalState` never applies. | **no** — `:Point`-anchored hydration. **⟨measured⟩** no Event reached the evidence set. |
 | **`:Source`** | ❌ **refused, both slots.** **⟨measured⟩** `Source -> Point` → `ValueError: Cannot create operator: Points ['…'] do not exist` (**⟨code⟩** raised at `sdk.py:28910`), because the endpoint probe sweeps `EPISTEMIC_LABELS` only (**⟨code⟩** `sdk.py:28893-28896`). | **not an EP node**, so it has no belief of its own. A Source reaches belief **only** as a Beta prior written onto an extracted **Point**: `_apply_source_inheritance` (**⟨code⟩** `sdk.py:41191`, its `MATCH (n:Point)-[:extractedFrom]->(s:Source)` at `:41358`). | n/a for EP. The Point-side inherited prior is then filtered by the *Point's* currency predicate when it is hydrated. | n/a — a Source is never a member of the evidence set, only its provenance for a Point. |
@@ -75,9 +86,11 @@ evidence *hydrated* with the same filter a Point's is?
    **mean over the claims attached to it by an `about*` edge** (**⟨code⟩** `ranking.py:838`, the
    `sum(confs)/len(confs)` at `:879`). Both are live and they can disagree. See §3 C2.
 2. **Two currencies read an entity, and only one of them reads the position axis.** The affected set
-   (**⟨code⟩** `ep.py:1461`, filtered by `live_c`/`live_o` from `_live_only`) and the direct-edge leg
-   (Batch 3, `ep.py:2090`) read **both** axes — **⟨measured⟩** both dropped a
-   position-ended endpoint. The **factor-input** leg does not (`ep.py:2258`). See §5 F1.
+   (**⟨code⟩** `ep.py:1455-1467`, filtered by `live_c`/`live_o` from `_live_only`) and the direct-edge
+   leg (Batch 3, `ep.py:2087-2092`) both filter on **both** axes, read from their own Cypher — that half
+   is **not** measured: **⟨measured⟩** only the direct-edge leg's effect exists (`0.0 / 0.0` for a
+   position-ended endpoint), and one untouched-target posterior cannot separate the two legs. The
+   **factor-input** leg reads neither position condition (`ep.py:2258`) — **⟨measured⟩**. See §5 F1.
 3. **`goalState` is not an EP input at any point.** **⟨measured⟩** a goal `:Object` with
    `goalState='abandoned'` and `status='live'` **still participates**, while the same goal with
    `status='deprecated'` is dropped; `is_terminal_status` returns `False` for the first and `True` for
@@ -246,8 +259,8 @@ The Cypher predicate it is meant to mirror reads **four** conditions (**⟨code�
 status word, `outdated` flag, `isClosed`, `pipelineSlot != 'terminal'`). Batch 2's own comment
 (`ep.py:2243-2246`) says its status set is *"derived from `TERMINAL_EXCLUDED_STATUSES` so the two
 cannot drift"* — true for the **words**; the position axis is a second *source* of the same answer and
-never reached this arm. **⟨measured⟩** — every ended shape contributed at exactly the live control's
-posterior:
+never reached this arm. **⟨measured⟩** — every ended shape contributed, the two Point shapes landing
+on the live control's posterior and the `:Object` shape on its own `(9,1)` prior:
 
 | operator input | target posterior (live control: `1.6391 / 1.0327`) |
 |---|---|
@@ -256,9 +269,11 @@ posterior:
 | `pipelineSlot='terminal'`, prior `(8,2)` | **`1.6391 / 1.0327` — contributed** |
 | `:Object` `isClosed=true`, posterior `(9,1)` | **`1.7769 / 0.9561` — contributed** |
 
-The asymmetry is the evidence: the affected-set leg and the direct-edge leg both **drop** a
-position-ended endpoint (**⟨measured⟩** both `0.0 / 0.0`), so within one EP run a node can be too dead
-to be re-measured and alive enough to vote.
+The direct-edge leg **drops** a position-ended endpoint (**⟨measured⟩** `0.0 / 0.0`), and the affected
+set filters on the same two axes in its own query (**⟨code⟩** `ep.py:1455-1467` — read from the Cypher,
+**not** separately observed: an untouched target prints `0.0 / 0.0` whether the affected set excluded
+the node or the direct-edge leg skipped the factor), so within one EP run a node can be too dead to be
+re-measured and alive enough to vote.
 
 **Fix direction:** project `isClosed` and `pipelineSlot` on Batch 2's statement and call
 `live.is_terminal_status(status, outdated, is_closed=…, stage_slot=…)` — the keyword-only position arms
