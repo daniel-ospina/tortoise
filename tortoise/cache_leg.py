@@ -265,9 +265,16 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     Closing it belongs at the write handle (``_GuardedGraph``), where a
     per-statement census already exists (§17.1), not here.
 
-    Replay is excluded by both callers: a rebuild WRITES the target on purpose,
-    and counting it would let a repair make the picture look healthier than the
-    live traffic it repaired.
+    ⛔ REPLAY IS NOT EXCLUDED HERE, and a caller must not assume it is. A rebuild
+    WRITES the target on purpose, and counting it would let a repair make the
+    picture look healthier than the live traffic it repaired. That exclusion
+    lives in exactly ONE place: ``projection.note_live_write_target``, which
+    returns before reaching this function when ``replay_window_open()`` is true.
+    All seven live lanes go through that helper, so they inherit it; this
+    function is caller-unchecked BY DESIGN and holds no window check of its own.
+    A lane that calls it DIRECTLY — instead of through the helper — counts a
+    rebuild's writes as live traffic, which is the polarity inversion this
+    registry exists to prevent. Go through the helper.
 
     WHAT THIS ANSWERS THAT ``cache_leg_failures`` CANNOT. ``cache_leg_failures``
     counts a CONFIGURATION split (record armed + this process's cache is the

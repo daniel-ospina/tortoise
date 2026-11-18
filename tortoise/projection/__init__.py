@@ -4653,8 +4653,13 @@ def note_live_write_target(proj) -> None:
       are raw multi-statement lanes that CHOOSE their graph;
     * and ``replay_window_open()`` excludes every one of them, because a rebuild
       writes the same target on purpose and counting it would let a repair make
-      the live picture look healthier than the traffic it repaired. (The fold and
-      the mint check the window at their own seam, before this helper.)
+      the live picture look healthier than the traffic it repaired — and this
+      helper is the ONE place that exclusion is applied: the
+      ``replay_window_open()`` return below runs before any target is recorded,
+      so every caller inherits it without checking anything itself. (The fold
+      calls this helper with no window check of its own, and the mint calls it
+      BEFORE its own check; ``cache_leg.note_cache_write_target`` has no window
+      check at all, so a direct caller there would count a rebuild as live.)
 
     ⛔ RESIDUAL, stated: a raw statement issued at ``proj.g`` inside a live scope
     from a lane that does NOT choose its graph — the capture provenance stamps
