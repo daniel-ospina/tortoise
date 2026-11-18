@@ -158,6 +158,14 @@ def warm_embedder(monkeypatch):
 def sdk(tmp_path):
     sdk = TortoiseSDK(db_path=str(tmp_path / "read13528.db"))
     try:
+        # ⛔ The embedder state is made DETERMINISTIC before anything else. In a
+        # single-file run the singleton starts cold, but the carve-out lane runs
+        # this file in one process with ~17 others, several of which leave a REAL
+        # model loaded — so "cold" is not a property of the process here, it is a
+        # property this fixture has to establish. (Measured on `test-carve-out`
+        # for PR #13531: the precondition below fired on all four cases because a
+        # previous file's warm singleton survived into this one.)
+        EmbeddingModel._reset()
         # PRIME the one-time cost OUTSIDE the cold window. The first read in a
         # process pays start-up that has nothing to do with the embedder — the
         # projection open, `kind_layers.section_of`'s spec compile (measured
@@ -170,8 +178,13 @@ def sdk(tmp_path):
         # ⛔ The fixtures are ORDER DEPENDENT on purpose: every test lists `sdk`
         # BEFORE `cold_embedder` / `warm_embedder`, so this runs while the
         # simulated load has not started. `get` is patched to the absent answer so
-        # priming cannot trigger a REAL load into the window either.
-        with mock.patch.object(EmbeddingModel, "get", lambda *_a, **_k: None):
+        # priming cannot trigger a REAL load into the window either — and
+        # `await_read_ready_reason` is patched to the same answer for the same
+        # reason: with `TORTOISE_EMBEDDER_WARMUP` restored to 1 it would otherwise
+        # kick a background load and leave the embedder warm for the cold tests.
+        with mock.patch.object(EmbeddingModel, "get", lambda *_a, **_k: None), \
+                mock.patch.object(EmbeddingModel, "await_read_ready_reason",
+                                  classmethod(lambda _cls, _budget: None)):
             sdk.tortoise_fts_query(_QUERY, limit=3)
         assert not EmbeddingModel.loaded(), (
             "priming must not load the embedder — the cold-window tests need it COLD")
