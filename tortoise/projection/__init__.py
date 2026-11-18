@@ -22010,16 +22010,6 @@ class FalkorProjection(
                 # facts and the line must not merge them (#13330 review P2 x2):
                 # "SURVIVED" is a MEASUREMENT, and it is only made when the
                 # post-drop catalogue actually answered.
-                # ⛔ NAME THE EVIDENCE, NOT THE OUTCOME (#13330 post-merge
-                # review, P3): `not _attempted` proves only that every refusal
-                # SAID `no such index` — it cannot prove no DDL was applied (an
-                # engine that applies a DROP and then reports `no such index` is
-                # this PR's own stated residual). So the line says what the store
-                # observed, never what happened on the server.
-                _read_noun = ("the post-drop catalogue" if _attempted
-                              else "the catalogue read before the sweep "
-                                   "(no DROP reported itself applied, so this "
-                                   "store treats that read as current)")
                 if _still_indexed is None:
                     # ⛔ #13330 review (P2): `None` has TWO causes and the line
                     # must not fabricate the wrong one. The read RAISING is a
@@ -22029,16 +22019,39 @@ class FalkorProjection(
                     # datum is already on the object: `_vector_index_served_labels`
                     # is a set whenever the inventory completed, and None only when
                     # the read itself did not.
+                    #
+                    # ⛔ The noun is a LITERAL here, and that is not an oversight
+                    # (#13330 post-merge review, round 5): `_still_indexed` is
+                    # `None` only when `_attempted` is True (the `True if not
+                    # _attempted` arm above), so the reused PRE-drop reading
+                    # reaches the SURVIVED arm below and can never reach this one.
+                    # Spelling both causes out keeps the claim above readable; a
+                    # `_read_noun` here would be a dead branch that reads as if the
+                    # pre-drop case were reachable.
                     _why = (
-                        f"{_read_noun} read FAILED"
+                        "the post-drop catalogue read FAILED"
                         if self._vector_index_served_labels is None
-                        else f"{_read_noun} answered in a shape this store "
-                             "could not parse"
+                        else "the post-drop catalogue answered in a shape this "
+                             "store could not parse"
                     )
                     _verdict = (
                         f"was NOT CONFIRMED removed: {_why}, so nothing measured "
                         "whether it is still there")
                 else:
+                    # ⛔ NAME THE EVIDENCE, NOT THE OUTCOME (#13330 post-merge
+                    # review, P3): `not _attempted` proves only that every refusal
+                    # SAID `no such index` — it cannot prove no DDL was applied (an
+                    # engine that applies a DROP and then reports `no such index`
+                    # is this PR's own stated residual). So the line says what the
+                    # store observed, never what happened on the server.
+                    #
+                    # This is the ONE arm where the noun varies: `_still_indexed`
+                    # is `True` both when a write was attempted and survived AND
+                    # when nothing was attempted at all.
+                    _read_noun = ("the post-drop catalogue" if _attempted
+                                  else "the catalogue read before the sweep "
+                                       "(no DROP reported itself applied, so this "
+                                       "store treats that read as current)")
                     _verdict = (
                         f"SURVIVED an ARMED retirement sweep: {_read_noun} "
                         "still reports it")
