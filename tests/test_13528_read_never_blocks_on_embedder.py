@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest import mock
@@ -60,7 +61,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise import read_stages
+from tortoise import embeddings, read_stages
 from tortoise.embeddings import (
     READ_EMBED_BUDGET_S,
     EmbeddingModel,
@@ -297,8 +298,14 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
         f"embed_get took {spent[STAGE_EMBED_GET]} ms of a {_LOAD_S * 1000:.0f} ms "
         f"load — the read is waiting on it again instead of declining inside its "
         f"{READ_EMBED_BUDGET_S * 1000:.0f} ms budget (measured pre-fix: 7857.3 ms)")
-    assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2, (
-        f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms — a read must not "
+    # ⛔ ``spent_ms()`` IS MILLISECONDS (``read_stages.Timeline.spent_ms``), so
+    # the bar needs the same ``* 1000.0`` the frame above it carries. Without it
+    # this compares against 4 ms rather than 4 000 ms — a bar the message two
+    # lines down says is the wrong number, and a flake door on the contended
+    # 4-worker carve-out lane (#13528 review F2, pre-existing).
+    assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
+        f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms of a "
+        f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a read must not "
         f"queue behind workers parked in the embedder load")
 
 
@@ -404,6 +411,105 @@ def test_a_designed_absence_is_refused_with_not_installed(sdk, monkeypatch):
             f"#5275 forbids an armed refusal from carrying the designed-absence "
             f"term — failure_kind must be not_installed, got "
             f"{excinfo.value.failure_kind!r}")
+    finally:
+        monkeypatch.undo()
+        EmbeddingModel._reset()
+
+
+# ── the re-arm arm: a SPENT attempt is RESTARTED, not reported absent ────
+
+
+def test_a_spent_read_attempt_is_rearmed_and_spawned(monkeypatch):
+    """#13528 review P2-2 — a SPENT load attempt is re-armed **and spawned**.
+
+    ``start_warm_up`` latches once per process, so a read that finds the attempt
+    spent re-arms exactly one background attempt and STARTS it before answering.
+    Answering ``absent_reason()`` there named a designed absence (or a broken
+    load) for a state where nothing was ever absent — a load was merely not
+    running — and it never kicked the retry that recovers the embedder.
+
+    ⛔ THE ROW THIS ARM DID NOT HAVE (#13528 review F1). Mutating the block back
+    to ``cls._rearm_warm_up(); return cls.absent_reason()`` left every row in
+    this file — and every row in ``test_13224_cold_embedder_write_bound.py``,
+    whose ``attempt_spent`` arm covers the WRITE twin only — GREEN. Both
+    behaviours the block adds (the spawn, and ``load_in_flight`` instead of the
+    absence term) were unpinned, so a revert was invisible.
+
+    ``_warm_up_worker`` — the thread BODY — is stubbed so the re-armed attempt
+    cannot start a REAL load (~57 s cold, and it would leave the singleton warm
+    for the rows after this one). The SPAWN is real: ``start_warm_up`` creates
+    and starts the thread, which is what the assertions below read.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    release = threading.Event()
+    try:
+        EmbeddingModel._reset()
+        EmbeddingModel._last_failure_kind = "load_failed"
+        EmbeddingModel._last_failed_at = (
+            time.monotonic() - EmbeddingModel._FAIL_COOLDOWN_S - 1)
+        # The once-per-process latch SPENT with nothing in flight — the exact
+        # state ``start_warm_up`` answers ``None`` for.
+        EmbeddingModel._warm_up_started = True
+        EmbeddingModel._warm_up_thread = None
+
+        with mock.patch.object(EmbeddingModel, "_warm_up_worker",
+                               classmethod(lambda _cls, _lt=None: release.wait(30))):
+            t0 = time.perf_counter()
+            decline = EmbeddingModel.await_read_ready_reason(
+                READ_EMBED_BUDGET_S)
+            elapsed = time.perf_counter() - t0
+
+        assert decline == "load_in_flight", (
+            f"a read that finds the attempt SPENT must re-arm and answer "
+            f"load_in_flight — got {decline!r}, which names a designed absence "
+            f"or a broken load for a load that was never absent")
+        assert elapsed < READ_EMBED_BUDGET_S, (
+            f"the re-armed read waited {elapsed:.2f}s (budget "
+            f"{READ_EMBED_BUDGET_S}s) — it must SPAWN the retry and decline, "
+            f"not sit out the budget for the attempt it just restarted")
+        assert EmbeddingModel._warm_up_started is True, (
+            "the re-arm must SPAWN the retry before answering, or the answer "
+            "is a claim about a load that does not exist")
+        spawned = EmbeddingModel._warm_up_thread
+        assert spawned is not None and spawned.is_alive(), (
+            "the re-armed attempt must be a LIVE thread, not just a cleared latch")
+    finally:
+        release.set()
+        t = EmbeddingModel._warm_up_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=30)
+        EmbeddingModel._reset()
+
+
+def test_a_rearm_that_cannot_spawn_answers_absent(monkeypatch):
+    """The honesty half: no spawn ⇒ the answer must NOT claim a load in flight.
+
+    The fallback is reachable only when the warm-up flag is switched off between
+    the predicate's first check and ``start_warm_up``'s own (it is the same
+    process-wide flag, read twice), so the flag is driven from a two-value
+    sequence. Delete the fallback and the read answers ``load_in_flight`` for a
+    lane that has just opted out — the same false claim, one state over.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    try:
+        EmbeddingModel._last_failure_kind = "load_failed"
+        EmbeddingModel._last_failed_at = (
+            time.monotonic() - EmbeddingModel._FAIL_COOLDOWN_S - 1)
+        EmbeddingModel._warm_up_started = True
+        EmbeddingModel._warm_up_thread = None
+        states = iter((True, False))
+        monkeypatch.setattr(embeddings, "_embedder_warmup_enabled",
+                            lambda: next(states, False))
+
+        assert EmbeddingModel.await_read_ready_reason(
+            READ_EMBED_BUDGET_S) == "load_failed", (
+            "with the warm-up switched off underneath the read, nothing was "
+            "spawned — so the answer must be absent_reason() (here the recorded "
+            "load_failed), never a claim that a load is in flight")
+        assert EmbeddingModel._warm_up_started is False, (
+            "a lane that cannot spawn must not leave the latch set — a later "
+            "read would read it as an attempt in flight")
     finally:
         monkeypatch.undo()
         EmbeddingModel._reset()
