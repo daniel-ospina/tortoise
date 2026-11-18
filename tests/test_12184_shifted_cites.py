@@ -154,6 +154,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, 'hosted_api.py:22925', 'tortoise/hosted_api.py', 22925, 'MERGE (s:Source {url:$did})'),
     (_AUDIT, '`:22737`', 'tortoise/hosted_api.py', 22737, 'def _execute_commit_writes'),
     (_AUDIT, '`:33601`', 'tortoise/hosted_api.py', 33601, 'MERGE (p:PackInstall {namespace: $ns})'),
+    # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
+    # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
+    # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
+    # exists for, and the reason row 13's parenthetical and §2.1's count marker survived three passes.
+    (_AUDIT, '`:5310` at this head', 'tortoise/projection/entities.py', 5310, 'def _upsert_document(self, ev: dict) -> None:'),
+    (_AUDIT, '`:7061` at this head', 'tortoise/projection/entities.py', 7061, 'def _upsert_source('),
+    (_AUDIT, '`:6681`', _SE, 6681, 'if expand_ops:'),
+    (_AUDIT, '`:3005` derives the label', _SE, 3005, 'label = "Source" if entity_type =='),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -249,6 +257,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22925'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22737`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33601`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5310` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7061` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6681`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3005` derives the label'): 1,
 }
 
 
@@ -404,7 +416,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # sit 64/65/70 lines below `:6869`, while `:6938`, the row that had no pin, is the 69th), and row
     # 13b's Source-writer pin (`sdk.py:21692` — `:21648` before `#13486` moved the writer) is the
     # same shape added again, for the same reason.
-    assert len(_PINS) == 48
+    # 48 -> 52 at review cycle 3: four rows added for corrections whose sites had NO pin at all
+    # (row 13's `entities.py` pair, §2.1's count marker, the Event row's label-derivation cite).
+    # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
+    assert len(_PINS) == 52
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
@@ -428,6 +443,21 @@ def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
         "`:6352` — it is history, so re-deriving it by content is not possible and a delta applied to it "
         "is the defect it warns about, one level up."
     )
+    # ⛔ The SUBJECT PROBE's four, added at review cycle 3: this pass delta-shifted `:6716-6729` to
+    # `:6718-6731` and NOTHING red, because this arm's tuple stopped at the three `search_engine.py`
+    # addresses. A recorded-wrong address takes no offset at any head, so the four are asserted as a
+    # set and the shifted form is asserted absent.
+    assert "(`:6711`, `:6710-6713`, `:6713`, `:6716-6729`)" in text, (
+        "the paragraph that records which addresses were WRONG no longer names the subject probe's "
+        "four (`:6711`, `:6710-6713`, `:6713`, `:6716-6729`) — they record what the address WAS, so "
+        "they take no delta and re-deriving them by content is not possible."
+    )
+    for shifted_probe in ("`:6718-6731`",):
+        assert shifted_probe not in text, (
+            f"the recorded-wrong list carries `{shifted_probe}`, an address no tree ever carried — it "
+            "is `:6716-6729` plus the `search_engine.py` +2, i.e. a delta applied to a RECORD rather "
+            "than to a citation."
+        )
     # ⛔ Scoped to the CLAUSE, not the whole document: these are bare addresses, and any legitimate
     # `:6549` spelled elsewhere in the census would red this arm on correct text.
     for shifted in ("`:3084`, `:4674-4678`, `:6549`", "walk at `:4674`", "operator leg at `:6549`"):
@@ -598,6 +628,30 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     (`:33583` at the head named above)), not the reverse.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    # ⛔ THE WHOLE ENUMERATION, not one entry (review cycle 3, F1). `#13466` re-pointed three of its
+    # entries to working-tree values and NOTHING red, because this arm asserted only the Object entry.
+    # Each value below is measured AT `ae54df166d` — `git show ae54df166d:tortoise/search_engine.py |
+    # grep -nF '<fragment>'` — and each is the reading this arm protects. The dual-head form for the one
+    # entry that had drifted at EVERY pass (`sdk.py`'s second `capture_redactions` writer) is the shape
+    # the docstring above sanctions: the declared head's figure first, this tree's after it in parens.
+    for bound in (
+        "subject probe `:7025-7028`",
+        "`subject_binding_available()` at `:7031-7044`",
+        "index note `:3070`;",
+        "`capture_redactions` writer `:2876` (on this tree `:2882`)",
+        "walk `:4780-4784`",
+        "operator leg `:6667`",
+        "label scan `:4708-4710`",
+        "HNSW\n`:4123`",
+        "label derivation `:3003`",
+        "`:3098`,",
+    ):
+        assert bound in text, (
+            f"the header enumeration no longer carries {bound!r} — those are its addresses AT `main` "
+            "`ae54df166d`, the head the paragraph announces twice. A working-tree value here re-points a "
+            "history cite, the `⚠️ CORRECTED` failure this file exists to stop (`#13466` did exactly that "
+            "to three of these entries and nothing red). Re-derive at `ae54df166d`, never at the tree."
+        )
     assert '`("Object", ["name"])`\n`:6869`;' in text, (
         "the header enumeration no longer names the Object declaration at `:6869` — the address it holds "
         "at the `main` head that paragraph announces (`ae54df166d`). `:6938` is THIS tree's value (and "
