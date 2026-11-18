@@ -81,8 +81,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:7048-7061`", _SE, 7048, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3100", _SE, 3100, "CALL db.idx.fulltext.queryNodes"),
     (_AUDIT, "| `tortoise/search_engine.py:4725-4727` |", _SE, 4725, "MATCH (n:{label_str})"),
-    # ⚠️ The token above carries its TABLE context on purpose. A bare `search_engine.py:4708-4710` is a
-    # SUBSTRING of §2.1's verdict token (`` `none`: `search_engine.py:4708-4710` ``), so the verdict row
+    # ⚠️ The token above carries its TABLE context on purpose. A bare `search_engine.py:4725-4727` is a
+    # SUBSTRING of §2.1's verdict token (`` `none`: `search_engine.py:4725-4727` ``), so the verdict row
     # satisfies this one and the TABLE row can be re-pointed alone without reddening anything — measured:
     # mutate the table to `:4511-4513` with the bare token -> 0 red, with the table-context token -> 1 red.
     (_AUDIT, "search_engine.py:4140", _SE, 4140, "CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit"),
@@ -487,8 +487,8 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
     ⛔ **AND THE DEFECT RETURNED ON `main` UNDER A DIFFERENT NUMBER — which is why the third assertion below
     exists.** `#13290` re-pointed this paragraph by a delta and landed on `:4489-4490`: also a plain label
     scan, but a DIFFERENT one — `run_vector_query`'s `MATCH (n:{label}) WHERE n.embedding IS NOT NULL RETURN
-    count(*)`, not the `run_structural_query` scan the table row quotes at `:4708-4710`. Measured on
-    `origin/main` at this re-cut: the table row names `:4708-4710`, the verdict paragraph names
+    count(*)`, not the `run_structural_query` scan the table row quotes at `:4725-4727`. Measured on
+    `origin/main` at that re-cut: the table row named `:4708-4710`, the verdict paragraph named
     `:4489-4490` — two addresses for one reader, in one table, again. The `:4350-4351` assertion cannot see
     it (`origin/main` reads 0 there), so this test would have passed over the live defect; the
     `:4489-4490` assertion is what makes it reachable.
@@ -496,8 +496,9 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
     ⛔ **AND IT RETURNED A THIRD TIME, WHICH IS WHY THE LAST ARM AGREES THE TWO SPELLINGS INSTEAD OF
     ASSERTING ONE LITERAL — the measured witness that a literal cannot see an agreement.** `#13466`
     re-derived §2.1's TABLE row to `:4725-4727` and left this verdict paragraph at the pre-move
-    `:4708-4710`, so `main` again gave TWO addresses for one reader (`:4708-4710` is
-    `where_clause = " AND ".join(conditions)`, the statement BEFORE the scan). This test's first
+    `:4708-4710`, so `main` again gave TWO addresses for one reader (`:4723` is
+    `where_clause = " AND ".join(conditions)`, the statement BEFORE the scan; `:4708-4710` there is the
+    comment block that justifies the kind clause). This test's first
     assertion — a literal bound to the verdict's own number — stayed GREEN over it, because a pin that
     names one side of a two-sided claim has nothing to disagree with. The pair is now read out of the
     document and compared; the literal is kept only as the content-verified value at this head.
