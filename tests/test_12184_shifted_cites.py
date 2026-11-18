@@ -560,17 +560,27 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     `git show ae54df166d:tortoise/projection/__init__.py | sed -n '6869p;6938p'` ->
     `("Object", ["name"]),` and then `# background RDB/AOF child in the fork slot, and a hung un-reaped`.
 
-    ⚠️ It does NOT ban `:6938` from the header: naming BOTH heads — the shape the `hosted_api.py:33583`
-    (`:33601` at this head) pair already uses — keeps the sentence true and this arm green, which is why the
-    assertion is on the `:6869` adjacency rather than on a token count.
+    ⚠️ The assertion is on the `:6869` ADJACENCY, not on `:6938`'s absence — but it does NOT follow
+    that disclosure is free, and an earlier form of this docstring said it was. The declaration must sit
+    DIRECTLY above `` :6869`; ``; anything between them breaks the adjacency this arm reads. And
+    disclosing this tree's figure appends a SECOND `:6938` occurrence, which
+    `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` counts at 1. So a header that
+    names both heads is a TWO-file edit, not a rewrite of this one: keep the declaration above
+    `` :6869`; ``, put the disclosure AFTER the semicolon, and move `_TOKEN_OCCURRENCES[':6938']` to 2
+    in the same change. ⛔ Both arms are correct — do not clear a red by loosening either one; that
+    deletes the only protection on the entry that actually suffered the false correction. The document's
+    own shape puts the branch figure FIRST with the head in parens (`:33601` **on this branch**
+    (`:33583` at the head named above)), not the reverse.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     assert '`("Object", ["name"])`\n`:6869`;' in text, (
         "the header enumeration no longer names the Object declaration at `:6869` — the address it holds "
         "at the `main` head that paragraph announces (`ae54df166d`). `:6938` is THIS tree's value (and "
         "§2.5's row); putting it here re-points a history cite to a working-tree address, the "
-        "`⚠️ CORRECTED` failure this file exists to stop. Either restore `:6869`, or name both heads "
-        "(`:6869` there, `:6938` at this head) as the `hosted_api.py:33583`/`:33601` pair does."
+        "`⚠️ CORRECTED` failure this file exists to stop. Restore `:6869` directly above a `;`. To ALSO "
+        "disclose this tree's figure, keep the declaration where it is, append the disclosure AFTER the "
+        "semicolon, and bump `_TOKEN_OCCURRENCES[':6938']` to 2 in the same change — otherwise "
+        "`test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` reds. Do not loosen either arm."
     )
 
 
