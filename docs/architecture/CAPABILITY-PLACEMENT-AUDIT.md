@@ -73,7 +73,7 @@ measurement of the pin's own remainder — a label its own population contradict
 this header assigns to `main` are counted in it. On any later head they
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
-**122 of this document's 214** `file:line` pairs name a different line at `main` `ae54df166d` — the same
+**123 of this document's 215** `file:line` pairs name a different line at `main` `ae54df166d` — the same
 head the enumeration above names, so the figure and the list describe one comparison rather than two
 (counted as the
 unique `path.py:NNNN` pairs in this file after resolving **every** written path to the module it names
@@ -84,17 +84,17 @@ restored, so `projection/__init__.py` is `tortoise/projection/__init__.py`; a pa
 (`tests/…`, `tools/…`, `tortoise/…`) is resolved AS WRITTEN and never prefixed — **skipping that step is what
 produced the `96 of 218` this header carried before the `#13124` review**, which reported **31 pairs as
 naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files exist there** and which
-was itself measured false; a range cite counts once, by its **start** line), which dedupes the 326 as-written spellings to 214 — 112
+was itself measured false; a range cite counts once, by its **start** line), which dedupes the 326 as-written spellings to 215 — 111
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
-text; **all 214 are comparable at BOTH heads** — every written path resolves to a module that exists at
+text; **all 215 are comparable at BOTH heads** — every written path resolves to a module that exists at
 `ccb49741b2ec`, so **no pair sits outside the ratio** — and **none of
-the 214 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
+the 215 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
-**The drift is 122 of those 214.** ⚠️ **These counts are a parsing decision, and this header states which
-one it took**: the 214 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
+**The drift is 123 of those 215.** ⚠️ **These counts are a parsing decision, and this header states which
+one it took**: the 215 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
 written as ONE token. The document also writes one pair as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above); it is resolved but not counted,
-and counting that form gives **215 pairs and 123 drifters**. So the basis must travel with the figure —
+and counting that form gives **216 pairs and 124 drifters**. So the basis must travel with the figure —
 122 and 123 are one measurement under two counting decisions, not two findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
 sentence read "…to 211 — 103 … collisions —" around a full paragraph; its alternative basis then quoted a
@@ -157,7 +157,7 @@ UNDECLARED head is resolved by OPENING it, never by inference. If the
 line does not carry what the row quotes, re-derive the cite from the row's own quoted fragment
 (`grep -n '<fragment>' <path>`) rather than moving its head by a guess. That is the enumeration the rule at
 the top of this header sends the reader to.
-⚠️ **The figure counts the file it is written in, so every revision moves it — and it is MEASURED over this file as it now stands, not carried forward**: the form this paragraph replaced quoted `111 of 217`. ⚠️ **It matched the editions up to the one that carried it — which is why it is recorded as provenance, not carried forward.** Measured by this header's own rule: at `43028d178b` (its drift counted at the `main` head the retired sentence names, `534f3e1bee` — **not** at `43028d178b` itself, where the same rule reads 126, and not at `534f3e1bee`'s own edition of this document, which reads `52 of 164`) the document is **314 spellings → 217 pairs → 111 drifters**, so the figure was RIGHT when written; at `295c26ebc8`, the edition that CARRIED it, the same rule gives **320 → 216 → 110**, so the sentence was already one edition stale on arrival. And `111` is a DRIFTER count, so comparing it against a pair count is not a re-measurement — the pairs at `43028d178b` are 217, which is exactly what the retired sentence said. The figures here are **326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable**, at `main` `ae54df166d`, re-measured against this file rather than carried forward by arithmetic from an earlier edition. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
+⚠️ **The figure counts the file it is written in, so every revision moves it — and it is MEASURED over this file as it now stands, not carried forward**: the form this paragraph replaced quoted `111 of 217`. ⚠️ **It matched the editions up to the one that carried it — which is why it is recorded as provenance, not carried forward.** Measured by this header's own rule: at `43028d178b` (its drift counted at the `main` head the retired sentence names, `534f3e1bee` — **not** at `43028d178b` itself, where the same rule reads 126, and not at `534f3e1bee`'s own edition of this document, which reads `52 of 164`) the document is **314 spellings → 217 pairs → 111 drifters**, so the figure was RIGHT when written; at `295c26ebc8`, the edition that CARRIED it, the same rule gives **320 → 216 → 110**, so the sentence was already one edition stale on arrival. And `111` is a DRIFTER count, so comparing it against a pair count is not a re-measurement — the pairs at `43028d178b` are 217, which is exactly what the retired sentence said. The figures here are **326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 215 comparable**, at `main` `ae54df166d`, re-measured against this file rather than carried forward by arithmetic from an earlier edition. ⚠️ **That instruction was obeyed at THIS head, not inherited from the last edition**: the preceding edition of this header read `214 → 112 → 122`, and the pair count fell by one when §2.1's verdict was re-pointed onto the address its own table row already carried (two spellings, one pair — so the drift lost a drifter and the dedupe gained a collision); the `sdk.py` cite that moved with the same pass is the other half of the same recount. A figure copied from the edition before this one would have been wrong by exactly the amount the header warns about. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of this header) instead of enumerated here.

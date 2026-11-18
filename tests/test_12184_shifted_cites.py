@@ -161,7 +161,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # exists for, and the reason row 13's parenthetical and §2.1's count marker survived three passes.
     (_AUDIT, '`:5310` at this head', 'tortoise/projection/entities.py', 5310, 'def _upsert_document(self, ev: dict) -> None:'),
     (_AUDIT, '`:7061` at this head', 'tortoise/projection/entities.py', 7061, 'def _upsert_source('),
-    (_AUDIT, '`:6681`', _SE, 6681, 'if expand_ops:'),
+    (_AUDIT, '`:6681` inside the same function', _SE, 6681, 'if expand_ops:'),
     (_AUDIT, '`:3005` derives the label', _SE, 3005, 'label = "Source" if entity_type =='),
 )
 
@@ -260,7 +260,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33601`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5310` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7061` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6681`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6681` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3005` derives the label'): 1,
 }
 
@@ -309,9 +309,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "122 of this document's 214",
-        "dedupes the 326 as-written spellings to 214 — 112",
-        "326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable",
+        "123 of this document's 215",
+        "dedupes the 326 as-written spellings to 215 — 111",
+        "326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 215 comparable",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
