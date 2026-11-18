@@ -259,6 +259,15 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     for falsified in (
         "`placement_spellings()` at the pin",
         "`MERGE (n:…) SET n += $props` at the pin",
+        # A SELF-INFLICTED one: an alternative counting basis was described as "±5 … 216 pairs … the
+        # numerator does not move — it is 124 under either basis". Measured, that basis gives 212 pairs and
+        # a numerator of 125; the basis that DOES give 216 gives 127. A reader following its instruction to
+        # compare the numerator would have concluded the correct 124 had rotted and "corrected" it by
+        # arithmetic — the offset-not-content failure, one level down. A number nobody measured is not a
+        # caveat; it is a claim.
+        "either basis",
+        "216 pairs",
+        "moves by ±5",
     ):
         assert falsified not in text, (
             f"the header again describes an address by content it does not carry at the pin ({falsified!r}) "

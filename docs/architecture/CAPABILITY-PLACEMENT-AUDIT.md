@@ -84,11 +84,6 @@ restored, so `projection/__init__.py` is `tortoise/projection/__init__.py` — *
 produced the `96 of 218` this header carried before the `#13124` review**, which reported **31 pairs as
 naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files exist there** and which
 understated the drift by 15; a range cite counts once, by its **start** line), which dedupes the 314 as-written spellings to 211 — 103
-⚠️ **The PAIR denominator moves by ±5 with one counting decision, and the figure says which one it takes**:
-a path and its line written in TWO code spans (`` `cache_projection.py` `:2433` ``) is not an
-as-written `path.py:NNNN` spelling, so it is resolved but not counted; counting those instead gives
-216 pairs. **The drift NUMERATOR does not move — it is 124 under either basis**, which is why the
-numerator, not the denominator, is what a later head should compare itself against.
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
 text; **all 211 are comparable at BOTH heads** — every written path resolves to a module that exists at
 `ccb49741b2ec`, so **no pair sits outside the ratio** — and **none of
