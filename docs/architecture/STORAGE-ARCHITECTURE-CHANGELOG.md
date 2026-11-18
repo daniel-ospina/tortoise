@@ -2527,18 +2527,19 @@ attributed the ≈58 % pricing to **§12.1b** (`"§12.1b, which prices the two r
 `git show f462ad3acbb4:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returned exactly **one** hit **on that
 pre-PR base** — §14.3 V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that ≈58 % of
 the unindexed read's store time was two REFUSED queryNodes round trips"* — and §12.1b (*"Where the vectors actually
-sit"*) carries the `16.96 / 13.40 / 4.97 ms` pair with **no** round-trip pricing. ⚠️ **It returns TWO at this head, and
-the second is this PR's own §12.1c sentence in `STORAGE-ARCHITECTURE.md`**, which cites that same 58 %: the check was
-scoped to the base it was made on, and the sentence that quotes it is itself a hit — stated here rather than left to
-look like a command that still answers one. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which is where it is
-measured. The correction moves a citation, not a number.
+sit"*) carries the `16.96 / 13.40 / 4.97 ms` pair with **no** round-trip pricing. ⚠️ **It returns TWO at this head:
+§14.3 V3's row, plus the §12.1c sentence `ae54df166d` added to `STORAGE-ARCHITECTURE.md`** — the hit the base
+lacked — which cites that same 58 %: the check was scoped to the base it was made on, and the sentence that quotes it
+is itself a hit — stated here rather than left to look like a command that still answers one. The landed sentence
+therefore attributes the 58 % to the 2026-11-17 re-read, which is where it is measured. The correction moves a
+citation, not a number.
 
 **⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
 as **§12.2**'s. The paragraph is inside **§12.1c** — `### 12.1c ⭐ DECISION (RESOLVED 2026-11-07) — should the vector
 index live in FalkorDB at all?` — and §12.2 is a different section, `### 12.2 ⇒ The lever is "what gets an embedding"`;
-the DECIDED block that follows the paragraph is §12.1c's too. This entry states the measured location rather than propagating the issue's, because a changelog entry
-whose section number sends a reader to an unrelated lever is the one thing it exists to prevent. The issue carries a
-comment recording the correction.
+the DECIDED block that follows the paragraph is §12.1c's too. This entry states the measured location rather than
+propagating the issue's, because a changelog entry whose section number sends a reader to an unrelated lever is the
+one thing it exists to prevent. The issue carries a comment recording the correction.
 
 **⚠️ And every location above is cited by heading NAME, not by line number — a review finding, and the fix for its
 root.** Earlier revisions of this entry cited `:1241`, `:1244`, `:1206–1211`, then `:1250` and `:1213–1217` (plus
