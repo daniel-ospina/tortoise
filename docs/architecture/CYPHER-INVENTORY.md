@@ -435,6 +435,12 @@ describes, from a third side. The earlier cuts are kept below, each naming the t
 **neither parent's set is necessarily the answer at a later merged tree**, which is why the cut above
 is re-derived rather than carried.
 
+**Subsequent forward merge — `origin/main` **`ae54df166d`** (5 commits, no conflicts).** No census
+SCALAR moved (`--check` → **`25 pinned counts match`**): `tortoise/embeddings.py`,
+`tortoise/monitoring.py` and `tortoise/record_writer.py` gained no statement site. Appendix A moved by
+**one** row — `monitoring.py`'s `_probe_once._run_query` `RETURN 1`, 4,670→**4,787** — so it is
+regenerated again here: the `file:line`-versus-SCALAR gap, from a fourth side.
+
 **Earlier cut — `origin/main` **`48585c94ff`** merged into this branch.** **No scalar moved at that
 merge, and that was a measurement rather than an assumption:** `--check` reported **`25 pinned counts
 match`**, §1's reconciliation read door **1,627 / 108** whole-text, bare **1,633 / 109**, verb
@@ -1310,7 +1316,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/mining.py:1472` | `EpSafeCommit.verify_no_auto_wire` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {is_operator:true})-[r]->(n:Point) WHERE n.id IN $ids…` |
 | `tortoise/mining.py:1480` | `EpSafeCommit.verify_no_auto_wire` | plain | read | candidate:SQL-shaped | `MATCH (o:Point {id:$id}) RETURN o.status` |
 | `tortoise/mining.py:1498` | `EpSafeCommit.verify_no_auto_wire` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (o:Point {id:$oid})-[r]->(s:Point) RETURN s.id, s.status` |
-| `tortoise/monitoring.py:4670` | `_probe_once._run_query` | plain | read | candidate:SQL-shaped | `RETURN 1` |
+| `tortoise/monitoring.py:4787` | `_probe_once._run_query` | plain | read | candidate:SQL-shaped | `RETURN 1` |
 | `tortoise/navigation.py:95` | `_resolve_root` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/navigation.py:205` | `entityProfile` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/navigation.py:319` | `tortoise_traverse` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
