@@ -2054,6 +2054,31 @@ class TestIntrospection:
         weighted = {m for m, _, w in sites.sites if w}
         assert weighted == set(WEIGHT_BEARING_METHODS), weighted
 
+    def test_the_container_write_is_declared_weight_bearing(self):
+        """#13556: the R1 weight moved WITH the retired doors, and it must stay.
+
+        `create_entity` absorbed `tortoise_create_point` (weight 1) and
+        `tortoise_create_diary_write` (weight 1), so its `_quota_gated` site passes
+        `abuse_weight=_container_abuse_weight`.  TWO halves must agree or R1 metering
+        silently dies: the SITE must weigh, and the method must be in the declared
+        family.  ⛔ The cheap way to green the partition is to delete `abuse_weight=`
+        from the site and the row with it — that is the fail-open #13556 review N2b
+        closed (`record_point_create` stops firing for every advertised point
+        write), so neither half may be dropped to satisfy the other.
+        """
+        from tool_surface_capabilities import (  # noqa: I001
+            WEIGHT_BEARING_METHODS, quota_gated_wrap_sites,
+        )
+        weights = {m: w for m, _, w in quota_gated_wrap_sites().sites}
+        assert weights.get("create_entity") is True, (
+            "the `create_entity` wrap site no longer passes `abuse_weight` — the R1 "
+            "point-create signal #13556 restored (review N2b) is gone again; the "
+            "weight belongs on the SITE, not in this declaration alone")
+        assert "create_entity" in WEIGHT_BEARING_METHODS, (
+            "`create_entity` weighs at its wrap site but is not in "
+            "WEIGHT_BEARING_METHODS — declare it here; do NOT drop the weight to "
+            "match the declaration")
+
     def test_no_write_tool_counted_as_read(self):
         """#4113: derive the ACTUAL wrap sites from the AST (not a text find),
         then assert the declared write-surface map is live in BOTH directions:
