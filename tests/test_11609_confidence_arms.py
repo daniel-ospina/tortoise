@@ -307,8 +307,8 @@ class TestTheArmArgumentsNameTheirArm:
         """P3 from the architecture review: the no-arm refusal compared the two sets
         against NOTHING armed, so an explicitly-armed call carrying the other arm's
         arguments was served with them on the floor."""
-        sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
-        sdk2, calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
+        sdk, _calls = _sdk_stub(monkeypatch, "recall_state", [])
+        _sdk2, _calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
         with pytest.raises(ValueError) as exc:
             sdk.check_confidence(**kwargs)
         assert arg in str(exc.value), str(exc.value)
