@@ -34,10 +34,10 @@ something derivable from today's code.
 | `get_entity` | 7 | `type=` | yes |
 | `list_knowledge` | 7 | `kind=` | yes |
 | `update_knowledge` | 5 | *(which fields — incl. the retract fields)* | yes |
-| `adjust_relationship` | 4 | *(strength)* | **no — Part C1** |
+| `adjust_relationship` | 4 | *(strength)* | yes |
 | `explore_connections` | 4 | *(none — dispatch is by argument)* | yes |
 | `index_sources_from_directory` | 4 | *(none — dispatch is by argument)* | yes |
-| `refresh_confidence` | 4 | `scope=` | **no — Part C1** |
+| `refresh_confidence` | 4 | `scope=` | yes |
 | `review_link_candidates` | 4 | *(none — dispatch is by argument)* | yes |
 | `delete_knowledge` | 3 | *(node or link)* | yes |
 | `manage_source_trust` | 3 | *(none — dispatch is by argument)* | yes |
@@ -50,7 +50,7 @@ something derivable from today's code.
 | `register_source` | 2 | *(none — dispatch is by argument)* | yes |
 | `write_question` | 2 | *(none — dispatch is by argument)* | yes |
 
-**22 merged targets. 19 of them have a method behind them today.** The other **3** are Phase 2 work, not renames.
+**22 merged targets. 21 of them have a method behind them today.** The other **1** are Phase 2 work, not renames.
 
 ## Part B — every served name and its single destination (46 live + 62 retired)
 
@@ -227,10 +227,6 @@ Destination rows: **29**. Registry tools: **108**.
 | Target tool | Where | Finding |
 |---|---|---|
 | `manage_sources` | MCP | no `def` on TortoiseSDK |
-| `adjust_relationship` | MCP | no `def` on TortoiseSDK |
-| `refresh_confidence` | MCP | no `def` on TortoiseSDK |
-| `create_memory_graph` | tenancy | no `def` on TortoiseSDK |
-| `write_knowledge_batch` | sdk-only | no `def` on TortoiseSDK |
 
 **These are not renames.** They are new methods that must be built in Phase 2, and the
 plan listed them as if they were renames. This is what Part A exists to catch.
