@@ -484,8 +484,8 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
         (`|`, `>`, `[...]`, `{...}`) is a failure, not a pass.
     (E) SEQUENCES, item by item: a `sequence` affiliation value is not covered
         by (A) alone, which sees only an item whose text BEGINS with `#`. Every
-        item gets (C)'s quoting check and a (B)-style value comparison, and a
-        length mismatch fails — a mid-item truncation
+        item NOT already named by (A) gets (C)'s quoting check and a (B)-style
+        value comparison, and a length mismatch fails — a mid-item truncation
         (`, #4333 census, #5380`) and a quoted item cut at an inner quote are
         both green under (A)-(D) alone (found in review; the population carries
         3 affiliation sequences).
@@ -557,16 +557,20 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
             # "YAML implicit typing, nothing was lost" and so contradicted (A)
             # inside one failure string (found in review: the `- #11395` item
             # shape, where both messages were printed for one mechanism).
-            wholly_comment: set[str] = set()
-            for text in texts:
-                if text.lstrip().startswith(_WHOLE_VALUE_COMMENT):
-                    wholly_comment.add(text)
-                    bad.append(
-                        f"`{key}` is ENTIRELY a YAML comment — everything after "
-                        f"the leading `#` is discarded and the key resolves to "
-                        f"None. Quote the value."
-                    )
-                    break
+            #
+            # EVERY diagnosed text is recorded, not just the first: the message
+            # is appended ONCE per key (a list of issue refs can hold several),
+            # while the skip has to cover all of them or the second and later
+            # items still collect the false clause.
+            wholly_comment: set[str] = {
+                text for text in texts if text.lstrip().startswith(_WHOLE_VALUE_COMMENT)
+            }
+            if wholly_comment:
+                bad.append(
+                    f"`{key}` is ENTIRELY a YAML comment — everything after "
+                    f"the leading `#` is discarded and the key resolves to "
+                    f"None. Quote the value."
+                )
             if kind in ("scalar_multiline", "sequence_multiline"):
                 bad.append(
                     f"`{key}` is a MULTI-LINE value — YAML folds it, and a "
