@@ -42,7 +42,8 @@ concurrency:
 jobs:
   closes-coherence:
     # PINNED TO THE FLEET'S x64 POOL (owner decision 2026-11-18): these housekeeping
-    # jobs were queueing on the hosted pool while 18-21 self-hosted runners sat idle.
+    # jobs were queueing on the hosted pool while 18 self-hosted runners sat idle (21 online,
+    # 3 busy — the measured figures; the date and the runs are on the decision comment).
     # `runs-on` is AND semantics, so `[self-hosted, self-hosted-x64]` selects every x64
     # runner and no ARM64 VM (ci.yml:1611 states the same spelling for the same reason).
     # The #9018 tool contract below is what makes this safe ON a pool runner: `ensure gh`

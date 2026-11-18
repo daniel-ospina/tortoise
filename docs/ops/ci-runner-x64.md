@@ -1170,10 +1170,10 @@ non-required work, so the failure mode is a missing measurement rather than a st
 
 Two things this pin keeps TRUE, which is why it is safe on a pool runner:
 
-- `closes-coherence` carries the #9018 tool contract (`Ensure gh` from `.github/scripts/
-  runner-tools.sh`, no `continue-on-error`), so a pool box without `gh` REDS this leg instead of
-  silently reporting the advisory as measured — the property `tests/test_runner_tool_contract.py`
-  sweeps for any job pinned to a pool label.
+- `closes-coherence` carries the #9018 tool contract (`Ensure gh` from
+  `.github/scripts/runner-tools.sh`, no `continue-on-error`), so a pool box without `gh` REDS this
+  leg instead of silently reporting the advisory as measured — the property
+  `tests/test_runner_tool_contract.py` sweeps for any job pinned to a pool label.
 - `redis-guard` needs no contract step: its only `run:` is `python3 tools/redis-guard.py`, whose only
   subprocess is `git rev-parse --show-toplevel`, and the job pins `actions/setup-python@v5` / `3.12`
   itself, so moving off `ubuntu-latest` cannot change the interpreter.
