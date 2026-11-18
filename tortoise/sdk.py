@@ -44590,6 +44590,16 @@ class TortoiseSDK:
         # ``exclude_status``. Default None = byte-identical to pre-#4509.
         exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
+        # #13302: the ENDED SCOPE — the read whose QUESTION is "what ended, and
+        # how?". Default False = byte-identical (every existing caller keeps the
+        # current-picture read it has). When True the population is the OTHER
+        # half of the one determinant (design §6): the records
+        # ``live._terminal_expression`` treats as ended, served with the ending
+        # the record itself carries (its lifecycle word, the successor it names,
+        # its terminal stage + outcome) and the time it ended. See
+        # ``tortoise/ended.py`` — no new state, no visibility field, no second
+        # vocabulary, and no per-call guess about which knob a surface accepts.
+        ended_scope: bool = False,
         _elevated_timeout_ms: int | None = None,
         # #7953 (§17.3): PRIVATE — the residency COORDINATE a NODE-naming read
         # asked about, as ``label:key`` (``cache_projection.declared_key``).
@@ -44753,6 +44763,46 @@ class TortoiseSDK:
         True to surface them (audit/history queries); a prior/resolution leg
         that must still SEE a terminal node (link-before-create, anchor
         resolution) opts in here too.
+
+        ended_scope (#13302): the OTHER question — default False, and the whole
+        current-picture read above is unchanged. `include_terminal` answers "the
+        same read, without the currency filter", which still needs a query that
+        MATCHES; this answers "what has ENDED", which is a question about STATE
+        and cannot be asked of a text match at all (a customer's
+        "has anything we relied on been withdrawn?" shares no word with
+        "the beach club confirmed our booking"). When True the population is the
+        records `live._terminal_expression` treats as ended — the SAME shared
+        predictor every read filters on, taken in the positive direction, so no
+        status set, slot literal or per-family deny-list lives here — served
+        newest ending first, each row carrying the ending the record itself
+        holds: its lifecycle `status` (``deprecated`` = nothing replaced it,
+        ``superseded`` = see `successorId`), the `stage` block (`slot` +
+        `outcome`) for a record ended on the POSITION axis, and `endedAt`.
+        `linkedEvents` carries the events wired to the record, which is what
+        makes "planned and never happened" answerable without knowing a kind's
+        stage names: a plan is ``stage.slot == "terminal"`` with an empty
+        `linkedEvents`.
+        ⛔ A `query` beside it is REFUSED, not ignored: a state enumeration that
+        silently dropped the caller's words would serve a whole population as if
+        it were their answer. The refusal is a CLOSED LIST, and it names EVERY
+        retrieval keyword the normal path uses to shrink, expand, re-rank,
+        re-weight, time-scope or enrich the row set: `query`, `threshold`,
+        `min_confidence`, `order_by`, `relationship_filter`, `traversal_path`,
+        `claim_class`, `exclude_status`, `exclude_turn_echo_session`, `graph_ranker`,
+        `structural_kind`, `structural_hops`, `pool_size`, `fusion_weights`,
+        `fusion_k`, `recency_field`, `recency_boost`, `query_date`, `time_aware`,
+        `keep_numeric`, `search_keys_prf`, `entity_key_expansion` and `w4_enrich`
+        (`exclude_turn_echo_session` would have returned rows the caller asked to
+        exclude, in silence — the failure the sentence above cites). A new
+        retrieval keyword must be classified in that list, because the list IS the
+        contract. `include_terminal` is the one keyword accepted beside it and it
+        is a NO-OP here rather than a drop: the ended population is already the
+        terminal one, so that flag can neither add nor remove a row. `entity_type`
+        (point/object/subject — the kinds with a lifecycle), `kind` and `limit`
+        scope and bound it.
+        `ended_scope` is not a visibility field on the record and adds no word
+        to the model: it is design §6's "option on the call", and the default
+        keeps every existing surface answering exactly what it answered before.
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -45004,6 +45054,77 @@ class TortoiseSDK:
                 f"'operator'), or omit claim_class — ignoring it here would "
                 f"return the rows the caller asked to exclude."
             )
+        # #13302: an ENDED-SCOPE read is the STATE population, not a match set, so
+        # every retrieval knob beside it is REFUSED rather than dropped. A silent
+        # drop is the defect class this file names repeatedly ("a keyword the
+        # chosen arm cannot RECORD is refused, never dropped"): a caller who
+        # passed a query and got the whole ended population back would read a
+        # state enumeration as an answer to their question, and a caller who
+        # passed ``min_confidence`` and got rows below it would never learn the
+        # floor was not applied. ``limit`` (the page bound), ``entity_type`` and
+        # ``kind`` (the population's scope) DO apply and stay served.
+        #
+        # ⛔ THE REFUSED SET IS CLOSED AND EVERY MEMBER IS NAMED BELOW. A knob that
+        # is not named here is NOT reached by this arm either, so it may only be
+        # admitted when dropping it cannot change which rows a caller receives. A
+        # knob the normal path uses to SHRINK, EXPAND, RE-RANK, RE-WEIGHT, TIME-SCOPE
+        # or ENRICH the row set is refused: silently dropping it serves a state
+        # population as if the caller's scope had been applied, which is the
+        # failure the comment above cites for ``query``. That is why the whole
+        # retrieval vocabulary is here and not just the eight filters first
+        # listed (#13416 review F4: ``structural_hops``/``structural_kind``/
+        # ``graph_ranker``/``pool_size``/``fusion_*``/``recency_*``/``query_date``/
+        # ``time_aware``/``keep_numeric``/``search_keys_prf``/
+        # ``entity_key_expansion``/``w4_enrich`` were dropped in silence).
+        # ⛔ ``include_terminal`` is deliberately NOT refused and is the ONE
+        # exception, by construction rather than by omission: the ended population
+        # is already the terminal one, so the flag can neither add nor remove a
+        # row here — refusing it would refuse a caller for asking for what they
+        # are getting. ``limit``, ``entity_type`` and ``kind`` scope and bound the
+        # read and stay served; the sink/plumbing keywords (``leg_trace``,
+        # ``read_status_out``, ``_truncation_out``, ``_elevated_timeout_ms``) are
+        # how the caller receives or times the answer, not what it contains.
+        if ended_scope:
+            _refused_ended = sorted(
+                name for name, _supplied in (
+                    ("query", query is not None),
+                    ("threshold", threshold not in (0.0, 0)),
+                    ("min_confidence", min_confidence not in (0.0, 0)),
+                    ("order_by", order_by != "relevance"),
+                    ("relationship_filter", relationship_filter is not None),
+                    ("traversal_path", traversal_path is not None),
+                    ("claim_class", claim_class is not None),
+                    ("exclude_status", bool(exclude_status)),
+                    ("exclude_turn_echo_session",
+                     exclude_turn_echo_session is not None),
+                    ("graph_ranker", graph_ranker is not None),
+                    ("structural_kind", structural_kind is not None),
+                    ("structural_hops", structural_hops not in (0, None)),
+                    ("pool_size", pool_size is not None),
+                    ("fusion_weights", fusion_weights is not None),
+                    ("fusion_k", fusion_k != 60),
+                    ("recency_field", recency_field is not None),
+                    ("recency_boost", recency_boost not in (0.0, 0)),
+                    ("query_date", query_date is not None),
+                    ("time_aware", bool(time_aware)),
+                    ("keep_numeric", bool(keep_numeric)),
+                    ("search_keys_prf", bool(search_keys_prf)),
+                    ("entity_key_expansion", bool(entity_key_expansion)),
+                    ("w4_enrich", w4_enrich is not True),
+                ) if _supplied
+            )
+            if _refused_ended:
+                raise ValueError(
+                    f"ended_scope is a STATE enumeration, not a relevance read, "
+                    f"so it cannot apply {', '.join(_refused_ended)}. It answers "
+                    f"\"what ended, and how\" from the records' own state: omit "
+                    f"{', '.join(_refused_ended)} and read the returned rows' "
+                    f"`status` / `successorId` / `stage` (with its `slot` and "
+                    f"`outcome`) / `endedAt`. Narrow the population with "
+                    f"entity_type= and kind=, and bound the page with limit=; "
+                    f"for a relevance read of what is still CURRENT, drop "
+                    f"ended_scope and search as before."
+                )
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
             annotate_ep_batch, get_relationships_bounded,
@@ -45357,6 +45478,35 @@ class TortoiseSDK:
         # #11679: the KIND FILTER below feeds `n.{kind_field} IN [...]`, so it
         # takes the read-filter set (descendants, never ancestors).
         expanded_kinds = self._read_filter_kinds(kind) if kind else None
+
+        # ── #13302: the ENDED SCOPE is served HERE ────────────────────────────
+        # Placed after the projection is obtained and its reachability proven
+        # (so `_with_read_status` records a status the store actually answered
+        # for), and after `label`/`kind_field`/`expanded_kinds` are resolved (so
+        # the enumeration reads each family by its OWN carriers and honours the
+        # same kind EXPANSION every other read filter uses). It returns before
+        # the retrieval machinery: this is a state enumeration, and running the
+        # legs first would either waste them or — worse — let a degraded FTS
+        # fallback fill an answer to a question that was never about words.
+        if ended_scope:
+            from .ended import enumerate_ended
+
+            # ONE row beyond the page, so the TRUNCATION marker is PROVEN rather
+            # than guessed: a population wider than ``limit`` is the only way a
+            # caller learns rows were cut, and asking for the extra row costs one
+            # slot in a bounded scan. Without it the marker would have to report a
+            # full page as complete (the #8447 defect) or an unfilled one as cut.
+            _fatter = enumerate_ended(
+                graph, entity_type=entity_type, kind=kind,
+                kinds=expanded_kinds, limit=limit + 1)
+            _ended_rows = _fatter[:limit]
+            # ``candidates`` is what this read could SEE and it may be BOUNDED
+            # (exactly the hosted ``GET /v1/points`` ``limit+1`` probe shape), which
+            # is why ``exact`` is the separate input: 3 here means "more than
+            # limit", never "exactly 3".
+            _trunc["candidates"] = len(_fatter)
+            _trunc["exact"] = len(_fatter) <= limit
+            return _with_read_status(_ended_rows)
 
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the
