@@ -854,6 +854,63 @@ def test_a_LEGACY_unserved_vector_is_CACHE_HELD_not_a_projection_gap():
     assert set(gap.unexplained_missing) == {"embedding"}, gap.as_dict()
 
 
+# ── the stored-form rule on the CHANGED arm (#13447 review cycle 3, issue 2) ──
+#
+# `#13447` makes an `Object`/`Subject` pair carry `embedding` on BOTH sides for the
+# first time: the record's as the float64 `jsonb` payload (#13220's column), the
+# cache's as the `vecf32($embedding)` clause. The arm compared them with a bare `!=`,
+# so the served-read parity instrument false-REDded on essentially every real vector
+# — the defect `#8615`/`#9184` already recorded for this pair in
+# `reconciliation._props_relation`. Two rows below: the stored-form agreement is
+# accepted, and a genuinely different vector still reddens (nothing blanket-forgiven).
+
+
+def _seam_pair(label: str, record_vector: list, cache_vector: list) -> rs.ParityDiff:
+    from tortoise.cache_projection import node_from_row
+
+    record_answer = dict(node_from_row(label, {
+        "id": "e-1", "name": "Acme Corp", "embedding": list(record_vector),
+        "props": {}}).props)
+    assert record_answer.get("embedding") is not None, sorted(record_answer)
+    cache_answer = {**record_answer, "embedding": list(cache_vector)}
+    return rs.parity_difference(cache_answer, record_answer, label=label)
+
+
+@pytest.mark.parametrize("label", ["Object", "Subject"])
+def test_a_vector_that_agrees_at_the_STORED_WIDTH_is_not_a_CHANGED_pair(label):
+    """The cache's `vecf32` rounding of the record's vector is an AGREEMENT.
+
+    Non-vacuity: pre-fix (a bare `!=`) this reds on `changed == {'embedding'}` for
+    both labels — the false RED `#13447` would otherwise publish on the very vectors
+    it makes round-trip.
+    """
+    from tortoise.stored_form import narrow_to_stored_width
+
+    record_vector = [0.1] * 384
+    cache_vector = narrow_to_stored_width(record_vector)
+    assert cache_vector is not None
+    assert cache_vector != record_vector, (
+        "the fixture must actually exercise the float64→float32 gap, or the "
+        "assertion below cannot vary")
+
+    diff = _seam_pair(label, record_vector, cache_vector)
+    assert diff.changed == {}, diff.as_dict()
+    assert diff.clean, diff.as_dict()
+
+
+@pytest.mark.parametrize("label", ["Object", "Subject"])
+def test_a_genuinely_different_vector_is_STILL_a_CHANGED_pair(label):
+    """CONTROL — the narrowing must not bless a different vector.
+
+    The rule narrows the RECORD side only, so a cache value that is not the rounding
+    of the record's is still a divergence. Without this row the fix would be
+    indistinguishable from "ignore the field".
+    """
+    diff = _seam_pair(label, [0.1] * 384, [0.9] * 384)
+    assert set(diff.changed) == {"embedding"}, diff.as_dict()
+    assert not diff.clean
+
+
 def test_a_record_served_read_carries_no_derived_name():
     conn = _FakeConn(rows=[_row(content_hash="abc", ep_dirty=True)])
     props = rs.read_point(conn, org_id="org_t", graph_id="g_t", point_id="p-1")

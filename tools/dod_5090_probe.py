@@ -294,6 +294,26 @@ class Row:
 #: The GATED seam (`#5008`). A write path that embeds a row must reach it.
 SEAM_CALL = "encode_for_row"
 
+#: `#13447` — the ONE derive-and-encode seam, reached as a MODULE-QUALIFIED call:
+#: `derived_embedding.encode(...)` (the live write and the graph folds) and
+#: `derived_embedding.derive_row(...)` (the `record-restore` rebuild).
+#:
+#: ⛔ WHY IT IS CREDITED AND WHY IT IS NOT CREDITED BY BARE NAME. That module IS
+#: the gate: `encode` is exactly `embeddings.encode_for_row(text, width,
+#: bounded=…)` plus a per-write memo, so a caller that reaches it has reached the
+#: gate, and a census that could not see it would report the four derived folds as
+#: `unresolved_write` — i.e. it would demand declarations for writers that ARE
+#: gated (the false-block direction) and, worse, would stop counting them as gated
+#: writers at all (`#12020`'s fail-open direction, one seam removed). But `encode`
+#: is a GENERIC name: `client.encode(x)` is a different function, which is exactly
+#: why `_named_callees` refuses a `func.attr` for alias resolution. So the
+#: RECEIVER is resolved to this module through the writer's own import aliases and
+#: only the call names below are accepted on it.
+SEAM_MODULE = "derived_embedding"
+
+#: The call names accepted on :data:`SEAM_MODULE` as a reach of the gate.
+SEAM_MODULE_CALLS: tuple[str, ...] = ("encode", "derive_row")
+
 #: The ungated primitives that ALSO produce a stored vector. `encode_for_store`
 #: is documented as the reads/backfills/repairs primitive (so its callers are
 #: `producer`, not `writer`), but `compute_session_embedding` feeds the session
@@ -377,8 +397,17 @@ WRITE_CLAUSE_BUILDERS: tuple[str, ...] = ("set_embedding_clause", "clear_then_se
 
 #: The names an import can alias to something this instrument must still resolve — the clause
 #: builders above plus the gate seams. Built once, not per call.
+#: ⛔ `SEAM_MODULE` IS ENROLLED FOR THE BINDING, NOT FOR THE CALL (`#13447` review cycle 7, P2).
+#: A *module* import has no call name to credit — `_named_callees`/`_callees` answer a `Name` or an
+#: `Attribute`, and this one resolves to `_seam_module_calls` — so membership adds nothing to the
+#: credit path. What it adds is a HOME for `_imports_that_REBIND` to test: without an entry, a
+#: module import is a name no rule resolves, so `from tortoise import derived_embedding` bound
+#: `derived_embedding` ambiguously and the receiver was decided by SPELLING alone. That is how a
+#: parameter, a writer-local assignment, or a foreign `from other.pkg import derived_embedding` came
+#: to be credited as the seam — the fail-open direction, because a credited reach is `gated`, which
+#: is OUTSIDE `NEEDS_A_DECLARATION`.
 _ALIASABLE_CALL_NAMES: frozenset[str] = (
-    frozenset(WRITE_CLAUSE_BUILDERS) | {SEAM_CALL} | frozenset(UNGATED_CALLS))
+    frozenset(WRITE_CLAUSE_BUILDERS) | {SEAM_CALL, SEAM_MODULE} | frozenset(UNGATED_CALLS))
 
 #: The module each aliasable name actually LIVES in. ⛔ An `ImportFrom` from anywhere else binds a
 #: different function that merely shares the name, and crediting it as the seam flips a writer that
@@ -413,6 +442,16 @@ _ALIAS_HOMES: dict[str, frozenset[str]] = {
     SEAM_CALL: frozenset({"tortoise.embeddings", "embeddings"}),
     "encode_for_store": frozenset({"tortoise.embeddings", "embeddings"}),
     "compute_session_embedding": frozenset({"tortoise.session_indexer", "session_indexer"}),
+    # ⛔ A MODULE, so the accepted spellings are the ones a `from … import` can NAME — not the
+    # module's own dotted path (`#13447` review cycle 7, P2). `_import_aliases` compares against
+    # `ImportFrom.module`, so the two live shapes arrive as `"tortoise"`
+    # (`from tortoise import derived_embedding`, `tortoise/**/*.py`) and `""`
+    # (`from . import derived_embedding`, `cache_projection.py`) — a home set of
+    # `{"tortoise.derived_embedding", …}` would match NEITHER and every real seam reach would drop
+    # to `unresolved_write` (the false-block direction: declarations demanded of gated writers).
+    # Anywhere else is a different object that shares the name, and `_imports_that_REBIND` counts it
+    # as a rebinding — which is exactly what stops a foreign import being credited (P2's third row).
+    SEAM_MODULE: frozenset({"tortoise", ""}),
 }
 
 
@@ -849,8 +888,16 @@ def _alias_credit_rank(name: str) -> int:
 #: builders and two ungated calls share a rank, so a bare `>` left the credited NAME dependent on
 #: source order (measured: `encode_for_store`+`compute_session_embedding` on one local name credit
 #: a different one per order). This tuple makes the tie deterministic and independent of the walk.
+#: ⛔ IT MUST CONTAIN EVERY `_ALIASABLE_CALL_NAMES` MEMBER — `_alias_preference` reads it by
+#: `.index()` and its `except ValueError` arm is marked `# pragma: no cover` on exactly that
+#: premise. `SEAM_MODULE` was enrolled as aliasable at `#13447` review cycle 7 without being added
+#: here, so that premise was false and live code sat behind a "no cover" pragma; pinned by
+#: `tests/test_dod_5090_probe.py::test_every_aliasable_name_has_a_canonical_order_entry`.
+#: ⛔ `SEAM_MODULE` is LAST on purpose: both it and `SEAM_CALL` are rank 0 (both credit `gated`), so
+#: an APPEND keeps the ordering that was measured before the enrolment and no published `callee`
+#: moves. Reordering it ahead of `SEAM_CALL` would silently republish those names (`#11444`).
 _ALIAS_CANONICAL_ORDER: tuple[str, ...] = (
-    *WRITE_CLAUSE_BUILDERS, *UNGATED_CALLS, SEAM_CALL)
+    *WRITE_CLAUSE_BUILDERS, *UNGATED_CALLS, SEAM_CALL, SEAM_MODULE)
 
 
 def _alias_preference(name: str) -> tuple[int, int]:
@@ -1034,6 +1081,115 @@ def _locally_bound(node) -> set[str]:
     and each of them was measured `gated` (owed nothing) before `_own_scope_bindings` knew them.
     """
     return _own_scope_bindings(node)
+
+
+def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
+    """The gate seam reached through the :data:`SEAM_MODULE` module (#13447).
+
+    Returns the matched call names (empty when the writer does not reach it).
+
+    ⛔ THE RECEIVER IS DECIDED BY ITS BINDING, NEVER BY ITS SPELLING (`#13447` review cycle 7, P2).
+    The question is *"does this name still mean the module?"*, which is the same question
+    `_locally_bound` / `_keep_shadowed_aliases` already answer for every other seam spelling in
+    this file — and the answer has to come from the import map, not from what the identifier looks
+    like. A name that merely READS like the module is not the module:
+
+        from tortoise import derived_embedding      # ← the module: a reach
+        def w(derived_embedding): …                 # ← a PARAMETER: not a reach
+        def w():
+            _derived_embedding = make()             # ← an ASSIGNMENT: not a reach
+        from other.pkg import derived_embedding     # ← a FOREIGN import: not a reach
+
+    Crediting any of the last three classes the writer `gated`, which is OUTSIDE
+    `NEEDS_A_DECLARATION` — so it stops owing a declaration while never reaching the gate. That is
+    `#12020` round 3's failure class (a writer-local `_enc = lambda p: p` still credited
+    encode_for_row`), re-created one seam over, and it is the direction this module exists to close.
+
+    Two conditions, both required:
+
+    * the receiver RESOLVES through the writer's own import map (`aliases`) to :data:`SEAM_MODULE`;
+      `SEAM_MODULE` is enrolled in `_ALIASABLE_CALL_NAMES` / `_ALIAS_HOMES` so `_import_aliases`
+      resolves `from tortoise import derived_embedding` and `from . import derived_embedding`
+      unchanged, and `_imports_that_REBIND` counts a foreign import as the rebinding it is;
+    * the receiver is NOT bound where the call sits — belt AND braces, because the caller already
+      drops shadowed aliases through `_keep_shadowed_aliases` and this function is also called
+      directly (its unit test, and any future caller) with a hand-fed map. That second half is
+      PINNED, not assumed: the DIRECT-CALL arm of
+      `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`
+      hands this function an alias map that still RESOLVES the receiver while the node's own `def`
+      binds it, which is the one shape this check can save (`#13447` review cycle 8, P3 — the
+      mutant that deleted it survived every other row in the file).
+
+    ⛔ "where the call sits" — NOT "in the writer's own scope" (`#13447` review cycle 10, P2,
+    measured). This walk descends the whole subtree, so a nested `def`'s PARAMETER bound only
+    inside it, and reading the writer's own scope once left the same rebinding forgiven one scope
+    down: a writer with `def helper(derived_embedding): return derived_embedding.encode('x')` and
+    an own ungated write clause measured `gated` — outside `NEEDS_A_DECLARATION`, i.e. owing no
+    declaration while never reaching the gate. The shadow is therefore threaded DOWNWARD per scope
+    (the shape `_named_callees` already uses, and for the same reason: "own scope only" would drop
+    the legitimate closure). Pinned — in both directions — by
+    `tests/test_dod_5090_probe.py::test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach`'s
+    nested rows.
+
+    An UNRESOLVED receiver — including the shape no rule in this file resolves
+    (`import tortoise.derived_embedding as de`, an `ast.Import`, which `_import_aliases` does not
+    read) — is reported the pre-#13447 way (`unresolved_write`, i.e. it owes a declaration). That is
+    the false-BLOCK direction, chosen deliberately: the other one makes the census blind to a gate
+    reach (`#12020`).
+
+    ⛔ The SPELLING arms are gone rather than narrowed a second time. Containment
+    (`SEAM_MODULE in name`) credited `derived_embedding_client.encode(...)` — a different object
+    with the same attribute, i.e. exactly the reach this docstring says does not count (`#13447`
+    review cycle 3, issue 7). Its replacement, a `"_" + SEAM_MODULE` SUFFIX, credited every
+    `*_derived_embedding` receiver (`my_derived_embedding`, `#13447` review cycle 6, issue 1). Both
+    were re-spellings of the same unasked question, which is why cycle 7 replaced the question
+    (binding) instead of the answer (a third spelling). Pinned by
+    `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`
+    (the substring/suffix rows) and
+    `…::test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach` (the three binding rows).
+    """
+    import ast
+
+    out: set[str] = set()
+
+    def visit(current: ast.AST, shadowed: frozenset[str]) -> None:
+        """Walk the subtree, adding each NESTED scope's own bindings for ITS subtree only.
+
+        ⛔ The shadow is threaded DOWNWARD, never read as "own scope only" (`#13447` review cycle
+        10, P2 — measured): the previous body asked `_locally_bound(node)` ONCE and then walked
+        with `ast.walk(node)`, which descends into nested `def`/`lambda` bodies, so the SAME
+        rebinding this file reds one scope up was silently forgiven one scope down —
+
+            def _w(proj):
+                def helper(derived_embedding):     # binds in `helper` only
+                    return derived_embedding.encode('x')
+                return proj.g.query('MATCH (n:Point) SET n.embedding = $e', …)
+
+        measured `('gated', 'encode_for_row')`, i.e. outside `NEEDS_A_DECLARATION`: the writer
+        stopped owing a declaration while never reaching the gate. `_named_callees` already
+        threads its shadow the same way, and its docstring states the reason ("the fix is NOT
+        'own scope only'" — that would drop the legitimate closure).
+        """
+        if isinstance(current, _NEW_SCOPE_NODES):
+            # Includes the ROOT when it is itself a writer `def`, so the seeding below is not the
+            # only path — and it is idempotent, because the two sets are the same question.
+            shadowed = shadowed | frozenset(_own_scope_bindings(current))
+        if isinstance(current, ast.Call):
+            func = current.func
+            if isinstance(func, ast.Attribute) and func.attr in SEAM_MODULE_CALLS:
+                name = getattr(func.value, "id", None)
+                if name is not None and name not in shadowed:
+                    # ⛔ `aliases.get(name)` with NO bare-name fallback: `aliases.get(name, name)`
+                    # made the resolution a no-op, so this guard could never fire for a name the
+                    # writer never imported — the only case that matters (`#13447` cycle 7, P2).
+                    canonical = aliases.get(name)
+                    if canonical is not None and canonical.split(".")[-1] == SEAM_MODULE:
+                        out.add(func.attr)
+        for child in ast.iter_child_nodes(current):
+            visit(child, shadowed)
+
+    visit(node, frozenset(_own_scope_bindings(node)))
+    return out
 
 
 def _named_callees(node) -> set[str]:
@@ -1650,6 +1806,18 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.record_writer::derived_embedding_columns": (
         ("tortoise/record_writer.py", "derived_embedding_columns",
          'columns={"embedding": list(vec)}'),),
+    # `#13447` — the two seam helpers `WRITER_LABEL_OVERRIDES` names, each cited at the
+    # call that makes it a WRITE path for the derivation: `encode` IS the gate reach
+    # (it forwards to `embeddings.encode_for_row`), and `fill_missing_row_vectors`
+    # reaches it through `derive_row`. Delete either call and the writer leaves the
+    # population, taking its override with it — which is why the needle is the call,
+    # not an import or a docstring sentence.
+    "tortoise.derived_embedding::encode": (
+        ("tortoise/derived_embedding.py", "encode",
+         "embeddings.encode_for_row(text, width, bounded=bounded, **extra)"),),
+    "tortoise.cache_projection::fill_missing_row_vectors": (
+        ("tortoise/cache_projection.py", "fill_missing_row_vectors",
+         "derived_embedding.derive_row(node.label, props, width=width)"),),
 }
 
 
@@ -1771,6 +1939,28 @@ WRITER_LABEL_OVERRIDES: dict[str, str] = {
     # it, so this is the SECOND entry. The ordering carries no meaning at all; the
     # claim was merely wrong and is struck rather than reworded.)
     "tortoise.record_writer::derived_embedding_columns": "Object",
+    # `#13447` — the SEAM itself (`tortoise/derived_embedding.py::encode`) and the
+    # rebuild fill (`tortoise/cache_projection.py::fill_missing_row_vectors`) are the
+    # two helpers the seam PR added BETWEEN a gate reach and the store. Both reach the
+    # gated seam (`encode` is `embeddings.encode_for_row` plus the per-write memo;
+    # `fill_missing_row_vectors` derives through `derive_row`), neither issues any Cypher
+    # at all, so the derivation classes each a WRITE path whose label no Cypher names —
+    # correctly, because the vector they produce is handed to a CALLER (`encode` returns
+    # it to `record_writer.derived_embedding_columns` and the graph folds;
+    # `fill_missing_row_vectors` returns rows whose `embedding` column the projection
+    # stores), and row 2 held PARTIAL on the two of them rather than naming a label.
+    #
+    # ⛔ SAME SHAPE AS THE ENTRY DIRECTLY ABOVE, so it is falsified the same way: the
+    # field is SINGLE-VALUED, and the choice is representative rather than exhaustive —
+    # every other label these two feed is separately visible in this population through
+    # the writer that stores it on a node (`projection.entities::_upsert_object` →
+    # `Object`, `::_upsert_subject` → `Subject`, the Event fold → `Event`, the document
+    # path via `set_embedding_clause("s")` → `Source`, and the record rows' own
+    # projection through `cache_projection_store_labels()`), so an unserved label cannot
+    # hide behind either entry. What an override must NOT do is name a label the function
+    # never touches: `Object` is the derived-entity label both of them feed.
+    "tortoise.derived_embedding::encode": "Object",
+    "tortoise.cache_projection::fill_missing_row_vectors": "Object",
 }
 
 
@@ -1970,7 +2160,11 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # re-splits the whole file per call, which cost 90 s on this tree.
             source = "\n".join(lines[node.lineno - 1:node.end_lineno])
             kind: str | None = None
-            if SEAM_CALL in called:
+            # ⛔ `#13447`: the seam MODULE's own calls are the same gate — see
+            # `SEAM_MODULE`. Credited before the ungated set, because a writer that
+            # reaches `derived_embedding.encode` HAS reached `encode_for_row`.
+            seam_module_calls = _seam_module_calls(node, aliases)
+            if SEAM_CALL in called or seam_module_calls:
                 callee, kind = SEAM_CALL, "gated"
             elif set(UNGATED_CALLS) & called:
                 callee = sorted(set(UNGATED_CALLS) & called)[0]

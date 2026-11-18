@@ -498,7 +498,7 @@ does not re-emit the pre-amendment figure as if it were this run's — and it sa
 
 ⛔ **E3's Point denominator mixes classes that CANNOT derive, and the figure is taken over the
 writer class — not over the link.** Of the 338 `Point` nodes: **159 mechanical turn rows**
-(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2801`, wired only by `CONTAINS`),
+(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2802`, wired only by `CONTAINS`),
 **141 extraction claims**, **29 operator Points** and **9 other Points** — each class read off the
 property its **writer** stamps (`is_episodic`, `is_operator`, an `extractedFrom` edge), none
 hand-typed, and each printed with its own anchored count.
@@ -1184,7 +1184,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 
 The pipeline's OWN path WAS `TortoiseSDK.capture_session` (**DELETED by #4282**, 2026-10-27 —
 this bundle's probes now drive the private `sdk._capture_session`) →
-`sdk._extract_session_v2` (`sdk.py:20506`; called at `:19395`) →
+`sdk._extract_session_v2` (`sdk.py:20511`; called at `:19400`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:14668`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
