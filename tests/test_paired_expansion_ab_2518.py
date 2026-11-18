@@ -1793,7 +1793,9 @@ def test_the_point_arm_reaches_the_lever_and_the_object_arm_cannot(tmp_path,
     assert point["expansion_fired_items"] >= 1
 
 
-# ── 2g. the four pins review round 4 measured GREEN (`#13267` F1–F6) ────────
+# ── 2g. the pins review round 4 measured GREEN (`#13267` F1–F6) ─────────────
+# ⛔ No count of them: the header said "four" over seven tests and no test can see
+# it (`#13267` review 15 F2). A count in a section header is a figure like any other.
 #
 # Every test below exists because a mutation SURVIVED the suite at this head and
 # was proven to by the reviewer, not because the property looked unprotected. The
