@@ -48,7 +48,9 @@ reading a comment — this document does not restate them.
 
 ### 1.1 The #8482 envelope — question (a)
 
-The envelope is **not added by the tool**. FastMCP derives it from the return annotation.
+The envelope is **not added by FastMCP for a tool whose ANNOTATION does not declare one**. It
+derives the wrap from the return annotation (a container may also build the same `ToolResult`
+by hand — see the note under the probe table, `_row_section_envelope`).
 Two independent reads agree — the pinned FastMCP source and a live probe.
 
 `fastmcp` is a **pinned dependency**, not vendored (`pyproject.toml:47`, `fastmcp==3.4.6`), so
@@ -83,8 +85,8 @@ Probe (`FastMCP("p").add_tool` + `call_tool`, a fake arm returning a list and a 
 ships the envelope AND the marker by hand: `tortoise_graph_overview`'s row-section arms go
 through `_row_section_envelope` (`mcp_server.py:7806`, marker at `:7842`, #10085) and
 return `{"result": […]}` with `_meta={"fastmcp": {"wrap_result": true}}` (measured at
-this head). So for that tool the marker is not a delta, and §1.2's "no envelope at all"
-means no envelope in the **advertised schema**, not an unwrapped body.
+this head). So for that tool the marker is not a delta, and §1.2's "no envelope in the
+advertised schema" is about the ADVERTISED schema, not an unwrapped body.
 
 **Answer to (a).** The envelope adds exactly **four** wire facts: (i) `structuredContent`
 becomes `{"result": <value>}`, (ii) `result` is in `required`, (iii) where a **wrapped**
@@ -97,7 +99,7 @@ schema — which the table's compressed rendering omits — is the schema's own 
 ⛔ Not a universal "the containers stamp none": `tortoise_graph_overview`'s row-section
 arms already stamp it by hand (`_row_section_envelope`, `mcp_server.py:7806`/`:7842`,
 #10085), so THIS fact's delta is its dict arms plus the other five containers — not the
-marker itself. (§1.2's "no envelope at all" is about the ADVERTISED schema.)
+marker itself. (§1.2 qualifies the same way: advertised schema only.)
 A UNION declares `anyOf` and no `type` regardless of its
 members (`list[dict] | dict` and `dict | bool` alike), and `object` declares `{}` and no
 `type` — which is precisely why `_violates_wrap_envelope` is type-blind for both. A container
