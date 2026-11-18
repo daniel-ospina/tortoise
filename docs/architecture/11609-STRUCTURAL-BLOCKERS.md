@@ -33,7 +33,7 @@ retired from the count. S1 unblocks the 9, and §4's `14 → 5` follows from tha
 
 ⛔ **The `PROTECTED` size is 14 here, not 16.** `#13556` retired `tortoise_create_point` and
 `tortoise_diary_write` from the class, so the table this document reasons about holds **14**
-(`tests/test_11609_door_retirement.py:150`, asserted `:603`). The twelve doors this document is
+(`tests/test_11609_door_retirement.py:193`, asserted `:603`). The twelve doors this document is
 about are untouched by that retirement (neither was a structural blocker), so the 9 / 3 / 1 split
 and `− 1` are unchanged; only the total and the derived arithmetic below move. Writing 16 here
 would be honest at this branch's base and FALSE the moment `main` is merged, which is why the

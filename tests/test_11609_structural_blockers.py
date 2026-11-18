@@ -219,6 +219,25 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     re-applies every binding at its own position, so a later shadow still cannot resurrect a
     call it precedes.
 
+    ⛔ IT FAILS CLOSED: a call is a site if it resolves **at its position** OR **under the
+    module-final map** (`#13585 review P2`). Position alone is not sound, because this walk has
+    position but NO SCOPES: it replays assignments collected by `ast.walk` from every block, so
+    a drop written in one scope was applied to a call in another — `tr = _placeholder()` at
+    module level, `def wire(app): return tr.FastAPIRouterAdapter(app)`, `tr = tool_registry`
+    after the `def` reported `[]` at the pre-union head while `main`'s final-map read reported
+    the site. The two arms are each other's blind spot: the final map is scope-blind and loses
+    the calls a later shadow erased (F1), the positional walk resolves each call where it
+    stands but cannot see a binding settled after it in a DIFFERENT block. Everything comparable
+    resolves names through a scope-aware symbol table rather than a flat replay (CPython's
+    `symtable.c` collects binding facts per block; ruff's `ruff_python_semantic::model` grades a
+    reference against the `Scope` holding the `Binding`; the language reference says assignments
+    make a name local to a block, so a binding in one block does not shadow a read in another) —
+    a union is the sound minimal shape until this helper carries one. Neither arm alone invents
+    or loses a site: the union is a strict superset of both, so no wiring either reading found
+    can go unreported. A binding written inside a FUNCTION BODY is also not replayed against the
+    module-level names (same reason: it is another block's local, and it cannot erase the module
+    binding a sibling function's call resolves against).
+
     DELIBERATELY not matched, stated rather than hidden: an instantiation reached through a
     dict or a dynamic import the AST cannot resolve (`registry["FastAPIRouterAdapter"](…)`,
     `importlib.import_module(...)`, `__import__`), a `functools.partial` of it, an
@@ -233,18 +252,19 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     def _is_module_name(dotted: str) -> bool:
         return dotted.rsplit(".", 1)[-1] == _ADAPTER_MODULE
 
-    def _resolves_to_class(dotted: str | None) -> bool:
+    def _resolves_to_class(dotted: str | None, local: set[str] | frozenset[str],
+                           module: set[str] | frozenset[str]) -> bool:
         if dotted is None:
             return False
-        if dotted in local_names:
+        if dotted in local:
             return True
         head, _, tail = dotted.rpartition(".")
         if tail != _ADAPTER_CLASS:
             return False
-        return head in module_names or _is_module_name(head)
+        return head in module or _is_module_name(head)
 
-    def _resolves_to_module(dotted: str | None) -> bool:
-        return dotted is not None and (dotted in module_names or _is_module_name(dotted))
+    def _resolves_to_module(dotted: str | None, module: set[str] | frozenset[str]) -> bool:
+        return dotted is not None and (dotted in module or _is_module_name(dotted))
 
     def _apply_import_or_definition(node: ast.AST) -> None:
         if isinstance(node, ast.ClassDef) and node.name == _ADAPTER_CLASS:
@@ -278,10 +298,10 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         for target in targets:
             if not isinstance(target, ast.Name):
                 continue
-            if _resolves_to_class(bound_value):
+            if _resolves_to_class(bound_value, local_names, module_names):
                 local_names.add(target.id)
                 module_names.discard(target.id)
-            elif _resolves_to_module(bound_value):
+            elif _resolves_to_module(bound_value, module_names):
                 module_names.add(target.id)
                 local_names.discard(target.id)
             else:
@@ -310,16 +330,41 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         if node.args.defaults:
             for param, default in zip(positional[-len(node.args.defaults):],
                                       node.args.defaults, strict=False):
-                if _resolves_to_class(_dotted(default)):
+                if _resolves_to_class(_dotted(default), local_names, module_names):
                     local_names.add(param.arg)
         for param, default in zip(node.args.kwonlyargs, node.args.kw_defaults,
                                   strict=False):
-            if default is not None and _resolves_to_class(_dotted(default)):
+            if default is not None and _resolves_to_class(
+                    _dotted(default), local_names, module_names):
                 local_names.add(param.arg)
+
+    # ⛔ THE SECOND ARM OF THE UNION: main's module-final map, snapshotted BEFORE the ordered
+    # walk mutates the live sets. This is `#13585 review P2` — the positional walk alone reports
+    # `[]` for a wiring whose binding is settled in a scope the walk cannot attribute, and that
+    # direction is the false PASS this reader exists to prevent. Keeping main's semantics as its
+    # own arm means the union can never lose a site the pre-F1 read found.
+    final_local_names = frozenset(local_names)
+    final_module_names = frozenset(module_names)
+
+    # A binding written inside a FUNCTION BODY belongs to that block, so it cannot erase the
+    # module-level name a call elsewhere resolves against (Python's own scoping: an assignment
+    # in a block makes the name local to THAT block). Collected by id, because the events below
+    # carry the same node objects.
+    nested_bindings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for child in ast.walk(node):
+                if isinstance(child, (ast.Assign, ast.AnnAssign)):
+                    nested_bindings.add(id(child))
 
     def _is_instantiation(node: ast.Call) -> bool:
         dotted = _dotted(node.func)
-        if dotted is not None and _resolves_to_class(dotted):
+        if dotted is not None and (
+            # where it stands (the per-position arm)
+            _resolves_to_class(dotted, local_names, module_names)
+            # …or where the module settles (the fail-closed arm)
+            or _resolves_to_class(dotted, final_local_names, final_module_names)
+        ):
             return True
         return (
             dotted == "getattr"
@@ -351,7 +396,8 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     sites: list[int] = []
     for _lineno, _col, _rank, node in events:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            _apply_assignment(node)
+            if id(node) not in nested_bindings:
+                _apply_assignment(node)
         elif isinstance(node, (ast.ClassDef, ast.ImportFrom, ast.Import)):
             _apply_import_or_definition(node)
         elif _is_instantiation(node):
@@ -782,15 +828,17 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     # again", a claim about a string — measured: one comment line above `def tortoise_query(`
     # in `tortoise/mcp_server.py` was enough. That is the same defect the sibling reader above
     # documents for `FastAPIRouterAdapter` (:190-196), so this scan is an AST read too.
-    # What it still catches: `e.rest_spec.path`, `getattr(e, "rest_spec")`, `e["rest_spec"]`.
+    # What it still catches: `e.rest_spec.path`, `getattr(e, "rest_spec")`, `e["rest_spec"]`,
+    # and `vars(e)["rest_spec"]` (a constant subscript — the residual list claimed otherwise
+    # until #13585 review P3).
     # What it therefore does NOT catch, stated rather than hidden: a field name built at
     # runtime (`getattr(e, "rest" + "_spec")`), which no static read can answer.
-    readers = [
-        str(source.relative_to(repo))
-        for source in scanned
-        if source.name != "tool_registry.py"
-        and _rest_spec_attribute_reads(source)
-    ]
+    # ⛔ THE WIRING IS EXTRACTED SO IT CAN BE FALSIFIED (#13585 review P3#1). The predicate had
+    # its own test, but nothing pinned the CALL SITE — and reverting this comprehension to
+    # `"rest_spec" in source.read_text(...)` reded no row, because the scanned population is one
+    # file (`tortoise/tool_registry.py`) and the line below excludes exactly that name. A guard
+    # whose contract can be reverted silently is the defect this PR exists to remove.
+    readers = _rest_spec_readers(scanned, repo)
     # ⛔ `tool_registry.py` is NOT exempt — it is where the route-deriving code LIVES, so a
     # filename exclusion leaves the one module that could host the loop unwatched (measured:
     # a `for e in TOOL_REGISTRY: app.add_api_route(e.rest_spec.path, …)` appended to that
@@ -947,6 +995,38 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "    tr = _fake_thing()\n"
         "    return tr\n"
     ), "a shadow in an UNRELATED function erased a real wiring elsewhere in the module"
+    # ⛔ THE MIRROR OF THE TWO ABOVE (`#13585 review P2`): a drop written in one block must not
+    # erase a call in ANOTHER block. The first two snippets were MEASURED to report `[]` at the
+    # pre-union head while `main`'s final-map read reported `[4]`, so they are a REGRESSION
+    # against `main` in the one direction this file calls "the false PASS this whole reader
+    # exists to prevent"; the union arm is what restores them. The third reported `[]` on BOTH
+    # readings (a flat replay has no scopes to attribute the shadow to) and is closed by the
+    # block rule: a function-body binding cannot unbind the module-level name.
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "tr = _fake_thing()\n"
+        "def wire(app):\n"
+        "    return tr.FastAPIRouterAdapter(app)\n"
+        "tr = tool_registry\n"
+    ), "a placeholder bound BEFORE the `def` erased a call in its body — the module-final `tr` " \
+       "is what that call resolves against at CALL time (the union arm)"
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "_wire = None\n"
+        "def build(app):\n"
+        "    return _wire(app)\n"
+        "_wire = FastAPIRouterAdapter\n"
+    ), "a `_wire = None` placeholder before the `def` erased the wiring settled AFTER it — the " \
+       "bare-name spelling of the same defect"
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "def unrelated():\n"
+        "    tr = _fake_thing()\n"
+        "    return tr\n"
+        "def wire(app):\n"
+        "    return tr.FastAPIRouterAdapter(app)\n"
+    ), "a sibling function's local shadow, textually BEFORE the wiring, erased it — a binding " \
+       "inside a function body cannot unbind the module-level name another function reads"
     # and the forward-reference half must survive the per-position read: Python resolves a name
     # at CALL time, so a chain declared below its use still instantiates the adapter.
     assert _adapter_instantiation_sites(
@@ -1019,6 +1099,58 @@ def test_the_rest_spec_read_is_an_attribute_not_a_substring(tmp_path):
     assert reads("spec = getattr(entry, 'rest_spec')\n"), (
         "`getattr(entry, 'rest_spec')` is not caught")
     assert reads("spec = entry['rest_spec']\n"), "a constant subscript is not caught"
+    assert reads("spec = vars(entry)['rest_spec']\n"), (
+        "`vars(entry)['rest_spec']` is a constant subscript and IS statically readable, so the "
+        "residual list that called it unreachable understated this reader's coverage")
+
+
+def test_the_rest_spec_scan_is_wired_to_the_attribute_reader(tmp_path):
+    """Falsifier for the CALL SITE, not just the predicate (#13585 review P3#1).
+
+    The helper had its own test above, but nothing pinned the wiring: reverting the scan's
+    `and _rest_spec_attribute_reads(source)` to `and "rest_spec" in source.read_text(...)`
+    reded NO row on the real tree, because the scanned population is exactly one file
+    (`tortoise/tool_registry.py`) and the same comprehension excludes that name. So the guard's
+    contract could be reverted silently — the class of defect this PR exists to remove.
+
+    Measured against a population that makes the two predicates disagree instead of relying on
+    the product tree: a module whose ONLY mention of the field is a comment must not be
+    reported, and an attribute reader must be.
+    """
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "comment_only.py").write_text(
+        "# the registry rest_spec is unrelated to this container\nx = 1\n", encoding="utf-8")
+    (product / "reads.py").write_text(
+        "for e in TOOL_REGISTRY:\n    app.add_api_route(e.rest_spec.path, handler)\n",
+        encoding="utf-8")
+    # the exempt-by-name module is NOT exempt here: the scan's filename exclusion is the
+    # caller's, and this falsifies the caller's arm too (a substring predicate would report
+    # `comment_only.py` regardless of that exclusion).
+    (product / "tool_registry.py").write_text("x = 1  # rest_spec\n", encoding="utf-8")
+
+    assert _rest_spec_readers(sorted(product.glob("*.py")), tmp_path) == [
+        "product/reads.py"
+    ], (
+        "the `rest_spec` scan is not wired to the ATTRIBUTE reader — a comment-only module was "
+        "reported, or the real attribute read was missed — so reverting the predicate to a "
+        "substring would red no row and the F2 fix could be undone silently"
+    )
+
+
+def _rest_spec_readers(paths: list[Path], root: Path) -> list[str]:
+    """Root-relative paths of product modules that READ the `rest_spec` field.
+
+    The scan's call site, extracted so it is falsifiable (#13585 review P3#1) — see
+    `test_the_rest_spec_scan_is_wired_to_the_attribute_reader`. `tool_registry.py` is excluded
+    by name here because it is read as its own AST below (`_rest_spec_use_outside_the_adapter`),
+    which is stricter: legitimate uses must sit INSIDE `FastAPIRouterAdapter`.
+    """
+    return [
+        str(source.relative_to(root))
+        for source in paths
+        if source.name != "tool_registry.py" and _rest_spec_attribute_reads(source)
+    ]
 
 
 def _rest_spec_attribute_reads(source: Path) -> list[int]:
@@ -1031,8 +1163,12 @@ def _rest_spec_attribute_reads(source: Path) -> list[int]:
     records the identical false BLOCK for the literal `FastAPIRouterAdapter(`).
 
     Deliberately NOT matched, stated rather than hidden: a field name assembled at runtime
-    (`getattr(e, "rest" + "_spec")`), and `vars(e)["rest_spec"]`. Both are dynamic reads no
-    static pass can answer, and neither is a shape a route-deriving loop is written in.
+    (`getattr(e, "rest" + "_spec")`), which no static pass can answer.
+
+    ⛔ `vars(e)["rest_spec"]` IS matched, by the `ast.Subscript` arm below — it is a constant
+    subscript, not a dynamic read. This paragraph listed it as NOT matched until
+    `#13585 review P3`, and a residual that claims LESS coverage than the code has is the same
+    species of drift this file exists to remove.
     """
     tree = ast.parse(source.read_text(encoding="utf-8", errors="replace"))
     lines: set[int] = set()
