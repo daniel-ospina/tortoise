@@ -5059,8 +5059,14 @@ def test_the_render_reports_only_what_it_can_observe_when_no_row_is_measured(
         "does (`never called`) — evidence about our usage, not about whether a tool is useful to a\n"
         "customer. A row carrying no flag records neither. Mainstream clients cap the tools they will\n"
         "show — a\n"
-        f"reported 40 in Cursor — so a client that caps there sees at most 40 of these {total}, while we\n"
-        "pay context for all of them on every turn. Every comparable we studied pins a smaller set,\n"
+        # ⛔ THE SMALL-SURFACE BRANCH, and the reason this pin had to be re-read rather than
+        # "corrected": at THIS head the advertised surface is exactly 40, the reported Cursor
+        # cap, so the render's `len(tools) > 40` guard takes the else arm — a cap the whole
+        # surface fits inside hides nothing, and the old sentence ("sees at most 40 of these
+        # 40") would assert a hiding that cannot happen. The paragraph's contract is
+        # unchanged: the observation, no cause, and no count beyond the surface's own size.
+        "reported 40 in Cursor — a cap the whole surface fits inside, so no tool is hidden by it,\n"
+        f"and we pay context for all {total} of them on every turn. Every comparable we studied pins a smaller set,\n"
         "and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and\n"
         "`tortoise_get_entity` already absorbed all six fetch-by-id getters — the last,\n"
         "`tortoise_get_session`, answers as `tortoise_get_entity(id, type=\"session\")` and is retired FORWARD in\n"
@@ -5170,15 +5176,28 @@ def test_the_render_does_not_claim_a_client_cap_binds_a_smaller_surface(tmp_path
     tool_idx = [
         i for i, r in enumerate(base["rows"]) if not str(r.get("name", "")).startswith("sdk:")
     ]
-    assert len(tool_idx) > 41, "the fixture needs a surface on both sides of the cap"
+    # ⛔ THE FIXTURE NO LONGER HAS TO BE BIGGER THAN THE CAP, and that is the honest change
+    # rather than a relaxed assertion: at #11609 lane P6's head the advertised surface is
+    # exactly 40 — the reported Cursor cap — so a `> 41` fixture requirement cannot be met by
+    # this baseline at all. The property under test is about the RENDER's branches, not about
+    # what this baseline happens to size, so the surface for each case is SYNTHESISED (below)
+    # and the pool only has to be big enough to clone from. 19 is the comparable boundary the
+    # loop actually needs real rows for; the `n > 40` cases clone.
+    assert len(tool_idx) >= 19, "the fixture needs enough real rows for the comparable boundary"
 
     for n in (10, 18, 19, 40, 41):
         doc = copy.deepcopy(base)
-        keep = set(tool_idx[:n])
-        doc["rows"] = [
-            r for i, r in enumerate(doc["rows"])
-            if i in keep or str(r.get("name", "")).startswith("sdk:")
-        ]
+        sdk_rows = [r for r in doc["rows"] if str(r.get("name", "")).startswith("sdk:")]
+        pool = [doc["rows"][i] for i in tool_idx]
+        surface = []
+        for k in range(n):
+            row = copy.deepcopy(pool[k % len(pool)])
+            if k >= len(pool):
+                # A DISTINCT name per cloned row: the render keys rows by name, so a clone
+                # under the same key would collapse back to the pool's size.
+                row["name"] = f"{row.get('name')}__synthetic{k}"
+            surface.append(row)
+        doc["rows"] = surface + sdk_rows
         assert len([r for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")]) == n
 
         text = _render_manifest(sm, doc, tmp_path, monkeypatch)
