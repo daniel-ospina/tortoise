@@ -3320,18 +3320,55 @@ def test_the_claim_ceiling_pair_and_both_found_deep_series_are_bound(artifact):
     assert f"the `random` arms read their **own** shares {rand_s}" in changelog
 
 
-#: EVERY flag that changes WHICH rows a read returns — the whole of the mirror
-#: contract, not a subset of it. `include_terminal` is the one that is DERIVED
-#: per leg rather than a fixed literal, so it is compared as a normalised
-#: expression: same operator, same comparator names, with only the CONDITION'S
-#: SUBJECT — the leg selector, `kind` at the mirror and `entity_type` at the
-#: reference — abstracted. Listing it
-#: here is deliberate: an earlier draft left it out of `_LEVER_FLAGS` and said in
-#: a comment that the caller "compared it separately", which the caller did not
-#: do — dropping `include_terminal=` from the mirror reddens nothing, and the
-#: Point leg would quietly become terminal-inclusive on the mirror alone.
-_LEVER_FLAGS = ("_record_reads", "_valid_time_rerank", "_rerank_candidates",
-                "include_terminal")
+def _sdk_boolean_levers() -> tuple[str, ...]:
+    """EVERY boolean keyword of `TortoiseSDK.tortoise_fts_query` — DERIVED, not listed.
+
+    A hand-maintained tuple is a claim about the SDK that nothing checks, and this
+    pin carried one: it named FOUR flags (`include_terminal`, `_record_reads`,
+    `_valid_time_rerank`, `_rerank_candidates`) while the signature carried TEN,
+    under a comment that said "EVERY flag that changes WHICH rows a read returns —
+    the whole of the mirror contract, not a subset of it". Measured at #13495
+    review cycle 5, on the pre-fix pin: adding `ended_scope=True` at the mirror —
+    `#13302`'s ENDED-population selector, which is as much a "which rows does this
+    read return" flag as any of the four — left the pin GREEN, as did
+    `exclude_status=["superseded"]`. So a mirror could start reading a different
+    POPULATION than `_fts_rows` while the only guard on that contract reported
+    nothing, which is the break the row above it exists to catch.
+
+    Derived from the source instead of restated, so the day a boolean lever is
+    added to the read, it is inside this pin: a divergence at one site alone then
+    reds `mirror == reference`, and a NAME at either site that is neither a lever
+    nor a site coordinate reds `_SITE_SPECIFIC`.
+
+    The rule is the parameter's FORM, not its annotation: a keyword-only argument
+    whose default is a literal `True`/`False`. That also picks up
+    `w4_enrich`/`time_aware`/`entity_key_expansion`/`keep_numeric`/
+    `search_keys_prf`/`ended_scope`, which neither site passes — they compare as
+    ABSENT on both sides, so including them costs nothing and keeps the claim
+    true. A flag that only ENRICHES a row is in scope on purpose: it is still a
+    lever that can make the two reads describe different readers.
+    """
+    tree = ast.parse((ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8"))
+    defs = [n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "tortoise_fts_query"]
+    assert len(defs) == 1, ("tortoise/sdk.py", "tortoise_fts_query", len(defs))
+    kwonly = defs[0].args.kwonlyargs
+    defaults = defs[0].args.kw_defaults
+    assert len(kwonly) == len(defaults), (len(kwonly), len(defaults))
+    return tuple(
+        arg.arg for arg, default in zip(kwonly, defaults, strict=True)
+        if isinstance(default, ast.Constant) and isinstance(default.value, bool))
+
+
+#: The names whose VALUES are allowed to differ between the mirror and its
+#: reference, because they are the site's own coordinates rather than part of the
+#: leg's shape: the leg selector (`kind` / `entity_type`), the width (`k` /
+#: `limit`), and the trace list the mirror collects for its own accounting. Every
+#: OTHER name at either call site must be one of the SDK's boolean levers — that is
+#: the whole of what this pin claims, and it now checks the claim in both
+#: directions instead of only over a hand-written subset.
+_SITE_SPECIFIC = frozenset({"entity_type", "limit", "leg_trace"})
 
 
 def _expr_form(node: ast.expr) -> tuple[str, str]:
@@ -3359,11 +3396,14 @@ def _expr_form(node: ast.expr) -> tuple[str, str]:
     return ("expr", ast.dump(_Abstract().visit(tree.body)))
 
 
-def _lever_flags(path: Path, func: str) -> dict[str, object]:
-    """`{flag: literal-or-derived-form}` for the ONE `tortoise_fts_query` call.
+def _call_keywords(path: Path, func: str) -> dict[str, ast.expr]:
+    """`{keyword: value node}` for the ONE `tortoise_fts_query` call in `func`.
 
-    ABSENT is a value: `_rerank_candidates` absent means the call INHERITS the
-    default (armed), which is exactly the state the mirror's comment claims.
+    A `**mapping` keyword carries `arg=None` and is NOT a name this can read —
+    the reference's `**extra` (`#4509`'s per-session `exclude_turn_echo_session`,
+    built conditionally) is exactly that, and it is deliberately outside this
+    pin's claim: it is runtime capture state, not a corpus lever, so it is named
+    here rather than silently dropped.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     owners = [n for n in ast.walk(tree)
@@ -3374,14 +3414,29 @@ def _lever_flags(path: Path, func: str) -> dict[str, object]:
              if isinstance(n, ast.Call)
              and getattr(n.func, "attr", None) == "tortoise_fts_query"]
     assert len(calls) == 1, (path, func, f"expected one call, found {len(calls)}")
+    return {kw.arg: kw.value for kw in calls[0].keywords if kw.arg is not None}
+
+
+def _flag_values(keywords: dict[str, ast.expr],
+                 flags: tuple[str, ...]) -> dict[str, object]:
+    """`{flag: literal-or-derived-form}` over whichever levers the call passes.
+
+    ABSENT is a value: `_rerank_candidates` absent means the call INHERITS the
+    default (armed), which is exactly the state the mirror's comment claims — the
+    dict simply has no key for it, and two sites that are both absent agree.
+    """
     out: dict[str, object] = {}
-    for kw in calls[0].keywords:
-        if kw.arg not in _LEVER_FLAGS:
+    for name in flags:
+        node = keywords.get(name)
+        if node is None:
             continue
         try:
-            out[kw.arg] = ast.literal_eval(kw.value)
+            out[name] = ast.literal_eval(node)
         except (ValueError, SyntaxError):
-            out[kw.arg] = _expr_form(kw.value)
+            # a DERIVED flag (`include_terminal=kind in (…),`) — compared as a
+            # normalised expression: same operator, same comparator names, with
+            # only the condition's SUBJECT abstracted.
+            out[name] = _expr_form(node)
     return out
 
 
@@ -3397,9 +3452,32 @@ def test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does():
     the only thing that reddened was the artifact's `tool_sha256` pin — which any
     artifact re-cut clears. So the contract the row cites is asserted HERE,
     against the leg it names, instead of being assumed from one site's presence.
+
+    The lever set is DERIVED from the read's own signature (`_sdk_boolean_levers`),
+    so the scope is the read's, not a list someone remembered to extend: a
+    population selector this pin used to miss (`ended_scope`) now reds when the
+    mirror alone starts passing it, and so does a row filter outside the lever set
+    (`exclude_status`), because both sites are held to "levers plus the three site
+    coordinates" in BOTH directions.
     """
-    mirror = _lever_flags(ROOT / "tools" / "window_quality_m2.py", "query")
-    reference = _lever_flags(ROOT / "tortoise" / "extractor_v2.py", "_fts_rows")
+    flags = _sdk_boolean_levers()
+    # Anti-vacuity, because a derivation that silently returned nothing (a moved
+    # method, a re-shaped signature) would make every comparison below trivially
+    # true: the levers this pin EXISTS for must be in it.
+    assert {"include_terminal", "_record_reads", "_valid_time_rerank",
+            "_rerank_candidates"} <= set(flags), flags
+    mirror_kw = _call_keywords(ROOT / "tools" / "window_quality_m2.py", "query")
+    reference_kw = _call_keywords(ROOT / "tortoise" / "extractor_v2.py", "_fts_rows")
+    allowed = set(flags) | _SITE_SPECIFIC
+    for label, kw in (("mirror", mirror_kw), ("reference", reference_kw)):
+        unexpected = sorted(set(kw) - allowed)
+        assert not unexpected, (
+            f"the {label} call passes {unexpected}, which is neither a boolean "
+            "lever of `tortoise_fts_query` nor one of the site coordinates "
+            f"{sorted(_SITE_SPECIFIC)} — if the read's shape really differs "
+            "here, say so in this pin rather than passing it silently")
+    mirror = _flag_values(mirror_kw, flags)
+    reference = _flag_values(reference_kw, flags)
     assert mirror == reference, (
         "tools/window_quality_m2.py::query() no longer reads the flag set "
         f"extractor_v2._fts_rows() reads: mirror={mirror} reference={reference} "
