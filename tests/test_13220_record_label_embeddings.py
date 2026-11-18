@@ -8,10 +8,14 @@ code:
    `supabase/migrations/` by the record's OWN readers (`table_columns`,
    `column_types`), not by a second regex written here.
 2. **The writer.** `record_writer.derived_embedding_columns` derives the vector
-   for `object`/`subject`/`event`/`document` from the SAME text the GRAPH fold
-   composes, and derives NOTHING where the graph derives nothing (a plain
-   `:Source`, a `meeting` event, a suppressed document, a carried vector the graph
-   honours).
+   for `object`/`subject`/`event`/`document`/`source` from the SAME text the
+   GRAPH fold composes, and derives NOTHING where the graph derives nothing (a
+   `meeting` event, a suppressed document, a carried vector the graph honours, a
+   session `:Source` whose text is the §9.4 narrative). ⚠️ A plain `:Source` NOW
+   derives one: `#13418` added the `SourceCreated` rule and `#13412` moved the
+   document's text onto the graph's `_build_search_text` — the per-label detail
+   and the byte-parity pins live in
+   `tests/test_13418_source_and_document_derivation.py`.
 3. **The carrier rule.** The derived value lands in the record's COLUMN and never
    in `public.journal_event.payload` — the record's copy of the journal line.
 4. **The rulings that are NOT spent.** The graph copy of `:Object`/`:Subject` is
@@ -187,12 +191,30 @@ def test_a_mined_event_derives_from_its_NESTED_carrier(encoder):
     assert encoder.text == "A b C"
 
 
-def test_a_document_derives_from_title_and_content(encoder):
+def test_a_document_derives_from_the_graphs_search_text_here_too(encoder):
+    """`title + summary + topics` — the graph's `_searchText`, not `title + content`.
+
+    ⛔ THIS TEST PINNED THE OLD FOLD AND WAS REVERSED BY `#13412` (see
+    `tests/test_13418_source_and_document_derivation.py`, which owns the parity
+    proof — including the pin that the record CALLS
+    `projection.entities._build_search_text` instead of re-implementing it).
+    `content` is not a graph property post-D10 (`_DOC_RETIRED_KEYS`) and #8419/
+    PR #13290 stopped the graph embedding it, so a record vector computed from it
+    encoded text the node never holds.
+    """
     rw.derived_embedding_columns({
         "type": "DocumentCreated", "url": "https://example.com/a",
-        "title": "Q3 pricing", "content": "the memo",
+        "title": "Q3 pricing", "summary": "the memo", "topics": ["q3"],
+        # ⛔ DISTINCT from `summary` on purpose (review of #13473, verified): when
+        # `content` repeated the summary, an absence assertion could not tell a
+        # `content` leak from the summary's own text — it read as a
+        # content-exclusion proof while proving nothing.
+        "content": "the long body text",
     })
-    assert encoder.text == "Q3 pricing the memo"
+    assert encoder.text == "Q3 pricing the memo q3"
+    assert "body" not in encoder.text, (
+        "`content` reached the record's vector — the graph stopped embedding it in "
+        "#8419 and it is not a graph property post-D10")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -219,26 +241,33 @@ def test_the_record_leg_declares_its_OWN_scope_not_the_graph_fold(encoder):
         f"backfill-repairable, which it is not")
 
 
-def test_a_plain_source_derives_nothing_because_the_graph_holds_none(encoder):
-    """A `SourceCreated` `:Source` carries no vector, because `_upsert_source` holds none.
+def test_a_plain_source_derives_the_text_its_node_holds(encoder):
+    """`SourceCreated` NOW derives — `#13418`, and the earlier arm was reasoned off a stale premise.
 
-    Deriving one would make the record's dense leg return sources the graph leg
-    never had — the divergence in the other direction, on a label whose
-    `document_kind IS NULL` filter is exactly the non-document population.
+    This test used to assert the opposite (`a_plain_source_derives_nothing_because
+    _the_graph_holds_none`) on the argument that a record vector would return
+    sources the graph leg never had. That argument does not survive the recorded
+    decisions: `source`/`document` are served from the RECORD
+    (`record_vector.LABEL_SERVED`), the vector's home is Postgres (§14.3 V2), the
+    graph must not grow a second copy (§13082's 584× RAM rule), and the owner's
+    2026-11-18 ruling puts `:Event`/`:Source` on `:Object`/`:Subject`'s treatment.
+    ⚠️ The GRAPH still computes no vector for a plain `:Source`
+    (`_upsert_source`) — that half is unchanged and is asserted by the sibling
+    test below, which reads the fold's source.
 
-    ⛔ SCOPED TO THIS EVENT, not to the `:Source` label (#13265 review cycle-7 F2):
-    a DOCUMENT-backed `:Source` DOES carry a vector — `_upsert_document` computes
-    one (`projection/entities.py:5398-5409`) and writes it (`:5616`,
-    `set_embedding_clause("s")`). What holds 0 vectors is the source the
-    `SourceCreated` fold writes, because `_upsert_source` has no embedding write
-    at all (`:6988`+). Asserting "`:Source` carries 0 embeddings" flatly was the
-    over-claim; this docstring is the label claim's corrected form.
+    ⛔ The byte-level parity and the skip arms (session source, carried vector)
+    live in `tests/test_13418_source_and_document_derivation.py`.
     """
     out = rw.derived_embedding_columns(
         {"type": "SourceCreated", "url": "https://example.com/a",
-         "name": "some source"})
-    assert out.columns == {}
-    assert encoder.calls == []
+         "title": "Acme pricing page",
+         "_searchText": "acme pricing discounts renewal"})
+    assert encoder.text == "acme pricing discounts renewal"
+    # The vector is the ONLY column: `_search_text` is the split's already, bound
+    # from this same payload key — and `title` alone would not be, which is why the
+    # rule reads `_searchText` (`tests/test_13418_…`: the title-only door abstains,
+    # and a `SourceCreated` cannot take a document row's vector).
+    assert set(out.columns) == {"embedding"}
 
 
 def test_a_meeting_event_derives_nothing(encoder):
@@ -480,8 +509,10 @@ def test_the_live_seam_threads_the_derived_columns_into_replay(encoder, monkeypa
     # derived[0]` and the map's KEY went unpinned — measured, mutating
     # `derived[index] = …` to `derived[0] = …` left this whole file green while
     # the real two-record plan bound the Object's fingerprint on the SOURCE row.
-    # `SourceCreated` has no text of its own, so it contributes no entry and the
-    # surviving key is 1.
+    # `SourceCreated` has no TEXT in this payload (a blank title), so it
+    # contributes no entry and the surviving key is 1. ⚠️ A source WITH text does
+    # contribute one now (#13418) — that is why this record's title is empty and
+    # the assertion below is about the KEY, not about sources in general.
     rw.RecordWriter(dsn="postgresql://record/db",
                     connect=lambda _dsn: FakeConnection()).write(
         [{"type": "SourceCreated", "id": "src-1", "title": ""},
@@ -678,21 +709,25 @@ def test_a_document_backed_source_DOES_carry_a_vector_while_a_plain_one_does_not
     # substring check on "embedding" read that PROSE as a write (measured while
     # writing this test — the assertion failed on its own comment).
     assert not re.search(r'set_embedding_clause\(|s\.embedding\s*=', source_body), (
-        "_upsert_source now writes an embedding — then the `SourceCreated` parity "
-        "assertions in this file (and `derived_embedding_columns`'s 'no vector "
-        "for a source' arm) are stale and this needs a re-measure, not a quiet pass")
+        "_upsert_source now writes an embedding — then the GRAPH holds a `:Source` "
+        "vector the record's `SourceCreated` rule (`#13418`) was written to "
+        "derive the same text for, and that rule's parity claim needs a "
+        "re-measure, not a quiet pass")
 
 
-def test_the_record_still_binds_a_plain_source_without_a_vector():
-    """Parity for the `SourceCreated` source, which the graph holds 0 vectors for,
-    at the plan level. (A document-backed `:Source` is a different writer and
-    DOES carry one — `_upsert_document`, see the docstring above.)
+def test_the_record_binds_a_plain_sources_vector_at_the_plan_level(encoder):
+    """`SourceCreated` binds `public.source.embedding` — the `#13418` delivered half.
+
+    The GRAPH counterpart is the test above: `_upsert_source` computes none. The
+    record now does, so the served label is answered rather than empty; the
+    column/index it lands in already existed
+    (`20261109000001_record_embedding_vector.sql`).
     """
     record = {"type": "SourceCreated", "url": "https://example.com/a",
-              "name": "a source"}
+              "title": "a source", "_searchText": "a source"}
     derived = rw.derived_embedding_columns(record)
-    assert derived.columns == {}
+    assert set(derived.columns) == {"embedding"}, derived
     plan = rp.replay_plan([record], org_id="org", graph_id="g",
                           derived={0: derived.columns})
     upserts = [s for s in plan if s.sql.startswith("INSERT INTO public.source ")]
-    assert "embedding" not in upserts[0].param_columns
+    assert "embedding" in upserts[0].param_columns
