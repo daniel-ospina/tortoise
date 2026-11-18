@@ -1318,8 +1318,10 @@ def test_a_null_cell_is_distinguishable_from_an_unrecorded_one():
     """
     control = _artifact("paired-object-60-control.json")
     cell = control["arms"]["object"]["per_k"]["k=15"]
-    assert cell["mde_paired"] is None
-    assert "no_such_field" not in cell
+    # the separation is executable, not prose: the default is NOT None, so a
+    # genuinely absent key reads as ABSENT here while a recorded-null cell reads
+    # as None — and the pre-fix `NaN` bytes (lenient-parsed to nan) read as neither
+    assert cell.get("mde_paired", "ABSENT") is None
     assert "NOT ESTIMABLE" in cell["mde_note"]
     # a finite MDE keeps its number and needs no note
     point = _artifact("paired-point-300.json")
