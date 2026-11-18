@@ -12373,10 +12373,9 @@ def _uri_graph_name(db_uri: str | None) -> str | None:
     sites in this module (`_get_proj`, and `check_connection`'s census read)
     before `_cache_graph_name` became the third consumer — and
     `_derive_graph_name`'s own docstring exists because a caller that names a
-    graph outside a projection must derive it IDENTICALLY. A drift in this
-    step makes a caller compare against a name the
-    projection never opens (a false mismatch, or a missed one), so it is one
-    function now, used by all three.
+    graph outside a projection must derive it IDENTICALLY. A drift in this step
+    makes a caller compare against a name the projection never opens (a false
+    mismatch, or a missed one), so it is one function now, used by all three.
     """
     if db_uri is None:
         return None

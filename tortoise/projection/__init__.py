@@ -4647,27 +4647,28 @@ def note_live_write_target(proj) -> None:
     * the structural-edge mint (`edges._record_structural_edges`) — once per
       mint that created a row;
     * the three declared live gateways that issue their own statements —
-      `onboarding.state._run`, `webhook_delivery._run`, `why_snapshot._run`;
-    * the two `hosted_api` lanes that raw-`DETACH DELETE` and choose their own
-      graph — `_delete_session_sync` and `_sweep_orphaned_writes`;
+      `onboarding.state._run`, `webhook_delivery._run`, `why_snapshot._run` —
+      and the two hosted session-delete sweeps
+      (`hosted_api._capture_session_impl`, `hosted_api.delete_session`), which
+      are raw multi-statement lanes that CHOOSE their graph;
     * and ``replay_window_open()`` excludes every one of them, because a rebuild
       writes the same target on purpose and counting it would let a repair make
-      the live picture look healthier than the traffic it repaired.
-
-      ⛔ THE EXCLUSION LIVES HERE, in this helper, and nowhere else. Neither the
-      fold nor the mint checks the window before calling it (`apply` does not
-      check at all, and `edges._record_structural_edges` calls this helper
-      BEFORE its own check), and `cache_leg.note_cache_write_target` carries no
-      guard of its own — by design it is caller-unchecked. So a producer that
-      calls `note_cache_write_target` DIRECTLY would count a rebuild's writes as
-      live traffic: go through this helper, always.
+      the live picture look healthier than the traffic it repaired — and this
+      helper is the ONE place that exclusion is applied: the
+      ``replay_window_open()`` return below runs before any target is recorded,
+      so every caller inherits it without checking anything itself. (The fold
+      calls this helper with no window check of its own, and the mint calls it
+      BEFORE its own check; ``cache_leg.note_cache_write_target`` has no window
+      check at all, so a direct caller there would count a rebuild as live.)
 
     ⛔ RESIDUAL, stated: a raw statement issued at ``proj.g`` inside a live scope
-    from anywhere ELSE — the capture provenance stamps (`_CAPTURE_PROVENANCE_LANE`)
-    are the standing example — is not recorded. That is accepted because such a
-    writer does not CHOOSE its graph (it stamps nodes by id in the graph the SDK is
-    already bound to), so it cannot hide this class; closing it belongs at the
-    write handle, where §17.1's per-statement census already lives.
+    from a lane that does NOT choose its graph — the capture provenance stamps
+    (`_CAPTURE_PROVENANCE_LANE`) are the standing example — is not recorded. That
+    is accepted because such a writer can only write the graph the SDK is already
+    bound to (it stamps nodes by id), so it cannot hide this class. A lane that
+    CHOOSES a graph calls this helper directly (the two hosted session-delete
+    sweeps are that shape); closing the rest belongs at the write handle, where
+    §17.1's per-statement census already lives.
 
     ⛔ TOTAL (#5148's rule): observability must never break a write that already
     landed, so every step — endpoint resolution included — is inside the guard.

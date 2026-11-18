@@ -125,10 +125,10 @@ CACHE_TARGET_OVERFLOW = "(other targets)"
 _TARGETS_CAP = 16
 
 #: ``{"<store>|<graph>": live write attempts}`` for THIS process, and its lock.
-#: Written by :func:`note_cache_write_target` from the SEVEN live lanes — the fold,
-#: the structural-edge mint, the three declared gateways, and the two hosted
-#: session-delete lanes — so the UNIT is one lane operation (a fold, a mint, a
-#: gateway statement), not one journal record.
+#: Written by :func:`note_cache_write_target` from the seven live lanes — the fold,
+#: the structural-edge mint, three declared gateways, and two hosted
+#: session-delete sweeps — so the UNIT is one lane operation (a fold, a mint, a
+#: gateway statement, a sweep), not one journal record.
 #: Read it for WHERE a process writes; do not read it as "writes landed", because
 #: an arm whose fold returns no count is counted even when its statement matched
 #: 0 rows (the bound is stated on `note_cache_write_target`).
@@ -244,14 +244,16 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
       ``why_snapshot._run`` — the three declared live GATEWAYS that issue their
       own statements under ``_onboarding_write_scope`` /
       ``_cache_write_authorized(<lane>)`` and fold no record at all;
-    * ``hosted_api._delete_session_sync`` and
-      ``hosted_api._sweep_orphaned_writes`` — the two hosted lanes that raw-
-      ``DETACH DELETE`` the session's nodes in the graph the credential opened,
-      which is a graph CHOICE, so "this lane does not choose its graph" does not
-      excuse them.
+    * ``hosted_api._capture_session_impl``'s Source sweep and
+      ``hosted_api.delete_session``'s ``_delete_session_sync`` — two raw
+      multi-statement ``DETACH DELETE`` lanes that CHOOSE their graph and fold no
+      record. They are the reason the helper is a sanctioned third option beside
+      "a fold" and "a mint": such a lane calls it directly.
 
-    An eighth producer added tomorrow must be added here; a raw statement issued
-    at ``proj.g`` from somewhere else is the named residual (see the helper).
+    An eighth gateway added tomorrow must be added here. The residual is narrower
+    than "any raw statement": it is a raw statement that does NOT choose its graph
+    (the capture provenance stamps, ``_CAPTURE_PROVENANCE_LANE``), and it is named
+    on the helper.
 
     ⛔ THE RESIDUAL IS NAMED RATHER THAN IMPLIED: a raw statement issued at
     ``proj.g`` inside a live scope — the capture provenance stamps
@@ -263,14 +265,16 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     Closing it belongs at the write handle (``_GuardedGraph``), where a
     per-statement census already exists (§17.1), not here.
 
-    Replay is excluded by the HELPER, not here: ``projection.note_live_write_target``
-    returns before calling this function whenever ``replay_window_open()`` — a
-    rebuild WRITES the target on purpose, and counting it would let a repair make
-    the picture look healthier than the live traffic it repaired. ⛔ This function
-    itself has NO replay guard, by design it is CALLER-UNCHECKED: it records the
-    attempt it is handed, so a caller that reaches it directly (rather than
-    through the helper) would count a rebuild's writes as live traffic. Always go
-    through ``projection.note_live_write_target``.
+    ⛔ REPLAY IS NOT EXCLUDED HERE, and a caller must not assume it is. A rebuild
+    WRITES the target on purpose, and counting it would let a repair make the
+    picture look healthier than the live traffic it repaired. That exclusion
+    lives in exactly ONE place: ``projection.note_live_write_target``, which
+    returns before reaching this function when ``replay_window_open()`` is true.
+    All seven live lanes go through that helper, so they inherit it; this
+    function is caller-unchecked BY DESIGN and holds no window check of its own.
+    A lane that calls it DIRECTLY — instead of through the helper — counts a
+    rebuild's writes as live traffic, which is the polarity inversion this
+    registry exists to prevent. Go through the helper.
 
     WHAT THIS ANSWERS THAT ``cache_leg_failures`` CANNOT. ``cache_leg_failures``
     counts a CONFIGURATION split (record armed + this process's cache is the
