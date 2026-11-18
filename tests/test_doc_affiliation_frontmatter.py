@@ -940,6 +940,7 @@ def test_a_wholly_commented_value_gets_ONE_TRUE_diagnosis(
     assert "the key resolves to None" in msg, msg
     assert "Quote the value." in msg, msg
 
+
 def test_a_single_quoted_escape_before_a_hash_is_measured_not_broken(tmp_path) -> None:
     """YAML's only single-quote escape is ``''``; it is NOT an unbalanced quote.
 

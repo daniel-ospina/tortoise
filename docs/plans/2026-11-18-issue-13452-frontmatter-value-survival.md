@@ -186,9 +186,15 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
    the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
    failure output, not asserted.**
-2. **Fixed tree:** `2 failed, 7 passed` — the 2 are the pre-existing absence reds
-   (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, `docs/evidence/13038-capstone/README.md`),
-   unchanged, named, and deliberately not "fixed" here. `git diff --stat` vs `main` = 9 files + 1 plan doc.
+2. **Fixed tree:** `2 failed, 9 passed` **at the post-rebase head** (`2 failed, 8 passed` at the
+   pre-rebase head — the extra pass is `#13485`'s own new test, which main added under ours) — the 2
+   are the pre-existing absence reds
+   (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the evidence bundles
+   `docs/evidence/13038-capstone/README.md` **+** `docs/evidence/13436-write-path-costs/README.md` —
+   the second bundle landed on `main` in `#13436` AFTER this plan was written, so the red now names
+   two bundles), unchanged, named, and deliberately not "fixed" here. Both counts were measured on
+   `origin/main` at `f6793959a2` as well (`2 failed, 8 passed`) — same two tests, same paths.
+   `git diff --stat` vs `main` = 9 files + 1 plan doc.
 3. **Mutant matrix — 22/22 behave as designed** (M1–M20 by `/tmp/matrix_13452.sh`; M13–M18 were
    added after code review, and M21/M22 were measured separately in `e488d2adcc`'s scratch run —
    one mutation at a time, tree restored byte-identical between each):
@@ -320,8 +326,10 @@ listed in §9. #13484's own attestation is minted at its own final head, after t
 
 **Out of scope — must NOT be raised** (note, file, do not chase):
 
-- the 2 pre-existing absence reds (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`,
-  `docs/evidence/13038-capstone/README.md`) — separate defect, explicitly excluded by the issue;
+- the 2 pre-existing absence reds (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the
+  evidence bundles `docs/evidence/13038-capstone/README.md` +
+  `docs/evidence/13436-write-path-costs/README.md`, the latter landed by `#13436` after this plan) —
+  separate defect, explicitly excluded by the issue;
 - `config/ci-surfaces.yml:13139` rationale drift (category B, no behavioural consequence);
 - other directories' unquoted-plain-scalar hazard (unmeasured here — stated as a gap);
 - the 7 sibling `aboutSubjects` in these files that are plain-but-parse-correctly (quoting them is
@@ -400,3 +408,45 @@ prints **90 measured / 94 compared**; the counter now counts affiliation values 
 substance — 8 of 8 flagged, every length pair exact — reproduces unchanged. That body is NOT
 edited: it carries the review attestation the gate reads, and an unrelated edit wipes that proof
 (the rule is in `AGENTS.md`). The corrected figure is recorded here instead.
+
+## 10. Rebase onto `main` — the conflict, and why the resolution is additive
+
+This PR carried a POSITIVE conflict with `main` (`mergeStateStatus: DIRTY`), so the rail refused it
+whatever the checks said. `main` had moved to `f6793959a2` and `#13485` — the post-merge repair of
+`#13476`, landed AFTER this branch was cut — rewrote the SAME arm and appended its own new test
+(`test_a_wholly_commented_value_gets_ONE_TRUE_diagnosis`).
+
+A second lane reached the same rebase concurrently and force-pushed its resolution
+(`7d4514f39e`, 06:31:17Z) while this one was verifying its own; the two agreed on
+every line but one, so the branch continues from THAT head and this run adds only
+what was missing instead of force-pushing a parallel history. The one divergence was
+formatting: the sibling resolution left a single blank line between the two top-level
+tests (E302 — legal, not in the enforced `select`, and `ruff format --check` is
+already unclean on `main` for unrelated comprehensions, so it reds no check), restored
+here.
+
+The conflict was **purely additive**: both sides appended a distinct test at the end of
+`tests/test_doc_affiliation_frontmatter.py`, with no overlapping lines and no semantic overlap —
+`#13485` fixed what the arm *says* about a wholly-commented value (diagnosis text, item vs key
+nullity), this PR fixes *where the closing quote is found* (`_closing_quote`, parity). The bound was
+one region, and it was resolved by keeping BOTH sides: no line of either was dropped, edited, or
+reordered.
+
+Everything else rebased without a hand-touch, including the `_closing_quote` helper and the truncated
+`"…#11901" KEEP` case that must stay RED.
+
+Measured at the post-rebase head:
+
+- the new test still **discriminates**: replaying the true pre-fix `_split_comment`
+  (`raw[:i].rstrip().endswith(q)`) into a scratch copy of the head reds it
+  (`- single-quoted` / `+ broken`, `tests/test_doc_affiliation_frontmatter.py:973`);
+- over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s
+  truncation case still `broken`;
+- `main` at `f6793959a2` measures `2 failed, 8 passed` on this file; the post-rebase head measures
+  `2 failed, 9 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test;
+- `test_docs_lint_baseline` + `test_docs_lint_gate` + `test_docs_citation_refs` → **106 passed**.
+
+One correction this rebase forced: the pre-existing absence red on the evidence bundles now names
+TWO bundles, because `#13436` landed `docs/evidence/13436-write-path-costs/README.md` without
+frontmatter after this plan was written. §7 and the out-of-scope list above record both; the defect
+is `main`'s, not this PR's.
