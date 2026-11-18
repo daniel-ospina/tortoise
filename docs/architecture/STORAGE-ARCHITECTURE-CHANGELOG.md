@@ -2522,10 +2522,11 @@ replaced by the target state:
   one that MEASURES the migration, since every answer names the store that produced it (`servedFrom` /
   `fallbackReason`). **`record` follows that count, never a date.** The `OVERRIDES:` line itself lives on the issue —
   `#7970` comment [`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268), where
-  AGENTS.md's rule puts it — and §2.0 carries a one-line pointer to it rather than a second copy (`grep -n
-  "OVERRIDES:" docs/architecture/STORAGE-ARCHITECTURE.md` → the pointer only; the seven-line supersession essay and
-  its quotation of the retired sentence are gone, because a dated *"was deferred, now it isn't"* re-telling is the
-  narration the owner ruled out).
+  AGENTS.md's rule puts it — and §2.0 carries a one-line pointer to it rather than a second copy. ⚠️ **§2.0 does
+  carry ONE bold `**OVERRIDES:**` line, and it is NOT this one:** it marks the *"keep the limit in falkor high"* clause
+  below, a different departure, which is why `grep -n "OVERRIDES:" docs/architecture/STORAGE-ARCHITECTURE.md` returns
+  several hits and cannot be used to check this. What is gone is the seven-line supersession essay and its quotation of
+  the retired sentence, because a dated *"was deferred, now it isn't"* re-telling is the narration the owner ruled out.
 - **§14.2's split marker** — the same status, stated there because that marker is where the engine's-role question is
   answered and it had restated the deferral.
 - **§17.3's reader paragraph** — *"the node-naming read that will drive this in production is deferred by §2.0"* was
