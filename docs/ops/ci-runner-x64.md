@@ -810,6 +810,11 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    pool outage or a contended box holds those required checks **pending** rather than answering them
    from GitHub-hosted — the exact trade the "any POOL-ONLY label" rule refuses, taken
    deliberately for those four rows and nowhere else.
+5. **Two housekeeping jobs are POOL-ONLY pins too (#13596).** `closes-coherence` and `redis-guard`
+   now name `[self-hosted, self-hosted-x64]` — neither is a required context, and both carry their
+   own `OVERRIDES:` record with the three failure modes and the idling measurement (`→ Residual: the
+   two #13596 housekeeping pins`). The one difference that matters: `closes-coherence` has NO
+   `paths:` filter, so a red there sits on every PR's tree, and the rail blocks on any red.
 
 ## The box's own choice: `CI_RUNNER_OS_LABEL`
 
@@ -1033,6 +1038,57 @@ Two further facts measured on the canary, so the next author copies the right pr
   `driver_scripts` surface, so the assert carries the same gate. Ungated it would red every PR —
   including the large majority that cannot touch the driver — naming a tool nothing would have used.
 
+### Residual: the two #13596 housekeeping pins are POOL-ONLY too — departures 3 and 4
+
+**OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `closes-coherence.yml`'s
+`closes-coherence` job and `redis-guard.yml`'s `redis-guard` job now read
+`runs-on: [self-hosted, self-hosted-x64]` (#13596), because both were queueing on the hosted pool
+while the fleet's own capacity sat idle — measured at the owner's 2026-11-18 decision on that PR:
+**151 runs queued, 8 in progress, 21 self-hosted runners online with only 3 busy**, so 18 pool
+runners were idle while the hosted pool backed up. Neither is a required context
+(`docs/ci/required-contexts.json`'s `required_contexts` lists all seven, and neither job is among
+them; `redis-guard.yml`'s own header records the same), so the departure is scoped exactly like
+the #10237 canary above: a pin whose red costs a WAIT and a re-run, never a required leg.
+
+What it costs, stated rather than inherited, in the three modes this page records. A "WAIT with no
+hosted half" is only the first (`:975` records it; the canary above measures TWO — QUEUED, and RED
+with ZERO steps at `:977-985`; the third, a red from a missing tool, is the #9018 mode recorded at
+`:269-272`). While the pool is down or the label is detached, `closes-coherence` never advises on
+**any** PR (that workflow carries no `paths:` filter) and `redis-guard`'s `push: main` run never
+measures — a QUEUED job with no red and no annotation.
+
+⛔ The other two modes are not a missing measurement, which is why this pin is not free: a pool box
+without `gh` reds `closes-coherence` by design (the `Ensure gh` bullet below fails closed), and a
+runner that claims the job and drops it reports ZERO steps (the canary's recorded mode above,
+`:977-985`). `closes-coherence` is unfiltered, so either red sits on every PR's tree, and the rail
+merges with `--admin` — required-ness decides nothing, so any red on that tree blocks the head's
+landing until someone re-runs it (`:959-961`). Non-required is what keeps this work out of the
+aggregate; it is NOT what makes its red free.
+
+`redis-guard` is the cheaper half: it is filtered both ways (`paths:` on `pull_request` and on
+`push: main`, `redis-guard.yml:19,26`), so its red can only reach a PR that touches `tortoise/**`,
+`graph-scripts/**`, the guard itself, or that workflow.
+
+Two things this pin keeps TRUE, which is why it is safe on a pool runner:
+
+- `closes-coherence` carries the #9018 tool contract (`Ensure gh` from
+  `.github/scripts/runner-tools.sh`, no `continue-on-error`), so a pool box without `gh` REDS this
+  leg instead of silently reporting the advisory as measured — the property
+  `tests/test_runner_tool_contract.py` pins for every `gh`-using job that can land on the pool (its
+  `GH_JOBS` literal, 18 jobs; a job that calls no `gh` is outside that sweep by construction, which
+  is why `redis-guard` needs no step).
+- `redis-guard` needs no contract step: its only `run:` is `python3 tools/redis-guard.py`, whose only
+  subprocess is `git rev-parse --show-toplevel`, and the job pins `actions/setup-python@v5` / `3.12`
+  itself, so moving off `ubuntu-latest` cannot change the interpreter.
+
+`tests/test_ci_runner_x64_install.py::test_every_pool_only_pin_is_named_in_the_runbooks_departure_record`
+pins this: a new static pool-only `runs-on:` that is not named in one of these `OVERRIDES:` blocks
+reds at TEST time instead of drifting into the tree unrecorded — the defect this section exists to
+repair, one layer up. ⛔ Its limit, stated so it is not over-read: it checks that a pin's file and
+job are BOTH NAMED in some departure record, not that the record attributed them correctly (the
+page could swap the two jobs between their files and stay green). Attribution is the reviewer's
+job; the guard's job is that an unrecorded pin cannot land silently.
+
 ## A runner can be ONLINE, IDLE and serve NOTHING — the wedged work dir
 
 ⛔ **`status=online` and `busy=false` are both true of a runner that fails every job in one
@@ -1150,47 +1206,3 @@ tools/install-ci-runner-x64.sh --repair-labels --count 8
   fallback not engaged the computed set is `self-hosted-x64` alone and `ubuntu-latest` stays off
   until the gate attaches it again. It cannot *detach* either — an explicit `--fallback off` is
   refused (exit 2) precisely because a repair cannot remove a label.
-
-### Residual: the two #13596 housekeeping pins are POOL-ONLY too — departures 3 and 4
-
-**OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `closes-coherence.yml`'s
-`closes-coherence` job and `redis-guard.yml`'s `redis-guard` job now read
-`runs-on: [self-hosted, self-hosted-x64]` (#13596), because both were queueing on the hosted pool
-while the fleet's own capacity sat idle — measured at the owner's 2026-11-18 decision on that PR:
-**151 runs queued, 8 in progress, 21 self-hosted runners online with only 3 busy**, so 18 pool
-runners were idle while the hosted pool backed up. Neither is a required context
-(`docs/ci/required-contexts.json`'s `required_contexts` lists all seven, and neither job is among
-them; `redis-guard.yml`'s own header records the same), so the departure is scoped exactly like
-the #10237 canary above: a pin whose red costs a WAIT and a re-run, never a required leg.
-
-What it costs, stated rather than inherited, in the three modes the canary records above. A "WAIT
-with no hosted half" is only the first: while the pool is down or the label is detached,
-`closes-coherence` never advises on **any** PR (that workflow carries no `paths:` filter) and
-`redis-guard`'s `push: main` run never measures — a QUEUED job with no red and no annotation.
-
-⛔ Two of those modes are not only a missing measurement, which is why this pin is not free: a pool
-box without `gh` reds `closes-coherence` by design (the #9018 contract below fails closed), and a
-runner that claims the job and drops it reports ZERO steps (the canary's recorded mode above,
-`:977-985`). `closes-coherence` is unfiltered, so either red sits on every PR's tree, and the rail
-merges with `--admin` — required-ness decides nothing, so any red on that tree blocks the head's
-landing until someone re-runs it (`:959-961`). Non-required is what keeps this work out of the
-aggregate; it is NOT what makes its red free.
-
-`redis-guard` is the cheaper half: it is filtered both ways (`paths:` on `pull_request` and on
-`push: main`, `redis-guard.yml:19,26`), so its red can only reach a PR that touches `tortoise/**`,
-`graph-scripts/**`, the guard itself, or that workflow.
-
-Two things this pin keeps TRUE, which is why it is safe on a pool runner:
-
-- `closes-coherence` carries the #9018 tool contract (`Ensure gh` from
-  `.github/scripts/runner-tools.sh`, no `continue-on-error`), so a pool box without `gh` REDS this
-  leg instead of silently reporting the advisory as measured — the property
-  `tests/test_runner_tool_contract.py` sweeps for any job pinned to a pool label.
-- `redis-guard` needs no contract step: its only `run:` is `python3 tools/redis-guard.py`, whose only
-  subprocess is `git rev-parse --show-toplevel`, and the job pins `actions/setup-python@v5` / `3.12`
-  itself, so moving off `ubuntu-latest` cannot change the interpreter.
-
-`tests/test_ci_runner_x64_install.py::test_every_pool_only_pin_is_named_in_the_runbooks_departure_record`
-pins this: a new static pool-only `runs-on:` that is not named in one of these `OVERRIDES:` blocks
-reds at TEST time instead of drifting into the tree unrecorded — the defect this section exists to
-repair, one layer up.

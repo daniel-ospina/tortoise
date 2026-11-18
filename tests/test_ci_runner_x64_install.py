@@ -3408,7 +3408,7 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
         782: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        902: r"test_the_changes_job_carries_no_job_scope_env",
+        907: r"test_the_changes_job_carries_no_job_scope_env",
         # 8h-bis quotes the label-contract table for the pre-mitigation absolute it pins: the two
         # rows a comment about what the pool CLAIMS must land on (the pair, and `:26` alone).
         25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
@@ -3460,7 +3460,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:902` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:907` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3530,7 +3530,7 @@ _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     26: r"^\| `ubuntu-24\.04` \| 10 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     90: r"still does \*\*not\*\* claim any",
     95: r"DROPS the whole class on re-registration",
-    880: r"^\| `40986603502`",
+    885: r"^\| `40986603502`",
 }
 
 
@@ -3616,7 +3616,7 @@ _SHORTHAND_RE = re.compile(r"`:(?P<start>\d+)(?:-(?P<end>\d+))?`")
 _SHORTHAND_RUNBOOK_ANCHORS: dict[int, str] = {
     54: r"the ARM64 VMs register `self-hosted, Linux, ARM64",
     806: r"The OPT-IN split \(`CI_SHARD_ROUTING=pool-split`\)",
-    921: r"three pool legs were killed at their own watchdogs",
+    926: r"three pool legs were killed at their own watchdogs",
 }
 
 
@@ -5043,7 +5043,7 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # sentence (the fifth reason, `test-record-postgres`'s client-major pin), so the
         # relay was re-derived from THIS head rather than carried forward — the same
         # discipline this comment already records for the 866 → 869 move.
-        ("docs/ops/ci-runner-x64.md", 902): r"test_the_changes_job_carries_no_job_scope_env",
+        ("docs/ops/ci-runner-x64.md", 907): r"test_the_changes_job_carries_no_job_scope_env",
         # ⛔ the capstone pin's re-cut history is NOT here, and its absence is the fix, not a gap:
         # it used to be ("tests/test_capstone_preregistration_9075.py", 1703), and that number was
         # re-derived SEVEN times (1590 → 1596 → 1673 → 1682 → 1693 → 1701 → 1703) because the
@@ -5440,6 +5440,17 @@ def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
     `redis-guard.yml::redis-guard`. Revert the two `runs-on:` values instead and it is green — the
     defect it pins is the unrecorded pin, which only exists while both halves are in the tree, so
     the `assert pins` arm below keeps an empty scan from passing as agreement.
+
+    WHAT THIS DOES NOT CHECK, stated so a green run is not over-read (review, 2026-11-18):
+
+    * **Attribution.** The rule is "both names occur in a departure record", not "this record
+      attributes THIS job to THIS file". A record that swapped the two jobs between their files
+      stays green. Pairing them would need a heuristic over prose the page is free to reword, and a
+      false RED here blocks a correct record — so attribution stays the reviewer's job, and the
+      guard's job stays "an unrecorded pin cannot land silently".
+    * **Which record.** Any departure block on the page satisfies it, so a passing mention inside
+      an UNRELATED departure record also counts. Tightening that would mean pinning the page's
+      section layout, which is the churn this pin exists to stop.
     """
     import yaml
 
