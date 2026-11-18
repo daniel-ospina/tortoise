@@ -195,7 +195,7 @@ rationale drift, or the 2 pre-existing absence reds.
 |---|---|---|---|
 | `tortoise.file_indexer.parse_frontmatter` | python consumer | `tests/test_file_indexer.py` (unchanged) | the read path this fix depends on; **not modified** |
 | `tortoise/docs_miner.py:352` | importer | `tests/test_file_indexer.py` | consumes the same parse; unaffected by quoting data |
-| `tests/test_doc_affiliation_frontmatter.py` (`test_research_doc_frontmatter_parses_as_yaml`) | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
+| `tests/test_doc_affiliation_frontmatter.py` (`test_research_doc_frontmatter_parses_as_yaml`) | the arm itself | `config/ci-surfaces.yml:3728` (`core`) + `:10678` (`tier1`) | dual-registered, so it runs for a docs-only diff AND for the full suite. ⛔ The two SURFACE labels here were inverted until review round 4: the line NUMBERS had been corrected while the labels carried forward from the pre-correction citations. Verified by enclosing key, not by eye — `:3728` sits in the `core:` sub-block (2632 ≤ 3728 < `ep:` at 8976) and `:10678` sits in the top-level `tier1:` list (10656 ≤ 10678 < `slow_files:` at 11248), which is the direction the line's own comment states: *"a docs-only diff runs `tier1` only; dual-registered with `core`"* |
 | `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at this head) | data | the arm's `docs/research/**/*.md` glob | the population the assertion iterates |
 | `scripts/check-doc-affiliation.cjs` | commit-time advisory | not CI-wired | **not touched**; deferred per §2 alternative E |
 
