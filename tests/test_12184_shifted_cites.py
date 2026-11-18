@@ -216,7 +216,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3003'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3070`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2715`'): 4,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2755`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2755`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2691-2702'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2703-2705'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2653-2654`'): 1,
@@ -506,7 +506,7 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
       `projection/entities.py:5646` were in NO pin before this one. ⛔ The earlier form of this
       bullet justified the same rows as "at `main` (the working tree: this branch is docs-only, so
       `main`'s `.py` files are this tree's)" — that was true when it was written and is FALSE for
-      the rows `#13363` re-derived: `sdk.py` moved `+22` and `hosted_api.py` `+6`/`+18`, so those
+      the rows `#13363` re-derived: `sdk.py` moved `+66` and `hosted_api.py` `+6`/`+18`, so those
       rows carry THIS tree's figures, not `main`'s. A row here is a claim about `REPO / path`, never
       about `main`'s copy of it — the same thing `_MAIN_SET_MISSED`'s own comment says.
     * CLAIM — the header still NAMES them, and no longer states the three absolutes the review measured
@@ -678,4 +678,31 @@ def test_the_main_head_figures_the_header_names_are_still_counted() -> None:
             "(`ae54df166d`); a changed count means one was re-pointed, which is the false correction "
             "this document is built around. Re-open the site by CONTENT — "
             "`git show ae54df166d:<path> | sed -n '<N>p'` — and fix the figure, not the count."
+        )
+
+
+#: The header states how far each site MOVED between the `main` head it names and this
+#: tree. A wrong delta is worse than a wrong address: a reader applies it as an OFFSET,
+#: which is the drift the header exists to stop. Nothing asserted these literals —
+#: measured: `**+66**` -> `**+65**` at one site left this file at **11 passed**.
+_DECLARED_DELTAS: tuple[tuple[str, int], ...] = (
+    ("`sdk.py` moved **+66**", 1),
+    ("`+66`/`+69`/`+6`", 1),
+    ("`projection/__init__.py` moved **+69**", 1),
+    ("**+280**", 1),
+    ("`hosted_api.py` moved **+6**", 1),
+    ("**+18**", 1),
+)
+
+
+def test_the_declared_move_deltas_are_the_ones_the_header_states() -> None:
+    """A moved figure must red here, not be discovered by a reader applying it."""
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    for token, expected in _DECLARED_DELTAS:
+        actual = text.count(token)
+        assert actual == expected, (
+            f"{_AUDIT} carries {token!r} {actual}x, not {expected}x — the header's own delta "
+            "figure changed. Re-derive it from the two heads the sentence names "
+            "(`git show ae54df166d:<path> | sed -n '<N>p'` versus `sed -n '<M>p' <path>`) and "
+            "update the claim; do not nudge it."
         )

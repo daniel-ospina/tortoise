@@ -625,7 +625,7 @@ def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
     `05-verify.md` stated, as the row's re-point at the head being merged, a pair the
     tree refutes at BOTH ends: neither `sdk.py:19449` nor `sdk.py:19485` occurs in
     `docs/00_index.md` at this head or on `main`, while the diff's actual re-point is
-    `sdk.py:21474` -> `:21496` (2-dot and 3-dot `--numstat` both `3 3`). It survived
+    `sdk.py:21474` -> `:21540` (2-dot and 3-dot `--numstat` `3 3` (3-dot) and `2 2` (2-dot)). It survived
     several review rounds for the same reason the census green did: the D5 arms in
     `test_7949_capstone_measure.py` scope to D5's OWN line, and this claim is in the
     file-table section, so nothing read it.
