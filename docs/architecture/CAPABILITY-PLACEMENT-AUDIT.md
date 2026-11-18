@@ -118,7 +118,7 @@ file — `search_engine.py` FTS
 `subject_binding_available()` at `:7031-7044`), label scan `:4708-4710`, HNSW
 `:4123`, label derivation `:3003`, index note `:3070`; `projection/__init__.py` `("Object", ["name"])`
 `:6869`; `sdk.py`'s second `capture_redactions` writer `:2876` (on this tree `:2882`); `audit.py`'s carrier probe `:2452`/`:2463`;
-and `mcp_server.py`'s `entity_type` passthrough `:5573` — and the drift figure
+and `mcp_server.py`'s `entity_type` passthrough `:5529` (on this tree `:5573`) — and the drift figure
 above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the `main` set, and an earlier
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
 `cache_projection.py` `:2485`, `:2542`, `:2714`, `:2714-2715`, `:2724-2726`, `:2776`, `:3841` and

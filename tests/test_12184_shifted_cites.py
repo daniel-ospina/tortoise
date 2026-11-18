@@ -700,6 +700,12 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "HNSW\n`:4123`",
         "label derivation `:3003`",
         "`:3098`,",
+        # ⛔ ADDED after the `#13345` main-merge re-pointed THIS entry to the merged tree's `:5573`
+        # while the list it sits in opens at `ae54df166d` (review round 8): the arm had no `mcp_server`
+        # bound at all, so that single re-point went green — the same class the entry counts above
+        # exist to stop, one file over. The value here is the declared head's; this tree's is disclosed
+        # beside it in the document, so the bound reads the declared-head spelling and only that.
+        "`mcp_server.py`'s `entity_type` passthrough `:5529`",
     ):
         assert bound in text, (
             f"the header enumeration no longer carries {bound!r} — those are its addresses AT `main` "
