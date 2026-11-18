@@ -7285,12 +7285,24 @@ def test_the_census_states_the_consequence_of_removing_each_label():
         "a label with no query path is not a surface consequence")
 
     # ⛔ EVERY entrant, and WHICH of them actually change (review round 7, P1):
-    # `tortoise_recall` reaches `:Object` (affected) and `:Point` (indexed, so
-    # not); the `:Point`-only tools are entrants with NO change — printing them
+    # the `:Object`-reaching door reaches `:Object` (affected) and `:Point` (indexed,
+    # so not); the `:Point`-only tools are entrants with NO change — printing them
     # as affected would over-report as surely as dropping them under-reported.
     by_tool = {e["tool"]: e for e in sc["surface"] if "tool" in e}
-    assert by_tool["tortoise_recall"]["reaches_affected_labels"] == ["object"], \
-        by_tool["tortoise_recall"]
+    # ⛔ #11609 Phase 2 RETIRED `tortoise_recall` in the same sweep that took the two
+    # doors below: it resolves only through the `#3883` warning shim now
+    # (`tool_registry.RETIRED_USE_INSTEAD`), so it is absent from `TOOL_REGISTRY` and
+    # therefore from this census — which is what `vector_leg_surface`'s own docstring
+    # promises ("one retired here cannot linger as a claim about a surface that no
+    # longer exists"). THE REACH DID NOT LEAVE WITH IT: the container that serves it,
+    # `tortoise_check_confidence(recall=True, …)`, IS named, carrying the `:Object`/
+    # `:Point` read of `recall_state`/`compute_confidence`. Asserting BOTH halves is
+    # the point — asserting only the container would let a second retired door vanish
+    # silently, and asserting only the absence would let the reach leave unremarked.
+    assert "tortoise_recall" not in by_tool, (
+        f"a RETIRED door is still entering this census: {sorted(by_tool)}")
+    assert by_tool["tortoise_check_confidence"]["reaches_affected_labels"] == ["object"], \
+        by_tool["tortoise_check_confidence"]
     # ⛔ #11609 Phase 2 RETIRED the two doors whose `sdk_method` used to make them
     # entrants here (`tortoise_suggest_entry_points`, `tortoise_search_sessions`):
     # each now declares no `sdk_method` because its member method is private behind
@@ -7397,13 +7409,16 @@ def test_the_surface_named_is_the_one_that_can_pass_entity_type():
     assert {"tortoise_search", "tortoise_query"} <= named, (
         f"the surface census missed a tool that can pass entity_type: {surface}")
     # ⛔ AND the third entrant class (#11088 review round 7, P1): a tool whose
-    # SDK method names the type itself. `tortoise_recall`'s DEFAULT mode calls
-    # `recall_state`, which asks the leg for `:Object`; `tortoise_search_sessions`
-    # asks for `:Event`. Neither forwards `entity_type`, so both sources above
-    # miss them — and dropping them understates the approval request.
-    recall = next(t for t in surface if t.get("tool") == "tortoise_recall")
+    # SDK method names the type itself. The recall arm calls `recall_state`, which
+    # asks the leg for `:Object`; `tortoise_search_sessions` asks for `:Event`.
+    # Neither forwards `entity_type`, so both sources above miss them — and dropping
+    # them understates the approval request.
+    # ⚠️ `tortoise_recall` itself was RETIRED into `tortoise_check_confidence`
+    # (#11609 Phase 2) — the NAME moved, the reach did not, so this class is pinned
+    # on the door that exists at this head.
+    recall = next(t for t in surface if t.get("tool") == "tortoise_check_confidence")
     assert "object" in recall["entity_types"], (
-        f"tortoise_recall's default state read queries :Object and is not named: {recall}")
+        f"the recall arm's :Object read queries :Object and is not named: {recall}")
     sessions = next(t for t in surface
                     if t.get("tool") == "tortoise_search_knowledge")
     assert "event" in sessions["entity_types"], sessions
@@ -11302,16 +11317,23 @@ def test_a_non_literal_entity_type_is_UNMEASURED_not_a_measured_no(
     guessed. Intersecting that string with the affected types yields `[]`, which
     the printer drops — an unmeasured consequence published as a measured "does
     not change", the direction the module calls dangerous.
+
+    ⚠️ The stub keys the method an ADVERTISED tool binds: `recall_state`'s own door
+    (`tortoise_recall`) was retired into `tortoise_check_confidence` at #11609 Phase 2,
+    so a stub keyed on `recall_state` would name no tool at all and this test would
+    red on `StopIteration` rather than on the property it exists to measure — an
+    absence that reads as a failure of the catalogue instead of a pass-through of the
+    `UNMEASURED` channel.
     """
     graph = _CensusGraph(
         catalogue=[], labels=["Object"], vectors={"Object": (2, [0.0] * 384)},
     )
     monkeypatch.setattr(
         probe, "_sdk_methods_on_vector_leg",
-        lambda: ({"recall_state": {"UNKNOWN(entity_type_var)"}}, None, None))
+        lambda: ({"check_confidence": {"UNKNOWN(entity_type_var)"}}, None, None))
     sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
                              graph_names=["g"])["surface_consequence"]
-    recall = next(e for e in sc["surface"] if e.get("tool") == "tortoise_recall")
+    recall = next(e for e in sc["surface"] if e.get("tool") == "tortoise_check_confidence")
     assert str(recall["reaches_affected_labels"]).startswith("UNMEASURED"), recall
 
 

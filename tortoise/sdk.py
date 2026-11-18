@@ -51500,8 +51500,7 @@ class TortoiseSDK:
             raise ControlPlaneError(with_limit_contact(
                 f"Team {org_id!r} is at its API-key cap (max_api_keys), so nothing was "
                 "minted. Rotate: mint the replacement first, then revoke the old "
-                "credential (row 36) — revoking frees the slot."
-            )) from exc
+                "credential (row 36) — revoking frees the slot.")) from exc
         return {
             "id": minted["id"],
             "key_prefix": minted["key_prefix"],
