@@ -327,3 +327,44 @@ M16 / M18. The attestation for this PR is recorded at the FINAL head, after thos
 
 **Acceptance:** every `R<n>` has its named evidence, and no open item remains on the declared
 surface.
+
+## 9. Review-round residuals — each closed, fixed, or recorded with its reason
+
+THREE head-bound review rounds ran past the recorded attestation (`5fc01193de` → `e488d2adcc`
+→ `7963c4a851` → `9f25dc79c9`). Each found message-level defects and no fail-open; where a
+finding was applied it was measured first, and where it was falsified the record was corrected
+in place rather than restated. What is left is listed here so the next reader inherits the
+measurement instead of repeating it.
+
+**Fixed at this head — a single-quoted `''` escape read as an unbalanced quote.**
+
+`'the ''KEEP'' #11395 ruling'` is legal, intact YAML: `parse_frontmatter` returns
+`the 'KEEP' #11395 ruling`. But the `''` escape leaves a quote immediately before the ` #`, so a
+close located by `raw[:i].rstrip().endswith(q)` fired at the wrong ` #` and check (C) reported
+*an unbalanced quote … remove the inner quote* — a remedy that asks the author to delete a legal
+escape. `_split_comment` now locates the close by PARITY (`_closing_quote`), so only a ` #` after
+the true closing quote is a comment. Measured: the value is now `('single-quoted', "the 'KEEP'
+#11395 ruling")` and the consumer agrees; the (C) mutant `"STORAGE-ARCHITECTURE.md, "#11901"
+KEEP"` has no ` #` after its close and STILL reds `broken`, so the truncation check is unchanged.
+Pinned by `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken`, which fails on the
+pre-fix helper (`('broken', None)`) — verified by re-applying the old body.
+
+**Already fixed — the sequence branch's false diagnosis.** `- 13452` (int) once reported "a
+sequence item has no legal transform, so this is a truncation" while the scalar branch said
+"implicit typing". Both non-string members now share `_type_mismatch`, which decides from the RAW
+text: measured, `- 13452` → *"YAML implicit typing, nothing was lost"*, and
+`13452 #11395 reopen, #13220` → *"a space-preceded `#` ended it at character 5 of 27, so the tail
+is GONE"*.
+
+**Recorded, not fixed — a plain value followed by an indented comment line is refused as
+MULTI-LINE.** YAML reads `X` + `\n  # note` intact, so this is a false block. It is a category-B
+over-block that cannot ship a defect (it fails closed and names the remedy), and the arm cannot
+distinguish an indented `#` continuation from a comment without becoming a YAML implementation —
+the refusal is declared in `_values`' docstring for that reason. Fixing it would require folding
+support, which is out of this issue's scope.
+
+**Recorded, not fixed — the PR body's `470 values compared` figure.** At this head the same probe
+prints **90 measured / 94 compared**; the counter now counts affiliation values only. The
+substance — 8 of 8 flagged, every length pair exact — reproduces unchanged. The body is NOT
+edited: it carries the review attestation the gate reads, and an unrelated edit wipes that proof
+(the rule is in `AGENTS.md`). The corrected figure is recorded here instead.

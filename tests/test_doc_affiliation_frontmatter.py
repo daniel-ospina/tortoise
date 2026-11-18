@@ -242,6 +242,34 @@ def _values(fm: list[str]) -> list[tuple[str, str, object]]:
     return out
 
 
+def _closing_quote(raw: str) -> int:
+    """Index of ``raw``'s closing quote, or ``-1`` when the scalar never closes.
+
+    Scanned by PARITY, not searched for a ``q`` at the end of the text before a
+    `` #``: a single-quoted body ending in the ``''`` escape leaves a quote right
+    before such a `` #``, and the old
+    ``raw[:i].rstrip().endswith(q)`` test read that escape as the close (found in
+    review, measured: ``'the ''KEEP'' #11395 ruling'`` parses INTACT to
+    ``the 'KEEP' #11395 ruling``, yet the arm red it as an unbalanced quote and
+    told the author to *remove the inner quote* — advice to delete a legal
+    escape). A double-quoted body is scanned with backslash escapes skipped.
+    """
+    q = raw[0]
+    i = 1
+    while i < len(raw):
+        ch = raw[i]
+        if q == '"' and ch == "\\":
+            i += 2
+            continue
+        if ch == q:
+            if q == "'" and raw[i : i + 2] == "''":
+                i += 2  # YAML's only single-quote escape: two quotes are one
+                continue
+            return i
+        i += 1
+    return -1
+
+
 def _split_comment(raw: str) -> str:
     """A QUOTED value's text with a trailing `` <space>#…`` comment removed.
 
@@ -252,11 +280,19 @@ def _split_comment(raw: str) -> str:
     matching a value that was shortened the same way. (An earlier draft DID split
     plain values here, which made the survival comparison tautological and let it
     report coverage it did not have — found in review.)
+
+    The close is located by ``_closing_quote``, so only a ` #` that sits AFTER
+    the true closing quote is treated as a comment. A split at any earlier ` #`
+    is refused, which keeps (C)'s truncation case red: `"a, "#1" KEEP"` has no
+    ` #` after its close, so the raw text survives to (C) and still reports the
+    unescaped inner quote.
     """
-    q = raw[0]
+    close = _closing_quote(raw)
+    if close == -1:
+        return raw  # never closes: the caller must report `malformed`
     i = raw.find(" #")
     while i != -1:
-        if raw[:i].rstrip().endswith(q):
+        if len(raw[:i].rstrip()) - 1 == close:
             return raw[:i].rstrip()
         i = raw.find(" #", i + 1)
     return raw
@@ -903,6 +939,44 @@ def test_a_wholly_commented_value_gets_ONE_TRUE_diagnosis(
     assert diagnoses(msg) == 1, msg
     assert "the key resolves to None" in msg, msg
     assert "Quote the value." in msg, msg
+
+def test_a_single_quoted_escape_before_a_hash_is_measured_not_broken(tmp_path) -> None:
+    """YAML's only single-quote escape is ``''``; it is NOT an unbalanced quote.
+
+    ``'the ''KEEP'' #11395 ruling'`` is legal, intact YAML — ``parse_frontmatter``
+    returns ``the 'KEEP' #11395 ruling`` — but the ``''`` escape leaves a quote
+    immediately before the `` #``, so a close located by
+    ``raw[:i].rstrip().endswith(q)`` fires at the WRONG `` #`` and (C) reports
+    *an unbalanced quote … remove the inner quote*: advice to delete a legal
+    escape. Nothing can ship on this — the arm is fail-closed — but a false
+    remedy is the same defect rounds 3 and 4 fixed in (D) and the sequence
+    branch, so it is fixed where it lives and pinned here.
+
+    Non-vacuity: on the pre-fix helper ``_quoted_style`` returns
+    ``('broken', None)`` for this value, so the first assertion fails.
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    value = "'the ''KEEP'' #11395 ruling'"
+    doc = tmp_path / "dossier.md"
+    doc.write_text(
+        f"---\ntitle: x\naboutObjects: {value}\n---\n\nbody\n", encoding="utf-8"
+    )
+    classified = {(key, kind): payload for key, kind, payload in _values(_frontmatter(doc))}
+    assert ("aboutObjects", "scalar") in classified, (
+        "`_values` no longer classifies this as a scalar — re-point this guard: "
+        f"{classified!r}"
+    )
+    style, expected = _quoted_style(classified[("aboutObjects", "scalar")])
+    assert style == "single-quoted", (
+        f"a `''` escape before a ` #` is legal YAML, but this arm reports "
+        f"{style!r} — the remedy it prints must not ask for a legal escape to "
+        f"be deleted"
+    )
+    assert expected == "the 'KEEP' #11395 ruling", expected
+    # …and the measured expectation is the value the real consumer parses, so
+    # the arm is not merely self-consistent.
+    assert parse_frontmatter(doc.read_text(encoding="utf-8"))["aboutObjects"] == expected
 
 
 def test_the_e1_e2_evidence_bundle_declares_its_affiliation() -> None:
