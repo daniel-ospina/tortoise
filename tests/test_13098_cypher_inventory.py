@@ -221,10 +221,12 @@ def _exactly_one(pattern: str, text: str, *, what: str, flags: int = re.MULTILIN
     helper, every arm, no arm left as the hole the next decoy walks through.
 
     ⛔ AND THAT IS PROVEN ARM BY ARM, not asserted (`#13458` review P2-3): `_GRADED_LOOKUPS`
-    enumerates every lookup below and `test_every_anchored_arm_refuses_a_duplicate` drives
-    THIS helper through `_grade_doc_text` once per row, so each named arm has its own red
-    when reverted to `re.search`. Adding a lookup without a table row is the gap that
-    review found; the two lists must stay the same length.
+    enumerates every `_exactly_one` ARM below and `test_every_anchored_arm_refuses_a_duplicate`
+    drives THIS helper through `_grade_doc_text` once per row, so each named arm has its own red
+    when reverted to `re.search`. Adding an ARM without a table row is the gap that review found;
+    the two lists must stay the same length. (The two §0/§1 BOUNDS `re.search` calls are not
+    arms and have no rows — their slice is a superset, and the coverage test counts them
+    separately so a third bare `re.search` still reds.)
     """
     found = re.findall(pattern, text, flags)
     assert found, f"{what} moved or changed shape; re-cut this pin with it"
@@ -559,8 +561,11 @@ def test_every_graded_lookup_has_a_coverage_row():
         "arms: a DUPLICATED row proves nothing twice and is invisible to the set comparison")
     assert len({row[0] for row in _GRADED_LOOKUPS}) == len(_GRADED_LOOKUPS), (
         "two rows share an arm id, so one of their cases reports under the other's name")
-    assert source.count("_exactly_one(") == len(_GRADED_LOOKUPS), (
-        f"`_grade_doc_text` makes {source.count('_exactly_one(')} `_exactly_one` calls but the\n"
+    # Whitespace-tolerant on purpose: `_exactly_one (` after an auto-format is the same call,
+    # and a `str.count` of the tight spelling would miss it (`#13458` review note 2).
+    arm_calls = len(re.findall(r"_exactly_one\s*\(", source))
+    assert arm_calls == len(_GRADED_LOOKUPS), (
+        f"`_grade_doc_text` makes {arm_calls} `_exactly_one` calls but the\n"
         f"table lists {len(_GRADED_LOOKUPS)} arms. The `what=` scan above only sees a\n"
         "double-quoted literal, so an arm added with `what=f\"…\"` or `what='…'` would pass it\n"
         "silently — add a row for the arm, and this count keeps the two in step")
