@@ -171,3 +171,28 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
     assert len(_PINS) == 24
+
+
+def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -> None:
+    """One reader, ONE address — the census names the label scan in three places.
+
+    The `_PINS` mechanism could not catch this defect: the pin row for the label scan
+    (`search_engine.py:4511-4513`) was satisfied by the §2.1 TABLE, which already carried the moved
+    address, so a VERDICT paragraph left behind at the pre-move address red no pin while the document
+    gave TWO addresses for one reader — and only one of them can open at any head. The `#13124`
+    post-merge review found exactly that (`:4350-4351` in the verdict, `:4511-4513` in the table).
+
+    NON-VACUOUS: the pre-fix document carries the second spelling
+    (`git show origin/main:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md |
+    grep -c '`none`: `search_engine.py:4350-4351`'` -> 1), so the second assertion reds on that tree.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    assert "`none`: `search_engine.py:4511-4513`, a plain label scan" in text, (
+        "§2.1's verdict paragraph no longer names the label scan at `:4511-4513`; re-derive it from "
+        "the statement rather than applying a delta to the address beside it."
+    )
+    assert "`none`: `search_engine.py:4350-4351`" not in text, (
+        "§2.1's verdict paragraph names the label scan at `:4350-4351` while the table above it names "
+        "the same reader row at `:4511-4513` — two addresses for one reader, and only one of them can "
+        "open at any head. That is the defect class this file exists for."
+    )

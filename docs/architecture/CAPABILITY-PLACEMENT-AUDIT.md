@@ -45,22 +45,36 @@ ratio the budget is sized against. See §8 for what was taken from outside and w
 same for **stored shapes**, and it states its population and its commands so a later head can re-derive
 every number rather than trust it.
 
-**Every `file:line` below is valid at ONE head: `ccb49741b2ec`** — the branch head this document was
+**The census wrote every `file:line` below at ONE head: `ccb49741b2ec`** — the branch head this document was
 written and reviewed at (its merge of `origin/main` `c4f6170cc302`); the census landed on `main` as the
 squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/head` (`git fetch origin
-'refs/pull/13095/head:ccb49741b2ec'`), so every cite below can be opened there. On any later head they
+'refs/pull/13095/head:ccb49741b2ec'`), so every cite the census wrote can be opened there.
+⚠️ **That is no longer true of EVERY cite below, and the honest fix is to name both heads rather than to
+pick one.** A later pass has re-derived a **named** set of addresses at `main`; they are enumerated in one
+place in this header (the sixteen, below, plus this revision's own groups) and they open at **`31bddb1dd9`**,
+the `main` this revision was cut at — a docs commit moves no `.py` line, so they also open at this branch's
+head. **The rule a reader applies is then mechanical and complete: an address in that enumeration opens at
+`main` `31bddb1dd9`; every other `file:line` here was written at the pin and opens at `ccb49741b2ec`.**
+⛔ **Take the head from the list, never from the row.** §2.5's whole-node row carries one of each
+(`record_serve.py:427` is in the `main` list; `projection/__init__.py:14169` is not, so it is at the pin),
+and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. The
+ratio below is the measurement of the pin-written remainder, so it is also the count of how much of it has
+already moved. On any later head they
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
-**96 of this document's 218** `file:line` pairs name a different line at `534f3e1bee` (counted as the
+**111 of this document's 217** `file:line` pairs name a different line at `534f3e1bee` (counted as the
 unique `path.py:NNNN` pairs in this file after resolving **every** written path to the module it names
 (a bare `name.py:` is `tortoise/name.py` when that file exists, and the one file of that name
 otherwise — `edges.py` is `tortoise/projection/edges.py`, `propagation.py` is
-`tortoise/projection/propagation.py`; a range cite counts once, by its **start** line), which dedupes the 314 as-written spellings to 218 — 96
+`tortoise/projection/propagation.py`; a **directory-qualified** path is the same rule with its prefix
+restored, so `projection/__init__.py` is `tortoise/projection/__init__.py` — **skipping that step is what
+produced the `96 of 218` this header carried before the `#13124` review**, which reported **31 pairs as
+naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files exist there** and which
+understated the drift by 15; a range cite counts once, by its **start** line), which dedupes the 314 as-written spellings to 217 — 97
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
-text; of the 218, **187 are comparable at BOTH heads** and the other **31 name a file that does not exist
-at `ccb49741b2ec`** at all — the `#13038`/`#13083` evidence artifacts and the tests added since — so those
-31 sit in neither side of the ratio), and **none of
-the 218 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
+text; **all 217 are comparable at BOTH heads** — every written path resolves to a module that exists at
+`ccb49741b2ec`, so **no pair sits outside the ratio** — and **none of
+the 217 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 ⚠️ **The pin promise was RE-CHECKED, not assumed, in the `#13083` follow-up — and it did not hold.**
 Sixteen superseded line-addresses did not open on the line their row quotes at `ccb49741b2ec`. ⚠️ **The
@@ -73,14 +87,22 @@ elsewhere in this document too. They had been advanced
 by a line delta rather than re-opened: the `search_engine.py` ones (`:3064`, `:4477-4481`, `:6352`) name
 lines that hold something else at **every** recent `main` head — no commit ever carried the FTS call at
 `:3064`, the walk at `:4477` or the operator leg at `:6352` — so the number was drifted forward, not
-read off. All sixteen were re-derived at the pin, and each is named here by the cite it became, with its
+read off. All sixteen were re-derived at `main` (`31bddb1dd9`) — ⚠️ **so they do NOT open at the pin
+above** — and each is named here by the cite it became, with its
 file — `search_engine.py` FTS
 `:3078`, walk `:4587`, operator leg `:6470`, subject probe `:6828-6831` (plus its `Event` leg `:6831`, and
 `subject_binding_available()` at `:6834-6847`), label scan `:4511-4513`, HNSW
 `:4097`, label derivation `:2983`, index note `:3050`; `projection/__init__.py` `("Object", ["name"])`
 `:6869`; `sdk.py`'s second `capture_redactions` writer `:2876`; `audit.py`'s carrier probe `:2452`/`:2463`;
 and `mcp_server.py`'s `entity_type` passthrough `:5529` — and the drift figure
-above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so every revision moves it — and the re-cut onto `main` moved it again, which is why the two figures at the top of this header are MEASURED over this file as it now stands** (314 written spellings → 218 pairs → 96 drifters of the 187 comparable) rather than carried forward by arithmetic from an earlier edition. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
+above was re-measured afterwards. ⚠️ **That enumeration is the WHOLE of the `main` set — a range entry
+spans every line it covers — and this revision adds its own entries to it**: `projection/__init__.py`'s
+fulltext declarations `:6854-6870` (the block), `:6864` (`Event`), `:6865` (`Subject`), `:6870` (`Source`);
+`record_serve.py:427` (`READ_POINT_BY_ID`); `sdk.py:36985`/`:37008` (the whole-node pair, still 23 apart);
+`audit.py:817`; and `mcp_server.py:5089`/`:8034`. **Every `file:line` in this document that is in neither
+this revision's list nor the sixteen above is at the pin `ccb49741b2ec`** — that is the enumeration the
+rule at the top of this header sends the reader to.
+⚠️ **The figure counts the file it is written in, so every revision moves it — and the re-cut onto `main` moved it again, which is why the two figures at the top of this header are MEASURED over this file as it now stands** (314 written spellings → 217 pairs → 111 drifters of the 217 comparable) rather than carried forward by arithmetic from an earlier edition. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of this header) instead of enumerated here.
@@ -92,8 +114,9 @@ no cite: the handle beside it then reads as corroboration of a line nobody read.
 §2.5's whole-node row said the whole-node read sat *"three lines above the walk"* — both cites were
 individually correct at the pin they were written for, and the distance is **23** (`MATCH (s:Subject {id:$sid})
 RETURN properties(s)` and the walk `MATCH (s:Subject {id:$sid})-[r]->(n) …`, with the subject-chain composition
-between them). ⚠️ **That row's two ADDRESSES have since been re-derived twice — at `main` they are `:36985` and
-`:37008` — and this paragraph is the record of the DISTANCE claim, so it quotes no address of its own**: a number
+between them). ⚠️ **That row's two ADDRESSES have since been re-derived twice — they are `:36985` and
+`:37008` now, both in this revision's `main` list below — and this paragraph is the record of the DISTANCE
+claim, so it quotes no address the row does not carry**: a number
 here that is not the number the row carries is the very defect it is warning about. So the rule above extends to the words
 **around** a cite: an adjective that fixes a position ("above", "beside", "in the same read") is a claim too, and
 it is checked the same way — by opening both lines at the declared head and counting. ⚠️ **That correction is
@@ -112,7 +135,7 @@ nothing else; row 15 gives bare module names beside `hosted_api.py:32965` and on
 five are *at risk* of drifting silently: no symbol will be there to re-find — for them the number IS the
 citation — so an insert above a cited site is undetectable from the row alone. The risk has already begun
 to bite: of the line-numbered cites in these five rows, **ten no longer name the same line at `main`**
-(counted at `534f3e1bee`, the same head the 108-of-215 figure above is measured at) — row 15's `hosted_api.py:32965`, whose
+(counted at `534f3e1bee`, the same head the 111-of-217 figure above is measured at) — row 15's `hosted_api.py:32965`, whose
 `MERGE (p:PackInstall …)` is at `:33539` there, and 9 of row 18's 16 — while rows 10, 11 and 14 and row
 15's `pack_manifest_store.py:467` still do. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
 Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
@@ -238,7 +261,7 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | **the whole-node accessor family** — `tortoise/sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296` (`get_point`'s `_cache_answer`), `:40513`; `tortoise/record_serve.py:427` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
 
 **Verdict: `graph`.** Eighteen reader rows, **fifteen of them capability-carrying** (three are deliberately
-`none`: `search_engine.py:4350-4351`, a plain label scan; `domain_validators.py:105`, a property-equality join;
+`none`: `search_engine.py:4511-4513`, a plain label scan; `domain_validators.py:105`, a property-equality join;
 and the whole-node accessor family above), **fifteen of them across six files** (`projection/propagation.py`,
 `sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`, `domain_validators.py`) — the three
 `none` rows bring `record_serve.py`, `projection/__init__.py` and `record_reconcile.py` as well; a
