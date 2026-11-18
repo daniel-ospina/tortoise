@@ -2818,9 +2818,12 @@ surfaces:
   # MEASURED term of `structurally_blind` have their own cases (F2/F3: each was
   # held by a mutant that passed the whole suite). Hermetic apart from ONE live arm
   # behind an explicit skip (`TORTOISE_DB_URI`, the same shape as its sibling
-  # above) — no DB is opened by the other cases, and the two `_build_artifact`
-  # pins stub the embedder probe because `EmbeddingModel.get()` loads a model
-  # (~2 min measured) and a structural pin has no business paying for that.
+  # above) — no DB is opened by the other cases, and EVERY `_build_artifact` pin
+  # stubs the embedder probe because `EmbeddingModel.get()` loads a model (~2 min
+  # measured) and a structural pin has no business paying for that. ⛔ No case count
+  # is quoted here: it moved from "the two" to all of them as the callers were
+  # found (the last two by a reviewer's AST scan, `#13267` review 12 F2), and a
+  # stubbing count in a comment is a figure that re-stales silently.
   - test_paired_expansion_ab_2518.py
   # #12186 M2: the §7 arming gate's evidence bundle must re-derive — the README's
   # two result tables are recomputed CELL BY CELL from `measurement.json`, every
