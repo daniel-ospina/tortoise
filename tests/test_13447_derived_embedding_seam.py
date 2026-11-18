@@ -132,6 +132,39 @@ def test_the_memo_survives_a_different_store_width(model_calls):
     assert from_fold == [0.5] * _DIM
 
 
+#: A document payload, as the record and the fold both receive it.
+_DOC = {"type": "DocumentCreated", "id": "doc-1", "title": "My doc",
+        "summary": "a summary", "topics": ["topic"]}
+
+
+def test_a_DOCUMENT_write_pays_ONE_call_too(model_calls):
+    """`#13412` landed, so the document pair dedupes — the claim two comments make.
+
+    ⛔ Both `derived_embedding`'s `DocumentCreated` paragraph and
+    `projection/entities._upsert_document`'s fold comment assert that a document
+    write pays ONE encode, and neither could witness it: the memo is keyed on the
+    TEXT, so the pair only dedupes because the record's
+    `_document_embedding_parts` CALLS `_build_search_text(title, summary, topics)` —
+    the same function the fold passes `st` from. Re-fork that rule back to the
+    pre-`#13412` `title + content` and the two legs compose DIFFERENT strings: this
+    row reds at 2 calls, and no other row in this file notices (which is why the
+    fold comment said "#13412 owns it" while that was true, and why it had to be
+    corrected once `#13412` landed — review cycle 8, P3).
+    """
+    from tortoise.projection.entities import _build_search_text
+
+    with de.write_scope("test"):
+        columns = rw.derived_embedding_columns(_DOC)
+        fold = de.encode(
+            _build_search_text(_DOC["title"], _DOC["summary"], _DOC["topics"]),
+            _DIM, bounded=True)
+    assert model_calls == ["My doc a summary topic"], (
+        f"a DOCUMENT write paid {len(model_calls)} model call(s) {model_calls} — the "
+        f"record's document rule and the fold must compose the SAME text (#13412), "
+        f"or the text-keyed memo cannot dedupe the pair")
+    assert columns.columns["embedding"] == fold == [0.5] * _DIM
+
+
 def test_a_width_mismatch_still_DROPS_the_vector_for_the_narrower_caller(model_calls):
     """`#4280` is preserved: the memo must not become a width-rule bypass.
 
