@@ -134,7 +134,11 @@ def _values(fm: list[str]) -> list[tuple[str, str, object]]:
     ``sequence``            ``key:`` then ``- item`` lines (which may sit at
                             column 0, as several files in this population do).
                             A `- #11395` item is a whole-value comment and parses
-                            to ``None``, so items are checked individually.
+                            to ``None``; items are therefore checked ONE BY ONE —
+                            the leading-`#` shape, the quoting shape, and (for the
+                            affiliation keys) item-by-item value survival. A
+                            shorter list or a changed item means the value did not
+                            survive.
     ``sequence_multiline``  a sequence whose item is continued on a following
                             indented line: the same swallowing shape, refused.
     ``other``               block scalar / flow collection / nested mapping.
@@ -507,6 +511,47 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                     "quote the whole value instead"
                 )
                 continue
+
+            if kind == "sequence":
+                # A sequence is only PARTLY covered by (A): an item truncated
+                # mid-text, or a quoted item cut at an inner quote, keeps its
+                # leading character and sails past it. Counting such a value as
+                # "measured" while no value-comparing check touches it is the
+                # exact fail-open this arm exists to close (found in review: a
+                # mid-item `, #4333 census, #5380` tail was green, and the
+                # population carries 3 affiliation sequences).
+                if key not in AFFILIATION_KEYS:
+                    continue
+                got_list = parsed.get(key)
+                if not isinstance(got_list, list) or len(got_list) != len(texts):
+                    bad.append(
+                        f"`{key}` does not SURVIVE the parse: {len(texts)} item(s) "
+                        f"{texts!r} became {got_list!r}"
+                    )
+                    continue
+                for raw_item, got_item in zip(texts, got_list):
+                    style, expected = _quoted_style(raw_item)
+                    if style in ("broken", "malformed"):
+                        bad.append(
+                            f"`{key}` item {raw_item!r} is {style} — a quoted item "
+                            "YAML cannot keep whole is TERMINATED at that quote. "
+                            "Remove the inner quote, or use a block scalar."
+                        )
+                        break
+                    if style == "escaped":
+                        continue
+                    if expected is None:
+                        expected = raw_item
+                    compared += 1
+                    if not isinstance(got_item, str) or got_item != expected:
+                        bad.append(
+                            f"`{key}` item {raw_item!r} (len {len(expected)}) "
+                            f"became {got_item!r} — a sequence item has no legal "
+                            "transform, so this is a truncation. Quote the item."
+                        )
+                        break
+                continue
+
             if kind != "scalar":
                 continue
 

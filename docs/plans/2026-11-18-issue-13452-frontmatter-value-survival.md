@@ -139,6 +139,12 @@ merged dossier, so the mutant has to redden it.
      `UNMEASURED` set. `aboutObjects: |`, `>`, `[...]`, `{...}` reach no comparison, so they **FAIL**
      with both remedies named. `_KV` also accepts a **whitespace-only** value, so `aboutObjects:   `
      cannot slip past enumeration either (that was a one-keystroke bypass of (D)).
+   - **(E) sequences, item by item.** A `sequence` affiliation value was previously counted as
+     "measured" while only (A) reached it — so a mid-item truncation
+     (`- tortoise-hosted-platform, #4333 census, #5380`) and a quoted item cut at an inner quote were
+     both GREEN, in a shape the population actually carries (3 affiliation sequences). Measured, then
+     fixed: each item now gets the quoting check and a value comparison, and a length mismatch is a
+     failure. The counter now reads every affiliation value as *compared*, not just counted.
    - **Refused styles:** a multi-line **plain** value, and a sequence item continued on a following
      line — both legal folding, both swallow a `#`-opening continuation, neither verifiable without
      becoming a YAML implementation. A **quoted** value is CLOSED, so an indented comment line after it
@@ -146,8 +152,8 @@ merged dossier, so the mutant has to redden it.
      false red on a legal block, and a truncated continuation passing green).
 4. **Residuals, stated in the code rather than omitted:** (i) `|`/`>`/`[`/`{` affiliation values are
    deliberately not compared — such text is preserved by construction — but they still FAIL (D), so
-   adopting one requires an explicit `UNMEASURED` entry with a reason; (ii) sequence items get (A) but
-   not a value-by-value compare; (iii) a character-level typo inside a quoted value is NOT a truncation
+   adopting one requires an explicit `UNMEASURED` entry with a reason; (ii) a character-level typo
+   inside a quoted value is NOT a truncation
    and stays green — measured (M6), and claiming otherwise would be a false claim of coverage;
    (iv) a deliberate trailing comment on an **affiliation** value will red (M18) — fail-closed, and the
    remedy (quote the value) genuinely clears it, unlike the shapes review found where it did not.
@@ -179,7 +185,7 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
 2. **Fixed tree:** `2 failed, 7 passed` — the 2 are the pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, `docs/evidence/13038-capstone/README.md`),
    unchanged, named, and deliberately not "fixed" here. `git diff --stat` vs `main` = 9 files + 1 plan doc.
-3. **Mutant matrix — 18/18 behave as designed** (`/tmp/matrix_13452.sh`, tree restored byte-identical
+3. **Mutant matrix — 20/20 behave as designed** (`/tmp/matrix_13452.sh`, tree restored byte-identical
    after each; M13–M18 were added after code review):
 
    | # | mutant | expected | observed |
@@ -202,6 +208,11 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    | M16 | escaped body **and** an unescaped inner quote | RED (C) | RED |
    | M17 | quoted value + indented comment line | GREEN — not a fold | GREEN |
    | M18 | `aboutObjects: A, # section 2` (affiliation tail is a comment) | RED (B), fail-closed | RED |
+   | M19 | sequence item truncated mid-text (`, #4333 census, #5380`) | RED (E) | RED |
+   | M20 | quoted sequence item cut at an inner quote | RED (E) | RED |
+
+   (An earlier draft also listed "an extra item appended" as a mutant; that is a legitimate edit, not a
+   truncation, and it correctly stays green — the expectation was wrong, not the arm.)
 
 4. `parse_frontmatter` on the dossier returns `aboutObjects` at its full raw length.
 5. `tests/test_file_indexer.py` untouched. The pins that actually OPEN these files were run on both
@@ -219,7 +230,8 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
 - **R1** the assertion is **vacuously green** — it skips what it means to measure, or reaches only
   shapes that are already correct → (A) is type-blind and unambiguous, (C) covers the quoted mangle,
   and **(D)** FAILS on any declared affiliation value that reached no check. Mutants
-  M1/M2/M3/M5/M7/M11/M12/M13/M15/M16/M18 red it. This is the risk that actually bit: review proved
+  M1/M2/M3/M5/M7/M11/M12/M13/M15/M16/M18/M19/M20 red it — including the shape review found last: a `sequence` value counted
+  as measured while no value-comparing check touched it. This is the risk that actually bit: review proved
   **(B) was tautological** in an earlier draft (0 of 8 flagged) because the comparison stripped the
   comment first; it now compares against RAW and flags 8 of 8.
 - **R2** the assertion **over-blocks** — a legal YAML construct reported as truncation → measured, not
