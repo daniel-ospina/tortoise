@@ -43,7 +43,9 @@ not.
 """
 from __future__ import annotations
 
+import ast
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -179,6 +181,58 @@ def test_error_defaults_kind_when_none_recorded(monkeypatch):
     assert ei.value.failure_kind == "model_unavailable"
 
 
+_KIND_PRODUCER_SOURCE = (
+    Path(__file__).resolve().parent.parent / "tortoise" / "embeddings.py"
+)
+
+
+def _kind_producer_assignments(source: str) -> list[ast.Assign | ast.AnnAssign]:
+    """Every ``<x>._last_failure_kind = …`` assignment in ``source``.
+
+    Extracted from the pin below so the scan and its REFUSAL can each be
+    exercised directly: the pin's contract is to red rather than silently
+    measure nothing, and a helper is the only way a row can assert that.
+    """
+    tree = ast.parse(source)
+
+    def _records_kind(target: ast.expr) -> bool:
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == "_last_failure_kind"
+        )
+
+    return [
+        node for node in ast.walk(tree)
+        if (isinstance(node, ast.Assign) and any(_records_kind(t) for t in node.targets))
+        or (isinstance(node, ast.AnnAssign) and _records_kind(node.target))
+    ]
+
+
+def _unmeasurable_producers(
+    assignments: list[ast.Assign | ast.AnnAssign],
+) -> list[ast.AST]:
+    """Producers whose value this pin cannot compare against ``FAILURE_KINDS``.
+
+    ⛔ ``None`` is a legitimate CLEAR (``EmbeddingModel`` resets the field with
+    it at several sites), so it stays measurable. Everything else must be a
+    ``str`` CONSTANT: a ``Name`` (a module constant — the likely refactor once
+    ``FAILURE_KINDS`` exists), and **also** a non-``str`` constant.
+    ``b"load_stalled"``, ``7`` and ``True`` are all ``ast.Constant``s, so a scan
+    that refused only non-Constants let them through the guard and then dropped
+    them from the derived vocabulary — the pin reported the vocabulary as pinned
+    while an armed refusal degraded it silently (#13548 review F2,
+    agent-infra#3442). ``bool`` is the sharpest instance: ``True`` is an ``int``
+    subclass, so a membership test over a string vocabulary cannot stand in for
+    it (PEP 586 on ``Literal[False]`` vs ``Literal[0]``).
+    """
+    return [
+        node for node in assignments
+        if getattr(node, "value", None) is None
+        or not isinstance(node.value, ast.Constant)
+        or not isinstance(node.value.value, (str, type(None)))
+    ]
+
+
 def test_every_recorded_failure_kind_is_in_the_declared_vocabulary():
     """The producers' literals and :data:`FAILURE_KINDS` cannot drift apart.
 
@@ -202,31 +256,12 @@ def test_every_recorded_failure_kind_is_in_the_declared_vocabulary():
     reporting the vocabulary as pinned while an armed refusal silently degraded
     it (#13534 review round 3, A and B).
     """
-    import ast
-    from pathlib import Path
-
-    source = Path(__file__).resolve().parent.parent / "tortoise" / "embeddings.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-
-    def _records_kind(target: ast.expr) -> bool:
-        return (
-            isinstance(target, ast.Attribute)
-            and target.attr == "_last_failure_kind"
-        )
-
-    assignments = [
-        node for node in ast.walk(tree)
-        if (isinstance(node, ast.Assign) and any(_records_kind(t) for t in node.targets))
-        or (isinstance(node, ast.AnnAssign) and _records_kind(node.target))
-    ]
+    source = _KIND_PRODUCER_SOURCE.read_text(encoding="utf-8")
+    assignments = _kind_producer_assignments(source)
     assert assignments, (
         "the AST scan found no ``_last_failure_kind`` assignments — the producer "
         "pattern moved, so this pin is no longer measuring anything")
-    non_literal = [
-        node for node in assignments
-        if getattr(node, "value", None) is None
-        or not isinstance(node.value, ast.Constant)
-    ]
+    non_literal = _unmeasurable_producers(assignments)
     assert not non_literal, (
         "a producer assigns ``_last_failure_kind`` a value this pin cannot compare "
         f"against FAILURE_KINDS (lines {[n.lineno for n in non_literal]}) — inline "
@@ -243,6 +278,48 @@ def test_every_recorded_failure_kind_is_in_the_declared_vocabulary():
         f"a producer records a kind outside the declared vocabulary: "
         f"{sorted(recorded - FAILURE_KINDS)!r}; an armed refusal would report "
         f"``model_unavailable`` for it, indistinguishable from nothing recorded")
+
+
+@pytest.mark.parametrize(
+    ("literal", "refused"),
+    [
+        ('"load_failed"', False),
+        ("None", False),
+        ('b"load_stalled"', True),
+        ("7", True),
+        ("True", True),
+        ("_KIND_TIMEOUT", True),
+    ],
+)
+def test_the_producer_scan_refuses_only_what_it_cannot_measure(literal, refused):
+    """The pin's fail-closed guard, exercised directly (#13548 review F2).
+
+    A producer value the scan cannot compare must be REFUSED, never silently
+    dropped: the subset check can only see what the scan hands it, so a filtered
+    value reads exactly like a vocabulary with no drift. Both directions are
+    pinned — a guard that also refused a plain ``str`` literal (or the legal
+    ``None`` clear) would red on correct code, which is the other way this scan
+    can fail.
+
+    ``bytes``/``int``/``bool`` are the arm the pre-fix guard missed: they are
+    ``ast.Constant``s, so they passed the non-literal refusal and then fell out
+    of the ``isinstance(value, str)`` derivation without a word.
+    """
+    source = f"def _load(self):\n    type(self)._last_failure_kind = {literal}\n"
+    assignments = _kind_producer_assignments(source)
+    assert len(assignments) == 1, (
+        f"the scan must find the one producer in {source!r}, or this row is "
+        f"measuring nothing")
+    refused_lines = [node.lineno for node in _unmeasurable_producers(assignments)]
+    if refused:
+        assert refused_lines == [2], (
+            f"a producer assigned {literal} is a value this pin cannot compare "
+            f"against FAILURE_KINDS — it must be refused, not filtered out of "
+            f"the derived vocabulary")
+    else:
+        assert refused_lines == [], (
+            f"a producer assigned {literal} IS measurable — refusing it would "
+            f"block correct code")
 
 
 @pytest.mark.parametrize("kind", sorted(FAILURE_KINDS))

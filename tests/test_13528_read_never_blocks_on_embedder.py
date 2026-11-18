@@ -529,6 +529,14 @@ def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
     at the seam because no fixture reproduces that staleness — not because the
     arm is unreachable.
 
+    ⛔ THE SECOND BEHAVIOUR CHANGE IS PINNED HERE TOO (#13548 review F1).
+    ``no_embedder`` with NOTHING recorded now answers ``model_unavailable``;
+    ``main``'s dict answered ``not_installed``. That is deliberate — the
+    contract's wording puts the fallback on "no kind was recorded", and a
+    designed-absence word is not itself a cause — and the two ``no_embedder``
+    arms below are what stop a re-added ``no_embedder -> not_installed`` special
+    case from shipping green, which is the #5275 mis-attribution one arm over.
+
     ⛔ THE #13543 DEFECT THIS PINS. ``main`` translated with a FIXED dict
     (``_READ_DECLINE_FAILURE_KIND``) that ignored ``_last_failure_kind`` entirely
     and answered ``model_unavailable`` for ``load_in_flight`` — the contract's
@@ -545,7 +553,16 @@ def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
             "with nothing recorded the contract's documented fallback is the "
             "honest answer — the load was in flight, nothing broke")
 
+        assert EmbeddingModel._as_failure_kind("no_embedder") == \
+            "model_unavailable", (
+            "with nothing recorded even the designed-absence trace word names no "
+            "cause of its own — the fallback is the honest answer, not "
+            "`not_installed`")
+
         EmbeddingModel._last_failure_kind = "load_failed"
+        assert EmbeddingModel._as_failure_kind("no_embedder") == "load_failed", (
+            "the recorded kind outranks the designed-absence trace word too — "
+            "the special-case shape this replaces")
         assert EmbeddingModel._as_failure_kind("load_in_flight") == "load_failed", (
             "a cause recorded by the time the refusal is raised must be named, "
             "not replaced by the fallback")
