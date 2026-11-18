@@ -496,7 +496,11 @@ def test_the_narrative_pin_refuses_an_in_section_decoy():
 
     # 2. AND THE REAL GRADING PATH REFUSES IT — not a helper in isolation: the same
     #    `_grade_doc_text` the pin above runs is handed the mutant, so reverting arm (b)
-    #    (or any arm) to a first-match `re.search` reds THIS test.
+    #    to a first-match `re.search` reds THIS test. The OTHER six lookups are not this
+    #    mutant's business (it duplicates only the narrative line) — each has its own
+    #    duplicate, and its own case, in `test_every_anchored_arm_refuses_a_duplicate`.
+    #    ⛔ Do not read "the arms share one helper" as "this test covers them": that is
+    #    precisely the overclaim `#13458` review P2-3 returned.
     kwargs = dict(sites=sites, non_cypher=result["non_cypher_door_calls"],
                   candidates=candidates, files_with_sites=result["files_with_sites"])
     _grade_doc_text(doc_text, **kwargs)  # baseline GREEN, so step 3's red is the mutant's
