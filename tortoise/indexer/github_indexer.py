@@ -327,7 +327,7 @@ def _row_is_frozen(status, outdated) -> bool:
     ⚠️ The invariant is "the CLOSING direction has no live holder", NOT "no
     writer can clear it" — the stronger claim is false. A coherent un-supersede
     (``update_entity(obj, status='live', supersededBy=None, supersededAt=None)``,
-    admitted at ``sdk.py:54063-54072`` — the NOT MONOTONE exception, documented
+    admitted at ``sdk.py:54069-54078`` — the NOT MONOTONE exception, documented
     at ``cache_projection.py:807``) DOES clear ``superseded``, and this read
     resumes the moment it does because the answer is derived from the stored row
     and never cached. What ``_upsert_object`` guarantees is narrower and is the
@@ -359,7 +359,7 @@ def _row_is_frozen(status, outdated) -> bool:
     # refuse it at intake (`lifecycle_vocabulary.py:279-286`, reached from S0's
     # `_read_caller_status` on both the update and create paths). It is kept readable
     # because rows persist — `lifecycle_vocabulary.py:263-264` records the history
-    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:53911-53913`
+    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:53917-53919`
     # enumerates the routes from the other side (a pre-fix SDK, a raw Cypher producer, a
     # JSONL replay of either) — and this repo deliberately keeps readers wider than its
     # doors (`live.py:100-108`). ⛔ Deliberately NOT citing the individual `sdk.py` call
@@ -1342,7 +1342,7 @@ class GitHubIndexer:
         answer the POSITION, and `None` only where the position is live
         (`_row_is_frozen` — the close fold is unreachable for them, the reopen fold
         is not). "Written once and never cleared" was the earlier, WRONG summary:
-        a coherent un-supersede does clear `superseded` (`sdk.py:54063-54072`). Answering `"closed"` there was the fix's own regression:
+        a coherent un-supersede does clear `superseded` (`sdk.py:54069-54078`). Answering `"closed"` there was the fix's own regression:
         it is a SUPERSET of the fold's guard set, and a superset re-fires exactly
         as a subset does.
         """
@@ -1392,7 +1392,7 @@ class GitHubIndexer:
         # `deprecated`) on an issue that stays OPEN on GitHub: `[1, 1, 1]` before
         # this arm.
         # ⚠️ "While set", not "for ever": a coherent un-supersede DOES clear
-        # `superseded` (`sdk.py:54063-54072`; the NOT-MONOTONE bullet at
+        # `superseded` (`sdk.py:54069-54078`; the NOT-MONOTONE bullet at
         # `cache_projection.py:807`), so the earlier "permanent" wording was one claim
         # too strong. It does not weaken the answer: this read derives from the
         # STORED row, so it resumes on the write that clears the word, and until
@@ -1631,8 +1631,8 @@ class GitHubIndexer:
         # Cost, stated: the shape the bug was measured on (a falsy marker on a LIVE
         # position, the row every props door can produce — `update_knowledge(id,
         # isClosed=0)` stores the integer verbatim: `update_knowledge`
-        # (`sdk.py:22388-22563`) relays through `_update_entity_any` to
-        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54512`)
+        # (`sdk.py:22394-22569`) relays through `_update_entity_any` to
+        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54518`)
         # applies the caller's props unchanged — `isClosed` is no reserved name, so
         # nothing coerces it) then records NO transition at all: `prev_state is None`
         # gates the mint off and nothing repairs the marker, so nothing re-fires.
