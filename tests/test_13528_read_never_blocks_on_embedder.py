@@ -455,7 +455,12 @@ def test_the_required_flag_with_no_extra_reports_not_installed(
             f"``not_installed``, got {ei.value.failure_kind!r} — "
             f"``no_embedder`` is the designed-absence TRACE term and is the "
             f"statement #5275 forbids an armed refusal from making")
-        assert ei.value.context, "the refusal must be attributable without reading code"
+        # The refusal's ``context`` attribution is NOT re-pinned here: it is the
+        # same seam `tests/test_5275_required_read_path.py`
+        # (`test_required_read_path_raises_not_fts_only`) already asserts, the
+        # ``context=`` argument is pre-existing in ``_unavailable``, and no edit
+        # to THIS diff can empty it — so an assertion on it here could not vary
+        # and would be evidence for nothing (#13534 review, rule-3 note).
     finally:
         EmbeddingModel._reset()
 
