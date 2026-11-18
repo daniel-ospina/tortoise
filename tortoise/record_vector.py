@@ -974,8 +974,10 @@ def searcher(
     result it may have had. With the budget bound here the statement timeout is
     ``min(RECORD_STATEMENT_TIMEOUT_MS, record_statement_ms(timeout_ms, statements))``
     — the door's ceiling, tightened, and then DIVIDED by the count of statements
-    THIS label's arm issues — so the query is cancelled with part of the read's
-    budget still on the clock, the graph branch answers inside that remainder
+    THIS label's arm issues (``statements`` is decided in :func:`vector_search`,
+    where the folded/column split is known — not in this closure) — so the query
+    is cancelled with part of the read's budget still on the clock, the graph
+    branch answers inside that remainder
     (``run_vector_query`` pins it to ``search_engine.remaining_read_ms`` of the
     record leg's own start, #11691 review P2), and the trace records the NAMED
     fallback (``scan_fallback``) instead of a ``timeout`` with no rows.
