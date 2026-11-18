@@ -66,6 +66,7 @@ claims:
 | `test_a_workflow_prose_block_is_still_documentation` | the same fix must not call every workflow block a command | a `note: >-` body (text) inside a workflow starts voting on `on_by_default` |
 | `test_a_run_key_outside_the_workflow_surface_is_not_executed` | the executed-key rule is SCOPED to the surface that runs it | any `.yml` with a `run:` block is scanned as shell, so a config tool's own field completes a DoD row |
 | `test_a_MATCH_label_is_not_credited_as_the_writers_label` | the writer map credits the label the WRITE names | a read's `MATCH (n:Point)` resolves a writer's stored label — how a label the writer never writes can read as "covered" |
+| `test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach` | `_seam_module_calls`'s own promise that `client.encode(...)` — same attribute, a different object — is not a reach (`#13447`) | the receiver is matched by substring CONTAINMENT, so `derived_embedding_client.encode(...)` is credited as a gated reach and the writer owes no declaration (the fail-OPEN direction on the census) |
 | `test_a_refusal_with_TWO_causes_names_BOTH_of_them` | `#11337`: a refusal must not repair one cause and hide the other | a covering index with an unreadable `dimension` over a mixed-width label refuses naming only the width, so the dimension cause is silently dropped and a reader who fixes the width is refused again with new text |
 | `test_the_width_probe_report_says_the_rows_were_ENGINE_CHOSEN` | `#11337`: the probe query has no `ORDER BY`, so "the first 5" is not a property it has — asserted against the ISSUED statement, not the prose | `how` counts the sampled rows but says nothing about which rows they were, so `derived_payload_B` can move between two runs of the same graph with no explanation in the report — or the probe silently GAINS an `ORDER BY` while the report and the census doc keep asserting a bound the query no longer has |
 | `test_the_census_doc_states_the_same_probe_bound_the_report_does` | the doc must state the bound the CODE emits, not a parallel wording that agrees only with a deterministic test fake | the doc keeps claiming an order the query does not impose, or the doc and `how` drift apart with neither failing (the positive assertion is derived from the emitted fragment, so a rewording has to move both) |
@@ -14095,3 +14096,42 @@ def test_12549_a_REFUSED_resolver_is_never_published_as_having_ANSWERED(
     assert "REFUSED" not in unreadable_note, unreadable_note
     assert "UNREADABLE OUTPUT" in unreadable_note, unreadable_note
     assert "answered for THIS tree by: compose=" not in unreadable_note, unreadable_note
+
+
+def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
+    """#13447 review cycle 3, issue 7 — the seam reach is resolved by NAME.
+
+    `_seam_module_calls` decides which writers the census credits with a gated
+    reach of `encode_for_row`, and its own docstring promises that
+    `client.encode(...)` — *"same attribute, a different object"* — is **not** a
+    reach. Substring containment broke that promise: a receiver called
+    `derived_embedding_client` contains `derived_embedding`, so `.encode(...)` on it
+    was credited and the writer stopped owing a declaration. That is the FAIL-OPEN
+    direction on the instrument — the false-MET side, not the false-block one.
+
+    Non-vacuity: on the pre-fix code (`SEAM_MODULE in name`) the negative tree
+    returns `{"encode"}`, so the `== set()` assertion is the row that reds.
+    """
+    positive = ast.parse(
+        "derived_embedding.encode('Acme')\n"
+        "_derived_embedding.derive_row('Object', {})\n"
+    )
+    assert probe._seam_module_calls(positive, {}) == {"encode", "derive_row"}
+
+    # A SHORT alias resolved through the caller's own import map is still a reach —
+    # the aliased canonical name ends in the module name.
+    aliased = ast.parse("de.encode('Acme')\n")
+    assert probe._seam_module_calls(
+        aliased, {"de": "tortoise.derived_embedding"}) == {"encode"}
+
+    # …and these three are NOT: each merely CONTAINS the module name, or is a
+    # different object carrying the same attribute.
+    negative = ast.parse(
+        "derived_embedding_client.encode('Acme')\n"
+        "embeds.derived_embedding_client.derive_row('Object', {})\n"
+        "client.encode('Acme')\n"
+    )
+    assert probe._seam_module_calls(negative, {}) == set(), (
+        "a receiver that only CONTAINS the seam module's name was credited as a "
+        "gated reach of `encode_for_row` — the census then reports the writer as "
+        "covered and it owes no declaration (the fail-open direction)")

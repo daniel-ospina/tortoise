@@ -1060,8 +1060,8 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     """The gate seam reached through the :data:`SEAM_MODULE` module (#13447).
 
     Returns the matched call names (empty when the writer does not reach it). The
-    receiver is resolved through the writer's own aliases AND by name containment,
-    so `_derived_embedding.encode(...)` (a module aliased on import),
+    receiver is resolved through the writer's own aliases AND by the module's own
+    spelling, so `_derived_embedding.encode(...)` (a module aliased on import),
     `derived_embedding.encode(...)` and `de.derive_row(...)`-style spellings that
     keep the module name are the same reach, while `client.encode(...)` — same
     attribute, a different object — is not a reach at all.
@@ -1073,6 +1073,13 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     (`unresolved_write`, i.e. it owes a declaration) rather than silently credited
     — the false-BLOCK direction, chosen because the other one makes the census
     blind to a gate reach (`#12020`).
+
+    ⛔ The local spelling is matched by NAME, not by substring containment
+    (`name == SEAM_MODULE` or `name.endswith("_" + SEAM_MODULE)`): containment
+    credited `derived_embedding_client.encode(...)` — a different object with the same
+    attribute — which is exactly the reach this docstring says does not count, i.e. the
+    fail-open direction on the instrument that decides which writers owe a declaration
+    (`#13447` review cycle 3, issue 7).
     """
     import ast
 
@@ -1088,7 +1095,21 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
         if name is None:
             continue
         canonical = aliases.get(name, name)
-        if canonical.split(".")[-1] == SEAM_MODULE or SEAM_MODULE in name:
+        # ⛔ The LOCAL spelling is matched by NAME, never by substring containment
+        # (`#13447` review cycle 3, issue 7). `SEAM_MODULE in name` credited a
+        # receiver that merely CONTAINS the module name — `derived_embedding_client`,
+        # `my_derived_embedding` — as a gated reach of `encode_for_row`, contradicting
+        # this function's own promise that `client.encode(...)` (same attribute, a
+        # DIFFERENT object) is not a reach at all. That is the fail-open direction on
+        # the census that decides which writers owe a declaration.
+        #
+        # The two real spellings are the bare module name and its underscore-alias form
+        # (`derived_embedding`, `_derived_embedding`), so the test is EQUALITY or a
+        # `"_" + SEAM_MODULE` suffix — a bounded set, not an open one. Pinned by
+        # `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`.
+        if (canonical.split(".")[-1] == SEAM_MODULE
+                or name == SEAM_MODULE
+                or name.endswith("_" + SEAM_MODULE)):
             out.add(func.attr)
     return out
 
