@@ -280,10 +280,11 @@ def test_valid_status_is_journaled_against_point_and_survives_rebuild(env):
 
     ⚠️ #9649: the fixture moved from ``archived`` to ``live`` because
     ``archived`` is not a DECLARED transition from ``draft``
-    (``_ALLOWED_TRANSITIONS['draft']`` is ``{live, retracted, superseded}``;
-    ONTOLOGY §5 records ``archived`` as *"reserved — no v1 write path"*), so the
-    generic door now refuses it. The property this test owns is the LABEL the
-    record names, not the value.
+    (``_ALLOWED_TRANSITIONS['draft']`` is ``{live, deprecated, superseded}``;
+    §5's four-row table names ``deprecated``/``superseded`` as ``live``'s targets,
+    and the *"reserved — no v1 write path"* row it used to carry was deleted in
+    v3.37), so the generic door now refuses it. The property this test owns is
+    the LABEL the record names, not the value.
     """
     sdk, events = env
     pid = _multilabel_point(sdk)
