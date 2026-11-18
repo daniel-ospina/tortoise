@@ -98,7 +98,17 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # The `prod-coupled` class exactly, same shape as
     # test_cross_tenant_read_isolation.py's registry control-plane seeding. The
     # seeded id is run-unique, so nothing collides.
-    "test_12943_cache_leg.py": {"registry": "prod-coupled"},
+    "test_12943_cache_leg.py": {"registry": "prod-coupled",
+                            # #12943: `test_an_org_level_graph_name_is_SILENT_and_that_is_
+                            # DELIBERATE` constructs `_make_sdk(namespace="orgA")` and ASSERTS
+                            # `sdk._cache_graph_name() == "org_orgA"` — the SDK's
+                            # namespace→graph mapping itself, so the literal must stay
+                            # byte-for-byte (the `assertion` class, like
+                            # test_namespace_uri_mode's rows). Renaming it to `test_orgA`
+                            # would rewrite the very derivation the test pins. The DB is
+                            # `tmp_path`-bound, so the shared-graph hazard is closed by the
+                            # redirect's per-path derivation, not by a rename.
+                            "orgA": "assertion"},
     # #13110: the SAME shape as #12943 above — this module's `_seed_registry`
     # helper provisions the `:Team` node the MCP lane's quota resolution reads
     # (`_make_sdk(namespace="registry")._get_registry()`), so the literal IS the
@@ -764,6 +774,10 @@ def test_no_redirect_stems_registry_exact():
         # Mirrors config/ci-surfaces.yml `carve_out:` and
         # tests/_embedded.TEST_NO_REDIRECT_STEMS — the three-way mirror.
         "test_13417_vectorless_rows",
+        # #13447: the DB-free seam half (a lambda encodes), so it rides the URI-unset
+        # carve-out job. Mirrors config/ci-surfaces.yml `carve_out:` and
+        # tests/_embedded.TEST_NO_REDIRECT_STEMS — the three-way mirror.
+        "test_13447_derived_embedding_seam",
         "test_config",
         "test_embedded_concurrency",
         # #2879: embedded AOF durability drift pin (carve-out — the docker

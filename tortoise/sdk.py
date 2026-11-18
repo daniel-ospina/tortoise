@@ -42,6 +42,7 @@ from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any, ClassVar
 
+from . import derived_embedding
 from .domain_loader import known_kinds, register_kind
 # #9572: the "nothing was named" predicate for the identity doors, ONE home
 # shared with the hosted REST/commit doors and the eval lane (stdlib-only leaf,
@@ -16407,6 +16408,10 @@ class TortoiseSDK:
             type_, id=id_, recorded_ts=recorded_ts,
             **_journal_record_payload(event))
 
+    # ⛔ ONE ENCODE PER WRITE (#13447): the record write and the fold below both
+    # encode this row's text; the decorator binds one memo across the pair, so the
+    # second encode is free (`derived_embedding.one_encode_scope`).
+    @derived_embedding.one_encode_scope
     def _apply_and_journal(self, proj, event: dict, *,
                            journal: bool = True) -> None:
         """THE live-write door for a pre-built Object/Subject/Event record.
@@ -51791,6 +51796,14 @@ class TortoiseSDK:
 
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
+    # ⛔ ONE ENCODE PER WRITE (#13447): this door runs the record write and the
+    # fold in BOTH orders depending on the LABEL — its Object/Subject/Event blocks
+    # fold before they journal (contract exception 2's neighbour), while
+    # `DocumentCreated` journals first and folds after — so the scope spans the
+    # PAIR order-independently; either way the second encode of the same text is
+    # free (`derived_embedding.one_encode_scope`, whose docstring states the
+    # per-label rule this comment must not contradict).
+    @derived_embedding.one_encode_scope
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
                        is_episodic: bool | None = None,
