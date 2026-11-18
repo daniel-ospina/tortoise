@@ -647,7 +647,11 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                         f"{texts!r} became {got_list!r}"
                     )
                     continue
-                for raw_item, got_item in zip(texts, got_list):
+                # `strict=True`: the length equality is already guaranteed by the
+                # guard above, so a truncating `zip` would silently DROP the
+                # items (E) exists to compare — the invariant is stated instead of
+                # assumed (ruff B905, which main-lint reds on).
+                for raw_item, got_item in zip(texts, got_list, strict=True):
                     if raw_item in wholly_comment:
                         # (A) already named this item's loss; a second reason from
                         # _type_mismatch would contradict it in the same string.
