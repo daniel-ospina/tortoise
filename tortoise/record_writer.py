@@ -213,8 +213,8 @@ from enum import StrEnum
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from . import (derived_embedding as _derived_embedding, postgres_bytes,
-               record_projection, status_vocabulary)
+from . import derived_embedding as _derived_embedding
+from . import postgres_bytes, record_projection, status_vocabulary
 from .env_truthy import env_flag
 
 _logger = logging.getLogger(__name__)

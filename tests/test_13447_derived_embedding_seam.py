@@ -43,7 +43,6 @@ from tortoise.cache_projection import (
     UNSERVED_VECTOR_LABELS,
     fill_missing_row_vectors,
     node_from_row,
-    node_statement,
     record_plan,
 )
 

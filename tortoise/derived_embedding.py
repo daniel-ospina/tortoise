@@ -52,13 +52,14 @@ import contextlib
 import contextvars
 import functools
 import logging
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 __all__ = [
-    "ComposedText",
     "ROW_TEXT_PARTS",
     "TEXT_PARTS_BY_RECORD_TYPE",
+    "ComposedText",
     "compose",
     "compose_for_row",
     "derive_row",
