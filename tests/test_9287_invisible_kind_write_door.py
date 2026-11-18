@@ -273,24 +273,38 @@ class TestUpdateEntityRefuses:
         ⛔ THE GATE IS REACHED, NOT MERELY PRESENT. Both arms RELAY to ``create_point``
         (they do not re-implement it), so the positional-kind gate this file opens with is
         the one a funnel write meets — a padded kind cannot slip in by arriving at a door
-        that never gated. The closed ``type=``
+        that never gated. The RELAY is pinned by the DOOR NAME in the match (step 2):
+        the refusal message is built as ``f"{door}: {prop} must be an identifier…"`` and
+        ``pytest.raises(match=…)`` is a substring search, so a bare
+        ``"pointKind must be an identifier"`` is satisfied by a copy of the gate living
+        in the funnel under its OWN door name — the drift this docstring says the relay
+        prevents. The closed ``type=``
         set is still closed, and the unrelated ``point_kind`` PROP a caller may put on an
         Object stays accepted: that false refusal is why the gate left in cycle 3.
         """
-        assert sdk._uncalibrated_ep_participants(None) == []
         # 1. The funnel's closed set is intact — a `type=` that is no arm is refused.
         with pytest.raises(ValueError, match="unknown type"):
             sdk.create_entity("NotAKind", "Not an entity")
-        # 2. The invisible-kind gate fires THROUGH the funnel, naming the code point.
+        # 2. The invisible-kind gate fires THROUGH the funnel, naming the code point —
+        #    under ``create_point``'s door, which is what makes it THAT gate and not a
+        #    re-implementation of it one door up.
         for spelling in ("\u2003statement\u2003", "statement\u200b"):
             with pytest.raises(ValueError,
-                               match="pointKind must be an identifier"):
+                               match="create_point: pointKind must be an "
+                                     "identifier"):
                 sdk.create_entity(
                     "point", "Padded through the funnel",
                     props={"pointKind": spelling})
-        # 3. Nothing those refusals touched was minted — the fail-open detector the
-        #    module docstring opens with still answers `[]`.
-        assert sdk._uncalibrated_ep_participants(None) == []
+        # 3. Nothing those refusals touched was minted — asserted on the MUTATION
+        #    SURFACE (the node set), never on ``_uncalibrated_ep_participants``: that
+        #    detector is blind to exactly these two spellings, because neither is in
+        #    ``_KIND_WHITESPACE_CHARS`` (ASCII whitespace + NBSP) so neither is ever
+        #    demanded — the KNOWN gap this file pins at
+        #    ``test_the_out_of_family_read_path_boundary_is_pinned``. It answers ``[]``
+        #    whether or not a padded ``:Point`` exists, so it cannot see the very
+        #    regression this row is here for: move the refusals after the graph write
+        #    and step 2 stays green while a padded Point is minted.
+        assert _point_ids(sdk) == []      # nothing was minted, padded kind or not
         # 4. The write cycle 3 dropped the gate FOR still lands: a `point_kind` prop on
         #    a label the calibration gate never reads is not a Point write.
         obj = sdk.create_object(
