@@ -206,9 +206,10 @@ Run 2026-10-24 against `tests/test_record_serve.py` (53 tests, re-derived with `
   conditions of the READ LANE rather than of the record: `record-read-lane-refused`, the
   submission never ran so the record was never asked, and `record-read-bound-miss`, the
   submission ran and did not answer inside the lane's bound; the sixth is the entity
-  union's own coverage reason, `record-label-not-served` — the read FELL BACK because the
-  label is outside `ENTITY_UNION_LABELS` (#13093), which is why it is named and counted in
-  `prefer` and absent in `record`); (b) a
+  union's own coverage reason, `record-label-not-served` — while
+  `entity_coverage_complete()` is False the union cannot settle every label a bare id COULD
+  name, so a `no row` miss names the DOOR's gap rather than an absent node (#13093); that is
+  why it is named and counted in `prefer` and absent in `record`); (b) a
   role/GUC misconfiguration, which refuses **structurally** (500) in both armed
   modes instead of being counted as `record-unavailable` — an ops reason for a
   value problem.
