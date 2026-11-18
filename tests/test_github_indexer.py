@@ -1110,12 +1110,17 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     projection refuses to move the row.
 
     ⛔ Only the LATCHED word is covered here. The WIDER terms (`status='outdated'`,
-    the legacy `outdated=true` flag) are NOT frozen by the fold and take their answer
-    per DIRECTION — the POSITION where the row HAS one, the WORD where it has none,
-    enumerated once on `_object_state_to_issue_state`'s docstring. Round-4 finding 2
-    found that answering `None` for them silently dropped a reopen the projection
-    WOULD apply. That asymmetry, both directions of it, is
-    `test_an_outdated_row_answers_the_position_axis` below.
+    the legacy `outdated=true` flag) are NOT frozen by the fold: they answer from the
+    POSITION where the row HAS one — `"closed"` once that position is ENDED, `None`
+    while it is LIVE (nothing could ever close it) — and, where the row has NO
+    position, `"closed"` unless the word maps to `open`, which is withheld as `None`.
+    The cases are enumerated once, on `_object_state_to_issue_state`'s docstring;
+    ⛔ NOT "per DIRECTION — the POSITION where the row HAS one, the WORD where it has
+    none", which is one case short in BOTH halves. Round-4 finding 2 found that
+    answering `None` for them silently dropped a reopen the projection WOULD apply.
+    All three legs are `test_an_outdated_row_answers_the_position_axis` (the position
+    legs) and `test_a_POSITIONLESS_wide_term_row_answers_one_direction_only` (the
+    position-less one) below.
     """
     oid = "github-issue-acme/repo1-1"
     frozen = {
@@ -1190,15 +1195,21 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
       bypasses the live-holder requirement for a single registered incarnation — so it
       IS dispatched, and it APPLIES, because the latch is that narrower set.
 
-    So the answer is the POSITION axis where the row HAS one: `None` while the
+    So the answer is taken from the POSITION where the row HAS one: `None` while the
     position is live (nothing could ever close it), the position-derived state once
     it is ended (so the reopen the projection WOULD apply is actually minted). A
-    POSITION-LESS row is the same asymmetry one dimension down — the WORD where
-    there is no position — and is the subject of
-    `test_a_POSITIONLESS_wide_term_row_answers_one_direction_only`. Answering
-    `None` for both — the round-3 shape — made every assertion about the closed
-    direction pass while silently DROPPING that reopen: measured `[0, 0]` and the
-    row left at `done`/`terminal`/`isClosed=true`.
+    POSITION-LESS row is the same asymmetry one dimension down — and it is NOT simply
+    "the WORD": the word is answered only where it says `closed`. Where it maps to
+    `open` (`_STATUS_TO_STATE`: `in_progress`, `live`, `open`) the answer is `None`,
+    withheld, because a close against a row with no live holder re-fires for ever;
+    where it maps to NOTHING (`outdated`, or a NULL status carrying the flag) it is
+    `"closed"`, since only a reopen can be minted there and that fold applies. That
+    third leg is the subject of
+    `test_a_POSITIONLESS_wide_term_row_answers_one_direction_only` below (the
+    `status='in_progress'` + flag shape, asserted `None` against a closed issue).
+    Answering `None` for both — the round-3 shape — made every assertion about the
+    closed direction pass while silently DROPPING that reopen: measured `[0, 0]` and
+    the row left at `done`/`terminal`/`isClosed=true`.
     """
     oid = "github-issue-acme/repo1-1"
 
