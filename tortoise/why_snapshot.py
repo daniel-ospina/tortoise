@@ -136,11 +136,18 @@ def _run(proj, cypher: str, params: dict | None = None):
     exists to prevent, and for this module it would leave the push serving
     whichever blocks happened to land (#8099 review F1, the #9233 rule).
     """
-    from tortoise.projection import _cache_write_authorized, _statement_writes
+    from tortoise.projection import (
+        _cache_write_authorized,
+        _statement_writes,
+        note_live_write_target,
+    )
 
     if _statement_writes(cypher):
         with _cache_write_authorized(WHY_SNAPSHOT_WRITE_LANE):
-            return proj.g.query(cypher, params=params)
+            result = proj.g.query(cypher, params=params)
+        # #12943: a live cache write that folds no record — counted here.
+        note_live_write_target(proj)
+        return result
     return proj.g.query(cypher, params=params)
 
 

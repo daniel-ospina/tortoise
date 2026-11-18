@@ -8,7 +8,7 @@ updated: 2026-11-13
 subjects.team: epistemic-team
 issue: "#12298"
 aboutSubjects: text ranking, FalkorDB fulltext index, ParadeDB pg_search, sparse query tokenizer, capture-time noun prior
-aboutObjects: SEARCH-ARCHITECTURE.md §6.2 / measure M3, epic #12186 C2 + C3, #11901 candidate-recall instrument, STORAGE-ARCHITECTURE.md §12.1/§12.2c, #11395 KEEP ruling
+aboutObjects: "SEARCH-ARCHITECTURE.md §6.2 / measure M3, epic #12186 C2 + C3, #11901 candidate-recall instrument, STORAGE-ARCHITECTURE.md §12.1/§12.2c, #11395 KEEP ruling"
 ---
 
 # M3 — the FTS leg's recall@k in isolation

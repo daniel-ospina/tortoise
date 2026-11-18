@@ -137,7 +137,7 @@ The issue body's quantities are **not wrong — they are readings of a moving su
 | **W6a** reconciliation — divergence as a number | **`#7952`** | **S2 (the evidence), S3 (the cache it observes)** | B | W4 |
 | **W6b** the completeness marker | **`#7952`** | **S4** | B · D | W3b, W4 — trigger: **partiality** |
 | **W7** residency router | **`#7953`** | **S4, S5** | D | W6b |
-| **W8** read path — the anchored surface | **`#7970`** | **S4, S5, S9** | D | W1, W4, W6b — **deferred by §2.0; P2** |
+| **W8** read path — the anchored surface | **`#7970`** | **S4, S5, S9** | D | W1, W4, W6b — **ARMED** since the §2.0 deferral was rescinded (2026-11-18); SEQUENCED, P2 |
 | **W10** cache projection — record → hot | **`#7971`** | **S3, S9** | B | W5, W2, W3b |
 | **W9** two-store cost model | **`#7954`** | **none** (arithmetic — verified by the table reproducing, not by a layer) | G | — (parallel; blocks nothing) |
 | — `aboutObject` stored-vs-derived | **`#7956`** | **none** (informative; **not parented to `#7879`**) | — | — |

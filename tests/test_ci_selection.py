@@ -22896,6 +22896,33 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_the_write_path_cost_instrument_and_its_evidence_select_the_pin():
+    # #13436 P7 (PR #13445) review P1: `tests/test_measure_13436_write_costs.py` is
+    # `core`-registered, and its pins read the INSTRUMENT and BOTH committed artifacts —
+    # so the instrument and the evidence directory are subjects of that suite. Without
+    # the CORE_ALSO entries this was the #3261/#6388 silent-drop class, and it was
+    # MEASURED on the reviewed head rather than assumed: a diff touching only
+    # `tools/measure_13436_write_costs.py`, or only one of the JSON artifacts, gave
+    # `surfaces: []` and the pin ABSENT — `tools/` is in `NON_PYTHON_PREFIXES` and a
+    # `docs/` path takes the docs-only early return, so neither ever reaches the `core`
+    # fallback. That is the diff that can disarm the instrument (the `_content` slice,
+    # the `rows[-1]` derivation, the refusal that must exit 3) merging with every pin
+    # that catches it unrun.
+    #
+    # Mutation check: removing either CORE_ALSO entry empties `surfaces` for its subject
+    # and drops the pin from `test_files` — the first assert below is the row that reds.
+    for subject in (
+        "tools/measure_13436_write_costs.py",
+        "docs/evidence/13436-write-path-costs/write-path-costs.json",
+        "docs/evidence/13436-write-path-costs/write-path-costs-run2.json",
+        "docs/evidence/13436-write-path-costs/README.md",
+    ):
+        r = _sel([subject])
+        assert "core" in r["surfaces"], (subject, r)
+        assert "test_measure_13436_write_costs.py" in r["test_files"], (subject, r)
+        assert r["full"] is False, (subject, r)
+
+
 def test_the_cypher_census_tool_and_doc_select_the_census_suite():
     # #13098: `tests/test_13098_cypher_inventory.py` is `core`-registered, and its pins
     # compare `tools/cypher_inventory.py`'s own count against the counts PINNED IN
