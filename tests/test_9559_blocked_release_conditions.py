@@ -1746,16 +1746,20 @@ def _strip_sql_comments(sql: str) -> str:
     `E`, quote, backslash, quote, quote — spells ONE quote character and closes at its
     THIRD `'`: quote 1 opens, the escaped quote is quote 2, quote 3 closes.
     An earlier cut modelled only the `''` doubling, so it paired quote 2 with quote 3
-    as one escaped quote and left the literal OPEN to end of file — and nothing AFTER
-    that literal was processed: every comment below it survived, a `/* … */` note
+    as one escaped quote and left the literal OPEN past the closing point — the scan
+    then stayed in literal state, so the comments below it SURVIVED, a `/* … */` note
     quoting a guarded body satisfied the assertion, and the gate went GREEN over a
-    live function with no fail-closed arm. (⛔ The whole file is NOT returned: text
-    ABOVE the escaped literal is still processed, so a migration carrying its usual
-    leading `-- header` loses that header and looks stripped — measured — while every
-    comment BELOW it survives. Say it this way round, or the next lane runs a
-    migration that starts with a header, sees the strip working, and concludes this
-    bug was imaginary.)
-    Measured, on this head, with a body carrying `E'\''` before such a note:
+    live function with no fail-closed arm. ⛔ THREE qualifications, each measured,
+    because each one is how a later reader concludes the bug was imaginary: the whole
+    file is NOT returned (text ABOVE the escaped literal is still processed, so a
+    migration carrying its usual leading `-- header` loses that header and LOOKS
+    stripped), the survival below stops at the first `'` — a below-comment with an
+    ODD number of apostrophes closes the pseudo-literal and stripping RESUMES, so the
+    note under such a comment is removed — and the survival is therefore NOT "nothing
+    below is processed". What survives is the below-text whose
+    quotes pair up, which is exactly what a `/* … ->'orgs' … */` note looks like.
+    Measured on `eb233604ac` (the head that carried the defect), on a body carrying
+    `E'\''` before such a note:
     `note_survived=True`, `GUARD_IN_BODY=True`; with the `E'\''` replaced by `'x'`,
     `note_survived=False`. That is the same false PASS as the row above reached
     through the other door, so the escape is MODELLED here rather than disclosed.
@@ -1858,9 +1862,35 @@ def _strip_sql_comments(sql: str) -> str:
             continue
         if ch == "'":
             in_literal = True
-            # `E'…'` / `e'…'` — the `E` must abut the quote and start its own token
+            # `E'…'` / `e'…'` — the `E` must abut the quote and start its own token,
+            # which it does unless the preceding character CONTINUES an identifier or
+            # a number: `_`, `$`, or an alnum. ⛔ `$` is in that set because §4.1
+            # admits it in an unquoted identifier after the first character, so
+            # `a$E'…'` is ONE identifier and not an escape string — the same rule
+            # `tortoise/record_projection.py:2380` already encodes as `in "_$"`, and
+            # omitting it here stripped `SELECT a$E'\'' AS q; -- c`.
+            # ⛔ WHAT THIS TEST CANNOT SEE, stated rather than glossed: the check is a
+            # bare character test, so it also suppresses the rule after a `$` that
+            # CLOSES a `$tag$` (`$q$x$q$E'…'`) or stands alone (`$E'…'`) — where PG's
+            # lexer does start a fresh token. Which direction the resulting
+            # mis-lexing takes depends on the literal's SPELLING, and both were
+            # measured: with this file's adjacent-row spelling `E'\''` the literal never
+            # closes again and a `--` comment below it SURVIVES (over-inclusion — the
+            # server calls it a comment, the strip keeps it as data: benign); with a
+            # single escaped quote `E'a\'-- c'` the literal closes EARLY and the `--`
+            # the server would treat as data is DELETED (fail-open). Neither is
+            # reachable from VALID SQL: adjacent constants need an operator or
+            # whitespace, so the shape is a parse error; measured 0 `$E'`/`$e'` in all
+            # 88 `supabase/migrations` files and byte-identical stripped output under
+            # both set members. The shipped lexer carries the same corner BY
+            # CONSTRUCTION, which is why the model matching it is the correct side of
+            # this trade.
+            # ⛔ A closing `"` is NOT such a character: it ENDS a quoted identifier,
+            # so `"a"E'…'` starts a fresh token and the escape rule must still apply —
+            # excluding `"` here left that form blind to EOF (`SELECT "a"E'\'' AS q;
+            # -- c` kept its comment), which is this fix's own fail-open in miniature.
             escape_literal = bool(i) and sql[i - 1] in "Ee" and (
-                i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] in '_"'))
+                i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] in "_$"))
             out.append(ch)
             i += 1
             continue
@@ -2513,13 +2543,15 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
     carries the quote character as `E'\\''` closes that literal at its THIRD `'`
     (quote 1 opens, the escaped quote is quote 2, quote 3 closes). The pre-fix scan
     modelled only the `''` doubling, paired quote 2 with quote 3 as one escaped quote,
-    and stayed in literal state to END OF FILE — so `_strip_sql_comments` stopped
-    processing BELOW that point (text above it still is; a leading `-- header` is
-    removed, which is what makes the failure look like a working strip). Every comment
-    below it survived, including a `/* … */` note quoting a guarded
-    body, and the guard assertion was satisfied by the NOTE while the executed
-    function had lost the arm. Same false PASS as the row above, one spelling further
-    in.
+    and stayed in literal state past the closing point — so `_strip_sql_comments`
+    stopped processing BELOW it (text above it still is; a leading `-- header` is
+    removed, which is what makes the failure look like a working strip). The comments
+    below it then SURVIVED — up to the first `'`, which closes the pseudo-literal and
+    resumes stripping; a below-comment with an ODD number of apostrophes therefore
+    hides nothing, while the note's paired `'…'` survives — including a `/* … */` note
+    quoting a guarded body, and the guard assertion was satisfied by the NOTE while the
+    executed function had lost the arm. Same false PASS as the row above, one spelling
+    further in.
 
     ⛔ Both halves are pinned: the lexical rule, and the gate-level consequence it
     exists for — a lexer row nobody can connect to a verdict is how the rule above
@@ -2599,6 +2631,40 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
     assert _strip_sql_comments("SELECT e'\\'' AS q; -- c\n") == "SELECT e'\\'' AS q; \n", (
         "the lowercase `e'…'` spelling must escape its quote too — if only `E'` is "
         "recognised, a body written `e'\''` blinds the strip to end of file again")
+
+    # 6. The prefix test must not SUPPRESS the rule after a CLOSED quoted identifier.
+    #    A single `"` ends an identifier — it is `""` that ESCAPES one, so the two
+    #    quotes are an escaped quote and not a close (see the `"…"` row below) — so
+    #    `"a"E'…'` starts a fresh token and the escape still applies. An earlier cut
+    #    listed `"` among the characters that continue a token, which turned the rule
+    #    off for exactly that form and left `SELECT "a"E'\'' AS q; -- c` with its
+    #    comment INTACT — the E-escape fail-open restored by one set member. Measured:
+    #    with `"` in that set this row's input came back verbatim; without it the
+    #    comment is removed.
+    assert _strip_sql_comments('SELECT "a"E\'\\\'\' AS q; -- c\n') == (
+        'SELECT "a"E\'\\\'\' AS q; \n'), (
+        "a closing `\"` does not continue a token: `\"a\"E'…'` must still be read as "
+        "an escape string, or the comment after it survives")
+    # Non-vacuity, both ways round: the `E` rule is still SUPPRESSED where the `E`
+    # really is the tail of a longer word, so the assertion above cannot be satisfied
+    # by simply deleting the prefix test altogether.
+    assert _strip_sql_comments("SELECT aE'\\'' AS q; -- c\n") == (
+        "SELECT aE'\\'' AS q; -- c\n"), (
+        "`aE'…'` is an identifier tail, not an escape string — if the prefix test is "
+        "gone entirely this strips, and the row above stops discriminating")
+    # `$` CONTINUES an identifier too (§4.1), so `a$E'…'` is ONE identifier and the
+    # escape must not arm there. Pinned because omitting `$` from the set is silent:
+    # the true lexing keeps `-- c` inside a literal that never closes, so a stripping
+    # scanner has DELETED text that belongs inside an unterminated literal — a
+    # statement PostgreSQL REJECTS rather than executes (§4.1.2.1: a constant must be
+    # BOUNDED by quotes), so the loss is latent. With `standard_conforming_strings` off
+    # (§4.1.2.2) the literal closes early instead and the server discards `-- c` as a
+    # comment, so neither mode executes that text. Measured: with `== "_"` (the pre-fix
+    # set) this input came back stripped.
+    assert _strip_sql_comments("SELECT a$E'\\'' AS q; -- c\n") == (
+        "SELECT a$E'\\'' AS q; -- c\n"), (
+        "`a$E'…'` is an identifier tail, not an escape string — a `$`-blind prefix "
+        "test strips the comment that PostgreSQL keeps inside the open literal")
 
 
 def test_a_quoted_IDENTIFIER_is_not_a_literal_and_cannot_blind_the_strip():

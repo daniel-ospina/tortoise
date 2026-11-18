@@ -12369,13 +12369,13 @@ def canonical_org_graph_name(tenant: str) -> str:
 def _uri_graph_name(db_uri: str | None) -> str | None:
     """The URI's own graph name, or ``None`` for an embedded construction.
 
-    The `urlparse(...).path.lstrip("/") or "tortoise"` step had THREE verbatim
-    copies in this module (`_get_proj`, `_graph_census`'s read, and
-    `_cache_graph_name`) — and `_derive_graph_name`'s own docstring exists
-    because a caller that names a graph outside a projection must derive it
-    IDENTICALLY. A drift in this step makes a caller compare against a name the
-    projection never opens (a false mismatch, or a missed one), so it is one
-    function now, used by all three.
+    The `urlparse(...).path.lstrip("/") or "tortoise"` step was copied at two
+    sites in this module (`_get_proj`, and `check_connection`'s census read)
+    before `_cache_graph_name` became the third consumer — and
+    `_derive_graph_name`'s own docstring exists because a caller that names a
+    graph outside a projection must derive it IDENTICALLY. A drift in this step
+    makes a caller compare against a name the projection never opens (a false
+    mismatch, or a missed one), so it is one function now, used by all three.
     """
     if db_uri is None:
         return None
@@ -16225,7 +16225,29 @@ class TortoiseSDK:
         # Cheap: a name derivation that opens nothing (no projection, no
         # socket) plus one regex on the name.
         if _note_tenant_graph is not None:
-            _note_tenant_graph(cache_graph=self._cache_graph_name(),
+            # ⛔ THE DERIVATION IS INSIDE THE GUARD, not just the call: the hook
+            # cannot raise, but its ARGUMENT is evaluated first — and
+            # `_cache_graph_name` parses the URI, which raises `ValueError` on a
+            # malformed one (`docker://[::1/db`). #5148 protects the call, not
+            # the argument (review cycle 2, finding 4).
+            #
+            # ⛔ NAMED RESIDUAL (review cycle 8, P3): when the derivation raises,
+            # `cache_graph=None` reaches `cache_leg.tenant_graph_reason`, whose
+            # `if not cache_graph: return None` arm is its "no bind shape decided
+            # yet" silence — so the tenant/cache GRADE does not run and NOTHING
+            # records that it did not. That is the honest bound rather than a
+            # claim: the alternative was a 500 on a bind that otherwise
+            # succeeded, and the silence is pinned by
+            # `tests/test_12943_cache_leg.py::
+            # test_a_malformed_uri_does_not_turn_binding_a_tenant_into_a_failure`.
+            # The repair is a counter for a grade that COULD NOT RUN (which the
+            # health block would then have to publish), not a different except
+            # clause here.
+            try:
+                _cache_graph = self._cache_graph_name()
+            except Exception:  # noqa: BLE001, RUF100
+                _cache_graph = None
+            _note_tenant_graph(cache_graph=_cache_graph,
                                org_id=org_id, graph_id=graph_id)
 
     def _cache_graph_name(self) -> str:
@@ -55716,6 +55738,28 @@ class TortoiseSDK:
         Nudges are advisory only — surfaced in the write response, never
         enforced (the agent acts via create_operator + mitigate_operator, or
         create_edge, if it wants; #4282 deleted ``operator_action``).
+
+        ⚠️ **COST — MEASURED, and nothing about it is optimised (#13436 P7).** The
+        scan returns the FULL ``content`` of all 400 rows and the only product is
+        the advisory below: **12.3-13.3 ms per call at 1,000 Points AND at 5,000**
+        (the 400-row cap is constant), moving **117.1 KiB** of content, and the
+        CALLER pays **+11.1 to +12.8 ms** of a 16.8-18.8 ms ``create_entity`` (~65-68 %
+        of it). ⚠️ The two blocks are SEQUENTIAL, not interleaved. The
+        CONTENT LENGTH is a real term once the seed is realistic: 60 / 300 / 1,200
+        chars per row measured **9.1 / 12.8 / 23.4 ms** (run 1) and **10.0 / 14.6 /
+        23.4 ms** (run 2) — 20x the length costs 2.57x (run 1) / 2.35x (run 2) the call, close to linear. ⚠️ A first
+        cut of the instrument seeded a repeated character and concluded the
+        opposite; that seed holds TOKENISATION constant while varying bytes, and
+        this method scores by token overlap, so the reading was an artefact.
+        ⛔ **Do not "fix" it from this docstring**: `#13436`'s mandate is *"an
+        optimisation off an unmeasured cost is the regression path"*, so a change
+        here starts from `docs/evidence/13436-write-path-costs/README.md`
+        (instrument: `tools/measure_13436_write_costs.py`), which states what was
+        measured, what it does not decide, and who owns which half. **Ownership:**
+        the ``ingest`` half is `#11796` (a placeholder keyed on the literal word
+        ``related``, one scan PER WRITTEN POINT); the ``create_entity`` /
+        ``create_edge`` half — one scan per write, measured above — is UNOWNED,
+        and that absence is the finding.
         """
         tokens = {w for w in re.findall(r"[a-z0-9]{4,}", (text or "").lower())}
         if not tokens:
