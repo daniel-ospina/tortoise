@@ -61,6 +61,7 @@ _PI = "tortoise/projection/__init__.py"
 _SDK = "tortoise/sdk.py"
 _MCP = "tortoise/mcp_server.py"
 _RS = "tortoise/record_serve.py"
+_GJ = "tortoise/goal_judgement.py"
 
 #: (document, cite token the document must still carry, target file, 1-based line, fragment at that line)
 _PINS: tuple[tuple[str, str, str, int, str], ...] = (
@@ -113,6 +114,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6865`", _PI, 6865, '("Subject", ["name"])'),
     (_AUDIT, "`:6870`", _PI, 6870, '("Source", ["_searchText"])'),
     (_AUDIT, "record_serve.py:461", _RS, 461, "READ_POINT_BY_ID: AnchoredRead("),
+    (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3449", _SE, 3449, "``:Source``/``:Document`` row must not contribute"),
     (_SUBSTRATE, "`:3447`", _SE, 3447, "# #11682: the corpus join is PER FAMILY"),
@@ -196,6 +198,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4904'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4823`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3079-3094'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2715'): 1,
 }
 
@@ -328,7 +331,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    assert len(_PINS) == 38
+    assert len(_PINS) == 39
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
