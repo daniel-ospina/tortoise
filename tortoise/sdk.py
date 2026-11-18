@@ -4812,14 +4812,14 @@ CROSS_LENS_ANN_TOP_K = 20
 CROSS_LENS_ANN_TOP_K_MAX = 100
 
 # #432: declarative spec for the Point lifecycle — ONTOLOGY §5's transition
-# table in code, ROW FOR ROW since v3.37. A DRAFT may terminalize before it is
-# ever live (``draft -> deprecated/superseded``), and §5's `draft` row now STATES
-# those three targets, so this map is the doc's table and not a superset of it.
-# ⛔ THAT EQUALITY IS PINNED:
+# table in code. The four MODEL rows match the doc ROW FOR ROW since v3.37; the
+# three legacy keys below (``retracted``, ``outdated``, ``archived``) are READ
+# deltas whose value is ``{}`` — that emptiness is what makes a stored word
+# terminal — so the map is a SUPERSET of the table BY KEY SET and an exact match
+# on every row the table states. ⛔ THAT ROW EQUALITY IS PINNED by
 # ``tests/test_claim_lifecycle.py::test_ontology_transitions_column_matches_the_
-# guard_map`` compares every row's ``Transitions to`` cell against this map, so
-# narrowing §5's `draft` cell back to ``live`` reds a test — do not "restore" the
-# doc to a subset of the map believing the widening is code-only.
+# guard_map``, which compares every ``Transitions to`` cell against this map:
+# narrowing §5's `draft` cell to ``live`` reds it — the doc is not a subset.
 # NOT consulted by update_point per-call (update_point only promotes
 # draft→live; every claim transition is observable via a Task 3 emit hook, and
 # no transition can slip through update_point unemitted).
