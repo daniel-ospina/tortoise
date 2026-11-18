@@ -63,7 +63,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > - **§4.1 Point and §4.3 Object `status`** now declare **one closed set of four** — `draft`, `live`,
 >   `deprecated`, `superseded` — for every knowledge kind. `deprecated` is *ended, nothing replaced it*;
 >   `superseded` is *ended, a replacement is named*. **`archived` is a write-side synonym of
->   `deprecated`** (the owner's ruling of 2026-11-17): accepted on write, stored as `deprecated`.
+>   `deprecated`** (the owner's ruling of 2026-11-16, relayed on #11824 as comment `6925010125`): accepted on write, stored as `deprecated`.
 >   `retracted`, `outdated` and `archived` are **no longer lifecycle words** and survive only as read
 >   deltas over stored rows (#12855); the model grants `retracted` no write-side synonym, and §4.2's
 >   Subject guard refuses it.
