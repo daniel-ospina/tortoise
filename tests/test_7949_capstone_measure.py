@@ -7464,8 +7464,9 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
 
     ⛔ WHAT THIS ARM CANNOT DO, and CORRECTED because an earlier cut of this docstring
     claimed a presence measured on exactly ONE box (#13489 review, P1): `2584a86ec1` is
-    a REBASE ORPHAN — `git ls-remote origin` matches no ref for it — so a FRESH clone
-    does not carry it, and `git cat-file -t` there is a `fatal`. Presence of the object
+    a REBASE ORPHAN — no ref TIP equals it (`git ls-remote origin` matches none) and a
+    clone's DEFAULT refspec does not fetch `refs/pull/*`, so a FRESH clone does not carry
+    it and `git cat-file -t` there is a `fatal`. Presence of the object
     is therefore a property of the CLONE, not of the repository, and neither a `fatal`
     nor a `commit` is by itself evidence about the figure. The arm distinguishes the two:
     it reads the line when the object is present (the real check) and SKIPS with a
@@ -16291,8 +16292,7 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
 #   before: Linting: 15 files / Summary: 178 issues in 1 file
 #   after:  Linting: 15 files / Summary:   0 issues in 0 files
 #
-# So the failure mode is asymmetric and worth a pin: a 35,202-character artifact
-# row is ONE keystroke away from 178 findings, and NONE of the cite pins in this
+# So the failure mode is asymmetric and worth a pin: an artifact row this long is ONE keystroke away from 178 findings, and NONE of the cite pins in this
 # file can see it — `_pin_row_failures` scopes to a markdown LINE, so a row of
 # numbers stays satisfied however badly the row's own table structure breaks.
 # The pin is structural rather than numeric (no count, no line number): every
@@ -16388,12 +16388,13 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 def test_the_D5_row_is_still_one_table_row():
     """D5 is the row this bundle re-derives ~50 numbers on, and it is ONE line.
 
-    ⛔ THE MEASUREMENT THAT MAKES THIS A PIN RATHER THAN A NICETY: the row is
-    35,202 characters long, and every cite arm in this file is line-scoped, so
-    the row can be broken structurally — 6 cells against a 4-cell header — while
-    all 47 `_PINS` rows, the spelling loop and the `_honours` clause pin stay
-    GREEN (measured at `62611368`: `test_7949_capstone_measure.py` was green on
-    the tree whose required `docs` check carried 178 new findings).
+    ⛔ THE MEASUREMENT THAT MAKES THIS A PIN RATHER THAN A NICETY: every cite arm in
+    this file is line-scoped, so this row can be broken structurally — 6 cells against a
+    4-cell header — while all 47 `_PINS` rows, the spelling loop and the `_honours` clause
+    pin stay GREEN (measured at `62611368`: `test_7949_capstone_measure.py` was green on
+    the tree whose required `docs` check carried 178 new findings). ⛔ Its LENGTH is NOT
+    typed here: it was 35,202 characters at `62611368` and moves on every commit that
+    edits the row, so read it with `sed -n '102p' <doc> | wc -c` at the head you are on.
     """
     d5 = [
         line for line in
@@ -16405,6 +16406,7 @@ def test_the_D5_row_is_still_one_table_row():
         "moves half of it out of every line-scoped pin in this file")
     assert len(_table_cells(d5[0].strip())) == 4, (
         "the D5 row must carry the 4 cells its header declares (got "
-        f"{len(_table_cells(d5[0].strip()))}). The row is 35,202 characters of "
-        "citations; one unescaped `|` splits it and reds the REQUIRED `docs` check "
+        f"{len(_table_cells(d5[0].strip()))}). The row is tens of thousands of "
+        "characters of citations (its length is not typed — it moves with every commit "
+        "that edits the row); one unescaped `|` splits it and reds the REQUIRED `docs` check "
         "with ~178 findings (#13489). Escape a pipe in a cell as `\\|`")
