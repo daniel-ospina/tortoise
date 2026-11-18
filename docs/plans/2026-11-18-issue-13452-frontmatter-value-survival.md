@@ -112,46 +112,45 @@ merged dossier, so the mutant has to redden it.
    The precedent is the quoting *style*, not the field.
 2. Add `_values(fm)` -> `(key, kind, payload)` classifying each top-level value as `scalar`,
    `scalar_multiline`, `sequence` (a `key:` followed by `- item` lines, which may sit at column 0),
-   or `other` (block scalar / flow collection / nested mapping). Add `_expectation(raw)` ->
-   `(style, expected)`, computing the expected value **by de-quoting by hand**, never via
-   `yaml.safe_load`.
-3. In `test_research_doc_frontmatter_parses_as_yaml`, after the presence check, run the checks that
-   together leave no escape — one check is provably not enough, and rounds 1 and 3 each demonstrated a
-   distinct hole in the previous design:
+   or `other` (block scalar / flow collection / nested mapping). Add `_quoted_style(raw)` ->
+   `(style, body)` — `plain` / `double-quoted` / `single-quoted` / `broken` / `malformed` /
+   `escaped` — de-quoting by hand, never via `yaml.safe_load`, plus `_split_comment(raw)` (which only
+   splits a QUOTED value, so a quoted value may carry a trailing comment) and `_has_unescaped_dq`.
+3. In `test_research_doc_frontmatter_parses_as_yaml`, after the presence check, measure the
+   affiliation VALUE four ways — one check is provably not enough, and review found a real hole in
+   each earlier design:
 
-   - **(A) the MECHANISM on the RAW text.** `_LOST_REF = re.compile(r"(?:^|\s)#\d")` — a `#` + digit
-     at the start of the value or after whitespace, i.e. an **issue reference sitting where YAML reads
-     a comment**. A match is a truncation by construction, whatever type the prefix resolves to, so it
-     reaches the three shapes an `isinstance(value, str)` comparison provably misses: 
-     `aboutObjects: #11395, #13082` → `{'aboutObjects': None}` (100 % lost), `issue: 3615 # refs` →
-     `3615`, and a `- #11395` item → `None`. **Deliberately narrow:** a trailing `# a comment` on a
-     plain value is legal YAML that loses no affiliation, and an arm that reds on it would be the
-     over-block it exists to avoid (measured: `type: research  # a comment` stays green).
-   - **(B) value survival** for the styles where YAML performs **no legal transform** — plain
-     (expected == raw, minus any trailing comment) and simply-quoted (expected == the de-quoted body) —
-     requiring `parsed[key] == expected`. A and B run **independently**; the `break` only ends the
-     per-text loop, so on the unfixed tree (B)'s denominator is **470 with 8 mangled**, every one
-     already flagged by (A). The 462/0 pair an earlier draft reported came from a short-circuiting
-     variant that is **not** what ships.
-   - **(C) quoting integrity** — the shape (B) cannot see and R3 names: an unescaped inner `"`, an
-     unbalanced `'`, or a missing closing quote TERMINATES the scalar. Measured:
-     `"STORAGE-ARCHITECTURE.md, "#11395" KEEP"` parses to `'STORAGE-ARCHITECTURE.md, '`. A legal
-     escaped body (`\"`) is not a defect and is declined rather than reddened.
-   - **(D) no silent omission** — `declared affiliation values == measured`, minus an explicit,
-     deliberately-empty `UNMEASURED` set of `(path, key)` pairs. This is what makes "no file is
-     exempted and there is no baseline" true rather than asserted, and it is the check that catches a
-     style nobody taught the arm about: `aboutObjects: |`, `>`, `[...]`, `{...}` are classified
-     `other`, reach no comparison, and therefore **fail (D)** with a message naming both remedies.
-   - **Refused styles:** a multi-line plain value, and a sequence whose item is continued on a
-     following indented line. Both are legal YAML folding, both swallow a continuation line that opens
-     with `#` (measured: parses to `'A,'`), and neither can be verified without becoming a YAML
-     implementation — so the arm refuses them and asks for quotes. Zero instances today.
+   - **(A) the whole value is a comment.** A value whose text BEGINS with `#` resolves to `None` and
+     100 % of it is gone. **Unambiguous** — a key with a real value never becomes `None` because of a
+     comment (`null`/`~` carry no `#`) — so no digit needs to appear. Checked for **every** key and for
+     sequence items, which is what reaches `aboutObjects: #11395, #13082` → `None`, `aboutObjects: # TODO
+     decide later` → `None`, and a `- #11395` item → `None`. An `isinstance(value, str)` comparison
+     misses all three.
+   - **(B) SURVIVAL, for the affiliation keys.** The parsed value must equal the **RAW** text (plain
+     style) or the de-quoted body (quoted style). Plain is compared against RAW **because** that is what
+     makes a shortened value fail: an earlier draft stripped the comment during comparison, which made
+     the check tautological and let it claim coverage it did not have (found in code review; measured:
+     it flagged 0 of the 8). It now flags **8 of 8** on the unfixed tree, `len 82 → 48 … 141 → 57`.
+   - **(C) quoting integrity.** An unescaped inner `"`, an unbalanced `'`, or a missing close
+     TERMINATES the scalar (`"a, "#1" KEEP"` → `'a, '`). The unescaped-quote test runs **before** the
+     escape branch: an escaped body can still carry an unescaped quote, and the reverse order let that
+     truncation through green (found in code review).
+   - **(D) no silent omission.** `declared affiliation values == measured`, minus a deliberately empty
+     `UNMEASURED` set. `aboutObjects: |`, `>`, `[...]`, `{...}` reach no comparison, so they **FAIL**
+     with both remedies named. `_KV` also accepts a **whitespace-only** value, so `aboutObjects:   `
+     cannot slip past enumeration either (that was a one-keystroke bypass of (D)).
+   - **Refused styles:** a multi-line **plain** value, and a sequence item continued on a following
+     line — both legal folding, both swallow a `#`-opening continuation, neither verifiable without
+     becoming a YAML implementation. A **quoted** value is CLOSED, so an indented comment line after it
+     is not a continuation; getting that distinction backwards was measured in both directions (a
+     false red on a legal block, and a truncated continuation passing green).
 4. **Residuals, stated in the code rather than omitted:** (i) `|`/`>`/`[`/`{` affiliation values are
-   *deliberately* not compared — such text is preserved by construction — but they still FAIL (D), so
-   adopting one requires writing an explicit `UNMEASURED` entry with a reason; (ii) sequence items are
-   checked for a lost reference but not compared value-by-value; (iii) a character-level typo inside a
-   quoted value is NOT a truncation and stays green — measured (M6), and claiming otherwise would be a
-   false claim of coverage.
+   deliberately not compared — such text is preserved by construction — but they still FAIL (D), so
+   adopting one requires an explicit `UNMEASURED` entry with a reason; (ii) sequence items get (A) but
+   not a value-by-value compare; (iii) a character-level typo inside a quoted value is NOT a truncation
+   and stays green — measured (M6), and claiming otherwise would be a false claim of coverage;
+   (iv) a deliberate trailing comment on an **affiliation** value will red (M18) — fail-closed, and the
+   remedy (quote the value) genuinely clears it, unlike the shapes review found where it did not.
 5. Update the module docstring (a new check 6) and the arm's docstring to say that **survival** is
    measured and by which checks, keeping #13432's non-vacuity note intact.
 
@@ -172,41 +171,44 @@ rationale drift, or the 2 pre-existing absence reds.
 
 Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_affiliation_frontmatter.py -q`
 
-1. **Unfixed tree** (this test file run against `origin/main` content): `3 failed, 6 passed` — the
-   research arm reds on **exactly the 8** `aboutObjects` values, each carrying BOTH the lost-reference
-   message and the length pair (`90 affiliation values measured, 470 values compared`); the
-   other 2 are the pre-existing absence reds.
-2. **Fixed tree:** `2 failed, 7 passed` — and the 2 are the **pre-existing absence reds**
+1. **Unfixed tree** (this test file against `origin/main` content): `3 failed, 6 passed` — the research
+   arm reds on **exactly the 8** `aboutObjects` values, each carrying the **RAW-vs-parsed length pair**
+   (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
+   the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
+   failure output, not asserted.**
+2. **Fixed tree:** `2 failed, 7 passed` — the 2 are the pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, `docs/evidence/13038-capstone/README.md`),
-   unchanged, named, and deliberately not "fixed" here. `git diff --stat` = 9 files + 1 plan doc.
-3. **Mutant matrix — 12/12 behave as designed** (script `/tmp/matrix_13452.sh`, tree restored
-   byte-identical after each):
+   unchanged, named, and deliberately not "fixed" here. `git diff --stat` vs `main` = 9 files + 1 plan doc.
+3. **Mutant matrix — 18/18 behave as designed** (`/tmp/matrix_13452.sh`, tree restored byte-identical
+   after each; M13–M18 were added after code review):
 
    | # | mutant | expected | observed |
    |---|---|---|---|
-   | M1 | unquote the dossier's `aboutObjects` | RED (A)+(B) | RED — `len 141` → `len 57` |
+   | M1 | unquote the dossier's `aboutObjects` | RED (B) | RED — `len 141` → `len 57` |
    | M2 | `aboutObjects: #11395, #13082` (whole value a comment) | RED, **not** skipped as `None` | RED (A) |
-   | M3 | inner unescaped `"` in a quoted value | RED (C) | RED — `is a quoted value YAML cannot keep whole` |
+   | M3 | inner unescaped `"` in a quoted value | RED (C) | RED |
    | M4 | multi-line plain continuation opening with `#` | RED (refused) | RED |
    | M5 | `- #11395` sequence item | RED (A) on items | RED |
    | M6 | a typo inside a quoted value (not a truncation) | **GREEN — stated** | GREEN |
    | M7 | `aboutObjects: \|` (block scalar) | RED (D) | RED |
-   | M8 | `type: research  # a comment` (deliberate comment) | GREEN — no over-block | GREEN |
+   | M8 | `type: research  # a comment` (deliberate) | GREEN | GREEN |
    | M9 | `"Vector placement"  # short title` | GREEN | GREEN |
    | M10 | `"…, \"#11395\" KEEP"` (legal escape) | GREEN | GREEN |
    | M11 | sequence item continued on the next line | RED (refused) | RED |
    | M12 | `aboutObjects: [a, '#11395']` (flow) | RED (D) | RED |
+   | M13 | `aboutObjects: # TODO decide later` (no digits) | RED (A) | RED |
+   | M14 | `"Vector placement"  # see #13452` (affiliation, trailing comment) | GREEN | GREEN |
+   | M15 | `aboutObjects:` + trailing spaces only | RED (D) | RED |
+   | M16 | escaped body **and** an unescaped inner quote | RED (C) | RED |
+   | M17 | quoted value + indented comment line | GREEN — not a fold | GREEN |
+   | M18 | `aboutObjects: A, # section 2` (affiliation tail is a comment) | RED (B), fail-closed | RED |
 
 4. `parse_frontmatter` on the dossier returns `aboutObjects` at its full raw length.
-5. `tests/test_file_indexer.py` untouched. The 5 pins that actually OPEN these files were run on both
-   trees: the 4 git-free ones give **identical** results (`3 failed, 182 passed` either side); the 5th
-   (`test_entry_point_python_guard`) cannot be run against main content in a scratch tree because it
-   shells out to `git ls-files`, so its main-side run is **not** claimed here. On this branch its
-   contribution to the 7 is 4 named cases (`test_entry_point_guards_the_interpreter_before_its_imports`
-   and `test_guard_refuses_an_old_interpreter_and_passes_the_floor`, for
-   `tools/capstone_state_value.py` and `tools/paired_expansion_ab_2518.py`), all pre-existing; the whole
-   sibling batch is `7 failed, 784 passed, 2 skipped` with the breakdown 4 + 2
-   (`test_m3_fts_leg_recall_12298`) + 1 (`test_12184_shifted_cites`).
+5. `tests/test_file_indexer.py` untouched. The pins that actually OPEN these files were run on both
+   trees: the 4 git-free ones give **identical** results (`3 failed, 182 passed` either side). The 5th
+   (`test_entry_point_python_guard`) shells out to `git ls-files`, so it cannot run against main content
+   in a scratch tree and is **not** claimed identical here; on this branch its contribution is 4 named
+   pre-existing cases. Whole sibling batch: `7 failed, 784 passed, 2 skipped` (4 + 2 + 1 pre-existing).
 
 ## 8. Review Scope Contract
 
@@ -214,31 +216,30 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
 — declared explicitly in §3).
 
 **Risk surface** — each with the check that would catch it:
-- **R1** the assertion is **vacuously green** — it skips the blocks it means to measure, or reaches
-  only value shapes that are already correct → caught by (A) being type-blind, by (C) for the
-  quoted-mangle shape, and by **(D)**, which FAILS on any declared affiliation value that reached no
-  check at all — the mechanism that closes `aboutObjects: |` / `[...]` / `{...}` (M7, M12). Mutants
-  M1/M2/M3/M5/M7/M11/M12 red it.
-- **R2** the assertion **over-blocks** — a legitimate YAML construct reported as truncation → measured,
-  not asserted: on the unfixed tree (A) flags exactly the 8 known defects and nothing else; a
-  deliberate trailing comment (M8), a quoted value with a trailing comment (M9) and a legal escaped
-  body (M10) all stay **green**. The two styles that would genuinely over-block — multi-line folding
-  and a continued sequence item — are **refused with a message naming the fix**, and have zero
-  instances in this population.
+- **R1** the assertion is **vacuously green** — it skips what it means to measure, or reaches only
+  shapes that are already correct → (A) is type-blind and unambiguous, (C) covers the quoted mangle,
+  and **(D)** FAILS on any declared affiliation value that reached no check. Mutants
+  M1/M2/M3/M5/M7/M11/M12/M13/M15/M16/M18 red it. This is the risk that actually bit: review proved
+  **(B) was tautological** in an earlier draft (0 of 8 flagged) because the comparison stripped the
+  comment first; it now compares against RAW and flags 8 of 8.
+- **R2** the assertion **over-blocks** — a legal YAML construct reported as truncation → measured, not
+  asserted: a deliberate trailing comment (M8), a quoted value with a trailing comment (M9), a legal
+  escaped body (M10) and an indented comment line after a quoted value (M17) all stay **GREEN**. The
+  shapes that do fail closed are refused with a message naming a remedy that actually clears them.
 - **R3** quoting **truncates** a value (unescaped inner `"`, unbalanced `'`, missing close) → caught by
-  **(C)** on the raw text; M3 reds it, M10 (a legal escape) stays green. Scoped honestly: R3 covers
-  truncation-at-a-quote, NOT a character-level typo — M6 stays green and is reported as such.
+  **(C)**, which runs **before** the escape decline — the reverse order let an escaped body with an
+  unescaped quote through green (M16 now reds). Scoped honestly: truncation-at-a-quote, NOT a
+  character typo (M6 green, stated).
 - **R4** **scope creep** (the 2 absence reds or the consumer get "fixed") → identical before/after
   failure sets + `git diff --stat` naming exactly 9 modified files + 1 new plan doc.
 
-**Review budget disclosure.** PLAN-VERIFY spent its **3** cycles (the standard cap): round 1 found an
-`isinstance(str)` fail-open that skipped a 100 %-lost value; round 2 found R3 unreachable, a false "no
-block sequences in this population", and the unstated (A)→(B) ordering; round 3 found (D) inert for
-block/flow styles, three over-blocks (deliberate comments, quoted+comment, legal escapes), and an
-invisible sequence-item continuation. Every round-3 finding was verified against the primary source by
-measurement and fixed, and the fix is validated by the 12-mutant matrix — but a 4th PLAN-VERIFY round
-would exceed the cap, so the *fix to round 3's findings* is **not** covered by a 4th plan-verify
-review. The independent check on the final code is the head-bound code review at the merge gate.
+**Review budget disclosure.** PLAN-VERIFY spent its **3** cycles (the standard cap); round 1 found an
+`isinstance(str)` fail-open that skipped a 100 %-lost value, round 2 found R3 unreachable and a false
+population claim, round 3 found (D) inert for block/flow plus three over-blocks — all verified by
+measurement, fixed, and covered by the matrix. Because the cap is spent, the *diff* then went to the
+**head-bound code review**, which found two more real defects — **(B) tautological** and **(C)
+unreachable behind the escape branch** — both verified by measurement, fixed, and now covered by M1 and
+M16 / M18. The attestation for this PR is recorded at the FINAL head, after those fixes.
 
 **Out of scope — must NOT be raised** (note, file, do not chase):
 - the 2 pre-existing absence reds (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`,
