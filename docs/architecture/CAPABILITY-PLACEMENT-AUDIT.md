@@ -117,7 +117,7 @@ file — `search_engine.py` FTS
 `:3098`, walk `:4780-4784`, operator leg `:6667`, subject probe `:7025-7028` (plus its `Event` leg `:7028`, and
 `subject_binding_available()` at `:7031-7044`), label scan `:4708-4710`, HNSW
 `:4123`, label derivation `:3003`, index note `:3070`; `projection/__init__.py` `("Object", ["name"])`
-`:6869`; `sdk.py`'s second `capture_redactions` writer `:2876`; `audit.py`'s carrier probe `:2452`/`:2463`;
+`:6938`; `sdk.py`'s second `capture_redactions` writer `:2876`; `audit.py`'s carrier probe `:2452`/`:2463`;
 and `mcp_server.py`'s `entity_type` passthrough `:5529` — and the drift figure
 above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the `main` set, and an earlier
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
@@ -519,7 +519,7 @@ counter's: the read is
 | `tortoise/definite_description_backfill.py:434` | `MATCH (o:Object) OPTIONAL MATCH (o)<-[r]-() WITH o, count(r) …` — degree census | **adjacency** |
 | `tortoise/sdk.py:37030` | `MATCH (s:Subject {id:$sid})-[r]->(n)` | **adjacency** |
 | **the whole-node accessor family** — `tortoise/sdk.py:37007` (`_provenance`: `MATCH (s:Subject {id:$sid}) RETURN properties(s)`, and the walk it pairs with is **23 lines below** at `:37030`, not beside it — the subject-chain composition sits between them), `tortoise/onboarding/seed.py:259` (the same read, from the seeder) and the label-generic `tortoise/record_reconcile.py:533` (`MATCH (n:{label}) RETURN properties(n)`, which reads `:Object`/`:Subject` too) | the **whole node**, handed back as a dict — the class §2.1 gives its own row, and §2's rule (stated in §2.3 for `:Event`) makes it this table's obligation too | **none** |
-| `tortoise/search_engine.py:3098` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no **product** caller passes the literal `'subject'` (test modules do — `tests/test_search_engine_gaps.py:1395`, `:1559`, `tests/test_integration_search.py`) — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5089`, `:5529`, `:8034`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6934` and `("Object", ["name"])` at `:6869` | **fulltext index** |
+| `tortoise/search_engine.py:3098` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no **product** caller passes the literal `'subject'` (test modules do — `tests/test_search_engine_gaps.py:1395`, `:1559`, `tests/test_integration_search.py`) — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5089`, `:5529`, `:8034`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6934` and `("Object", ["name"])` at `:6938` | **fulltext index** |
 
 `:Tag` belongs on this row too, and an earlier draft got it **wrong** by calling it bookkeeping: every tag
 read resolves the node **through the edge** — `sdk.py:28069`

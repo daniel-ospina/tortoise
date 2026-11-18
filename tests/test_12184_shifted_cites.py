@@ -112,6 +112,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6923-6939`", _PI, 6923, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6933`", _PI, 6933, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6934`", _PI, 6934, '("Subject", ["name"])'),
+    # ⛔ The Object half of the SAME declaration had NO row, and that absence is ISSUE 1 of the
+    # `#13489` review: `:6869` was left 69 lines short while its three siblings (`:6923-6939`,
+    # `:6933`, `:6934`, `:6939`) moved — and `:6869` opens on `"pointKind",`, an unrelated
+    # property list, so the cite read exactly like a correct one. An absent pin is not coverage.
+    (_AUDIT, "`:6938`", _PI, 6938, '("Object", ["name"])'),
     (_AUDIT, "`:6939`", _PI, 6939, '("Source", ["_searchText"])'),
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
@@ -211,6 +216,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6923-6939`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6933`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6934`'): 1,
+    # 2, not 1: `#13363`'s header amendment names the Object declaration a SECOND time (the
+    # enumeration at `:120` beside §2.5's row), so both sites are load-bearing.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6939`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
@@ -377,7 +385,9 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    assert len(_PINS) == 46
+    # 47: `#13489`'s review added the `:6938` row (`("Object", ["name"])`, the §2.5 address that
+    # had NO pin at all, which is how `:6869` stayed 69 lines behind its three siblings).
+    assert len(_PINS) == 47
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
@@ -468,9 +478,14 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     Two arms, because the defect was two-sided:
 
-    * CONTENT — each of the eight carries, at `main` (the working tree: this branch is docs-only, so
-      `main`'s `.py` files are this tree's), the fragment the document quotes for it. `_PINS` reaches
-      five of them; `:2433`, `:2490` and `projection/entities.py:5646` were in NO pin before this one.
+    * CONTENT — each of the eight carries, **on this branch's tree** (the tree this test reads),
+      the fragment the document quotes for it. `_PINS` reaches five of them; `:2433`, `:2490` and
+      `projection/entities.py:5646` were in NO pin before this one. ⛔ The earlier form of this
+      bullet justified the same rows as "at `main` (the working tree: this branch is docs-only, so
+      `main`'s `.py` files are this tree's)" — that was true when it was written and is FALSE for
+      the rows `#13363` re-derived: `sdk.py` moved `+22` and `hosted_api.py` `+6`/`+18`, so those
+      rows carry THIS tree's figures, not `main`'s. A row here is a claim about `REPO / path`, never
+      about `main`'s copy of it — the same thing `_MAIN_SET_MISSED`'s own comment says.
     * CLAIM — the header still NAMES them, and no longer states the three absolutes the review measured
       false, nor the "pin-written remainder" label whose denominator contradicted it.
 
