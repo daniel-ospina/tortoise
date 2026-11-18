@@ -55,7 +55,12 @@ exists to prevent — a number that no longer reproduces against the tree it nam
 see any of them — named rather than line-numbered, because this PR's own insertions above it moved
 the line: `missing = [key for key in REQUIRED_KEYS if key not in parsed]` asks whether four keys are
 **present**, and `REQUIRED_KEYS` does not even contain the two fields that carry the affiliation
-to other entities.
+to other entities. The number it used to carry was correct when written and rotted TWICE under it —
+`:643` where the comprehension sat at `34df19504d`, `659` at `10a3d694`, `666` from `fcf5d9cd72` on
+(measured per head). ⛔ No guard can catch that: `test_docs_citation_refs.py`'s `_PATH_REF` is
+`(docs/[A-Za-z0-9_./-]+\.md):(\d+)`, so a `tests/….py:NNN` pointer is never resolved and never
+reds (the widening is #11573, open). A name is therefore the one form that cannot go stale — the
+rule §9's discrimination paragraph already states for this test file, applied here as well.
 
 **Falsification check:** if a value-survival assertion does not redden when one `aboutObjects`
 value is reverted from quoted to unquoted plain, the design is wrong and the arm is a rubber stamp
@@ -657,7 +662,7 @@ exist on `main` — so the exclusion is about ownership, not severity.
   end-to-end. For THAT shape (`'a'x'`) alone, what the fix would leave is a HELPER-LEVEL comparing
   verdict on parser-refused input — the latent class those four rows already carry — not a fail-open.
   ⛔ That does NOT generalise, and an earlier revision of this bullet stated it as though it did: on
-  the canonical truncation shape `"a, "#1" KEEP"`, which YAML ACCEPTS (reading `a, `), the slice
+  the canonical truncation shape `"a, "#1" KEEP"`, which YAML ACCEPTS (reading `'a, '`), the slice
   moves `('broken', None)` → `('double-quoted', 'a, ')` — a COMPARING verdict whose body equals what
   PyYAML reads — so the PARSE arm never refuses it and the arm goes GREEN end-to-end (measured at
   `6cea462fd4`: driving `test_research_doc_frontmatter_parses_as_yaml` over a tmp tree holding that
