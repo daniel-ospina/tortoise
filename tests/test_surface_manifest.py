@@ -5332,16 +5332,20 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # `record_decision`; `update_knowledge` already had one) and FOUR doors were retired
     # (`supersede` -> `supersede_knowledge`, `update_entity` -> `update_knowledge`,
     # `file_decision` -> `write_question`, `file_human_approval` -> `record_decision`).
-    # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
-    # approved targets still ABSENT from the live class (see the 23 the declaration gate
-    # prints), so naming them as delivered here was false.
+    # ⛔ `adjust_relationship` and `refresh_confidence` were approved targets still ABSENT
+    # here; #11609 P3 implemented them along with the other nine, so this comment no longer
+    # describes the tree (see the P3 line below).
     # 110 -> 94 on 2026-11-16 (#12901 wave 2): the canonical control-plane partition
     # (`N1`–`N6`) left the PUBLIC surface — sixteen members, every body privatised as the
     # seam its hosted caller now uses — so the live set shrank again without touching the
     # approved 40 (none of the sixteen was an approved row). 110 is this tree's BEFORE:
     # the wave branched before #12951's READ/QUERY containers, so its own "118 -> 102"
     # never saw that wave's -8. The manifest under test is the one re-cut HERE.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 94
+    # 94 -> 105 on 2026-11-18 by #11609 P3 (#12901's SDK leg): the eleven approved names
+    # that had no `def` were implemented. The LIVE count rises, which no earlier line in
+    # this comment chain does — every other move was a removal. The off-surface 66 does not
+    # move: an implemented approved name is not surplus (105 − 39 approved-and-live = 66).
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 105
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():
@@ -5375,17 +5379,45 @@ def test_the_compliance_check_is_RED_on_todays_gap(capsys):
     # arithmetic (#4185 review finding).
     assert (targets["mcp"], targets["sdk"]) == (27, 40), (
         "#3540 ruling B added the consolidated source-management tool: 26 -> 27")
-    assert (live["mcp"], live["sdk"]) != (27, 40), (
+    assert (live["mcp"], live["sdk_declared"]) != (27, 40), (
         "the gap has closed — update this test's premise (it exists to pin the RED)"
     )
     rc = tc.main(["surface-target-check.py"])
     out = capsys.readouterr().out
     assert rc == 1, out
     assert f"{targets['mcp']} MCP tools / {targets['sdk']} SDK methods" in out, out
-    assert f"{live['mcp']} MCP tools / {live['sdk']} SDK methods" in out, out
+    # The SDK leg's printed count is the DECLARED-resolving axis (#11609): 40 of 40 — GREEN
+    # on that leg, while the MCP leg keeps this run RED. Both are asserted, because a
+    # compliance check that went green here would be the false PASS the #10034 fix guards.
+    assert f"{live['mcp']} MCP tools / {live['sdk_declared']} SDK methods" in out, out
+    assert live["sdk_declared"] == targets["sdk"], (
+        "the SDK leg is no longer the RED one — if it regressed, this test hides it"
+    )
     assert f"Δ {live['mcp'] - targets['mcp']:+d}" in out, out
-    assert f"Δ {live['sdk'] - targets['sdk']:+d}" in out, out
+    assert f"Δ {live['sdk_declared'] - targets['sdk']:+d}" in out, out
     assert "OVER TARGET" in out, out
+
+
+def _live_stub(mcp: int, sdk: int) -> dict:
+    """A `live_surface()` result stub carrying EVERY key the tool now reads.
+
+    Two axes, deliberately separate (#11609): `sdk_declared` is the COMPLIANCE count
+    (declared names that resolve — what the verdict compares to the target), while `sdk`
+    and `sdk_public_methods` are the `dir()`-shaped public-method count kept as the
+    reported fallback. A stub carrying only one of them would make these tests exercise a
+    shape the real instrument never returns.
+    """
+    return {
+        "mcp": mcp,
+        "sdk": sdk,
+        "sdk_declared": sdk,
+        "sdk_public_methods": sdk,
+        "sdk_resolved": [f"m{i}" for i in range(sdk)],
+        "sdk_unresolved": [],
+        "declared": [f"m{i}" for i in range(sdk)],
+        "tools": [],
+        "sdk_methods": [],
+    }
 
 
 def test_a_surface_UNDER_the_target_is_labelled_UNDER_not_OVER(monkeypatch, capsys):
@@ -5398,7 +5430,7 @@ def test_a_surface_UNDER_the_target_is_labelled_UNDER_not_OVER(monkeypatch, caps
     monkeypatch.setattr(
         tc,
         "live_surface",
-        lambda: {"mcp": 20, "sdk": 30, "tools": [], "sdk_methods": []},
+        lambda *_a, **_kw: _live_stub(mcp=20, sdk=30),
     )
     rc = tc.main(["surface-target-check.py"])
     out = capsys.readouterr().out
@@ -5418,7 +5450,7 @@ def test_the_compliance_check_is_GREEN_when_the_live_surface_equals_the_target(
     monkeypatch.setattr(
         tc,
         "live_surface",
-        lambda: {"mcp": 27, "sdk": 40, "tools": [], "sdk_methods": []},
+        lambda *_a, **_kw: _live_stub(mcp=27, sdk=40),
     )
     rc = tc.main(["surface-target-check.py"])
     out = capsys.readouterr().out
