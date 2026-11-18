@@ -1158,8 +1158,8 @@ while the fleet's own capacity sat idle — measured at the owner's 2026-11-18 d
 **151 runs queued, 8 in progress, 21 self-hosted runners online with only 3 busy**, so 18 pool
 runners were idle while the hosted pool backed up. Neither is a required context
 (`docs/ci/required-contexts.json`'s `required_contexts` lists all seven, and neither job is among
-them; `redis-guard.yml`'s own header records the same), so the departure is scoped exactly like the
-#10237 canary above: a pin whose red costs a WAIT and a re-run, never a required leg.
+them; `redis-guard.yml`'s own header records the same), so the departure is scoped exactly like
+the #10237 canary above: a pin whose red costs a WAIT and a re-run, never a required leg.
 
 What it costs, stated rather than inherited: **a WAIT with no hosted half.** A pool-only pin has no
 degraded mode — while the pool is down or the label is detached, `closes-coherence` never advises on
