@@ -2704,8 +2704,9 @@ surfaces:
   # prefix answers ALL surfaces with `full: True`: measured on `foo/bar.py`) — and
   # therefore proves nothing about the real module; three review rounds reproduced
   # this comment's citation that way.
-  # MEASURED on the real path: `tools/ci_selection.py --changed-files
-  # tools/bridge_table.py` -> `surfaces=['api']`, `full=False`, with
+  # MEASURED **with this PR's `api` row removed** — i.e. the hole the `api` row
+  # closes, so re-running it at head shows the pin PRESENT: `tools/ci_selection.py
+  # --changed-files tools/bridge_table.py` -> `surfaces=['api']`, `full=False`, with
   # `test_bridge_table.py` selected and this file NOT — `tools/bridge_table.py` is a
   # `SOURCE_PATTERNS["api"]` entry and is absent from `CORE_ALSO`, so `core` alone
   # is a hole for the one edit path S1's sufficiency edge depends on. That is what

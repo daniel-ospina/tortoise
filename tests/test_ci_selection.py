@@ -3676,8 +3676,9 @@ def test_a_bridge_table_only_diff_runs_the_structural_blocker_pin():
     `tests/test_11609_structural_blockers.py`'s S1-sufficiency arm reads
     `tools/bridge_table.py`'s `DESTINATION` map. `tools/bridge_table.py` is a
     `SOURCE_PATTERNS["api"]` entry and is absent from `CORE_ALSO`, so a
-    bridge_table-only diff selects `api` and DROPS `core` — measured: the selected
-    set was `['api']` with this pin absent, so a PR re-pointing a door in the very
+    bridge_table-only diff selects `api` and DROPS `core` — measured **before the
+    dual row this change adds**: the selected set was `['api']` with this pin
+    absent, so a PR re-pointing a door in the very
     map the pin reads ran neither leg that carries it. A `core`-only registration
     was coverage theatre for that path; the registration is now dual (the same
     pattern as `test_bridge_table.py`, whose guards have the same exposure).

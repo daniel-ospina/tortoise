@@ -191,7 +191,7 @@ $ rg -n 'FastAPIRouterAdapter' --glob '!.venv/*' .
 ./tests/test_tool_registry.py:818:        adapter = FastAPIRouterAdapter(router)
 ```
 
-(Excerpt: the full run also prints 11 `docs/…` hits, none of which is code.)
+(Excerpt: the full run also prints 12 `docs/…` hits, none of which is code.)
 
 The only **instantiation** is in a test (`tests/test_tool_registry.py:818`); the product has
 a comment and the class definition, and nothing else. And `tortoise/hosted_api.py` does not import
