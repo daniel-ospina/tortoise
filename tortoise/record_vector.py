@@ -829,6 +829,7 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
         node_from_row,
         read_lifecycle_events,
     )
+    from .live import is_position_ended
     from .search_engine import _status_vocab_for
 
     label = entity_type.capitalize()
@@ -887,13 +888,41 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
     excluded = (frozenset() if excluded_statuses == ()
                 else frozenset(excluded_statuses or vocabulary))
 
+    # ⛔ THE CAGE IS TWO AXES, NOT THE STATUS WORD ALONE (`#13034`, design §6).
+    # Both graph dense branches cage with `search_engine._exclude_status_clause`,
+    # which delegates to `live._terminal_excluded` — and that predicate excludes a
+    # row whose STATUS word is terminal **and** a row the POSITION axis records as
+    # ended (`isClosed`, or a `terminal` pipeline slot). Its own docstring forbids
+    # a reader opting out of the position axis: "a reader may therefore pick its
+    # vocabulary and its flag conjunct; it may not opt out of the position axis".
+    #
+    # A status-only cage here therefore SERVES an `:Object` ended only by
+    # `isClosed` (`status` absent or `live`, the flag set) that the graph leg
+    # HIDES — the `#689` fail-OPEN direction, silently, and it reads as better
+    # recall. The connector/pack stage fold writes that marker, and
+    # `apply_event_stream_folds` above has ALREADY put both props on `node.props`
+    # (`pipeline.stage_move_props` is the one spelling of `STAGE_PROPS`), so the
+    # datum is here and `public.object` needing no `is_closed` column is not a gap.
+    # It also inflated `available`, so the shortfall assertion was measured against
+    # an uncaged population.
+    #
+    # ⚠️ `excluded` empty is the caller's TERMINAL-ROWS-IN opt-in, and the graph
+    # honours it by emitting NO clause at all (`_exclude_status_clause` returns ""
+    # for a falsy vocabulary, taking the position axis with it) — so the whole cage
+    # is gated on it, not just the status test.
     keys: list[str] = []
     available = 0
     for node in folded:
-        status = node.props.get("status")
-        if isinstance(status, str) and status in excluded:
-            keys.append(node.key)
-            continue
+        if excluded:
+            status = node.props.get("status")
+            if isinstance(status, str) and status in excluded:
+                keys.append(node.key)
+                continue
+            if is_position_ended(
+                    is_closed=node.props.get("isClosed"),
+                    stage_slot=node.props.get("pipelineSlot")):
+                keys.append(node.key)
+                continue
         if has_vector.get(node.key):
             available += 1
     return keys, available
@@ -1232,7 +1261,12 @@ def vector_search(
                     # than take a silent `scan`, and it gets only the remainder of
                     # the read (`#11691`). A TRUNCATED fold is not an option — the
                     # terminal keys it dropped are rows this leg would SERVE.
-                    logging.getLogger(LOG_NAME).warning(
+                    # ⚠️ `info`, matching the record-leg fallbacks in
+                    # `search_engine.run_vector_query` (`info`/`debug` for the same
+                    # event). A tenant permanently past the budget would otherwise
+                    # emit one WARNING per `object`/`subject` dense read, for ever —
+                    # a bounded decline is a designed answer, not an incident.
+                    logging.getLogger(LOG_NAME).info(
                         "the record's `%s` fold prefetch is over its row/event "
                         "budget, so this read declines to the graph branch (a "
                         "bound, not a degradation)", entity_type)
@@ -1247,7 +1281,7 @@ def vector_search(
                     # NAME the fallback (#4999) and hand the graph only the
                     # remainder of the read (#11691). See
                     # `RecordVectorDeclined`.
-                    logging.getLogger(LOG_NAME).warning(
+                    logging.getLogger(LOG_NAME).info(
                         "the record's fold calls %d `%s` keys terminal — over "
                         "the %d-key bind budget, so this read declines to the "
                         "graph branch (a bound, not a degradation)",

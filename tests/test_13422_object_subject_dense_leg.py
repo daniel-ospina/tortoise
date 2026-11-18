@@ -681,13 +681,17 @@ def test_the_prefetch_does_not_select_the_payload_columns():
         assert named == expected, (sorted(expected - named), sorted(named - expected))
 # ── 6. the prefetch's PYTHON half is bounded, and the decline is NAMED ────
 
-def _drive_fold(monkeypatch, rows):
+def _drive_fold(monkeypatch, rows, excluded_statuses=None):
     """Run `_folded_terminal_keys` over REALISTIC rows and return what it built.
 
     `id` and `name` are DIFFERENT in these rows on purpose — see
     `test_the_fold_appends_the_LEGS_id_and_not_the_name`. The projection double
     mirrors what `node_from_row` really does: the key comes from
     `KEY_PROPERTY` (`id`) and the rest becomes `props`.
+
+    `excluded_statuses` is threaded through because ``()`` is not "the default" —
+    it is the caller's terminal-rows-IN opt-in, and the cage's two axes are gated
+    on it together (see `test_the_audit_opt_in_drops_the_POSITION_axis_too`).
     """
     import tortoise.cache_projection as cp
 
@@ -709,7 +713,73 @@ def _drive_fold(monkeypatch, rows):
 
     return record_vector._folded_terminal_keys(
         object(), _NoopCursor(),
-        record_vector._Scope(org_id="org", graph_id="graph"), "object", None)
+        record_vector._Scope(org_id="org", graph_id="graph"), "object",
+        excluded_statuses)
+
+
+def test_an_object_ended_only_by_the_POSITION_axis_is_not_served(monkeypatch):
+    """⛔ THE CAGE IS TWO AXES (`#13034`, design §6), NOT THE STATUS WORD ALONE.
+
+    Both graph dense branches cage with `search_engine._exclude_status_clause` →
+    `live._terminal_excluded`, which excludes a row whose STATUS word is terminal
+    **and** a row the POSITION axis records as ended: `isClosed`, or a stage in
+    the `terminal` slot. `_terminal_excluded`'s own docstring forbids a reader
+    opting out of the position axis. The connector/pack stage fold writes that
+    marker, and `apply_event_stream_folds` has already put both props on
+    `node.props` — so a row ended ONLY by the position axis (`status` absent or
+    `live`, flag set) is HIDDEN by the graph leg and was SERVED by this one: the
+    `#689` fail-OPEN direction, silently, and it read as better recall. It also
+    inflated `available`, so the shortfall assertion was measured against an
+    uncaged population.
+
+    RED on the status-only cage: `keys == []` for the two ended rows. The live
+    row is asserted PRESENT and COUNTED on purpose (the vacuity guard every other
+    terminal case in this file carries): a fold that excluded everything, or one
+    that counted nothing, cannot pass this row.
+    """
+    keys, available = _drive_fold(monkeypatch, [
+        # ended by `isClosed` alone — the connector/pack stage fold's marker
+        {"id": "obj-closed", "name": "closedco", "status": None,
+         "isClosed": True, "has_embedding_vec": True},
+        # ended by a TERMINAL SLOT alone (the marker was never written)
+        {"id": "obj-term-slot", "name": "slotco", "status": "live",
+         "pipelineSlot": "terminal", "has_embedding_vec": True},
+        # live on BOTH axes — must be SERVED and COUNTED (the vacuity guard)
+        {"id": "obj-live", "name": "liveco", "status": "live",
+         "isClosed": False, "pipelineSlot": "active",
+         "has_embedding_vec": True},
+    ])
+    assert keys == ["obj-closed", "obj-term-slot"], (
+        "a row the POSITION axis records as ended must join the fold's exclusion "
+        f"set, exactly as the graph leg's `_terminal_excluded` hides it; got {keys} "
+        "— a status-only cage SERVES what #689 hides, with no error")
+    assert available == 1, (
+        "`available` is the population the SHORTFALL assertion counts, so it must "
+        f"drop the position-ended rows too; got {available}")
+
+
+def test_the_audit_opt_in_drops_the_POSITION_axis_too(monkeypatch):
+    """``excluded_statuses == ()`` is the caller's TERMINAL-ROWS-IN opt-in.
+
+    The graph honours it by emitting NO clause at all — `_exclude_status_clause`
+    returns the empty string for a falsy vocabulary — and that takes the position
+    axis with it, because the whole clause is the one predicate. A record leg that
+    dropped only the status half would disagree with the graph about the same
+    request, which is the second way the two legs can serve different answers.
+
+    RED if the position-axis test is applied unconditionally.
+    """
+    keys, available = _drive_fold(monkeypatch, [
+        {"id": "obj-closed", "name": "closedco", "status": None,
+         "isClosed": True, "has_embedding_vec": True},
+        {"id": "obj-archived", "name": "acme-2", "status": "archived",
+         "has_embedding_vec": True},
+    ], excluded_statuses=())
+    assert keys == [], (
+        "the audit opt-in asks for TERMINAL ROWS IN, so neither axis may exclude "
+        f"— the graph emits no clause at all; got {keys}")
+    assert available == 2, (
+        f"both rows are served under the opt-in; got available={available}")
 
 
 def test_the_fold_appends_the_LEGS_id_and_not_the_name(monkeypatch):

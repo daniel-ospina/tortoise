@@ -449,6 +449,7 @@ def test_the_recency_key_is_the_CASE_not_a_bare_coalesce(schema, point_rows):
 # scope another test could write.
 _SEQ_OBJECT_ARCHIVED = 900101
 _SEQ_SUBJECT_RETRACTED = 900102
+_SEQ_OBJECT_POSITION_ENDED = 900103
 
 
 def _seed_semantic(conn, label, key, *, embedding, superseded_by=None):
@@ -493,6 +494,27 @@ def _seed_restatus(conn, *, seq, label, node_id, status):
             "INSERT INTO public.journal_event "
             "(org_id, graph_id, seq, event_type, payload) "
             "VALUES (%s, %s, %s, 'EntityMutated', %s::jsonb) "
+            "ON CONFLICT DO NOTHING",
+            (ORG, GRAPH, seq, payload))
+
+
+def _seed_stage_fold(conn, *, seq, object_name, event_kind):
+    """The POSITION axis's carrier: a connector event the journal fold replays.
+
+    `github.issue.closed` is a `BUILTIN_CONNECTOR_FOLDS` key mapping to the
+    connector pipeline's `done` stage, whose slot is terminal — so the fold writes
+    `isClosed: true` (and `pipelineSlot: done`) onto the named Object, exactly as
+    a live stage advance does. The event names its Object by NAME (`object`), the
+    connector leg's own coordinate; `event_type` stays `EventRecorded` because
+    that is the row `read_lifecycle_events` admits for a fold event — the KIND
+    lives in the payload.
+    """
+    payload = json.dumps({"eventKind": event_kind, "object": object_name})
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.journal_event "
+            "(org_id, graph_id, seq, event_type, payload) "
+            "VALUES (%s, %s, %s, 'EventRecorded', %s::jsonb) "
             "ON CONFLICT DO NOTHING",
             (ORG, GRAPH, seq, payload))
 
@@ -586,6 +608,44 @@ def test_a_retracted_subject_is_excluded_by_the_records_journal_fold(tenant):
     opt_in = _search_vec("subject", hot=5, limit=10, excluded_statuses=())
     assert sorted(row[0] for row in opt_in) == [
         "s_13422_retr", "s_13422_retr_live"], opt_in
+
+
+def test_an_object_ended_only_by_the_POSITION_axis_is_excluded(tenant):
+    """⛔ THE CAGE IS TWO AXES (`#13034`, design §6) — THIS LEG CAGED ONE.
+
+    `live._terminal_excluded` — the predicate BOTH graph dense branches cage with
+    — excludes a row whose STATUS word is terminal **and** a row the POSITION axis
+    records as ended (`isClosed`, or a `terminal` pipeline slot). Its docstring
+    forbids a reader opting out of the position axis. An `:Object` closed by a
+    connector stage fold carries `status` ABSENT (or `live`) with `isClosed` set,
+    so a status-only cage HIDES it on the graph leg and SERVED it here: the `#689`
+    fail-OPEN direction, silently, and it read as better recall. Both rows below
+    are equally near, so an uncaged leg returns both and the assertion is what
+    distinguishes them.
+
+    ⛔ THE MARKER IS NOT A COLUMN: `public.object` has no `is_closed`, and the
+    value reaches `node.props` through the journal fold — `github.issue.closed`
+    folds to the connector pipeline's `done` stage (`BUILTIN_CONNECTOR_FOLDS`),
+    whose slot is terminal, so `apply_stage_fold` writes `isClosed: true`.
+    """
+    _seed_semantic(tenant, "Object", "o_13422_closed", embedding=_vec(7))
+    _seed_semantic(tenant, "Object", "o_13422_closed_live", embedding=_vec(7))
+    _seed_stage_fold(tenant, seq=_SEQ_OBJECT_POSITION_ENDED,
+                     object_name="o_13422_closed",
+                     event_kind="github.issue.closed")
+
+    rows = _search_vec("object", hot=7, limit=10)
+    assert [row[0] for row in rows] == ["o_13422_closed_live"], (
+        "an Object ended ONLY by the POSITION axis (`isClosed`, status absent) "
+        "was served by the record leg — the graph leg hides it, so this is the "
+        f"#689 fail-open reported as better recall ({rows})")
+    # ⛔ THE VACUITY GUARD, as in the archived/retracted cases: the excluded row
+    # must be PROVABLY there and ANN-visible, or "it was not returned" proves
+    # nothing. With the audit opt-in BOTH come back, so the default read's single
+    # row is the CAGE's doing and not a missing/tiny row.
+    opt_in = _search_vec("object", hot=7, limit=10, excluded_statuses=())
+    assert sorted(row[0] for row in opt_in) == [
+        "o_13422_closed", "o_13422_closed_live"], opt_in
 
 
 def test_the_audit_opt_in_returns_terminal_rows_on_the_record_leg(tenant):
