@@ -8,7 +8,7 @@ product's payloads as its evidence — never this lane's summary of them.
 | run | product | reader | scoreboard |
 |---|---|---|---|
 | **before** | `bf3a7b8e77bf` (the parent commit, worktree unmodified) | fresh, 81.0 s | **3 right · 3 wrong** — Q1, Q5, Q6 wrong |
-| **after** | `c8ecf9b37e6f` (#13302's commit) | fresh, 84.5 s | **5 right · 1 wrong** — Q1 wrong |
+| **after** | `9843916417d2` (#13302's code, after the review-round fixes) | fresh, 79.0 s | **5 right · 1 wrong** — Q1 wrong |
 
 **Q5** (*"what was planned and never happened?"*) and **Q6** (*"has anything we relied on been
 withdrawn?"*) flip to `right`. **Q1–Q4 do not regress**: Q2–Q4 stay `right`, and Q1 stays `wrong`
@@ -19,7 +19,7 @@ commitment unless the caller guesses its name — which is a different issue and
 
 - `run-after.json` / `scoreboard-after.md` — **one complete run** end to end:
   `bash docs/evidence/13038-capstone/rerun.sh --judge fresh --out <scratch> --verdicts-out <file>`
-  at `c8ecf9b37e6f`. Its header carries that run's own durations (110.2 s ingest + ask, 84.5 s
+  at `9843916417d2`. Its header carries that run's own durations (109.6 s ingest + ask, 79.0 s
   reader).
 - `run-before.json` / `scoreboard-before.md` — the ingest + ask half was produced by the SAME
   command against the unmodified tree at `bf3a7b8e77bf`; that run's own reader was refused by this

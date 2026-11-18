@@ -1,39 +1,39 @@
 {
   "_provenance": {
-    "packet": "/private/tmp/capstone-13302-final/judge-packet.json",
+    "packet": "/private/tmp/capstone-13302-final3/judge-packet.json",
     "reader": "fresh",
-    "elapsed_s": 84.5,
+    "elapsed_s": 79.0,
     "reason": "",
     "note": "Written by this instrument. `--verdicts <this file>` re-scores the same packet without spawning a reader."
   },
   "Q1": {
     "verdict": "wrong",
-    "because": "It serves Q4 pricing ($39) and the uptime target but omits the pending 12 December launch plan, which the narrative counts as a current commitment, so the 'what we are committed to' set is incomplete.",
-    "cause": "Plans vocabulary / S0-S7 slice: the plan object (core:plan) is not returned by an object-scope 'current commitments' search (0 rows, vector leg no_embedder, fts empty), so the only served items are points."
+    "because": "The served answer lists only Q4 pricing and the Q4 uptime statement and omits the 12 December launch plan entirely, so the customer is not told a live current commitment exists.",
+    "cause": "Degraded retrieval: the vector leg is dead (no_embedder) and the lexical-only object search for 'current commitments' returned 0 rows, so the live core:plan never surfaced."
   },
   "Q2": {
     "verdict": "right",
-    "because": "It serves the launch as a core:plan node with stage 'scheduled', isClosed=false and no occurrence event anywhere in the graph, so plan and fact are told apart.",
+    "because": "The product serves the launch plan node with stage 'scheduled', isClosed=false, no occurrence event, and the only events in the graph are uptime readings \u2014 so a plan is shown as planned, not as having happened.",
     "cause": null
   },
   "Q3": {
     "verdict": "right",
-    "because": "The served rows name Q4 pricing ($39) as the replacement, carry supersedes=[Q3 id] and a live successor node, and invent no rationale.",
+    "because": "Q3 pricing ($29/seat) is shown as superseded and Q4 pricing ($39/seat) is served as live with supersedes pointing at the Q3 id and text 'replacing the Q3 decision', naming the successor without inventing a rationale.",
     "cause": null
   },
   "Q4": {
     "verdict": "right",
-    "because": "It reports unmet with the basis given as the 99.72% November reading measured against the >=99.9 target (comparison false), not a bare status word.",
+    "because": "The judgement is 'unmet' with the basis served explicitly: reading 99.72 percent at 2026-11-15 against the >= 99.9 threshold, comparison false, backed by the stored measurement event.",
     "cause": null
   },
   "Q5": {
     "verdict": "right",
-    "because": "The ended scope serves the Thursday partner call \u2014 6 November as a closed plan with terminal stage 'cancelled', while the still-pending December launch is not reported as never happened.",
+    "because": "The ended-scope read serves the Thursday partner call \u2014 6 November with stage 'cancelled', slot 'terminal', isClosed=true and no linked events \u2014 so it is reported as a plan that ended without occurring, not as current or upcoming.",
     "cause": null
   },
   "Q6": {
     "verdict": "right",
-    "because": "The retracted beach-club confirmation is excluded from default scope and served with status 'retracted' when terminal scope is included, so it both stops counting and can be reported as withdrawn.",
+    "because": "The retracted beach club claim is stopped from counting in the default scope and is served with status 'retracted' (node read plus ended listing), so the product can say the confirmation was withdrawn.",
     "cause": null
   }
 }
