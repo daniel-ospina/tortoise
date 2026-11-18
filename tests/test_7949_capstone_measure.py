@@ -6158,14 +6158,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # one FILE and the consume pair was re-pointed in one document while the
         # definition stayed wrong in both.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
-            ("6834", "def subject_binding_available(graph) -> bool:"),
+            ("7031", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
             ("12077", "subject_binding_available,"),
             ("12130", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("6834", "def subject_binding_available(graph) -> bool:"),
+            ("7031", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
@@ -6284,11 +6284,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
         # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
         # pointer to a row that no longer exists). Measured at THIS head, not copied: `@app.post("/v1/sessions")` is
-        # `:18987` and `@app.post("/v1/sessions/install-probe")` is `:21542` — the pair the row
+        # `:19503` and `@app.post("/v1/sessions/install-probe")` is `:22058` — the pair the row
         # below pins, each the file's ONLY occurrence of its needle. (Prose here had `:18854`/`:21409`, `#12947`'s head.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("19481", ("exact", '@app.post("/v1/sessions")')),
-            ("22036", '@app.post("/v1/sessions/install-probe")'),
+            ("19503", ("exact", '@app.post("/v1/sessions")')),
+            ("22058", '@app.post("/v1/sessions/install-probe")'),
         ), "hosted_api"),
         # ⛔ The four repairs `#12587` round 2 made, each given the reader it lacked.
         # Every one was measured UNPINNED first (revert -> 776 passed), which is the
@@ -6298,7 +6298,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # LINE as the cite (`_pin_row_failures` scopes to one line, not a paragraph),
         # so it is the clause after the number, not the heading above it.
         ("00-plan.md", 'returns `"v2"` **unless**', (
-            ("19618", "def _capture_lane() -> str:"),
+            ("19640", "def _capture_lane() -> str:"),
         ), "hosted_api"),
         ("00-plan.md", "**default-ON**: `TORTOISE_S4_DELTA`", (
             ("1174", 'env_flag("TORTOISE_S4_DELTA", True)'),
@@ -6379,16 +6379,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
         # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
-        # form occurs at THREE lines (`:10576`, `:19473`, `:19535`) — and the bare
-        # call occurs once too (`:10158` is `return quota_refusal_payload(`), at four
-        # lines in all: a `(document, pin)` pair moved together onto `:19535` — the
-        # `CohortCostCapExceeded` arm (`except` at `:19515`), the WRONG refusal — would
+        # form occurs at THREE lines (`:11118`, `:20232`, `:20272`) — and the bare
+        # call occurs once too (`:10700` is `return quota_refusal_payload(`), at four
+        # lines in all: a `(document, pin)` pair moved together onto `:20272` — the
+        # `CohortCostCapExceeded` arm (`except` at `:20252`), the WRONG refusal — would
         # satisfy the bare anchor and stay green on it.
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
-            ("20185", "if count + est > max_points:"),
-            ("20210", "quota_refusal_payload(QuotaExceededError("),
+            ("20207", "if count + est > max_points:"),
+            ("20232", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
         # re-states `hosted_api.py:19589` (`19558` when this note was written, the same guard read at an older head), so it is
@@ -6398,7 +6398,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-head number is pinned: the `:18205` beside it is a STAMP read at
         # `a577d0e25c` and does NOT resolve here, so pinning it would red a true record.
         ("03-test-design.md", "`:82`'s `hosted_api.py:", (
-            ("20185", "if count + est > max_points:"),
+            ("20207", "if count + est > max_points:"),
         ), "hosted_api"),
         # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review). The row whose
         # SUBJECT is that line numbers rot carried NINE this-head cites and no reader at
@@ -6406,8 +6406,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # is unique in the file. The first cut pinned only three of the nine, and review measured the
         # residual by mutating the rest — the rest of the file GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `9d790287af`", (
-            ("20078", "``body.harness`` only ever introduces a harness on a session the server"),
-            ("20185", "if count + est > max_points:"),
+            ("20100", "``body.harness`` only ever introduces a harness on a session the server"),
+            ("20207", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("12050", "_registry_cache = PackRegistry(packs_dir)"),
@@ -6493,7 +6493,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ABOVE it, and a phrase that binds the wrong line is the failure `_pin_row_failures`
         # reports rather than hides).
         ("00-plan.md", "returns `\"v2\"`", (
-            ("19618", "def _capture_lane() -> str:"),
+            ("19640", "def _capture_lane() -> str:"),
         ), "hosted_api"),
         # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3, P2): re-pointed to
         # `:14465-14542` and unread, so both endpoints could move silently. Only the START
@@ -6533,30 +6533,31 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # than assumed from one bumped number — and ⛔ RE-DERIVED ONCE MORE at the rebase onto
         # `main` @ `b8f56fdec4`, where the three offsets STILL hold at the new START, so the
         # START is again confirmed by structure rather than by a bumped number:
-        # ⛔ RE-DERIVED AGAIN at the `#13102` merge of `origin/main` `b8f56fdec4` (13 main
+        # ⛔ RE-DERIVED AGAIN at the forward merge of `origin/main` `0774035055` (this merge):
+        # `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split) inserts 22 lines above
+        # `org_info`, so the span start is now 15224 and the END — the blank line before
+        # `return OrgInfoResponse(` — is 15301 (the call itself is `:15280`). The three offsets
+        # (+29 `nodes_used`, +39 `max_nodes`, +77 END) still hold EXACTLY at the new START, which
+        # is how the figures below were re-derived rather than nudged: `grep -n
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15224`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15231` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15241` (inside it), and `:15301` is
+        # the blank line immediately before `return OrgInfoResponse(` at `:15280`.
+        #
+        # The `#13102` merge of `origin/main` `b8f56fdec4` (13 main
         # commits past `97fd713ffb`, which had already moved the span to 14896-14973): the span
-        # start is 15180 at the `#13102` merge and the END — the blank line before
-        # `return OrgInfoResponse(` — was 15257 (the call itself `:15258`). ⛔ RE-MEASURED AT THE
-        # MERGE OF `origin/main` `31bddb1dd9` INTO THIS BRANCH: both endpoints had moved by a
-        # uniform +22, so the START is now 15202 and the END 15279 (`return OrgInfoResponse(`
-        # is `:15280`) — the doc row was stale on `main` BEFORE this lane touched it, which is
-        # why the mutation cases below all reported "the only failure was a stale TABLE ROW".
-        # The three offsets (+29 `nodes_used`, +39
-        # `max_nodes`, +77 END) still hold EXACTLY at the new START, which is how the figures
-        # below were re-derived rather than nudged. Measured on the merged tree, and re-measured
+        # start was 15180 and the END — the blank line before `return OrgInfoResponse(` — was
+        # 15257 (the call itself is `:15258`). The three offsets (+29 `nodes_used`, +39
+        # `max_nodes`, +77 END) held EXACTLY at that START too, which is how those figures
+        # were re-derived rather than nudged. Measured on the merged tree, and re-measured
         # again after the merge resolved — the two sides of the conflict printed the SAME three
         # figures, which is what made keeping them a verification rather than a side-pick:
-        # ⛔ RE-DERIVED at #13248's merge of `origin/main` `31bddb1dd9` — MEASURED, never nudged,
-        # and the three offsets this comment tracks (+29 `nodes_used`, +39 `max_nodes`, +77 END)
-        # still hold EXACTLY at the new START (`:15202`; `nodes_used` `:15231`, `max_nodes`
-        # `:15241`, END `:15279` = the blank line before `return OrgInfoResponse(` at `:15280`).
-        # The greps that re-derived them, so the next lane re-measures instead of trusting this:
-        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15202`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15231` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15241` (inside it), and `:15279` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:15280`.
+        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15180`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15209` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
+        # the blank line immediately before `return OrgInfoResponse(` at `:15258`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
-            ("15202", "point_count = await asyncio.to_thread("),
+            ("15224", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
         # ⛔ `:1186` IS NOT PINNED BY A ROW *ALONE*, and the reason is measured rather than
         # stylistic: it is stated TWICE on ONE doc line ("is STAMP-bound (`:1186` is the
@@ -6683,7 +6684,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15202-15279`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:15224-15301`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
@@ -6691,27 +6692,27 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # true for any end at or beyond `:15241` (both needles are the file's only occurrences —
     # `:15231` and `:15241` — so a later end cannot change the sum). Ends below `:15241` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15202`-`:15240` gives a non-empty window that lacks at least the second needle,
-    # and an end below `:15202` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15224`-`:15240` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15224` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
-    assert _i7.count("`hosted_api.py:15202-15279`") == 1, (
+    assert _i7.count("`hosted_api.py:15224-15301`") == 1, (
         "04-plan.md I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
         "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
     _org_info = _EPIC_CITE_SOURCES["hosted_api"].read_text(encoding="utf-8").splitlines()
-    _span = _org_info[15202 - 1:15279]
+    _span = _org_info[15224 - 1:15301]
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
         assert sum(_needle in _l for _l in _span) == 1, (
-            f"04-plan.md I7 says `:15202-15279` publishes `nodes_used` / `max_nodes`, but "
+            f"04-plan.md I7 says `:15224-15301` publishes `nodes_used` / `max_nodes`, but "
             f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
             "range has moved, so re-derive it (start AND end) rather than bumping one end")
     # …and the END by structure, because membership inside a window cannot see it move.
-    _i7_end_ok = _org_info[15279 - 1].strip() == "" and bool(
-        _org_info[15279].lstrip().startswith("return OrgInfoResponse("))
+    _i7_end_ok = _org_info[15301 - 1].strip() == "" and bool(
+        _org_info[15301].lstrip().startswith("return OrgInfoResponse("))
     assert _i7_end_ok, (
-        "04-plan.md I7's range end (`:15279`) is no longer the blank line before "
+        "04-plan.md I7's range end (`:15301`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
 

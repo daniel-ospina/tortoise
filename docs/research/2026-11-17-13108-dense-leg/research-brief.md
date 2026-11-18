@@ -79,9 +79,9 @@ without reading the source.
    The claim that matters is the CODE one, and it is verifiable at `sdk.py`: the encode call
    precedes the chain, so its cost is charged to the caller's thread, not to the leg's budget.
 2. **It is submitted and runs out of budget.** Two budgets, both 500 ms by default: the
-   per-leg driver timeout (`timeout_ms: int = VECTOR_LEG_BUDGET_MS` = 500, `search_engine.py:3566`;
-   `:2868` is `run_fts_query`'s — the LEXICAL leg's — and `runner_timeout` in `degradation_chain`
-   is defined at `:4939`, not `:4773`, which is a comment line about `#4210`/`#3019`;
+   per-leg driver timeout (`timeout_ms: int = VECTOR_LEG_BUDGET_MS` = 500, `search_engine.py:3586`;
+   `:2886` is `run_fts_query`'s — the LEXICAL leg's — and `runner_timeout` in `degradation_chain`
+   is defined at `:5136`, not `:4970`, which is a comment line about `#4210`/`#3019`;
    `#13121` round 8 F4) and the collector's
    `as_completed(timeout=0.5)`. A leg **still not done at the post-deadline rescan** is
    recorded `reason="timeout", ran=True, degraded=True` (`#8450`, `#6851`).

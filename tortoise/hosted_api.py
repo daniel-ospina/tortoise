@@ -7914,11 +7914,11 @@ def _record_health() -> dict:
     Never raises and never 5xxes — a health path must always answer.
     """
     try:
-        from tortoise import record_writer
         # #12943 (reopened): the live-write TARGET registry lives in
         # `cache_leg` (it is a bounded per-process map, not a Prometheus
         # counter — a per-graph label would be unbounded cardinality), so it is
         # imported with the counters and read in the SAME snapshot.
+        from tortoise import record_writer
         from tortoise.cache_leg import cache_write_targets as _cache_targets
         from tortoise.monitoring import (
             cache_leg_failure_counts,
@@ -14402,16 +14402,38 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     unprojectable row, a tenancy that bypasses RLS: retrying repairs none of
     them, so `prefer` does not treat them as "still incomplete".
 
-    ⚠️ **A credential with NO RECORD TENANT is a third case, and it is not a
-    misconfiguration.** Session and JWT credentials resolve no record tenant by
-    design, so in `record` mode that is a **500** (there is no cache branch to
+    ⚠️ **A read whose org has no NAMEABLE `kind='default'` row is a third case,
+    and it is not a misconfiguration.** ⛔ NOT a credential class: since #10046 an
+    API key (#10025), a SESSION/JWT credential and an OAuth `oat_` token all name
+    that row through `supabase_control.default_graph_id_for_credential`, so what
+    this case means is that the row could not be NAMED — absent, tombstoned,
+    another org's, unreadable — or this is a deployment with no control plane.
+    (The paragraph below says the same; an earlier revision of this one still
+    attributed it to the credential's shape, which sent the reader away from the
+    repair.) In `record` mode that is a **500** (there is no cache branch to
     fall back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
-    `record-tenant-unresolved`, the third of the FIVE reasons
-    (`record_serve.FALLBACK_REASONS`). The remaining two are conditions of the
-    READ LANE, not of the record: `record-read-lane-refused` (the submission
+    `record-tenant-unresolved`, the third of the SIX reasons
+    (`record_serve.FALLBACK_REASONS`). The remaining three: two are conditions of
+    the READ LANE, not of the record — `record-read-lane-refused` (the submission
     never ran, so the record was never asked) and `record-read-bound-miss` (the
     submission RAN and did not answer inside the lane's bound — asked, not
-    unasked, and not an outage claim either).
+    unasked, and not an outage claim either) — and the sixth,
+    `record-label-not-served`, is the ENTITY union's coverage reason (#13093):
+    the fallback NAMES a coverage problem; coverage does not cause the fallback —
+    any `props is None` in `prefer` falls back, and coverage only picks which of
+    the two names it gets. ⛔ And coverage is a TWO-FACT conjunction, so no single
+    repair clears it: every label a bare id can NAME must be SERVED at parity
+    (`record_serve.ENTITY_UNION_JURISDICTION` is the resolver's five labels and
+    this union serves three of them; `Event` AND `Source` are the two it does not,
+    both for want of parity — #9721), AND none of those five may sit in
+    `record_serve.ENTITY_UNION_ADDRESS_RESIDUALS` (`Source` does: the record keys
+    it `url`, so a bare id does not address it — #13351, a residual that is not
+    itself a parity gap but sits on top of one). Nor is the name chosen per label:
+    `serve_entity`'s `_miss_reason()` is handed NO label and branches on
+    `entity_coverage_complete()` alone, so a miss on a label that IS served names
+    this same reason. It is not reachable from THIS route, which is why the count
+    above is over the vocabulary rather than over the reasons a point read can
+    name.
 
     ⚠️ A record-served answer carries the record's PRIMARY field set, and the
     differences from the cache answer are named here in full. `content_hash` is
@@ -50636,7 +50658,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 190 tracked files (726 distinct
+# ABSOLUTE line number from 189 tracked files (723 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
