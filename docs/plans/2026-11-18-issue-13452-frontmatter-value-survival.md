@@ -556,7 +556,7 @@ support, which is out of this issue's scope.
 finding, and neither is an escape: in `test_research_doc_frontmatter_parses_as_yaml` the
 `assert measured` / `assert compared` pair runs BEFORE `assert not failures`, so a tree the guard
 samples sparsely reds on *"measured no affiliation value at all — re-point this guard"* — advice
-that points at the guard instead of at the value; and `_values`' SCALAR branch `continue`s on
+that points at the guard instead of at the value; and that same test's SCALAR branch `continue`s on
 `escaped` before it reaches `compared += 1`, so a tree whose affiliated values are all escaped
 leaves the counter legitimately empty and fires the same message, as does the SEQUENCE branch's
 same `assert measured` / `compared` pair. (Cited BY NAME, not by line — this document's own rule
@@ -587,9 +587,14 @@ it printed was itself the class this PR removes: the arm said *"the value is TER
 remove the inner quote"* when `yaml.safe_load` reads the value whole, so a reader was told to delete
 a legal inner quote. That half needed no lexer change and is now FIXED: `_unkeepable_quoted` splits
 the diagnosis by VERDICT, so `malformed` names the shapes that actually clear it (one space before
-the `#`; the whole value on one line inside its quotes; a block scalar) while only `broken` — where
+the `#`; the whole value on one line inside its quotes) while only `broken` — where
 YAML really does stop at an inner quote — keeps the deletion advice, and
-`test_a_malformed_value_names_a_true_remedy` pins both halves. Clearing the VERDICT means
+`test_a_malformed_value_names_a_true_remedy` pins both halves. ⛔ NEITHER message offers *"use a
+block scalar"*, which an earlier revision of both did: `_values` classifies `|`/`>` as
+`kind == "other"` and (D) records `measured` only for `kind != "other"`, so a block scalar reaches
+NO check and reds *"NOT measured by ANY check — quote the value"* — the same false-remedy class
+this PR removes, now pinned by an `assert "block scalar" not in msg` in both arms. See
+`_unkeepable_quoted`'s docstring. Clearing the VERDICT means
 teaching the arm to accept a non-space-separated trailing comment after a close — a lexer widening,
 out of this issue's scope, and unchanged by the remedy fix.
 Measured scale, so it is not read as larger than it is. ⚠️ The differential below was run by the
