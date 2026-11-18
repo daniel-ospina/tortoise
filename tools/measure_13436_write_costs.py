@@ -89,6 +89,7 @@ import argparse
 import json
 import os
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -184,6 +185,37 @@ def _loadavg() -> list[float] | str:
         return [round(x, 2) for x in os.getloadavg()]
     except OSError:  # pragma: no cover - platform without loadavg
         return "unavailable"
+
+
+
+def _git(argv: list[str]) -> str:
+    """One `git` read in the repo this file lives in; "<unknown>" if it cannot run.
+
+    Deliberately not silent: the artifact must not read as a pinned tree when the
+    read failed, so an absent answer is the literal string, never an empty one.
+    """
+    try:
+        out = subprocess.run(
+            ["git", *argv], cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "<unknown>"
+    if out.returncode != 0:
+        return "<unknown>"
+    return out.stdout.strip()
+
+
+def _git_dirty_paths() -> list[str]:
+    """Tracked paths modified/dirty in the tree being measured (untracked excluded).
+
+    Untracked files are excluded on purpose: the artifacts themselves are untracked
+    on the run that writes them, so including them would make every run "dirty".
+    """
+    out = _git(["status", "--porcelain", "--untracked-files=no"])
+    if out in ("", "<unknown>"):
+        return [] if out == "" else ["<unknown>"]
+    return sorted(line[3:].strip() for line in out.splitlines() if line.strip())
 
 
 def _engine_version(proj) -> str:
@@ -574,6 +606,16 @@ def main(argv: list[str] | None = None) -> int:
             "loadavg_at_start": _loadavg(),
             "python": sys.version.split()[0],
             "db_uri_env": os.environ.get("TORTOISE_DB_URI", "<unset>"),
+            # ⛔ THE TREE THIS MEASURED, recorded because a provenance claim a
+            # reader cannot check is how one artifact came to describe a head its
+            # own numbers were not taken at (#13436 review cycle 3, P1). A dirty
+            # tree is named rather than hidden: `git_dirty` lists the paths, and
+            # a run whose measured paths are modified is only as good as that
+            # list says.
+            "git_head": _git(["rev-parse", "HEAD"]),
+            "git_head_short": _git(["rev-parse", "--short", "HEAD"]),
+            "git_branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
+            "git_dirty": _git_dirty_paths(),
         },
         "arms": {},
     }
