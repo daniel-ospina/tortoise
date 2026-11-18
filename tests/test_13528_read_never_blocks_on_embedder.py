@@ -334,9 +334,12 @@ def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
     decline and the raise that carries it, and ``_last_failure_kind`` then holds
     the operator's real answer. The earlier shape special-cased ``no_embedder``
     and returned the ``model_unavailable`` fallback for everything else, so that
-    recorded cause was discarded. No read-path row can reach this state (the arm
-    that answers ``load_in_flight`` requires no recorded failure), so it is pinned
-    at the seam.
+    recorded cause was discarded. No cold-window ROW in this suite reaches that
+    state (each leaves nothing recorded), but the READ PATH does: a failure older
+    than ``_FAIL_COOLDOWN_S`` leaves ``load_in_flight`` on the trace with a
+    recorded kind, and ``_as_failure_kind`` then reports that kind. It is pinned
+    at the seam because no fixture reproduces that staleness — not because the
+    arm is unreachable.
     """
     EmbeddingModel._reset()
     try:

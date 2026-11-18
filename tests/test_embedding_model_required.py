@@ -191,10 +191,16 @@ def test_every_recorded_failure_kind_is_in_the_declared_vocabulary():
     class one level down (#13534 review round 2, B).
 
     ⛔ DERIVED, not re-typed. The producers are found by PARSING
-    ``tortoise/embeddings.py`` for ``<x>._last_failure_kind = "<literal>"``
+    ``tortoise/embeddings.py`` for ``<x>._last_failure_kind = <value>``
     assignments, so adding a fifth kind at a producer reds here rather than
     needing this test to have been remembered — the drift class ``MEMORY.md``
     records under ``[vocab]`` (two hand copies never catch their SHARED drift).
+
+    ⛔ AND A NON-LITERAL PRODUCER IS REFUSED, not skipped: a check that compares
+    only ``ast.Constant`` values would leave a producer assigned from a module
+    constant — the likely refactor once ``FAILURE_KINDS`` exists — unmeasured,
+    reporting the vocabulary as pinned while an armed refusal silently degraded
+    it (#13534 review round 3, A and B).
     """
     import ast
     from pathlib import Path
@@ -203,14 +209,32 @@ def test_every_recorded_failure_kind_is_in_the_declared_vocabulary():
     tree = ast.parse(source.read_text(encoding="utf-8"))
 
     def _records_kind(target: ast.expr) -> bool:
-        return isinstance(target, ast.Attribute) and target.attr == "_last_failure_kind"
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == "_last_failure_kind"
+        )
 
+    assignments = [
+        node for node in ast.walk(tree)
+        if (isinstance(node, ast.Assign) and any(_records_kind(t) for t in node.targets))
+        or (isinstance(node, ast.AnnAssign) and _records_kind(node.target))
+    ]
+    assert assignments, (
+        "the AST scan found no ``_last_failure_kind`` assignments — the producer "
+        "pattern moved, so this pin is no longer measuring anything")
+    non_literal = [
+        node for node in assignments
+        if getattr(node, "value", None) is None
+        or not isinstance(node.value, ast.Constant)
+    ]
+    assert not non_literal, (
+        "a producer assigns ``_last_failure_kind`` a value this pin cannot compare "
+        f"against FAILURE_KINDS (lines {[n.lineno for n in non_literal]}) — inline "
+        "the literal, or widen this pin; an unmeasurable producer reports the "
+        "vocabulary as pinned while an armed refusal degrades it silently")
     recorded = {
-        node.value.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
-        and any(_records_kind(t) for t in node.targets)
+        node.value.value for node in assignments
+        if isinstance(node.value.value, str)
     }
     assert recorded, (
         "the AST scan found no recorded kind literals — the producer pattern "

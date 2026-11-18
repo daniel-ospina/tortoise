@@ -1337,7 +1337,9 @@ class EmbeddingModel:
         longer). The one difference is the return vocabulary: a read publishes
         its decline on the LEG TRACE next to the terms that already live there,
         so this returns a leg-trace reason (``absent_reason``'s terms, plus
-        ``load_in_flight`` for the state that has recorded no failure yet) rather
+        ``load_in_flight`` for a load still in flight or just re-armed — a
+        failure older than ``_FAIL_COOLDOWN_S`` can be recorded alongside it,
+        which is why :meth:`_as_failure_kind` lets that recorded kind win) rather
         than the write path's private decline tokens. ⛔ That vocabulary is NOT
         ``EmbedderUnavailableError.failure_kind``: the refusal translates it at
         the single exit (:meth:`_as_failure_kind`), so an ARMED process gets the

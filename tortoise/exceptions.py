@@ -348,7 +348,9 @@ class PropagationCensusRefused(RuntimeError):
 #: translates trace reasons into it (``EmbeddingModel._as_failure_kind``) must not
 #: each carry a hand copy — the drift class ``MEMORY.md`` records under ``[vocab]``.
 #: ``tests/test_embedding_model_required.py`` derives the producer set from the AST
-#: and asserts it is a subset, so a new kind cannot appear unnoticed.
+#: and asserts it is a subset — a producer value written as a plain string literal
+#: cannot appear unnoticed, and a producer value that is NOT a literal is itself
+#: refused (the pin reds rather than silently measuring nothing).
 FAILURE_KINDS = frozenset(
     {"not_installed", "load_failed", "load_timeout", "model_unavailable"})
 
