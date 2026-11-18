@@ -48,7 +48,11 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from tortoise import mcp_server as ms
-from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter
+from tortoise.tool_registry import (
+    RETIRED_TOOL_REGISTRY,
+    TOOL_REGISTRY,
+    FastAPIRouterAdapter,
+)
 
 #: The eight doors `PROTECTED` holds for the #8482 array-envelope reason.
 ENVELOPE_DOORS = (
@@ -235,7 +239,12 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     a union is the sound minimal shape until this helper carries one. Neither arm alone invents
     or loses a site: the union is a strict superset of both, so no wiring either reading found
     can go unreported — EXCEPT that a name a block on the call's chain BINDS is answered by that
-    block alone (unioning it would re-admit the very shadow Python says wins).
+    block alone (unioning it would re-admit the very shadow Python says wins), and EXCEPT a
+    DESTRUCTURING target, where the reading that preceded this PR ignored the target entirely
+    and therefore kept a binding the assignment overwrites: `A, b = object, A` … `A(app)` is not
+    a site here and WAS one there, because `A` is `object`. That is a false BLOCK `main` emits
+    and this head does not — measured, and pinned so the element-wise reading cannot decay back
+    into "ignore the target".
 
     ⛔ EVERY BINDING IS REPLAYED INTO THE BLOCK THAT OWNS IT, AND A CALL IS RESOLVED THROUGH THE
     WHOLE CHAIN (`#13585 review` P3). A FLAT replay cannot say which block a binding belongs to,
@@ -476,9 +485,16 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         does not rebind `a` — CPython's execution model §4.2.1).
 
         So recurse over the BINDING shapes — `Name`, the elements of `Tuple`/`List`, and
-        `Starred` — and answer `[]` for `Attribute`/`Subscript`. Both consumers
-        (`_note_binding`, `_apply_assignment`) share this one function, so the fix lands in
-        both and they cannot drift apart.
+        `Starred` — and answer `[]` for `Attribute`/`Subscript`.
+
+        ⛔ THE TWO CALLERS NO LONGER SHARE THIS ONE FUNCTION (`#13585` P2, the value-side fix).
+        `_note_binding` (the block-locality pass) asks this function WHICH NAMES a target
+        binds; `_apply_assignment` asks `_binding_pairs` WHICH VALUE each name is bound to. The
+        shapes therefore differ in exactly one place, deliberately: this function answers the
+        names INSIDE a `Starred` (block locality needs them), while `_binding_pairs` skips a
+        starred target ELEMENT because its middle slice has no static value. So a binding shape
+        added here does NOT reach `_apply_assignment` — extend `_binding_pairs` with it, or the
+        value side silently stops pairing.
         """
         if isinstance(target, ast.Name):
             return [target.id]
@@ -487,6 +503,59 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         if isinstance(target, ast.Starred):
             return _target_names(target.value)
         return []
+
+    def _binding_pairs(target: ast.AST, value: ast.AST | None) -> list[tuple[str, ast.AST | None]]:
+        """Each name a target BINDS, paired with the VALUE it is bound to where that is static.
+
+        ⛔ THE VALUE SIDE OF THE SAME FIX (`#13585` P2, measured after the store fix). A
+        DESTRUCTURING assignment binds element by element — `A, b = A, object` binds `A` to the
+        adapter — but `_dotted` answers only a dotted EXPRESSION, so a `Tuple` value was `None`
+        and every name in the target was recorded `SHADOWED`. That lost the alias, so
+        `A, b = A, object` … `A(app)` reported `[]` at the head while `main` — which skipped
+        every non-`Name` target and therefore never dropped the import binding — reported the
+        site. Same false PASS as the store arm, one level down: the pin's headline claim goes
+        green over a module that really wires the adapter.
+
+        So pair a destructuring target with a destructuring value whenever the arity matches
+        (recursing through nested tuples/lists, and through ONE `Starred`, whose middle slice is
+        skipped because a slice has no static value: the elements AFTER it are paired from the
+        right, `a, *b, c = (1, 2, 3, 4)` → `c` is `4`). That parenthesised arm is the ONLY
+        starred path here: a bare starred target (`*a = [1]`) is a `SyntaxError`, so there is
+        no separate `Starred`-target arm to keep in sync with it.
+
+        ⛔ AN UNPAIRABLE DESTRUCTURING MAKES NO CLAIM AT ALL (`return []`), rather than binding
+        every name `SHADOWED`. The value is determinate at run time but unreadable here, so
+        `SHADOWED` would be a claim the source does not support — and it is exactly the shape
+        that lost sites: `A, b = build_pair()` … `A(app)` is a wiring the pre-`#13585` reader
+        reported and the `SHADOWED` fallback dropped. Making NO claim leaves any earlier binding
+        in force (the name is still recorded as a block-local by `_note_binding`, so it does not
+        leak an enclosing block's meaning), which is both what `main` did for every non-`Name`
+        target and the only option that can neither invent a site nor lose one.
+        """
+        if isinstance(target, ast.Name):
+            return [(target.id, value)]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            value_elts = value.elts if isinstance(value, (ast.Tuple, ast.List)) else None
+            stars = [i for i, e in enumerate(target.elts) if isinstance(e, ast.Starred)]
+            if (
+                value_elts is not None
+                # defensive: Python's parser rejects two stars (`*a, *b = …` is a
+                # SyntaxError), so this can only be true for a hand-built AST.
+                and len(stars) <= 1
+                and not any(isinstance(e, ast.Starred) for e in value_elts)
+                and len(value_elts) >= len(target.elts) - len(stars)
+            ):
+                pairs: list[tuple[str, ast.AST | None]] = []
+                for index, element in enumerate(target.elts):
+                    if isinstance(element, ast.Starred):
+                        continue  # the middle slice has no static value; paired below
+                    # before the star: positional from the left; after it: from the right
+                    offset = index if not stars or index < stars[0] else (
+                        len(value_elts) - (len(target.elts) - index))
+                    pairs.extend(_binding_pairs(element, value_elts[offset]))
+                return pairs
+            return []  # an unreadable sequence value: make no claim (see above)
+        return []  # an Attribute/Subscript STORE binds nothing — see `_target_names`
 
     def _parameter_names(args: ast.arguments) -> list[str]:
         names = [param.arg for param in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
@@ -610,11 +679,11 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
 
     def _apply_assignment(node: ast.Assign | ast.AnnAssign, chain: tuple[ast.AST, ...]) -> None:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        bound_value = _dotted(node.value) if node.value is not None else None
-        class_bound = _resolves_to_class(bound_value, chain, envs)
-        module_bound = _resolves_to_module(bound_value, chain, envs)
         for target in targets:
-            for name in _target_names(target):
+            for name, bound in _binding_pairs(target, node.value):
+                bound_value = _dotted(bound) if bound is not None else None
+                class_bound = _resolves_to_class(bound_value, chain, envs)
+                module_bound = _resolves_to_module(bound_value, chain, envs)
                 # ⛔ THE VALUE LANDS IN THE BLOCK THAT OWNS THE NAME (`#13585 review c2a6c706`
                 # P3) — `global` goes to the module, `nonlocal` to the enclosing function — and a
                 # redirected write is a JOIN, because whether it takes effect at all depends on
@@ -795,9 +864,13 @@ def _mounted_router_names(source: str) -> set[str]:
 
 #: All nine `NO_CONTAINER_YET` destinations. A `tenancy:`/`sdk:` prefix is not an MCP door.
 NO_CONTAINER_DESTINATIONS = {
+    # ⛔ `tortoise_delete_point` / `tortoise_delete_entity` left this map in #11609 lane P6:
+    # the owner's #9660 ruling executes the `delete_knowledge` row by KEEPING
+    # `tortoise_delete` and widening it, so their destination became a live door (the kept
+    # entry) and both retired FORWARD into it. `tortoise_delete` itself stays — it IS the
+    # kept entry — and it is the one member here whose "not a door" claim is about a NAME
+    # (`delete_knowledge`) rather than about the capability.
     "tortoise_delete": "delete_knowledge",
-    "tortoise_delete_point": "delete_knowledge",
-    "tortoise_delete_entity": "delete_knowledge",
     "tortoise_create_edge": "link_entities",
     "tortoise_create_operator": "link_entities",
     "tortoise_events_poll": "poll_events",
@@ -809,6 +882,22 @@ NO_CONTAINER_DESTINATIONS = {
 
 def _live() -> dict:
     return {t.name: t for t in TOOL_REGISTRY}
+
+
+def _any_entry(name: str) -> "object | None":
+    """The entry for `name` from EITHER registry — live first, then retired.
+
+    ⛔ The route pins below read this, not `_live()`, and that is the point of the
+    retirement they document (#11609 lane P6): a door may leave the ADVERTISED surface while
+    its hand-written REST route keeps serving, and the customer promise is about the ROUTE.
+    Reading only `_live()` would make these pins red the moment the door retired — which
+    would either block a correct retirement or, worse, invite deleting the pin that proves
+    the route survives. A name that is in NEITHER registry still fails, so this is not a
+    relaxation of "the row exists".
+    """
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+
+    return _live().get(name) or {t.name: t for t in RETIRED_TOOL_REGISTRY}.get(name)
 
 
 def _schema(name: str) -> dict | None:
@@ -1085,22 +1174,25 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
           defines the field, whose only permitted uses are inside `FastAPIRouterAdapter`.
           Without it, no other path derives a route either.
 
-    The registry records that *"retiring the registry entry deletes its REST route with it"*,
-    and `PROTECTED` lists three doors on that basis. It is not true on `main`:
+    The registry recorded that *"retiring the registry entry deletes its REST route with
+    it"*, and `PROTECTED` listed three doors on that basis. It is not true on `main`:
 
       · `FastAPIRouterAdapter` — the only thing that would derive a route from a `rest_spec` —
         is instantiated **nowhere** in product code (only in tests). Measured, below.
       · the served routes are hand-written decorators on FastAPI apps that call the **SDK**
         directly; `hosted_api.py` does not read `TOOL_REGISTRY` for routes at all.
 
-    So this pin asserts the fact that MAKES the reason stale. If a future change wires the
-    adapter (the #3875 direction), this test reds — which is correct: the reason would then
-    become true again and `PROTECTED` would deserve the coupling it claims.
+    So this pin asserts the fact that MAKES the reason stale — and #11609 lane P6 carried it
+    out: `tortoise_issue_insight` and `tortoise_session_context` retired FORWARD, and this pin
+    still reads their rows (from `RETIRED_TOOL_REGISTRY`) and their served routes, which is
+    how the customer promise is kept checkable after the registry row leaves `tools/list`.
+    If a future change wires the adapter (the #3875 direction), this test reds — which is
+    correct: the reason would then become true again.
     """
     from tortoise import hosted_api, selfhost_api
 
     method, path = spec
-    entry = _live().get(door)
+    entry = _any_entry(door)
     assert entry is not None, f"{door} is not advertised — re-derive this pin"
     assert entry.rest_spec is not None, (
         f"{door} lost its `rest_spec`, which is the only thing `PROTECTED` cites for it")
@@ -1598,6 +1690,99 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "FastAPIRouterAdapter(x)\n"
     ), ("a `global` rebinding is a JOIN over 'did that function run', so the call stays "
         "REPORTED — the declared over-read (AGENTS.md A/B), deliberately not a silent drop")
+    # ⛔ THE VALUE SIDE OF THE SAME FIX (`#13585` P2, measured after the store rows above).
+    # `_dotted` answers only a dotted EXPRESSION, so a DESTRUCTURING value read as `None` and
+    # every name in the target was bound `SHADOWED` — the alias was lost, and a module that
+    # really wires the adapter through `A, b = A, object` reported `[]`. `main` reported the
+    # site (it skipped every non-`Name` target, so it never dropped the import binding), which
+    # makes this a REGRESSION in the false-PASS direction, and the mirror row below is the
+    # polar control: on `main` it ALSO reported a site, and that report was wrong — `A` is
+    # `object` there. Element-wise pairing answers both directions; ignoring the target, which
+    # is what `main` did, answers neither.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A, b = A, object\n"
+        "A(app)\n"
+    ), ("a DESTRUCTURING value erased the alias — `A, b = A, object` binds `A` to the adapter "
+        "and the head reported `[]` (`main` reported this site)")
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "x, tr = 1, tr\n"
+        "def wire(app):\n"
+        "    return tr.FastAPIRouterAdapter(app)\n"
+    ), "a DESTRUCTURING value erased a MODULE alias — the module spelling of the row above"
+    # NESTING: the adapter is in the INNER element (index 1, `(b, c)`), so this row is
+    # load-bearing on the RECURSION at `_binding_pairs`'s tuple arm — replacing it with a
+    # no-claim for nested elements (`(n, None) for n in _target_names(element)`) binds `b`
+    # `SHADOWED` and reds this row. (The adapter in the OUTER element would leave it green, so
+    # that shape is covered by the row above, not this one.)
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "(a1, (b, c)) = (object, (A, 2))\n"
+        "b(app)\n"
+    ), ("a NESTED destructuring value erased the alias paired into it — `b` is bound to `A` "
+        "through the inner tuple, so the recursion into nested elements is what answers here")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A, b = object, A\n"
+        "A(app)\n"
+    ) == [], ("`A, b = object, A` reads as a site — element-wise pairing must place the value "
+              "where it BELONGS, not report every destructuring (this reported a site on `main`)")
+    # ⛔ AN UNPAIRABLE DESTRUCTURING MAKES NO CLAIM (`_binding_pairs`'s `return []`). `A` IS in
+    # the target here — that is the whole point: the value is a CALL, so the pair is
+    # undeterminable and the reader must leave the import binding in force rather than claim
+    # `SHADOWED`. Restoring the pre-fix claim (`[(name, None) for name in _target_names(target)]`)
+    # binds `A` `SHADOWED` and reds this row — the documented false PASS (`main` reported the
+    # site) would otherwise return with every row green.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A, b = build_pair()\n"
+        "A(app)\n"
+    ), ("an UNREADABLE destructuring value made a claim it cannot support: `A, b = "
+        "build_pair()` determines nothing statically, so `A`'s import binding must stand")
+    # …the orthogonal control: a destructuring that does not NAME `A` cannot touch it either.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "b, c = build_pair()\n"
+        "A(app)\n"
+    ), "an unrelated destructuring (`b, c = build_pair()`) touched `A`'s binding"
+    # ⛔ THE STARRED HALF (`#13585` P2). The two offset formulas only diverge when the star
+    # actually CAPTURES, so the value list must be longer than the target: with a 2-element
+    # value `A, *rest = A, 2` pairs the same under either formula. These rows red the two most
+    # likely rot points — `offset = index` (right-anchored elements mispaired) and an
+    # unconditional right-anchor (left-anchored elements mispaired).
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A, *rest = A, 2, 3\n"
+        "A(app)\n"
+    ), ("a STAR before the tail misplaced the left-anchored element — `A` is `A` in "
+        "`A, *rest = A, 2, 3`, so an unconditional right-anchor loses the site")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "*rest, A = 1, 2, 3, A\n"
+        "A(app)\n"
+    ), ("a STAR before the tail misplaced the right-anchored element — `A` is the LAST value "
+        "in `*rest, A = 1, 2, 3, A`, so a left-anchored offset loses the site")
+    # the arity guard: with one star the value needs at least `n - 1` items. An EMPTY star is
+    # the only shape that separates `>=` from `>`, and it must be a longer TARGET with a short
+    # value (`A, b, *rest = 2, 3` binds `A = 2`, `rest = []`). Pairing it honestly stops the
+    # call being a site; falling through the guard makes no claim, which leaves the import
+    # binding in force and would REPORT the site — so the `== []` is what reds `>=` → `>`.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A, b, *rest = 2, 3\n"
+        "A(app)\n"
+    ) == [], ("an EMPTY star skipped the arity check — `A` is `2` in `A, b, *rest = 2, 3`, "
+              "so the call is not a site (falling through the guard would report one)")
+    # …and a STARRED VALUE is unreadable here (`(*x, 1)` has no static element at the star), so
+    # the value-side guard must refuse to pair rather than pair `A` with the `Starred` node.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "x = (object,)\n"
+        "A, *rest = (*x, 1)\n"
+        "A(app)\n"
+    ), ("a STARRED VALUE was paired element-wise — `(*x, 1)` has no static element at the "
+        "star, so no claim may be made and `A`'s import binding must stand")
     # and the forward-reference half must survive the per-position read: Python resolves a name
     # at CALL time, so a chain declared below its use still instantiates the adapter.
     assert _adapter_instantiation_sites(
@@ -2081,7 +2266,7 @@ def test_the_serving_handler_reaches_the_sdk_not_the_mcp_door(door, spec):
       · the body DOES reach the SDK object (`sdk.<method>`), which is what makes the route
         independent of the MCP surface.
     """
-    entry = _live().get(door)
+    entry = _any_entry(door)
     assert entry is not None and entry.rest_spec is not None, (
         f"{door} is not advertised with a `rest_spec` — re-derive this pin")
     # ⛔ From the LITERAL table, not off the row: a row re-pointed to another METHOD shares
@@ -2177,8 +2362,10 @@ def test_register_all_would_derive_the_route_from_the_row():
     Two distinct facts — "this would happen" and "this does happen" — and collapsing them is
     how a dead adapter reads as the serving path (#3875).
     """
-    entries = [e for e in TOOL_REGISTRY if e.name == "tortoise_issue_insight"]
-    assert entries, "tortoise_issue_insight left TOOL_REGISTRY — re-derive this pin"
+    entries = [e for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+               if e.name == "tortoise_issue_insight"]
+    assert entries, (
+        "tortoise_issue_insight left BOTH registries — re-derive this pin")
     # The LITERAL table, not the row: a row whose method changed would make this pin assert
     # whatever the mutated row now says, and `/v1/context` shows the path is not unique per
     # verb, so both the method and the path have to come from the literal.
@@ -2188,15 +2375,22 @@ def test_register_all_would_derive_the_route_from_the_row():
         f"{entries[0].rest_spec.path}, not {method} {path}")
 
     full = _RecordingRouter()
-    all_handlers = {e.name: (lambda: None) for e in TOOL_REGISTRY if e.rest_spec is not None}
-    FastAPIRouterAdapter(full).register_all(TOOL_REGISTRY, all_handlers)
+    all_handlers = {e.name: (lambda: None)
+                    for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+                    if e.rest_spec is not None}
+    FastAPIRouterAdapter(full).register_all(
+        (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY), all_handlers)
     assert any(p == path and m == (method,) for p, m, _ in full.routes), (
         f"no {method} {path} route was registered by the adapter — {full.routes}")
 
     # …and without THIS row, with a handler for every surviving route-bearing row, exactly
     # that one route disappears. (A short handler map would register nothing at all and so
     # would not measure the removal.)
-    survivors = [e for e in TOOL_REGISTRY if e.name != entries[0].name]
+    # ⛔ The SERVED set, not `TOOL_REGISTRY`: #11609 lane P6 retired this row, and a probe
+    # over the advertised set alone would report the route as never derivable — a FALSE RED
+    # on a retirement whose whole premise is that the ROW still carries the route.
+    survivors = [e for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+                 if e.name != entries[0].name]
     without_row = _RecordingRouter()
     FastAPIRouterAdapter(without_row).register_all(survivors, all_handlers)
     assert not any(p == path and m == (method,) for p, m, _ in without_row.routes), (
@@ -2287,8 +2481,11 @@ def test_the_recorded_destination_is_still_not_an_mcp_door(door, destination):
     """A retirement pointer must name a LIVE tool (`TestEveryPointerResolvesInOneHop`).
 
     So a destination that exists as an SDK method (`delete_knowledge`, `link_entities`,
-    `poll_events`, `list_memory_graphs`) does NOT make the nine retirable — and a
-    `tenancy:`/`sdk:` prefix is a router/SDK path, not a door at all.
+    `poll_events`, `list_memory_graphs`) does NOT make these retirable — and a
+    `tenancy:`/`sdk:` prefix is a router/SDK path, not a door at all. (#11609 lane P6
+    retired two of the original nine — `delete_point` / `delete_entity` — because the
+    #9660 ruling executes the `delete_knowledge` row by KEEPING `tortoise_delete`, which
+    makes that destination a live door under its own name.)
     """
     from tools.bridge_table import DESTINATION
 

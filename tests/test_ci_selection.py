@@ -9975,7 +9975,7 @@ def test_the_changes_job_carries_no_job_scope_env():
     `env: {CI_SHARD_ROUTING: ...}` and NEITHER emitter step carried it, so both
     assertions below fail on that tree.
 
-    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:902`
+    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:907`
     and the capstone pin's re-cut history (in `tests/test_capstone_preregistration_9075.py`,
     the comment ending "… and job scope is now forbidden by
     `test_the_changes_job_carries_no_job_scope_env`.") both send an operator here by name, and
@@ -10299,6 +10299,15 @@ ROWED_BY_THIS_FOLD = (
     # `core` for the same reason as the row above: `tortoise/record_vector.py`,
     # `tortoise/search_engine.py` and `tortoise/projection/` collect on no other surface.
     "test_13610_graph_vector_copy.py",
+    # #13629 — the entity-vector retirement pair's falsifiers (the parity census and the
+    # preview-by-default stripper, `tools/entity_vector_parity_census.py` +
+    # `tools/strip_graph_entity_vectors.py`). A file this fold ADDED, registered on
+    # `core` and on two `CORE_ALSO` entries because `tools/` is a flat
+    # `NON_PYTHON_PREFIXES` swallow and no SOURCE_PATTERNS row matches either tool — so
+    # without those entries a tools-only diff selects NOTHING and these falsifiers never
+    # run. The row is here for the same reason as the one above: the ENTRY-RULE pin
+    # iterates this EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
+    "test_13629_entity_vector_retire.py",
 )
 
 
