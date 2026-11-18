@@ -703,8 +703,10 @@ def _fold_prefetch_select(table: str) -> str:
     """`t.col, t.col, …` for `table` — every column EXCEPT the stored payloads.
 
     ⛔ WHY THE PAYLOAD IS DROPPED, measured (`#13466` review P2): the fold reads
-    `id`/`name`/kind/`superseded_by`/`superseded_at` and the NULL-ness of
-    `embedding_vec` — never the vector, never the jsonb. `SELECT *` materialises
+    `id`/`name`/kind/`superseded_by`/`superseded_at`, the NULL-ness of
+    `embedding_vec`, and `props` — the jsonb `node_from_row` genuinely needs, so
+    it is NOT dropped here. What IS dropped, and dominates the row, are the two
+    VECTOR payloads (`embedding` and `embedding_vec`). `SELECT *` materialises
     both, and on 8,000 rows it measured **~2.0 s** against **~0.19 s** for this
     projection. Per-row sizes, measured with `pg_column_size` on `pgvector/pgvector:pg16`
     (`#13466` review cycle 2): `embedding_vec` is a FIXED `vector(384)` = **1,544 B**

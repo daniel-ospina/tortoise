@@ -284,11 +284,19 @@ def test_the_fold_key_coordinate_is_the_legs_id_column():
     `_folded_terminal_keys` appends `node.key`, and `node_from_row` derives that
     from `cache_projection.KEY_PROPERTY` — `id` for both labels at this head. The
     textual pin above cannot see a `node.props["name"]` substitution, and every
-    LIVE test seeds `id == name == node_key` (the schema's own
-    `chk_*_node_key_is_contract_key` forces `node_key = id`), so no behavioural
-    test can tell either. This is the pin that can: if `KEY_PROPERTY` moves, the
-    exclusion list names a value the SELECT does not return, excludes NOTHING, and
-    serves `#689`'s rows with every other check green.
+    LIVE test seeds `id == name == node_key`, so THIS ROW — which compares the two
+    DECLARATIONS — is what reds when the coordinate moves.
+
+    ⚠️ It is NOT the only witness, and an earlier version of this docstring
+    claimed it was ("no behavioural test can tell either") — that was FALSE and a
+    fresh-context review measured it: `node_key = id` is forced by
+    `20261027000001`'s `chk_*_node_key_is_contract_key`, but `name = id` is NOT
+    (that migration says *"A name is a LOOKUP key now, not an identity"*), so a
+    row with `id != name` is legal and DOES distinguish. The behavioural pin is
+    `test_the_fold_appends_the_LEGS_id_and_not_the_name` below, which is the one
+    that reds if the code starts appending a name (`#13466` review, mutation
+    survivor: `keys.append(node.key)` -> `node.props.get("name")` left 206 DB-free
+    tests green before it existed).
     """
     from tortoise.cache_projection import KEY_PROPERTY, node_from_row
 
@@ -662,6 +670,97 @@ def test_the_prefetch_does_not_select_the_payload_columns():
         named = {part.strip().removeprefix("t.") for part in rendered.split(",")}
         assert named == expected, (sorted(expected - named), sorted(named - expected))
 # ── 6. the prefetch's PYTHON half is bounded, and the decline is NAMED ────
+
+def _drive_fold(monkeypatch, rows):
+    """Run `_folded_terminal_keys` over REALISTIC rows and return what it built.
+
+    `id` and `name` are DIFFERENT in these rows on purpose — see
+    `test_the_fold_appends_the_LEGS_id_and_not_the_name`. The projection double
+    mirrors what `node_from_row` really does: the key comes from
+    `KEY_PROPERTY` (`id`) and the rest becomes `props`.
+    """
+    import tortoise.cache_projection as cp
+
+    class _Node:
+        """The two attributes the fold reads."""
+
+        def __init__(self, row):
+            self.key = row.get("id")
+            self.props = {key: value for key, value in row.items()
+                          if key not in ("id", "has_embedding_vec")}
+
+    monkeypatch.setattr(record_vector, "_rows_as_dicts", lambda cur: rows)
+    monkeypatch.setattr(cp, "node_from_row", lambda label, row: _Node(row))
+    monkeypatch.setattr(cp, "read_lifecycle_events", lambda conn, **kwargs: [])
+
+    class _NoopCursor:
+        def execute(self, sql, params=None):
+            pass
+
+    return record_vector._folded_terminal_keys(
+        object(), _NoopCursor(),
+        record_vector._Scope(org_id="org", graph_id="graph"), "object", None)
+
+
+def test_the_fold_appends_the_LEGS_id_and_not_the_name(monkeypatch):
+    """⛔ THE CAGE'S EXCLUSION VALUE MUST BE THE COLUMN THE SELECT EMITS.
+
+    The fold appends `node.key` and the kNN SELECTs `id`; `<> ALL(keys)` is a
+    comparison of ONE coordinate against the SAME coordinate. Append a name
+    instead and the clause compares NAMES to the `id` column — it excludes
+    NOTHING, and terminal `Object`/`Subject` rows are served and reported as
+    better recall, which is the `#689` fail-OPEN this PR exists to prevent.
+
+    Mutation survivor this pins (`#13466` review): `keys.append(node.key)` ->
+    `keys.append(node.props.get("name"))` left **206 DB-free tests green** — and
+    the row that claimed to cover it (`test_the_fold_key_coordinate_is_the_legs_id_column`)
+    only compares the two DECLARATIONS, so it cannot see a name substitution
+    either. Its premise that "no behavioural test can tell" was false:
+    `20261027000001` forces `node_key = id`, but `name = id` is NOT forced
+    ("A name is a LOOKUP key now, not an identity"), so `id != name` is legal —
+    which is exactly what these rows model.
+    """
+    keys, _available = _drive_fold(monkeypatch, [
+        {"id": "obj-1-uuid", "name": "acme-2", "status": "archived",
+         "has_embedding_vec": True},
+        {"id": "obj-2-uuid", "name": "liveco", "status": None,
+         "has_embedding_vec": True},
+    ])
+    assert keys == ["obj-1-uuid"], (
+        "the terminal key must be the LEG's id (the column the SELECT emits and "
+        f"`<> ALL` compares); got {keys} — a NAME here excludes nothing and "
+        "serves the rows #689 hides")
+
+
+def test_the_available_count_is_only_VECTOR_BEARING_non_terminal_rows(monkeypatch):
+    """⛔ `available` FEEDS THE SHORTFALL ASSERTION, SO ITS CONJUNCTS MATTER.
+
+    `available` is what the leg reports as the rows the filter selects; the
+    shortfall assertion compares it with the rows the kNN returned, and a short
+    answer raises `VectorShortfall` → `scan_fallback`. Counting a row that carries
+    NO VECTOR inflates it and turns a complete read into a spurious shortfall.
+    That is the NORMAL state, not an edge: `#13220`'s column "ARRIVES EMPTY" and
+    every re-folded row stays NULL, so the folded arm would collapse to a graph
+    scan for ordinary tenants.
+
+    Mutation survivor this pins (`#13466` review):
+    `if has_vector.get(node.key):` -> `if True:` left **175 DB-free tests green**.
+    """
+    keys, available = _drive_fold(monkeypatch, [
+        {"id": "obj-live-vec", "name": "liveco", "status": None,
+         "has_embedding_vec": True},
+        {"id": "obj-live-novec", "name": "otherco", "status": None,
+         "has_embedding_vec": False},
+        {"id": "obj-term-vec", "name": "acme-2", "status": "archived",
+         "has_embedding_vec": True},
+    ])
+    assert keys == ["obj-term-vec"], keys
+    assert available == 1, (
+        "`available` must count only VECTOR-BEARING non-terminal rows: the "
+        f"vectorless live row and the terminal row do not count; got {available} "
+        "— an inflated count makes a complete read look short and raises a "
+        "spurious VectorShortfall (scan_fallback for the normal state)")
+
 
 def test_the_prefetch_row_budget_declines_instead_of_truncating():
     """⛔ `statement_timeout` CANNOT BOUND THE PYTHON FOLD, so this must.
