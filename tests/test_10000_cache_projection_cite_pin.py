@@ -22,12 +22,13 @@ WHAT IT DOES NOT DO. It does not assert the section's WORDING, its repair-route
 list, or its citation style — those were `#10852`'s state-locking arms and are
 retired with the module that held them (`#13554` carries the rest of that class).
 It asserts one thing, in one direction: every `test_*` the section names is
-defined SOMEWHERE under `tests/`. It derives that universe from the tree rather
-than a hand-spelled module list, so a RENAMED leg reds this arm instead of
-leaving a dead cite looking like proof.
+defined SOMEWHERE under `tests/`. It derives that universe from the tree (every
+`tests/**/test_*.py`, subdirectories included) rather than a hand-spelled module
+list, so a RENAMED leg reds this arm instead of leaving a dead cite looking like
+proof.
 
 WHAT IT DELIBERATELY DOES NOT SEE — a cross-file MOVE. `_DEFINED` is a name-only
-union over `tests/*.py`, so if a cited leg keeps its name and moves to another
+union over that tree, so if a cited leg keeps its name and moves to another
 module, this arm stays GREEN even though the section's sentence now names the
 wrong FILE. That is by design, not an oversight: which module a leg lives in is a
 wording claim about the document, and `#13439`'s rule retires exactly that class
@@ -60,9 +61,12 @@ TESTS = ROOT / "tests"
 #: which reports a name the author never wrote; and allowing uppercase alone is
 #: not enough, because the alternation-free class lets the engine BACKTRACK to a
 #: shorter match that satisfies `(?!\.py)`, so `test_foo_cites.py` would still
-#: describe a fragment. The alnum lookahead makes the match `maximal` — a
-#: truncated prefix can never be the answer — and the `.py` lookahead then skips
-#: the filename whole.
+#: describe a fragment. The alnum lookahead makes the match `maximal`, so a
+#: truncated prefix of a FILENAME can never be the answer, and the `.py`
+#: lookahead then skips the filename whole. ⚠️ Named residual: a dotted suffix
+#: that is not `.py` (`` `test_foo.bar` ``) still truncates to `test_foo`, so an
+#: exotic cite could resolve against the wrong leg. Not worth a wider class —
+#: rejecting a following `.` would also drop a cite a sentence ends on.
 _CITED = re.compile(r"(?<![/\w])(test_[A-Za-z0-9_]+)(?!\.py)(?![A-Za-z0-9_])")
 
 #: A `def test_…(` at the start of a line, allowing indentation and `async`.
@@ -106,13 +110,13 @@ def test_every_test_name_the_pin_section_cites_is_defined():
         "false. Re-derive what the pin is before trusting this arm")
 
     defined: set[str] = set()
-    for path in sorted(TESTS.glob("*.py")):
+    for path in sorted(TESTS.rglob("test_*.py")):
         defined.update(_DEFINED.findall(
             path.read_text(encoding="utf-8", errors="replace")))
 
     missing = [name for name in cited if name not in defined]
     assert not missing, (
         f"`{DOC.name}`'s `{PIN_HEADING}` cites {missing}, which no "
-        f"`tests/*.py` defines. A cited leg that does not exist pins nothing: "
+        f"`tests/**/test_*.py` defines. A cited leg that does not exist pins nothing: "
         "re-point the cite at the test that now carries the claim (do not delete "
         "the citation, and do not rename the test back to satisfy the doc)")
