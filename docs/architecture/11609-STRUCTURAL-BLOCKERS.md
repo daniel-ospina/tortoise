@@ -70,20 +70,23 @@ return ToolResult(
 
 Probe (`FastMCP("p").add_tool` + `call_tool`, a fake arm returning a list and a paginated dict):
 
-| annotation | advertised `output_schema` | `structuredContent`, list arm | `structuredContent`, dict arm |
-|---|---|---|---|
-| `typing.Any` (**the containers today**) | `null` | **absent** | the dict itself |
-| `object` | `{result:{}, required:["result"], x-fastmcp-wrap-result:true}` | `{"result":[…]}` | `{"result":{…}}` |
-| `list[dict]` (**the doors**) | `{result:{type:array}, required:["result"], x-fastmcp-wrap-result:true}` | `{"result":[…]}` | `{"result":{…}}` |
-| `list[dict] \| dict` (`tortoise_query`) | `{result:{anyOf:[array,object]}, required:["result"], x-fastmcp-wrap-result:true}` | `{"result":[…]}` | `{"result":{…}}` |
-| `dict` | object schema, **no** wrap marker | **raises** `structured_content must be a dict or None` | the dict itself |
+| annotation | advertised `output_schema` | `structuredContent`, list arm | `structuredContent`, dict arm | `result.meta` (wire `_meta`) |
+|---|---|---|---|---|
+| `typing.Any` (**the containers today**) | `null` | **absent** | the dict itself | `null` |
+| `object` | `{result:{}, required:["result"], x-fastmcp-wrap-result:true}` | `{"result":[…]}` | `{"result":{…}}` | `{"fastmcp":{"wrap_result":true}}` |
+| `list[dict]` (**the doors**) | `{result:{type:array}, required:["result"], x-fastmcp-wrap-result:true}` | `{"result":[…]}` | `{"result":{…}}` | `{"fastmcp":{"wrap_result":true}}` |
+| `list[dict] \| dict` (`tortoise_query`) | `{result:{anyOf:[array,object]}, required:["result"], x-fastmcp-wrap-result:true}` | `{"result":[…]}` | `{"result":{…}}` | `{"fastmcp":{"wrap_result":true}}` |
+| `dict` | object schema, **no** wrap marker | **raises** `structured_content must be a dict or None` | the dict itself | `null` |
 
-**Answer to (a).** The envelope adds exactly three wire facts: (i) `structuredContent`
-becomes `{"result": <value>}`, (ii) `result` is in `required`, and (iii) where a **wrapped**
+**Answer to (a).** The envelope adds exactly **four** wire facts: (i) `structuredContent`
+becomes `{"result": <value>}`, (ii) `result` is in `required`, (iii) where a **wrapped**
 annotation declares one, `result` also carries a `type` — `array` for `list[dict]`, and
 NOTHING for the `object`-annotated form, whose `result` is `{}` (the `type: object` in that
 schema — which the table's compressed rendering omits — is the schema's own top level, not
-`result`'s). A UNION declares `anyOf` and no `type` regardless of its
+`result`'s), and (iv) a wrapped result stamps the `_meta` marker
+`{"fastmcp":{"wrap_result":true}}`, where today's `Any` containers stamp **no `_meta`**
+(`fastmcp/tools/base.py:368`; both arms probed, `test_a_wrapped_result_also_stamps_the_meta_marker`).
+A UNION declares `anyOf` and no `type` regardless of its
 members (`list[dict] | dict` and `dict | bool` alike), and `object` declares `{}` and no
 `type` — which is precisely why `_violates_wrap_envelope` is type-blind for both. A container
 **can** return a pageable shape
@@ -205,7 +208,8 @@ $ rg -n 'FastAPIRouterAdapter' --glob '!.venv/*' .
 ```
 
 (Excerpt. The print above is the product code plus the test that constructs the adapter. The
-full run's remaining hits are 12 in other `docs/…` files, 9 in this document, and 16 in
+full run's remaining hits are 12 in other `docs/…` files, 10 in this document (one of them
+this file's own frontmatter `aboutObjects:` line), and 16 in
 `tests/test_11609_structural_blockers.py` — none of them product code.)
 
 The only **instantiation** is in a test (`tests/test_tool_registry.py:818`); the product has
@@ -263,6 +267,8 @@ already `list[dict]`, so it already answered `{"result": [...]}`, and the contai
 under the union answers the same bytes. Three things still change for a migrating caller and
 are not claimed away: the tool **name**, the argument **names** (the container's `mode=`/
 `kind=` discriminator), and the advertised schema (`result` becomes `anyOf[array, object]`).
+A fourth is visible only to a client that inspects `_meta`: a wrapped result stamps
+`{"fastmcp":{"wrap_result":true}}` where today's `Any` containers stamp none (§1.1(iv)).
 
 Why the alternatives lose:
 

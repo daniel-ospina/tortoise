@@ -142,6 +142,62 @@ def _declares_route(app_module, method: str, path: str) -> bool:
     return path in _declared_route_paths(app_module, method)
 
 
+def _imported_names(source: str, module: str) -> set[str]:
+    """The local names `source` binds with `from <module> import …` (alias-aware).
+
+    AST, not a regex, for the same reason as `_mounted_router_names`: a commented-out import
+    line is not a binding, and a text match cannot tell the two apart.
+    """
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module == module:
+            names.update(alias.asname or alias.name for alias in node.names)
+    return names
+
+
+class _LiveIncludeRouter(ast.NodeVisitor):
+    """The router arguments of `include_router(…)` calls in LIVE statements only."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_If(self, node: ast.If) -> None:
+        # `if False: app.include_router(…)` IS a Call node in the tree but never runs, and it
+        # is one of the forms a lane reaches for to disable a mount, so the dead branch is
+        # not visited.
+        if isinstance(node.test, ast.Constant) and not node.test.value:
+            for statement in node.orelse:
+                self.visit(statement)
+            return
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "include_router" \
+                and node.args:
+            target = node.args[0]
+            if isinstance(target, ast.Name):
+                self.names.add(target.id)
+            elif isinstance(target, ast.Attribute):
+                self.names.add(target.attr)
+        self.generic_visit(node)
+
+
+def _mounted_router_names(source: str) -> set[str]:
+    """The router names `source` hands to a LIVE `include_router(…)` call.
+
+    ⛔ AST, not `re.findall(r"include_router\\(\\s*([\\w.]+)", …)`: that regex is unanchored
+    and comment-blind, so COMMENTING THE MOUNT OUT — the first move a human makes to disable
+    a REST surface — leaves the match in place while `selfhost.py` serves `/v1/*` no longer
+    (measured on the pre-fix reading: the mutant `# app.include_router(_rest_router)` left
+    all three parametrized rows GREEN). Only a live call can produce the edge, so a comment,
+    a docstring, and a statically-false branch none of them read as a mount —
+    `test_the_mount_reading_is_not_comment_blind` keeps each form as a falsifier.
+    """
+    visitor = _LiveIncludeRouter()
+    visitor.visit(ast.parse(source))
+    return visitor.names
+
+
 #: All nine `NO_CONTAINER_YET` destinations. A `tenancy:`/`sdk:` prefix is not an MCP door.
 NO_CONTAINER_DESTINATIONS = {
     "tortoise_delete": "delete_knowledge",
@@ -260,6 +316,13 @@ def _probe(annotation) -> dict[tuple[str, str], object]:
         # `ToolResult` exposes `structured_content` only — there is no `structuredContent`
         # alias on it (measured), so a camelCase fallback here would read as if one existed.
         out[(arm, "structured")] = getattr(result, "structured_content", None)
+        # ⛔ Not `getattr(…, None)`: a FastMCP rename of `meta` would read as `None`, and
+        # `None` is the value this file treats as "no marker" — the vacuity `_schema`
+        # guards one level up.
+        assert hasattr(result, "meta"), (
+            "the result object has no `meta` — FastMCP changed shape, and the `_meta` wire "
+            "fact this file pins would silently report 'no marker' for every annotation")
+        out[(arm, "meta")] = result.meta
     tool_obj = asyncio.run(server.get_tool("envelope_probe"))
     out[("schema", "output")] = tool_obj.output_schema
     return out
@@ -301,6 +364,31 @@ def test_the_union_rewraps_an_already_dict_arm():
         "result": {"results": [{"id": 1}], "total": 1, "hasMore": False}}, (
         "the union no longer re-wraps the dict arm — if FastMCP changed this, S1 may have "
         "become free, and that is a reason to re-measure the whole decision")
+
+
+def test_a_wrapped_result_also_stamps_the_meta_marker():
+    """⛔ §1.1's FOURTH wire fact: `_meta` — the delta a client sees without the schema.
+
+    `fastmcp/tools/base.py:368` stamps `meta={"fastmcp": {"wrap_result": True}}` whenever the
+    annotation selects the wrap, and `None` otherwise (both measured here). Today's
+    containers return `Any`, so they stamp NO `_meta`; every annotation that carries the
+    envelope stamps the marker. A client that inspects `_meta` — FastMCP's own record that a
+    result was wrapped — therefore sees a FOURTH delta, which §1.1 originally listed as
+    three. The count is pinned so a future lane cannot re-derive the stale "three".
+    """
+    marker = {"fastmcp": {"wrap_result": True}}
+    plain = _probe(Any)             # the containers' annotation today: NO wrap, NO marker
+    wrapped = _probe(list[dict] | dict)
+
+    assert plain[("namespace", "meta")] is None, (
+        f"an `Any` tool now stamps `_meta` ({plain[('namespace', 'meta')]!r}) — the "
+        "containers already carry the marker, so the fourth wire fact is not a delta")
+    assert plain[("claim", "meta")] is None, plain[("claim", "meta")]
+    for arm in ("namespace", "claim"):
+        assert wrapped[(arm, "meta")] == marker, (
+            f"the wrapped annotation's {arm} arm stamps {wrapped[(arm, 'meta')]!r}, not "
+            f"{marker!r} — if FastMCP stopped stamping `_meta`, §1.1's fourth wire fact "
+            "must be re-measured before it is cited")
 
 
 def test_the_list_arm_does_not_change_for_a_migrating_caller():
@@ -422,15 +510,8 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
         selfhost_src = (repo / "tortoise" / "selfhost.py").read_text(
             encoding="utf-8", errors="replace")
         # the names bound to `selfhost_api`'s router in the app module (alias-aware)
-        bound: set[str] = set()
-        for match in re.finditer(r"from\s+tortoise\.selfhost_api\s+import\s+([^\n#]+)",
-                                 selfhost_src):
-            for part in match.group(1).split(","):
-                part = part.strip()
-                if not part:
-                    continue
-                bound.add(part.split(" as ")[-1].strip())
-        mounted = set(re.findall(r"include_router\(\s*([\w.]+)", selfhost_src))
+        bound = _imported_names(selfhost_src, "tortoise.selfhost_api")
+        mounted = _mounted_router_names(selfhost_src)
         assert bound & mounted, (
             f"{path} is declared on `{selfhost_api.__name__}`'s router, but "
             "`tortoise/selfhost.py` never `include_router()`s a router it imports from "
@@ -473,6 +554,44 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
         f"product module(s) {readers} now read `rest_spec` — routes may be "
         "registry-derived again; re-derive §1.5 before trusting the `rest_spec` half of "
         "the plan")
+
+
+def test_the_mount_reading_is_not_comment_blind():
+    """The mount arm's own falsifier: only a LIVE `include_router(…)` is a mount.
+
+    Measured on the pre-fix reading (`re.findall(r"include_router\\(\\s*([\\w.]+)", src)`):
+    replacing `app.include_router(_rest_router)` with `# app.include_router(_rest_router)` in
+    `tortoise/selfhost.py` — the most natural way a lane disables the REST surface — left
+    `mounted == {"_rest_router"}` and all three parametrized rows green, while `/v1/*` was no
+    longer served at all. A comment is not a mount; neither is a docstring, nor a
+    statically-false branch.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    source = (repo / "tortoise" / "selfhost.py").read_text(
+        encoding="utf-8", errors="replace")
+    live_line = "app.include_router(_rest_router)"
+    assert live_line in source, (
+        "`tortoise/selfhost.py` no longer carries the live mount this pin reads — re-derive "
+        "the mount arm before trusting it")
+
+    # the POSITIVE arm is not vacuous: the real file's mount is found, under the alias its
+    # import binds (`selfhost.py:1050 router as _rest_router`).
+    assert _mounted_router_names(source) >= {"_rest_router"}, (
+        "the AST reading misses the REAL mount in `tortoise/selfhost.py` — that would fail "
+        "a served route, so the reading is broken rather than strict")
+    assert _imported_names(source, "tortoise.selfhost_api") >= {"_rest_router"}, (
+        "the alias-aware import reading lost `_rest_router` — the intersection this pin "
+        "takes would then be empty for a served route")
+
+    commented = source.replace(live_line, f"# mutation: {live_line} removed")
+    assert commented != source
+    assert _mounted_router_names(commented) == set(), (
+        "commenting the mount out still reads as mounted — a lane that disables the REST "
+        "surface with a comment would keep this pin green while no route is served")
+    assert _mounted_router_names(f'"""{live_line}"""\n') == set(), (
+        "a docstring naming the mount reads as a mount")
+    assert _mounted_router_names(f"if False:\n    {live_line}\n") == set(), (
+        "a statically-false `if` branch reads as a mount")
 
 
 def _rest_spec_use_outside_the_adapter(source: Path) -> list[int]:
