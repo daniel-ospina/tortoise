@@ -33,15 +33,9 @@
 # missing secret must fail the deploy, not silently skip the gate.
 set -euo pipefail
 # Byte-deterministic collation: the version set-diff (sort/comm) and the
-# out-of-order ordering comparison below both sort raw version strings. That is
-# the CLI's own key, not a coincidence: `db push` re-sorts local paths by the
-# version substring of `^([0-9]+)_(.*)\.sql$` and compares it lexically
-# (`sortMigrationPathsByVersion` / `compareMigrationVersions`, supabase/cli
-# v2.122.1 — the version `.github/workflows/supabase-deploy.yml:243` pins), so
-# the lexical (= byte) order here matches the order it would apply them in.
-# ⛔ Not FILENAME order: the two agree unless a version is a proper PREFIX of
-# another (`2026111700_…` vs `20261117000003_…`), where filename order is wrong
-# (#13393).
+# out-of-order ordering comparison below both sort raw version strings. The
+# Supabase CLI sequences migration files by filename, so the lexical (= byte)
+# order here matches the order `supabase db push` would apply them in.
 export LC_ALL=C
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -160,8 +154,7 @@ done
 # project) means nothing is applied yet, so no repo-ahead version is out of
 # order. A blocking version that sorts BEFORE this reference cannot be applied
 # as-is: `supabase db push --include-all` applies the whole repo-pending set in
-# the CLI's VERSION order (the version substring, string-compared — see the header
-# note above), so it would land on top of a later migration (#4278).
+# filename order, so it would land on top of a later migration (#4278).
 REMOTE_MAX="$(printf '%s\n' "$REMOTE_VERSIONS" | sort | tail -n1)"
 BLOCK_SAFE=""
 BLOCK_OOO=""
@@ -186,7 +179,7 @@ fi
 # list below — yet `supabase db push --include-all` still pushes it. Report it
 # before any exit so a short blocking list is never read as the whole job.
 if [ -n "$WARN_ONLY" ]; then
-  echo "  warn-only repo-ahead migrations (index-only, no data-correctness dependency): not order-checked — --include-all still applies them in VERSION order: $WARN_ONLY"
+  echo "  warn-only repo-ahead migrations (index-only, no data-correctness dependency): not order-checked — --include-all still applies them in filename order: $WARN_ONLY"
 fi
 # Say what repo-ahead does NOT establish, before ANY exit prescribes an action.
 # ⛔ TWO STATEMENTS, TWO DIFFERENT AUDIENCES — do not merge them again.
@@ -415,7 +408,7 @@ if [ -n "$BLOCKING" ]; then
       echo "    2. then dispatch the deploy for the pending set above —"
       echo "       gh workflow run supabase-deploy.yml --ref main"
       echo '    `supabase db push --include-all` applies the WHOLE repo-pending set in'
-      echo "    VERSION order, so step 2 before step 1 would apply the out-of-order"
+      echo "    filename order, so step 2 before step 1 would apply the out-of-order"
       echo "    versions too."
     else
       # ONE decision, per version, made FROM PROD — this gate cannot make it.
@@ -426,7 +419,7 @@ if [ -n "$BLOCKING" ]; then
       echo "  Remediation — decide PER VERSION, from prod (this gate sees versions, not schema):"
       echo "    (a) the objects are ABSENT — apply migrations first:"
       echo "        gh workflow run supabase-deploy.yml --ref main"
-      echo "        # or manually: supabase db push --linked --include-all --yes (whole pending set, VERSION order)"
+      echo "        # or manually: supabase db push --linked --include-all --yes (whole pending set, filename order)"
       echo "    (b) the objects are PRESENT and only the version is unrecorded (bookkeeping"
       echo "        drift, #9613): record it WITHOUT running DDL —"
       echo "        supabase migration repair --linked --status applied <version> --yes"

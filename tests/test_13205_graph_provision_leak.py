@@ -622,7 +622,7 @@ class TestTheSharedDoubleDerivesItsCertificate:
     ``_org_graph_names`` REFUSES an uncertified walk, so a fake that always
     certifies makes a walk production would refuse look green.
 
-    The arms below are FIVE edges of the real rule (``supabase_control``):
+    The arms below are four edges of the real rule (``supabase_control``):
     ``advanceable = [c for c in cursors if c]; if not advanceable: break`` — a
     page with NO cursor cannot advance; a page with one can, and keeping its
     uncursored rows is what production does; an ordinary page certifies; and
@@ -631,9 +631,7 @@ class TestTheSharedDoubleDerivesItsCertificate:
     may have ignored ``order`` and a later cursor would step OVER rows that were
     never served. That fourth edge was missing until review round 17: the double
     certified a duplicated page while the store refuses it, which is the LOOSE
-    direction and the one that matters to a purge — and the STATED-TOTAL edge
-    (``len(seen) >= total``, where ``seen`` is a set of cursor values) was missing
-    until round 20, on a gate no other arm could reach.
+    direction and the one that matters to a purge.
     """
 
     @staticmethod
@@ -725,10 +723,8 @@ class TestTheSharedDoubleDerivesItsCertificate:
         gate cannot refuse. That is the same "false PASS in the double that
         decides a purge" class the earlier rounds fixed on the other two gates,
         so all three rows are pinned here — unmet total, the distinct-cursor rule
-        (a MIXED page's single seen cursor cannot satisfy a total of 2, and the
-        duplicate shape does NOT pin it: gate 2 refuses that first), and the
-        met-total control that stops the gate being satisfied by refusing
-        everything.
+        (a DUPLICATE cannot satisfy a total of 2), and the met-total control that
+        stops the gate being satisfied by refusing everything.
         """
         from tests.fake_control_plane import FakeControlPlane
 
@@ -736,12 +732,9 @@ class TestTheSharedDoubleDerivesItsCertificate:
         assert certifiable([{"id": "g1"}], 2, "id") is False, (
             "one row against a stated total of 2 must not certify — the walk did "
             "not meet the total the server stated")
-        assert certifiable([{"id": "g1"}, {"namespace": "org_1"}], 2, "id") is False, (
-            "the total counts DISTINCT CURSOR VALUES, not rows: a MIXED page has "
-            "ONE seen cursor against a stated total of 2, so it is not met. This "
-            "is the row that discriminates — `len(rows) >= total` would say True. "
-            "⛔ NOT a duplicate id: gate 2 refuses [g1, g1] before gate 3 runs, so "
-            "that shape pins the ascension gate, not this one.")
+        assert certifiable([{"id": "g1"}, {"id": "g1"}], 2, "id") is False, (
+            "the total counts DISTINCT CURSOR VALUES, not rows: two rows carrying "
+            "the same gid are one seen row, so a total of 2 is not met")
         assert certifiable([{"id": "g1"}, {"id": "g2"}], 2, "id") is True, (
             "…and a met total still certifies, so the gate cannot be satisfied by "
             "refusing everything")

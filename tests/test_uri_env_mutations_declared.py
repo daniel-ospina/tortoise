@@ -1413,33 +1413,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_13098_cypher_inventory.py": [
         r'^monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"\s*,\s*'
         r'"docker://:pw@127\.0\.0\.1:6379"\s*\)$'],
-    # ── test_verbatim_index_cohort_8429.py — DELIBERATE_URI, four literal sites
-    # #13290/#8429: the module landed with its five mutation sites untriaged, so
-    # this register reds on them (`test_verbatim_index_cohort_8429.py:101/103/435/
-    # 440/442`). The intent is DELIBERATE_URI — the test PINS ITS OWN SERVER
-    # TARGET on purpose, because the defect it measures (a VERBATIM plain-`List`
-    # embedding is invisible to the `Point` HNSW index) cannot occur on the
-    # embedded lane at all: a store with no index would certify the fix by
-    # measuring nothing (#8429's own "skips loudly" premise).
-    #   * the module-level probe tries each seam in turn — the ambient value, the
-    #     docker seam, the legacy seam (#6673: they publish on DIFFERENT ports) —
-    #     and restores the ambient value in `finally`, so the lane it found is the
-    #     base every cohort graph is derived from;
-    #   * `_cohort_sdk` installs that URI for exactly the SDK CONSTRUCTION and
-    #     restores it immediately — `TortoiseSDK(<uri>)` treats a positional as a
-    #     PATH and the SDK reads `TORTOISE_DB_URI` at construction, so the env IS
-    #     the seam here and `monkeypatch` cannot be used at module scope.
-    # Both halves save and restore (`_old_uri`, `old`), which is why the sibling
-    # restoration guard is satisfied without this row; only the DECLARATION was
-    # missing. ⛔ ONE ARM PER STRIPPED LINE, `^`…`$`-anchored: `_is_declared`
-    # matches each censused line on its own, so these four spellings are all the
-    # row authorizes and a future site in the same file reds until triaged
-    # (#11083 — a looser arm would ride along silently).
-    "test_verbatim_index_cohort_8429.py": [
-        r'^os\.environ\["TORTOISE_DB_URI"\] = _old_uri$',
-        r'^os\.environ\.pop\("TORTOISE_DB_URI", None\)$',
-        r'^os\.environ\["TORTOISE_DB_URI"\] = uri$',
-        r'^os\.environ\["TORTOISE_DB_URI"\] = old$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

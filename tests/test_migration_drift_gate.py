@@ -247,8 +247,7 @@ def test_duplicate_free_but_pending_blocks_normally():
 # the ordinary pending case and the out-of-order case — a blocking version
 # OLDER than prod's newest applied version, where "apply migrations first"
 # lands the migration on top of its successor (`supabase db push --include-all`
-# applies the whole repo-pending set in the applier's order — the VERSION
-# substring compared as a string, not the filename). The BLOCKING list also
+# applies the whole repo-pending set in filename order). The BLOCKING list also
 # silently omitted warn-class (index-only) repo-ahead migrations, which are
 # still pushed. Against the pre-#4278 script (`origin/main` @ 877fa52d1, which
 # predates this change) the behaviour tests below fail. Re-run it against that
@@ -512,8 +511,7 @@ def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
     assert "_b.sql" not in r.stdout, r.stdout
     assert "git mv 20260813000005_a.sql" not in r.stdout, r.stdout
     # The ordering bound applies here too: `--include-all` applies the whole
-    # pending set in the applier's order (version substring, string compare), so a
-    # rename to a prefix BELOW prod's newest
+    # pending set in filename order, so a rename to a prefix BELOW prod's newest
     # applied version is the #4278 hazard this gate refuses elsewhere.
     assert "sorts AFTER 0001" in r.stdout, r.stdout
 
@@ -842,22 +840,12 @@ def test_remote_max_is_the_greatest_applied_version():
     assert "20260918000001" in ooo[0], ooo[0]
 
 
-def test_comparator_is_lexical_matching_the_cli_version_order():
-    """The ordering reference compares the VERSION substring lexically — the CLI's
-    own key (`compareMigrationVersions` in `migration-timestamp.format.ts`, a plain
-    `a < b`), not numeric order and not the whole filename. With variable-width
-    prefixes they differ: an applied `999` and a pending `1000` — `'1' < '9'`, so
-    the CLI orders `1000` first, and applying `1000` on top of the already-applied
-    `999` IS out of order. Numeric comparison would wrongly call it safe.
-
-    Note what this fixture can and cannot see: `999` vs `1000` is a case where the
-    version order and the FILENAME order agree, so this row pins the comparator
-    against a NUMERIC re-sort only. The version-vs-filename divergence needs a
-    prefix pair (`2026111700_…` vs `20261117000003_…`) and is pinned next to the
-    selector that depends on it —
-    `test_9559_blocked_release_conditions.py::
-    test_the_live_definition_is_the_LAST_BY_VERSION_and_only_applied_names_qualify`
-    (#13393)."""
+def test_comparator_is_lexical_matching_cli_filename_order():
+    """The ordering reference follows the CLI's filename order (string compare),
+    not numeric order. With variable-width prefixes they differ: an applied
+    `999` and a pending `1000` — the CLI orders `1000` first, so applying `1000`
+    on top of the already-applied `999` IS out of order. Numeric comparison
+    would wrongly call it safe."""
     r = _run_fixture(
         {"1000_late_named.sql": "CREATE TABLE IF NOT EXISTS public.a (id text);\n"},
         ["999"],

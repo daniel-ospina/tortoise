@@ -7724,15 +7724,13 @@ def test_tortoise_fts_query_records_no_embedder_and_encode_failed(
 
 
 def test_wrong_dim_node_fts_still_hits(tmp_path):
-    """#8430: a wrong-DIMENSION node costs its own dense row, not the leg.
+    """D4 (R3): a malformed embedding node → leg reason='query_failed' (NOT
+    no_embeddings), and FTS still returns hits — the leg-mix shows the failure,
+    never a silent empty vector leg.
 
     The node is malformed by DIMENSION (`[0.1, 0.2]` against the 384-dim query)
-    — #8430's root. #8430's read-seam fix drops that row, so the leg reason is
-    `ok` (it answered from the rows it can read) and FTS still returns hits.
-    Before #8430 one such node made the whole `MATCH` raise and the leg recorded
-    `query_failed`; the degradation contract this file exists for — "a dead
-    vector leg must never cost the FTS match" — is unchanged and still pinned by
-    the FTS assertions below.
+    — #8430's root. The plain-``List`` SHAPE alone no longer poisons the MATCH;
+    #8316 normalises it at the read boundary.
     """
     _require_embedder()
     q = {
@@ -7758,10 +7756,7 @@ def test_wrong_dim_node_fts_still_hits(tmp_path):
             params={"q": q["question_id"]})
         ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
         vec = next(e for e in ret["legs"] if e["leg"] == "vector")
-        assert vec["reason"] == "ok", (
-            f"the vector leg recorded {vec['reason']!r} — one wrong-width stored "
-            "List is still aborting the whole MATCH (#8430)")
-        assert vec["degraded"] is False
+        assert vec["reason"] == "query_failed"
         fts = next(e for e in ret["legs"] if e["leg"] == "fts")
         assert fts["reason"] == "ok"
         assert any(h["id"] == "poisoned" for h in ret["hits"])

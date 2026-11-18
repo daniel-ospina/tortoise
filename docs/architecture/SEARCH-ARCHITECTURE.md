@@ -48,8 +48,7 @@ the FalkorDB question** (four more HNSW structures, five total, on provisioned R
 keep their stored embedding and **no pass may remove it or stop writing it**. The 2026-11-17 ruling below decides the
 **INDEX** half — yes, in Postgres — and its state is **decided, implementation in flight — `#13220`**; ⚠️ **and the ruling that governs removal is the same day's SECOND one, which
 supersedes the KEEP ruling for the GRAPH COPY only** (`#11395` comment `6956793300`, `OVERRIDES:` recorded there): that graph copy's removal becomes permissible only once the
-record holds **and** indexes that label — record first (`#13220`'s step 1), graph removal second, **in a later release and
-never in the same one** — a condition not met while implementation is
+record holds **and** indexes that label — a condition not met while implementation is
 in flight, so today nothing may be removed and nothing may stop being written — and `:Event`/`:Source` are neither protected by the KEEP ruling nor
 retired by this second one. ⚠️ **Two rules, stated as two:** that comment's authorisation to RETIRE a graph copy is
 scoped — `:Object`/`:Subject` only — while its record-first condition (the record must hold and index a

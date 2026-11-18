@@ -310,9 +310,8 @@ def test_update_entity_point_branch_verbatim_embedding_is_dense_readable(tmp_pat
             sdk.close()
 
 
-# ── what the seam does NOT normalise — and what #8430 closed on top of it ────
-#    Pins both halves so the claims in the seam's docstring and in the
-#    leg_trace comment stay verified.
+# ── the seam's own residual: what it does NOT normalise, pinned so the claim
+#    in its docstring and in the leg_trace comment stays verified ─────────────
 #
 # The NULL/absent case is deliberately NOT pinned here: the read filters it with
 # `WHERE n.embedding IS NOT NULL` BEFORE the seam is evaluated, and a NULL
@@ -322,20 +321,16 @@ def test_update_entity_point_branch_verbatim_embedding_is_dense_readable(tmp_pat
 # leg-level empty/null coverage lives in
 # `test_search_engine.py::test_vector_trace_no_embeddings_zero_row_guard`.
 
-def test_a_non_numeric_embedding_no_longer_aborts_the_match(tmp_path):
-    """The residual #8316 named, CLOSED by #8430 (this pin is inverted, not removed).
+def test_a_non_numeric_embedding_still_records_query_failed(tmp_path):
+    """The residual #8430 owns: a ``List`` the cast cannot READ still aborts.
 
-    The #8316 seam normalised a right-width ``List`` of NUMBERS. A ``List`` of
-    strings passed the ``typeof(_v) = 'List'`` filter and then raised inside
-    ``vecf32`` ("vectorf32 expects an array of numbers"), taking the whole
-    ``MATCH`` down exactly as the type mismatch did before #8316. #8430 owns
-    that class and closed it in the same lazy filter (an element check), so the
-    unreadable row is now DROPPED and the typed neighbour KEEPS its dense leg.
-
-    The WIDTH half of #8430 is pinned by
-    ``test_search_engine.py::test_vector_trace_wrong_dim_node_no_longer_kills_the_leg``;
-    the residual that remains — a wrong-width TYPED vector — is pinned in
-    ``tests/test_embedding_boundary_8419_8430.py``.
+    The seam normalises a right-width ``List`` of NUMBERS. A ``List`` of
+    strings passes the ``typeof(_v) = 'List'`` filter and then raises inside
+    ``vecf32`` ("vectorf32 expects an array of numbers"), which takes the whole
+    ``MATCH`` down exactly as the type mismatch did before #8316 — so this is
+    #8430's class, not a shape #8316 claims to normalise, and pinning it keeps
+    that boundary honest (the WIDTH half of it is pinned by
+    ``test_search_engine.py::test_vector_trace_wrong_dim_node_is_query_failed``).
     """
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "non_numeric.db"))
@@ -347,14 +342,16 @@ def test_a_non_numeric_embedding_no_longer_aborts_the_match(tmp_path):
                 "CREATE (p:Point {id:'junk', content:'board game', "
                 "pointKind:'statement', embedding:$v})",
                 params={"v": ["x"] * DIM})
-            hits, reason = _dense(sdk, [0.1] * DIM)
-            assert reason == "ok", (
-                "expected the unreadable value to be DROPPED so the leg can "
-                f"answer from the healthy row — got {reason!r}. If this records "
-                "`query_failed` again, the #8430 element check regressed.")
-            assert healthy in hits, (
-                "the typed neighbour lost its dense leg to a non-numeric "
-                "neighbour (#8430)")
-            assert "junk" not in hits
+            _hits, reason = _dense(sdk, [0.1] * DIM)
+            assert reason == "query_failed", (
+                "expected the unreadable value to abort the MATCH (the #8430 "
+                f"residual named by the leg_trace comment) — got {reason!r}. "
+                "If this now records 'ok', the #8430 class was closed and "
+                "this test plus the leg_trace comment it pins must be "
+                "UPDATED, not deleted.")
+            # The whole-MATCH claim is carried by the leg REASON above: every
+            # failure branch of run_vector_query records `query_failed` and
+            # returns [] (so `hits == []` here would be entailed by the reason,
+            # not independent evidence of it).
         finally:
             sdk.close()

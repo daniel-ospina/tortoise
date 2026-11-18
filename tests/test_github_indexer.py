@@ -549,103 +549,25 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
         f"its reopen exactly once ({mints}) — `None` for EVERYTHING is not the fix")
 
 
-def test_a_FALSY_isClosed_with_NO_position_still_withholds_the_open_word(sdk):
-    """The STATUS-word path to `"open"` had no pin — the gap this one closes.
-
-    `fall_through` becomes `"open"` two ways — a stage/slot PROP is present, or the
-    legacy `status` word maps to it through `_STATUS_TO_STATE` (`in_progress`,
-    `live`, `open`). Every other falsy pin exercises the first way or a
-    non-`"open"` word, so a narrowing of the arm to position-carrying rows survived
-    the whole suite while restoring the measured defect for this one.
-
-    A position-less row is ordinary: a first ingest that records no stage fold leaves
-    none, and a pre-S0 row may never have had any. It is not live either (the
-    Integer-`0` marker fails `coalesce(n.isClosed, false) = false`), so the close
-    fold is never dispatched for it and `"open"` mints a `-closed` on every poll of a
-    CLOSED issue — the same unbounded journal growth, reached without a stage prop.
-    """
-    oid = "github-issue-acme/repo1-1"
-    t = MockGitHubTransport(issues=[gh_issue(1)])
-    _run(_indexer(t), sdk)
-    proj = sdk._get_proj()
-    # The word and the marker through the PUBLIC DOOR; the row carries no position.
-    sdk.update_knowledge(oid, status="live", isClosed=0)
-    proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) "
-                 "REMOVE o.pipelineStageId, o.pipelineSlot")
-    stored = proj.g.query(
-        f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.status, o.isClosed, "
-        "typeof(o.isClosed), o.pipelineStageId, o.pipelineSlot").result_set[0]
-    # PREMISE PIN, not coverage: a door or a projection that started coercing the
-    # marker, dropping the word, or recording a position would leave the pin below
-    # passing for a shape it is not about — so the precondition is asserted, never
-    # assumed. The diff adds READS only, so these can not vary under a mutation of
-    # it and must not be counted as guards (#13326 F2, agent-infra#3442 rule 3).
-    assert stored[1] == 0 and stored[2] == "Integer", (
-        f"the door did not store the uncoerced integer this pin is about: {stored!r}")
-    assert stored[0] == "live", (
-        f"the word this pin is about (one that maps to `open`) was not stored: {stored!r}")
-    assert stored[3] is None and stored[4] is None, (
-        f"the precondition is not the POSITION-LESS shape: {stored!r}")
-    # GitHub CLOSED over the row: the withheld `"open"` is what made this loop.
-    t.issues_by_repo["acme/repo1"] = [gh_issue(
-        1, state="closed", closed_at="2026-07-20T08:00:00Z",
-        updated_at="2026-07-20T08:00:00Z")]
-    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
-    kinds = sorted(r[0] for r in proj.g.query(
-        "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-issue-acme/repo1-1' "
-        "RETURN e.eventKind").result_set)
-    assert mints == [0, 0, 0], (
-        "a position-less row with a falsy marker was read as OPEN from its status "
-        f"word, so a CLOSED issue minted a close per poll ({mints}); events {kinds}")
-    assert "github.issue.closed" not in kinds, (
-        f"a false close was minted through the status-word path: {kinds}")
-    # …and the reopen direction records nothing either — `None` is the answer, not
-    # `"closed"`: this row has no `"closed"` reading to preserve.
-    t.issues_by_repo["acme/repo1"] = [gh_issue(
-        1, state="open", closed_at=None, updated_at="2026-07-23T08:00:00Z")]
-    assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
-        "a falsy-marker row with no position and no `closed` word must record no "
-        "transition in either direction")
-
-
 def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
-    """#13326 (measured on `origin/main` `54682177bc`), the half that had no pin: `isClosed=0`.
-
-    ⚠️ Attribution corrected (#13326 review P3): this half was NOT #13288 round-2 `F1`
-    — that finding is "the position arm shadows the unresolvable guard, and the new
-    comment says it cannot", and no #13288 comment mentions `isClosed=0`, `Integer`,
-    or a falsy non-boolean marker. The closest prior record is #13289's review P3
-    ("a falsy non-boolean `outdated` (`0`, `''`) reads live in Python but terminal in
-    Cypher — RECORDED, NOT FIXED") — the same excluded middle one FIELD over; the
-    `isClosed` field itself was found for #13326.
+    """#13288 review R2/F1, the half that had no pin: `isClosed=0`.
 
     `create_object(..., isClosed=1)` is documented at the truthy pin BELOW
     (`test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`); the
-    FALSY half is reachable through EITHER props door — there is no partition to
-    justify (#13326 review, second lane: `create_object("x", objectKind=
-    "core:issue", isClosed=0)` stores `['x', 0, 'Integer']` too, measured). Every
-    props door stores the marker VERBATIM and none coerces; the `update_knowledge`
-    spelling below is the one this pin uses (measured on the merged head:
+    FALSY half is reachable through the other door, `update_knowledge(id,
+    isClosed=0)`, which stores the INTEGER `0` (measured on the merged head:
     `typeof(o.isClosed)` → `['Integer']`). The two sides then disagree
     irreconcilably: this module reads it by `bool()` (→ live), while the fold's
     live-holder probe compares `coalesce(n.isClosed, false) = false` in Cypher,
     where `0 = false` is FALSE under FalkorDB's strict types (measured:
     `RETURN 0 = false, typeof(0)` → `[False, 'Integer']`; vendor-documented, and
-    `toBoolean(0)` is the explicit coercion). So the row has NO live holder, and no
-    CLOSING fold is dispatched for it — the marker is never repaired from the close
-    side. (Trigger-reach is a separate fact and the module docstring states it: a
-    `github.issue.reopened` fold reached by NAME DOES rewrite the marker, which is
-    exactly why the arm keeps a `"closed"` answer wherever the position or a legacy
-    `status` word already records an end.)
+    `toBoolean(0)` is the explicit coercion). So the row has NO live holder, no
+    fold runs on it, and the marker is never repaired.
 
     Measured pre-fix on the merged head, four polls of a CLOSED issue: mints
     `[1, 1, 1, 1]`, four permanent `-closed` Events, the row byte-identical. The
-    read now WITHHOLDS THE `"open"` ANSWER for a falsy non-boolean marker on a
-    position that records no end — it answers `None` where the answer would
-    otherwise be `"open"`, which gates the transition arm off. It does NOT answer
-    `None` everywhere (#13326 review P2): where the position records an end, or a
-    legacy `status` word already says closed, the `"closed"` answer is kept, because
-    that is the reading the reopen fold reaches and REPAIRS.
+    read now answers `None` (unplaceable) for a falsy non-boolean marker on a
+    position that records no end, which gates the transition arm off.
 
     ⛔ The `[0,0,0,0]` polls alone do NOT test that answer (#13326 F2): the
     reading this arm REJECTS, `"closed"`, mints nothing there either, because

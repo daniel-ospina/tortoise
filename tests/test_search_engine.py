@@ -281,20 +281,13 @@ def test_vector_trace_ok_on_healthy_graph(tmp_path):
         sdk.close()
 
 
-def test_vector_trace_wrong_dim_node_no_longer_kills_the_leg(tmp_path):
-    """#8430: a wrong-DIMENSION node costs its own row, not the brute-force MATCH.
+def test_vector_trace_wrong_dim_node_is_query_failed(tmp_path):
+    """D4 (R3): a malformed embedding node costs the brute-force MATCH.
 
     The node here is malformed by DIMENSION (a 2-dim list against the 384-dim
-    query). The plain-``List`` SHAPE alone was fixed by #8316 at the read
-    boundary; the WIDTH half was #8430, and the read seam now DROPS a row the
-    distance expression cannot pair with (``query_failed`` was what one such
-    node used to cost every other row). The healthy Point therefore keeps its
-    dense leg.
-
-    Renamed from ``test_vector_trace_wrong_dim_node_is_query_failed``, which
-    pinned the pre-#8430 symptom; the TYPED wrong-width residual — which still
-    records ``query_failed`` — is pinned in
-    ``tests/test_embedding_boundary_8419_8430.py``.
+    query), which is #8430's root. The plain-``List`` SHAPE alone no longer
+    poisons the leg — #8316 normalises it at the read boundary — so this test
+    now exercises the width half, not the type half.
     """
     _embedder_or_skip()
     sdk = _trace_sdk(tmp_path)
@@ -303,22 +296,12 @@ def test_vector_trace_wrong_dim_node_no_longer_kills_the_leg(tmp_path):
         sdk._get_proj().g.query(
             "CREATE (p:Point {id:'poisoned', content:'board game', "
             "pointKind:'statement', embedding:[0.1, 0.2]})")
-        from tortoise.search_engine import reset_circuit_breakers
-        reset_circuit_breakers()
         trace: list[dict] = []
         hits = run_vector_query(sdk._get_proj().g, [0.0] * 384, limit=5,
                                 leg_trace=trace)
+        assert hits == []
         vec = next(e for e in trace if e["leg"] == "vector")
-        assert vec["reason"] == "ok", (
-            f"the dense leg recorded {vec['reason']!r} — a 2-dim stored List is "
-            "still aborting the whole MATCH (#8430)")
-        ids = [pid for pid, _score in hits]
-        assert "healthy" in ids, (
-            "the healthy Point lost its dense leg to a wrong-width neighbour "
-            "(#8430)")
-        assert "poisoned" not in ids, (
-            "the wrong-width row reached the result set — it cannot be scored, "
-            "so it must be dropped")
+        assert vec["reason"] == "query_failed"
     finally:
         sdk.close()
 

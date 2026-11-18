@@ -29,10 +29,8 @@ Citing by NAME is the recorded convention, not this file's invention:
     line number, and never by row **ordinal**. Both go stale the same way".
   * `docs/evidence/7949-capstone/E1-E5-PROOFS.md:137` — "cited **by title, never
     by line**: a line number ROTS".
-  * `tortoise/hosted_api.py`, the `POST /v1/context` transport-bound comment —
-    "Cited by SYMBOL, never by line number (line numbers re-stale — …)". Cited
-    without a line number because that is the rule it states, and this list's
-    own `:NNN` entries rot the same way when the target grows above them.
+  * `tortoise/hosted_api.py:5006` — "Cited by SYMBOL, never by line number (line
+    numbers re-stale)".
 
 Sphinx's cross-reference guidance converges on the same rule from outside this
 repo: explicit labels (`:ref:`) are preferred over fragile direct links because

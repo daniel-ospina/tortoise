@@ -27,8 +27,8 @@ to the entity read reds here without a database.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

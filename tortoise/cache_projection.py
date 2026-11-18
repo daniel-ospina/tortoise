@@ -719,12 +719,9 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: of DEFAULTS (`eventKind` `''`, `subject`/`object` `''`, `startedAt` `''`,
 #: `participants` `[]`, `classificationLevel` `'internal'`, `format` `'jsonl'`,
 #: and `id`) and writes all of it unconditionally with `e += $props`, so a
-#: record-sourced `:Event` loses every one of them the record row does not carry —
-#: PER COLUMN, so the count follows the row: seven for an event whose optional
-#: columns are NULL apart from `event_kind`, EIGHT when `event_kind` is NULL too
-#: (including the ONTOLOGY §4.5-REQUIRED `eventKind` when a producer omits it),
-#: and none for a row that carries them all (#13392 review cycle 2: the count was
-#: stated without its shape). Also undeclared:
+#: record-sourced `:Event` loses every one of them the record row does not carry
+#: (seven, for an event whose optional columns are NULL) — including the
+#: ONTOLOGY §4.5-REQUIRED `eventKind` when a producer omits it. Also undeclared:
 #: the other `:Source` create clauses (`_materialize_connector_source`,
 #: `_upsert_document`, `_mint_source_stub`) and the `_stub` adoption marker the
 #: fold clears. Filed as #9721, as its own change, for two shapes this table cannot

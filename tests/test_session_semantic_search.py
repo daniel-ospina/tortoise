@@ -424,11 +424,9 @@ class TestReviewRegressions:
         — is therefore NOT what this test pins; it is pinned where the LEG
         reasons are observable:
         ``test_longmem_runner.py::test_wrong_dim_node_fts_still_hits``
-        (a wrong-width neighbour, ``fts.reason == 'ok'`` AND the row returned)
-        and ``test_search_engine.py::
-        test_vector_trace_wrong_dim_node_no_longer_kills_the_leg`` — both now
-        assert the leg TOOK ITS OWN ROW ONLY (#8430), which is the behaviour
-        this file's ``s_legacy`` assertion also depends on.
+        (``vector.reason == 'query_failed'`` AND ``fts.reason == 'ok'`` AND the
+        row returned) and ``test_search_engine.py::
+        test_vector_trace_wrong_dim_node_is_query_failed``.
         """
         sdk = _fresh_sdk()
         try:

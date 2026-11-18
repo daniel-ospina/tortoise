@@ -10,9 +10,8 @@ content edit. A bare ``List`` node is not in the HNSW index at all, so it is
 silently missing from the index-served Point dense leg (#8429) — the reason the
 write seam keeps server-owned vectors typed. (#8316 has since normalised a
 right-width ``List`` at the READ boundary, so the abort this file was originally
-named for no longer happens for a right-width stored value; #8430 drops a value
-the read cannot consume — a wrong width, a non-numeric value — instead of
-aborting the whole MATCH.) This is #4521's class, but on
+named for no longer happens for a right-width stored value; a wrong-width or
+non-numeric one still aborts the MATCH — #8430.) This is #4521's class, but on
 the **LIVE** path —
 ``update_point`` is the writer behind the MCP ``tortoise_update`` tool and the
 hosted update route — where #4521 / PR #7740 fixed only the REPLAY's
@@ -167,9 +166,9 @@ def test_content_edit_leaves_a_readable_typed_vector(tmp_path):
                 "ONE content edit stored the re-derived embedding as a plain "
                 "`List` — the vector is no longer the typed shape the HNSW "
                 "index cohort requires (#8429); since #8316 the READ only "
-                "normalises a right-width List, and since #8430 it drops a "
-                "value it cannot consume instead of aborting the MATCH "
-                "(#4520 residual, the #4521 class on the live path)")
+                "normalises a right-width List (a wrong width still aborts "
+                "the MATCH — #8430) (#4520 residual, the #4521 class on the "
+                "live path)")
 
             # (2) the write shape is probed by `_dense_distance` — a RAW
             #     `n.embedding` expression, deliberately STRICTER than the real
