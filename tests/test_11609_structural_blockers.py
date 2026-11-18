@@ -398,8 +398,39 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, path):
     # `hosted_api` mounts at the full path; `selfhost_api`'s router carries a `/v1` prefix
     # (`selfhost_api.py:28`) and spells the suffix — both are read from the module, never
     # assumed (see `_declared_route_paths`).
-    assert any(_declares_route(module, entry.rest_spec.method, path)
-               for module in _serving_modules()), (
+    hosted_declares = _declares_route(hosted_api, entry.rest_spec.method, path)
+    selfhost_declares = _declares_route(selfhost_api, entry.rest_spec.method, path)
+
+    # (2b) a DECLARATION is not a SERVING route: `@router.get(…)` in `selfhost_api.py` only
+    # reaches a client because `selfhost.py` does `app.include_router(_rest_router)`. Without
+    # this arm the pin asserts "a decorator line exists" while the doc and this test's name
+    # assert "the route is served" — MEASURED: deleting
+    # `selfhost.py:1052 app.include_router(_rest_router)` left all three of these parametrized
+    # pins GREEN while `/v1/*` was no longer served at all. (FastAPI's own answer is the
+    # runtime route tree, `app.routes` / `iter_route_contexts()`; a source scan is used here
+    # because `tortoise/selfhost.py` refuses to import without `TORTOISE_SECRET_PEPPER` — so
+    # the include EDGE is pinned instead of the mounted table.)
+    if selfhost_declares:
+        selfhost_src = (repo / "tortoise" / "selfhost.py").read_text(
+            encoding="utf-8", errors="replace")
+        # the names bound to `selfhost_api`'s router in the app module (alias-aware)
+        bound: set[str] = set()
+        for match in re.finditer(r"from\s+tortoise\.selfhost_api\s+import\s+([^\n#]+)",
+                                 selfhost_src):
+            for part in match.group(1).split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                bound.add(part.split(" as ")[-1].strip())
+        mounted = set(re.findall(r"include_router\(\s*([\w.]+)", selfhost_src))
+        assert bound & mounted, (
+            f"{path} is declared on `{selfhost_api.__name__}`'s router, but "
+            "`tortoise/selfhost.py` never `include_router()`s a router it imports from "
+            f"`tortoise.selfhost_api` (imported={sorted(bound) or 'NOTHING'}, "
+            f"mounted={sorted(mounted) or 'NOTHING'}) — the decorator is dead code and the "
+            "route is NOT served; this pin's premise changed")
+
+    assert hosted_declares or selfhost_declares, (
         f"{path} is not served by a hand-written {entry.rest_spec.method} decorator in "
         f"{hosted_api.__name__} or {selfhost_api.__name__} — if the route is really gone, "
         "this pin's premise changed")
