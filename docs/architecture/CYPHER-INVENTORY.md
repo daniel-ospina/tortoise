@@ -427,27 +427,34 @@ file: HEAD `1` → merged `0`, and **no** file gained one), which by definition 
 door side is unchanged (**1,628 / 109** product, bare **1,634 / 110**), and `--all-surface` reads
 **9,075 / 826**.
 
-**Appendix A rotted green a third time on this merge**: **758 of its 1,314 rows** were stale —
-**379 statement sites** renumbered, each counted once per side — across **ten** files, and every
-shift is explained by main-side insertions above the sites. Per file (stale rows, measured shifts):
+**Appendix A rotted green a third time on this merge**: **759 of its 1,314 rows** were stale — **758**
+by a line shift alone and **one** that also re-attributed
+(`projection/__init__.py:13045` → `:13234`, `FalkorProjection.apply` → `_apply_event`) — across
+**ten** files, and **every shift is predicted exactly by `main`'s own line changes above the site**
+(insertions, plus one 38-line removal in `projection/__init__.py`). The counting basis is a row-for-row
+comparison against this branch's pre-merge cut (`05c5615b9938`, the same 1,314 rows, matched by file
+and taken in order, delta = merged line − parent line), and it is reproducible: a shifted row has
+exactly one delta, so **each row below must satisfy `stale rows == sum of its brackets`** — an earlier
+cut of this paragraph failed that self-check, which is why the rule is written down here. Per file
+(stale rows, measured shifts):
 
 | file | stale rows | observed shifts (lines) |
 |---|---|---|
-| `tortoise/sdk.py` | 357 | +22 (211 rows), +44 (32) |
-| `tortoise/hosted_api.py` | 239 | +1 (33), +6 (21), +18 (86) |
-| `tortoise/projection/__init__.py` | 84 | +69 (1), +280 (14), +295 (24) |
-| `tortoise/projection/edges.py` | 29 | +26 (20) |
-| `tortoise/projection/entities.py` | 27 | +12 (12) |
-| `tortoise/indexer/github_indexer.py` | 11 | +4 (6), +11 (1), +15 (3) |
-| `tortoise/webhook_delivery.py` | 5 | +8 (4) |
-| `tortoise/why_snapshot.py` | 3 | +7 (2) |
-| `tortoise/onboarding/state.py` | 2 | +1 (1) |
+| `tortoise/sdk.py` | 357 | +22 (311 rows), +44 (46) |
+| `tortoise/hosted_api.py` | 240 | +1 (57), +6 (42), +18 (141) |
+| `tortoise/projection/__init__.py` | 84 | +69 (1), +189 (1), +280 (49), +295 (33) |
+| `tortoise/projection/edges.py` | 29 | +26 (29) |
+| `tortoise/projection/entities.py` | 27 | +12 (27) |
+| `tortoise/indexer/github_indexer.py` | 11 | +4 (6), +11 (1), +15 (4) |
+| `tortoise/webhook_delivery.py` | 5 | +4 (1), +8 (4) |
+| `tortoise/why_snapshot.py` | 3 | +4 (1), +7 (2) |
+| `tortoise/onboarding/state.py` | 2 | +1 (2) |
 | `tortoise/record_projection.py` | 1 | +21 (1) |
 
 The row count is unchanged at **1,314** — the merge added and removed no statement site — so this is
-purely the `file:line`-versus-SCALAR gap: every pin was GREEN while all 758 rows would have pointed a
-reader at the wrong line. Appendix A is regenerated with `--markdown` at THIS merged tree, so this
-paragraph and the table it describes are one cut.
+purely the `file:line`-versus-SCALAR gap: every pin was GREEN while all 759 stale rows would have
+pointed a reader at the wrong line. Appendix A is regenerated with `--markdown` at THIS merged tree, so
+this paragraph and the table it describes are one cut.
 
 **Earlier cut — `origin/main` **`f462ad3acb`** merged into this branch, carrying `#13302`'s
 `tortoise/ended.py` via `#13416`.** Re-derived by RUNNING the tool on
