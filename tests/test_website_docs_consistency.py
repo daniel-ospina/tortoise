@@ -441,6 +441,49 @@ def test_docs_lists_every_canonical_point_status() -> None:
                 )
 
 
+def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
+    """`docs.html` may not claim EVERY read surface HIDES an `outdated` row.
+
+    The `outdated` boolean is a dead marker for retrieval — `_terminal_excluded`
+    ANDs its `coalesce(n.outdated, false) = false` conjunct by default
+    (`tortoise/live.py:159`) — but it is NOT hidden on every read.
+    `belief_timeline` (`tortoise/sdk.py:27720`) takes no opt-in flag and
+    deliberately re-attaches superseded priors down the CORRECTS chain, emitting
+    them with `outdated: True` (`:27830-27889`); `get_point` (`:29952`) returns
+    the row by address. That behaviour is already asserted by
+    `tests/test_de2e6_temporal.py::test_timeline_keeps_superseded_prior`, which
+    is green on `main`, so an absolute "every read surface hides it" states the
+    opposite of a passing test.
+
+    This is the same defect class the page was just corrected for, one commit
+    later: it had claimed `outdated` was "no longer writable at all", falsified
+    by the server's writers — and a replacement absolute that is WIDER than the
+    code is the same error, not a smaller one, on the page whose subject is
+    precision about this word. `docs/ONTOLOGY.md:1174` states the bounded
+    version ("readers … must continue to honour") and `:1182` scopes the
+    exclusion to the DEFAULT query surfaces, so this pin holds the page to the
+    ontology: every read treats the row as ENDED, the default query surfaces
+    drop it, and the addressed/history reads still show it.
+    """
+    html = _read(DOCS)
+    assert "every read surface hides" not in html, (
+        "website/docs.html claims every read surface HIDES an `outdated` row. "
+        "That is not true: `belief_timeline` returns such rows by default "
+        "(marked `outdated: True`) and `get_point` returns them by address — "
+        "see tests/test_de2e6_temporal.py::test_timeline_keeps_superseded_prior, "
+        "which passes on main. State the bounded fact instead: every read treats "
+        "it as ENDED, the default QUERY surfaces drop it, and the history / "
+        "addressed reads still show it."
+    )
+    assert "belief_timeline" in html, (
+        "website/docs.html no longer names the read surface that KEEPS an "
+        "`outdated` row (`belief_timeline`). Without it the paragraph's scoping "
+        "generalises to the reader's whole API, which the SDK contradicts. If "
+        "the carve-out is now described another way, update this pin with the "
+        "reasoning rather than deleting it."
+    )
+
+
 # ── The belief mechanism (the #3332 headline defect) ─────────────────────────
 
 
