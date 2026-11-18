@@ -50,7 +50,7 @@ claims:
 | `test_an_UNMEASURED_consequence_is_CARRIED_not_dropped` | the under-reporting channel, `surface_consequence.unmeasured_labels` | a label whose consequence is `UNMEASURED` is skipped like a `False`, so `entity_types_whose_query_results_change` reads as the whole population while it is only the measured part |
 | `test_an_unresolvable_leg_method_reports_UNMEASURED_not_an_EMPTY_surface` | round-2 P2: a rename must not read as "no tool is affected" | `VECTOR_LEG_SDK_METHOD` stops resolving, both sets empty, and the surface reports `[]` — a measured-looking "no MCP tool can pass `entity_type`" — with no `UNMEASURED` channel |
 | `test_the_surface_named_is_the_one_that_can_pass_entity_type` | the CALLERS, derived from the registry **and** the handler AST **and** the SDK's own fixed-type call sites | the `sdk_method` binding alone is used, so `tortoise_query` (bound to `paginated_query`, yet forwarding a `text=` argument to `tortoise_fts_query(entity_type=…)`) is missing — the direction that UNDERSTATES a surface change |
-| `test_a_tool_whose_SDK_method_fixes_entity_type_is_named` | the THIRD entrant source, and the default it must resolve before reading any call site | a tool whose SDK method names the type itself (`tortoise_recall` → `object`, `tortoise_search_sessions` → `event`) is named by neither the registry nor the handler scan, and a one-pass walk reports a defaulted call as `UNKNOWN` |
+| `test_a_tool_whose_SDK_method_fixes_entity_type_is_named` | the THIRD entrant source, and the default it must resolve before reading any call site | a tool whose SDK method names the type itself (`check_confidence` → `object`, `search_knowledge` → `event`) is named by neither the registry nor the handler scan, and a one-pass walk reports a defaulted call as `UNKNOWN` |
 | `test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure` | `#11088` round 7 P2: one row's width is not the label's | `stored × width × 4` multiplies ONE sampled row across every row, so a mixed-width label (an `EMBEDDING_DIM` rotation) publishes a wrong byte figure with no UNMEASURED signal |
 | `test_the_census_reports_EVERY_index_KIND_not_only_VECTOR` | §3.1's *"the same run settles it"* — the FULLTEXT datum the run promised to answer | the catalogue parse keeps VECTOR rows only, so whether a lexically-matching query survives a removal is not in the answer, while the doc says it is |
 | `test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING` | E2E D9 (`04-plan.md` §7) on a real engine: `Point` indexed, the four served labels unindexed **with bytes**, and the graph's visible shape unchanged across the call (⚠️ a corroborating observation — the READ-ONLY verb is what forbids the write) | the census mutates the graph it measures (labels / node counts / edges / the index catalogue / per-label embedding counts), or an unindexed label loses its `entity_type` set |
@@ -7285,12 +7285,22 @@ def test_the_census_states_the_consequence_of_removing_each_label():
         "a label with no query path is not a surface consequence")
 
     # ⛔ EVERY entrant, and WHICH of them actually change (review round 7, P1):
-    # `tortoise_recall` reaches `:Object` (affected) and `:Point` (indexed, so
-    # not); the `:Point`-only tools are entrants with NO change — printing them
-    # as affected would over-report as surely as dropping them under-reported.
+    # `tortoise_check_confidence` reaches `:Object` (affected) and `:Point`
+    # (indexed, so not); the `:Point`-only tools are entrants with NO change —
+    # printing them as affected would over-report as surely as dropping them
+    # under-reported.
     by_tool = {e["tool"]: e for e in sc["surface"] if "tool" in e}
-    assert by_tool["tortoise_recall"]["reaches_affected_labels"] == ["object"], \
-        by_tool["tortoise_recall"]
+    # ⛔ `tortoise_recall` carried this reach when the round-7 finding was
+    # written, and `#13550` RETIRED it FORWARD: `RETIRED_USE_INSTEAD` points at
+    # `tortoise_check_confidence(recall=True, …, mode="state")`, and `recall_state`
+    # — the SDK method that asks the leg for `:Object` — is the arm that tool
+    # now calls. The reach did not leave with the door, so the entrant is
+    # RE-POINTED here rather than dropped, and the retired name is pinned
+    # ABSENT exactly like the other retired doors two lines below: a door that
+    # silently comes back must not read as a surface that never mentioned it.
+    assert by_tool["tortoise_check_confidence"]["reaches_affected_labels"] == [
+        "object"], by_tool["tortoise_check_confidence"]
+    assert "tortoise_recall" not in by_tool, sorted(by_tool)
     # ⛔ #11609 Phase 2 RETIRED the two doors whose `sdk_method` used to make them
     # entrants here (`tortoise_suggest_entry_points`, `tortoise_search_sessions`):
     # each now declares no `sdk_method` because its member method is private behind
@@ -7397,13 +7407,19 @@ def test_the_surface_named_is_the_one_that_can_pass_entity_type():
     assert {"tortoise_search", "tortoise_query"} <= named, (
         f"the surface census missed a tool that can pass entity_type: {surface}")
     # ⛔ AND the third entrant class (#11088 review round 7, P1): a tool whose
-    # SDK method names the type itself. `tortoise_recall`'s DEFAULT mode calls
-    # `recall_state`, which asks the leg for `:Object`; `tortoise_search_sessions`
-    # asks for `:Event`. Neither forwards `entity_type`, so both sources above
-    # miss them — and dropping them understates the approval request.
-    recall = next(t for t in surface if t.get("tool") == "tortoise_recall")
+    # SDK method names the type itself. `tortoise_check_confidence`'s RECALL arm
+    # calls `recall_state`, which asks the leg for `:Object`;
+    # `tortoise_search_knowledge` asks for `:Event`. Neither forwards
+    # `entity_type`, so both sources above miss them — and dropping them
+    # understates the approval request. ⛔ `#13550` retired the two doors that
+    # carried these reaches first (`tortoise_recall` →
+    # `tortoise_check_confidence(recall=True, mode="state")`;
+    # `tortoise_search_sessions` → `tortoise_search_knowledge`), so the example
+    # names the LIVE surface rather than a name the registry no longer serves.
+    recall = next(t for t in surface
+                  if t.get("tool") == "tortoise_check_confidence")
     assert "object" in recall["entity_types"], (
-        f"tortoise_recall's default state read queries :Object and is not named: {recall}")
+        f"check_confidence's RECALL arm queries :Object and is not named: {recall}")
     sessions = next(t for t in surface
                     if t.get("tool") == "tortoise_search_knowledge")
     assert "event" in sessions["entity_types"], sessions
@@ -11306,12 +11322,19 @@ def test_a_non_literal_entity_type_is_UNMEASURED_not_a_measured_no(
     graph = _CensusGraph(
         catalogue=[], labels=["Object"], vectors={"Object": (2, [0.0] * 384)},
     )
+    # ⛔ The injected method must be one the LIVE registry binds, or the surface
+    # is empty and this arm is unreachable — it named `recall_state` until
+    # `#13550` retired `tortoise_recall` forward into
+    # `tortoise_check_confidence` (`RETIRED_USE_INSTEAD`), leaving the injected
+    # name bound to no advertised tool and the `next(...)` raising StopIteration
+    # instead of measuring.
     monkeypatch.setattr(
         probe, "_sdk_methods_on_vector_leg",
-        lambda: ({"recall_state": {"UNKNOWN(entity_type_var)"}}, None, None))
+        lambda: ({"check_confidence": {"UNKNOWN(entity_type_var)"}}, None, None))
     sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
                              graph_names=["g"])["surface_consequence"]
-    recall = next(e for e in sc["surface"] if e.get("tool") == "tortoise_recall")
+    recall = next(e for e in sc["surface"]
+                  if e.get("tool") == "tortoise_check_confidence")
     assert str(recall["reaches_affected_labels"]).startswith("UNMEASURED"), recall
 
 
