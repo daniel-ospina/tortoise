@@ -540,7 +540,7 @@ def test_two_distinct_rows_on_one_path_double_register():
     FastAPIRouterAdapter(router).register_all(
         [leaf, rehomed], {leaf.name: lambda: None, rehomed.name: lambda: None})
     assert [p for p, _, _ in router.routes].count(leaf.rest_spec.path) == 2, router.routes
-    assert [n for _, _, n in router.routes][0] == leaf.name, (
+    assert next(n for _, _, n in router.routes) == leaf.name, (
         "the leaf no longer wins first-match, so a duplicated route would not silently "
         "shadow the container")
 
