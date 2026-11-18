@@ -64,7 +64,7 @@ sixteen written at the pin that never opened there, and the `#13124` review foun
 the whole of the `main` set**, and the pin is the default for a cite in neither list only because that is
 where it was written.
 ⛔ **Take the head from the list, never from the row.** §2.1's whole-node row carries one of each
-(`record_serve.py:461` is in the `main` list; `projection/__init__.py:14169` is not, so it is at the pin),
+(`record_serve.py:468` is in the `main` list; `projection/__init__.py:14169` is not, so it is at the pin),
 and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. The
 ratio below is a **whole-document** measurement — every `path.py:NNNN` pair in this file, the `main`-set
 addresses above included — so it is the count of how much of a document written at the pin has since
@@ -135,7 +135,7 @@ enumeration is what has been RE-DERIVED, each entry carrying the head it was mea
 that nothing else is at `main`** — and a range entry spans every line it covers.
 ⚠️ **This revision adds its own entries to it**: `projection/__init__.py`'s fulltext declarations
 `:6854-6870` (the block), `:6864` (`Event`), `:6865` (`Subject`), `:6870` (`Source`);
-`record_serve.py:461` (`READ_POINT_BY_ID`); `sdk.py:36985`/`:37008` (the whole-node pair, still 23 apart);
+`record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:36985`/`:37008` (the whole-node pair, still 23 apart);
 `audit.py:817`; `mcp_server.py:5089`/`:8034`; `goal_judgement.py:1128`; and §2.1's own table, which carries
 two of this class as well — `sdk.py:23982` and `search_engine.py:6721`, both open at `main` and neither
 open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at `main` but
@@ -308,7 +308,7 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/domain_validators.py:105` (and the same property-join shape at `:174-182`, `:197-205`) | `MATCH (req) WHERE (req:Point OR req:Object) AND (req.pointKind IN $req_kinds OR req.objectKind IN $req_kinds)`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
 | `tortoise/domain_validators.py:153-158` (`orphan_use_case`) | `OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, op_type:'composedOf'})-[:hasPart]->(jtbd:Point)` — a **2-hop `hasPart` walk**, i.e. every parented use-case is found THROUGH the tree | **adjacency** |
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
-| **the whole-node accessor family** — `tortoise/sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296` (`get_point`'s `_cache_answer`), `:40513`; `tortoise/record_serve.py:461` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
+| **the whole-node accessor family** — `tortoise/sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296` (`get_point`'s `_cache_answer`), `:40513`; `tortoise/record_serve.py:468` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
 
 **Verdict: `graph`.** Eighteen reader rows, **fifteen of them capability-carrying** (three are deliberately
 `none`: `search_engine.py:4708-4710`, a plain label scan; `domain_validators.py:105`, a property-equality join;

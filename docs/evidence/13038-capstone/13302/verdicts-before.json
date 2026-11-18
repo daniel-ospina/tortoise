@@ -1,0 +1,39 @@
+{
+  "_provenance": {
+    "packet": "/private/tmp/capstone-13302-before/judge-packet.json",
+    "reader": "fresh",
+    "elapsed_s": 81.0,
+    "reason": "",
+    "note": "Written by this instrument. `--verdicts <this file>` re-scores the same packet without spawning a reader."
+  },
+  "Q1": {
+    "verdict": "wrong",
+    "because": "The served set is only two of the four current commitments \u2014 Q4 pricing ($39) and the Q4 uptime result \u2014 with the 12 December launch plan missing entirely, so a customer asking what they are committed to is not told about the launch.",
+    "cause": "S0/S7 plans vocabulary + currency predicate: the object leg for 'current commitments' and 'onboarding flow' returned 0 rows, so the plan commitment never entered the answer (vector leg also down, no_embedder)."
+  },
+  "Q2": {
+    "verdict": "right",
+    "because": "The plan is served as 'Launch event \u2014 12 December at the beach club' with stage scheduled, slot entry and isClosed=false, so planned and happened are correctly distinguished.",
+    "cause": null
+  },
+  "Q3": {
+    "verdict": "right",
+    "because": "It names Q4 pricing ($39/seat) as the live successor, shows Q3 ($29/seat) as superseded with its supersedes link, and invents no rationale.",
+    "cause": null
+  },
+  "Q4": {
+    "verdict": "right",
+    "because": "The judgement compares the November reading of 99.72% against the >= 99.9 target and returns unmet with the reading cited, not a bare status word.",
+    "cause": null
+  },
+  "Q5": {
+    "verdict": "wrong",
+    "because": "Both searches for 'what was planned and never happened' and 'thursday partner call' returned zero rows; the cancelled 6 November call was only reachable by already knowing its id, so the customer is not given it.",
+    "cause": "Terminal exclusion (include_terminal=false) plus no plan vocabulary in search: cancelled plans sit in terminal scope and the default read cannot reach them."
+  },
+  "Q6": {
+    "verdict": "wrong",
+    "because": "The default-scope reads served two unrelated rows (Q4 pricing and the uptime statement, zero query overlap) instead of the retracted claim, which appeared only when terminal scope was forced \u2014 so the surface cannot say the claim was withdrawn.",
+    "cause": "Currency predicate (#13034) treats 'retracted' as non-current and hides it from default reads, with the tfidf fallback ranking unrelated live points instead."
+  }
+}
