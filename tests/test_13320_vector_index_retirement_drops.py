@@ -568,6 +568,14 @@ def test_an_engine_that_ACCEPTS_the_drop_and_keeps_the_index_is_a_false_PASS(
     line = warnings[0]
     assert "SURVIVED" in line and "FALSE PASS" in line, (
         f"the line must say the index SURVIVED a measurement and why: {line!r}")
+    # ⛔ A WRITE WAS ATTEMPTED, so the rows in hand ARE the post-drop ones
+    # (#13330 post-merge review, P3): the other half of `_read_noun`'s selection.
+    # Without this, dropping the `if _attempted` branch sends this lane back to
+    # describing a pre-drop read that did not produce the rows it used.
+    assert "the post-drop catalogue" in line, (
+        f"an accepted DROP is described by the wrong read: {line!r}")
+    assert "read before the sweep" not in line, (
+        f"a write WAS attempted, so the rows are post-drop: {line!r}")
     assert "none refused" in line, (
         "the line must distinguish 'nothing was refused' from 'nothing was "
         f"attempted'; got {line!r}")
@@ -1177,3 +1185,12 @@ def test_a_REUSED_pre_drop_read_is_reported_as_the_MEASUREMENT_it_is(
         f"a measured survivor was reported as unmeasured: {line!r}")
     assert "post-drop" not in line, (
         f"there was no post-drop read — the rows were the gate's: {line!r}")
+    # ⛔ AND THE DISCLOSURE ITSELF IS PINNED, not only the absence of the wrong
+    # word (#13330 post-merge review, P3): without these two the whole
+    # `_read_noun` selection can be flattened to a bare "the catalogue" and the
+    # claim this pin exists for — that the line names the evidence it rests on —
+    # silently disappears while the test stays green.
+    assert "read before the sweep" in line, (
+        f"the line no longer names WHICH read it refers to: {line!r}")
+    assert "no DROP reported itself applied" in line, (
+        f"the line asserts an outcome instead of the observation: {line!r}")
