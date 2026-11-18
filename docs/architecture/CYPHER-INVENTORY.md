@@ -493,13 +493,18 @@ conversions land in a file that already carries sites. The `rg` reconciliation i
 this tree (1,622 / 2,330 / 1,628 bare / 2,064 / 2,402), Appendix A is regenerated with `--markdown`,
 and `--check` reports **`25 pinned counts match`**.
 
-⚠️ Those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
+⚠️ THREE of those `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
 below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
 `MERGE (s:Source {url:$id})`, and this census counts LINES — so AT THAT HEAD the tool read 2,343 / 143
 where it read 2,342 / 142, and `rg` read 2,330 / 142, 2,064 and 2,402 where it read 2,329 / 141, 2,063
-and 2,401. The 13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED
-(the added match is single-line, not cross-line), and §1's `record_projection.py:4777` citation is
-corrected to `:4830` because that same commit moved it.
+and 2,401. ⛔ The other TWO did NOT move, and the reason is the predicate, not the commit: the DOOR
+figure (`1,624` / `108` at `34bd33d22a`; `1,623` / `108` at `31bddb1dd9`) and the bare-door figure
+(`1,630` → `1,629`) are drawn from a predicate `#13265` did not touch — it added **0** door calls and
+exactly **1** verb occurrence (`git show 34bd33d22a -- tortoise/ | grep '^+' |
+grep -cE '\.(ro_)?(query|execute)\s*\('` → `0`; `… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`).
+The 13-occurrence one-file whole-text gap and the nine-prose/four-Cypher split are UNCHANGED by it
+(the added match is single-line, not cross-line, and §1 counts the same 13 sites — nine prose, four
+Cypher examples).
 ⛔ **AND IT MOVED AGAIN, TWICE, BEFORE THIS PR COULD MERGE — each figure bound to the ONE tree it was
 measured on.** At `origin/main` **`31bddb1dd9`** the appendix `main` carried was stale in **96 of its
 1,311 rows** over exactly two files: `#13330` (`3bcb6c6531`) added `+438 / −47` to
