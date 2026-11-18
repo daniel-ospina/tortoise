@@ -53,10 +53,6 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 #   "assertion"        — the test ASSERTS the SDK's namespace→graph mapping
 #                        (test_namespace_uri_mode, test_sdk_legacy_coverage);
 #                        the literal must stay byte-for-byte.
-#   "synthetic-source" — the literal rides a SOURCE STRING handed to
-#                        `ast.parse` (or the explanation around it), never a
-#                        construction; there is nothing to rename and nothing
-#                        for the redirect to resolve.
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
@@ -192,24 +188,26 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_3516_client_captured_at.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     # #10046: the two `namespace="registry"` matches in this module are TEXT fed
-    # to `ast.parse`, never a construction. `test_a_literal_namespace_is_not_an
+    # to `ast.parse`, never a construction — `test_a_literal_namespace_is_not_an
     # _org_scoped_site` hands the record-tenant scanner a synthetic source
-    # snippet and asserts the round-3 predicate excludes a string-literal
-    # namespace; the other is the same literal quoted in that test's own
-    # docstring. Both are kept byte-for-byte `"registry"` ON PURPOSE — that is
-    # the spelling PROD resolves and the exact shape the doubled-predicate P1
-    # mis-counted — so they are declared here rather than renamed to a `test_*`
-    # namespace, which would make the pin exercise a spelling no prod lane uses
-    # (and the docstring `grep` a literal it no longer explains). The guard greps
-    # file TEXT, so it cannot tell this from a real construction; MEASURED:
-    # without this row it reds on BOTH of those matches — the docstring sample
-    # and the `registry = 'def f():\n    return _make_sdk(namespace="registry")'`
-    # string — → `test-slow (e)` → python-ci-gate, which is how it was found.
-    # ⛔ NO LINE NUMBERS, deliberately (#10723 review F3): an earlier revision
-    # cited them and they were stale by the very next head, because both matches
-    # ride the END of a file that keeps growing. Name the construct, not the
-    # line — the same rule `tortoise/mcp_auth.py`'s anchors now follow.
-    "test_10047_record_every_lane.py": {"registry": "synthetic-source"},
+    # snippet, and the other is the same literal quoted in that test's own
+    # docstring. ⛔ **NO ROW, and that is deliberate (#11929; #13584 review).**
+    # This
+    # guard used to grep file TEXT, so it could not tell a string sample from a
+    # real construction and both matches red `test-slow (e)` without a row. The
+    # span scanner now classifies STRING and COMMENT tokens first
+    # (`_string_and_comment_spans`), so both matches are skipped as samples
+    # and the declaration below went dead. **A dead routing row is not harmless:
+    # it would silently ROUTE a real `namespace="registry"` construction added
+    # to this file later** — the fail-OPEN direction. MEASURED at this head:
+    # `_namespace_literals_in_source(test_10047_record_every_lane.py)` yields
+    # `[]`, so re-adding the row buys nothing and costs that silence.
+    #
+    # (The two matches are still `"registry"` ON PURPOSE — that is the spelling
+    # PROD resolves and the exact shape the doubled-predicate P1 mis-counted.
+    # Renaming either to a `test_*` namespace would make the pin exercise a
+    # spelling no prod lane uses.)
+    #
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
     # is the same construction the endpoint under test uses, and the behaviour
@@ -343,7 +341,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_pack_state.py": {
         "tenant-a": "team-identity", "tenant-b": "team-identity",
         "team-k": "team-identity", "t-reg-2": "team-identity",
-        "mcp-team": "team-identity", "t-bf-1": "team-identity",
+        # ⛔ `mcp-team` was declared here and REMOVED (#11929; #13584 review): it
+        # occurs zero times in this file, so the row could never be consulted —
+        # and a dead routing row does not merely do nothing, it would ROUTE a
+        # real `namespace="mcp-team"` added later instead of reddening. MEASURED
+        # at the review head: `grep -c mcp-team tests/test_pack_state.py` → 0.
+        # (A FURTHER dead row, distinct from the three #11929 rows — do not
+        # re-count and widen that issue's count.)
+        "t-bf-1": "team-identity",
     },
     "test_quota.py": {"registry": "prod-coupled"},
     # #9567 capstone: D11/D12 drive the SHIPPED quota gate, whose resolver
@@ -568,7 +573,7 @@ _GUARD_EXEMPT_FILES = {
 
 
 def _string_and_comment_spans(src: str) -> list[tuple[int, int]]:
-    """Absolute character spans of STRING and COMMENT tokens (#13490).
+    """Absolute character spans of STRING and COMMENT tokens (#13584 review).
 
     A call spelling that lives INSIDE a string is TEXT, not a construction:
     `test_12943_cache_leg.py` asserts `"_make_sdk(" in inspect.getsource(...)`,
@@ -587,8 +592,8 @@ def _string_and_comment_spans(src: str) -> list[tuple[int, int]]:
     returned, so the failure direction is "scan more", never "skip the file".
     """
     starts = [0]
-    for line in src.splitlines(keepends=True):
-        starts.append(starts[-1] + len(line))
+    for line in src.split("\n"):
+        starts.append(starts[-1] + len(line) + 1)
     spans: list[tuple[int, int]] = []
     try:
         for tok in tokenize.generate_tokens(io.StringIO(src).readline):
@@ -682,7 +687,7 @@ def _select_graph_literals():
 
 
 def test_a_call_spelling_inside_a_string_is_not_a_construction():
-    """#13490: the guard's own evidence must name a LINE that holds a call.
+    """#13584 review: the guard's own evidence must name a LINE that holds a call.
 
     `test_12943_cache_leg.py` asserts `"_make_sdk(" in inspect.getsource(...)`.
     Counting that TEXT as a call site made the guard report a phantom site at
@@ -704,6 +709,36 @@ def test_a_call_spelling_inside_a_string_is_not_a_construction():
         '    return sdk\n'
     )
     assert list(_namespace_literals_in_source(src)) == [(4, "orgA")]
+
+
+@pytest.mark.parametrize("separator", ["\f", "\x85", "\u2028", "\u2029"])
+def test_the_span_table_counts_newlines_only_like_the_tokenizer_does(separator):
+    """#13584 review: `splitlines()` is NOT the tokenizer's line count.
+
+    `str.splitlines()` additionally breaks on `\f`, `\x85`, `\u2028`/`\u2029`
+    (`\v` and `\x1c`-`\x1e` too, but the tokenizer refuses those outright), while
+    `tokenize` numbers physical lines by `\n` alone. One such character inserts a
+    phantom row in the offset table, and every span AFTER it is attributed at
+    least one character too EARLY. This helper's whole job is removing phantom
+    attributions, so its arithmetic must agree with the tokenizer rather than
+    with a wider notion of "line".
+
+    DISCRIMINATING: on this source the `splitlines()` table yields
+    `["'A'", " 'B", "'B'"]` — a span that starts one character early and a
+    second that names the WRONG literal — so the spans are re-sliced to prove
+    each one names the token it claims, not merely counted.
+    """
+    src = (
+        "row = 1\n"
+        "marker = 'A'\n"
+        f"{separator}\n"
+        "late = 'B'\n"
+        "tail = 'C'\n"
+    )
+    spans = _string_and_comment_spans(src)
+    assert [src[a:b] for a, b in spans] == ["'A'", "'B'", "'C'"], (
+        f"span table disagrees with the tokenizer after {separator!r}: "
+        f"{[(a, b, src[a:b]) for a, b in spans]}")
 
 
 def test_namespace_literals_guard_passing_or_routed():

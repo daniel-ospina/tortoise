@@ -289,7 +289,8 @@ INTERNAL_PATH_READERS: frozenset[str] = frozenset({
 })
 
 # The wrap sites that pass `abuse_weight` (R1 point-create metering).  Every
-# other `_quota_gated` site must NOT.
+# other `_quota_gated` site must NOT.  A row here means the SITE passes a weight
+# (constant or callable) — not that the weight is always 1.
 # #4282 Phase 2 folded the two decision doors into containers; the WEIGHT travels
 # with the CAPABILITY, so the two weighted sites are the new names — `write_question`
 # (`_quota_gated(..., abuse_weight=lambda r, a, k: 1 + len(options) + len(evidence))`)
@@ -311,6 +312,18 @@ WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
     # above are the ones the merged tree actually weights, and the retired pair is
     # in no `_quota_gated(..., abuse_weight=)` site any more (measured, see the
     # module's own wrap-site arm).
+    # ⛔ #13556: `create_entity` absorbed the POINT and DIARY doors, so their R1
+    # weight moved WITH the capability — the container's `_quota_gated` site passes
+    # `abuse_weight=_container_abuse_weight` and this row is the declaration catching
+    # UP with it. Without it the partition reds on a site that legitimately weighs
+    # (`wrap_site_violations` → `_quota_gated(create_entity)@…: abuse_weight=True`).
+    # The weight is a CALLABLE, not the `1` both retired doors passed: only the
+    # point-shaped arms create a Point, so `subject`/`object`/`event`/`document`
+    # record 0 and an edit burst never trips R1 (`tests/test_11609_create_arms.py`
+    # pins that 1/0 split, and `test_abuse_integration.py`'s
+    # `test_the_container_write_is_declared_weight_bearing` pins that BOTH halves of
+    # this win — the site weighs AND the name is declared — stay).
+    "create_entity",
 })
 
 # #11609 lane C: four retired methods are still SERVED, through doors that call the
