@@ -45,6 +45,7 @@ document.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -491,6 +492,15 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
     `:4489-4490` — two addresses for one reader, in one table, again. The `:4350-4351` assertion cannot see
     it (`origin/main` reads 0 there), so this test would have passed over the live defect; the
     `:4489-4490` assertion is what makes it reachable.
+
+    ⛔ **AND IT RETURNED A THIRD TIME, WHICH IS WHY THE LAST ARM AGREES THE TWO SPELLINGS INSTEAD OF
+    ASSERTING ONE LITERAL — the measured witness that a literal cannot see an agreement.** `#13466`
+    re-derived §2.1's TABLE row to `:4725-4727` and left this verdict paragraph at the pre-move
+    `:4708-4710`, so `main` again gave TWO addresses for one reader (`:4708-4710` is
+    `where_clause = " AND ".join(conditions)`, the statement BEFORE the scan). This test's first
+    assertion — a literal bound to the verdict's own number — stayed GREEN over it, because a pin that
+    names one side of a two-sided claim has nothing to disagree with. The pair is now read out of the
+    document and compared; the literal is kept only as the content-verified value at this head.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     assert "`none`: `search_engine.py:4725-4727`, a plain label scan" in text, (
@@ -509,6 +519,26 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
         "it by applying a delta to `:4350-4351` instead of opening the statement, which is the same "
         "offset-not-content failure as the `:4549` re-point this file was written for. Re-derive from "
         "the fragment (`grep -n 'MATCH (n:{label_str})'`), never from the address beside it."
+    )
+    # ⛔ THE AGREEMENT ARM. §2.1's verdict paragraph and its `run_structural_query` table row name the
+    # SAME reader, so their ranges must BE the same range — read from the document, not restated.
+    # `#13466` is the measured witness that a literal on one side cannot see the other: it moved the
+    # table and left the verdict behind, and the assertion above (bound to the verdict's own literal)
+    # stayed green over a document that named two addresses for one reader.
+    verdict = re.search(r"`none`: `search_engine\.py:(\d+)-(\d+)`, a plain label scan", text)
+    table = re.search(
+        r"\| `tortoise/search_engine\.py:(\d+)-(\d+)` \| `run_structural_query`'s", text)
+    assert verdict and table, (
+        "§2.1 no longer spells the label scan as a range in BOTH the verdict paragraph and the "
+        "`run_structural_query` table row; this arm compares the two, so both must stay ranges "
+        f"(verdict={verdict and verdict.group(0)!r}, table={table and table.group(0)!r})"
+    )
+    assert verdict.groups() == table.groups(), (
+        f"§2.1 gives the label scan two addresses — the verdict paragraph says "
+        f":{verdict.group(1)}-{verdict.group(2)}, the table row says "
+        f":{table.group(1)}-{table.group(2)} — and only one of them can open at any head. Re-derive "
+        "BOTH from the fragment (`grep -n 'MATCH (n:{label_str})'`); a delta applied to one of them "
+        "is how this defect has now landed three times."
     )
 
 
