@@ -97,9 +97,10 @@ schema — which the table's compressed rendering omits — is the schema's own 
 `{"fastmcp":{"wrap_result":true}}`, where the arms S1 would change stamp **no `_meta`**
 (`fastmcp/tools/base.py:368`; both arms probed, `test_a_wrapped_result_also_stamps_the_meta_marker`).
 ⛔ Not a universal "the containers stamp none": `tortoise_graph_overview`'s row-section
-arms already stamp it by hand (`_row_section_envelope`, `mcp_server.py:7806`/`:7842`,
-#10085), so THIS fact's delta is its dict arms plus the other five containers — not the
-marker itself. (§1.2 qualifies the same way: advertised schema only.)
+arms already stamp it by hand (`_row_section_envelope`, `mcp_server.py:7806`/`:7842`, see
+issue 10085), so THIS fact's delta is its dict arms plus the other five containers — not
+the marker itself. (§1.2 qualifies the same way: advertised schema only.)
+
 A UNION declares `anyOf` and no `type` regardless of its
 members (`list[dict] | dict` and `dict | bool` alike), and `object` declares `{}` and no
 `type` — which is precisely why `_violates_wrap_envelope` is type-blind for both. A container
