@@ -2532,7 +2532,7 @@ is where it is measured. The correction moves a citation, not a number.
 
 **⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
 as **§12.2**'s. The paragraph is inside **§12.1c** (`### 12.1c ⭐ DECISION (RESOLVED 2026-11-07)` at `:1169`), and
-§12.2 — *the lever is "what gets an embedding"* — begins at `:1244`; the DECIDED block that follows the paragraph is
+§12.2 — *the lever is "what gets an embedding"* — begins at `:1250`; the DECIDED block that follows the paragraph is
 §12.1c's too. This entry states the measured location rather than propagating the issue's, because a changelog entry
 whose section number sends a reader to an unrelated lever is the one thing it exists to prevent. The issue carries a
 comment recording the correction.
@@ -2543,20 +2543,25 @@ hop"* from that. §14.3 V3's own row says the opposite: *"≈58 % of the unindex
 `queryNodes` round trips, **which `#13108` removed**"* — and the code carries the removal (`search_engine.py`
 `_index_known_absent`, which skips the doomed attempt). The paired artifacts in `docs/research/2026-11-17-13108-dense-leg/`
 §5 measure what that read does once the round trips are gone: **34.78 ms → 13.26 ms p50** at 1,000 rows (−62 %) —
-*inside* the ~10–15 ms hop band the paragraph compares against. So a sentence citing the removal's cost as the
+*inside* the ~10–15 ms hop band the paragraph compares against — and **65.73 ms → 47.47 ms** at 8,000, still well
+outside it (⚠️ with §5's own qualification on that pair: it was measured against a draft of the fix rather than the
+merged commit; both arms `scan_fallback`, so the direction stands). So a sentence citing the removal's cost as the
 current app-path number would have made the paragraph's own claim ("the readings disagree, so no single number
-decides it") rest on a defect that no longer exists. The readings are **kept with their dates**, the two app-path
-ones are marked **pre-removal**, the post-removal reading is stated — **and so is its own size dependence**, because a
-conclusion that rests on the *pre-removal* pair is the same error one level down: the paired artifacts give the
-post-removal read as **13.26 ms → 47.47 ms** from 1,000 to 8,000 rows (−62 % / −28 % against each arm's own pre-removal
-pair), so the SIZE argument now holds on the shipped series as well as on the single-arm `34.45 → 56.88 ms` one. The
-conclusion is unchanged, and it now rests on the readings as they are rather than on one of them as it was.
+decides it") rest on a defect that no longer exists — and the clause written to replace it ("today's app-path number
+does not settle it either way") was itself corrected by the next review round, because it generalised the
+**1,000-row** reading to the paragraph's own ~8,000-object size. The readings are **kept with their dates**, the two
+app-path ones are marked **pre-removal**, the post-removal readings are stated at BOTH sizes — **and their own size
+dependence with them**, because a conclusion resting on the *pre-removal* pair alone would be the same error one level
+down: the paired artifacts give the post-removal read as **13.26 ms → 47.47 ms** from 1,000 to 8,000 rows (−62 % / −28 %
+against each arm's own pre-removal pair), so the SIZE argument holds on the shipped series as well as on the
+single-arm `34.45 → 56.88 ms` one. The conclusion is unchanged, and it now rests on the readings as they are rather
+than on one of them as it was.
 
 **What did NOT change.** The argument for option 2 is untouched **by this change**: it rests on the **ledger**
 (provisioned, unevictable RAM for a row the record already holds, §12.1a / §14.3 V1) and on the **size dependence**,
 and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
 sentence immediately below the changed paragraph was itself revised on `main` by `#13435` in the same window (it now
-says *“held for a row the record already has”* and carries the two-population clause, `:1206–1211`), and this
+says *“held for a row the record already has”* and carries the two-population clause, `:1213–1217`), and this
 rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
 ledger/sequencing conclusion are what this entry claims survived; nothing here re-states the neighbouring sentence as
 though it were unchanged. No decision was reopened, no figure was retired, and nothing here authorises removal — the
