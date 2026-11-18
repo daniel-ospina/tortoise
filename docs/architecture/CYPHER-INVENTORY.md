@@ -462,6 +462,32 @@ now does touch `tortoise/indexer/github_indexer.py` — measured, it moves **no*
 (`non_cypher_door_calls` stays 258), so this cut's numbers are unaffected. `--check` reports **`25
 pinned counts match`**.
 
+**This re-cut's base:** `origin/main` **`ae54df166d`**, merged here — re-derived by RUNNING the tool
+on the final merged tree, never by arithmetic on the markers. **No census SCALAR moved** (`--check`
+reports **`25 pinned counts match`**), and **Appendix A moved by exactly ONE row**: this test's
+appendix arm reddened on the merge over
+`tortoise/monitoring.py:4670` → the tool measuring `4787` (**+117**). All of it comes from ONE commit,
+`main`'s **`b8723c0f16`** (`#13430`), which added **132** lines to that file, **117** of them above the
+single site (two hunks — `@@ -806,6 +806,89 @@` **+83** and `@@ -2816,6 +2899,40 @@` **+34** —
+whose sum is the row's shift); the other **15** sit BELOW it, in two hunks (`@@ -7622,6 +7739,12 @@`
+**+6**, `@@ -7832,6 +7955,15 @@` **+9**), and move nothing. ⚠️ The **`340d500491`**
+"this regeneration's base" paragraph above says `main`
+had touched `tortoise/` not at all since `340d500491`; that was true of ITS base, and `b8723c0f16`
+now does — the `file:line`-versus-SCALAR gap this section describes, from a fourth side: every SCALAR
+stayed green while the appendix had already rotted, because line numbers are only graded by the
+byte-compare arm.
+
+**And the SAME arm reddened a second time at merge,** when this branch integrated `origin/main`
+**`8cc31bbb9e`**: one more row moved, `tortoise/monitoring.py:4787` → **`4806`** (**+19**), and again
+**no census SCALAR moved** (`--check` reports **`25 pinned counts match`**). All of it comes from ONE
+commit, `main`'s **`1afeab3763`** (`#13454`), which touched `tortoise/monitoring.py` `30 +/9 −` — net
+**+21** lines, of which **19 are above the site** in three hunks (`@@ -818,7 +818,9 @@` **+2**,
+`@@ -826,9 +828,24 @@` **+15**, `@@ -884,8 +901,10 @@` **+2**) and **2 are below** it
+(`@@ -7742,9 +7761,11 @@` **+2**), which moves nothing. Appendix A is regenerated with `--markdown` on
+this merged tree, so this paragraph and the table it describes are one cut. ⛔ That is now **two**
+merges in a row on which the appendix rotted green — the `b8723c0f16` paragraph above is the first —
+which is the argument for the byte-compare arm, not for re-cutting by hand.
+
 **Where these SCALARS were last cut:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
 forward merges (`0774035055`, then `9d13dc1bf7`) — re-derived by RUNNING the tool on the FINAL
 merged tree, never by arithmetic on the markers. `main`'s two commits between them move no census
