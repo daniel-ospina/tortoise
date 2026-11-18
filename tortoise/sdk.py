@@ -10654,8 +10654,14 @@ def _item_type_text(item: dict) -> str:
     return _type_text(item.get("type"))
 
 
+#: The label each `type=` arm writes, for the `unknown type` message ONLY.
+#: ⛔ It decides nothing (see `tests/test_11609_door_retirement.py`, which reads
+#: the arms themselves and refused an earlier revision that asserted on this
+#: map). `point`/`diary` land on `:Point` — ONE belief kind, so a point is
+#: `:Point {pointKind: …}` and there is no `:Diary` label (#10977).
 _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
-                       "event": "Event", "document": "Source"}
+                       "event": "Event", "document": "Source",
+                       "point": "Point", "diary": "Point (pointKind=diary)"}
 
 
 def _indefinite(phrase: str) -> str:
@@ -54954,6 +54960,21 @@ class TortoiseSDK:
             required; D10 (ONTOLOGY v3.15 §4.4) retires ``:Document`` — a
             document is a ``:Source``, so this routes through the deprecated
             label alias and journals ``DocumentCreated``)
+          - point    → a ``:Point`` claim. ``props={"pointKind": …}`` is the
+            kind (the same way ``subjectKind``/``objectKind`` are carried, and
+            for the same reason: the container has no per-kind parameters), and
+            an UNSENT kind defaults to ``statement`` — ONE belief kind, so a
+            point is ``:Point {pointKind: statement}``, never a new kind
+            (#10977). ``name`` is the claim's CONTENT (the point door's
+            ``content``), and the write RELAYS to ``create_point`` so every gate
+            on that path is reached unchanged. ``dedup`` defaults to ``True``
+            here because the retired ``tortoise_create_point`` door declared it
+            so; ``create_point``'s own default is ``False`` (#11609).
+          - diary    → a ``:Point {pointKind: 'diary'}``. ``name`` is the entry
+            and ``props`` carries ``authoredBy`` (REQUIRED — the retired
+            ``tortoise_diary_write`` named the agent as its first argument),
+            plus ``topic``/``wing``. A caller-supplied ``pointKind`` that
+            contradicts ``diary`` is REFUSED, never silently re-filed.
 
         Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
         ``nudges`` lists top related Points (by name/content token overlap) with
@@ -54964,6 +54985,12 @@ class TortoiseSDK:
         (``no_source`` only for documents, where its remedy is real;
         ``extracted_from_inert`` on any type that declares an unwired ref).
         Advisory only: never a block, and it never changes what is stored.
+
+        The ``point``/``diary`` arms return the SAME ``{node, nudges}`` shape
+        and compute their nudges, but their ``node`` is whatever
+        ``create_point`` returned (minus its transient ``advisories``, which
+        move to the top level) — a Point's node is its property bag, including
+        the ``valid_to_shaped`` receipt (#9202).
 
         #9964 — THE KIND DECIDES THE LAYER. The classifier's entity partition
         merges objects and subjects, so a kind it returns can belong to the
@@ -55538,6 +55565,12 @@ class TortoiseSDK:
             node = self._create_entity("Document", did, {
                 "title": name, "documentKind": documentKind, **props},
                 "DocumentCreated", is_episodic=is_episodic)
+        elif t == "point":
+            return self._absorbed_point_write(
+                t, name, props, is_episodic=is_episodic, guard=_guard)
+        elif t == "diary":
+            return self._absorbed_point_write(
+                t, name, props, is_episodic=is_episodic, guard=_guard)
         else:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
@@ -55975,6 +56008,139 @@ class TortoiseSDK:
         scored.sort(key=lambda r: (-r["score"], r["candidate"]))
         return [{k: r[k] for k in ("candidate", "suggested_relation", "reason")}
                 for r in scored[:limit]]
+
+    def _absorbed_point_write(self, t: str, name: str, props: dict, *,
+                              is_episodic: bool | None = None,
+                              guard: object | None = None) -> dict:
+        """The `type="point"` and `type="diary"` arms of `create_entity` (#11609).
+
+        `tortoise_create_point` and `tortoise_diary_write` retire FORWARD into
+        `create_entity`, and these arms are what make that retirement legal: the
+        `PROTECTED` table in `tests/test_11609_door_retirement.py` records
+        *"create_entity has no point arm"* / *"…no diary arm"* as the reason
+        neither door could retire, and a door may only leave that table in the
+        batch that makes its stated reason FALSE.
+
+        ⛔ BOTH ARMS RELAY TO `create_point` — they do not re-implement it. The
+        point write path is ~600 lines of gates with their own recorded rulings
+        (kind approval #5475, invisible-kind #9287, narrative #10000, the status
+        vocabulary #11824, the validity window #5352, content-hash dedup #6110,
+        provenance inference #3263 …). A second spelling of any of it here would
+        be the drift this file keeps paying for, and the ONE promise the
+        retirement makes is "the same node" — which is only provable by
+        reaching the same code. `create_point` STAYS an SDK method (it is the
+        door's SDK surface, and this arm makes no surface change); only the MCP
+        NAME retires.
+
+        ⛔ THE ARMS RETURN BEFORE THE ENTITY POST-PROCESSING, and that is
+        load-bearing rather than tidy. The code below the dispatch materialises
+        `extractedFrom` for the labels in `_ENTITY_SOURCE_LABELS` and otherwise
+        reports the ref as INERT — but `create_point` DOES wire a declared
+        `extractedFrom` (and infers one from `session_id`, #3263), so falling
+        through would duplicate that work and attach an `extracted_from_inert`
+        advisory to a write whose source was in fact materialised.
+
+        ⛔ TWO ARMS, ONE BODY — the split is for
+        `_create_entity_dispatch_arms()`, which reads the dispatch as
+        `^        (?:el)?if t == "([a-z_]+)":$` and would not see a combined
+        `elif t in (…):`. Each `type=` value must therefore be its OWN one-line
+        branch; the behaviour they share lives here.
+        """
+        # ⛔ THE KIND IS THE CALLER'S, NOT THIS ARM'S — except where the
+        # discriminator already decided it. `type="point"` is a DOOR, not a kind:
+        # `props={"pointKind": …}` says which kind, exactly as
+        # `subjectKind`/`objectKind` do one arm up, and an UNSENT kind defaults to
+        # `statement` (the ontology's claim default, #10977 — a point is
+        # `:Point {pointKind: statement}`, ONE belief kind, never a new kind).
+        # `type="diary"` pins the kind, so a caller-supplied `pointKind` that
+        # CONTRADICTS it is refused rather than silently re-filing the write: the
+        # retired `tortoise_diary_write` took no kind argument at all, and a
+        # container that answers `type="diary"` with a `statement` is exactly
+        # the "deletes the door and keeps the name, with no capability behind
+        # either" failure the door-retirement suite exists to catch.
+        declared_kind = props.pop("pointKind", None)
+        if declared_kind is None:
+            declared_kind = props.pop("point_kind", None)
+        if t == "diary":
+            # `_type_text` is the ONE primitive both sides of this seam read a
+            # `type`/kind with (content, lowercased, no subclass dispatch), so a
+            # `" Diary "` spelling is the same kind and a NON-STR reads as blank
+            # — "not supplied", the same rule `named_kind` applies. Either way
+            # the write below is a `pointKind='diary'`, which is exactly what
+            # `type='diary'` promised.
+            if declared_kind is not None and _type_text(declared_kind) not in (
+                    "", "diary"):
+                raise ValueError(
+                    "create_entity(type='diary') pins the kind — the write "
+                    f"declares pointKind={declared_kind!r}. A diary entry is "
+                    "a :Point {pointKind: 'diary'}; write a different kind "
+                    "with type='point'.")
+            # `tortoise_diary_write(agent_name, …)` could not be called without
+            # its author, so neither can the arm that absorbs it. A NAMED
+            # refusal, not a silent default: `authoredBy` is what makes a diary
+            # entry attributable. `None` (absent) is the only value refused — a
+            # blank string is accepted exactly as the retired door accepted it
+            # (#1934: never invent a refusal).
+            if props.get("authoredBy") is None:
+                raise ValueError(
+                    "create_entity(type='diary') requires authoredBy — the "
+                    "agent the entry is written by. The retired "
+                    "tortoise_diary_write named it as its first argument.")
+            point_kind = "diary"
+        else:
+            point_kind = "statement" if declared_kind is None else declared_kind
+            # ⛔ The retired door's DEDUP DEFAULT, not `create_point`'s. They
+            # differ and the difference is a silent behaviour change: the MCP
+            # `tortoise_create_point` declares `dedup: bool = True`, so a
+            # migrating caller that omits it FOLDS (the door's own docstring is
+            # largely about that fold), while `create_point`'s SDK default is
+            # False. Carrying `create_point`'s default here would turn every
+            # migrated re-write into a duplicate Point.
+            # ⛔ `tortoise_diary_write` passed NO dedup, so the diary arm does
+            # not acquire one: it keeps `create_point`'s default, which is what
+            # the door did.
+            props.setdefault("dedup", True)
+        point = self.create_point(
+            point_kind, name, is_episodic=is_episodic, **props)
+        return self._absorbed_point_result(point, name, guard)
+
+    def _absorbed_point_result(self, point: dict, text: str,
+                               guard: object | None = None) -> dict:
+        """The container's reply for a POINT-shaped arm (#11609).
+
+        The two arms that relay to `create_point` (`type="point"` and
+        `type="diary"`) get the container's `{node, nudges}` shape, not the
+        point's own flat dict — the same asymmetry `_flat_entity_result`
+        resolves in the other direction for the legacy `create_*` aliases.
+        Neither the retired door nor `create_point` is changed by this: they keep
+        answering exactly as they did, which is what the shipped shim serves.
+
+        ⛔ THE TRANSIENT KEYS MOVE, THEY ARE NOT COPIED. `create_point` returns
+        two things that are NOT node properties — `advisories` (the #8171/#9964
+        note, never journaled) and the `valid_to_shaped` receipt (#9202) — and
+        leaving `advisories` inside `node` would put it where every other arm
+        does not, so a caller switching on `result.get("advisories")` would see
+        nothing on the point arm alone. The receipt stays ON the node: it is a
+        statement about THIS caller's `validTo`, which is exactly where the point
+        door puts it.
+
+        Nudges are COMPUTED here rather than returned empty. An empty list is
+        indistinguishable from "this claim relates to nothing", and a claim is
+        the write most in need of the IMPL/NAND suggestion — the cost of the
+        scan is documented on `_nudge_candidates` (#13436: 12.3-13.3 ms at both
+        1,000 and 5,000 Points; its 400-row cap is constant) and it is the price
+        of the CONTAINER's shape, which the door it absorbed never paid because
+        the door does not promise nudges at all.
+        """
+        node = dict(point)
+        advisories = node.pop("advisories", None)
+        return {
+            "node": node,
+            **_kind_guard_payloads(guard),
+            "nudges": self._nudge_candidates(
+                text, exclude_ids=[node.get("id")]),
+            **({"advisories": advisories} if advisories else {}),
+        }
 
     def _flat_entity_result(self, result: dict) -> dict:
         """Bare node a legacy ``create_*`` alias returns, plus #8171 advisories.

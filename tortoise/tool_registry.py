@@ -290,9 +290,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         idempotent=True,
         http_policy=True,
         sdk_method="create_point",
-        rest_spec=RestSpec(method="POST", path="/v1/points",
-                           request_model="CreatePointRequest",
-                           response_model="PointResponse"),
+        # #11609: NO `rest_spec` — `POST /v1/points` moved onto
+        # `tortoise_create_entity` (the container whose `type='point'` arm
+        # absorbs this door). `tortoise_dream` → `tortoise_refresh_confidence`
+        # is the same move, and leaving the spec on a RETIRED entry would drop
+        # the route from the registry-derived set while the surface still
+        # claimed it.
     ),
     ToolDefinition(
         name="tortoise_query",
@@ -1420,7 +1423,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_create_entity",
         id="surface.create_entity",
-        description="Create an entity — type: subject|object|event|document. "
+        description="Create an entity — type: subject|object|event|document|point|diary. "
                     "Event entities wire about* edges from aboutSubject/aboutObject/"
                     "aboutPoint/aboutDocument props. Returns {node, nudges, "
                     "advisories?} — nudges suggest IMPL/NAND/mitigate connections "
@@ -1428,10 +1431,32 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "source and no provenance (advisory only, never a block). "
                     "For type='document', declaring extractedFrom materializes "
                     "the :Source (#8171); on subject/object/event it is inert "
-                    "and an extracted_from_inert advisory is returned.",
+                    "and an extracted_from_inert advisory is returned. "
+                    "type='point' absorbs tortoise_create_point: `name` is the "
+                    "claim's content and props={\"pointKind\": ...} is the kind "
+                    "(default 'statement'); dedup defaults to True as that door "
+                    "declared. type='diary' absorbs tortoise_diary_write: `name` "
+                    "is the entry and props carries authoredBy (required), "
+                    "topic and wing.",
         risk="destructive",  # a repeat call re-applies caller props ON MATCH (#9572)
         http_policy=True,
         sdk_method="create_entity",
+        # #11609: `POST /v1/points` is the REST twin of the POINT arm, and the
+        # registry entry is where the surface records that pairing — so the spec
+        # MOVES here when `tortoise_create_point` retires, exactly as
+        # `POST /v1/dream` moved onto `tortoise_refresh_confidence` when
+        # `tortoise_dream` retired. Leaving it behind would delete the route from
+        # `FastAPIRouterAdapter`'s registry-derived set
+        # (`tests/test_tool_registry.py::TestFastAPIRouterAdapter` asserts
+        # `("POST", "/v1/points")` is registered) and would leave the surface
+        # claiming a REST route no advertised tool answers. ⚠️ The route the
+        # SERVERS actually serve is hand-written (`hosted_api.py`'s
+        # `@app.post("/v1/points")`, `selfhost_api.py`'s router) and is untouched
+        # by this — the spec is the surface RECORD, and it stays with the door
+        # that covers the capability.
+        rest_spec=RestSpec(method="POST", path="/v1/points",
+                           request_model="CreatePointRequest",
+                           response_model="PointResponse"),
     ),
     ToolDefinition(
         name="tortoise_update",
@@ -2805,14 +2830,18 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #     (`paginated_query`, `query_points_by_tag`), and one of the two UNION
     #     envelopes the #8482 sweep's shrinkage floor measures. Retiring it is a
     #     re-pointing decision, not a door removal, so it is not this wave's.
-    #   · `create_point`, `diary_write` — `create_entity` has NO `point`/`diary`
-    #     arm (its types are subject|object|event|document), so retiring either
-    #     would remove the WRITE, not the name. `compute_confidence` is the same
-    #     shape at `check_confidence`, whose own docstring says so. `recall` is the
-    #     same shape one step further out: the canonical target (row 3) names
-    #     `recall_beliefs` as its absorber, that container is not live yet, and its
-    #     bridge-table destination `check_confidence` has no `recall` arm — so
-    #     retiring it today would delete the read, not fold it.
+    #   · `create_point`, `diary_write` — RETIRED in #11609 lane P1, which BUILT
+    #     the arms that made their recorded reason false (`create_entity` now
+    #     dispatches `type="point"` and `type="diary"`, see the residue block
+    #     below). Their reason was the prototype of this rule: the `PROTECTED`
+    #     contract named "create_entity has no point arm" / "…no diary arm", and
+    #     the arm had to land BEFORE the door could leave the table.
+    #     `compute_confidence` is the same shape at `check_confidence`, whose own
+    #     docstring says so. `recall` is the same shape one step further out: the
+    #     canonical target (row 3) names `recall_beliefs` as its absorber, that
+    #     container is not live yet, and its bridge-table destination
+    #     `check_confidence` has no `recall` arm — so retiring it today would
+    #     delete the read, not fold it.
     #   · `delete`/`delete_point`/`delete_entity`, `create_edge`/`create_operator`,
     #     `events_poll`, `org_create`, `ingest`, `list_graphs` — their destinations
     #     (`delete_knowledge`, `link_entities`, `poll_events`, the tenancy pair and
@@ -2821,7 +2850,7 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #
     # The seven below are the residue: `-> dict`, no `rest_spec`, no envelope
     # repair, and a destination arm that exists and delegates to the very method
-    # the door calls. The names above are 25 of the 25 live names off the 27-target —
+    # the door calls. The names above are 23 of the 23 live names off the 27-target —
     # if you find a live name that is not on the target and not in that list, the
     # list is incomplete and that name is NOT safe to retire.
     # ⛔ ONE HOP to a live name in every pointer (GitHub's own
@@ -2852,6 +2881,39 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_create_document":
         'tortoise_create_entity(type="document", name=<title>, '
         'props={"documentKind": ..., ...})',
+    # ── #11609 lane P1 — the two POINT-shaped doors ───────────────────────
+    # These retire because the arms they need now EXIST (`type="point"`,
+    # `type="diary"`); for three waves they were held by exactly one reason,
+    # "create_entity has no arm", recorded in `tests/test_11609_door_retirement.py`'s
+    # `PROTECTED` table with the note that a door may only leave that table in the
+    # batch that makes its reason FALSE.
+    #
+    # ⛔ `pointKind` rides INSIDE `props` for the same mechanical reason the four
+    # `create_*` pointers do (see the block above): `tortoise_create_entity(type,
+    # name, props=None)` has no `pointKind` parameter. But unlike them it is not a
+    # bare "do not drop the discriminator" note — an UNSENT `pointKind` is not an
+    # error here, it DEFAULTS to `statement`, so a `tortoise_create_point(
+    # kind="hypothesis", …)` caller migrated by the pointer alone would silently
+    # file a statement. Hence the kind is named in the pointer.
+    #
+    # ⛔ `name` is the CONTENT on both, and that is stated rather than implied: the
+    # point door's second argument is `content`, so `name=...` alone reads as an
+    # entity label. The fold is named in prose, NOT as a kwarg — `dedup` is not a
+    # parameter of the container (it rides `props`), and a pointer spelling it as
+    # one is a `TypeError` for the migrating caller
+    # (`test_every_named_argument_is_one_the_container_accepts` binds every
+    # `name=` in a pointer against the live tool's signature).
+    "tortoise_create_point":
+        'tortoise_create_entity(type="point", name=<content>, '
+        'props={"pointKind": ..., ...})  (a repeat folds by content, as this '
+        'door did)',
+    # `authoredBy` is REQUIRED by the diary arm, exactly as `agent_name` was
+    # required by the door, and it is the only argument that cannot be omitted.
+    # `topic`/`wing` are named because they are the door's other two and dropping
+    # either narrows what the entry records.
+    "tortoise_diary_write":
+        'tortoise_create_entity(type="diary", name=<entry>, '
+        'props={"authoredBy": ..., "topic": ..., "wing": ...})',
 }
 
 
