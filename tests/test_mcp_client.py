@@ -331,10 +331,19 @@ class TestStatus:
 
 class TestTools:
     def test_list_tools_contains_create_point(self, client_env):
+        """`list_tools` is the ADVERTISED surface (#11609 lane P1).
+
+        The representative moved off `tortoise_create_point` when that door
+        retired forward into `create_entity`'s `type="point"` arm: a retired name
+        is served only through the #3883 shim, so it is deliberately absent here.
+        `test_call_create_point` below still CALLS the retired name and still
+        passes — that is the shim working, and it is why the two paths are pinned
+        separately.
+        """
         from tortoise.mcp_client import list_tools
 
         tools = list_tools()
-        assert "tortoise_create_point" in tools
+        assert "tortoise_create_entity" in tools
         assert "tortoise_query" in tools
 
     def test_call_create_point(self, client_env):
@@ -626,7 +635,7 @@ class TestCredentialResolution:
         # A dead endpoint in the environment, which the store-sourced key ignores.
         monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:1/mcp")
 
-        assert "tortoise_create_point" in mcp_client.list_tools()
+        assert "tortoise_create_entity" in mcp_client.list_tools()
         sent = [h for h in seen if h]
         assert sent and set(sent) == {"Bearer tt_stored"}, sent
 
@@ -1880,6 +1889,6 @@ class TestCredentialResolution:
         url, seen = recorded_daemon
         monkeypatch.setenv("TORTOISE_MCP_URL", url)
 
-        assert "tortoise_create_point" in mcp_client.list_tools()
+        assert "tortoise_create_entity" in mcp_client.list_tools()
         assert all(h is None for h in seen), seen
 

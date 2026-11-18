@@ -4224,6 +4224,56 @@ def _parse(v: Any) -> Any:
     return v
 
 
+def _tag_gate(props: dict | None) -> dict | None:
+    """The #329 tag batch cap + value validation — ONE spelling (#11609).
+
+    Enforced here rather than in `create_point` because it is a QUOTA guard on the
+    TOOL, not a property rule: the refusal carries `ERR_QUOTA`, which is what a
+    client switches on. It used to live only in `tortoise_create_point`'s handler,
+    so when that door retired FORWARD into `create_entity` the advertised
+    point-write path was left with no tag gate at all — `create_point` writes every
+    tag it is handed straight to `TAGGED` edges (`tortoise/sdk.py:18414`), i.e. an
+    unbounded list and non-string tags, on a limit that was enforced yesterday.
+    That is a fail-open on a quota, so the container applies the SAME gate to its
+    point-shaped arms (#13556 review N2a).
+
+    Returns the refusal body to wrap in `_SafeError`, or `None` when the tags are
+    acceptable. Deliberately silent for a NON-list `tags` value: `create_point`
+    itself drops a non-list (there is nothing to write), and inventing a refusal
+    here would refuse writes the SDK accepts (#1934).
+    """
+    from tortoise.quota import MAX_TAGS_PER_POINT
+
+    tags = (props or {}).get("tags") or []
+    if not isinstance(tags, list):
+        return None
+    if len(tags) > MAX_TAGS_PER_POINT:
+        return {"error": f"tags exceed the cap ({MAX_TAGS_PER_POINT})",
+                "code": ERR_QUOTA}
+    for t in tags:
+        if not isinstance(t, str) or not t.strip() or len(t) > 200:
+            return {"error": f"invalid tag value: {t!r} (must be a "
+                             f"non-empty string ≤ 200 chars)"}
+    return None
+
+
+def _container_abuse_weight(_result, args, _kwargs) -> int:
+    """R1 (#308): does THIS `create_entity` call create a Point?
+
+    `_quota_gated` records a weighted `point_create` event for the write, and both
+    retired doors recorded weight 1 (`:4285` create_point, `:6264` diary_write). The
+    container passed no weight, so after the retirement `record_point_create`
+    stopped firing for point creation on the advertised path — abuse-rate detection
+    lost the signal exactly where the write moved (#13556 review N2b).
+
+    A CALLABLE, not a constant: the answer depends on the `type=` argument, which
+    only the call site knows — `subject`/`object`/`event`/`document` create no Point
+    and must stay weight 0 (an edit/update burst must never trip R1).
+    """
+    declared = args[0] if args else ""
+    return 1 if str(declared or "").strip().lower() in _POINT_SHAPED_ENTITY_TYPES else 0
+
+
 def tortoise_create_point(kind: str, content: str,
                           authoredBy: str | None = None,
                           credibility: str | int | float | None = None,
@@ -4268,17 +4318,11 @@ def tortoise_create_point(kind: str, content: str,
         merged["authoredBy"] = authoredBy
     if credibility is not None:
         merged["credibility"] = credibility
-    # #329 tag batch cap + value validation
-    from tortoise.quota import MAX_TAGS_PER_POINT
-    tags = merged.get("tags") or []
-    if isinstance(tags, list):
-        if len(tags) > MAX_TAGS_PER_POINT:
-            return _SafeError({"error": f"tags exceed the cap ({MAX_TAGS_PER_POINT})",
-                               "code": ERR_QUOTA})
-        for t in tags:
-            if not isinstance(t, str) or not t.strip() or len(t) > 200:
-                return _SafeError({"error": f"invalid tag value: {t!r} (must be a "
-                                            f"non-empty string ≤ 200 chars)"})
+    # #329 tag batch cap + value validation — `_tag_gate` is the ONE spelling,
+    # shared with `tortoise_create_entity`'s point-shaped arms (#11609 review N2a).
+    _tag_error = _tag_gate(merged)
+    if _tag_error:
+        return _SafeError(_tag_error)
     merged["dedup"] = dedup
     # #13110: the LEGACY goal shape — a goal POINT (§4.1 carries `goalState`
     # too, and the objective map's goals are Points, #7856) — so the same field
@@ -6836,8 +6880,54 @@ def tortoise_create_entity(type: str, name: str, props: Any = None,
         return _SafeError({"error": _reject, "code": ERR_INVALID})
     if goalState is not None:
         props = {**(props or {}), "goalState": goalState}
-    return _safe(_quota_gated(_get_org_sdk().create_entity, "points"),
-                 type, name, **(props or {}))
+    # ⛔ THE TAG GUARD THE RETIRED DOOR CARRIED (#13556 review N2a). #329's batch
+    # cap and value rules lived ONLY in `tortoise_create_point`'s handler, so the
+    # door's retirement would have left the advertised point-write path
+    # accepting an unbounded tag list and non-string tags — a quota limit failing
+    # OPEN, which is not a tidy-up. Gated on the POINT-SHAPED arms alone: the tag
+    # list reaches `create_point` from nowhere else on this door.
+    if str(type or "").strip().lower() in _POINT_SHAPED_ENTITY_TYPES:
+        _tag_error = _tag_gate(props)
+        if _tag_error:
+            return _SafeError(_tag_error)
+    result = _safe(_quota_gated(_get_org_sdk().create_entity, "points",
+                                # R1 (#308) — the retired doors' abuse weight,
+                                # decided by the arm the call lands on (N2b).
+                                abuse_weight=_container_abuse_weight),
+                   type, name, **(props or {}))
+    # ⛔ THE ONBOARDING OBSERVATION MOVED WITH THE DOOR (#11609 lane P1).
+    # `tortoise_create_point` carried TWO things: the node write and the
+    # server-side completion signal (`_maybe_onboarding_auto_complete`). This
+    # container had only the first, so retiring the door without this block
+    # would have absorbed the node and DROPPED the signal — "file your first
+    # memory" would stop flipping the dashboard to Connected for every harness
+    # that follows the ADVERTISED call, which is now the only call a grant-based
+    # client can make. It is #394's lesson exactly (`create_document`'s
+    # `_link_source` half was lost in the move and had to be restored): a
+    # retirement is legal when the container does EVERYTHING the door did.
+    #
+    # POINT-SHAPED ARMS ONLY, and `point` alone within them (#13556 review F2):
+    # `tortoise_create_point` observed an onboarding step, while
+    # `tortoise_diary_write` — the door `type="diary"` absorbs — never did, so
+    # observing for the diary arm would be a product behaviour change smuggled
+    # into a retirement (a diary entry flipping the dashboard to Connected).
+    # `subject`/`object`/`event`/`document` never observed either and must not
+    # start. See `_OBSERVING_ENTITY_TYPES` for the recorded set.
+    #
+    # #3926: gate on the typed failure result, never on key presence — a user
+    # prop named "error" must not suppress the observation.
+    if (not isinstance(result, _SafeError)
+            and str(type or "").strip().lower() in _OBSERVING_ENTITY_TYPES):
+        # Read the PERSISTED kind (the arm returns the node it wrote), never the
+        # one that was asked for — the same rule `tortoise_create_point` applies
+        # two hundred lines up, because the kind guard can re-route it (#9287).
+        _node = result.get("node") if isinstance(result, dict) else None
+        _recorded_kind = (_node.get("pointKind")
+                          if isinstance(_node, dict) else None)
+        _maybe_onboarding_auto_complete(
+            decision_observed=(str(_recorded_kind or "").strip().lower()
+                               in DECISION_SHAPED_POINT_KINDS))
+    return result
 
 
 def tortoise_update(id: str, props: Any = None) -> dict:
@@ -9064,6 +9154,26 @@ _ONBOARDING_STATE_TTL = 60.0
 # label, not of the evidence. `criterion`/`evidence` are deliberately NOT in the
 # set: both protocols file them as REASONS, and a bare reason is no decision.
 DECISION_SHAPED_POINT_KINDS = frozenset({"decision", "option"})
+
+#: The `create_entity` discriminators that are POINT-SHAPED — i.e. the arms that
+#: relay to `create_point` (#11609 lane P1). They carry the point write's
+#: obligations — the #329 tag cap/value validation and the R1 point_create abuse
+#: event — which is why the container gates BOTH of them on this set.
+#: ⛔ It is NOT the observation set: see `_OBSERVING_ENTITY_TYPES` below, which is
+#: narrower for a reason. Kept as a named set, not an inline tuple, so the
+#: handler's guards and their tests read the SAME list.
+_POINT_SHAPED_ENTITY_TYPES = frozenset({"point", "diary"})
+
+#: The `create_entity` discriminators whose write carries the ONBOARDING
+#: completion signal. `point` ALONE, and deliberately not the whole point-shaped
+#: family (#13556 review F2): `tortoise_create_point` fired
+#: `_maybe_onboarding_auto_complete`; `tortoise_diary_write` — the door the
+#: `type="diary"` arm absorbs — is a two-line passthrough that never did
+#: (`:6258-6265`). Observing for `diary` would create a completion the retired
+#: door could not, i.e. flip a dashboard to *Connected* on a diary entry. A
+#: retirement may not widen the observation as a side effect; `diary` therefore
+#: writes the same node and observes NOTHING, exactly as its door did.
+_OBSERVING_ENTITY_TYPES = frozenset({"point"})
 
 #: In-flight gate resolutions, keyed by org (#2924 review). The gate now AWAITS
 #: between the cache lookup and the fill, so without this N concurrent

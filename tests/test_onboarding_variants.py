@@ -505,8 +505,13 @@ def test_9660_chatgpt_first_job_names_only_ADVERTISED_tools():
     # advertised but does nothing for onboarding.
     assert 'tortoise_graph_overview(section="health")' in body, (
         "the ChatGPT first job must verify through the advertised health section")
-    assert "tortoise_create_point" in body, (
-        "…and must still file the first memory, which is what marks it connected")
+    # ⛔ BOTH HALVES, for the reason this test exists (#11609 lane P1): the file
+    # half used to be satisfied by naming `tortoise_create_point`, which was itself
+    # retired forward into `create_entity`'s `type="point"` arm — so a body that
+    # kept it would satisfy this assertion while failing the retirement rule above.
+    assert 'tortoise_create_entity(type="point"' in body, (
+        "…and must still file the first memory through an ADVERTISED door, which is "
+        "what marks it connected")
     # The shared body is correct where the legacy name still answers (get_tool):
     # the other six harnesses keep it, so this is a per-harness fix, not a
     # rewrite of everyone's copy.

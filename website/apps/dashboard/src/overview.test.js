@@ -1008,7 +1008,22 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   // `[/file my first memory/i, 'live prompt bodies…']` entry was reaching for
   // through the source text.
   const promptsSrc = readFileSync(join(__dirname, 'wizardPrompts.js'), 'utf8')
-  assert.deepEqual(promptsSrc.match(/\bpoints?\b/gi) ?? [], [],
+  // ⛔ ONE UNAVOIDABLE MACHINE TOKEN, COUNT-PINNED, and a comment strip so the
+  // explanation below is not itself a hit (#11609 lane P1). The grant-based leaf's
+  // file step must name an ADVERTISED door, and the only advertised door that files
+  // a belief takes the discriminator `type="point"` — the container has no per-kind
+  // parameter, so there is no spelling of that call without the token. The ban is on
+  // "point" as USER-FACING vocabulary (the anchor term is "memories", #2361); a
+  // discriminator inside a call signature an agent pastes is neither prose nor a
+  // competing term. The exception is COUNT-PINNED exactly like main.jsx's ALLOW list
+  // above: a second occurrence, or a prose use, still reds.
+  const promptsScan = stripComments(promptsSrc)
+  const MACHINE_TYPE_POINT = /type="point"/g
+  assert.equal((promptsScan.match(MACHINE_TYPE_POINT) ?? []).length, 1,
+    'the count-pinned `type="point"` machine token in wizardPrompts.js changed — '
+    + 're-derive this pin rather than widening it')
+  assert.deepEqual(promptsScan.replace(MACHINE_TYPE_POINT, ' ')
+    .match(/\bpoints?\b/gi) ?? [], [],
     'new "point" vocabulary in wizardPrompts.js — the live wizard copy')
   const rendered = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web', 'chatgpt']
     .flatMap((h) => [1, 2].map((s) => wizardPromptText(h, s, 'tk_test', 'included')))

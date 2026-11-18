@@ -192,10 +192,26 @@ RETIRED_LITERAL: dict[str, str] = {
         'tortoise_create_entity(type="document", name=<title>, '
         'props={"documentKind": ..., ...})'
     ),
-    # #11609 P2 — the CONFIDENCE ARMS wave. Two doors retired forward into
+    # #11609 lane P1: the two POINT-shaped doors retire into the arms this batch
+    # built. `pointKind` is INSIDE props (`tortoise_create_entity(type, name,
+    # props=None)` has no such parameter) and it is named rather than implied: an
+    # unsent kind DEFAULTS to `statement`, a real kind, so a pointer that dropped
+    # it would migrate a `hypothesis` into a `statement` with no error. `name` is
+    # the CONTENT on both doors — their second argument — and the parenthetical on
+    # the point pointer says the fold still happens, in PROSE: spelling `dedup=`
+    # would be a kwarg the container does not accept.
+    "tortoise_create_point": (
+        'tortoise_create_entity(type="point", name=<content>, '
+        'props={"pointKind": ..., ...})  (a repeat folds by content, as this door did)'
+    ),
+    "tortoise_diary_write": (
+        'tortoise_create_entity(type="diary", name=<entry>, '
+        'props={"authoredBy": ..., "topic": ..., "wing": ...})'
+    ),
+    # #11609 P2 — the CONFIDENCE ARMS wave. Two more doors retired forward into
     # `tortoise_check_confidence`, which was already advertised: the container grew a
     # `recompute=` and a `recall=` PARAMETER instead of a row, so no container row
-    # arrives and the map grows by exactly the two retired names — 60 + 2 = 62, which
+    # arrives and the map grows by exactly the two retired names — 62 + 2 = 64, which
     # is `RETIRED_TOOL_REGISTRY`'s size and the row count the doc renders. Each pointer
     # NAMES the arm: the container's default is a DIFFERENT operation (the stored
     # calibration view), so a pointer without it would look like a successful
@@ -617,16 +633,19 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     # The pin moves with each landed batch.
     # 53 after the FOUR container batches: 23 at the base + 14 (lane B's WRITE/MUTATE
     # wave) + 9 (#12951's READ/QUERY wave) + 7 (lane C's SOURCES/MINE/SESSION wave).
-    # 60 at THIS head, adding the #11609 DOOR-RETIREMENT wave's seven — a wave that
-    # arrives with NO container row (its destinations were already advertised), so it
-    # contributes only retired names: 53 + 7 = 60, which is exactly `counts.retired`
-    # in `config/surface-manifest.yml` at that merge.
-    # 62 at THIS head, adding #11609 P2's CONFIDENCE-ARMS wave's two — two doors retired
-    # into `tortoise_check_confidence`, which was already advertised and grew a
-    # `recompute=`/`recall=` PARAMETER rather than a row, so again only retired names
-    # arrive: 60 + 2 = 62, which is exactly `counts.retired` at this head.
-    assert len(RETIRED_LITERAL) == 62, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 62"
+    # 60 after the #11609 DOOR-RETIREMENT wave's seven — a wave that arrives with NO
+    # container row (its destinations were already advertised), so it contributes only
+    # retired names: 53 + 7 = 60.
+    # 62 after #11609 lane P1: the two POINT-shaped doors (`create_point`,
+    # `diary_write`) retire into `create_entity`'s new `type="point"` / `type="diary"`
+    # ARMS — again no container row, because the arms are built on a tool that was
+    # already advertised. 60 + 2 = 62.
+    # 64 at THIS head: #11609 P2's CONFIDENCE-ARMS wave adds two more the same way,
+    # into `tortoise_check_confidence`'s `recompute=`/`recall=` PARAMETERS rather than a
+    # row, so again only retired names arrive: 62 + 2 = 64, which is exactly
+    # `counts.retired` in `config/surface-manifest.yml` at this merge.
+    assert len(RETIRED_LITERAL) == 64, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 64"
     )
 
 
@@ -953,9 +972,15 @@ def test_rendezvous_hint_fires_only_for_the_landed_registry_split() -> None:
     # An unrelated stale key must NOT be described as the #4031 rendezvous: a
     # current name dropped from the rows leaves the retired set stale PLUS one
     # more, so the stale set is no longer exactly the retired set.
-    # Any CURRENT name works as the stray; it had to move when `tortoise_audit` retired
-    # into the container (#4282), because a retired name is not in `current_only`.
-    with_stray = [r for r in current_only if r["name"] != "tortoise_create_point"]
+    # Any CURRENT name works as the stray; it had to move twice — when `tortoise_audit`
+    # retired into the container (#4282), and again for #11609 lane P1, which retired
+    # `tortoise_create_point` (`current_only` no longer contains it, so filtering it out
+    # was a NO-OP and the stray case silently became a restatement of the healthy one).
+    # `tortoise_create_entity` is the container both point-shaped doors now answer
+    # through, so this stays valid as long as the arm-based retirement does.
+    with_stray = [r for r in current_only if r["name"] != "tortoise_create_entity"]
+    assert len(with_stray) == len(current_only) - 1, (
+        "the stray was not removed, so this case no longer tests a stray at all")
     assert mrt._rendezvous_hint(with_stray) is None, (
         "an unrelated stale map key was mislabelled as the #4031 rendezvous"
     )
