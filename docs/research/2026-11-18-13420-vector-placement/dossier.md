@@ -8,7 +8,7 @@ updated: 2026-11-18
 subjects.team: epistemic-team
 issue: "#13420"
 aboutSubjects: "`:Object`/`:Subject` entity fingerprints, derived-entity embedding write path, graph-side vector copies, record (Postgres) vector ownership"
-aboutObjects: STORAGE-ARCHITECTURE.md §2.0/§12.1c/§14.3 V3/§17.1/§17.2, #11395 KEEP ruling and its 2026-11-17 reopen, #13220, #13082, #5004, #13417, #13422
+aboutObjects: "STORAGE-ARCHITECTURE.md §2.0/§12.1c/§14.3 V3/§17.1/§17.2, #11395 KEEP ruling and its 2026-11-17 reopen, #13220, #13082, #5004, #13417, #13422"
 ---
 
 # #13420 — the vector-placement decision dossier
