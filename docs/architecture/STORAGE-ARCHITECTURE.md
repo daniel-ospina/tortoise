@@ -1162,7 +1162,7 @@ longer a gap to be closed on this engine. The per-label state — each item read
 
 ⇒ **The gap this section measures is therefore no longer "the graph has no index for these labels"; it is "the
 record's columns are unevenly filled and only five labels are served", which is a WRITE-and-SERVING gap, not a schema
-gap** (§14.3 V3, `#13220`). Do not read the table above as a statement that the placement is still open.
+gap** (§14.3 V3). ⚠️ **The placement is decided; `#13220` records it, and the surviving halves are filed where they live rather than there: the WRITE half is `#13418` (a plain `:Source` derives no record vector), the SERVING half is `#13422` (`LABEL_SERVED` reaches five labels, and neither `object` nor `subject` is among them), and the record's document-vector text is `#13412`.** Do not read the table above as a statement that the placement is still open.
 
 **★ Practical footnote for `:Source`:** `Source` carries **no vector index** (2026-09-24 inventory, §12.1b) — ⚠️ and that is an INDEX fact, not a claim about the property: a document `:Source` **does** carry an `embedding` (`_upsert_document` writes `s.embedding`, pinned by `tests/test_vecf32_overwrite_seams_4524.py::test_document_embedding_overwrite_lands`), so what the label holds is measured by `tools/dod_5090_probe.py --census`, never inferred from the inventory — but it **already holds `url` and `contentHash`**, so §9.4 ③'s *"identity is URL + content hash"* is **already implemented**. ⚠️ The vector's TEXT is not an existing node field, though: for a session Source it is the S1 narrative read from `public.session_narrative` (§9.1, and §9.4 above, which records that the 2026-11-17 ruling settles WHETHER a non-session `:Source` carries a vector — yes, in Postgres, §14.3, *decided, implementation in flight (the decision is recorded at `#13220`)* — and not which text it embeds) — a session's `summary` is §4.6 metadata and never the narrative. *(Which text a non-session Source embeds — its own `summary`, its `topics`, or something else — is that ruling's own remainder: V2's vector question is answered and its TEXT question is not.)* *(Avg `Source.title` = 44 bytes — a Source's own text is tiny, so its 1.5 KB vector would be ~35× its title.)*
 
@@ -1196,8 +1196,7 @@ single hop — and the job these vectors do is **resolution**, a *lookup*, not a
 graph-side copy **loses to an indexed Postgres one on the axis the index exists for** (a scan grows with the
 population, an index does not), which is the whole of the argument option 2 makes. ⚠️ **The comparison is
 SIZE-DEPENDENT, and the paragraph above is the measurement that says so:** 9.26 ms for a full scan of 7,859 `Object`
-vectors is *faster* than the ~10–15 ms cross-store hop, which is exactly why §14.3 V3 keeps a scan until volume earns
-an index (`21.04 ms → 21.48 ms` from 1,000 to 8,000 rows indexed, `34.45 ms → 56.88 ms` scanned). What holds at EVERY
+vectors is *faster* than the ~10–15 ms cross-store hop — so at this size the scan wins on latency, and what makes the case for the index is the SIZE dependence rather than today's number (`21.04 ms → 21.48 ms` from 1,000 to 8,000 rows indexed, `34.45 ms → 56.88 ms` scanned). What holds at EVERY
 size is the ledger rather than the latency: the graph-side copy is bytes on provisioned, unevictable RAM for a row the
 record already stores (§12.1a, §14.3 V1).
 
