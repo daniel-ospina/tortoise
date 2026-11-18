@@ -2988,6 +2988,128 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     _refuse_a_bare_or_disclaimed_citation(block)
 
 
+# ⛔ THE TWO SHAPES THE v3.38 RELEASE SHIPPED AND A REVIEW CAUGHT, kept verbatim as the
+# NON-VACUITY direction below. Both are PROSE, and the §4.3 pin above is scoped away
+# from every release that does not quote that clause — which is why these shipped
+# through the four review rounds the PR body says caught them. An arm scoped by
+# CONTENT cannot guard an entry whose content is something else; these two read what
+# the entry actually claims about its own evidence.
+_PREFIX_APPROVAL_RECORD = (
+    "> **Owner approval of the exact change:** 2026-11-18, given in-session, after the audit\n"
+    "> measured the behaviour. The artifact is the text itself.")
+_PREFIX_UNRESOLVED_POINTER = (
+    "> reads four conditions). That is a code defect with its own issue; it is not a "
+    "sentence to rewrite.")
+
+
+def _quoted_paragraphs(block: str) -> list[str]:
+    """The block's quote PARAGRAPHS, quote prefixes stripped and wrapping joined.
+
+    A PARAGRAPH, not a line: the approval record WRAPS (its citation sits on a later
+    physical line than the bold label), so a line-scoped read would refuse a record
+    that does name its home — a false block on a true sentence.
+    """
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for line in block.splitlines():
+        if line.strip() in {"", ">"}:
+            if current:
+                paragraphs.append(" ".join(current))
+                current = []
+            continue
+        current.append(re.sub(r"^[\s>]+", "", line))
+    if current:
+        paragraphs.append(" ".join(current))
+    return paragraphs
+
+
+def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
+    """A release that RECORDS an owner approval must say where that approval lives.
+
+    ⛔ THIS IS NOT THE UNCONDITIONAL DEMAND the pin above measured to false-block. That
+    demand was "the newest block carries a comment id", which reds a legitimate
+    release that changes something else and cites nothing; the file's practice does
+    not support it. This arm speaks ONLY when the block RECORDS an owner approval — a
+    release that never mentions one owes no citation and stays green.
+
+    The file's own record is why the arm exists at all: its CRITICAL RULE requires
+    Daniel Ospina's explicit approval of the exact changes, and its v3.37 entry
+    records that *"the artifact is the text itself"* is the form the owner REJECTED,
+    because a reader cannot resolve it. An approval record with no resolvable home is
+    a release asserting a decision it cannot point at.
+    """
+    records = [paragraph for paragraph in _quoted_paragraphs(block)
+               if re.search(r"\*\*Owner approval\b", paragraph)]
+    assert len(records) == 1, (
+        f"the newest block carries {len(records)} owner-approval paragraphs; this arm "
+        "reads exactly ONE, so a second copy would shadow the one checked")
+    record = records[0]
+    assert _CITATION_RE.search(record), (
+        "the newest changelog block records an owner approval but names no comment id "
+        "in an accepted form, so the approval has no home a reader can resolve — cite "
+        "the comment that records it (``comment <id>`` or the permalink), as the v3.37 "
+        "entry does. *\"The artifact is the text itself\"* is the form the owner "
+        f"rejected; the paragraph reads: {record!r}")
+
+
+_OWN_ISSUE_RE = re.compile(r"\bown issue\b")
+_ISSUE_NUMBER_RE = re.compile(r"#\d{2,}")
+
+
+def _refuse_an_unresolvable_pointer(block: str) -> None:
+    """A sentence that names an issue as something's home must give its number.
+
+    The #5063 class this repo already chases in `tests/test_docs_citation_refs.py`: a
+    pointer a reader is told to follow that resolves to nothing. *"its own issue"*,
+    with no number, is that pointer — the reader lands on no issue at all, and the
+    defect the sentence disclaims is tracked by nothing a reader can find.
+    """
+    for sentence in re.split(r"(?<=[.;!?])\s+", block):
+        if _OWN_ISSUE_RE.search(sentence) and not _ISSUE_NUMBER_RE.search(sentence):
+            raise AssertionError(
+                "a changelog sentence names an issue as the home of a defect but gives "
+                "no issue number, so a reader cannot follow it — cite the issue "
+                f"(``#NNNNN``): {sentence!r}")
+
+
+def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
+    """The approval's home resolves, and a defect pointer resolves — for ANY release.
+
+    ⛔ WHY THIS ARM EXISTS AT ALL, stated as the measured failure: the v3.38 entry
+    shipped an approval record reading *"the artifact is the text itself"* and a
+    pointer reading *"its own issue"* — the two corrections its own PR body lists
+    among the defects review caught. Neither was in the artifact, and no arm could
+    see either: the §4.3 pins above are scoped to a block that quotes that clause,
+    which this release does not, so they return before reading a word of it. An arm
+    scoped by CONTENT cannot guard an entry whose content is something else.
+
+    ⛔ WHAT THIS ARM DOES NOT DECIDE, stated rather than implied: it cannot verify
+    that the CITED approval is real (that is the reviewer step
+    ``gh api repos/.../issues/comments/<id>`` performs, recorded in #12068), and it
+    cannot see whether an ISSUE the prose cites is OPEN — issue state lives in the
+    tracker, not in the tree, so a sentence asserting a closed issue is open is
+    beyond a static suite. That is exactly how the third defect of the same release
+    shipped (*"remains open (#9063)"* for an issue closed COMPLETED in 2026-10-20);
+    it was corrected in the text, and this docstring records that no arm covers its
+    class rather than implying one does.
+    """
+    block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    # CONTROL RUN: the landed block must PASS both arms, so a probe that refuses for
+    # an unrelated reason cannot satisfy the negative direction below.
+    _refuse_an_approval_record_with_no_resolvable_home(block)
+    _refuse_an_unresolvable_pointer(block)
+    # NON-VACUITY: both shapes this release shipped are refused, verbatim.
+    with pytest.raises(AssertionError):
+        _refuse_an_approval_record_with_no_resolvable_home(_PREFIX_APPROVAL_RECORD)
+    with pytest.raises(AssertionError):
+        _refuse_an_unresolvable_pointer(_PREFIX_UNRESOLVED_POINTER)
+    # …and a RESOLVED pointer is not refused, so the arm cannot be satisfied by
+    # refusing every sentence that mentions an issue's existence.
+    _refuse_an_unresolvable_pointer(
+        "> reads four conditions). That is a code defect with its own issue, #13450; "
+        "it is not a sentence to rewrite.")
+
+
 def test_the_approval_arm_refuses_a_bare_or_disclaimed_citation() -> None:
     """Every row of the denial table, plus the attribution shape — and the landed
     entry still passes.
