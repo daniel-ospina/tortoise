@@ -33,6 +33,78 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.36 (2026-11-17 — one four-word lifecycle vocabulary; `guideline` leaves `goalState`):**
+>
+> **Owner approval of the exact changes:** the ruling these hunks apply is on record on **#11824**,
+> comment `6925010125`: *"archive and deprecate are synonyms, for write we should have either and then
+> the guard auto-fixes to a single one"*. The owner approved the **exact text** of the six hunks on
+> 2026-11-17, in-session, and the approval is relayed onto **#11824** as comment `6965147045`, so a
+> reader can resolve it instead of being told it lives in a pane. The design the hunks implement is
+> owner-approved and recorded: #12895 merged 2026-11-16, and #12954 carried its remaining rulings.
+>
+> **v3.36 lands this sentence in §4.3, and this is the sentence the file carries:**
+>
+> > **Core Object types accept `draft`, `live`, `deprecated`, `superseded` (#11824); an Object created
+> > without a status stores none and reads as `live` (#9974 R1 — never a fabricated `live` write).
+> > `superseded` means replaced: it names the successor; `deprecated` is ended with nothing replacing it
+> > and needs no successor — `archived` is accepted as its synonym on write and stored as `deprecated`.
+> > A journal rebuild is unchanged and still restores a supersession recorded without a successor.
+> > `in_progress` and `completed` are **positions, not lifecycle words** — they become stages of the
+> > kind's declared pipeline (`pipelineStageId`, #2792), and the built-in connector folds that write
+> > them target those stages. `outdated` and `retracted` are not Object lifecycle words and are not
+> > retained. Pack-declared kinds validate against their own declared words, which become their pipeline
+> > stages rather than a wider status list (#11824).**
+>
+> Source: the approved target model, `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`, and the
+> decisions recorded on **#11824**.
+>
+> **What changed in the model:**
+>
+> - **§4.1 Point and §4.3 Object `status`** now declare **one closed set of four** — `draft`, `live`,
+>   `deprecated`, `superseded` — for every knowledge kind. `deprecated` is *ended, nothing replaced it*;
+>   `superseded` is *ended, a replacement is named*. **`archived` is a write-side synonym of
+>   `deprecated`** (the owner's ruling of 2026-11-16, relayed on #11824 as comment `6925010125`): accepted on write, stored as `deprecated`.
+>   `retracted`, `outdated` and `archived` are **no longer lifecycle words** and survive only as read
+>   deltas over stored rows (#12855); the model grants `retracted` no write-side synonym, and §4.2's
+>   Subject guard is stated as refusing it — **that stated refusal is false of the shipped guard, and it
+>   is named as a residue below rather than repeated here as fact.**
+> - **§4.3 Object** additionally records that **`in_progress` and `completed` are positions, not
+>   lifecycle words** — they become stages of the kind's declared pipeline (`pipelineStageId`, #2792) —
+>   and that a pack's declared words become its pipeline stages rather than a wider status list.
+> - **§4.2 Subject** states the same four words, with `archived` as a write-side synonym of `deprecated`.
+> - **§4.1 and §4.3 `goalState`** drop **`guideline`**. The owner's #6792 form ruling is **not
+>   withdrawn**; it is reassigned — directionality is a question about **priority**, not achievement,
+>   and priority has no design yet. The same two rows record that the goal's two endings are the
+>   lifecycle's endings on that axis (`abandoned` is `deprecated`; `superseded` is `superseded`), and
+>   that a write whose ending disagrees with `status` is refused.
+> - **§5's `goalState` blockquote** carries the dated status note recording the `guideline` removal and
+>   where it went, following this file's convention of correcting an approved clause with a dated note
+>   rather than rewriting it.
+>
+> **Three residues this edit leaves, named so the owner sees them rather than inheriting them silently:**
+> §5's *Point Status Vocabulary* table and a §10.5 decision row (`docs/ONTOLOGY.md:1527`) still present the retired six words as the
+> model vocabulary. They fall outside the six approved hunks, and the CRITICAL RULE at
+> `docs/ONTOLOGY.md:41` forbids editing them without the owner's approval of that exact text, so
+> they are left untouched here and apply only once that approval is given on #11824.
+>
+> The third is a **model-versus-code disagreement inside §4.2's row**, which says *"`retracted` is not
+> among the §4.2 declared verbs and the write guard REFUSES it"*. The shipped guard does the opposite and
+> treats `retracted` exactly as it treats `archived`: `lifecycle_vocabulary.LIFECYCLE_STATUS_SYNONYMS`
+> maps both to `deprecated` for every kind (measured at this head —
+> `read_caller_status('retracted', kind=':Subject')` returns `deprecated`). That row is owner-approved
+> text inside the approved hunks, so it is not this edit's to rewrite; like the other two it is owed to the
+> owner on #11824, under the same exact-text gate.
+>
+> **What did NOT change:** the §4 field tables other than those five rows; every `Impl` status; the
+> valid-time rules (§4.7); the pack-declaration mechanics; and every stored value. Nothing is migrated
+> here — the stored-rows rewrite is a separate, owner-authorised step tracked on #12855.
+>
+> **Why this is a model change and not a status report:** the four-word set and the `goalState` removal
+> are *what we want*, stated as the specification. Whether the code already matches is a different
+> question with a different home: the plan's slices
+> (`docs/plans/2026-11-16-state-lifecycle-implementation.md`) and the issues that track them (#10371,
+> #12855, #13034, #13035, #13100).
+>
 > **Changelog v3.35 (2026-11-13 — the temporal-immutability constraint states the model, not its enforcement):**
 >
 > **Owner approval of the exact changes:** 2026-11-13, given in-session. The approval's artifact is the
@@ -397,7 +469,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
 > `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
 > `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
-> (`ONTOLOGY.md:1174`) remains correct as written.
+> (`ONTOLOGY.md:1179`) remains correct as written.
 
 ---
 

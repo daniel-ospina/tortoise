@@ -30,11 +30,18 @@ WHAT THIS PINS
 4. Every ``docs/evidence/*/README.md`` declares them — the CLASS, not one
    pinned bundle. The single-file pin added for #9110 was satisfied while a
    second bundle (#9664) landed with no frontmatter at all.
+5. Every ``docs/research/**/*.md`` frontmatter block is **parseable YAML**, and
+   the required fields survive the parse. The four arms above check that the
+   keys are PRESENT as lines; a block can carry every key and still fail to
+   parse, in which case ``tortoise.file_indexer.parse_frontmatter`` returns
+   ``{}`` by design and the whole affiliation vanishes — met on paper only.
 
 Non-vacuity: on the pre-fix tree the two architecture companions carry neither
 ``created`` nor a team key, and the STORAGE companion carries the copied gate —
 so checks 2 and 3 fail there; and ``docs/evidence/9664-capstone/README.md``
-opens at ``# #9664 — capstone acceptance``, so check 4 fails there.
+opens at ``# #9664 — capstone acceptance``, so check 4 fails there; and
+``docs/research/2026-11-18-13420-vector-placement/dossier.md`` opened its
+``aboutSubjects`` value with a backtick, so check 5 fails there.
 
 Static, no network / DB / graph.
 """
@@ -207,6 +214,50 @@ def test_every_evidence_bundle_readme_declares_its_affiliation() -> None:
         "docs/evidence/*/README.md missing required affiliation frontmatter: "
         f"{failures} — AGENTS.md's Documentation Filing Protocol; copy the "
         "block from docs/evidence/7950-capstone/README.md"
+    )
+
+
+def test_research_doc_frontmatter_parses_as_yaml() -> None:
+    """#13432 review F1: presence is not parseability — `docs/research/` parses.
+
+    A YAML plain scalar may not begin with a backtick (a reserved indicator), so
+    a block can carry every required key as a LINE (which ``_missing`` sees, and
+    which ``scripts/check-doc-affiliation.cjs`` sees too) and still fail to
+    parse. ``tortoise.file_indexer.parse_frontmatter`` catches the error and
+    returns ``{}`` **by design**, so the failure is silent: the consumer sees no
+    frontmatter at all — ``title``, ``type``, ``doc_status``, the team and the
+    subjects all vanish, and AGENTS.md's affiliation rule is met on paper only.
+    Nothing on the CI path parsed this block, which is how it landed green.
+
+    This arm reads the block through the SAME consumer the index pipeline uses,
+    so it measures the real degradation rather than a re-implementation.
+
+    Non-vacuity: at the pre-fix tree ``docs/research/2026-11-18-13420-vector-
+    placement/dossier.md`` opens its ``aboutSubjects`` value with a backtick, so
+    ``parse_frontmatter`` returns ``{}`` and this reds on it.
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    paths = sorted((ROOT / "docs" / "research").glob("**/*.md"))
+    assert paths, "docs/research/ has no markdown files — re-point this guard"
+    failures: dict[str, str] = {}
+    for path in paths:
+        # No frontmatter block at all is the OTHER arms' business; this arm is
+        # about blocks that exist and do not parse.
+        if not _frontmatter(path):
+            continue
+        rel = str(path.relative_to(ROOT))
+        parsed = parse_frontmatter(path.read_text(encoding="utf-8"))
+        if not parsed:
+            failures[rel] = "frontmatter block does not parse (degraded to {})"
+            continue
+        missing = [key for key in REQUIRED_KEYS if key not in parsed]
+        if missing:
+            failures[rel] = f"parsed, but drops {missing}"
+    assert not failures, (
+        "docs/research/**/*.md frontmatter is unparseable or loses required "
+        f"fields after parsing: {failures} — quote a value that starts with a "
+        "YAML reserved indicator (e.g. a backtick) instead of leaving it plain"
     )
 
 
