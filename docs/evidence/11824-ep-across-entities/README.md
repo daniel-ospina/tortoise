@@ -332,8 +332,13 @@ F1, a closed node keeps both its full-strength posterior and its vote.
 ## 7. Evidence index
 
 **Measured on this branch, this lane's container (`fdb-lane-783bdc9798`, port 16416), base
-`340d500491`.** Both probes completed with `DONE`; the run was repeated after the port was made an env
-var, with identical verdicts.
+`340d500491`.** Both probes completed with `DONE` and identical verdicts on repeated runs.
+
+⚠️ **`measure_per_labels.py` can die mid-run with a raw `redis.exceptions.TimeoutError`** — observed
+once, at the `:Subject` target-slot write in section E (the loop's second iteration). That is a
+**client read timeout** — a query slower than the client's socket timeout on a loaded host — not a
+failed assertion and not lost data: re-issuing the same run exits `0` and prints `DONE`.
+**Re-run it before concluding anything from a traceback.**
 
 | File | What it holds |
 |---|---|
