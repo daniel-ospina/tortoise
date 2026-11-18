@@ -480,6 +480,33 @@ def _cohort_sdk():
         sdk.close()
 
 
+def _bindings_of(tree: ast.Module, name: str) -> list:
+    """Every WRITTEN binding of `name` in `tree`: `=`, `:=`, `for`, `with … as`.
+
+    A static scan of the shapes a reader can see (review pass 5, P3). It exists so
+    the probe pins can say "no LITERAL is bound to this name, and at least one
+    binding is the mint", instead of "exactly one assignment exists" — the count
+    rule false-REDDED a bare declaration (`x: str`) and a legitimate re-mint
+    (`x = x or _probe_graph_name()`), and blamed a decoy that was not there.
+    ⛔ A DYNAMIC binding (`globals()[…] = …`) escapes any static scan; that
+    residual is accepted, and each pin states it.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        elif isinstance(node, (ast.NamedExpr, ast.For)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [i.optional_vars for i in node.items
+                       if i.optional_vars is not None]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            found.append(node)
+    return found
+
+
 def test_the_cohort_graph_name_is_one_this_tree_can_reap():
     """#13290 review F1 — a FIXED name is invisible to BOTH cleanup arms.
 
@@ -572,19 +599,25 @@ def test_the_probe_graph_name_is_one_this_tree_can_reap():
     # An annotated binding (`_probe_graph: str = _probe_graph_name()`) is the
     # same fact spelled differently, so it counts as a binding rather than a
     # false RED against a correct call site.
-    bindings = [n for n in ast.walk(tree)
-                if isinstance(n, (ast.Assign, ast.AnnAssign))
-                and (any(isinstance(t, ast.Name) and t.id == "_probe_graph"
-                         for t in (n.targets if isinstance(n, ast.Assign)
-                                   else [n.target])))]
-    assert len(bindings) == 1, (
-        f"expected EXACTLY ONE binding of `_probe_graph`, found {len(bindings)} "
-        "— a decoy mint assignment beside the literal IN USE would otherwise "
-        "pass this pin and the census (#13290)")
-    assert isinstance(bindings[0].value, ast.Call) and \
-        getattr(bindings[0].value.func, "id", None) == "_probe_graph_name", (
-        "`_probe_graph` is not bound to `_probe_graph_name()` — the call site is "
-        "wired to something other than the per-run mint (#13290)")
+    bindings = _bindings_of(tree, "_probe_graph")
+    # ANY literal bound to the name REDs — that is the leak, wherever it sits
+    # (review pass 5, P3: `len(bindings) == 1` false-REDDED a bare declaration or
+    # a legitimate re-mint, and then accused a tree containing no literal at all).
+    literal = [b for b in bindings if isinstance(b.value, ast.Constant)]
+    assert not literal, (
+        "`_probe_graph` is bound to a LITERAL — a fixed spelling feeds "
+        "`ensure_indexes`' DDL into one graph shared by every lane and CI run, "
+        "and the census still passes because it only sees the keyword (#13290)")
+    assert any(isinstance(b.value, ast.Call)
+               and getattr(b.value.func, "id", None) == "_probe_graph_name"
+               for b in bindings), (
+        "`_probe_graph` is never bound to `_probe_graph_name()` — the call site "
+        "is wired to something other than the per-run mint (#13290)")
+    # ⛔ RESIDUAL, stated rather than implied: this is a STATIC scan of
+    # WRITTEN bindings. `_bindings_of` covers `=` / `:=` / `for` / `with … as`
+    # targets, so the shapes a reader can see are covered; a DYNAMIC binding
+    # (`globals()["_probe_graph"] = …`, `setattr`) escapes any static scan, and
+    # that residual is accepted because the mint call must ALSO be present.#13290
 
 
 def test_the_live_fixture_teardown_drops_its_own_graph(monkeypatch):

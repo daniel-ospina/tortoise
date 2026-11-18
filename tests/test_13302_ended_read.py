@@ -107,6 +107,33 @@ _AVAILABLE, _WORKING_URI = _probe([
 ])
 
 
+def _bindings_of(tree: ast.Module, name: str) -> list:
+    """Every WRITTEN binding of `name` in `tree`: `=`, `:=`, `for`, `with … as`.
+
+    A static scan of the shapes a reader can see (review pass 5, P3). It exists so
+    the probe pins can say "no LITERAL is bound to this name, and at least one
+    binding is the mint", instead of "exactly one assignment exists" — the count
+    rule false-REDDED a bare declaration (`x: str`) and a legitimate re-mint
+    (`x = x or _probe_graph_name()`), and blamed a decoy that was not there.
+    ⛔ A DYNAMIC binding (`globals()[…] = …`) escapes any static scan; that
+    residual is accepted, and each pin states it.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        elif isinstance(node, (ast.NamedExpr, ast.For)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [i.optional_vars for i in node.items
+                       if i.optional_vars is not None]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            found.append(node)
+    return found
+
+
 def test_the_probe_graph_is_named_at_the_call():
     """#13302 — the probe's `from_uri(` PASSES the minted graph name.
 
@@ -150,19 +177,19 @@ def test_the_probe_graph_is_named_at_the_call():
         "sees the keyword (#13302)")
     # EXACTLY ONE binding (review pass 4, P2): a decoy mint assignment beside the
     # literal IN USE must RED, and an annotated binding must count as a binding.
-    bindings = [n for n in ast.walk(tree)
-                if isinstance(n, (ast.Assign, ast.AnnAssign))
-                and (any(isinstance(t, ast.Name) and t.id == "probe_graph"
-                         for t in (n.targets if isinstance(n, ast.Assign)
-                                   else [n.target])))]
-    assert len(bindings) == 1, (
-        f"expected EXACTLY ONE binding of `probe_graph`, found {len(bindings)} — "
-        "a decoy mint assignment beside the literal IN USE would otherwise pass "
-        "this pin and the census (#13302)")
-    assert isinstance(bindings[0].value, ast.Call) and \
-        getattr(bindings[0].value.func, "id", None) == "_probe_graph_name", (
-        "`probe_graph` is not bound to `_probe_graph_name()` — the call site is "
+    bindings = _bindings_of(tree, "probe_graph")
+    literal = [b for b in bindings if isinstance(b.value, ast.Constant)]
+    assert not literal, (
+        "`probe_graph` is bound to a LITERAL — a fixed spelling feeds "
+        "`ensure_indexes`' DDL into one graph shared by every lane and CI run, "
+        "and the census still passes because it only sees the keyword (#13302)")
+    assert any(isinstance(b.value, ast.Call)
+               and getattr(b.value.func, "id", None) == "_probe_graph_name"
+               for b in bindings), (
+        "`probe_graph` is never bound to `_probe_graph_name()` — the call site is "
         "wired to something other than the per-run mint (#13302)")
+    # RESIDUAL: a DYNAMIC binding escapes any static scan; see `_bindings_of` in
+    # tests/test_verbatim_index_cohort_8429.py (#13302).
 
 
 _docker_only = pytest.mark.skipif(
