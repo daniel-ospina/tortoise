@@ -267,6 +267,10 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   origin/main, not assumed (a stdio-only door would have left this view untouched
     #   and the floor would be 41, not 40). So 43 − 3 = 40 advertising tools.
     #
+    #   #11609 P2's CONFIDENCE ARMS then retired two MORE `http_policy=True` doors into a
+    #   container already in this population: the view moves 43 → 41 and the advertising
+    #   floor moves with it, 41 − 3 = **38**.
+    #
     #   ⛔ These are TWO populations and the terms do not cross (review finding, #12951):
     #   the unfiltered registry (59 → 55) and the filtered view (54 → 50) differ by the
     #   FIVE `http_policy=False` rows (`expand_relationships`,
@@ -283,12 +287,14 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   Stating either one's net as if both
     #   populations were the same hides a real `http_policy=False` row behind a
     #   coincidence.
-    # 43 -> 41 when #11609 lane P1 retired the two POINT-shaped doors (`create_point`,
+    # 48 -> 46 when #11609 lane P1 retired the two POINT-shaped doors (`create_point`,
     # `diary_write`) — both were `http_policy=True` and neither brought a container row,
-    # because `create_entity` absorbs them as ARMS on a tool already in this population.
-    assert len(advertising) >= 38, (
+    # because `create_entity` absorbs them as ARMS on a tool already in this population —
+    # and 46 -> 44 when #11609 P2 retired `compute_confidence`/`recall` into
+    # `check_confidence` the same way (both `http_policy=True`, no container row).
+    assert len(advertising) >= 36, (
         f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
-        "at least 38 (41 HTTP-filtered live tools minus the 3 excluded names in that "
+        "at least 36 (39 HTTP-filtered live tools minus the 3 excluded names in that "
         "view); a lower number means the registry lost entries, not that a pin moved")
     # …and the served view must BE that population, name for name, so a name that is
     # registered-but-unserved is caught too (the floor above cannot see a substitution).
@@ -300,10 +306,12 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
         f"served-only={sorted(set(advertised) - http_population)}")
     # 50 until #11609's door-retirement wave retired seven `http_policy=True`
     # doors into containers already in this population (50 − 7 = 43), then 43 − 2 = 41
-    # when #11609 lane P1 retired the two POINT-shaped doors the same way. A floor, for
-    # the same reason as the one above: an equality would move with a collapsed
+    # when #11609 lane P1 retired the two POINT-shaped doors the same way, and 41 − 2 = 39
+    # when #11609 P2's confidence arms retired `compute_confidence`/`recall` into
+    # `check_confidence` the same way. A floor, for the same reason as the one above: an
+    # equality would move with a collapsed
     # registry and pass over it.
-    assert len(http_population) >= 41, (
+    assert len(http_population) >= 39, (
         f"the registry's http_policy population collapsed to {len(http_population)}")
     for name in advertising:
         schema = advertised[name]

@@ -1467,8 +1467,16 @@ def test_skill_decide_protocol_tools_are_registered_mcp_tools():
     # The health verify is guarded by the explicit SECTION assertion below, which
     # DOES redden — measured: the pre-fix decide section contains 0 occurrences of
     # `tortoise_graph_overview(section="health")`.
-    for required in ("tortoise_compute_confidence", "tortoise_create_operator"):
+    # #11609 P2: the ranking arm moved. `tortoise_compute_confidence` is retired into the
+    # confidence container's `recompute=True` arm, so the protocol names the container —
+    # and the ARM is pinned separately below, because naming the container alone gets a
+    # token list no different from one that asks for the stored calibration view.
+    for required in ("tortoise_check_confidence", "tortoise_create_operator"):
         assert required in tokens, f"decide protocol must use {required}"
+    assert "check_confidence(recompute=True)" in decide_section, (
+        "the decide protocol must RANK through the confidence container's recompute "
+        "arm — the container's default answers the stored calibration view, so a "
+        "protocol naming it without the arm presents no ranking at all")
     assert 'tortoise_graph_overview(section="health")' in decide_section, (
         "the decide protocol must verify the live connection through the "
         "container's health section — the retired `tortoise_health` name is not "

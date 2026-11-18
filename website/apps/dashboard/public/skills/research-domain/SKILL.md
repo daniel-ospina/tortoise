@@ -62,9 +62,15 @@ sources**, not a narrative: "X is true — because <source>", one claim per line
 **Step 3 — mine.** This is the step that makes the next cycle possible. For each
 claim:
 
-1. `tortoise_create_point(kind="statement", content=<the claim>,
-   extractedFrom=<source url>, props={"sourceKind": "T1"})` — file the claim
-   with its provenance. Tiers are the SourceKind taxonomy in
+1. `tortoise_create_entity(type="point", name=<the claim>,
+   props={"pointKind": "statement", "sourceKind": "T1"})` — file the claim
+   with its tier. ⛔ NOT `extractedFrom=` as a top-level argument: that leg
+   belonged to the retired `create_point` door. `create_entity` takes the claim's
+   fields in `props`, and materialising a `:Source` from a ref is DOCUMENT-ONLY —
+   for `type="document"` pass `props={"extractedFrom": ...}` and the `:Source`
+   is created; for a point a declared ref is INERT (the response carries an
+   `extracted_from_inert` advisory and NO source is created). The provenance gap
+   for points is #13577. Tiers are the SourceKind taxonomy in
    `how-to-use-tortoise`: T0 direct observation … T4 speculative. A claim with
    no tier is a claim you cannot grade later.
 2. Connect it to **itself** — the claims in this round support or contradict
@@ -83,7 +89,7 @@ claim:
 support:
 
 ```text
-tortoise_recall(mode="gaps", query="<domain label>")
+tortoise_check_confidence(recall=True, mode="gaps", query="<domain label>")
 ```
 
 Returns the claims that carry epistemic **load** (outgoing IMPL + NAND — other
@@ -161,7 +167,8 @@ Contradictions found: <n> (see analyse-for-contradictions)
 
 - If a research call fails, report it and **do not** mine fabricated claims in
   its place — an empty round is a fine outcome, an invented source is not.
-- If `tortoise_recall(mode="gaps")` returns nothing on the *first* cycle, the
+- If `tortoise_check_confidence(recall=True, mode="gaps")` returns nothing on the
+  *first* cycle, the
   problem is usually upstream: nothing was wired with load. Check that the mined
   claims have outgoing IMPL/NAND edges before concluding the domain is
   well-supported.

@@ -654,7 +654,7 @@ Never hand-edit inside markers you did not write; the next refresh discards it.
    - Claude Desktop / Claude Web: you have no REST/curl surface, and **no
      dashboard click connects anything** — the server writes this same
      checkpoint itself on your first successful graph write
-     (`tortoise_create_point` / `tortoise_write_question` →
+     (`tortoise_create_entity(type="point", ...)` / `tortoise_write_question` →
      `_maybe_onboarding_auto_complete()`). File a first memory and the
      dashboard reflects it on its own: the done step (step 3) shows Connected
      the moment your agent files. The connect step does NOT advance by itself
@@ -939,7 +939,8 @@ connection):
 1. **Refine the decision with the user.** Write it as a short domain label
    (e.g. `2026-Q3-db-migration`). Get the options right first — the user owns
    the option set.
-2. **File the decision parts as points** with `tortoise_create_point`:
+2. **File the decision parts as points** with
+   `tortoise_create_entity(type="point", ...)`:
    - one `decision` point per option (`kind="decision"`, content = the
      option),
    - one `criterion` point per decision criterion,
@@ -951,7 +952,8 @@ connection):
    `pointKind: option` (its anti-pattern list forbids storing the decision
    itself as a Point). `option` is an SDK-registered kind
    (`tortoise/sdk.py`), not an ONTOLOGY §5 canonical one, and
-   `tortoise_create_point` stores it verbatim — so both labels are accepted,
+   `tortoise_create_entity(type="point", props={"pointKind": ...})` stores it verbatim
+   — so both labels are accepted,
    and the server OBSERVES both: the onboarding `decide-completed` step fires
    on either `decision` or `option` (`tortoise/mcp_server.py`
    `DECISION_SHAPED_POINT_KINDS`, #3916). Follow whichever protocol you have —
@@ -971,7 +973,7 @@ connection):
 4. **Wire criteria → options** with `tortoise_create_operator`:
    - `criterion -[IMPL]-> option` — the criterion argues FOR the option,
    - `criterion -[NAND]-> option` — the criterion argues AGAINST the option.
-   A ranking needs ≥1 IMPL edge before `tortoise_compute_confidence` can
+   A ranking needs ≥1 IMPL edge before `tortoise_check_confidence(recompute=True)` can
    produce signal.
 5. **Mitigate, don't NAND, for fit.** When a finding is true but matters
    less, express it on the OPERATOR with
@@ -1019,8 +1021,8 @@ connection):
    multiplier.
 6. **Options can IMPL/NAND each other** — two go well together (IMPL), three
    are mutually exclusive (NAND).
-7. **Rank + sanity-check.** Run `tortoise_compute_confidence` (anchors = the
-   decision/options) → present the ranked options with EP confidence AND the
+7. **Rank + sanity-check.** Run `tortoise_check_confidence(recompute=True)` (anchors =
+   the decision/options) → present the ranked options with EP confidence AND the
    *why*: the top edges that moved each option. Run `tortoise_graph_overview(section="structure_check")`
    to confirm no orphaned operators.
 
