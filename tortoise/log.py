@@ -1855,11 +1855,23 @@ class EventLog:
         follows), because one process appending repeatedly is the common shape;
         it is REFRESHED here on every answer a caller paid for, so a
         ``position()`` does not re-read the journal on every call. Writing it
-        here cannot race: the memo is this instance's, and both call sites hold
-        the per-path THREAD lock, which is what excludes another thread of this
-        process. (It does NOT exclude another PROCESS — the ``flock`` is
-        conditional, `_lock_exclusive` may return ``False`` — so the memo's
-        validity rests on the ``(size, mtime_ns)`` identity, not on exclusion.)
+        here cannot race: the memo is this instance's, and both WRITE-path call
+        sites (`append`, `position`) hold the per-path THREAD lock, which is what
+        excludes another thread of this process. (It does NOT exclude another
+        PROCESS — the ``flock`` is conditional, `_lock_exclusive` may return
+        ``False`` — so the memo's validity rests on the ``(size, mtime_ns)``
+        identity, not on exclusion.)
+
+        ⛔ THE THIRD CALL SITE IS DELIBERATELY LOCK-FREE:
+        :meth:`position_readonly` reads the journal from the REQUEST path, where
+        taking the append lock is the defect it exists to avoid (#13331 review
+        F2). Do NOT "fix" that by holding the thread lock here — that would put
+        a search inside the append critical section, which is half of what
+        ``position()``'s lock cost. What makes the unlocked memo write safe is
+        the identity check above, not mutual exclusion: a racing write installs
+        an entry that is only ever read back when ``(raw, size, mtime_ns)``
+        match the reader's own observation, so the worst outcome is a cheaper
+        miss, never a number for a state nobody saw.
 
         ``None`` is a NAMED absence, not a zero: the journal could not be READ
         (``OSError`` — EACCES/EIO, not a parse problem, which ``read_all``
@@ -1963,6 +1975,14 @@ class EventLog:
         to the file the path has since left and there is no count to give for
         the one it now names. Neither case caches anything.
 
+        ⛔ ``0`` FOR A MISSING PATH IS THIS METHOD'S CONTRACT, NOT A
+        MEASUREMENT A CALLER MAY READ AS COVERAGE. A caller that needs "how many
+        records does this journal hold" — and must not take the append lock or
+        need write permission to find out — wants :meth:`position_readonly`,
+        which answers ``None`` for a path it could not count. Reading this
+        method's ``0`` as "the journal is empty" is how a coverage check reports
+        a journal it never measured as complete (#13331 review F3/B).
+
         Unlike :meth:`append` it RECOUNTS even while the journal's sidecar is in
         its ``_POSITION_CACHE_DEAD`` window: the append path declines that cost
         because it runs on every write, whereas this is an explicit measurement
@@ -2036,6 +2056,84 @@ class EventLog:
                 if (after, after_mtime) == (size, mtime_ns):
                     self._refresh_position_cache(key, count, size, mtime_ns)
             return count
+
+    def position_readonly(self) -> int | None:
+        """How many records the journal holds — read-only, lock-free, or ``None``.
+
+        The sibling of :meth:`position` for a caller that must NOT pay its
+        side effects: a REQUEST path (#13331) and the operator verb that gates
+        it. ``position()`` takes the append lock (a wedged peer parks it for
+        ``_FLOCK_TIMEOUT_S``, and a timeout there stamps the path UNHEALTHY for
+        ``_FLOCK_UNHEALTHY_FOR_S`` — 30 s of ``append`` returning ``None``
+        WITHOUT contending), and it opens the journal ``a+b`` so it needs WRITE
+        permission. Both are wrong for a read: a read-shaped call must not be
+        able to suppress the ``seq`` of a concurrent writer, and a journal on a
+        read-only mount is a legitimate shape (a reader deployment, a standby).
+        The tree already made this call once — ``sdk._journal_knows_point``
+        reads ``os.stat`` and a byte scan and says so in as many words ("NOT
+        ``EventLog.position()`` … that read takes the append lock"). This is
+        that reading, for the coverage question.
+
+        ``None`` is a NAMED ABSENCE, never ``0``: the path does not exist, is
+        not a regular file, or could not be counted. ``position()`` answers ``0``
+        for a missing path (deliberate there: a journal deleted between its
+        ``exists`` check and its open is re-created empty), and a caller that
+        reads that as a measurement concludes "the journal is empty, so nothing
+        is missing from the record" — a false PASS over a journal that was never
+        counted, which is the fail-open direction every reader here refuses
+        (#13331 review F3/B). An EMPTY journal still answers ``0``: it exists
+        and it holds no records.
+
+        The COUNT itself is :meth:`_records_before` — the same reader
+        :meth:`position` uses, so no second definition of "record" can drift
+        from the replay's. It consults this instance's memo, then the position
+        sidecar, then recounts. **Nothing here writes**: no lock, no sidecar
+        write-through (that would assert a count for a state this call never
+        proved exclusive — ``position()`` re-reads the state under the lock for
+        exactly that reason), no append, no lock-state stamp. ``position()``'s
+        ``OSError`` arms therefore cannot fire here; they become ``None``.
+
+        RESIDUAL, stated rather than implied: when the sidecar does not
+        describe the current file state (a journal that has been appended to
+        since its last cache write, i.e. any BUSY tenant) the count is an
+        O(journal) read — ``read_all`` materializes the file, ~6-8x its size in
+        RSS. That is the cost :meth:`position` pays too; what is fixed here is
+        the lock, the write-fd requirement and the lock-state amplification. A
+        caller that cannot afford the recount must bound its own use of this
+        (``record_vector.READINESS_TTL_SECONDS`` is the dense leg's bound), and
+        the incremental-count design is #13365.
+
+        A PEER that appends DURING the count makes the returned number stale by
+        however much the peer wrote — a LOWER bound on the state at the instant
+        the count started, exactly as ``position()`` documents for the same
+        window (it has no ``None`` to give either). Nothing CROSS-PROCESS is
+        written by such a count: no sidecar and no lock-state stamp, so a peer
+        cannot inherit it. The INSTANCE memo IS refreshed on every path that
+        DERIVES a count (``_records_before`` installs ``_position_memo``
+        there, #13345 review P3-3) — though not on its two ``None`` arms, which
+        return before the install, and the install itself is suppressed — so a
+        later call on this same instance may answer from it, but only on an
+        exact ``(size, mtime_ns)`` match, which is what keeps that from hiding
+        a peer append.
+        """
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            # Absent, unreadable, ESTALE on a networked volume: not a count.
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            # A directory or a device at the journal path is not a journal. No
+            # `position()`-style `a+b` open to raise from, and `_count_records`
+            # would raise a different errno family per platform — so it is
+            # refused HERE, as the one answer both callers need.
+            return None
+        try:
+            return self._records_before(st.st_size, st.st_mtime_ns)
+        except _COUNT_MAY_RAISE:
+            # Belt to `_records_before`'s own braces: its ``None`` contract is
+            # the answer for an unreadable journal, and a raise that escaped it
+            # would turn a readiness probe into a search-path exception.
+            return None
 
     def _lock_key(self) -> str:
         """The resolved path this journal's append lock is keyed on.

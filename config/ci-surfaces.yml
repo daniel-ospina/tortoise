@@ -3372,6 +3372,25 @@ surfaces:
   # and blocks for it, so the read must answer from the graph inside its budget
   # with a named `scan_fallback`. No DSN, no graph, no key, no model.
   - test_11691_vector_leg_budget.py
+  # #13331: the LIVE write chokepoint, the journal-coverage leg and the dense
+  # leg's per-tenant gate. `core` because every subject resolves the `core`
+  # fallback and nothing else claims it: `tortoise/live_write.py`,
+  # `tortoise/record_reconcile.py` and `tortoise/record_vector.py` have no
+  # `SOURCE_PATTERNS` entry (`--changed-files tortoise/live_write.py` ->
+  # `['core']`, measured), so a diff to the chokepoint's order or to the gate
+  # collects this file only through a `core` row. ⛔ THIS ROW IS A REPAIR OF A
+  # BLOCKING DEFECT THE PR SHIPPED WITH (#13331 review F1): the file landed with
+  # NO manifest row, so `ci_selection.py --integrity` reported
+  # `manifest drift: ['test_13331_live_write.py']` — a REQUIRED leg red, and every
+  # case inert in CI, because `fast_pool()` is built from these member lists
+  # rather than from a `tests/**` glob. ⛔ NO BARE CASE COUNT HERE (#13345 review
+  # F2): this line said `26` while the file held **42 test functions / 51
+  # collected cases** (2 parametrized blocks, 8 + 3 rows) at `ee1d88b729`, so a
+  # literal goes stale the moment a test is added. Derive it instead:
+  # `grep -c '^def test_' tests/test_13331_live_write.py`.
+  # DB-free: the journal, the record and the cache are doubles; no DSN, no graph,
+  # no model.
+  - test_13331_live_write.py
   # #13034: the ONE currency rule (lifecycle word AND position axis) and its
   # five consumers. `core` for the same reason as the rows above —
   # `tortoise/live.py`, `tortoise/pipeline.py` and

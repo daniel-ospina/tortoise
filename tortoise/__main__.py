@@ -839,11 +839,80 @@ def _cmd_record_reconcile(args):
         # journal-projected point reports a permanent mismatch and this verb
         # exits 3 forever on a healthy pair (#9196 review, P1).
         scan = scan_cache_view(proj.g, timeout_ms=timeout_ms)
+        # #13331 — the THIRD leg: does the record hold every position the JOURNAL
+        # holds? A journal position the record never consumed is invisible to the
+        # record↔cache comparison (both sides can agree perfectly while a whole
+        # write is missing), so it is named here rather than reasoned about. The
+        # journal's own enumeration is `EventLog.position_readonly()` — the SAME
+        # reader a replay numbers against, minus `position()`'s side effects (the
+        # append lock and the write fd, which a measurement verb must not impose
+        # on the writer's journal: #13331 review F2) — and the record side is
+        # `record_projection.journal_coverage`, the reader the live chokepoint and
+        # the dense-leg gate share.
+        #
+        # ⛔ A JOURNAL THAT CANNOT BE COUNTED IS NOT A CLEAN JOURNAL (#13331
+        # review F3/B). `position()` answers `0` for a missing path, and a `0`
+        # here makes `unprojected` 0 for any tenant whose record holds a row — so
+        # `record-reconcile --journal /typo/events.jsonl` printed the unqualified
+        # `✓ record == cache` and exited 0, on a tenant that might be far behind.
+        # The verb also promises `1` is never returned, and an unreadable path
+        # used to escape as a traceback; both shapes are the "no verdict was
+        # produced" answer this verb already has.
+        # ⛔ `is not None`, never truthiness: `--journal ""` — the shape
+        # `--journal "$UNSET_VAR"` takes — is a journal the operator SUPPLIED and
+        # that cannot be counted, so it must reach the refusal below (exit 2),
+        # not be dropped as though uninformed and leave the unqualified
+        # `✓ record == cache` printing an exit-0 pass (#13345 review P1). The
+        # neighbouring `TORTOISE_RECORD_BACKUP_DSN` arm already refuses
+        # set-but-blank for the same reason.
+        journal_leg = None
+        if args.journal is not None:
+            from tortoise.log import EventLog
+            from tortoise.record_projection import journal_coverage as _coverage
+
+            log = EventLog(args.journal)
+            enumerated = log.position_readonly()
+            if enumerated is None:
+                raise ReconciliationUnavailable(
+                    f"the journal at {args.journal!r} could not be COUNTED (it "
+                    f"does not exist, is not a regular file, or could not be "
+                    f"read) — so the journal leg is UNKNOWN, not clean. A record "
+                    f"short of its journal reads as complete when the journal "
+                    f"that would show the lag cannot be counted (#13331). Check "
+                    f"the --journal path and the file's permissions")
+            # ⛔ THE RECORD'S OWN READ RAISES BY DESIGN, SO IT IS TRANSLATED
+            # HERE (#13345 review F1). `journal_coverage` refuses an unreadable
+            # record (`RecordProjectionError` when the aggregate returns no row)
+            # and re-raises whatever the driver raises — `QueryCanceled` from the
+            # gap statement under this session's `statement_timeout`, and
+            # `UndefinedTable` on a partially-migrated record. None of those is
+            # `ReconciliationUnavailable`, so without this arm they propagated
+            # past both handlers below and out of the verb as a TRACEBACK, i.e.
+            # exit **1** — the code this verb's docstring says it never returns,
+            # and the exact class the sibling `enumerated is None` arm above and
+            # the record↔cache read (`read_record_view`, wrapped at the top of
+            # this block) were already fixed for. A scheduler then reads a crash
+            # instead of `verdict=unanswerable`, and the operator is pointed at a
+            # Python stack instead of "the journal leg is UNKNOWN".
+            # `PlacementTableUnavailable` stays itself: a fault in the INSTALL is
+            # not a fault in the record, and the handler below says so.
+            try:
+                journal_leg = _coverage(
+                    conn, org_id=args.org, graph_id=args.graph,
+                    enumerated=enumerated)
+            except (ReconciliationUnavailable, PlacementTableUnavailable):
+                raise
+            except Exception as e:
+                raise ReconciliationUnavailable(
+                    f"the record's journal coverage could not be read "
+                    f"({type(e).__name__}) — the journal leg is UNKNOWN, not "
+                    f"clean") from e
         result = reconcile_record_and_cache(
             record_key_map(view),
             scan.view,
             declaration=declaration,
             placed=scan.placed,
+            journal=journal_leg,
         )
     except ReconciliationUnavailable as e:
         print(f"Record↔cache reconciliation UNAVAILABLE: {e}", file=sys.stderr)
@@ -17512,6 +17581,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="Bound on EACH cache-label read (default: 2000, must "
                          "be positive). A read that hits it refuses (exit 2) "
                          "— it never returns a partial answer")
+    # ⛔ Deliberately NOT `type=Path`: the empty string must survive as a
+    # SUPPLIED value so the verb can refuse it (`--journal "$UNSET_VAR"`), and
+    # `Path("")` is `Path(".")` — a directory, i.e. a different diagnosis.
+    rr.add_argument("--journal", default=None,
+                    help="Path to the tenant's JSONL journal (events.jsonl). "
+                         "With it, the run also reports #13331's third leg: how "
+                         "many of the journal's enumerated positions the record "
+                         "does NOT hold (verdict=unprojected_journal, exit 3). "
+                         "Heal with `tools/record_runner.py apply`. Without it, "
+                         "the journal leg is reported as null — not as zero")
     rr.add_argument("--json", action="store_true",
                     help="Machine-readable JSON output")
     # #9557 (R9): the RECORD's backup. Deliberately not `backup` (that verb
