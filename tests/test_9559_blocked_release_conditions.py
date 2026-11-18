@@ -1746,15 +1746,17 @@ def _strip_sql_comments(sql: str) -> str:
     `E`, quote, backslash, quote, quote — spells ONE quote character and closes at its
     THIRD `'`: quote 1 opens, the escaped quote is quote 2, quote 3 closes.
     An earlier cut modelled only the `''` doubling, so it paired quote 2 with quote 3
-    as one escaped quote and left the literal OPEN to end of file — and nothing AFTER
-    that literal was processed: every comment below it survived, a `/* … */` note
+    as one escaped quote and left the literal OPEN — nothing AFTER that literal was
+    processed, so the comments below it SURVIVED, a `/* … */` note
     quoting a guarded body satisfied the assertion, and the gate went GREEN over a
-    live function with no fail-closed arm. (⛔ The whole file is NOT returned: text
-    ABOVE the escaped literal is still processed, so a migration carrying its usual
-    leading `-- header` loses that header and looks stripped — measured — while every
-    comment BELOW it survives. Say it this way round, or the next lane runs a
-    migration that starts with a header, sees the strip working, and concludes this
-    bug was imaginary.)
+    live function with no fail-closed arm. ⛔ THREE qualifications, each measured,
+    because each one is how a later reader concludes the bug was imaginary: the whole
+    file is NOT returned (text ABOVE the escaped literal is still processed, so a
+    migration carrying its usual leading `-- header` loses that header and LOOKS
+    stripped), and the survival below stops at the first `'` — a below-comment with an
+    ODD number of apostrophes closes the pseudo-literal and stripping RESUMES, so the
+    note under such a comment is removed. What survives is the below-text whose
+    quotes pair up, which is exactly what a `/* … ->'orgs' … */` note looks like.
     Measured, on this head, with a body carrying `E'\''` before such a note:
     `note_survived=True`, `GUARD_IN_BODY=True`; with the `E'\''` replaced by `'x'`,
     `note_survived=False`. That is the same false PASS as the row above reached
@@ -2519,13 +2521,16 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
     carries the quote character as `E'\\''` closes that literal at its THIRD `'`
     (quote 1 opens, the escaped quote is quote 2, quote 3 closes). The pre-fix scan
     modelled only the `''` doubling, paired quote 2 with quote 3 as one escaped quote,
-    and stayed in literal state to END OF FILE — so `_strip_sql_comments` stopped
-    processing BELOW that point (text above it still is; a leading `-- header` is
-    removed, which is what makes the failure look like a working strip). Every comment
-    below it survived, including a `/* … */` note quoting a guarded
-    body, and the guard assertion was satisfied by the NOTE while the executed
-    function had lost the arm. Same false PASS as the row above, one spelling further
-    in.
+    and stayed in literal state past the closing point — so `_strip_sql_comments`
+    stopped
+    processing BELOW it (text above it still is; a leading `-- header` is
+    removed, which is what makes the failure look like a working strip). The comments
+    below it then SURVIVED — up to the first `'`, which closes the pseudo-literal and
+    resumes stripping; a below-comment with an ODD number of apostrophes therefore
+    hides nothing, while the note's paired `'…'` survives — including a `/* … */` note
+    quoting a guarded body, and the guard assertion was satisfied by the NOTE while the
+    executed function had lost the arm. Same false PASS as the row above, one spelling
+    further in.
 
     ⛔ Both halves are pinned: the lexical rule, and the gate-level consequence it
     exists for — a lexer row nobody can connect to a verdict is how the rule above
