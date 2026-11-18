@@ -331,6 +331,35 @@ def _has_unescaped_dq(body: str) -> bool:
     return False
 
 
+def _unkeepable_quoted(subject: str, style: str) -> str:
+    """The diagnosis for a quoted value this arm does not compare, BY VERDICT.
+
+    ``broken`` and ``malformed`` have DIFFERENT causes, so they need different
+    remedies — and one shared sentence gave both the truncation remedy, *"the
+    value is TERMINATED there. Remove the inner quote"*. That is true of
+    ``broken`` (YAML really does stop at an inner quote) and FALSE of
+    ``malformed``, whose shapes YAML keeps whole: `"x"# note` (a trailing
+    comment with no space before it), a MULTI-LINE quoted scalar, and a scalar
+    that genuinely never closes. For those, *"remove the inner quote"* asks the
+    author to delete a legal character — the same false-remedy class as the
+    `''`-escape finding this PR exists to remove — so the remedy that clears
+    them is named instead. No verdict changes: both arms still refuse the file.
+    """
+    if style == "broken":
+        return (
+            f"{subject} is broken — a quoted value YAML cannot keep whole is "
+            "TERMINATED at an inner quote. Remove the inner quote, or use a "
+            "block scalar."
+        )
+    return (
+        f"{subject} is malformed — no closing quote on that line. Either the "
+        "scalar is genuinely unterminated, or its closing quote is followed by "
+        "a comment with no space between (put one space before the `#`); a "
+        "quoted scalar continued onto the next line is refused here too. Keep "
+        "the whole value on one line inside its quotes, or use a block scalar."
+    )
+
+
 def _quoted_style(raw: str) -> tuple[str, str | None]:
     """``(style, body)`` for a quoted value; ``("plain", None)`` when unquoted.
 
@@ -726,9 +755,7 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                     style, expected = _quoted_style(raw_item)
                     if style in ("broken", "malformed"):
                         bad.append(
-                            f"`{key}` item {raw_item!r} is {style} — a quoted item "
-                            "YAML cannot keep whole is TERMINATED at that quote. "
-                            "Remove the inner quote, or use a block scalar."
+                            _unkeepable_quoted(f"`{key}` item {raw_item!r}", style)
                         )
                         break
                     if style == "escaped":
@@ -756,12 +783,7 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
             # affiliation carries is the one this issue is about.
             style, expected = _quoted_style(texts[0])
             if style in ("broken", "malformed"):
-                bad.append(
-                    f"`{key}` is a quoted value YAML cannot keep whole "
-                    f"({style}: an unescaped inner quote, an unbalanced quote, or "
-                    "no closing quote) — the value is TERMINATED there. Remove "
-                    "the inner quote, or use a block scalar."
-                )
+                bad.append(_unkeepable_quoted(f"`{key}`", style))
                 continue
             if key not in AFFILIATION_KEYS:
                 continue
@@ -1244,3 +1266,77 @@ def test_the_e1_e2_evidence_bundle_declares_its_affiliation() -> None:
         f"docs/evidence/7949-capstone/E1-E2.md must declare {missing} — the "
         "AGENTS.md doc-filing rule and the convention of the bundle it copies."
     )
+
+
+def test_a_malformed_value_names_a_true_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`malformed` and `broken` no longer share a remedy — one of them was false.
+
+    Both verdicts refuse the file, which is correct: nothing can ship on either.
+    What was wrong was the PRINTED REMEDY, which was the truncation sentence for
+    both — *"the value is TERMINATED there. Remove the inner quote"*. For
+    `broken` that is true (YAML stops at the unescaped inner quote). For
+    `malformed` it is false, because YAML keeps every member of that family
+    whole, and the sentence tells the author to delete a legal character — the
+    same false-remedy class as the `''`-escape finding this PR exists to remove.
+
+    The whole family is recorded in the plan doc §9 as *recorded, not fixed*,
+    with one reason: clearing the VERDICT means a lexer widening (accepting a
+    trailing comment that is not space-separated). The remedy is a different
+    fix and needs no lexer change: name the cause the author can act on. That is
+    what this test pins, and it pins the `broken` sentence too, so a future
+    simplification cannot flatten the two back into one.
+
+    Non-vacuity: on the pre-fix arm every ``"Remove the inner quote" not in msg``
+    assertion below fails, because both verdicts carried that sentence.
+    """
+
+    def red(body: str) -> str:
+        """Run the arm over a one-case tmp docs tree and return its failure text."""
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        (root / "docs" / "research").mkdir(parents=True, exist_ok=True)
+        (root / "docs" / "research" / "control.md").write_text(
+            _FM_HEAD + "aboutObjects: tortoise-platform, tortoise-hosted\n---\n\n# c\n",
+            encoding="utf-8",
+        )
+        (root / "docs" / "research" / "case.md").write_text(
+            _FM_HEAD + body + "---\n\n# case\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "ROOT", root)
+        with pytest.raises(AssertionError) as excinfo:
+            test_research_doc_frontmatter_parses_as_yaml()
+        # The rewritten-assert explanation repeats the failures dict, so take the
+        # arm's own single-line message.
+        return str(excinfo.value).split("\n", 1)[0]
+
+    from tortoise.file_indexer import parse_frontmatter
+
+    # (a) LEGAL YAML refused as `malformed`: a trailing comment with no space
+    # before it. YAML keeps `x`, so "remove the inner quote" is advice to delete
+    # a character the value needs; the remedy that clears it is the SPACE.
+    assert parse_frontmatter(
+        '---\ntitle: x\naboutObjects: "x"# note\n---\n'
+    )["aboutObjects"] == "x", "control: `\"x\"# note` must load whole"
+    msg = red('aboutObjects: "x"# note\n')
+    assert "malformed" in msg, msg
+    assert "Remove the inner quote" not in msg, msg
+    assert "put one space before the `#`" in msg, msg
+
+    # (b) LEGAL YAML refused as `malformed`: a quoted scalar continued on the
+    # next line. The remedy names the one-line form / block scalar.
+    assert parse_frontmatter(
+        '---\ntitle: x\naboutObjects: "a\n  b"\n---\n'
+    )["aboutObjects"] == "a b", "control: a continued quoted scalar loads whole"
+    msg = red('aboutObjects: "a\n  b"\n')
+    assert "malformed" in msg, msg
+    assert "Remove the inner quote" not in msg, msg
+    assert "one line inside its quotes" in msg, msg
+
+    # (c) the truncation verdict is UNCHANGED and keeps its own sentence: here
+    # YAML really does stop at the inner quote, so the deletion advice is right.
+    msg = red('aboutObjects: "a, "#1" KEEP"\n')
+    assert "broken" in msg, msg
+    assert "TERMINATED at an inner quote" in msg, msg
+    assert "Remove the inner quote" in msg, msg
+    assert "put one space before the `#`" not in msg, msg
