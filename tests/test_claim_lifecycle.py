@@ -285,15 +285,38 @@ def _ontology_status_section() -> str:
 #: v3.37 review, round 5). `test_ontology_legacy_pin_reads_the_note_not_the_section`
 #: drives each one BOTH bare and QUOTED (`> ---`), with no blank line.
 #: ⛔ AND `<` IS NARROWED TO THE INTERRUPTING FORMS — CommonMark HTML-block types
-#: 1-6: comment `<!--`, declaration `<!` + an ASCII letter (doctype/entity), PI `<?`,
-#: CDATA, a closing tag, and a tag name followed by whitespace or `>`. A bare `<`
-#: also matched an AUTOLINK, which is INLINE, so a legitimate prose continuation
-#: `<https://…>` was cut and the note lost (a false RED, round 6) — and dropping the
-#: `![A-Za-z]` half of that narrowing re-opened the opposite hole on `<!DOCTYPE>`
-#: (round 7). Both directions are pinned in the test beside this class.
+#: 1-6 — because a bare `<` matched an AUTOLINK, which is INLINE, so a legitimate
+#: prose continuation `<https://…>` was cut and the note lost (a false RED, round 6).
+#: ⛔ BUT "NOT A BARE `<`" WAS NOT THE SAME AS "TYPES 1-6": the round-6/7 rewrite
+#: still accepted ANY tag name followed by `>`/whitespace, and CommonMark assigns
+#: exactly that shape to **type 7** (a complete tag on a line of its own), which
+#: **cannot interrupt a paragraph** — so `<span>x</span>`, `<em>x</em>`, `<code>` and
+#: a type-7 CLOSING tag like `</span>` all cut a continuation the renderer keeps, the
+#: same false RED one layer in (measured: this guard, round 9 — the note lost
+#: `archived` on every one of them). `tools/closes_landing.py` had already recorded
+#: the same fact for its own parser ("a type-7 line is INLINE in an open paragraph
+#: and starts nothing", round-50 review P1); this is the second reader of it.
+#: The class below is therefore MIRRORED from the reference implementation's
+#: `reHtmlBlockOpen` (commonmark.js `lib/blocks.js`, types 1-6) rather than hand-
+#: approximated a third time: a by-NAME block list is the only thing that separates
+#: type 6 from type 7.
+_HTML_BLOCK_INTERRUPT_RE = (
+    r"<(?:script|pre|textarea|style)(?:\s|>|$)"      # type 1, case-insensitive
+    r"|<!--"                                          # type 2
+    r"|<\?"                                           # type 3
+    r"|<![A-Za-z]"                                     # type 4 (doctype/entity)
+    r"|<!\[CDATA\["                                     # type 5
+    r"|</?(?:address|article|aside|base|basefont|blockquote|body|caption|center"
+    r"|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure"
+    r"|footer|form|frame|frameset|h[123456]|head|header|hr|html|iframe|legend|li"
+    r"|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section"
+    r"|search|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)"
+    r"(?:\s|/?>|$)"                                  # type 6
+)
 _BLOCK_START_RE = re.compile(
     r"^(?:[#>|]|[-*+]\s|\d+[.)]\s|=+\s*$|(?:[-*_][ \t]*){3,}$|```|~~~"
-    r"|<(?:!--|![A-Za-z]|\?|!\[CDATA\[|/[A-Za-z]|[A-Za-z][A-Za-z0-9-]*(?:\s|/?>)))")
+    r"|" + _HTML_BLOCK_INTERRUPT_RE + r")",
+    re.IGNORECASE)
 
 
 def _unwrap(text: str) -> str:
@@ -714,12 +737,16 @@ def test_ontology_legacy_pin_reads_the_note_not_the_section():
     assert "read-side legacy" in auto_note and "`archived`" in auto_note, (
         "an autolink is INLINE, so a continuation carrying one is still the note; "
         f"the block-start class cut it: {auto_note!r}")
-    # ⛔ AND A REAL HTML BLOCK *IS* A BLOCK START — CommonMark type 4 (`<!` + an ASCII
-    # letter: doctype, entity) interrupts a paragraph, so the line after it must not be
-    # absorbed. Dropping `![A-Za-z]` from the class let a note missing `archived` borrow
-    # it from the prose after `<!DOCTYPE html>` (v3.37 review, round 7).
+    # ⛔ AND A REAL HTML BLOCK *IS* A BLOCK START — CommonMark types 1-6 interrupt a
+    # paragraph, so the line after one must not be absorbed. Dropping `![A-Za-z]` let a
+    # note missing `archived` borrow it from the prose after `<!DOCTYPE html>` (round 7).
+    # Every type is driven, including the type-6 BY-NAME list's own edge shapes
+    # (`<div/>`, a bare `<div` at end of line) and type 1 (`<script>`, which is NOT in
+    # the type-6 list and is its own arm).
     for html_block in ("<!DOCTYPE html>", '<!ENTITY x "y">', "<div>", "<!-- c -->",
-                       "<?php x ?>", "<![CDATA[ x ]]>", "</span>"):
+                       "<?php x ?>", "<![CDATA[ x ]]>", "<script>", "<pre>",
+                       "<style>", "<textarea>", "<table>", "<h2>", '<div class="x">',
+                       "<div/>", "<div", "</div>", "</table>"):
         html_fixture = (
             "### Point Status Vocabulary (canonical)\n"
             "\n"
@@ -731,6 +758,26 @@ def test_ontology_legacy_pin_reads_the_note_not_the_section():
         assert "`archived`" not in html_note, (
             f"`{html_block}` is an HTML BLOCK start, so it ends the note; the class "
             f"absorbed the prose after it: {html_note!r}")
+    # ⛔ AND THE OTHER DIRECTION, ONE LAYER IN FROM THE AUTOLINK: a TYPE-7 line cannot
+    # interrupt a paragraph, so a continuation beginning with an INLINE tag — or with
+    # a closing tag whose name is not an HTML block tag — is still the note. The
+    # round-6/7 class accepted any tag name followed by `>`/whitespace, which is
+    # exactly type 7's shape, so every one of these cut the continuation and reddened
+    # a CORRECT disclosure (measured: the note lost `archived` on each).
+    for inline in ("<span>x</span>", "<em>x</em>", "<code>x</code>", "<a href=\"/x\">y</a>",
+                   "</span>", "</em>", "<br />", "<https://example.com/12855>",
+                   "<3 items", "<diverse>"):
+        inline_fixture = (
+            "### Point Status Vocabulary (canonical)\n"
+            "\n"
+            "> **`retracted` and `outdated` are read-side legacy**, not statuses,\n"
+            f"{inline} and stored rows may still hold `archived`.\n"
+        )
+        inline_note = _read_side_legacy_note(inline_fixture)
+        assert "`archived`" in inline_note, (
+            f"`{inline}` is INLINE (a type-7 line cannot interrupt a paragraph), so "
+            f"the continuation is still the note; the block-start class cut it: "
+            f"{inline_note!r}")
 
 
 def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):
