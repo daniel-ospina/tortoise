@@ -30372,19 +30372,43 @@ class TortoiseSDK:
                          session: bool = False,
                          calibrate: bool = False,
                          include_provenance: bool = False,
-                         limit: int = 50,
-                         require_calibration: bool | None = None) -> Any:
-        """How confident the graph is — the confidence view ONLY (row 5).
+                         limit: int | None = None,
+                         require_calibration: bool | None = None,
+                         # ── RECOMPUTE arm (#11609) — absorbs
+                         # `tortoise_compute_confidence`, whose whole argument set
+                         # is carried here so the retired door's callers migrate
+                         # WITHOUT losing a parameter.
+                         recompute: bool = False,
+                         factors: Any = None,
+                         evidence: Any = None,
+                         anchors: list[str] | None = None,
+                         max_hops: int | None = 1,
+                         rel_filter: str = "IMPL|NAND",
+                         direction: str = "both",
+                         recency_decay: float | None = None,
+                         # ── RECALL arm (#11609) — absorbs `tortoise_recall`'s
+                         # `state`/`custom` intent (see ``mode`` below).
+                         recall: bool = False,
+                         mode: str = "state",
+                         query: str | None = None,
+                         kind: str | None = None,
+                         include_superseded: bool = False,
+                         min_confidence: float = 0.0,
+                         relevance_exp: float | None = None,
+                         confidence_exp: float | None = None,
+                         centrality_weight: float | None = None) -> Any:
+        """How confident the graph is — the confidence view, AND its two writers.
 
-        The container answers with the confidence VIEW; it never recomputes the
-        posterior (that is :meth:`compute_confidence`'s job, and the reason
-        `compute_confidence` stays its own entry). ⚠️ It is NOT write-free: the
-        ``claim_id`` arm reaches :meth:`get_confidence`, whose lazy-consistency
-        path dreams a DIRTY root (``self.dream(dirty_only=True, …)``) — a write
-        that PRE-DATES this container and is unchanged by it, which is also why
-        the MCP door for this row is tiered ``maintenance`` rather than ``read``.
+        The container answers with the confidence VIEW by default. ⚠️ It is NOT
+        write-free: the ``claim_id`` arm reaches :meth:`get_confidence`, whose
+        lazy-consistency path dreams a DIRTY root (``self.dream(dirty_only=True,
+        …)``) — a write that PRE-DATES this container and is unchanged by it,
+        which is also why the MCP door for this row is tiered ``maintenance``
+        rather than ``read``. ``recompute=True`` writes too, by definition.
+
         Dispatch is by argument, as `docs/product/bridge-table.md` Part A
-        records for this target:
+        records for this target — and the last two arms are the ones that let
+        `tortoise_compute_confidence` and `tortoise_recall` retire (#11609):
 
           claim_id= — one claim's EP posterior ``{mean, variance, alpha, beta}``;
               ``include_provenance=True`` adds the chain behind it.
@@ -30395,10 +30419,86 @@ class TortoiseSDK:
           (no selector) — the graph-wide calibration audit, which is the answer
               to "how confident is this graph" rather than "how confident is
               this claim".
+          recompute=True — RE-DERIVE the posterior by EP belief propagation over
+              the dirty subgraph (or over ``factors=`` / ``anchors=``), i.e.
+              :meth:`compute_confidence`. This is the arm
+              `tortoise_compute_confidence` retires into; every argument that door
+              took is a parameter here (``factors``, ``evidence``, ``anchors``,
+              ``max_hops``, ``rel_filter``, ``direction``,
+              ``require_calibration``), plus ``recency_decay`` from the SDK verb.
+          recall=True — EPISTEMIC RECALL: what is true and high-confidence right
+              now, re-ranked by the multiplicative confidence gate. This is the
+              arm `tortoise_recall` retires into. ``mode`` selects the
+              ``state``/``custom`` intent; the OTHER two intents (`gaps`,
+              `subgraph`) are NOT absorbed here — they are graph-structure reads
+              rather than confidence reads, and the SDK already exposes them
+              directly as :meth:`recall_gaps` / :meth:`recall_subgraph`, which
+              the refusal below names.
+
+        ⛔ ONE arm per call. Neither NEW selector may be combined with another arm
+        and the two may not be combined with each other: a call naming two is
+        REFUSED rather than partly answered — the contract :meth:`update_knowledge`
+        states for its arms. The LEGACY precedence (``claim_id`` beating ``topic``,
+        ``session`` beating ``calibrate``) is deliberately untouched: a caller
+        relying on it keeps its exact behaviour, while a caller reaching for a
+        NEW arm cannot silently receive an old one.
+
+        ``limit`` is resolved PER ARM, never by a shared default: the ``topic``
+        arm keeps its historical 50, the recall arm keeps ``recall_state``'s 10.
+        A single default here would have WIDENED every migrating recall caller's
+        answer by 5x with no error (the failure class the door-retirement suite
+        guards for `days`/`limit`).
 
         ``require_calibration`` is forwarded verbatim to the EP read; ``None``
         keeps the shared posture (default fail-closed, #344).
         """
+        armed = [name for name, on in (("recompute", recompute),
+                                       ("recall", recall)) if on]
+        if len(armed) > 1:
+            raise ValueError(
+                "check_confidence: ONE arm per call — this call names "
+                f"{', '.join(sorted(armed))}. They answer different questions "
+                "(a re-derived posterior, an epistemic recall), so a combined "
+                "call would return one of them and drop the other with no "
+                "error. Send them as separate calls.")
+        legacy = [name for name, on in (("claim_id", bool(claim_id)),
+                                        ("topic", bool(topic)),
+                                        ("session", session),
+                                        ("calibrate", calibrate)) if on]
+        if armed and legacy:
+            raise ValueError(
+                f"check_confidence: {armed[0]}=True cannot be combined with "
+                f"{', '.join(legacy)}. {armed[0]}=True selects its own arm — a "
+                "call naming both would answer one of them and drop the other "
+                "with no error. Send them as separate calls.")
+        if recompute:
+            return self.compute_confidence(
+                factors, evidence, anchors=anchors, max_hops=max_hops,
+                rel_filter=rel_filter, direction=direction,
+                require_calibration=require_calibration,
+                recency_decay=recency_decay)
+        if recall:
+            if mode not in ("state", "custom"):
+                raise ValueError(
+                    f"check_confidence(recall=True) has no {mode!r} arm — it "
+                    "absorbs the `state` intent (and `custom`, which is the same "
+                    "state machinery with no preset tuning). `gaps` and "
+                    "`subgraph` are graph-structure reads, not confidence "
+                    "reads: call recall_gaps(...) / recall_subgraph(...) "
+                    "directly on this SDK.")
+            # `state` and `custom` differ only in whether the PRESET is applied,
+            # and `recall_state`'s own signature defaults ARE that preset
+            # (1.0 / 1.0 / 0.10) — so passing the resolved value through is the
+            # same call for both, with `custom` simply never overriding it.
+            return self.recall_state(
+                query, kind=kind,
+                limit=10 if limit is None else limit,
+                include_superseded=include_superseded,
+                min_confidence=min_confidence,
+                relevance_exp=(1.0 if relevance_exp is None else relevance_exp),
+                confidence_exp=(1.0 if confidence_exp is None else confidence_exp),
+                centrality_weight=(0.10 if centrality_weight is None
+                                   else centrality_weight))
         if claim_id:
             view = self.get_confidence(
                 claim_id, require_calibration=require_calibration)
@@ -30409,7 +30509,8 @@ class TortoiseSDK:
                 "provenance": self._provenance(claim_id),
             }
         if topic:
-            return self.belief_timeline(topic, limit=limit)
+            return self.belief_timeline(
+                topic, limit=50 if limit is None else limit)
         if session:
             return self.session_context()
         # calibrate=True, and the no-selector default: the graph-wide view.

@@ -8066,17 +8066,98 @@ def tortoise_check_confidence(claim_id: str | None = None,
                               session: bool = False,
                               calibrate: bool = False,
                               include_provenance: bool = False,
-                              limit: int = 50,
-                              require_calibration: bool | None = None) -> Any:
-    """How confident the graph is — the confidence view only (#4282 row 5).
+                              limit: int | None = None,
+                              require_calibration: bool | None = None,
+                              recompute: bool = False,
+                              factors: Any = None,
+                              evidence: Any = None,
+                              anchors: Any = None,
+                              max_hops: int | None = 1,
+                              rel_filter: str = "IMPL|NAND",
+                              direction: str = "both",
+                              recall: bool = False,
+                              mode: str = "state",
+                              query: str | None = None,
+                              kind: str | None = None,
+                              include_superseded: bool = False,
+                              min_confidence: float = 0.0,
+                              relevance_exp: float | None = None,
+                              confidence_exp: float | None = None,
+                              centrality_weight: float | None = None,
+                              seed: str | None = None,
+                              depth: int | None = None,
+                              completeness: str | None = None,
+                              min_load: int | None = None,
+                              max_support: int | None = None,
+                              max_nodes: int | None = None) -> Any:
+    """How confident the graph is — the view, plus the two arms it absorbed.
 
     Dispatch by argument: claim_id | topic | session | calibrate (the default
-    when nothing is named). It never RECOMPUTES the posterior, and it is not
-    write-free either: the `claim_id` arm reaches `get_confidence`, whose
-    lazy-consistency path dreams a DIRTY root (`self.dream(dirty_only=True, …)`)
-    — a write that PRE-DATES this container and is unchanged by it, which is why
-    the row is tiered `maintenance` rather than `read`.
+    when nothing is named) | recompute | recall. It is not write-free: the
+    `claim_id` arm reaches `get_confidence`, whose lazy-consistency path dreams
+    a DIRTY root (`self.dream(dirty_only=True, …)`) — a write that PRE-DATES
+    this container and is unchanged by it, which is why the row is tiered
+    `maintenance` rather than `read`. `recompute=True` writes by definition.
+
+    `recompute=True` RE-DERIVES the posterior by EP belief propagation and is
+    what `tortoise_compute_confidence` retires into; it DISPATCHES to that
+    handler rather than re-implementing it, so the retired name (still served
+    through the #3883 warning shim, on that exact function) and this arm cannot
+    disagree.
+
+    `recall=True` answers "what is true and high-confidence right now" and is
+    what `tortoise_recall` retires into. It dispatches to that handler too, and
+    therefore carries ALL FOUR of its intents (`state`, `gaps`, `subgraph`,
+    `custom`) — the signature above names every argument both of the retired
+    doors took, so a migrating caller keeps its whole call.
+
+    ⛔ ONE arm per call: naming `recompute`/`recall` together, or either beside
+    `claim_id`/`topic`/`session`/`calibrate`, is REFUSED below rather than
+    answered partly. The legacy precedence among the four OLD selectors is
+    untouched.
+
+    `limit` is resolved per arm, never by one shared default: the `topic` arm
+    keeps 50, the recall arm keeps the recalled door's own per-mode defaults.
     """
+    armed = [name for name, on in (("recompute", recompute),
+                                   ("recall", recall)) if on]
+    if len(armed) > 1:
+        return _SafeError({
+            "error": ("check_confidence: ONE arm per call — this call names "
+                      f"{', '.join(sorted(armed))}. They answer different "
+                      "questions (a re-derived posterior, an epistemic recall), "
+                      "so a combined call would return one of them and drop the "
+                      "other with no error. Send them as separate calls."),
+            "code": ERR_INVALID})
+    legacy = [name for name, on in (("claim_id", bool(claim_id)),
+                                    ("topic", bool(topic)),
+                                    ("session", session),
+                                    ("calibrate", calibrate)) if on]
+    if armed and legacy:
+        return _SafeError({
+            "error": (f"check_confidence: {armed[0]}=True cannot be combined "
+                      f"with {', '.join(legacy)}. {armed[0]}=True selects its "
+                      "own arm — a call naming both would answer one of them "
+                      "and drop the other with no error. Send them as separate "
+                      "calls."),
+            "code": ERR_INVALID})
+    if recompute:
+        # `tortoise_compute_confidence`'s own default is True (fail-closed, #344);
+        # `None` here means NOT SUPPLIED rather than False, so it resolves to it.
+        return tortoise_compute_confidence(
+            factors, evidence, anchors=anchors, max_hops=max_hops,
+            rel_filter=rel_filter, direction=direction,
+            require_calibration=(True if require_calibration is None
+                                 else require_calibration))
+    if recall:
+        return tortoise_recall(
+            query, mode=mode, kind=kind, limit=limit,
+            include_superseded=include_superseded,
+            min_confidence=min_confidence,
+            relevance_exp=relevance_exp, confidence_exp=confidence_exp,
+            centrality_weight=centrality_weight,
+            seed=seed, depth=depth, completeness=completeness,
+            min_load=min_load, max_support=max_support, max_nodes=max_nodes)
     return _safe(
         _get_org_sdk().check_confidence, claim_id, topic=topic, session=session,
         calibrate=calibrate, include_provenance=include_provenance,
