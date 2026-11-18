@@ -344,6 +344,26 @@ same prefetch returns the shortfall assertion's `available` figure, so the cage 
 fourth. Past `_FOLDED_TERMINAL_KEY_BUDGET` keys the leg returns `None` — the documented *"not served HERE"* answer —
 and the caller's graph branch applies the identical cage in Cypher.
 
+**What the review changed, and why it is recorded here rather than tidied away.** Three of the first cut's claims were
+wrong in ways that only a reviewer could see (`#13466`):
+
+* the prefetch was `SELECT *`, which materialises `embedding` (jsonb, ~2.5 KB/row) and the generated `embedding_vec`
+  (~7 KB/row) that the fold never reads. **Measured: ~2.0 s on 8,000 `object` rows**, against **~0.19 s** for the
+  payload-free projection — so at the folded arm's per-statement share the leg could never answer on any tenant of
+  realistic size, while presenting a bind budget it could never reach;
+* the leg issues **three** data statements against the column arm's two, so dividing the read budget by
+  `RECORD_LEG_STATEMENTS_PER_READ` let it spend the WHOLE read and hand the graph branch a floored `1 ms` — the
+  `#11691` reserve silently did not hold for these two labels. The folded arm now divides by one MORE than it issues;
+* the over-budget decline returned `None`, which the caller takes SILENTLY (it is the contract's *"no record table
+  serves this label"*), so the fallback was recorded as a plain `scan` and the graph branch got the full budget again
+  (`#4999`, `#11691`). It now raises `RecordVectorDeclined`.
+
+⛔ **The residual that is still true, and the reason this is a read half rather than the whole answer:** the fold
+itself costs ~0.14 s on 8,000 nodes, so a tenant at that scale overruns the folded arm's statement share and falls
+through to the graph as the NAMED `scan_fallback` — correct, but it means these two labels are not record-served at
+fleet scale. The cost is removed by materialising the fold; narrowing the node read per target is exactly where a
+missed path becomes a `#689` leak, so it is filed rather than attempted.
+
 **What did NOT change, and must not be read as changed.** `cutover_armed()` is still OFF by default, so **the graph
 leg answers for these two labels today** exactly as it did; the graph copy is still written and still read, because
 removing it is the second step of the `#11395` comment `6956793300` ruling (record first, graph removal second, never

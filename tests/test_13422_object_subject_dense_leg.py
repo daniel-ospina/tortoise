@@ -148,7 +148,7 @@ def test_the_folded_keys_are_the_columns_the_leg_returns():
     ]
     assert len(exclusion) == 1, "the folded exclusion clause is gone or duplicated"
     body = ast.unparse(exclusion[0])
-    assert "t.{id_column} <> ALL" in body or "id_column} <> ALL" in body, (
+    assert "id_column} <> ALL" in body, (
         f"the folded exclusion does not use `id_column` ({body}) — a list of "
         "`node_key` values excludes nothing, because the leg SELECTs `id`")
     assert "node_key" not in body, (
@@ -156,6 +156,33 @@ def test_the_folded_keys_are_the_columns_the_leg_returns():
         "column, not the key the leg returns")
     assert record_vector.LABEL_SERVED["object"][1] == "id"
     assert record_vector.LABEL_SERVED["subject"][1] == "id"
+
+
+def test_the_fold_key_coordinate_is_the_legs_id_column():
+    """⛔ THE ACTUAL INVARIANT: `node.key` must BE the column the leg SELECTs.
+
+    `_folded_terminal_keys` appends `node.key`, and `node_from_row` derives that
+    from `cache_projection.KEY_PROPERTY` — `id` for both labels at this head. The
+    textual pin above cannot see a `node.props["name"]` substitution, and every
+    LIVE test seeds `id == name == node_key` (the schema's own
+    `chk_*_node_key_is_contract_key` forces `node_key = id`), so no behavioural
+    test can tell either. This is the pin that can: if `KEY_PROPERTY` moves, the
+    exclusion list names a value the SELECT does not return, excludes NOTHING, and
+    serves `#689`'s rows with every other check green.
+    """
+    from tortoise.cache_projection import KEY_PROPERTY, node_from_row
+
+    for label, entity_type in (("Object", "object"), ("Subject", "subject")):
+        assert KEY_PROPERTY[label] == "id", (
+            f"`{label}` folds by `{KEY_PROPERTY[label]}`, but the dense leg "
+            f"SELECTs `{record_vector.LABEL_SERVED[entity_type][1]}` — the two "
+            "coordinates have diverged and the cage excludes nothing")
+        assert record_vector.LABEL_SERVED[entity_type][1] == KEY_PROPERTY[label]
+        node = node_from_row(label, {"node_key": "n", "name": "n",
+                                    "id": "i"})
+        assert node.key == "i", (
+            f"`{label}`'s RecordNode key is {node.key!r} — the exclusion list "
+            "would carry names where the SELECT returns ids")
 
 
 # ── 3. one home each for the vocabulary and the fold ───────────────────────
@@ -225,16 +252,21 @@ def test_the_folded_comparison_is_exact_and_case_sensitive():
 
 # ── 4. the over-budget bound declines, never degrades ─────────────────────
 
-def test_the_bind_budget_declines_the_record_branch():
-    """Past the budget the leg returns `None`, so the caller takes the graph.
+def test_the_bind_budget_DECLINES_rather_than_answering_None():
+    """⛔ Past the budget the leg RAISES `RecordVectorDeclined`, never returns `[]`.
 
-    `None` is the documented "not served HERE" answer and the caller falls
-    through to the branch that applies the identical cage in Cypher. A bound that
-    instead returned a FILTERED-IN list would serve `#689`'s rows; one that
-    returned `[]` would report an empty corpus.
+    `[]` would report an empty corpus and a FILTERED-IN list would serve
+    `#689`'s rows; `None` was the first cut and the review caught why it is wrong
+    (`#13466` review P3): `None` is the contract's *"no record table serves this
+    label"*, which the caller takes SILENTLY, while a DECLINED leg has already
+    spent this read's prefetch and must NAME the fallback (`#4999`) and hand the
+    graph only the remainder of the budget (`#11691`).
     """
-    src = MODULE.read_text()
-    tree = ast.parse(src)
+    assert issubclass(record_vector.RecordVectorDeclined,
+                      record_vector.RecordVectorError), (
+        "a caller that does not know the subclass must still take the graph "
+        "branch, so Declined has to be a RecordVectorError")
+    tree = ast.parse(MODULE.read_text())
     func = next(node for node in ast.walk(tree)
                 if isinstance(node, ast.FunctionDef)
                 and node.name == "vector_search")
@@ -246,14 +278,70 @@ def test_the_bind_budget_declines_the_record_branch():
     assert len(over_budget) == 1, (
         "the bind-budget guard is gone or duplicated — the folded arm would "
         "bind an unbounded text array into every read")
-    assert any(isinstance(node, ast.Return)
-               and isinstance(node.value, ast.Constant)
-               and node.value.value is None
-               for node in over_budget[0].body), (
-        "the over-budget arm must RETURN None (graph branch), never an empty or "
-        "unfiltered list")
+    body = over_budget[0].body
+    assert any(isinstance(node, ast.Raise) for node in body), (
+        "the over-budget arm must RAISE RecordVectorDeclined, never return "
+        "`None` (silent, unnamed fallback) or a list (empty corpus, or #689's "
+        "rows filtered IN)")
+    assert not any(isinstance(node, ast.Return) for node in body), body
 
 
 def test_the_budget_is_a_bound_and_it_is_positive():
     assert isinstance(record_vector._FOLDED_TERMINAL_KEY_BUDGET, int)
     assert record_vector._FOLDED_TERMINAL_KEY_BUDGET > 0
+
+
+# ── 5. the folded arm leaves the graph its #11691 reserve ────────────────
+
+def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
+    """⛔ THE `#11691` RESERVE, for a leg that issues three statements.
+
+    The column arm issues two data statements and divides by
+    `RECORD_LEG_STATEMENTS_PER_READ` (3), leaving the third as the graph branch's
+    reserve. The folded arm issues THREE (its two prefetches, then the kNN), so
+    dividing by the same 3 lets it spend the whole read and hand the graph a
+    floored `1 ms` — turning these two labels' real path into an empty result.
+    `#13466` review P3 measured that the old pin
+    (`test_11691_vector_leg_budget.py`) asserts the COLUMN arm's arithmetic and
+    stays green for the folded one.
+    """
+    budget = 500
+    column_share = record_vector.record_statement_ms(budget)
+    assert column_share * 2 < budget, (
+        "the column arm's two statements must fit strictly inside the read")
+    folded_share = record_vector.record_statement_ms(
+        budget, record_vector.RECORD_LEG_STATEMENTS_PER_READ + 1)
+    assert folded_share * 3 < budget, (
+        f"the folded arm's three statements must also leave a reserve "
+        f"({folded_share} x 3 >= {budget}) — otherwise the graph branch is handed "
+        "a floored timeout and the label's real path returns nothing")
+    # …and the divisor really is one more where it is decided.
+    tree = ast.parse(MODULE.read_text())
+    func = next(node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "vector_search")
+    assert "RECORD_LEG_STATEMENTS_PER_READ + 1" in ast.unparse(func), (
+        "vector_search no longer adds the reserve share for folded labels")
+
+
+def test_the_prefetch_does_not_select_the_payload_columns():
+    """⛔ `SELECT *` ON THE PREFETCH IS A MEASURED 2.0 s -> 27 ms (`#13466` P2).
+
+    The fold reads no vector and no jsonb, but `SELECT *` materialises
+    `embedding` (jsonb, ~2.5 KB/row) and the generated `embedding_vec` (~7 KB/row)
+    for every row of the label. Measured on 8,000 rows: ~2.0 s with the payload,
+    ~27 ms without — i.e. at a 166 ms statement share the leg could never answer on
+    any tenant of realistic size, while claiming a bound it could not reach.
+    """
+    from tortoise.record_projection import table_columns
+
+    columns = table_columns()
+    for table in ("object", "subject"):
+        rendered = record_vector._fold_prefetch_select(table)
+        assert "embedding" not in rendered.replace(" ", ""), rendered
+        assert "embedding_vec" not in rendered, rendered
+        # …and it is the census minus exactly the two payload columns, so a
+        # migration that adds a column is read without an edit here.
+        expected = set(columns[table]) - {"embedding", "embedding_vec"}
+        named = {part.strip().removeprefix("t.") for part in rendered.split(",")}
+        assert named == expected, (sorted(expected - named), sorted(named - expected))
