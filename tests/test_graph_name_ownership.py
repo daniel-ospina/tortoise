@@ -100,21 +100,28 @@ def test_the_product_family_is_an_ALIAS_of_the_composer_that_strips_it():
     assert embedded._PRODUCT_GRAPH_PREFIXES is sdk._TENANT_GRAPH_PREFIXES
 
     tree = ast.parse((REPO / "tests" / "_embedded.py").read_text(encoding="utf-8"))
-    decl = next(
-        (n for n in tree.body
-         if n.__class__.__name__ in ("Assign", "AnnAssign")
-         and any(isinstance(t, ast.Name) and t.id == "_SWEEP_OWNED_PREFIXES"
-                 for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))),
-        None)
-    # `next(..., None)` + an explicit assert, not a bare `next(...)`: if the
-    # declaration is renamed or gains a type annotation, a bare `next` raises a
-    # message-less `StopIteration` and the reader learns nothing about what the
-    # pin was looking for. Both spellings are accepted above for the same
-    # reason — `sdk._TENANT_GRAPH_PREFIXES` is itself annotated, so annotating
-    # this one is the plausible next edit, not a law violation.
-    assert decl is not None, (
+    # EVERY declaration, not the first one: `next(...)` would read a composed
+    # declaration and ignore a value-identical re-inline placed AFTER it — which
+    # is the one that binds, and precisely the drift this test exists to catch.
+    # Both spellings are accepted (`Assign` and `AnnAssign`) because
+    # `sdk._TENANT_GRAPH_PREFIXES` is itself annotated, so annotating this one is
+    # the plausible next edit, not an offence.
+    decls = [n for n in tree.body
+             if n.__class__.__name__ in ("Assign", "AnnAssign")
+             and any(isinstance(t, ast.Name) and t.id == "_SWEEP_OWNED_PREFIXES"
+                     for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+    # An explicit assert, not a bare `next(...)`: a rename must fail with a
+    # sentence saying what the pin was looking for, never a message-less
+    # `StopIteration`.
+    assert decls, (
         "no assignment to `_SWEEP_OWNED_PREFIXES` found in tests/_embedded.py — "
         "the alias pin cannot run; point it at wherever the vocabulary moved")
+    assert len(decls) == 1, (
+        "_SWEEP_OWNED_PREFIXES is declared "
+        f"{len(decls)} times in tests/_embedded.py — a second declaration is the "
+        "drift, and the LAST one binds, so a re-inline after the composed form "
+        "would win silently")
+    decl = decls[0]
     assert isinstance(decl.value, ast.Tuple), (
         "the sweep's journal vocabulary is no longer a tuple literal")
     unpacked = [e.value.id for e in decl.value.elts

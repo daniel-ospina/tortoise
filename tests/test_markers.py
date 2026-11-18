@@ -349,7 +349,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
         # and a dead routing row does not merely do nothing, it would ROUTE a
         # real `namespace="mcp-team"` added later instead of reddening. MEASURED
         # at the review head: `grep -c mcp-team tests/test_pack_state.py` → 0.
-        # (This is a FOURTH dead row, distinct from the three #11929 counts.)
+        # (This is a FOURTH dead row, distinct from the three #11929 rows.)
         "t-bf-1": "team-identity",
     },
     "test_quota.py": {"registry": "prod-coupled"},
