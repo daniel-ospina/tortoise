@@ -124,8 +124,17 @@ CACHE_TARGET_OVERFLOW = "(other targets)"
 #: the signal that this process is past the registry's resolution.
 _TARGETS_CAP = 16
 
-#: ``{"<store>|<graph>": live writes}`` for THIS process, and its lock. Written
-#: by :func:`note_cache_write_target` from the one fold every live write passes.
+#: ``{"<store>|<graph>": counted live-write lane operations}`` for THIS process,
+#: and its lock. Not an attempt count and not a row count — see
+#: :func:`note_cache_write_target`'s own paragraph for what it does and does not
+#: bound.
+#: Written by :func:`note_cache_write_target` from the seven live lanes — the fold,
+#: the structural-edge mint, three declared gateways, and two hosted
+#: session-delete sweeps — so the UNIT is one lane operation (a fold, a mint, a
+#: gateway statement, a sweep), not one journal record.
+#: Read it for WHERE a process writes; do not read it as "writes landed", because
+#: an arm whose fold returns no count is counted even when its statement matched
+#: 0 rows (the bound is stated on `note_cache_write_target`).
 _TARGETS: dict[str, int] = {}
 _TARGETS_LOCK = threading.Lock()
 
@@ -221,14 +230,58 @@ def cache_store_fingerprint(endpoint: object) -> str:
 
 
 def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
-    """Count one LIVE write against the store+graph it actually folded into.
+    """Record one LIVE write lane operation at the store+graph it reached.
 
-    Called from ``FalkorProjection.apply`` — the ONE fold every live door passes
-    (SDK, REST, MCP, capture, the onboarding metadata lane) after ``create_point``
-    went through the outbox — so the count cannot drift from the writes. Replay
-    is excluded by the caller: a rebuild WRITES the target on purpose and
-    counting it would let a repair make the picture look healthier than the live
-    traffic it repaired.
+    SEVEN call sites, and the list is maintained rather than implied:
+    ``projection.note_live_write_target`` is the ONE helper they all go through,
+    so the endpoint resolution has a single owner.
+
+    * ``FalkorProjection.apply`` — the fold every door passes (SDK, REST, MCP,
+      capture, the metadata lanes), counted once per fold that RETURNED and that
+      no `_skip()` mark covered. Read that as a STATEMENT test, not a landed-row
+      test: an UNMARKED arm whose fold returns no count (`SubjectAdded`,
+      `ObjectRegistered`, `DocumentCreated`) is counted even when it issued
+      nothing, and one that a raise interrupted is not counted at all — both
+      directions are stated in full below;
+    * ``_record_structural_edges`` — ``create_edge`` and the about-lane mint
+      their edges with a raw ``MERGE`` under ``_structural_edge_write_scope`` and
+      never pass ``apply``, so without that hook a process whose writes are edges
+      registers NO target (the same "{} means healthy" illusion, one lane over);
+    * ``onboarding.state._run``, ``webhook_delivery._run``,
+      ``why_snapshot._run`` — the three declared live GATEWAYS that issue their
+      own statements under ``_onboarding_write_scope`` /
+      ``_cache_write_authorized(<lane>)`` and fold no record at all;
+    * ``hosted_api._capture_session_impl``'s Source sweep and
+      ``hosted_api.delete_session``'s ``_delete_session_sync`` — two raw
+      multi-statement ``DETACH DELETE`` lanes that CHOOSE their graph and fold no
+      record. They are the reason the helper is a sanctioned third option beside
+      "a fold" and "a mint": such a lane calls it directly.
+
+    An eighth gateway added tomorrow must be added here. The residual is narrower
+    than "any raw statement": it is a raw statement that does NOT choose its graph
+    (the capture provenance stamps, ``_CAPTURE_PROVENANCE_LANE``), and it is named
+    on the helper.
+
+    ⛔ THE RESIDUAL IS NAMED RATHER THAN IMPLIED: a raw statement issued at
+    ``proj.g`` inside a live scope — the capture provenance stamps
+    (``_CAPTURE_PROVENANCE_LANE``) are the standing example — reaches the graph
+    without passing either lane and is NOT counted. That is accepted because such
+    a writer does not CHOOSE its graph (it stamps nodes by id in the graph the
+    SDK is already bound to), so it cannot hide the split this registry exists to
+    expose; a lane that could choose would have to go through a fold or a mint.
+    Closing it belongs at the write handle (``_GuardedGraph``), where a
+    per-statement census already exists (§17.1), not here.
+
+    ⛔ REPLAY IS NOT EXCLUDED HERE, and a caller must not assume it is. A rebuild
+    WRITES the target on purpose, and counting it would let a repair make the
+    picture look healthier than the live traffic it repaired. That exclusion
+    lives in exactly ONE place: ``projection.note_live_write_target``, which
+    returns before reaching this function when ``replay_window_open()`` is true.
+    All seven live lanes go through that helper, so they inherit it; this
+    function is caller-unchecked BY DESIGN and holds no window check of its own.
+    A lane that calls it DIRECTLY — instead of through the helper — counts a
+    rebuild's writes as live traffic, which is the polarity inversion this
+    registry exists to prevent. Go through the helper.
 
     WHAT THIS ANSWERS THAT ``cache_leg_failures`` CANNOT. ``cache_leg_failures``
     counts a CONFIGURATION split (record armed + this process's cache is the
@@ -242,10 +295,34 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     looked at has 0" becomes "this process wrote 8 to THAT target" — one number
     to compare, whichever of the shapes caused it (#12943 reopening).
 
-    A COUNT IS NOT A VERDICT: two targets in one process is normal for a
-    deployment that writes the registry graph as well as tenant graphs. What is
-    pathological is the TENANT's target absent from this list — or present under
-    a store the deployment does not read.
+    A COUNT IS NOT A VERDICT, AND IT IS NOT A WRITE COUNT. The unit is one lane
+    operation — a fold, a mint, a gateway statement — so it answers WHERE a
+    process writes, which is the question the split turns on.
+
+    ⛔ WHAT IT DOES NOT COUNT, stated because "bound" invites the wrong reading in
+    both directions. It is NOT an attempt count: a `_skip()`-marked fold was
+    STARTED and is deliberately not counted — counting starts is the wrong
+    direction (`FalkorProjection._apply_event`'s `_skip` bound says why) — so
+    attempts outnumber this number. It is NOT a row count either: an arm whose
+    fold returns no count is still counted when its statement matched 0 rows, so
+    it can exceed the rows written. And a fold that issues a statement and then
+    RAISES — `_upsert` writes props and THEN edges; `_fold_session_deleted`
+    deletes the Source and THEN the Session — is a landed write this registry
+    does not count at all, because the hook runs on the fold's RETURN.
+
+    The one claim that holds in the direction that matters: **no under-report for
+    a fold that RETURNED** — a returned fold that wrote anything is counted,
+    because the only thing that suppresses the count is a `_skip()` mark, and a
+    mark is placed only where the fold's own return says nothing was written.
+    ⛔ Say nothing stronger than that: "no under-report" holds for folds that
+    RETURNED, NOT for every fold that WROTE (the interrupted shape is the gap),
+    and the marks do not make the count exact in the other direction either — the
+    arms that cannot be marked are counted regardless. The interrupted shape is
+    the named residual, and closing it belongs at the fold's own statement
+    boundary, not here. Two targets
+    in one process is normal for a deployment that writes the registry graph as
+    well as tenant graphs. What is pathological is the TENANT's target absent
+    from this list — or present under a store the deployment does not read.
 
     Deliberately cannot raise (#5148's rule — observability must never deny a
     write that already landed): the caller folds inside a live scope and the

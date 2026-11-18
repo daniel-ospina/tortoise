@@ -26,6 +26,7 @@ than report agreement.
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import shutil
@@ -140,6 +141,242 @@ def test_the_doc_appendix_row_count_is_the_census_site_count():
         "`python tools/cypher_inventory.py --markdown` rather than hand-editing")
 
 
+NARRATIVE_PATTERN = r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)"
+
+# ⛔ EVERY `_exactly_one` ARM `_grade_doc_text` MAKES, one row each, as
+# `(arm, what, bounds, pattern)`. The patterns are the ARM'S OWN constants (defined here, used
+# by `_grade_doc_text` below), so this table cannot drift from the arms it claims to cover:
+# renaming or re-cutting a pattern re-points the row with it, and deleting a row cannot leave a
+# stale literal behind. `what` is the `what=` string the arm passes to `_exactly_one`, which lets
+# the assertion name the arm that fired rather than accepting any refusal.
+#
+# ⛔ "ARM" IS THE UNIT OF THIS TABLE, NOT "LOOKUP" — `_grade_doc_text` also makes TWO
+# `re.search` calls (#13458` review F1): the §0/§1 bounds lookups. Those are not arms and are
+# not graded here: their slice is a SUPERSET of the region an arm reads, so an in-section decoy
+# is still refused by the arm that reads it. They are COUNTED instead, below.
+#
+# ⛔ THIS TABLE IS THE UNIQUENESS COVERAGE CLAIM (`#13458` review P2-3). Before it existed,
+# the mutant proof duplicated only NARRATIVE_PATTERN, so arm (b) was the only arm whose
+# revert-to-`re.search` any test could redden, while two docstrings said "any arm". One row
+# per arm — 7 rows for 7 `_exactly_one` arms — makes that claim executable. A deleted row, a
+# DUPLICATED row and a row whose `what=` matches nothing are all reds
+# (`test_every_graded_lookup_has_a_coverage_row`); a DUPLICATED row alone would not be, which is
+# why that test asserts multiplicity and arm-id uniqueness on top of set equality.
+#
+# A row whose pattern no longer matches its section fails loudly ("no line in the scoped
+# section matches") rather than silently proving nothing, so a re-cut that moves a row
+# cannot leave a dead case behind.
+SECTION0_BOUNDS = r"^## 0\..*?^## 1\."
+SECTION1_BOUNDS = r"^## 1\..*?^## 2\."
+DECOMPOSITION_PATTERN = (
+    r"^= ([\d,]+) +classified Cypher statements \+ ([\d,]+) non-Cypher door calls$")
+TABLE_NON_CYPHER_PATTERN = (
+    r"^\| non-Cypher door calls \(excluded from every shape total\) \| (\d+) \|$")
+TABLE_AST_PATTERN = r"^\| \*\*AST door calls\*\* = census \+ non-Cypher \| \*\*(\d+)\*\* \|$"
+TABLE_SITES_PATTERN = r"^\| \*\*statement sites \(this census\)\*\* \| \*\*(\d+)\*\* \|$"
+TABLE_CANDIDATES_PATTERN = (
+    r"^\| \*\*`plain` READS — the migration candidates\*\* \| \*\*(\d+)\*\* \|$")
+PRODUCT_SURFACE_PATTERN = (
+    r"^\| product surface \(this census\) \| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \|")
+
+_GRADED_LOOKUPS: tuple[tuple[str, str, str, str], ...] = (
+    ("a", "§1's decomposition line (publishes §0's operands)", SECTION1_BOUNDS,
+     DECOMPOSITION_PATTERN),
+    ("a2-non-cypher", "§0's `non-Cypher door calls` table row", SECTION0_BOUNDS,
+     TABLE_NON_CYPHER_PATTERN),
+    ("a2-ast", "§0's `AST door calls` table row", SECTION0_BOUNDS, TABLE_AST_PATTERN),
+    ("a2-sites", "§0's `statement sites` table row", SECTION0_BOUNDS, TABLE_SITES_PATTERN),
+    ("a2-candidates", "§0's `plain` READS table row", SECTION0_BOUNDS,
+     TABLE_CANDIDATES_PATTERN),
+    ("b-narrative", "§0's 'N of M product statements (P %)' line", SECTION0_BOUNDS,
+     NARRATIVE_PATTERN),
+    ("c-product-surface", "§1's product-surface table row", SECTION1_BOUNDS,
+     PRODUCT_SURFACE_PATTERN),
+)
+
+# The ONLY bare `re.search` lookups `_grade_doc_text` is allowed to make: the §0 and §1 region
+# bounds. They are not arms — a slice is a SUPERSET of the region its arms read, so an
+# in-section decoy is still refused by the arm that reads it — and they are counted by
+# `test_every_graded_lookup_has_a_coverage_row` so a third one cannot arrive unremarked
+# (`#13458` review F1).
+_UNGRADED_BOUNDS_LOOKUPS = 2
+
+
+def _exactly_one(pattern: str, text: str, *, what: str, flags: int = re.MULTILINE) -> tuple[str, ...]:
+    """The ONE occurrence of `pattern` in `text`; zero or MANY is a red, never first-match.
+
+    ⛔ `re.search` takes the FIRST match, so a SECOND occurrence of a pinned
+    publication — a decoy planted ABOVE the real one **inside the same section** —
+    re-points the arm at the decoy while the real line rots green. Slicing to a
+    section closes the CROSS-section decoy; this closes the IN-section one, which is
+    the same mechanism one level in (`#13424` review P2-1). Uniqueness rather than
+    first-match is the property a pin actually needs: "one anchored expected value"
+    only holds if the pattern can match once.
+
+    ⛔ THE ANCHORED ARMS ARE GUARDED TOO, deliberately. The review called that case
+    "much weaker" because a decoy there must reproduce an entire row label — true, and
+    a duplicated whole row IS itself a doc defect, but the consequence is identical: a
+    correct duplicate above a rotted real row is a GREEN pin over a doc that disagrees
+    with the census, which is the false PASS this whole test exists to refuse. One
+    helper, every arm, no arm left as the hole the next decoy walks through.
+
+    ⛔ AND THAT IS PROVEN ARM BY ARM, not asserted (`#13458` review P2-3): `_GRADED_LOOKUPS`
+    enumerates every `_exactly_one` ARM below and `test_every_anchored_arm_refuses_a_duplicate`
+    drives THIS helper through `_grade_doc_text` once per row, so each named arm has its own red
+    when reverted to `re.search`. Adding an ARM without a table row is the gap that review found;
+    the two lists must stay the same length. (The two §0/§1 BOUNDS `re.search` calls are not
+    arms and have no rows — their slice is a superset, and the coverage test counts them
+    separately so a third bare `re.search` still reds.)
+    """
+    found = re.findall(pattern, text, flags)
+    assert found, f"{what} moved or changed shape; re-cut this pin with it"
+    assert len(found) == 1, (
+        f"{what} now appears {len(found)} times; this pin can only grade ONE — "
+        "remove the duplicate, or re-cut this pin with them")
+    match = found[0]
+    # `findall` returns a bare string for a one-group pattern and a tuple for several;
+    # callers unpack uniformly, so normalise here rather than at four call sites.
+    return match if isinstance(match, tuple) else (match,)
+
+
+def _grade_doc_text(doc_text: str, *, sites: int, non_cypher: int, candidates: int,
+                    files_with_sites: int) -> None:
+    """Grade EVERY publication of §0's operand pair in `doc_text`, or red.
+
+    ⛔ EXTRACTED FROM THE TEST ON PURPOSE (`#13424` review P2-1): a guard nothing can be
+    pointed at is an assertion nobody has shown to bite. TWO tests drive THIS function
+    against a doctored document, and they partition the arms below between them:
+    `test_the_narrative_pin_refuses_an_in_section_decoy` reproduces the false PASS end to
+    end for arm (b), and `test_every_anchored_arm_refuses_a_duplicate` walks
+    `_GRADED_LOOKUPS` — one case per lookup — so reverting ANY arm to a first-match
+    `re.search` reds the row named after THAT arm instead of quietly re-opening the false
+    PASS. ⛔ Every `_exactly_one` ARM below appears in `_GRADED_LOOKUPS`; a new arm that is not
+    listed there is a coverage gap, and adding one without a row is the overclaim this was
+    caught making (`#13458` review P2-3). The function's TWO other regex lookups are the §0/§1
+    bounds `re.search` calls, which are deliberately NOT arms — their slice is a superset of
+    the region an arm reads, so an in-section decoy is still refused by that arm. They are
+    counted by the coverage test so a THIRD bare `re.search` cannot slip in unremarked.
+
+    The reasoning below is the test's, moved with the arms it explains.
+    """
+    # ⛔ REGION BOUNDS, established ONCE for every arm below.
+    #
+    # Each of the four publications this test grades lives in a SPECIFIC section, and a
+    # whole-document `re.search` takes the FIRST match ANYWHERE in the file. So a decoy —
+    # say a correct `= 1314 … + 258` planted above §0, or any other prose quoting the
+    # phrase — silently re-points the arm at the decoy while the real publication rots
+    # green. That is a false PASS, the exact failure mode every guard in this test exists
+    # to refuse (`#13424` review P2-F1).
+    #
+    # Slicing first makes the SHAPE GUARD do its job: if a section stops publishing its
+    # pair, the arm REDS instead of matching some other section. Arm (b) was scoped this
+    # way from the start; leaving (a), (a2) and (c) unscoped was an inconsistency, not a
+    # decision, and it was measurably exploitable.
+    #
+    # ⛔ AND A SLICE IS ONLY HALF THE GUARD: it stops ANOTHER section re-pointing an arm,
+    # not a SECOND occurrence INSIDE this one. Every arm below therefore goes through
+    # `_exactly_one`, which refuses a duplicate instead of taking the first match
+    # (`#13424` review P2-1; `test_the_narrative_pin_refuses_an_in_section_decoy` is the
+    # executable proof that the refusal is load-bearing).
+    section0 = re.search(SECTION0_BOUNDS, doc_text, re.MULTILINE | re.DOTALL)
+    assert section0, "§0's section bounds moved (no `## 0.` … `## 1.`); re-cut this pin with them"
+    section1 = re.search(SECTION1_BOUNDS, doc_text, re.MULTILINE | re.DOTALL)
+    assert section1, "§1's section bounds moved (no `## 1.` … `## 2.`); re-cut this pin with them"
+
+    # (a) §1's decomposition line — §0's operand pair, published in §1's block:
+    # `= N classified Cypher statements + M non-Cypher door calls`
+    #
+    # ⛔ It sits in §1's block, not §0 — §0 publishes the same pair in its table and its
+    # narrative, and this line is the third publication, one screen further down. Scoped
+    # to §1 for the decoy reason above. The MESSAGES below name §1 too, deliberately: a
+    # re-cutter whose arm fires is told where the line actually lives, so they do not
+    # hunt for it in §0 and "fix" a publication this arm does not read (`#13424` R2).
+    doc_sites_raw, doc_non_cypher_raw = _exactly_one(
+        DECOMPOSITION_PATTERN,
+        section1.group(0),
+        what="§1's decomposition line (publishes §0's operands)")
+    doc_sites = int(doc_sites_raw.replace(",", ""))
+    doc_non_cypher = int(doc_non_cypher_raw.replace(",", ""))
+    assert (doc_sites, doc_non_cypher) == (sites, non_cypher), (
+        "§1's decomposition states §0's deltas, and it disagrees with the census: "
+        f"doc={doc_sites}+{doc_non_cypher} measured={sites}+{non_cypher}")
+
+    # (a2) §0's count TABLE publishes the same pair one screen above the block, and
+    # it is the arm nothing else grades: on the `#13249` re-cut at `ffe10dd198` the
+    # table and the block both read `260 / 1571` while the pins said `258 / 1569`
+    # and `--check` printed `25 pinned counts match` — a whole merge shipped a table
+    # contradicting the pins, the block's own `1,622 − 53` arithmetic AND §7.
+    # Scoped to §0 (`#13424` review P2-F1): the table is the FIRST publication in the
+    # document, so a decoy above it would re-point these four rows.
+    (table_non_cypher,) = _exactly_one(
+        TABLE_NON_CYPHER_PATTERN,
+        section0.group(0), what="§0's `non-Cypher door calls` table row")
+    (table_ast,) = _exactly_one(
+        TABLE_AST_PATTERN,
+        section0.group(0), what="§0's `AST door calls` table row")
+    # The two OPERAND rows, not just the two derived ones: `non-Cypher` and `AST` are
+    # both COMPUTED from the pair below, so a re-cut that moved only the operands would
+    # red (a)/(b) and this arm alike — but the reverse is what shipped at `ffe10dd198`:
+    # the table published its own operands, and nothing here read them. Pinning the
+    # operands adds NO new failure surface: (a) and (b) already require a re-cut to move
+    # `sites` and `candidates` in the block and the narrative, so a re-cutter is already
+    # obliged to touch these rows. It closes the remaining way THIS table can go stale
+    # while every other publication is right — the exact class the arm exists for.
+    (table_sites,) = _exactly_one(
+        TABLE_SITES_PATTERN,
+        section0.group(0), what="§0's `statement sites` table row")
+    (table_candidates,) = _exactly_one(
+        TABLE_CANDIDATES_PATTERN,
+        section0.group(0), what="§0's `plain` READS table row")
+    assert int(table_sites) == sites, (
+        f"§0's table says {table_sites} statement sites, the census measures {sites}")
+    assert int(table_candidates) == candidates, (
+        f"§0's table says {table_candidates} `plain` migration candidates, the census "
+        f"measures {candidates}")
+    assert int(table_non_cypher) == non_cypher, (
+        f"§0's table says {table_non_cypher} non-Cypher door calls, the census "
+        f"measures {non_cypher}")
+    assert int(table_ast) == sites + non_cypher, (
+        f"§0's table says {table_ast} AST door calls, {sites} + {non_cypher} is "
+        f"{sites + non_cypher}")
+
+    # (b) §0's narrative: `N of M product statements (P %)` — N is the candidate
+    # count (plain READS), M is the statement sites, and P is DERIVED from them.
+    #
+    # ⛔ SCOPED TO §0's OWN TEXT, for the same decoy reason every arm above is now
+    # scoped (`#13249` review, `#13424` P2-F1). The pattern is deliberately loose about
+    # the line's PREFIX (a legitimate reword must not red) but not about WHERE: the
+    # shared `section0` slice above makes the shape guard do its job, so if §0 stops
+    # publishing the pair the arm REDS rather than matching some other section.
+    #
+    # ⛔ AND IT DEMANDS UNIQUENESS, not a first match — this arm's pattern is the one
+    # that is deliberately loose about the line's prefix, so a second restatement of the
+    # pair inside §0 is the plausible way in (a re-cutter adding a summary sentence above
+    # the finding line). Uniqueness makes that a red instead of a re-pointed arm
+    # (`#13424` review P2-1).
+    doc_candidates_raw, doc_statement_sites_raw, doc_percent_raw = _exactly_one(
+        NARRATIVE_PATTERN, section0.group(0),
+        what="§0's 'N of M product statements (P %)' line")
+    doc_candidates = int(doc_candidates_raw.replace(",", ""))
+    doc_statement_sites = int(doc_statement_sites_raw.replace(",", ""))
+    doc_percent = float(doc_percent_raw)
+    assert (doc_candidates, doc_statement_sites) == (candidates, sites), (
+        "§0's narrative count disagrees with the census: "
+        f"doc={doc_candidates} of {doc_statement_sites} measured={candidates} of {sites}")
+    assert doc_percent == round(candidates / sites * 100, 1), (
+        f"§0's percentage is {doc_percent}, but {candidates}/{sites} is "
+        f"{round(candidates / sites * 100, 1)}")
+
+    # (c) §1's comparison table: the product-surface row, and the files carrying a site.
+    row_sites, row_files = _exactly_one(
+        PRODUCT_SURFACE_PATTERN,
+        section1.group(0), what="§1's product-surface table row")
+    assert (int(row_sites), int(row_files)) == (sites, files_with_sites), (
+        "§1's comparison table disagrees with the census: "
+        f"doc={row_sites} sites / {row_files} files, "
+        f"measured={sites} / {files_with_sites}")
+
+
 def test_the_published_decomposition_names_the_measured_operands():
     """§0/§1 reconcile ARITHMETICALLY over operands, and the operands are the claim.
 
@@ -168,7 +405,8 @@ def test_the_published_decomposition_names_the_measured_operands():
     with `--check` printing `25 pinned counts match` over both (`#13368` R2-R4).
 
     ⛔ WHAT IT DOES NOT GRADE, stated rather than implied (`#13249` review,
-    handover item 2): it pins §0's decomposition, §0's narrative
+    handover item 2): it pins §1's decomposition line (§0's operand pair, published
+    in §1's block), §0's narrative
     pair and §1's PRODUCT-surface row, plus FOUR rows of §0's count TABLE —
     `statement sites`, `` `plain` READS``, `non-Cypher door calls` and `AST door calls`.
     It does NOT pin the shape-split rows under them (`860 (579 read, 281 write)`,
@@ -198,110 +436,195 @@ def test_the_published_decomposition_names_the_measured_operands():
     non_cypher = result["non_cypher_door_calls"]
     candidates = sum(1 for s in result["sites"] if s.verdict.startswith("candidate"))
 
-    # ⛔ REGION BOUNDS, established ONCE for every arm below.
-    #
-    # Each of the four publications this test grades lives in a SPECIFIC section, and a
-    # whole-document `re.search` takes the FIRST match ANYWHERE in the file. So a decoy —
-    # say a correct `= 1314 … + 258` planted above §0, or any other prose quoting the
-    # phrase — silently re-points the arm at the decoy while the real publication rots
-    # green. That is a false PASS, the exact failure mode every guard in this test exists
-    # to refuse (`#13424` review P2-F1).
-    #
-    # Slicing first makes the SHAPE GUARD do its job: if a section stops publishing its
-    # pair, the arm REDS instead of matching some other section. Arm (b) was scoped this
-    # way from the start; leaving (a), (a2) and (c) unscoped was an inconsistency, not a
-    # decision, and it was measurably exploitable.
+    # ⛔ THE ARMS LIVE IN `_grade_doc_text`, so the identical code can be driven against
+    # the in-section decoy mutant (`test_the_narrative_pin_refuses_an_in_section_decoy`);
+    # that function's comments carry the region-bounds and per-arm reasoning.
+    _grade_doc_text(doc_text, sites=sites, non_cypher=non_cypher,
+                    candidates=candidates, files_with_sites=result["files_with_sites"])
+
+def test_the_narrative_pin_refuses_an_in_section_decoy():
+    """A SECOND occurrence INSIDE §0 must red the arm, not re-point it (`#13424` P2-1).
+
+    Slicing arm (b) to §0's own text closed the CROSS-section decoy. It did not close
+    the same mechanism one level in: the arm's pattern is prefix-loose by design (a
+    legitimate reword must not red), so a `> 579 of 1314 product statements (44.1 %)`
+    restatement planted ABOVE the finding line — plausible in §0, which is where the
+    numbers are first published — was what `re.search` bound to, while the real line
+    rotted to `580 of 1314`. Measured on the pre-fix arm: **GREEN** over a §0 that
+    disagrees with the census.
+
+    This test is the non-vacuity proof for the fix: it builds exactly that mutant from
+    the live doc and asserts BOTH halves — that a first-match search binds the decoy
+    (the false PASS being refused), and that `_grade_doc_text` — the REAL grading path,
+    baseline-GREEN on the unmutated doc — refuses it. Either half alone is won't-do:
+    the first is what makes this test FAIL on the pre-fix arm, the second is what makes it
+    fail if arm (b) — the one this mutant duplicates — is ever reverted to first-match.
+    ⛔ IT PROVES ARM (b) ONLY, and says so: the other six lookups have their own rows in
+    `test_every_anchored_arm_refuses_a_duplicate`, which is where their proof lives
+    (`#13458` review P2-3: this docstring used to claim "an arm", i.e. any arm).
+    """
+    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    result = census.census(("tortoise",))
+    sites = len(result["sites"])
+    candidates = sum(1 for s in result["sites"] if s.verdict.startswith("candidate"))
+    percent = round(candidates / sites * 100, 1)
+
     section0 = re.search(r"^## 0\..*?^## 1\.", doc_text, re.MULTILINE | re.DOTALL)
     assert section0, "§0's section bounds moved (no `## 0.` … `## 1.`); re-cut this pin with them"
-    section1 = re.search(r"^## 1\..*?^## 2\.", doc_text, re.MULTILINE | re.DOTALL)
-    assert section1, "§1's section bounds moved (no `## 1.` … `## 2.`); re-cut this pin with them"
+    # The mutant is the WHOLE document with one bullet added inside §0 — it has to be, or
+    # `_grade_doc_text` (which grades §1 too) would red on the missing section rather than
+    # on the defect this test names, i.e. the proof would be of the wrong thing.
+    lines = doc_text.splitlines(keepends=True)
+    real = next(i for i, line in enumerate(lines) if re.search(NARRATIVE_PATTERN, line))
+    assert section0.start() <= len("".join(lines[:real])) < section0.end(), (
+        "the narrative line is no longer inside §0, so this decoy is not the in-section one")
 
-    # (a) §0's decomposition: `= N classified Cypher statements + M non-Cypher door calls`
-    #
-    # ⛔ It sits in §1's block, not §0 — §0 publishes the same pair in its table and its
-    # narrative, and this line is the third publication, one screen further down. Scoped
-    # to §1 for the decoy reason above.
-    decomposition = re.search(
-        r"^= ([\d,]+) +classified Cypher statements \+ ([\d,]+) non-Cypher door calls$",
-        section1.group(0), re.MULTILINE)
-    assert decomposition, "§0's decomposition line moved or changed shape; re-cut this pin with it"
-    doc_sites = int(decomposition.group(1).replace(",", ""))
-    doc_non_cypher = int(decomposition.group(2).replace(",", ""))
-    assert (doc_sites, doc_non_cypher) == (sites, non_cypher), (
-        "§0's decomposition states the deltas it explains, and it disagrees with the census: "
-        f"doc={doc_sites}+{doc_non_cypher} measured={sites}+{non_cypher}")
+    # The decoy states the CORRECT pair, so a first-match search is satisfied by it...
+    decoy = f"> **The count, restated:** {candidates} of {sites} product statements ({percent} %)\n"
+    # ...and the REAL line rots to a different count, which is the doc defect the pin exists
+    # to catch. Only the real line moves; the decoy is a plain addition above it.
+    rotted = re.sub(r"\b[\d,]+ of [\d,]+", f"{candidates + 1} of {sites}", lines[real], count=1)
+    assert rotted != lines[real], "the fixture's rot did not take; the decoy proof would be vacuous"
+    mutant = "".join([*lines[:real], decoy, rotted, *lines[real + 1:]])
 
-    # (a2) §0's count TABLE publishes the same pair one screen above the block, and
-    # it is the arm nothing else grades: on the `#13249` re-cut at `ffe10dd198` the
-    # table and the block both read `260 / 1571` while the pins said `258 / 1569`
-    # and `--check` printed `25 pinned counts match` — a whole merge shipped a table
-    # contradicting the pins, the block's own `1,622 − 53` arithmetic AND §7.
-    # Scoped to §0 (`#13424` review P2-F1): the table is the FIRST publication in the
-    # document, so a decoy above it would re-point these four rows.
-    table_non_cypher = re.search(
-        r"^\| non-Cypher door calls \(excluded from every shape total\) \| (\d+) \|$",
-        section0.group(0), re.MULTILINE)
-    table_ast = re.search(
-        r"^\| \*\*AST door calls\*\* = census \+ non-Cypher \| \*\*(\d+)\*\* \|$",
-        section0.group(0), re.MULTILINE)
-    # The two OPERAND rows, not just the two derived ones: `non-Cypher` and `AST` are
-    # both COMPUTED from the pair below, so a re-cut that moved only the operands would
-    # red (a)/(b) and this arm alike — but the reverse is what shipped at `ffe10dd198`:
-    # the table published its own operands, and nothing here read them. Pinning the
-    # operands adds NO new failure surface: (a) and (b) already require a re-cut to move
-    # `sites` and `candidates` in the block and the narrative, so a re-cutter is already
-    # obliged to touch these rows. It closes the remaining way THIS table can go stale
-    # while every other publication is right — the exact class the arm exists for.
-    table_sites = re.search(
-        r"^\| \*\*statement sites \(this census\)\*\* \| \*\*(\d+)\*\* \|$",
-        section0.group(0), re.MULTILINE)
-    table_candidates = re.search(
-        r"^\| \*\*`plain` READS — the migration candidates\*\* \| \*\*(\d+)\*\* \|$",
-        section0.group(0), re.MULTILINE)
-    assert table_non_cypher and table_ast and table_sites and table_candidates, (
-        "§0's count table rows moved or changed shape; re-cut this pin with them")
-    assert int(table_sites.group(1)) == sites, (
-        f"§0's table says {table_sites.group(1)} statement sites, the census measures {sites}")
-    assert int(table_candidates.group(1)) == candidates, (
-        f"§0's table says {table_candidates.group(1)} `plain` migration candidates, the census "
-        f"measures {candidates}")
-    assert int(table_non_cypher.group(1)) == non_cypher, (
-        f"§0's table says {table_non_cypher.group(1)} non-Cypher door calls, the census "
-        f"measures {non_cypher}")
-    assert int(table_ast.group(1)) == sites + non_cypher, (
-        f"§0's table says {table_ast.group(1)} AST door calls, {sites} + {non_cypher} is "
-        f"{sites + non_cypher}")
+    # 1. THE FALSE PASS, reproduced: the pre-fix arm binds the decoy and grades GREEN over a
+    #    §0 whose own finding line now disagrees with the census.
+    first = re.search(NARRATIVE_PATTERN, mutant)
+    assert first, "the mutant stopped publishing the pair at all — the proof is not the one claimed"
+    assert (int(first.group(1)), int(first.group(2)), float(first.group(3))) == (
+        candidates, sites, percent), (
+        "the decoy is not what a first-match search binds to, so this test would not have "
+        "failed on the pre-fix arm")
 
-    # (b) §0's narrative: `N of M product statements (P %)` — N is the candidate
-    # count (plain READS), M is the statement sites, and P is DERIVED from them.
-    #
-    # ⛔ SCOPED TO §0's OWN TEXT, for the same decoy reason every arm above is now
-    # scoped (`#13249` review, `#13424` P2-F1). The pattern is deliberately loose about
-    # the line's PREFIX (a legitimate reword must not red) but not about WHERE: the
-    # shared `section0` slice above makes the shape guard do its job, so if §0 stops
-    # publishing the pair the arm REDS rather than matching some other section.
-    narrative = re.search(
-        r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)", section0.group(0))
-    assert narrative, "§0's 'N of M product statements (P %)' line moved; re-cut this pin with it"
-    doc_candidates = int(narrative.group(1).replace(",", ""))
-    doc_statement_sites = int(narrative.group(2).replace(",", ""))
-    doc_percent = float(narrative.group(3))
-    assert (doc_candidates, doc_statement_sites) == (candidates, sites), (
-        "§0's narrative count disagrees with the census: "
-        f"doc={doc_candidates} of {doc_statement_sites} measured={candidates} of {sites}")
-    assert doc_percent == round(candidates / sites * 100, 1), (
-        f"§0's percentage is {doc_percent}, but {candidates}/{sites} is "
-        f"{round(candidates / sites * 100, 1)}")
+    # 2. AND THE REAL GRADING PATH REFUSES IT — not a helper in isolation: the same
+    #    `_grade_doc_text` the pin above runs is handed the mutant, so reverting arm (b)
+    #    to a first-match `re.search` reds THIS test. The OTHER six lookups are not this
+    #    mutant's business (it duplicates only the narrative line) — each has its own
+    #    duplicate, and its own case, in `test_every_anchored_arm_refuses_a_duplicate`.
+    #    ⛔ Do not read "the arms share one helper" as "this test covers them": that is
+    #    precisely the overclaim `#13458` review P2-3 returned.
+    kwargs = dict(sites=sites, non_cypher=result["non_cypher_door_calls"],
+                  candidates=candidates, files_with_sites=result["files_with_sites"])
+    _grade_doc_text(doc_text, **kwargs)  # baseline GREEN, so step 3's red is the mutant's
+    with pytest.raises(AssertionError) as refused:
+        _grade_doc_text(mutant, **kwargs)
+    message = str(refused.value)
+    assert "now appears 2 times" in message, message
+    assert "can only grade ONE" in message, message
 
-    # (c) §1's comparison table: the product-surface row, and the files carrying a site.
-    table_row = re.search(
-        r"^\| product surface \(this census\) \| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \|",
-        section1.group(0), re.MULTILINE)
-    assert table_row, "§1's product-surface table row moved; re-cut this pin with it"
-    assert (int(table_row.group(1)), int(table_row.group(2))) == (sites, result["files_with_sites"]), (
-        "§1's comparison table disagrees with the census: "
-        f"doc={table_row.group(1)} sites / {table_row.group(2)} files, "
-        f"measured={sites} / {result['files_with_sites']}")
+
+@pytest.fixture(scope="module")
+def measured_census() -> dict[str, int]:
+    """The census, measured ONCE — the arm-coverage test grades seven mutants of ONE doc.
+
+    `census()` is a full tree walk (measured ~6 s at `#13458`), so measuring it per case
+    would add ~40 s to prove what one measurement already settles.
+    """
+    result = census.census(("tortoise",))
+    return {
+        "sites": len(result["sites"]),
+        "non_cypher": result["non_cypher_door_calls"],
+        "candidates": sum(1 for s in result["sites"] if s.verdict.startswith("candidate")),
+        "files_with_sites": result["files_with_sites"],
+    }
+
+
+def test_every_graded_lookup_has_a_coverage_row():
+    """`_GRADED_LOOKUPS` and the `_exactly_one` arms of `_grade_doc_text` are the SAME set.
+
+    Read from the function's own source rather than counted, so the pairing is mechanical: an
+    arm added without a row is a coverage gap named here, and a row left behind for an arm
+    that no longer exists is a DEAD case that silently proves nothing. Both directions matter
+    — before this existed the mutant proof covered arm (b) only while two docstrings said
+    "any arm", which is the overclaim the review returned (`#13458` P2-3).
+
+    ⛔ SET EQUALITY ALONE WAS NOT ENOUGH (`#13458` review F1/F2), and both gaps were executed
+    before they were closed:
+
+    * the `what=` scan can only see a DOUBLE-QUOTED literal, so an arm added as
+      `what=f"…"`, `what='…'` or a bare `re.search` was invisible to it while this function's
+      own docstring promised it would be caught. The call COUNTS below close that: arms by
+      `_exactly_one(`, and the two bounds lookups by `re.search(` against a named constant.
+    * a DUPLICATED row keeps set equality (`set` dedupes), so nothing redded. Multiplicity and
+      arm-id uniqueness are asserted explicitly.
+    """
+    source = inspect.getsource(_grade_doc_text)
+    armed = set(re.findall(r'what="([^"]+)"', source))
+    listed = {row[1] for row in _GRADED_LOOKUPS}
+    assert listed == armed, (
+        "every arm in `_grade_doc_text` needs exactly one row in `_GRADED_LOOKUPS`, and every\n"
+        "row needs a live arm — otherwise the uniqueness claim has a hole nobody can see:\n"
+        f"  arms with NO proof row: {sorted(armed - listed)}\n"
+        f"  proof rows with NO arm: {sorted(listed - armed)}")
+    assert len(_GRADED_LOOKUPS) == len(listed), (
+        f"`_GRADED_LOOKUPS` carries {len(_GRADED_LOOKUPS)} rows but only {len(listed)} distinct\n"
+        "arms: a DUPLICATED row proves nothing twice and is invisible to the set comparison")
+    assert len({row[0] for row in _GRADED_LOOKUPS}) == len(_GRADED_LOOKUPS), (
+        "two rows share an arm id, so one of their cases reports under the other's name")
+    # Both counts are whitespace-tolerant on purpose: a formatter's `_exactly_one (` or
+    # `re.search (` is the same call, and a `str.count` of the tight spelling would miss it
+    # (`#13458` review notes). The pair must stay symmetric — a tolerant arm count next to a
+    # tight bounds count is the asymmetry that let a spaced third `re.search` pass.
+    arm_calls = len(re.findall(r"_exactly_one\s*\(", source))
+    assert arm_calls == len(_GRADED_LOOKUPS), (
+        f"`_grade_doc_text` makes {arm_calls} `_exactly_one` calls but the\n"
+        f"table lists {len(_GRADED_LOOKUPS)} arms. The `what=` scan above only sees a\n"
+        "double-quoted literal, so an arm added with `what=f\"…\"` or `what='…'` would pass it\n"
+        "silently — add a row for the arm, and this count keeps the two in step")
+    assert len(re.findall(r"re\.search\s*\(", source)) == _UNGRADED_BOUNDS_LOOKUPS, (
+        f"`_grade_doc_text` makes {len(re.findall(r're\.search\s*\(', source))} bare "
+        "`re.search` lookups; only\n"
+        f"the {_UNGRADED_BOUNDS_LOOKUPS} section bounds are allowed to be ungraded. A new one\n"
+        "is either an ARM (use `_exactly_one` and add a `_GRADED_LOOKUPS` row) or it needs its\n"
+        "own justification written down where the bounds are established")
+
+
+@pytest.mark.parametrize("arm, what, bounds, pattern", _GRADED_LOOKUPS,
+                         ids=[row[0] for row in _GRADED_LOOKUPS])
+def test_every_anchored_arm_refuses_a_duplicate(arm, what, bounds, pattern, measured_census):
+    """EACH ARM's uniqueness guard reds on its own duplicate (`#13458` review P2-3).
+
+    The sibling mutant test proves arm (b) end to end, including the false PASS a first-match
+    search reproduces. That is one arm. `_grade_doc_text` makes SEVEN `_exactly_one` arms, and
+    a guard no test can redden is exactly the "quietly re-opened false PASS" the arms exist to
+    refuse — so this test drives the REAL grading path once per row of `_GRADED_LOOKUPS`:
+
+      1. locate the line this arm binds, INSIDE the section it is scoped to;
+      2. duplicate that line ABOVE itself — a CORRECT restatement, which is the decoy shape
+         (a first-match search stays satisfied by the copy while the real line rots);
+      3. assert the unmutated doc grades GREEN, so the red below is the mutant's;
+      4. assert the refusal names THIS arm (`"<what> now appears 2 times"`), not some earlier
+         assertion that happens to fire first.
+
+    ⛔ Step 4 is what makes this non-vacuous per arm: revert JUST that arm to `re.search` and
+    only that arm's case reds, so the failure names the arm it belongs to.
+    """
+    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
+        encoding="utf-8")
+    section = re.search(bounds, doc_text, re.MULTILINE | re.DOTALL)
+    assert section, f"arm ({arm}): its section bounds moved; re-cut this pin with them"
+    section_text = section.group(0)
+    hit = re.search(pattern, section_text, re.MULTILINE)
+    assert hit, (
+        f"arm ({arm}): no line in the scoped section matches this arm's pattern — the case\n"
+        f"would prove nothing about arm ({arm}); pattern={pattern!r}")
+    line_start = section_text.rfind("\n", 0, hit.start()) + 1
+    line_end = section_text.find("\n", hit.end())
+    assert line_end != -1, (
+        f"arm ({arm}): the matched line carries no terminator; re-cut this case")
+    real_line = section_text[line_start:line_end + 1]
+    mutant_section = section_text[:line_start] + real_line + section_text[line_start:]
+    mutant = doc_text[:section.start()] + mutant_section + doc_text[section.end():]
+
+    # Baseline GREEN on the unmutated doc, so step 4's red is the MUTANT's, not the fixture's
+    # (the same anti-vacuity property the sibling test states).
+    _grade_doc_text(doc_text, **measured_census)
+    with pytest.raises(AssertionError) as refused:
+        _grade_doc_text(mutant, **measured_census)
+    message = str(refused.value)
+    assert f"{what} now appears 2 times" in message, (
+        f"arm ({arm}) has a uniqueness guard no test can redden: duplicating its own line did\n"
+        f"not red THAT arm. The refusal raised was:\n{message}")
 
 
 def test_the_census_reconciles_arithmetically():

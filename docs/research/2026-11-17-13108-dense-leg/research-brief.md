@@ -8,7 +8,7 @@ updated: 2026-11-17
 subjects.team: epistemic-team
 issue: "#13108"
 aboutSubjects: dense (vector) retrieval leg, hybrid degradation, capture-time link-before-create prior, FalkorDB vector index
-aboutObjects: STORAGE-ARCHITECTURE.md §14.3 V3, §12.1a size-earned rule, SEARCH-ARCHITECTURE.md §6.2, #11901, #2952, #4999, #6851
+aboutObjects: "STORAGE-ARCHITECTURE.md §14.3 V3, §12.1a size-earned rule, SEARCH-ARCHITECTURE.md §6.2, #11901, #2952, #4999, #6851"
 ---
 
 # The dense leg under load — mechanism, latency, and what removes it

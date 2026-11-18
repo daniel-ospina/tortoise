@@ -386,12 +386,15 @@ def _required_dim_for_graph(uri: str, graph_name: str, *,
 # The VECTOR parity is exact only on the index path (``_doc_write``, which sets
 # ``suppress_embedding=True`` and so writes no vector — the sweep is the only
 # producer). On the legacy ``create_document`` /
-# ``create_entity(type='document')`` path ``_upsert_document`` STILL stores a
-# vector composed from ``title + content`` whenever ``suppress_embedding`` is
-# absent (``projection/entities.py::_upsert_document``), so a
-# ``--force-re-embed`` MOVES such a node's vector to its ``_searchText``
-# composition. That is a known, separately filed residual (#8419) — this
-# surface does NOT give byte-exact vector parity on every write path.
+# ``create_entity(type='document')`` path ``_upsert_document`` composes the
+# SAME surface (``st = _build_search_text(title, summary, topics)``, then
+# ``encode_for_row(st, …)``) and writes it to ``s._searchText`` in the same
+# statement — so the node's vector and its stored ``_searchText`` are one text
+# there too, and this sweep's ``coalesce(n._searchText, n.title)`` re-embeds
+# exactly what the fold encoded. ⛔ THE ``title + content`` FOLD THIS PARAGRAPH
+# USED TO DESCRIBE WAS REMOVED BY #8419 / PR #13290; a ``--force-re-embed`` no
+# longer MOVES such a node's vector, and `record_writer`'s ``DocumentCreated``
+# rule was brought onto the same composition by #13412 (PR #13473).
 
 # Index-time meeting suppression (projection/entities.py:483) — meetings
 # never receive embeddings. Cypher `eventKind <> 'meeting'` is NULL-falsy for
