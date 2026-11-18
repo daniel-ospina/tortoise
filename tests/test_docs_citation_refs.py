@@ -561,11 +561,15 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "or is asked to repair `main`'s drift inside a docs PR "
         "(#13489 review, P0)")
     # ⛔ THE ANTI-NEGATION LEG (#13489 review, P1 — MEASURED). The leg just above only requires
-    # the command to be PRESENT, and it occurs six times in this file: five say `tortoise/` is
-    # empty and one said the OPPOSITE ("… is NOT empty, and neither is `git diff --name-only
-    # origin/main...HEAD -- tortoise/`"), so the false sentence SATISFIED that leg — and the
-    # cell contradicted itself, five sentences apart. Presence was never the property being
-    # relied on; AGREEMENT is, so that is what is asserted here.
+    # the command to be PRESENT, and it occurs six times in this file. The split is MEASURED at
+    # the pre-fix document (`16ace39823`) rather than asserted, because an earlier cut of this
+    # comment stated it wrong (#13489 review, P3): THREE assert the list is empty (`-> empty`
+    # x1, `is empty` x2), ONE asserts the opposite ("… is NOT empty, and neither is `git diff
+    # --name-only origin/main...HEAD -- tortoise/`"), ONE quotes the opposite only in order to
+    # refute it ("returns exactly those two" — FALSE in every half), and ONE names the command
+    # with no verdict at all ("read them from …"). So the false sentence SATISFIED that leg —
+    # and the cell contradicted itself, five sentences apart. Presence was never the property
+    # being relied on; AGREEMENT is, so that is what is asserted here.
     #
     # NON-VACUITY, MEASURED: on the pre-fix document the first tuple member below IS present
     # (`grep -c 'and neither is'` -> 1) and this leg reds on it; it is green only after the
