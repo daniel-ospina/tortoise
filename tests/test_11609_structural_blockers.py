@@ -370,11 +370,14 @@ def test_a_wrapped_result_also_stamps_the_meta_marker():
     """⛔ §1.1's FOURTH wire fact: `_meta` — the delta a client sees without the schema.
 
     `fastmcp/tools/base.py:368` stamps `meta={"fastmcp": {"wrap_result": True}}` whenever the
-    annotation selects the wrap, and `None` otherwise (both measured here). Today's
-    containers return `Any`, so they stamp NO `_meta`; every annotation that carries the
-    envelope stamps the marker. A client that inspects `_meta` — FastMCP's own record that a
-    result was wrapped — therefore sees a FOURTH delta, which §1.1 originally listed as
-    three. The count is pinned so a future lane cannot re-derive the stale "three".
+    annotation selects the wrap, and `None` otherwise (both measured here). An `Any`
+    annotation stamps NO `_meta`; every annotation that carries the envelope stamps the
+    marker. ⛔ One of the six containers already stamps it BY HAND (`tortoise_graph_overview`'s
+    row-section arms, `_row_section_envelope`, `mcp_server.py:7842`), so the four-fact set is
+    the contract — for that one tool the marker is not a delta. A client that inspects `_meta`
+    — FastMCP's own record that a result was wrapped — therefore sees a FOURTH delta, which
+    §1.1 originally listed as three. The count is pinned so a future lane cannot re-derive
+    the stale "three".
     """
     marker = {"fastmcp": {"wrap_result": True}}
     plain = _probe(Any)             # the containers' annotation today: NO wrap, NO marker

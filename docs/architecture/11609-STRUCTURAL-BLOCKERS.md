@@ -78,14 +78,26 @@ Probe (`FastMCP("p").add_tool` + `call_tool`, a fake arm returning a list and a 
 | `list[dict] \| dict` (`tortoise_query`) | `{result:{anyOf:[array,object]}, required:["result"], x-fastmcp-wrap-result:true}` | `{"result":[…]}` | `{"result":{…}}` | `{"fastmcp":{"wrap_result":true}}` |
 | `dict` | object schema, **no** wrap marker | **raises** `structured_content must be a dict or None` | the dict itself | `null` |
 
+⛔ The `typing.Any` row is the FastMCP **CONTRACT**, measured on a synthetic tool with an
+`Any` annotation — it is not a claim about each container's body. One of S1's six already
+ships the envelope AND the marker by hand: `tortoise_graph_overview`'s row-section arms go
+through `_row_section_envelope` (`mcp_server.py:7806`, marker at `:7842`, #10085) and
+return `{"result": […]}` with `_meta={"fastmcp": {"wrap_result": true}}` (measured at
+this head). So for that tool the marker is not a delta, and §1.2's "no envelope at all"
+means no envelope in the **advertised schema**, not an unwrapped body.
+
 **Answer to (a).** The envelope adds exactly **four** wire facts: (i) `structuredContent`
 becomes `{"result": <value>}`, (ii) `result` is in `required`, (iii) where a **wrapped**
 annotation declares one, `result` also carries a `type` — `array` for `list[dict]`, and
 NOTHING for the `object`-annotated form, whose `result` is `{}` (the `type: object` in that
 schema — which the table's compressed rendering omits — is the schema's own top level, not
 `result`'s), and (iv) a wrapped result stamps the `_meta` marker
-`{"fastmcp":{"wrap_result":true}}`, where today's `Any` containers stamp **no `_meta`**
+`{"fastmcp":{"wrap_result":true}}`, where the arms S1 would change stamp **no `_meta`**
 (`fastmcp/tools/base.py:368`; both arms probed, `test_a_wrapped_result_also_stamps_the_meta_marker`).
+⛔ Not a universal "the containers stamp none": `tortoise_graph_overview`'s row-section
+arms already stamp it by hand (`_row_section_envelope`, `mcp_server.py:7806`/`:7842`,
+#10085), so THIS fact's delta is its dict arms plus the other five containers — not the
+marker itself. (§1.2's "no envelope at all" is about the ADVERTISED schema.)
 A UNION declares `anyOf` and no `type` regardless of its
 members (`list[dict] | dict` and `dict | bool` alike), and `object` declares `{}` and no
 `type` — which is precisely why `_violates_wrap_envelope` is type-blind for both. A container
@@ -140,7 +152,9 @@ container-shaped door on main that already carries a pageable union.
 
 Containers, measured: the **advertised (registry)** tools whose `output_schema` is `None` —
 `get_entity`, `graph_overview`, `search_knowledge`, `list_knowledge`, `check_confidence`,
-`explore_connections`, `review_link_candidates` — i.e. **no envelope at all**. (`get_entity`
+`explore_connections`, `review_link_candidates` — i.e. **no envelope in the advertised
+schema** (one of them, `graph_overview`, still ENVELOPES its row-section arms in the body —
+see §1.1's table note). (`get_entity`
 is a dict-only container and is **not** among S1's six: no envelope door lands on it. Two
 retired aliases, `tortoise_overview` and `tortoise_get`, are still served through the
 warning shim with `None` schemas and are excluded because they are not advertised tools.)
@@ -268,7 +282,8 @@ under the union answers the same bytes. Three things still change for a migratin
 are not claimed away: the tool **name**, the argument **names** (the container's `mode=`/
 `kind=` discriminator), and the advertised schema (`result` becomes `anyOf[array, object]`).
 A fourth is visible only to a client that inspects `_meta`: a wrapped result stamps
-`{"fastmcp":{"wrap_result":true}}` where today's `Any` containers stamp none (§1.1(iv)).
+`{"fastmcp":{"wrap_result":true}}` where the arms S1 would change stamp none (§1.1(iv)) —
+except `tortoise_graph_overview`'s row-section arms, which stamp it by hand today.
 
 Why the alternatives lose:
 
