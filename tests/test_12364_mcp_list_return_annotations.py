@@ -60,19 +60,27 @@ def _registry_pairs() -> list[tuple[str, str]]:
         sdk_method = getattr(row, "sdk_method", None)
         if sdk_method:
             pairs.append((row.name, sdk_method))
-    # 37 on the merged surface (48 live rows, 11 of which declare no `sdk_method`),
-    # after the READ/QUERY, WRITE/MUTATE and SOURCES/MINE/SESSION container waves each
-    # retired rows that DID name one, and then #11609's door-retirement wave retired
-    # seven more that each named one (44 − 7 = 37; `get_session`, `list_batch`,
-    # `find_cross_lens_candidates` and the four `create_*` aliases all wrapped an SDK
-    # method). The threshold keeps slack on purpose: it is a scan-sanity floor ("did the
-    # scan reach the registry at all?"), not a pin on the surface — a floor left at the
-    # pre-consolidation number would red on a CORRECT retirement, which is exactly what
-    # the previous `> 40` did when the seventh door left. But the slack is the margin it
-    # ALWAYS had — four rows, not a number chosen after the run: `> 40` sat 4 under 44, so
-    # `> 33` sits 4 under 37. A floor that drifts down by as much as the surface does
-    # (`> 30`) stops noticing a scan that has lost an arm of its own.
-    assert len(pairs) > 33, f"registry scan found only {len(pairs)} rows — the scan is broken"
+    # 33 on the merged surface at this head — MEASURED from a run, and the population is
+    # what moves the floor. `#13550`'s arm-retirement wave was the LAST to take doors that
+    # each NAMED an `sdk_method` (`tortoise_recall` -> `recall_state` and
+    # `tortoise_compute_confidence` -> `compute_confidence`, both now served through
+    # `tortoise_check_confidence(recall=True / …)`); before it, the READ/QUERY, WRITE/MUTATE
+    # and SOURCES/MINE/SESSION container waves each retired rows that DID name one, and
+    # #11609's door-retirement wave retired seven more (44 − 7 = 37 at that edition;
+    # `get_session`, `list_batch`, `find_cross_lens_candidates` and the four `create_*`
+    # aliases all wrapped an SDK method).
+    # ⛔ The population is a MEASUREMENT, not a derivation: `37 − 2 = 35` is NOT this head's
+    # number — an edition-to-edition delta is exactly the offset-not-content arithmetic the
+    # neighbouring arms in this file exist to stop — and the previous edition's `37` was
+    # itself above what `main` produced, which is how it went unnoticed. So the count is
+    # recorded from a run and the RULE beside it is the margin, never a free threshold:
+    # `> 40` sat 4 under 44, `> 33` sat 4 under 37, so `> 29` sits 4 under 33.
+    # The threshold keeps slack on purpose: it is a scan-sanity floor ("did the scan reach
+    # the registry at all?"), not a pin on the surface — a floor left at the pre-consolidation
+    # number would red on a CORRECT retirement, which is exactly what the previous `> 40` did
+    # when the seventh door left. A floor that drifts down by as much as the surface does
+    # stops noticing a scan that has lost an arm of its own.
+    assert len(pairs) > 29, f"registry scan found only {len(pairs)} rows — the scan is broken"
     return pairs
 
 
@@ -281,6 +289,10 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # population with them (`get_session`, `list_batch`, `find_cross_lens_candidates`);
     # the four `create_*` aliases were NOT pass-throughs — they reshaped, so they are
     # counted by the `reshaped` term above and subtract nothing here: 16 − 3 = 13.
+    # 13 -> 12 with #13550's arm-retirement wave, and only ONE of its two doors counts
+    # here: `tortoise_compute_confidence` was a pass-through (`return _safe(sdk
+    # .compute_confidence, …)`), while `tortoise_recall` RESHAPED (`return {"mode": mode,
+    # "results": results}`), so it left the `reshaped` term above instead.
     # (An earlier cut of this comment claimed all seven subtracted — 16 − 7 = 9 — and
     # that arithmetic put the floor four rows under the population the scan actually
     # produces, which is slack on the one guard whose job is to notice a collapse.)
@@ -288,7 +300,7 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # at 16); it is not lowered to whatever a green run last produced, and the two
     # guards ABOVE (`checked > 0`, and `checked + reshaped == len(pairs)`) are what
     # still make a vacuous scan impossible.
-    assert checked >= 13, (
+    assert checked >= 12, (
         f"only {checked} pass-through wrappers were found — the scan is not "
         f"reaching the registry, so a clean result here would be vacuous")
     assert not offenders, (
