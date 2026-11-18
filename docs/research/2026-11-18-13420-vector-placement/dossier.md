@@ -315,7 +315,7 @@ R2 changes an **invariant**, not a ruling sentence. Two recorded statements, bot
 
 | family | who | shape |
 |---|---|---|
-| **embed at ingest, synchronously** | Graphiti/Zep — the node's own save statement names the vector (`SET n.name_embedding = vecf32($entity_data.name_embedding)` on FalkorDB; `db.create.setNodeVectorProperty(n, "name_embedding", …)` on Neo4j, `graphiti_core/models/nodes/node_db_queries.py`), so the embedding and the node's properties are written together and there is no second store to reconcile | the write is not complete until the vector exists; **no repair path needed** |
+| **embed at ingest, synchronously** | Graphiti/Zep — the node's own save statement names the vector (`SET n.name_embedding = vecf32($entity_data.name_embedding)` on FalkorDB; `db.create.setNodeVectorProperty(n, "name_embedding", …)` on Neo4j, `graphiti_core/models/nodes/node_db_queries.py`), so the embedding and the node's properties are written together and there is **no separate vector write to reconcile** | at the default arms the vector is co-written with the node, so no reconciliation exists; ⚠️ **not "the write cannot complete without one"** — the Neptune arm persists the node with an empty embedding and the Neo4j `has_aoss` arm skips the vector write (see §2.3), which is a degenerate write-now form of our own bounded path |
 | **embed in an offline batch index** | Microsoft GraphRAG (*"indexing can be an expensive operation"*; the pipeline builds the index) | the "write" *is* the index build; retrieval reads a finished artifact |
 
 ⇒ **Neither family does our bounded shape** ("write the row now, maybe without a vector, repair later"). That
@@ -347,7 +347,10 @@ derived pair, which is the only *measured* waste in this whole dossier that neit
 - **Full deferral is the honest end-state for a system whose embedder can be 57 s cold.** A bound of 0.25 s is
   a bet that the model is warm; the recorded `#13108` measurement (dense leg drops to keyword-only in **45 %**
   of eval windows, recall@3 = 75 %) says the read path already pays for that bet, and `#13156` says a
-  budget-cancelled leg is **indistinguishable from a slow store** in the trace. Deferral with a real queue
+  budget-cancelled leg is **indistinguishable from a slow store** in the trace. ⚠️ **Both figures are
+  `#13108`'s own, at its own load; `STORAGE-ARCHITECTURE.md:1650` records that the 45 %-of-windows figure was
+  NOT reproduced on this box at the eval's 1,000-name scale (only at 8,000 rows under load)** — read them as
+  that arm's measurement, not as a fleet-wide rate. Deferral with a real queue
   would make the write's p95 independent of the model rather than bounded by a constant we chose.
 - **The 584× cost argument cuts the other way too:** an embedder running in a request thread is a resident
   model held for the request's sake; a worker is one process serving many writes. That is a *hypothesis* —
