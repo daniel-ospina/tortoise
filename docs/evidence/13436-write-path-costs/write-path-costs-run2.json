@@ -13,9 +13,9 @@
           "gate_reads_per_request": 0,
           "note": "control \u2014 names no pack",
           "request_ms": {
-            "max_ms": 15.773,
-            "median_ms": 14.18,
-            "min_ms": 12.44,
+            "max_ms": 12.755,
+            "median_ms": 11.818,
+            "min_ms": 10.302,
             "n": 7
           },
           "shape": "point_core"
@@ -26,74 +26,74 @@
           "gate_reads_per_request": 0,
           "note": "control \u2014 names no pack",
           "request_ms": {
-            "max_ms": 19.906,
-            "median_ms": 16.761,
-            "min_ms": 15.863,
+            "max_ms": 14.659,
+            "median_ms": 12.975,
+            "min_ms": 12.23,
             "n": 7
           },
           "shape": "point_bare"
         },
         {
           "expected_gate_reads": 1,
-          "gate_ms_per_request": 19.727,
+          "gate_ms_per_request": 19.367,
           "gate_reads_per_request": 1,
           "note": "names a pack",
           "request_ms": {
-            "max_ms": 48.474,
-            "median_ms": 46.406,
-            "min_ms": 43.183,
+            "max_ms": 31.594,
+            "median_ms": 29.595,
+            "min_ms": 28.1,
             "n": 7
           },
           "shape": "point_ns"
         },
         {
           "expected_gate_reads": 1,
-          "gate_ms_per_request": 19.727,
+          "gate_ms_per_request": 19.367,
           "gate_reads_per_request": 1,
           "note": "names a pack through the props passthrough",
           "request_ms": {
-            "max_ms": 52.818,
-            "median_ms": 36.248,
-            "min_ms": 34.73,
+            "max_ms": 38.492,
+            "median_ms": 31.364,
+            "min_ms": 29.371,
             "n": 7
           },
           "shape": "point_ns_in_props"
         },
         {
           "expected_gate_reads": 1,
-          "gate_ms_per_request": 19.727,
+          "gate_ms_per_request": 19.367,
           "gate_reads_per_request": 1,
           "note": "names a pack",
           "request_ms": {
-            "max_ms": 61.642,
-            "median_ms": 49.946,
-            "min_ms": 36.946,
+            "max_ms": 60.247,
+            "median_ms": 40.292,
+            "min_ms": 36.826,
             "n": 7
           },
           "shape": "object_ns"
         },
         {
           "expected_gate_reads": 2,
-          "gate_ms_per_request": 39.454,
+          "gate_ms_per_request": 38.734,
           "gate_reads_per_request": 2,
           "note": "SAME pack named twice (positional + props)",
           "request_ms": {
-            "max_ms": 73.738,
-            "median_ms": 67.384,
-            "min_ms": 54.457,
+            "max_ms": 58.325,
+            "median_ms": 54.107,
+            "min_ms": 52.084,
             "n": 7
           },
           "shape": "point_ns_twice"
         },
         {
           "expected_gate_reads": 2,
-          "gate_ms_per_request": 39.454,
+          "gate_ms_per_request": 38.734,
           "gate_reads_per_request": 2,
           "note": "SAME pack named twice (camel + snake)",
           "request_ms": {
-            "max_ms": 74.771,
-            "median_ms": 62.26,
-            "min_ms": 57.078,
+            "max_ms": 63.813,
+            "median_ms": 61.453,
+            "min_ms": 57.053,
             "n": 7
           },
           "shape": "object_ns_twice"
@@ -111,9 +111,9 @@
       },
       "points": 5000,
       "single_gate_read": {
-        "max_ms": 22.2,
-        "median_ms": 19.727,
-        "min_ms": 18.231,
+        "max_ms": 20.693,
+        "median_ms": 19.367,
+        "min_ms": 17.098,
         "n": 7
       }
     },
@@ -124,9 +124,9 @@
           "content_bytes_returned": 23936,
           "content_chars_per_row": 60,
           "nudge_call": {
-            "max_ms": 13.524,
-            "median_ms": 9.371,
-            "min_ms": 9.318,
+            "max_ms": 9.804,
+            "median_ms": 9.097,
+            "min_ms": 8.862,
             "n": 7
           },
           "points": 1000,
@@ -136,9 +136,9 @@
           "content_bytes_returned": 119925,
           "content_chars_per_row": 300,
           "nudge_call": {
-            "max_ms": 19.004,
-            "median_ms": 13.339,
-            "min_ms": 12.794,
+            "max_ms": 15.193,
+            "median_ms": 13.615,
+            "min_ms": 12.082,
             "n": 7
           },
           "points": 1000,
@@ -148,9 +148,9 @@
           "content_bytes_returned": 479990,
           "content_chars_per_row": 1200,
           "nudge_call": {
-            "max_ms": 24.589,
-            "median_ms": 24.242,
-            "min_ms": 23.509,
+            "max_ms": 26.963,
+            "median_ms": 24.87,
+            "min_ms": 24.026,
             "n": 7
           },
           "points": 1000,
@@ -160,24 +160,24 @@
       "by_size": [
         {
           "nudge_call": {
-            "max_ms": 17.721,
-            "median_ms": 12.684,
-            "min_ms": 12.339,
+            "max_ms": 15.87,
+            "median_ms": 13.921,
+            "min_ms": 13.362,
             "n": 7
           },
           "nudges_produced": 3,
           "object_create_ms": {
-            "delta_ms": 8.79,
+            "delta_ms": 13.003,
             "with_nudge": {
-              "max_ms": 28.955,
-              "median_ms": 16.732,
-              "min_ms": 16.404,
+              "max_ms": 20.75,
+              "median_ms": 19.146,
+              "min_ms": 17.863,
               "n": 7
             },
             "without_nudge": {
-              "max_ms": 8.228,
-              "median_ms": 7.942,
-              "min_ms": 6.771,
+              "max_ms": 7.453,
+              "median_ms": 6.143,
+              "min_ms": 5.294,
               "n": 7
             }
           },
@@ -193,24 +193,24 @@
         },
         {
           "nudge_call": {
-            "max_ms": 13.001,
-            "median_ms": 12.845,
-            "min_ms": 12.644,
+            "max_ms": 15.335,
+            "median_ms": 13.979,
+            "min_ms": 12.804,
             "n": 7
           },
           "nudges_produced": 3,
           "object_create_ms": {
-            "delta_ms": 11.008,
+            "delta_ms": 12.23,
             "with_nudge": {
-              "max_ms": 17.511,
-              "median_ms": 17.144,
-              "min_ms": 16.192,
+              "max_ms": 22.41,
+              "median_ms": 19.561,
+              "min_ms": 17.547,
               "n": 7
             },
             "without_nudge": {
-              "max_ms": 7.223,
-              "median_ms": 6.136,
-              "min_ms": 5.995,
+              "max_ms": 8.074,
+              "median_ms": 7.331,
+              "min_ms": 6.409,
               "n": 7
             }
           },
@@ -233,34 +233,34 @@
         {
           "points": 1000,
           "probe_ms": {
-            "max_ms": 6.136,
-            "median_ms": 5.327,
-            "min_ms": 4.946,
+            "max_ms": 6.912,
+            "median_ms": 5.785,
+            "min_ms": 5.358,
             "n": 7
           },
-          "us_per_point": 5.327,
+          "us_per_point": 5.785,
           "verdict": true
         },
         {
           "points": 5000,
           "probe_ms": {
-            "max_ms": 7.867,
-            "median_ms": 6.552,
-            "min_ms": 6.087,
+            "max_ms": 6.769,
+            "median_ms": 6.051,
+            "min_ms": 5.602,
             "n": 7
           },
-          "us_per_point": 1.31,
+          "us_per_point": 1.21,
           "verdict": true
         },
         {
           "points": 20000,
           "probe_ms": {
-            "max_ms": 10.32,
-            "median_ms": 10.013,
-            "min_ms": 9.096,
+            "max_ms": 12.782,
+            "median_ms": 10.72,
+            "min_ms": 8.894,
             "n": 7
           },
-          "us_per_point": 0.501,
+          "us_per_point": 0.536,
           "verdict": true
         }
       ],
@@ -271,29 +271,29 @@
     "db_uri_env": "docker://:@127.0.0.1:16402/tortoise_test_matrix",
     "engine": "graph ver 42006 (4.20.6)",
     "graphs_measured": [
-      "test_measure13436_version_0_2622964",
-      "test_measure13436_nudge_1000_2622964",
-      "test_measure13436_nudge_5000_2622964",
-      "test_measure13436_nudgec60_1000_2622964",
-      "test_measure13436_nudgec300_1000_2622964",
-      "test_measure13436_nudgec1200_1000_2622964",
-      "test_measure13436_kindgate_5000_2622964",
-      "test_measure13436_schema_1000_2622964",
-      "test_measure13436_schema_5000_2622964",
-      "test_measure13436_schema_20000_2622964"
+      "test_measure13436_version_0_2826494",
+      "test_measure13436_nudge_1000_2826494",
+      "test_measure13436_nudge_5000_2826494",
+      "test_measure13436_nudgec60_1000_2826494",
+      "test_measure13436_nudgec300_1000_2826494",
+      "test_measure13436_nudgec1200_1000_2826494",
+      "test_measure13436_kindgate_5000_2826494",
+      "test_measure13436_schema_1000_2826494",
+      "test_measure13436_schema_5000_2826494",
+      "test_measure13436_schema_20000_2826494"
     ],
     "loadavg_at_end": [
-      6.87,
-      6.36,
-      6.13
+      9.39,
+      8.58,
+      7.31
     ],
     "loadavg_at_start": [
-      7.31,
-      6.41,
-      6.14
+      8.5,
+      8.38,
+      7.22
     ],
     "python": "3.12.3"
   },
   "issue": 13436,
-  "measured_at": "2026-11-18T02:15:10Z"
+  "measured_at": "2026-11-18T02:24:45Z"
 }
