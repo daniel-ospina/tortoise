@@ -396,17 +396,28 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
 
 
 def test_the_resolver_reds_on_a_double_applied_offset() -> None:
-    """Negative control — the exact defect: 4921 + 3 = 4924 is the `#7704` note, not the loop.
+    """Negative control — the exact defect: the loop's cite re-pointed at the `#7704` note below it.
 
     Reachable: it is the shipped pre-fix state of the m3 brief, reintroduced here by mutating a COPY of
     the shipped row with the cite token LEFT INTACT, so the failure is reported by the CONTENT arm and
     cannot be satisfied by the token arm (which is what a re-pointed token would trip first).
+
+    The spurious line is DERIVED FROM CONTENT, not hardcoded: the note it must land on has moved twice
+    since this control was written, and a hardcoded `4907` rotted into a line that no longer holds the
+    note — the do-nothing control then failed for the wrong reason (the note check, not the content arm).
     """
-    row = (_M3_BRIEF, "tortoise/search_engine.py:4921", _SE, 4921, "for rank, (pid, _score) in enumerate(ranked)")
-    doubled = (row[0], row[1], row[2], 4924, row[4])
+    loop_line = 4921
+    note_line = next(
+        i + 1
+        for i, line in enumerate((REPO / _SE).read_text(encoding="utf-8").splitlines())
+        if "#7704 (MEASURED MECHANISM" in line
+    )
+    assert note_line > loop_line, "the `#7704` note must sit BELOW the loop it annotates"
+    row = (_M3_BRIEF, "tortoise/search_engine.py:4921", _SE, loop_line, "for rank, (pid, _score) in enumerate(ranked)")
+    doubled = (row[0], row[1], row[2], note_line, row[4])
     errors = _resolve((doubled,))
     assert errors, "a spurious +3 must red the resolver"
-    assert ":4924" in errors[0] and "#7704" in errors[0]
+    assert f":{note_line}" in errors[0] and "#7704" in errors[0]
     assert "is gone" not in errors[0], "the content arm must be the one that fires"
 
 
