@@ -154,6 +154,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_CENSUS, "cache_projection.py:2776", _CP, 2776, "tail_denied = forbidden | {"),
     (_AUDIT, 'sdk.py:21750', 'tortoise/sdk.py', 21750, 's.summary=CASE WHEN $sum'),
     (_AUDIT, '`:21873`', 'tortoise/sdk.py', 21873, 's.summary, s.topics, s.'),
+    # ⚠️ Row 13b's Source-writer cite, added by the peer lane because the site had NO pin at
+    # all. Its number is re-derived by CONTENT at THIS tree, not carried from theirs —
+    #   grep -n 'search_text = _source_search_text(topics=topics)' tortoise/sdk.py
+    # -> 21708, the capture writer's actual `_searchText` assignment (the `#3518`
+    # contract), not the comment above it and not the `sessionCaptured` provenance block
+    # an earlier pin sat on.
+    (_AUDIT, 'sdk.py:21708', _SDK, 21708, 'search_text = _source_search_text(topics=topics)'),
     (_AUDIT, 'hosted_api.py:22925', 'tortoise/hosted_api.py', 22925, 'MERGE (s:Source {url:$did})'),
     (_AUDIT, '`:22737`', 'tortoise/hosted_api.py', 22737, 'def _execute_commit_writes'),
     # ⛔ The document carries TWO addresses for this one statement on purpose: `:33583` is the number
@@ -180,11 +187,13 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":3778", _CP, 3841, 'if table == "point"'),
     (":5666", _ENT, 5666, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
-    # sent readers to the pin. ⛔ The pin is wrong for all six, and the earlier form of this comment was
-    # itself wrong about HOW: it said `sdk.py:24010` is a DELETE and `hosted_api.py:22925` is
-    # `if is_subject_kind(...)`, "both executable". Measured at `ccb49741b2ec`: `sdk.py:24010` is
-    # `# creates a PARALLEL edge on attribute change; the two-` and there is NO `DELETE` in 23990-24040;
-    # `hosted_api.py:22925` is the `)` closing `create_entity(...)`, the guard being `:22919`.
+    # sent readers to the pin. ⛔ The pin is wrong for all six, and BOTH readings of HOW were
+    # measured at `ccb49741b2ec`, so they are reconciled here rather than one displacing the
+    # other: the pin DOES hold a DELETE at `sdk.py:23982` (`... DELETE r"`), which is why
+    # "every one is a comment" is false — but `sdk.py:24010` is `# creates a PARALLEL edge on
+    # attribute change; the two-` and there is NO `DELETE` in 23990-24040, so a DELETE elsewhere
+    # in the file is not a DELETE in this region. `hosted_api.py:22919` IS
+    # `if is_subject_kind(_ekind or ""):` and `:22925` is the `)` closing `create_entity(...)`.
     ("sdk.py:24064", _SDK, 24064, "(n:Point {id:$id})-[:TAGGED]->()"),
     ("search_engine.py:6738", _SE, 6738, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:21750", _SDK, 21750, "s.summary=CASE WHEN $sum"),
@@ -231,7 +240,6 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6933`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6934`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6939`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24064'): 2,
@@ -243,11 +251,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4921'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4840`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3081-3096'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28019'): 1,
     ('docs/00_index.md', 'sdk.py:28019'): 1,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21750'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21873`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21708'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22925'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22737`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33601`'): 1,
@@ -464,8 +474,9 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX}
-    assert len(_PINS) == 49, (
-        "47 before the `#13345` review added the D-1 dedup filter's two addresses (one per document that "
+    assert len(_PINS) == 50, (
+        "47 on this branch, +1 from `origin/main`'s own `:6938` row (the `#13489` sweep added it after this "
+        "branch forked), +2 for the `#13345` review's D-1 dedup filter addresses (one per document that "
         "promises to carry the same number). The bound is not a target: a row DELETED to make the suite "
         "pass is the failure mode, so this number moves only when a row is added on purpose — the `:6938` "
         "row was added because §2.5 row 8's `(\"Object\", [\"name\"])` cite was the one address in that "
@@ -561,10 +572,14 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     Two arms, because the defect was two-sided:
 
-    * CONTENT — each of the eight carries, in the WORKING TREE (`_resolve` reads `REPO`, so these rows are
-      branch coordinates: on the docs-only branch that wrote them that was identical to `main`, and a branch
-      that moves `.py` files must move these rows with it), the fragment the document quotes for it. `_PINS` reaches
-      five of them; `:2485`, `:2542` and `projection/entities.py:5666` were in NO pin before this one.
+    * CONTENT — each of the eight carries, **on this branch's tree** (the tree this test reads),
+      the fragment the document quotes for it. `_PINS` reaches five of them; `:2464`, `:2521` and
+      `projection/entities.py:5666` were in NO pin before this one. ⛔ The earlier form of this
+      bullet justified the same rows as "at `main` (the working tree: this branch is docs-only, so
+      `main`'s `.py` files are this tree's)" — that was true when it was written and is FALSE for
+      the rows `#13363` re-derived: `sdk.py` moved `+22` and `hosted_api.py` `+6`/`+18`, so those
+      rows carry THIS tree's figures, not `main`'s. A row here is a claim about `REPO / path`, never
+      about `main`'s copy of it — the same thing `_MAIN_SET_MISSED`'s own comment says.
     * CLAIM — the header still NAMES them, and no longer states the three absolutes the review measured
       false, nor the "pin-written remainder" label whose denominator contradicted it.
 
