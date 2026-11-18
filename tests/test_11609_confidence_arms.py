@@ -307,16 +307,17 @@ class TestTheArmArgumentsNameTheirArm:
         """P3 from the architecture review: the no-arm refusal compared the two sets
         against NOTHING armed, so an explicitly-armed call carrying the other arm's
         arguments was served with them on the floor."""
+        # Both handlers are stubbed so NEITHER arm can silently answer, and both
+        # recorders are READ below: "refused" alone is also what a
+        # serve-then-raise looks like, so an empty call log is the half of this
+        # test that says the refusal preceded dispatch (RUF059 flagged the
+        # dropped assertion, it was not dead weight — #13593).
         sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
         _, calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
         with pytest.raises(ValueError) as exc:
             sdk.check_confidence(**kwargs)
         assert arg in str(exc.value), str(exc.value)
         assert f"{off}-arm argument(s)" in str(exc.value), str(exc.value)
-        # ⛔ The refusal is the whole claim ("served with them on the floor"), so it
-        # must be proven to have happened BEFORE dispatch: "raised" alone is also
-        # what a raise-after-serve looks like. Both recorders stay empty; an
-        # unused `calls` was exactly the assertion this test had dropped (RUF059).
         assert calls == [], calls
         assert calls2 == [], calls2
 
