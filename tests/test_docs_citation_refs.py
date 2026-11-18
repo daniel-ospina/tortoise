@@ -503,5 +503,59 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
+def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
+    """⛔ A document reported a checker's EXIT CODE as green while the checker was RED.
+
+    `docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md` stated, in three
+    cells, that `tools/hosted_api_cite_census.py --check` "exits 0" / "reports every
+    stated figure `== measured`" / "reports both figures `== measured`". MEASURED at
+    that head the verb exits **1** with twelve `STALE` lines — and it exits 1 on
+    `origin/main` too (`git diff --name-only origin/main...HEAD -- tortoise/` is
+    empty, so the two modules whose notes it grades are identical to `main`'s), which
+    means no merge of that branch could have made the claim true.
+
+    ⛔ AND NOTHING READ THOSE CELLS. This file resolves POINTERS (a `file:line` that
+    must land on text), and the D5 arms in `test_7949_capstone_measure.py` are scoped
+    to D5's own markdown line — so a FALSE PASS survived several review rounds inside
+    the document whose subject is stale claims.
+
+    This is the same policy this file already enforces, one layer up: the recorded
+    convention is that assertions are made **by NAME**, never by a number that rots
+    (`docs/architecture/S2-DECISION-SEAM.md`), and an exit code a document does not
+    measure is that class of number. Because the census's own state is `main`'s drift
+    rather than the branch's, the honest text names the COMMAND and the head it must
+    be read at. So this arm asserts (a) the green literals are GONE, (b) the command
+    is still discoverable (deleting a false green must send the reader to the verb,
+    not away from it), and (c) the inherited-red attribution is still stated, so the
+    next reader is sent to `--refresh`/`main` and not asked to "fix" `main`'s census
+    inside a docs PR.
+
+    NON-VACUITY: on the pre-fix document all three legs red — the first on the
+    literal, the other two on their absence.
+    """
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    for green in (
+        "--check` exits 0",
+        "--check` reports every stated figure `== measured`",
+        "--check` reports both figures `== measured`",
+    ):
+        assert green not in doc, (
+            f"05-verify.md asserts {green!r}. `tools/hosted_api_cite_census.py --check` "
+            "is RED at this head (exit 1, `STALE` lines) and is red on `origin/main` "
+            "too, so a merge would put a false PASS claim into a document beside a "
+            "checker that refutes it. State the COMMAND and the head it must be read "
+            "at — never a green (#13489 review, P0)")
+    assert "tools/hosted_api_cite_census.py --check" in doc, (
+        "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
+        "— removing the false green must send the reader to the verb, not delete the "
+        "pointer to it (#13489 review, P0)")
+    assert "git diff --name-only origin/main...HEAD -- tortoise/" in doc, (
+        "05-verify.md no longer states the command that shows the census red is "
+        "INHERITED (`tortoise/` is not in this diff, so both graded modules are "
+        "`origin/main`'s). Without it the next reader reads the red as this branch's, "
+        "or is asked to repair `main`'s drift inside a docs PR "
+        "(#13489 review, P0)")
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-q"])
