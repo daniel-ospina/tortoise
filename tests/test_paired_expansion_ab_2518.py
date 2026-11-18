@@ -3168,6 +3168,47 @@ def test_a_ci_that_excludes_zero_where_the_exact_test_does_not_is_CALLED_OUT():
     assert named in " ".join(brief.split()), (
         f"the caveat must NAME the short-query cells it covers ({sorted(short)}); "
         "naming them as a set from the artifacts is not the same as printing them")
+    # ⛔ `#13267` review 12 F2: the row-set SENTENCE was checked for presence only,
+    # so the retracted wording could be reinserted beside it, and `0.0313`,
+    # `0.0625`, the k = 5 percentile count and the row COUNT were literals no test
+    # read. Every one of them is derived from the artifacts now.
+    flat = " ".join(brief.split())
+    assert "At k = 3, 5 and 10" not in flat, (
+        "the retracted row-set wording is back — k = 5 does separate, and k = 10's "
+        "percentile is seven items")
+    words = {1: "one", 2: "two", 3: "three", 4: "four"}
+    assert f"{words[len(clash)].capitalize()} rows' bootstrap intervals" in flat, (
+        f"the caveat opens with the derived clash count ({len(clash)}); it prints "
+        "a different word")
+    # the k = 5 exclusion's own figures, derived
+    head5 = next(c for c in not_clash if "point-300.json" in c["artifact"]
+                 and c["k"] == "k=5" and c["b"] == 6)
+    # ⛔ parse + compare numerically: the brief prints 4 dp and `.4f` on 0.03125
+    # rounds the other way, so a formatted-string match would fail on a tie
+    printed5 = re.search(r"its exact p is (\d+\.\d+)", flat)
+    assert printed5 and abs(float(printed5.group(1)) - head5["p"]) < 1e-4, (
+        f"the k = 5 exclusion must quote its own p ({head5['p']}); it prints "
+        f"{printed5.group(1) if printed5 else 'nothing'}")
+    assert f"{words[head5['lo_items']]} discordant items, not one" in flat, (
+        f"k = 5's 2.5th percentile is {head5['lo_items']} items; the caveat must "
+        "say so rather than reusing the one-item story")
+    # the duality sentence divides by the clashing cells' own exact p
+    clash_ps = {f"{c['p']:g}" for c in clash}
+    # ⛔ scoped to the CAVEAT PARAGRAPH, not the whole brief: the §3 table prints
+    # the same 0.0625, so a document-wide search is satisfied by the table and the
+    # duality sentence can carry any p at all (`#13267` review 12 F2)
+    caveat_para = flat[flat.index("rows' bootstrap intervals"):
+                       flat.index("nowhere else.")]
+    assert any(p_ in caveat_para for p_ in clash_ps), (
+        f"the duality sentence must quote the clashing cells' own exact p "
+        f"({sorted(clash_ps)}); the caveat paragraph carries none of them")
+    # b/c/n are stated once for all clashing cells, so they must be true of all
+    assert "`b = 5`, `c = 0`, `n = 300`" in brief or \
+        "`b = 5`, `c = 0`, `n = 300`" in flat, (
+        "the caveat states b/c/n for every clashing cell at once; all three must "
+        "hold for all of them")
+    for cell in clash:
+        assert (cell["b"], cell["c"], cell["n"]) == (5, 0, 300), cell
     assert "0.0065" in brief and "(1 − 5/300)³⁰⁰" in brief, (
         "the caveat must print the resample probability it derives")
     assert f"1/300 = {1 / 300 * 100:.2f} pp" in brief, (
