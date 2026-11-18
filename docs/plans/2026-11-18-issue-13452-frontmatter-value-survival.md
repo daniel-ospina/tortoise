@@ -186,16 +186,18 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
    the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
    failure output, not asserted.**
-2. **Fixed tree:** `2 failed, 10 passed` **at this head** (`2 failed, 8 passed` at the
-   pre-rebase head — one extra pass is `#13485`'s own new test, which main added under ours, and the
-   other is the mid-body parity test this PR's tip commit added) — the 2
-   are the pre-existing absence reds
+2. **Fixed tree:** `2 failed, 11 passed` **at this head** — the same 2 failures throughout, and each
+   count is tied to the head that produced it, because tests are appended to this file every round:
+   `8 passed` pre-rebase, `9 passed` at the rebased `36700a89b7` (the extra pass is `#13485`'s own new
+   test, which main added under ours), `10 passed` once the `''`-parity pin landed, and `11 passed`
+   once the `"`-backslash pin landed. The 2 are the pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the evidence bundles
    `docs/evidence/13038-capstone/README.md` **+** `docs/evidence/13436-write-path-costs/README.md` —
    the second bundle landed on `main` in `#13436` AFTER this plan was written, so the red now names
-   two bundles), unchanged, named, and deliberately not "fixed" here. Both counts were measured on
-   `origin/main` at `f6793959a2` as well (`2 failed, 8 passed`) — same two tests, same paths.
-   `git diff --stat` vs `main` = 9 files + 1 plan doc.
+   two bundles), unchanged, named, and deliberately not "fixed" here. The baseline was measured on
+   `origin/main` at `f6793959a2` too (`2 failed, 8 passed`) — same two tests, same paths.
+   `git diff --stat` vs `main` = **2 files** (this plan doc + the test file) — the `9 files + 1 plan
+   doc` this line used to carry was #13476's tree, measured at THAT head, and was false here.
 3. **Mutant matrix — 22/22 behave as designed** (M1–M20 by `/tmp/matrix_13452.sh`; M13–M18 were
    added after code review, and M21/M22 were measured separately in `e488d2adcc`'s scratch run —
    one mutation at a time, tree restored byte-identical between each):
@@ -390,6 +392,25 @@ escape* remedy), with green CI. `test_a_single_quoted_escape_mid_body_under_a_tr
 now pins the parity half: with the skip deleted it reds and the sibling stays green
 (`1 failed, 1 passed`), so each half names its own falsifier.
 
+**Fixed at this head — the `"` backslash skip had no pin (round-4 review).**
+
+`"a\"" # c` is legal YAML — `parse_frontmatter` returns `a"` — and the escaped quote sits
+immediately before the space-then-hash that introduces the comment, so a close found WITHOUT
+skipping backslash escapes lands on that
+escaped quote; nothing is stripped after it, the raw text reaches `_quoted_style` still ending in
+`# c`, and `value.endswith(q)` fails: the arm reports `('malformed', None)` — the same
+*remove the inner quote* class of false remedy this PR removes. This is the one arm the PRE-fix
+helper already got RIGHT (it never scanned for a close: it cut at the space-then-hash whose left
+side ended in the quote char, which this shape satisfies), so the backslash skip is old behaviour carried by a
+NEW branch — and nothing else in the file reds when it goes: measured with the skip deleted at
+`f426ea53fa` (no pin in the file yet) the file stayed at `2 failed, 10 passed` — the same two
+pre-existing absence reds, nothing else noticing — while this shape regressed. Pinned now by
+`test_a_double_quoted_backslash_escape_before_a_comment_is_measured`; with the pin in place the same
+mutant measures `3 failed, 10 passed` at this head (the 2 pre-existing reds **plus** this test, which
+reds alone under `-k double_quoted_backslash`: `1 failed, 12 deselected`). Same finding shape as the parity
+half above, and the same reason it is worth its own test: `_closing_quote` added branches, and a
+branch nothing asserts is a branch a later simplification is free to drop.
+
 **Already fixed — the sequence branch's false diagnosis.** `- 13452` (int) once reported "a
 sequence item has no legal transform, so this is a truncation" while the scalar branch said
 "implicit typing". Both non-string members now share `_type_mismatch`, which decides from the RAW
@@ -476,13 +497,16 @@ Measured at the post-rebase head:
 
 - the new test still **discriminates**: replaying the true pre-fix `_split_comment`
   (`raw[:i].rstrip().endswith(q)`) into a scratch copy of the head reds it
-  (`- single-quoted` / `+ broken`, `tests/test_doc_affiliation_frontmatter.py:981`, the
-  `assert style == "single-quoted"`);
+  (`- single-quoted` / `+ broken`) — the failing assertion is
+  `assert style == "single-quoted"` in
+  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:981` at this
+  head; it was `:974` when the mutant was run, and it moves whenever a test is
+  appended to this file, so cite it by name, not by line);
 - over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s
   truncation case still `broken`;
 - `main` at `f6793959a2` measures `2 failed, 8 passed` on this file; this head measures
-  `2 failed, 10 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
-  and this PR's own mid-body parity test;
+  `2 failed, 11 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
+  and this PR's own two pins (the `''` parity half and the `"` backslash half);
 - `test_docs_lint_baseline` + `test_docs_lint_gate` + `test_docs_citation_refs` → **106 passed**.
 
 One correction this rebase forced: the pre-existing absence red on the evidence bundles now names

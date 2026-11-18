@@ -1032,6 +1032,55 @@ def test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured(
     assert parse_frontmatter(doc.read_text(encoding="utf-8"))["aboutObjects"] == expected
 
 
+def test_a_double_quoted_backslash_escape_before_a_comment_is_measured(
+    tmp_path,
+) -> None:
+    """The ``"`` BACKSLASH skip, pinned separately from the ``''`` parity skip.
+
+    ``"a\"" # c`` is legal YAML — ``parse_frontmatter`` returns ``a"`` — and the
+    escaped ``"`` sits immediately before the `` #``, so a close found without
+    skipping backslash escapes lands ON that escaped quote, the split takes
+    everything after it as the comment, and the value no longer ends with a
+    quote: the arm reports ``('malformed', None)``, the *remove the inner quote*
+    class of false remedy this whole change removes.
+
+    This is the one arm the PRE-fix helper already got right (it never scanned
+    for a close at all — it cut at the `` #`` whose left side ended in the quote
+    char, which this shape satisfies), so the skip is old behaviour preserved by
+    a NEW branch, and nothing else in this file reds when it goes.
+
+    Non-vacuity: deleting the two-line backslash skip in ``_closing_quote``
+    leaves the rest of this file GREEN (measured: ``2 failed, 10 passed``, the
+    same two pre-existing absence reds) while ``_quoted_style`` returns
+    ``('malformed', None)`` here, so the ``style`` assertion below is the only
+    thing that notices.
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    value = '"a\\"" # c'
+    doc = tmp_path / "dossier.md"
+    doc.write_text(
+        f"---\ntitle: x\naboutObjects: {value}\n---\n\nbody\n", encoding="utf-8"
+    )
+    classified = {(key, kind): payload for key, kind, payload in _values(_frontmatter(doc))}
+    assert ("aboutObjects", "scalar") in classified, (
+        "`_values` no longer classifies this as a scalar — re-point this guard: "
+        f"{classified!r}"
+    )
+    style, expected = _quoted_style(classified[("aboutObjects", "scalar")])
+    assert style == "escaped", (
+        "a backslash-escaped quote before a trailing comment is legal YAML, but "
+        f"this arm reports {style!r} — the close scan skipped no escape and the "
+        "printed remedy would ask for a legal escape to be deleted"
+    )
+    assert expected is None, (
+        "an `escaped` body declines the value comparison by design (hand "
+        f"de-quoting cannot reproduce `\\t`/`\\uXXXX`) — got {expected!r}"
+    )
+    # …and the consumer agrees the value is whole, which is what `malformed` denies.
+    assert parse_frontmatter(doc.read_text(encoding="utf-8"))["aboutObjects"] == 'a"'
+
+
 def test_the_e1_e2_evidence_bundle_declares_its_affiliation() -> None:
     """#9110 review P2: the evidence bundle landed with no frontmatter at all.
 
