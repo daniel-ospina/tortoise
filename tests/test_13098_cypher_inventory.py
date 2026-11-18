@@ -168,7 +168,8 @@ def test_the_published_decomposition_names_the_measured_operands():
     with `--check` printing `25 pinned counts match` over both (`#13368` R2-R4).
 
     ⛔ WHAT IT DOES NOT GRADE, stated rather than implied (`#13249` review,
-    handover item 2): it pins §0's decomposition, §0's narrative
+    handover item 2): it pins §1's decomposition line (§0's operand pair, published
+    in §1's block), §0's narrative
     pair and §1's PRODUCT-surface row, plus FOUR rows of §0's count TABLE —
     `statement sites`, `` `plain` READS``, `non-Cypher door calls` and `AST door calls`.
     It does NOT pin the shape-split rows under them (`860 (579 read, 281 write)`,
@@ -216,19 +217,24 @@ def test_the_published_decomposition_names_the_measured_operands():
     section1 = re.search(r"^## 1\..*?^## 2\.", doc_text, re.MULTILINE | re.DOTALL)
     assert section1, "§1's section bounds moved (no `## 1.` … `## 2.`); re-cut this pin with them"
 
-    # (a) §0's decomposition: `= N classified Cypher statements + M non-Cypher door calls`
+    # (a) §1's decomposition line — §0's operand pair, published in §1's block:
+    # `= N classified Cypher statements + M non-Cypher door calls`
     #
     # ⛔ It sits in §1's block, not §0 — §0 publishes the same pair in its table and its
     # narrative, and this line is the third publication, one screen further down. Scoped
-    # to §1 for the decoy reason above.
+    # to §1 for the decoy reason above. The MESSAGES below name §1 too, deliberately: a
+    # re-cutter whose arm fires is told where the line actually lives, so they do not
+    # hunt for it in §0 and "fix" a publication this arm does not read (`#13424` R2).
     decomposition = re.search(
         r"^= ([\d,]+) +classified Cypher statements \+ ([\d,]+) non-Cypher door calls$",
         section1.group(0), re.MULTILINE)
-    assert decomposition, "§0's decomposition line moved or changed shape; re-cut this pin with it"
+    assert decomposition, (
+        "§1's decomposition line (publishes §0's operands) moved or changed shape; "
+        "re-cut this pin with it")
     doc_sites = int(decomposition.group(1).replace(",", ""))
     doc_non_cypher = int(decomposition.group(2).replace(",", ""))
     assert (doc_sites, doc_non_cypher) == (sites, non_cypher), (
-        "§0's decomposition states the deltas it explains, and it disagrees with the census: "
+        "§1's decomposition states §0's deltas, and it disagrees with the census: "
         f"doc={doc_sites}+{doc_non_cypher} measured={sites}+{non_cypher}")
 
     # (a2) §0's count TABLE publishes the same pair one screen above the block, and
