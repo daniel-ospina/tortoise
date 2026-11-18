@@ -503,5 +503,167 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
+def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
+    """⛔ A document reported a checker's EXIT CODE as green while the checker was RED.
+
+    `docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md` stated, in three
+    cells, that `tools/hosted_api_cite_census.py --check` "exits 0" / "reports every
+    stated figure `== measured`" / "reports both figures `== measured`". MEASURED at
+    that head the verb exits **1** with twelve `STALE` lines — and it exits 1 on
+    `origin/main` too (`git diff --name-only origin/main...HEAD -- tortoise/` is
+    empty, so the two modules whose notes it grades are identical to `main`'s), which
+    means no merge of that branch could have made the claim true.
+
+    ⛔ AND NOTHING READ THOSE CELLS. This file resolves POINTERS (a `file:line` that
+    must land on text), and the D5 arms in `test_7949_capstone_measure.py` are scoped
+    to D5's own markdown line — so a FALSE PASS survived several review rounds inside
+    the document whose subject is stale claims.
+
+    This is the same policy this file already enforces, one layer up: the recorded
+    convention is that assertions are made **by NAME**, never by a number that rots
+    (`docs/architecture/S2-DECISION-SEAM.md`), and an exit code a document does not
+    measure is that class of number. Because the census's own state is `main`'s drift
+    rather than the branch's, the honest text names the COMMAND and the head it must
+    be read at. So this arm asserts (a) the green literals are GONE, (b) the command
+    is still discoverable (deleting a false green must send the reader to the verb,
+    not away from it), and (c) the inherited-red attribution is still stated, so the
+    next reader is sent to `--refresh`/`main` and not asked to "fix" `main`'s census
+    inside a docs PR.
+
+    NON-VACUITY, MEASURED: on the pre-fix document **leg (a) reds**
+    (`AssertionError: 05-verify.md asserts '--check` exits 0'`). Legs (b) and (c)
+    already HELD there — the command string and the inherited-red attribution were
+    both present while the false green sat beside them — so they are REGRESSION
+    legs: they keep the reader pointed at the verb and at the inherited-red
+    attribution after the deletion, and an edit that drops either reds here.
+    """
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    for green in (
+        "--check` exits 0",
+        "--check` reports every stated figure `== measured`",
+        "--check` reports both figures `== measured`",
+    ):
+        assert green not in doc, (
+            f"05-verify.md asserts {green!r}. `tools/hosted_api_cite_census.py --check` "
+            "is RED at this head (exit 1, `STALE` lines) and is red on `origin/main` "
+            "too, so a merge would put a false PASS claim into a document beside a "
+            "checker that refutes it. State the COMMAND and the head it must be read "
+            "at — never a green (#13489 review, P0)")
+    assert "tools/hosted_api_cite_census.py --check" in doc, (
+        "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
+        "— removing the false green must send the reader to the verb, not delete the "
+        "pointer to it (#13489 review, P0)")
+    assert "git diff --name-only origin/main...HEAD -- tortoise/" in doc, (
+        "05-verify.md no longer states the command that shows the census red is "
+        "INHERITED (`tortoise/` is not in this diff, so both graded modules are "
+        "`origin/main`'s). Without it the next reader reads the red as this branch's, "
+        "or is asked to repair `main`'s drift inside a docs PR "
+        "(#13489 review, P0)")
+    # ⛔ THE ANTI-NEGATION LEG (#13489 review, P1 — MEASURED). The leg just above only requires
+    # the command to be PRESENT, and it occurs six times in this file. The split is MEASURED at
+    # the pre-fix document (`16ace39823`) rather than asserted, because an earlier cut of this
+    # comment stated it wrong (#13489 review, P3): THREE assert the list is empty (`-> empty`
+    # x1, `is empty` x2), ONE asserts the opposite ("… is NOT empty, and neither is `git diff
+    # --name-only origin/main...HEAD -- tortoise/`"), ONE quotes the opposite only in order to
+    # refute it ("returns exactly those two" — FALSE in every half), and ONE names the command
+    # with no verdict at all ("read them from …"). So the false sentence SATISFIED that leg —
+    # and the cell contradicted itself, five sentences apart. Presence was never the property
+    # being relied on; AGREEMENT is, so that is what is asserted here.
+    #
+    # NON-VACUITY, MEASURED: on the pre-fix document the first tuple member below IS present
+    # (`grep -c 'and neither is'` -> 1) and this leg reds on it; it is green only after the
+    # clause is deleted. The third member refuses the same claim in the other spelling the cell
+    # used to carry — `… tortoise/` "returns exactly those two" — and the QUOTES are what tell
+    # that quoted retraction apart from a re-assertion (the pattern matches only the unquoted
+    # form, so the retraction that still records the false spelling stays legal).
+    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    for _negation in (
+        f"neither is `{_tortoise_cmd}`",
+        f"{_tortoise_cmd}` is NOT empty",
+        f"{_tortoise_cmd}` returns exactly those two",
+    ):
+        assert _negation not in doc, (
+            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints 0 lines at "
+            "this head (the `#12943` modules landed on `main`, so they sit on BOTH sides "
+            "of the merge and contribute no path here), so the sentence is refuted by the "
+            "very command it quotes — and it satisfied the presence-only leg above while "
+            "contradicting the empty claims beside it (#13489 review, P1)")
+    assert any(f"{_tortoise_cmd}` {_word}" in doc
+               for _word in ("is empty", "-> empty", "is EMPTY")), (
+        "05-verify.md must still state, in words, that the `tortoise/` path list is EMPTY "
+        "— naming the command is not an answer, and deleting the FALSE reading must leave a "
+        "reader who can see which way the measurement went (#13489 review, P1)")
+    # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
+    # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
+    # head they were measured at". The first cut of the repair said "at the head that still
+    # carried those modules" — a DESCRIPTION of a head, not one a reader can open, so the
+    # statements stayed exactly as uncheckable as before and this arm stayed green over
+    # them: `activation_scorecard.py` being the only `tortoise/` module `#12943` did not
+    # touch is true of `2584a86ec1` and false of THIS head (no `tortoise/` path is in the
+    # diff at all), so without a head the sentence reads as this head's.
+    #
+    # NON-VACUITY, MEASURED: reds on that cut (no SHA in the paragraph); green once the
+    # MERGE head is named beside the statements.
+    _module_claim = [p for p in doc.split("\n\n") if "`#12943` did not touch" in p]
+    assert _module_claim, (
+        "05-verify.md no longer states which `tortoise/` module `#12943` did not touch — "
+        "this leg reads the head that claim was measured at (#13489 review, P1)")
+    for _para in _module_claim:
+        assert "2584a86ec1" in _para, (
+            "05-verify.md states that `activation_scorecard.py` was the only `tortoise/` "
+            "module `#12943` did not touch WITHOUT naming the head it was measured at. "
+            "At this head that file is not in the diff at all, so the sentence is the MERGE "
+            "head's; name it beside the claim (`2584a86ec1`, with the merge-base command "
+            "that prints its set) or the two module statements stay uncheckable "
+            "(#13489 review, P1)")
+
+
+def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
+    """⛔ The doc said it re-pointed that row to `sdk.py:19485`. The row reads `:21496`.
+
+    `05-verify.md` stated, as the row's re-point at the head being merged, a pair the
+    tree refutes at BOTH ends: neither `sdk.py:19449` nor `sdk.py:19485` occurs in
+    `docs/00_index.md` at this head or on `main`, while the diff's actual re-point is
+    `sdk.py:21474` -> `:21496` (2-dot and 3-dot `--numstat` both `3 3`). It survived
+    several review rounds for the same reason the census green did: the D5 arms in
+    `test_7949_capstone_measure.py` scope to D5's OWN line, and this claim is in the
+    file-table section, so nothing read it.
+
+    The arm is deliberately GIT-FREE (no other leg in the suite shells out): a
+    re-point's NEW side must resolve in the file at the head being merged, and its OLD
+    side must NOT — which is exactly what "re-pointed" means, and it is checkable
+    from the working tree alone.
+
+    NON-VACUITY, MEASURED: on the pre-fix document the regex does not match at all
+    (it stated ``re-pointing that row's `sdk.py:19449` → `:19485` at the merge head``,
+    with no `cite from`), so `assert m` reds; and had it matched, the new side
+    `19485` is absent from `docs/00_index.md` (`grep -c 'sdk.py:19485'` -> 0), so the
+    second leg reds too.
+    """
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    m = re.search(
+        r"re-pointing that row's `sdk\.py` cite from \*\*`:(\d+)`\*\*.*?"
+        r"to \*\*`:(\d+)`\*\*",
+        doc, re.S)
+    assert m, (
+        "05-verify.md no longer states the index row's re-point as "
+        "`from **`:OLD`** ... to **`:NEW`**`. State it with both ends named, so this "
+        "arm can check the pair against the file the re-point lands in "
+        "(#13489 review, cycle 5)")
+    old, new = m.groups()
+    index = (DOCS / "00_index.md").read_text(encoding="utf-8")
+    assert f"sdk.py:{new}" in index, (
+        f"05-verify.md says the row's cite is re-pointed to `sdk.py:{new}`; "
+        f"`docs/00_index.md` does not carry that cite at this head, so the document "
+        "names a line the file it describes does not point at "
+        "(#13489 review, cycle 5)")
+    assert f"sdk.py:{old}" not in index, (
+        f"05-verify.md calls `sdk.py:{old}` the PRE-re-point value, but "
+        f"`docs/00_index.md` still carries it — either the re-point did not happen "
+        "or the pair is stale (#13489 review, cycle 5)")
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-q"])
