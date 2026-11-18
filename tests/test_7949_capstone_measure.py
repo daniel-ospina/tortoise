@@ -7491,9 +7491,12 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
         pytest.skip(
             f"{head} (the MERGE head D5 quotes `:20236` for) is not carried by this "
             "clone, so the figure is UNCHECKED here, not disproved. It is a REBASE "
-            "ORPHAN: `git ls-remote origin` matches no ref for it, so a fresh clone "
-            "and CI's `fetch-depth: 1` checkout both lack it by construction. Re-arm "
-            "on a box that still holds it with `git fetch origin " + head + "`."
+            "ORPHAN: `git ls-remote origin` matches no ref for it, so NO fetch by "
+            "name can retrieve it (`git fetch origin " + head + "` -> `fatal: "
+            "couldn't find remote ref`), and a fresh clone and CI's "
+            "`fetch-depth: 1` checkout both lack it by construction. This arm can "
+            "only run where an object DB ALREADY holds the object — it is NOT "
+            "re-armable from the remote."
             f" git: {shown.stderr.strip()}")
     hits = [
         _n for _n, _line in enumerate(shown.stdout.splitlines(), 1)
