@@ -26,6 +26,7 @@ nothing. What is pinned is the reasoning surface and the committed artifact.
 """
 from __future__ import annotations
 
+import ast
 import json
 import math
 import re
@@ -3319,20 +3320,42 @@ def test_the_claim_ceiling_pair_and_both_found_deep_series_are_bound(artifact):
     assert f"the `random` arms read their **own** shares {rand_s}" in changelog
 
 
-#: The flags that change WHICH rows a read returns. `include_terminal` is one of
-#: them but it is derived per leg rather than fixed, so it is compared separately
-#: by the caller below; these three are the ones the mirror must copy verbatim.
-_LEVER_FLAGS = ("_record_reads", "_valid_time_rerank", "_rerank_candidates")
+#: EVERY flag that changes WHICH rows a read returns — the whole of the mirror
+#: contract, not a subset of it. `include_terminal` is the one that is DERIVED
+#: per leg rather than a fixed literal, so it is compared as a normalised
+#: expression: same operator, same constants, with only the parameter NAME
+#: abstracted (`kind` at the mirror, `entity_type` at the reference). Listing it
+#: here is deliberate: an earlier draft left it out of `_LEVER_FLAGS` and said in
+#: a comment that the caller "compared it separately", which the caller did not
+#: do — dropping `include_terminal=` from the mirror reddens nothing, and the
+#: Point leg would quietly become terminal-inclusive on the mirror alone.
+_LEVER_FLAGS = ("_record_reads", "_valid_time_rerank", "_rerank_candidates",
+                "include_terminal")
+
+
+def _expr_form(node: ast.expr) -> tuple[str, str]:
+    """A derived flag's shape, with every variable name abstracted to `<arg>`.
+
+    The two sites name their own parameter differently, and that name carries no
+    meaning; the operator and the compared constants do, so those are kept. A
+    legitimate respelling of the condition on BOTH sides stays green; a change to
+    one side alone reds.
+    """
+
+    class _Abstract(ast.NodeTransformer):
+        def visit_Name(self, inner: ast.Name) -> ast.Name:
+            return ast.copy_location(ast.Name(id="<arg>", ctx=inner.ctx), inner)
+
+    tree = ast.parse(ast.unparse(node), mode="eval")
+    return ("expr", ast.dump(_Abstract().visit(tree.body)))
 
 
 def _lever_flags(path: Path, func: str) -> dict[str, object]:
-    """`{flag: literal}` for the ONE `tortoise_fts_query` call inside `func`.
+    """`{flag: literal-or-derived-form}` for the ONE `tortoise_fts_query` call.
 
     ABSENT is a value: `_rerank_candidates` absent means the call INHERITS the
     default (armed), which is exactly the state the mirror's comment claims.
     """
-    import ast
-
     tree = ast.parse(path.read_text(encoding="utf-8"))
     owners = [n for n in ast.walk(tree)
               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -3349,7 +3372,7 @@ def _lever_flags(path: Path, func: str) -> dict[str, object]:
         try:
             out[kw.arg] = ast.literal_eval(kw.value)
         except (ValueError, SyntaxError):
-            out[kw.arg] = f"<not a literal: {ast.dump(kw.value)[:60]}>"
+            out[kw.arg] = _expr_form(kw.value)
     return out
 
 
@@ -3374,6 +3397,14 @@ def test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does():
         "— the instrument's recall figures would describe a reader that ships "
         "does not run")
     # …and the shared flag set is the one the row's comment describes: the fused
-    # rerank is INHERITED (armed), the valid-time selection opts out.
+    # rerank is INHERITED (armed), the valid-time selection opts out. These two
+    # directions are asserted on top of equality because both sides could opt
+    # out in lockstep, which `mirror == reference` alone would call a match.
     assert reference.get("_rerank_candidates") is None, reference
     assert reference.get("_valid_time_rerank") is False, reference
+    # …and `include_terminal` is DERIVED, never a constant: a hard-coded `True`
+    # on both sides would satisfy equality while making the reference's Point
+    # leg terminal-inclusive, which is the opposite of what it documents.
+    assert isinstance(mirror.get("include_terminal"), tuple), (
+        f"`include_terminal` must stay derived per leg (kind/entity_type in the "
+        f"entity legs only), not a constant: {mirror.get('include_terminal')!r}")
