@@ -115,6 +115,10 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6870`", _PI, 6870, '("Source", ["_searchText"])'),
     (_AUDIT, "record_serve.py:461", _RS, 461, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
+    (_AUDIT, "sdk.py:23982", _SDK, 23982, "(n:Point {id:$id})-[:TAGGED]->()"),
+    (_AUDIT, "search_engine.py:6721", _SE, 6721, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
+    (_AUDIT, "sdk.py:23982", _SDK, 23982, '(n:Point {id:$id})-[:TAGGED]->()'),
+    (_AUDIT, "search_engine.py:6721", _SE, 6721, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3449", _SE, 3449, "``:Source``/``:Document`` row must not contribute"),
     (_SUBSTRATE, "`:3447`", _SE, 3447, "# #11682: the corpus join is PER FAMILY"),
@@ -204,6 +208,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4823`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3079-3094'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:23982'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6721'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:23982'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6721'): 2,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2715'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21668'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21791`'): 1,
@@ -243,7 +251,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """REVERT GUARD, not a re-measurement — say what this does NOT prove.
 
     The drift figures and the two pin-side descriptions below were each corrected by the `#13083` review:
-    the counts still read `322`/`216`/`106` for a file that measures `314`/`211`/`103`, and the pin-side
+    the counts still read `322`/`216`/`106` for a file that measures `324`/`216`/`108`, and the pin-side
     prose described `:3735` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; `:3735`
     is `for prop in sorted(STORED_VECTOR_PROPS):`) and `:2715` as `placement_spellings()` (that function is
     the pin's `:1798`; `:2715` is `if k not in tail_denied})`). Nothing asserted them, so both could revert
@@ -255,9 +263,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "123 of this document's 210",
-        "dedupes the 316 as-written spellings to 210 — 106",
-        "316 written spellings → 210 pairs → 106 collisions → 123 drifters of the 210 comparable",
+        "123 of this document's 215",
+        "dedupes the 324 as-written spellings to 215 — 109",
+        "324 written spellings → 215 pairs → 109 collisions → 123 drifters of the 215 comparable",
         "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
@@ -269,15 +277,20 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     for falsified in (
         "`placement_spellings()` at the pin",
         "`MERGE (n:…) SET n += $props` at the pin",
-        # A SELF-INFLICTED one: an alternative counting basis was described as "±5 … 216 pairs … the
-        # numerator does not move — it is 124 under either basis". Measured, that basis gives 212 pairs and
-        # a numerator of 125; the basis that DOES give 216 gives 127. A reader following its instruction to
-        # compare the numerator would have concluded the correct 124 had rotted and "corrected" it by
-        # arithmetic — the offset-not-content failure, one level down. A number nobody measured is not a
-        # caveat; it is a claim.
-        "either basis",
-        "216 pairs",
+        # A SELF-INFLICTED one: an alternative counting basis was described as "±5 … the numerator does not
+        # move — it is 124 under either basis". Both halves are claims about MEASUREMENT, and both were
+        # asserted rather than measured: the basis-INVARIANCE is false (counting the two-code-span pair adds
+        # `cache_projection.py:2433`, a `main`-set address, so the numerator moves to 124 from 123), and "±5"
+        # names a fixed offset for a denominator that moves by whatever the counting decision moves it by. A
+        # reader told to compare numerators across bases would have "corrected" a correct figure by
+        # arithmetic — the offset-not-content failure, one level down.
+        # ⛔ The absence guard forbids the CLAIMS, not the numbers. `"216 pairs"` was in an earlier form of
+        # this tuple and it reds on CORRECT text the moment a later pass measures 216 pairs and says so —
+        # an over-block that reads as a finding. Guard the sentence a regression would restore, never a bare
+        # figure that a re-measurement may legitimately produce.
+        "does not move",
         "moves by ±5",
+        "under either basis",
     ):
         assert falsified not in text, (
             f"the header again describes an address by content it does not carry at the pin ({falsified!r}) "
@@ -350,7 +363,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    assert len(_PINS) == 44
+    assert len(_PINS) == 48
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
