@@ -1623,6 +1623,15 @@ class TestAMentionIsNotAnOccurrence:
             def __ne__(self, other):
                 return False
 
+            def __repr__(self):
+                # ⛔ A LYING `__repr__` on purpose (#13586 review, finding 1):
+                # `str.__str__` ignores it, which is WHY the rendering is the
+                # right primitive. Without this override the raw object and its
+                # rendering format identically, so the message assertion below
+                # passed for a message built from the RAW `event_kind!r` — i.e.
+                # it could not pin the normalisation it claims to pin.
+                return "<lying _Kind>"
+
             __hash__ = str.__hash__
 
         g = sdk._get_proj().g
@@ -1634,6 +1643,41 @@ class TestAMentionIsNotAnOccurrence:
         # …and the message names the kind that was REFUSED, not a `!r` the
         # subclass could have rewritten.
         assert "'meeting'" in message, message
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+        assert _stage(sdk, plan["id"])["stageId"] == PO.STAGE_SCHEDULED
+        assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
+
+    def test_a_NON_STRING_kind_cannot_slip_past_the_refusal(self, sdk):
+        """The non-`str` arm is REFUSED, not compared (#13586 review, finding 2).
+
+        `kind != OCCURRENCE_EVENT_KIND` on a non-`str` is that object's OWN
+        `__ne__`, so an object outside the `str` hierarchy — which the rendering
+        normalisation never touches — skipped the refusal and reached
+        `create_entity(eventKind=<object>)`, past `sdk.py`'s `if not eventKind`
+        guard (an instance is truthy). The inversion is the same one the `str`
+        subclass arms above close: a plan at terminal `held` with no occurrence
+        `:Event`, served by the read as *planned and never happened*. A guard
+        that asks a caller-supplied object whether it is the occurrence kind is
+        not a guard; `is_plan_kind` (:176) already fails CLOSED for a non-`str`.
+        """
+
+        class _NotAString:
+            """Outside `str` entirely, and lying in both directions."""
+
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held as a non-string liar")
+        with pytest.raises(ValueError) as exc:
+            PO.record_occurrence(sdk, plan["id"], event_kind=_NotAString())
+        message = str(exc.value)
+        assert "MENTION" in message and "create_entity" in message, message
         assert g.query(
             "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
             params={"p": plan["id"]}).result_set[0][0] == 0
@@ -1733,6 +1777,40 @@ class TestAMentionIsNotAnOccurrence:
         plan = PO.create_plan(sdk, "Held through the twin door")
         with pytest.raises(ValueError) as exc:
             PO.settle_plan(sdk, plan["id"], _AlwaysEqual(PO.STAGE_HELD))
+        message = str(exc.value)
+        assert "not a no-occurrence ending" in message, message
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+        cur = _stage(sdk, plan["id"])
+        assert cur["stageId"] == PO.STAGE_SCHEDULED
+        assert cur["isClosed"] is False
+        assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
+
+    def test_a_NON_STRING_stage_cannot_settle_a_plan(self, sdk):
+        """`settle_plan`'s non-`str` arm: refuse it, do not ask it (#13586 f2).
+
+        `stage not in (…)` on a non-`str` consults that object's own `__eq__`,
+        so a non-`str` liar is "contained" and the refusal never fires. The value
+        then reaches `advance_stage`, where a guard that only resolves `str`
+        parks a write behind a call it was supposed to refuse — the "a refused
+        call leaves nothing behind" rule the surrounding comments state twice.
+        Same rule as the `str`-subclass arm above and as `is_plan_kind` (:176).
+        """
+
+        class _NotAString:
+            """Outside `str` entirely; `__eq__` says it IS every ending."""
+
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held through the non-string door")
+        with pytest.raises(ValueError) as exc:
+            PO.settle_plan(sdk, plan["id"], _NotAString())
         message = str(exc.value)
         assert "not a no-occurrence ending" in message, message
         assert g.query(

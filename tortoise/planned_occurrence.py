@@ -668,7 +668,13 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
             else event_kind)
     # ⛔ BEFORE the resolve and before ANY write: a refused call leaves nothing
     # behind (the same rule the two `_owned`/collision guards below follow).
-    if kind != OCCURRENCE_EVENT_KIND:
+    # ⛔ A NON-`str` is REFUSED, never compared: `!=` on an arbitrary object is
+    # that object's OWN `__ne__`, so a non-`str` liar (`__ne__` → False) skipped
+    # this refusal and reached `create_entity(eventKind=<object>)` — the same
+    # inversion, one type-check away (#13586 review, finding 2). `is_plan_kind`
+    # (:176) already fails CLOSED for a non-`str`; this guard follows the same
+    # rule, and `!=` on a value now known to be an exact `str` is honest.
+    if not isinstance(kind, str) or kind != OCCURRENCE_EVENT_KIND:
         raise ValueError(
             f"Refused: `event_kind={kind!r}` cannot be the Event that "
             f"records an OCCURRENCE. This call's `{OCCURRENCE_REL}` link is the "
@@ -789,8 +795,12 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
     # (:648-651) and the exact inversion this refusal exists to make
     # unrepresentable (#13586 review, finding 1). Normalising ONCE means the
     # value CHECKED is the value MOVED.
+    # ⛔ The same NON-`str` arm as `record_occurrence` above: `not in` on an
+    # arbitrary object consults its own `__eq__`, so a non-`str` liar is
+    # "contained" and this refusal never fires (#13586 review, finding 2). Refuse
+    # it, rather than ask it.
     stage = str.__str__(stage) if isinstance(stage, str) else stage
-    if stage not in (STAGE_MISSED, STAGE_CANCELLED):
+    if not isinstance(stage, str) or stage not in (STAGE_MISSED, STAGE_CANCELLED):
         raise ValueError(
             f"Refused: {stage!r} is not a no-occurrence ending. WHAT TO DO: use "
             f"{STAGE_MISSED!r} or {STAGE_CANCELLED!r} here; if it DID happen, "
