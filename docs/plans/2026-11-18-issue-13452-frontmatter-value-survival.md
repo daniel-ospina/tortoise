@@ -155,7 +155,7 @@ merged dossier, so the mutant has to redden it.
    adopting one requires an explicit `UNMEASURED` entry with a reason; (ii) a character-level typo
    inside a quoted value is NOT a truncation
    and stays green — measured (M6), and claiming otherwise would be a false claim of coverage;
-   (iv) a deliberate trailing comment on an **affiliation** value will red (M18) — fail-closed, and the
+   (iii) a deliberate trailing comment on an **affiliation** value will red (M18) — fail-closed, and the
    remedy (quote the value) genuinely clears it, unlike the shapes review found where it did not.
 5. Update the module docstring (a new check 6) and the arm's docstring to say that **survival** is
    measured and by which checks, keeping #13432's non-vacuity note intact.
