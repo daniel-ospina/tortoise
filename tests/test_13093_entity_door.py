@@ -804,6 +804,54 @@ def _strip_sql_comments(sql: str) -> str:
     return "".join(out)
 
 
+def _mask_plain_literals(sql: str) -> str:
+    """Blank the CONTENTS of single-quoted literals that are not `EXECUTE`d DDL.
+
+    ⛔ A LITERAL THAT MERELY *MENTIONS* THE DDL MUST NOT MOVE THE PREMISE. This
+    corpus documents replaced DDL in `COMMENT ON … IS '…'` and `RAISE NOTICE`
+    prose (and writes DDL inside comments as house style), so a literal quoting
+    `DROP CONSTRAINT …` or the OLD `ADD CONSTRAINT … CHECK (…)` is exactly the
+    text a future migration is most likely to carry. Measured before this mask
+    existed: a `COMMENT ON CONSTRAINT … IS 'DROP CONSTRAINT <name>;'` cleared the
+    premise (false RED), and a real `DROP` followed by a `RAISE NOTICE` quoting
+    the historical `ADD CONSTRAINT … CHECK (…)` returned that expression — a
+    false GREEN, the class this whole reader exists for.
+
+    ⛔ AN `EXECUTE 'ALTER TABLE …'` LITERAL IS KEPT, because that IS the DDL: the
+    house style wraps conditional DDL in `DO $$ … EXECUTE '…' … $$`
+    (`20261025000001_record_tenancy_role_and_guc.sql:113,142`,
+    `20261023000002_blog_author_backfill_atomic.sql:91,109`). The test is the
+    token immediately before the opening quote.
+
+    ⚠️ POSITION-PRESERVING: contents become spaces (newlines kept), the quotes stay,
+    and the length never changes — so a caller can match on the masked text and
+    read the REAL expression back out of the original by the same span. `''`
+    escape pairs are masked as part of the contents, which is what keeps
+    `CHECK (node_key = 'a;b')` matchable and recoverable verbatim.
+    """
+    out = list(sql)
+    i, n = 0, len(sql)
+    while i < n:
+        if sql[i] != "'":
+            i += 1
+            continue
+        end = i + 1
+        while end < n:
+            if sql[end] == "'":
+                if sql[end + 1:end + 2] == "'":
+                    end += 2
+                    continue
+                break
+            end += 1
+        keep = sql[:i].rstrip().lower().endswith("execute")
+        if not keep:
+            for k in range(i + 1, min(end, n)):
+                if out[k] != "\n":
+                    out[k] = " "
+        i = end + 1
+    return "".join(out)
+
+
 def _effective_event_node_key_check(sql: str) -> str | None:
     """The `node_key = …` expression the record ENFORCES, or `None` if dropped.
 
@@ -860,22 +908,24 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     claimed to be covered; a migration written that way must update this reader
     deliberately.
 
-    ⚠️ A STRING LITERAL THAT MERELY *MENTIONS* THE DDL IS READ AS DDL. The DECL
-    body and the comment scanner are literal-aware, but the DROP / RENAME /
-    OWNER-GONE scan is not, because the `EXECUTE 'ALTER TABLE …'` case must be
-    read. So a `COMMENT ON CONSTRAINT … IS 'DROP CONSTRAINT …'`, a `RAISE NOTICE`
-    naming the DDL, or a function body returning it can move the premise it does
-    not touch — measured, and the `COMMENT ON` form reports a WRONG expression.
-    This is DECLARED, not fixed: masking literals would need a second view of the
-    text, which is the change class that produced the last four findings. It fails
-    toward a red, never toward a green the record would disprove.
+    ⚠️ A LITERAL THAT MERELY *MENTIONS* THE DDL CANNOT MOVE THE PREMISE: every
+    statement scan runs on text whose NON-`EXECUTE` literal contents are blanked
+    (`_mask_plain_literals`), so a `COMMENT ON … IS 'DROP CONSTRAINT …'` or a
+    `RAISE NOTICE` quoting the OLD expression is inert — while an `EXECUTE 'ALTER
+    TABLE …'` literal is still read, because that IS the DDL. ⚠️ The residual is
+    the flip side of that rule: DDL mentioned inside an `EXECUTE`d literal is read
+    as DDL, which is what makes the conditional-DDL house style work and is the
+    reason the two cases cannot be told apart by text alone.
 
     ⚠️ TWO LIMITS THIS READER DOES NOT MODEL, both stated rather than implied:
     a `$tag$`-quoted STRING is not distinguished from a dollar-quoted BODY, and
     an `E'…'` backslash escape is not modelled — so an apostrophe inside one
     (e.g. `RAISE NOTICE $m$don't$m$;`) flips the comment scanner's literal state
     for the rest of the file, which can make a COMMENTED-OUT statement read as
-    DDL (measured: false red). No record migration does either today.
+    DDL (measured: false red). No record migration has an apostrophe inside
+    either today — the two `E'…'` escapes that DO exist
+    (`20261102000002_record_point_search_keys_text.sql:139,143`, `E' \t\n\r\v\f'`)
+    contain none.
 
     ⚠️ It DOES model the premise dying or MOVING without a `DROP CONSTRAINT`: the
     table dropped, `node_key` dropped (which cascades the CHECK), the table or the
@@ -907,18 +957,26 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     # after a real drop returned the unenforced expression (a FALSE GREEN on
     # exactly the class this reader exists for).
     sql = _strip_sql_comments(sql)
-    for match in _EVENT_KEY_DROP_RE.finditer(sql):
+    # ⛔ ONE VIEW, POSITION-PRESERVING: every scan runs on the masked text, and the
+    # captured expression is read back out of the ORIGINAL by the same span, so a
+    # literal inside the expression survives verbatim while a literal that merely
+    # MENTIONS the DDL cannot move the premise.
+    masked = _mask_plain_literals(sql)
+    for match in _EVENT_KEY_DROP_RE.finditer(masked):
         events.append((match.start(), "drop", None, None))
-    for match in _EVENT_KEY_DECL_RE.finditer(sql):
-        events.append((match.start(), "decl", match.group("expr"), None))
-    for match in _EVENT_KEY_OWNER_GONE_RE.finditer(sql):
+    for match in _EVENT_KEY_DECL_RE.finditer(masked):
+        events.append((match.start(), "decl",
+                       sql[match.start("expr"):match.end("expr")], None))
+    for match in _EVENT_KEY_OWNER_GONE_RE.finditer(masked):
         events.append((match.start(), "drop", None, None))
-    for match in _EVENT_KEY_OWNER_MOVE_RE.finditer(sql):
-        moved = (f"table `public.event` -> `{match.group('table')}`"
-                 if match.group("table")
-                 else f"column `node_key` -> `{match.group('column')}`")
+    for match in _EVENT_KEY_OWNER_MOVE_RE.finditer(masked):
+        # ⛔ STRIP THE QUOTES: a quoted target (`RENAME TO "Event_V2"`) must report
+        # the name the DDL names, not `"Event_V2`.
+        target = (match.group("table") or match.group("column")).strip('"')
+        moved = (f"table `public.event` -> `{target}`"
+                 if match.group("table") else f"column `node_key` -> `{target}`")
         events.append((match.start(), "rename", moved, "owner-move"))
-    for match in _EVENT_KEY_RENAME_RE.finditer(sql):
+    for match in _EVENT_KEY_RENAME_RE.finditer(masked):
         old = match.group("old").strip('"').lower()
         new = match.group("new").strip('"').lower()
         if _EVENT_KEY_CONSTRAINT in (old, new):
@@ -1202,10 +1260,20 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
     mention = landed + (
         f"\nCOMMENT ON CONSTRAINT {_EVENT_KEY_CONSTRAINT} ON public.event\n"
         f"    IS 'DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};';\n")
-    assert _effective_event_node_key_check(mention) is None, (
-        "KNOWN LIMIT (declared in _effective_event_node_key_check): a literal "
-        "that MENTIONS a drop is read as a drop — the reader is expected to "
-        "answer `None` here, and if that changed, delete this arm")
+    assert _effective_event_node_key_check(mention) == _EVENT_KEY_CHECK, (
+        "a literal that MENTIONS a drop moved the premise — `COMMENT ON … IS` "
+        "and `RAISE NOTICE` prose is how this corpus documents DDL, so this is "
+        "the text a future migration is most likely to carry")
+    # ⛔ AND THE DANGEROUS DIRECTION: a real drop, then prose quoting the OLD
+    #     expression. Before the mask this returned the historical expression and
+    #     the row stayed GREEN while the record enforced nothing.
+    stale_prose = landed + (
+        f"\nALTER TABLE public.event DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        "DO $$ BEGIN RAISE NOTICE 'replaced " + _EVENT_KEY_CONSTRAINT + " "
+        f"CHECK {_EVENT_KEY_CHECK[1:-1]}'; END $$;\n")
+    assert _effective_event_node_key_check(stale_prose) is None, (
+        "prose quoting the OLD expression re-installed the premise after a real "
+        "drop — the record enforces nothing there, so the row must NOT stay green")
 
     #     ⛔ AND AN `EXECUTE`-WRAPPED MOVE MUST NOT SWALLOW THE LITERAL'S CLOSING
     #     QUOTE: the name atom is non-greedy, so a lookahead that omits `'` lets
@@ -1220,6 +1288,15 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
                      "RENAME TO event_v2'; END $$;\n")
     assert "event_v2'" not in str(excinfo.value), (
         f"the moved-to name carried the literal's quote — {excinfo.value}")
+
+    #     ⛔ AND A QUOTED TARGET REPORTS THE NAME, NOT THE QUOTES: `"Event_V2"` is
+    #     the same name as `Event_V2` (the constraint-name branch already strips),
+    #     so a diagnostic carrying `"Event_V2` names no DDL either.
+    with pytest.raises(AssertionError, match="MOVED the premise's owner") as qexc:
+        _effective_event_node_key_check(
+            landed + '\nALTER TABLE public.event RENAME TO "Event_V2";\n')
+    assert "`Event_V2`" in str(qexc.value) and '"Event_V2' not in str(qexc.value), (
+        f"the quoted target kept its quote — {qexc.value}")
 
     # 1i. A `CREATE TABLE` that declares the constraint as its LAST element: the
     #     body must stop at its OWN balanced close, not swallow the table's `)`.
