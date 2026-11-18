@@ -439,8 +439,13 @@ nine-prose/four-Cypher split are UNCHANGED by it (the added match is single-line
 `--check` cannot see them — its 25 pins are SCALARS, and an insertion is not a new statement — so
 re-cutting the appendix moves ROWS while every SCALAR stays put. Measured **on `9cebd72ad7`'s OWN
 TREE — both sides of the comparison at that one commit**, because a cut taken at a later head is a
-different pair and reproduces a different number (at this head the same comparison reads 746 rows /
-8 files, the three extra files being everything merged since): the appendix `main` carried there was
+different pair and reproduces a different number (at this head the same comparison reads **746 rows /
+8 files**, and it is NOT purely a renumbering: 744 of those rows are the same statement at a new
+`file:line`, and the remaining two are a row OUT and a row IN — `#13124` moved the object-signal
+adjacency read out of `StateRanker._fetch_object_signals` (still defined, now carrying no site) into a
+new `fetch_entity_signals`, leaving `tortoise/ranking.py` at five rows. Nor are the three extra files
+"everything merged since": `git diff --name-only 9cebd72ad7..HEAD -- tortoise/` lists **nine** files,
+four of which carry no statement row at all): the appendix `main` carried there was
 stale in **709 of its 1,311 rows**, over exactly five files — the same 1,311 statements, renumbered:
 
 | file | rows | shift |
