@@ -146,7 +146,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 7f4485763bc3298d52b85bc2b1ec427802f7b51e
+cut_at_commit: 0d5bb6506ff1c85e08ac8614816121a950579624
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1008,17 +1008,17 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 44
+  tools: 40
   sdk_public_methods: 105
-  retired: 64
+  retired: 68
   keyword_distribution:
     fetch: 9
     create: 8
     update: 5
-    delete: 4
+    delete: 2
     list: 4
-    find: 3
-    trace: 2
+    find: 2
+    trace: 1
     check: 5
     link: 2
     operate: 2
@@ -1085,6 +1085,16 @@ retired:
 - name: tortoise_create_subject
   use_instead: 'tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})'
   sdk_method: create_subject
+  http_policy: true
+  approval: null
+- name: tortoise_delete_entity
+  use_instead: tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)
+  sdk_method: delete_entity
+  http_policy: true
+  approval: null
+- name: tortoise_delete_point
+  use_instead: tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)
+  sdk_method: delete_point_wrapped
   http_policy: true
   approval: null
 - name: tortoise_diary_write
@@ -1186,6 +1196,11 @@ retired:
 - name: tortoise_invalidate
   use_instead: tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)
   sdk_method: invalidate_point
+  http_policy: true
+  approval: null
+- name: tortoise_issue_insight
+  use_instead: tortoise_search_knowledge(title=..., body=..., repo=..., mode="issue_insight")
+  sdk_method: issue_insight
   http_policy: true
   approval: null
 - name: tortoise_list_batch
@@ -1291,6 +1306,11 @@ retired:
   sdk_method: null
   http_policy: true
   approval: null
+- name: tortoise_session_context
+  use_instead: tortoise_check_confidence(session=True)
+  sdk_method: session_context
+  http_policy: true
+  approval: null
 - name: tortoise_set_point_baseline
   use_instead: tortoise_refresh_confidence(scope="baseline", point_id=..., alpha=..., beta=...)
   sdk_method: set_point_baseline
@@ -1353,59 +1373,6 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  # ⛔ PROVENANCE, not a value: `served_from` below is `main`'s cell, written by a re-cut — this
-  # diff does not re-stamp it (see the end of this block). It is recorded here because `main`'s copy
-  # of this file carries NO per-row rationale at all (a re-cut re-emits only `MANIFEST_HEADER`), so
-  # every fact below is one a later lane would otherwise have to re-derive from scratch.
-  #
-  # WHY THE CELL WENT STALE. `#13075` (`a09a0b3840`, "the currency rule reads the position axis")
-  # edited `def tortoise_query` IN PLACE — its diff is three hunks INSIDE the handler, four in the
-  # file, the fourth being the module-level `from tortoise.live import is_terminal_status` import,
-  # so that count is scoped to the handler and no reader should take it as the file's total.
-  # `served_from` is `_code_digest` of that handler's CODE OBJECT, so an edit inside it re-stamps
-  # the cell, and the row went stale: `surface_manifest.py check --provenance-strict` read it as a
-  # FAIL on `main` ITSELF — measured on pristine `main` worktrees at `55ec2c71b1` and at
-  # `3d437429e9` (the re-cut whose only changed file was `config/ci-surfaces.yml`, so it cannot
-  # reach this row): rc=1, the identical `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8`
-  # pair. Re-derive it with that command; never type a digest from memory.
-  #
-  # ⛔ THIS ROW WAS RE-CUT, NOT HAND-HELD, IN #11609 P2 — and that is why the block survived the
-  # cut instead of being lost with it. The confidence-arms batch GREW `tortoise_check_confidence`
-  # (the RECOMPUTE/RECALL arms, then the refusal that an arm-only argument names its arm), so the
-  # handler's code object changed and `served_from`/`served_attributes` genuinely moved: the
-  # `cut` below wrote the derived pair, exactly as "Derived files re-cut, never hand-edited" says
-  # to. What that cut also does — silently, by design — is delete this block along with every
-  # other per-row one, which is the ONLY thing this block exists to warn about. It is restored by
-  # hand because `cut` re-emits `MANIFEST_HEADER` alone; the cell above is the cut's, never typed.
-  #
-  # ⛔ A LATER `main` LANE RESTATED THIS AND GOT IT WRONG, so its block is folded into this one
-  # instead of being kept twice. `#13000`'s `980f271acc` added eleven lines here saying this row
-  # was "refreshed here to the value the tree derives" and quoting `at 55` tools as "unchanged" —
-  # but that commit changes no `served_from` line at all (the refresh was `#13052`'s `cut`, landed
-  # earlier the same morning), and `#13052` had ALREADY retired seven doors, so 55 was a door count
-  # behind on the day it was written and 44 is what `rows` carries now (#11609 P2's
-  # confidence arms retired two, the create-arms wave two more). Keeping both blocks would
-  # leave this file asserting a count its own `rows` does not have — which is exactly what
-  # `test_no_per_row_comment_quotes_a_stale_surface_count` reds on. The measurement it quoted is
-  # preserved rather than erased: a pristine `main` at `2390101f68` read the same recorded/derived
-  # pair this block already names two paragraphs up, so what is dropped here is the stale COUNT and
-  # the wrong verb, not the fact.
-  #
-  # A full `cut` is deliberately NOT run from a docs branch. It is NOT owner-only — `p_cut.add_
-  # argument("--commit", …)` carries no `required=True` and `build_doc` falls back to
-  # `git rev-parse HEAD`, and `cmd_cut` carries no identity check — but it is gated on the owner's
-  # approval DOCUMENT: `read_approval` reads `docs/product/canonical-mcp-tools.md` and `build_doc`
-  # REFUSES when that file is missing (`_frontmatter` raises `SurfaceEvidenceUnreadable`) or
-  # carries no `approval_status`. The operative reason here is narrower: a re-cut would delete this
-  # block to buy back a cell that is already correct on `main`.
-  #
-  # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the
-  # source and RE-RUN the generator (buf/protoc baselines and the mainstream codegen convention
-  # all state it, and it is the right default) — because this file's provenance is only
-  # re-derivable from the record beside the row: a `cut` deletes every per-row block, so "just
-  # regenerate it" would cost the WHY to re-buy a value the tree already agrees with. The VALUE is
-  # still never hand-derived — it is the digest `check --provenance-strict` compares. A reader
-  # holding the "always regenerate" page should put it down here, not "fix" this row by cutting.
   served_from: tortoise/mcp_server.py:59f8f7e5957d81d8
   served_attributes: 7a717e4e60ce3bfa
   family: memory
@@ -1625,41 +1592,12 @@ rows:
   recommendation: keep
   basis: observed
   reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: memory
-  proposed: true
+  recommended_family: null
+  proposed: false
   exemption: false
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_delete
-  cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
-- name: tortoise_delete_point
-  served_from: tortoise/mcp_server.py:8449e50d5d6790b4
-  served_attributes: e613762460869509
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: delete_point_wrapped
-  group_source: mapped
-  keyword: delete
-  keyword_rank: 4
-  cluster: delete
-  canonical: false
-  job: Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone. dry_run=True previews the blast
-    radius (the point and every edge that would be removed) and changes nothing.
-  dependency: declares TortoiseSDK.delete_point_wrapped (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_delete` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: memory
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_delete
-  cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_supersede_knowledge
   served_from: tortoise/mcp_server.py:b1b735e7c515c9cd
   served_attributes: 3b483f3ddfc755b7
@@ -1743,34 +1681,6 @@ rows:
   basis: observed
   reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
     that needs your judgement — I am not calling it fat on `never called` alone
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_issue_insight
-  served_from: tortoise/mcp_server.py:c00d1786ba538ea6
-  served_attributes: 432a3854a01085d8
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: issue_insight
-  group_source: mapped
-  keyword: find
-  keyword_rank: 6
-  cluster: null
-  canonical: null
-  job: 'Return a compact ''there''s more in the graph'' insight for a would-be issue — call BEFORE filing. Surfaces
-    cross-session decisions / EP-tagged claims matching the title (semantic stage) plus prior indexed issues for
-    the repo (repo= given). Fail-closed: empty graph -> no_prior_knowledge; populated graph + unindexed repo ->
-    repo_not_indexed.'
-  dependency: declares TortoiseSDK.issue_insight (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1963,34 +1873,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_delete_entity
-  served_from: tortoise/mcp_server.py:72d367c45cf4b38a
-  served_attributes: e353b3f25fb68584
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: delete_entity
-  group_source: mapped
-  keyword: delete
-  keyword_rank: 4
-  cluster: delete
-  canonical: false
-  job: Delete any entity by ID. DESTRUCTIVE — cannot be undone. dry_run=True previews the node(s) and every edge
-    that would be removed and changes nothing.
-  dependency: declares TortoiseSDK.delete_entity (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_delete` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: memory
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_delete
-  cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_adjust_relationship
   served_from: tortoise/mcp_server.py:64e520fa73e4c15e
   served_attributes: 9f46e051e33934f2
@@ -2317,31 +2199,6 @@ rows:
     reaches the store, and the response adds `changes` (per-claim before→after deltas), only while TORTOISE_CHANGE_FEED
     is enabled.'
   dependency: declares TortoiseSDK.poll_events (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_session_context
-  served_from: tortoise/mcp_server.py:5e1abe12c810e056
-  served_attributes: 734ca6ea44c83df3
-  family: sessions
-  family_rank: 4
-  served: http
-  sdk_method: session_context
-  group_source: mapped
-  keyword: trace
-  keyword_rank: 7
-  cluster: null
-  canonical: null
-  job: Return 'what happened last session' — diary entries, recent Points, Events, confidence changes.
-  dependency: declares TortoiseSDK.session_context (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -3303,11 +3160,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.delete_entity.
-  dependency: 'reached by 1 registered tool(s): tortoise_delete_entity'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_delete_entity (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3395,11 +3252,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.delete_point_wrapped.
-  dependency: 'reached by 1 registered tool(s): tortoise_delete_point'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_delete_point (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3879,11 +3736,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.issue_insight.
-  dependency: 'reached by 1 registered tool(s): tortoise_issue_insight'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_issue_insight (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4685,11 +4542,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.session_context.
-  dependency: 'reached by 1 registered tool(s): tortoise_session_context'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_session_context (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
