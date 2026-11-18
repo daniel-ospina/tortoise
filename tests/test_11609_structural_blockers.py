@@ -88,6 +88,54 @@ REST_SPEC_DOORS = {
     "tortoise_search": ("/v1/search"),
 }
 
+#: A hand-written route decorator: `@app.get("/v1/search")` / `@router.post("/context")`.
+#: Shared by the text reading and the AST reading so the two cannot disagree on what a
+#: "declared route" is — an AST arm that matches nothing is a SKIP, not a pass.
+_DECORATOR = re.compile(r'^\s*@(?:app|router)\.(get|post|put|patch|delete)\(\s*"([^"]+)"')
+
+#: The app modules that serve `REST_SPEC_DOORS`. ⛔ The mount prefix is READ from each module
+#: (`_declared_prefix`), never hard-coded: `hosted_api` mounts at the full path while
+#: `selfhost_api`'s router carries `prefix="/v1"` (`selfhost_api.py:28`) and spells only the
+#: suffix. A hard-coded prefix is the way a module-sized hole opens silently — change one app's
+#: prefix (or its decorators' spelling) and its arm matches nothing while the other app keeps a
+#: shared `assert found` non-empty, so the whole handler-body loop for that module never runs.
+def _serving_modules():
+    from tortoise import hosted_api, selfhost_api
+
+    return (hosted_api, selfhost_api)
+
+
+def _declared_prefix(app_module) -> str:
+    """The `APIRouter(prefix=…)` the module declares, or `""` for a full-path `app`."""
+    match = re.search(
+        r'APIRouter\(\s*prefix\s*=\s*["\']([^"\']+)["\']',
+        inspect.getsource(app_module))
+    return match.group(1) if match else ""
+
+
+def _declared_route_paths(app_module, method: str) -> set[str]:
+    """Every absolute path the module's SOURCE declares for `method`.
+
+    BOTH spellings are admitted — the literal decorator argument and that argument under the
+    module's declared prefix — because the two are the same route and an app may switch from
+    one convention to the other. Admitting only the convention it uses TODAY would turn a
+    legitimate spelling change into an arm that silently measures nothing.
+    """
+    prefix = _declared_prefix(app_module)
+    paths: set[str] = set()
+    for line in inspect.getsource(app_module).splitlines():
+        match = _DECORATOR.match(line)
+        if match and match.group(1).upper() == method.upper():
+            paths.add(match.group(2))
+            paths.add(prefix + match.group(2))
+    return paths
+
+
+def _declares_route(app_module, method: str, path: str) -> bool:
+    """Does the module's SOURCE declare a hand-written `method path` decorator?"""
+    return path in _declared_route_paths(app_module, method)
+
+
 #: All nine `NO_CONTAINER_YET` destinations. A `tenancy:`/`sdk:` prefix is not an MCP door.
 NO_CONTAINER_DESTINATIONS = {
     "tortoise_delete": "delete_knowledge",
@@ -347,20 +395,11 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, path):
     # on a comment (`hosted_api.py:5568` is `# ... @app.post("/v1/context") ...`) and on a
     # DIFFERENT operation sharing the path with another verb (`:37939` is a POST where this
     # row is GET), and on the self-hosted `volunteer_context` POST (`selfhost_api.py:480`).
-    pattern = re.compile(
-        r'^\s*@(?:app|router)\.(get|post|put|patch|delete)\(\s*"([^"]+)"')
-
-    def served(app_module, prefix: str) -> bool:
-        for line in inspect.getsource(app_module).splitlines():
-            match = pattern.match(line)
-            if (match and match.group(1).upper() == entry.rest_spec.method
-                    and prefix + match.group(2) == path):
-                return True
-        return False
-
     # `hosted_api` mounts at the full path; `selfhost_api`'s router carries a `/v1` prefix
-    # (`selfhost_api.py:28`) and spells the suffix.
-    assert served(hosted_api, "") or served(selfhost_api, "/v1"), (
+    # (`selfhost_api.py:28`) and spells the suffix — both are read from the module, never
+    # assumed (see `_declared_route_paths`).
+    assert any(_declares_route(module, entry.rest_spec.method, path)
+               for module in _serving_modules()), (
         f"{path} is not served by a hand-written {entry.rest_spec.method} decorator in "
         f"{hosted_api.__name__} or {selfhost_api.__name__} — if the route is really gone, "
         "this pin's premise changed")
@@ -426,13 +465,15 @@ def _rest_spec_use_outside_the_adapter(source: Path) -> list[int]:
 
 # ── what the SERVING HANDLER does — the other half of S3's premise ───────────
 
-def _handler_asts(app_module, method: str, prefix: str, path: str) -> list:
+def _handler_asts(app_module, method: str, path: str) -> list:
     """The AST of every function `app_module` decorates to serve `method path`.
 
     The SAME predicate the pin above states in text — a DECORATOR node, the row's own
-    METHOD, and the decorator's own literal argument under the module's real prefix — so a
-    comment or a look-alike route on another verb cannot satisfy it.
+    METHOD, and the decorator's own literal argument under EITHER the module's declared
+    prefix or the full path as spelled — so a comment or a look-alike route on another verb
+    cannot satisfy it, and a spelling change cannot make it silently match nothing.
     """
+    prefix = _declared_prefix(app_module)
     tree = ast.parse(inspect.getsource(app_module))
     found = []
     for node in ast.walk(tree):
@@ -445,7 +486,7 @@ def _handler_asts(app_module, method: str, prefix: str, path: str) -> list:
                 continue
             arg = dec.args[0] if dec.args else None
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
-                    and prefix + arg.value == path:
+                    and (arg.value == path or prefix + arg.value == path):
                 found.append(node)
                 break
     return found
@@ -490,19 +531,31 @@ def test_the_serving_handler_reaches_the_sdk_not_the_mcp_door(door, path):
       · the body DOES reach the SDK object (`sdk.<method>`), which is what makes the route
         independent of the MCP surface.
     """
-    from tortoise import hosted_api, selfhost_api
-
     entry = _live().get(door)
     assert entry is not None and entry.rest_spec is not None, (
         f"{door} is not advertised with a `rest_spec` — re-derive this pin")
     method = entry.rest_spec.method
 
-    found = [(module, node)
-             for module, prefix in ((hosted_api, ""), (selfhost_api, "/v1"))
-             for node in _handler_asts(module, method, prefix, path)]
+    found = []
+    for module in _serving_modules():
+        # ⛔ `assert found` alone is an AGGREGATE check: a module whose prefix or decorator
+        # shape drifted contributes zero nodes while the other module keeps the aggregate
+        # non-empty, so the whole `door not in body` / `TOOL_REGISTRY` / `_sdk_attributes`
+        # loop for that module never runs and nothing notices. Measured convention: the two
+        # apps really do differ (`hosted_api` spells the full path, `selfhost_api` prefixes
+        # `/v1`), which is exactly how a silent, module-sized hole would open.
+        nodes = _handler_asts(module, method, path)
+        if _declares_route(module, method, path):
+            assert nodes, (
+                f"`{module.__name__}` DECLARES a hand-written {method} {path} decorator but "
+                "the AST reading found no handler for it — the reader went blind (decorator "
+                "shape, an alias other than `@app`/`@router`, or a multi-line decorator), so "
+                "this module's handler body was never examined. That is a skip, not a pass")
+        found.extend((module, node) for node in nodes)
     assert found, (
-        f"no hand-written {method} decorator serves {path} in `hosted_api` or "
-        "`selfhost_api` — this pin's premise changed and S3 must be re-derived")
+        f"no hand-written {method} decorator serves {path} in "
+        f"{', '.join(f'`{m.__name__}`' for m in _serving_modules())} — this pin's "
+        "premise changed and S3 must be re-derived")
 
     for module, node in found:
         where = f"{module.__name__}:{node.name}"
@@ -543,13 +596,23 @@ def test_the_sdk_edge_reading_is_not_vacuous():
 
     # …and the same reading DOES find the SDK edge on the REAL serving handler, which is what
     # keeps the mutant's RED from being an artefact of the measurement.
-    from tortoise import hosted_api
+    from tortoise import hosted_api, selfhost_api
 
-    real = _handler_asts(hosted_api, "GET", "", "/v1/issue-insight")
+    real = _handler_asts(hosted_api, "GET", "/v1/issue-insight")
     assert real and _sdk_attributes(real[0]), (
         "the real `/v1/issue-insight` handler reaches no `sdk.<method>` — either it moved "
         "onto the MCP door (S3's premise gone) or the reading broke")
     assert "tortoise_issue_insight" not in _body_source(real[0])
+
+    # …and on BOTH serving modules, not the first one that answers: `selfhost_api` serves
+    # `/v1/search` under its own `/v1` router prefix, so it is the arm a prefix-only reading
+    # loses first. Without this, a reading that found nothing at all in the second module
+    # would still be reported as "the reading works" by the assertion above.
+    selfhost = _handler_asts(selfhost_api, "GET", "/v1/search")
+    assert selfhost and _sdk_attributes(selfhost[0]), (
+        "the self-hosted `/v1/search` handler reaches no `sdk.<method>` under its `/v1` "
+        "prefix — the per-module reading is blind to the prefixed app, which is the arm "
+        "that lets a module-sized hole open silently")
 
 
 def test_register_all_would_derive_the_route_from_the_row():
