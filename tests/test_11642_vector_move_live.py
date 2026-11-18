@@ -796,3 +796,96 @@ def test_the_two_fingerprints_are_columns_on_object_and_subject(tenant):
                 "        'fp-object-tail', '{\"embedding\": [0.0]}'::jsonb)",
                 (ORG, GRAPH))
         assert "chk_object_props_no_derived" in str(excinfo.value), excinfo.value
+
+
+# ── a parked handle must not outlive a MIGRATION pass ──────────────────────
+#
+# The pool parks the READ door's handle IN TRANSACTION **on purpose** (its reset
+# is at REUSE, not at release — `record_writer._park_connection`), so a parked
+# handle holds an `AccessShareLock` on every record table that read touched until
+# its transaction ends. The bound for that is SERVER-side
+# (`IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`, 60 s) — which does NOT bound a
+# `CREATE POLICY`: the migration's `AccessExclusiveLock` is refused by the parked
+# `AccessShareLock` immediately, and the migration's own connection is the one
+# that waits. `_ensure_record_schema` is that migration pass, and it runs in
+# `test_12894_record_cursor_live.py`'s module fixture AFTER this file has served
+# `object`/`subject` reads — so the two sessions are the SAME test process.
+#
+# MEASURED at `0f153899` (#13466): the `test-record-postgres` leg reds with
+# `psycopg2.errors.DeadlockDetected` at `test_12894_record_cursor_live.py`'s
+# setup for ALL 43 of its tests (CI run 44306051806, and reproduced twice
+# locally on a fresh `pgvector/pgvector:pg16`), while a clean `origin/main` tree
+# on the same image passes 3/3. `origin/main` never reaches this shape because
+# `object`/`subject` answered `None` before any statement ran — this PR is what
+# makes the fold read the record on those labels.
+
+
+def _parked_record_sessions(dsn: str) -> list[int]:
+    """The process's OTHER sessions left `idle in transaction` holding record locks.
+
+    Deliberately keyed on the SERVED state rather than on the pool's internals: a
+    handle is dangerous exactly when the server says it is idle inside a
+    transaction that still holds relation locks, whatever the client thinks.
+    """
+    psycopg2 = pytest.importorskip(
+        "psycopg2", reason="psycopg2-binary is the record's driver")
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT a.pid FROM pg_stat_activity AS a "
+                "  JOIN pg_locks AS l ON l.pid = a.pid "
+                "  JOIN pg_class AS c ON c.oid = l.relation "
+                "  JOIN pg_namespace AS n ON n.oid = c.relnamespace "
+                "WHERE a.pid <> pg_backend_pid() "
+                "  AND a.datname = current_database() "
+                "  AND a.state LIKE 'idle in transaction%' "
+                "  AND l.granted AND l.locktype = 'relation' "
+                "  AND n.nspname = 'public' "
+                "ORDER BY a.pid")
+            return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def test_the_migration_pass_releases_a_parked_handle_before_it_applies_DDL(tenant):
+    """The migration pass must not leave a parked handle holding record locks.
+
+    Non-vacuous by construction: the leading assertion refuses to pass unless the
+    read really left a parked handle, so the pin cannot silently stop witnessing
+    anything if the pool's parking behaviour changes.
+    """
+    from tests.test_9078_record_written_by_production_path import _ensure_record_schema
+
+    _seed_semantic(tenant, "Object", "o_13422_parked", embedding=_vec(7))
+    rows = _search_vec("object", hot=7, limit=10)
+    assert [row[0] for row in rows] == ["o_13422_parked"], rows
+
+    dsn = os.environ[RECORD_DB_ENV]
+    parked = _parked_record_sessions(dsn)
+    assert parked, (
+        "the dense read left NO handle parked idle in transaction, so the "
+        "assertion below cannot witness anything — the pool's parking has "
+        "changed and this pin must be re-derived, not deleted")
+
+    # ⛔ A BOUND ON THE PASS ITSELF, not a wall-clock reading: the parked
+    # handle's transaction is ended by the SERVER after 60 s
+    # (`IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`), so without a `lock_timeout` this
+    # test would merely take a minute and then pass — and a minute of blocking
+    # DDL is the same defect one `deadlock_timeout` away from the `DeadlockDetected`
+    # the leg actually reports. 10 s is far above what an uncontended `CREATE
+    # POLICY` on an empty table costs and far below the 60 s the parked
+    # transaction would otherwise hold.
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute("SET lock_timeout = '10s'")
+    _ensure_record_schema(conn)
+
+    remaining = _parked_record_sessions(dsn)
+    assert not remaining, (
+        "a record read's parked handle survived the migration pass: it still "
+        f"holds AccessShare locks on the record tables (pids {remaining}), and "
+        "the pass's `CREATE POLICY` takes AccessExclusive on those same tables "
+        "— which is the `DeadlockDetected` that reds the whole "
+        "`test_12894_record_cursor_live.py` module (#13466)")
