@@ -1717,6 +1717,19 @@ surfaces:
   # other two arms of the same ownership; cross-surface registration is deliberate, while a
   # SECOND row within one surface is what `--integrity` reds.
   - test_13224_cold_embedder_write_bound.py
+  # #13528: the READ-side twin of the #13224 row above — a read must not spend its
+  # budget acquiring a COLD embedder (`EmbeddingModel.await_read_ready_reason`, called
+  # from `sdk.tortoise_fts_query`, which is what `/v1/search` and `POST /v1/context`
+  # reach through `hosted_api._read_offload` on the 8-worker read lane). Measured
+  # pre-fix on this file's own lane: `embed_get` 7857.3 ms of an 8.0 s load, i.e. the
+  # whole one-time load charged to a read. This row is the `api` OWNERSHIP record,
+  # not the leg trigger: `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERNS
+  # match that REPLACES the `core` fallback, and the file is a `carve_out:` member, so
+  # `select()` subtracts it from `test_files` and the carve-out job runs it — the same
+  # classification-vs-selection distinction the #13224 row records. Cross-surface
+  # registration is deliberate (`core` = the projection fold arm, `eval` =
+  # `tortoise/embeddings.py`); a SECOND row within one surface is what `--integrity` reds.
+  - test_13528_read_never_blocks_on_embedder.py
   # #13417: the DERIVED-entity write's own omission counter. This row is the `api`
   # OWNERSHIP record and its justification is the MODULE it grades, not a claim
   # about the door it drives: the loop builds a real fold in
@@ -3502,6 +3515,13 @@ surfaces:
   # `core` row is what makes `--integrity` classify the file at all. The `eval` row is the
   # `tortoise/embeddings.py` arm and the `api` row the hosted-door arm.
   - test_13224_cold_embedder_write_bound.py
+  # #13528: the READ-side acquisition bound. `core` is the
+  # `tortoise/read_stages.py` / `tortoise/projection` arm of the same ownership triple
+  # (#13224 above records the shape): the stage assertions this file carries grade the
+  # instrument in `read_stages.py`, which matches no named SOURCE_PATTERN and therefore
+  # selects `core` by fallback. It is not the leg trigger (`carve_out:` is), it is what
+  # makes `--integrity` classify the file at all.
+  - test_13528_read_never_blocks_on_embedder.py
   # #13417 (fresh-context review HIGH, PR #13430): the VECTORLESS-ROW observation and the repair
   # loop it feeds. `core` is the `tortoise/monitoring.py` arm — that module matches no named
   # SOURCE_PATTERN and therefore selects `core` by fallback, and it owns the counter's family name
@@ -10263,6 +10283,13 @@ surfaces:
   # classification-vs-selection distinction those rows record. Same module as
   # `test_dod_5090_probe.py` directly above, which pins its `encode_for_row` seam census.
   - test_13224_cold_embedder_write_bound.py
+  # #13528: the READ bound's own module. `tortoise/embeddings.py` is an EXACT `eval`
+  # SOURCE_PATTERNS match (the #3359 row in `tools/ci_selection.py`), so an
+  # `embeddings.py`-only diff resolves to `eval` and REPLACES the `core` fallback — this
+  # row records that `await_read_ready_reason` is an `eval`-surface subject, exactly as
+  # the #13224 row above does for `await_write_ready_reason`. Same module as
+  # `test_13224_cold_embedder_write_bound.py` directly above.
+  - test_13528_read_never_blocks_on_embedder.py
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
   # `tortoise/**`, and `tortoise/cross_lens.py` / `embeddings.py` select `eval`,
@@ -11537,6 +11564,15 @@ carve_out:
 # #8488/#10122 rows above document (a `core`-only registration would make the manifest green
 # and run NOTHING on a docker leg).
 - test_13224_cold_embedder_write_bound.py
+# #13528: the READ bound — a read must not wait for a COLD embedder; the vector leg is
+# declined inside `READ_EMBED_BUDGET_S` and the reason (`load_timeout`) is recorded on
+# the leg trace. Embedded-lane by design: every case builds a `TortoiseSDK(<tmp_path>)`
+# path store and the cold-window assertions compare against the simulated load, so a
+# URI-set lane would redirect the construction and grade the server's already-warm
+# embedder — measuring nothing. Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS and
+# DECLARED in tests/test_markers.py::test_no_redirect_stems_registry_exact — the
+# three-way mirror the #13224 rows above document.
+- test_13528_read_never_blocks_on_embedder.py
 - test_precision_leak_4028.py  # #4028: the surface half asserts embedded brute-force floor semantics
 - test_graph_integrity_gate.py
 - test_per_session_census.py
