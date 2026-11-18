@@ -1367,6 +1367,85 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         assert not flagged(line), f"the class check is a false positive on: {line!r}"
 
 
+#: The one deferral `STORAGE-ARCHITECTURE.md` must never again state as a STATUS:
+#: the anchored-read cutover's.
+#:
+#: WHY THIS IS NOT AN ARM ON THE CLASS CHECK. `_STATUS_WORDS` / `_STATUS_LOWER`
+#: are the delivery-state vocabulary, and `DEFERRED` is deliberately not in
+#: either — the document legitimately defers TWO other things (the
+#: stored-vs-derived edge question, owner ruling 2026-09-23; and `#9213`'s
+#: restore-reason lane), so a bare `DEFERRED` arm would red on correct content,
+#: which is the noisy half of "dead or noisy". What is wrong is not the WORD; it
+#: is the word attached to THIS cutover. So the arm is scoped to the subject.
+#:
+#: NON-VACUITY is asserted in the test below and was measured against the
+#: pre-fix revision: the retired §2.0 sentence (*"`#7970`'s anchored-read
+#: cutover therefore stays DEFERRED by §2.0"*, present at `f392d513`) fires the
+#: FIRST alternative. Note it spans a line break in the document — the class
+#: check's arms are per-line (`[^.\n]`), which is one reason they could not have
+#: carried this shape even if `DEFERRED` were in their vocabulary.
+_DEFERRED_CUTOVER = re.compile(
+    r"\b(?:anchored[- ]read|cutover)\b[^.]{0,80}?\bDEFERRED\b"
+    r"|\bDEFERRED\b[^.]{0,80}?\b(?:anchored[- ]read|cutover)\b",
+    re.IGNORECASE,
+)
+
+
+def test_the_storage_document_does_not_defer_the_anchored_read_cutover():
+    """`STORAGE-ARCHITECTURE.md` §2.0 states the cutover; it does not defer it.
+
+    The 2026-11-07 split recorded the cutover as *"`#7970`'s anchored-read
+    cutover therefore stays DEFERRED by §2.0"*; the owner rescinded that
+    deferral on 2026-11-18 (`#7970` comment `6965853268`), and `#8542` moved the
+    record of the move to `STORAGE-ARCHITECTURE-CHANGELOG.md`. The class guard
+    above could not see it: `DEFERRED` is not in its state vocabulary, and its
+    arms are per-line while the retired sentence wraps. Measured at the pre-fix
+    head (`f392d513`), the class check was green with that sentence in the
+    document.
+
+    The arm is subject-scoped on purpose, so it does NOT red on the document's
+    two legitimate deferrals — the stored-vs-derived edge question (owner ruling
+    2026-09-23) and `#9213`'s restore-reason lane — which is the whole content of
+    the scoping and the reason a bare `DEFERRED` arm was refused.
+
+    A pointer to the rescission is fine and expected; a repeated status claim is
+    not, in either word order, which is the same order-symmetry the class check's
+    `_STATUS_ADJACENT` carries.
+    """
+    text = STORAGE.read_text(encoding="utf-8")
+    offenders = [
+        f"STORAGE-ARCHITECTURE.md:{text[:match.start()].count(chr(10)) + 1}: {match.group(0)!r}"
+        for match in _DEFERRED_CUTOVER.finditer(text)
+    ]
+    assert not offenders, (
+        "§2.0 states the anchored-read cutover as the ARMED capability it is; a "
+        "DEFERRED status for it is the claim the owner rescinded on 2026-11-18, and "
+        "the record of the move belongs in STORAGE-ARCHITECTURE-CHANGELOG.md:\n  - "
+        + "\n  - ".join(offenders)
+    )
+
+    # NON-VACUITY — the arm fires on the retired sentence, verbatim, including the
+    # line break the document carried it across.
+    assert _DEFERRED_CUTOVER.search(
+        "the 2026-11-07 split recorded here as *\"`#7970`'s anchored-read\n"
+        "cutover therefore stays DEFERRED by §2.0\"* — rescinded by the owner"
+    ), "the pin no longer fires on the pre-fix §2.0 sentence it was written against"
+    # …and in the other order, which `_STATUS_ADJACENT` also pins for its own class.
+    assert _DEFERRED_CUTOVER.search(
+        "The cutover is DEFERRED until the record serves every label."
+    ), "the pin does not fire on the state-word-first order"
+
+    # NOT NOISY — the document's two legitimate deferrals, and the armed statement.
+    for ok in (
+        "**The stored-vs-derived question is DEFERRED to post-launch, not left open.**",
+        "disclosed as DEFERRED to `#9213`, not claimed truthful.",
+        "**The anchored-read cutover is ARMED, and it is this ruling's second half:**",
+    ):
+        assert not _DEFERRED_CUTOVER.search(ok), (
+            f"the pin is a false positive on ordinary deferral prose: {ok!r}"
+        )
+
+
 CHANGELOG = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE-CHANGELOG.md"
 
 

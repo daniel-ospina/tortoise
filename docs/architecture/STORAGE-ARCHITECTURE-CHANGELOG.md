@@ -2554,9 +2554,17 @@ completeness through private-beta (bounded after the search doc's M2), self-host
 opposed to its measurement). None of them is this cutover, and collapsing them into one status would be the opposite
 of the fix.
 
-**Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (15) — the class guard that now scans
-`STORAGE-ARCHITECTURE.md` for issue-state claims, change narration and delivery state, so a reintroduced
-*"stays DEFERRED"* reds rather than reading as prose. `tests/test_extractor_v4_doc_citations.py` and
+**Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (16) — the class guard that scans
+`STORAGE-ARCHITECTURE.md` for issue-state claims, change narration and delivery state. ⚠️ **Read its coverage
+exactly: that vocabulary does NOT include a bare *"stays DEFERRED"*.** `DEFERRED` is deliberately outside
+`_STATUS_WORDS`/`_STATUS_LOWER` because this document legitimately defers two other things (the stored-vs-derived
+edge question, owner ruling 2026-09-23; and `#9213`'s restore-reason lane), so a `DEFERRED` arm would red on correct
+content — and the class check's arms are per-line, while the retired sentence wrapped. What pins this shape is
+therefore a separate subject-scoped arm, added by this change:
+`::test_the_storage_document_does_not_defer_the_anchored_read_cutover`, which ties `DEFERRED` to *this* cutover in
+both word orders and carries a non-vacuity fixture on the retired sentence. **It reds on the pre-fix text
+(`f392d513`) and is green here, so this shape is now guarded rather than merely absent.**
+`tests/test_extractor_v4_doc_citations.py` and
 `tests/test_extractor_v4_step_list_consistency.py` (37 together with the above), and the ten doc-cite files that read
 this document (`tests/_cite_resolution.py`, `tests/test_10191_record_move_doc_pin.py`,
 `tests/test_10853_session_source_prose.py`, `tests/test_7948_about_object_read_sites.py`,

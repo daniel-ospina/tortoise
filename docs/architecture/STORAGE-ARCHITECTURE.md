@@ -130,22 +130,25 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > the unarmed path) · **`prefer`** (the record first, with a NAMED and COUNTED cache fallback) · **`record`** (the record
 > only, where an unreachable record raises instead of reading as an absence). It is parsed once in
 > `tortoise/record_serve.py::serve_mode` and consumed at every door that serves an anchored read — `GET /v1/points/{id}`
-> and `TortoiseSDK.get_point`'s `served_out` form (which is what the MCP `tortoise_get_point` door calls), the bare
-> by-id entity door (`tortoise_get_entity` → `TortoiseSDK.get_entity`, `#13093`), and the residency router's
-> `node-by-key` repair — each through `record_serve`. The set is enumerated in `record_serve.ANCHORED_READS`, with its
-> exclusions and their reasons beside them, so this paragraph names no door the module does not. **`prefer` is the mode
+> and the point door `TortoiseSDK.get_point`'s `served_out` form (reached by the MCP typed door
+> `tortoise_get_entity(id, type="point")` — `tortoise_get_point` is that door's RETIRED alias — and by the operator
+> door), and the bare by-id entity door (`tortoise_get_entity` → `TortoiseSDK.get_entity`, `#13093`) — each through
+> `record_serve`, via its two serving entry points `serve_point` and `serve_entity`. The set is enumerated in
+> `record_serve.ANCHORED_READS`, with its exclusions and their reasons beside them; ⚠️ **that registry also carries
+> `node-by-key` as a SERVED CAPABILITY with no consumer wired yet** — its entry's own reason says so, and
+> `residency_router.route_for_coordinate`, which mints the coordinate a `fetch-record` repair is handed, has no
+> non-test caller — so that capability is named there and is not a door here. **`prefer` is the mode
 > that MEASURES the migration** — every answer names the store that produced it (`servedFrom` / `fallbackReason`) — and
 > it is the mode armed in production; **`record` follows that count**, never a date. The epic's
 > `08-hosted-prerequisites.md` §0.1 and N1 state the same, and `docs/architecture/SEARCH-ARCHITECTURE.md` also
 > **resolves V1** (§14.3).
 >
-> **OVERRIDES:** the deferral of this cutover, which the 2026-11-07 split recorded here as *"`#7970`'s anchored-read
-> cutover therefore stays DEFERRED by §2.0"* — rescinded by the owner on 2026-11-18 (`#7970` comment
-> [`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268)): the constraint the
-> deferral protected — *not forcing the ordinary read path to parse both stores* — is satisfied by the built cutover
-> itself, so keeping it deferred protects nothing. **The destination is unchanged** (2026-10-08: Postgres is the system
-> of record, FalkorDB a derived hot cache); only the timing moves, and it moves the direction that ruling already
-> chose — *the split happens BEFORE the first customer, because migration cost scales with customer count.*
+> ℹ️ The deferral recorded by the 2026-11-07 split is rescinded, and the record of why it was and what supersedes it —
+> the `OVERRIDES:` line and its reasoning — is `#7970` comment
+> [`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268) and this file's
+> **2026-11-18** entry in `STORAGE-ARCHITECTURE-CHANGELOG.md`. **The destination is unchanged** (2026-10-08: Postgres
+> is the system of record, FalkorDB a derived hot cache); the split happens BEFORE the first customer, because
+> migration cost scales with customer count.
 >
 > **NARROWED — "keep the limit in falkor high":** the cache stays **complete through private-beta**, and becomes a **bounded
 > window only after the search doc's M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9 — a DIFFERENT M2 from §15's invoice measurement), sized by the tier's 30 %-of-price cost budget (a complete graph's **total** is \$11.01/tenant — 193 %, and its RAM line **alone** is \$8.75 — against a
@@ -1649,8 +1652,9 @@ follows is the evidence each ruling rests on, which is design.
 > only after the search doc's M2 measures retrieval quality (`SEARCH-ARCHITECTURE.md` §1.5, §9). **The anchored-read
 > cutover — the ordinary point read served from Postgres — is ARMED**, and it is not a third thing:
 > `TORTOISE_RECORD_SERVE` selects `off` / `prefer` / `record` (`record_serve.MODES`), `prefer` is the mode armed in
-> production because it is the one that measures the migration, and `record` follows that count (§2.0's marker carries
-> the `OVERRIDES:` line for the rescinded deferral).
+> production because it is the one that measures the migration, and `record` follows that count (§2.0 states the armed
+> status; the `OVERRIDES:` line for the rescinded deferral and its reasoning are on `#7970` comment `6965853268` and in
+> this file's 2026-11-18 entry in `STORAGE-ARCHITECTURE-CHANGELOG.md`).
 
 **FalkorDB stays hosted, and there is still no engine rewrite. What changes is its ROLE:**
 
