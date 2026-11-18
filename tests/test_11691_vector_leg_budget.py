@@ -1151,3 +1151,54 @@ def test_the_destructive_warning_names_the_width_the_ddl_actually_builds():
         assert f"{width} columns in public.{table}" in message, (
             f"the refusal does not state the derived width of public.{table} "
             f"({width} columns): {message}")
+
+
+def test_each_arm_divides_by_its_own_statement_count_plus_the_reserve():
+    """⛔ THE DIVISOR IS NOT THE STATEMENT COUNT (`#13466` cycle 6, P2).
+
+    `RECORD_LEG_STATEMENTS_PER_READ` and `FOLD_ARM_DIVISOR` are DIVISORS: the data
+    statements an arm issues PLUS the one share left for the graph branch. The two
+    numbers are different, and conflating them is the defect `#13466` cycle 4
+    fixed — a divisor equal to the count spends the whole read and hands the graph
+    branch a floored ``1 ms``.
+
+    Pinned as a RELATIONSHIP against written-literal counts, not as bare values.
+    `LEG_STATEMENT_MS` above derives its expectation FROM the constant, so raising
+    the constant (3 -> 4) would rewrite that expectation and stay green; measured
+    by the cycle-6 reviewer as the reason the prose claim was unpinnable. These
+    assertions red instead, in both directions: shrink a count and the divisor
+    stops leaving a share; grow the divisor and the shapes stop agreeing.
+
+    The two arms must also stay DISTINCT — a folded label issues one statement more
+    than a column-filtered one (its second prefetch), so one divisor cannot serve
+    both.
+    """
+    column_statements = record_vector.COLUMN_ARM_STATEMENTS
+    folded_statements = record_vector.FOLD_ARM_STATEMENTS
+
+    assert column_statements + 1 == record_vector.RECORD_LEG_STATEMENTS_PER_READ, (
+        "the column arm's divisor must be its statement count plus the graph's "
+        "reserve share")
+    assert folded_statements + 1 == record_vector.FOLD_ARM_DIVISOR, (
+        "the folded arm's divisor must be its statement count plus the graph's "
+        "reserve share")
+
+    # The reserve is REAL: on a budget the arm spends its share for each statement
+    # and still has at least one share left for the graph (the cycle-4 inequality,
+    # now asserted per arm rather than for the folded arm alone).
+    for divisor, statements in (
+        (record_vector.RECORD_LEG_STATEMENTS_PER_READ, column_statements),
+        (record_vector.FOLD_ARM_DIVISOR, folded_statements),
+    ):
+        share = record_vector.record_statement_ms(BUDGET_MS, divisor)
+        assert BUDGET_MS - share * statements >= share, (
+            f"divisor={divisor} statements={statements} leaves the graph branch "
+            f"less than one share of a {BUDGET_MS} ms read")
+
+    # A folded label's second prefetch is what makes the arms differ; if the
+    # counts ever coincide, `vector_search`'s per-arm selection is dead code and
+    # the folded arm would be under-divided.
+    assert folded_statements == column_statements + 1, (
+        f"the folded arm must issue exactly one more statement than the column "
+        f"arm (folded={folded_statements}, column={column_statements})")
+    assert record_vector.FOLD_ARM_DIVISOR == record_vector.RECORD_LEG_STATEMENTS_PER_READ + 1
