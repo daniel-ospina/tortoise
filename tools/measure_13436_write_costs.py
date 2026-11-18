@@ -189,12 +189,14 @@ def _content(chars: int, i: int) -> str:
 
 
 #: Real vocabulary, so both the byte length AND the token structure scale together.
-_WORD_BANK = (
-    "record fold journal projection cache write door refusal status change "
-    "measured graph index vector embedding label kind owner decision slice "
-    "gate cost latency scan review commit branch head evidence artifact "
-    "retire sequence release boundary reason reader writer surface"
-).split()
+_WORD_BANK = [
+    "record", "fold", "journal", "projection", "cache", "write", "door",
+    "refusal", "status", "change", "measured", "graph", "index", "vector",
+    "embedding", "label", "kind", "owner", "decision", "slice", "gate", "cost",
+    "latency", "scan", "review", "commit", "branch", "head", "evidence",
+    "artifact", "retire", "sequence", "release", "boundary", "reason", "reader",
+    "writer", "surface",
+]
 
 
 def _loadavg() -> list[float] | str:
@@ -254,7 +256,7 @@ def _engine_version(proj) -> str:
             major, minor, patch = found
             return f"graph ver {major * 10000 + minor * 100 + patch} ({major}.{minor}.{patch})"
         return "unavailable (module list answered no graph module)"
-    except Exception as e:  # noqa: BLE001 - disclose, never fail the artifact
+    except Exception as e:  # disclose, never fail the artifact
         return f"unavailable ({e.__class__.__name__}: {e})"
 
 
@@ -385,6 +387,19 @@ def _hosted_commit_composition(rows: list[dict]) -> dict:
 
 
 def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
+    # THE DOOR DELTA's closure, built OUTSIDE the loop and taking `sdk` as an
+    # argument: a closure over the loop variable captures the LAST iteration's
+    # `sdk` if it ever escapes its iteration (B023 — and the lint red on this file).
+    def door(sdk_obj, tag: str):
+        made = {"i": 0}
+
+        def _one():
+            made["i"] += 1
+            sdk_obj.create_entity(type="object", name=f"{tag} {made['i']}",
+                                  objectKind="core:other")
+
+        return _one
+
     _assert_statement_matches_source()
     out = {"arm": "nudges", "cost": "400-row :Point scan returning full content",
            "by_size": [], "by_content_length": []}
@@ -404,25 +419,18 @@ def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
         name_bytes = sum(len(str(r[2] or "").encode("utf-8")) for r in rows)
         scanned = len(rows)
 
-        call = _time_call(lambda: sdk._nudge_candidates(NUDGE_TEXT, limit=3), reps)
+        # `sdk=sdk` BINDS the loop variable: an unbound closure captures the LAST
+        # iteration's `sdk`, which is a measured-arm bug the moment the call moves
+        # out of the current iteration (B023, and the lint red on this file).
+        call = _time_call(lambda sdk=sdk: sdk._nudge_candidates(NUDGE_TEXT, limit=3), reps)
         produced = sdk._nudge_candidates(NUDGE_TEXT, limit=3)
 
         # THE DOOR DELTA — same graph, same seeds, only the nudge differs.
-        def door(tag: str):
-            made = {"i": 0}
-
-            def _one():
-                made["i"] += 1
-                sdk.create_entity(type="object", name=f"{tag} {made['i']}",
-                                  objectKind="core:other")
-
-            return _one
-
-        with_nudge = _time_call(door("withnudge"), reps, warmups=1)
+        with_nudge = _time_call(door(sdk, "withnudge"), reps, warmups=1)
         original = sdk._nudge_candidates
         sdk._nudge_candidates = lambda *a, **k: []  # type: ignore[assignment]
         try:
-            without_nudge = _time_call(door("withoutnudge"), reps, warmups=1)
+            without_nudge = _time_call(door(sdk, "withoutnudge"), reps, warmups=1)
         finally:
             sdk._nudge_candidates = original  # type: ignore[assignment]
 
@@ -462,7 +470,7 @@ def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
         rows = proj.g.query(NUDGE_SQL, params={"ex": []}).result_set
         content_bytes = sum(len(str(r[1] or "").encode("utf-8")) for r in rows)
         content_chars = sum(len(str(r[1] or "")) for r in rows)
-        call = _time_call(lambda: sdk._nudge_candidates(NUDGE_TEXT, limit=3), reps)
+        call = _time_call(lambda sdk=sdk: sdk._nudge_candidates(NUDGE_TEXT, limit=3), reps)
         out["by_content_length"].append({
             "points": n,
             # MEASURED, and the requested number beside it: `_content` now pads to the
@@ -617,7 +625,7 @@ def arm_schema(sizes: list[int], reps: int) -> dict:
                 f"`_schema_is_current()` returned {verdict!r} at {n} Points — a False "
                 "means the probe fell through to the full sweep, so timing it would "
                 "report the sweep's cost as the probe's")
-        measured = _time_call(lambda: proj._schema_is_current(), reps)
+        measured = _time_call(lambda proj=proj: proj._schema_is_current(), reps)
         out["by_size"].append({
             "points": n,
             "verdict": verdict,
