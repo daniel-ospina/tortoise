@@ -294,6 +294,26 @@ class Row:
 #: The GATED seam (`#5008`). A write path that embeds a row must reach it.
 SEAM_CALL = "encode_for_row"
 
+#: `#13447` — the ONE derive-and-encode seam, reached as a MODULE-QUALIFIED call:
+#: `derived_embedding.encode(...)` (the live write and the graph folds) and
+#: `derived_embedding.derive_row(...)` (the `record-restore` rebuild).
+#:
+#: ⛔ WHY IT IS CREDITED AND WHY IT IS NOT CREDITED BY BARE NAME. That module IS
+#: the gate: `encode` is exactly `embeddings.encode_for_row(text, width,
+#: bounded=…)` plus a per-write memo, so a caller that reaches it has reached the
+#: gate, and a census that could not see it would report the four derived folds as
+#: `unresolved_write` — i.e. it would demand declarations for writers that ARE
+#: gated (the false-block direction) and, worse, would stop counting them as gated
+#: writers at all (`#12020`'s fail-open direction, one seam removed). But `encode`
+#: is a GENERIC name: `client.encode(x)` is a different function, which is exactly
+#: why `_named_callees` refuses a `func.attr` for alias resolution. So the
+#: RECEIVER is resolved to this module through the writer's own import aliases and
+#: only the call names below are accepted on it.
+SEAM_MODULE = "derived_embedding"
+
+#: The call names accepted on :data:`SEAM_MODULE` as a reach of the gate.
+SEAM_MODULE_CALLS: tuple[str, ...] = ("encode", "derive_row")
+
 #: The ungated primitives that ALSO produce a stored vector. `encode_for_store`
 #: is documented as the reads/backfills/repairs primitive (so its callers are
 #: `producer`, not `writer`), but `compute_session_embedding` feeds the session
@@ -1034,6 +1054,43 @@ def _locally_bound(node) -> set[str]:
     and each of them was measured `gated` (owed nothing) before `_own_scope_bindings` knew them.
     """
     return _own_scope_bindings(node)
+
+
+def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
+    """The gate seam reached through the :data:`SEAM_MODULE` module (#13447).
+
+    Returns the matched call names (empty when the writer does not reach it). The
+    receiver is resolved through the writer's own aliases AND by name containment,
+    so `_derived_embedding.encode(...)` (a module aliased on import),
+    `derived_embedding.encode(...)` and `de.derive_row(...)`-style spellings that
+    keep the module name are the same reach, while `client.encode(...)` — same
+    attribute, a different object — is not a reach at all.
+
+    ⚠️ RESIDUAL, stated rather than implied: a SHORT alias that drops the module
+    name (`import tortoise.derived_embedding as de`) is not resolved here, because
+    `_import_aliases` keeps only the canonical names it is taught and this tool has
+    no import-graph resolver. Such a caller is reported the pre-#13447 way
+    (`unresolved_write`, i.e. it owes a declaration) rather than silently credited
+    — the false-BLOCK direction, chosen because the other one makes the census
+    blind to a gate reach (`#12020`).
+    """
+    import ast
+
+    out: set[str] = set()
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if not isinstance(func, ast.Attribute) or func.attr not in SEAM_MODULE_CALLS:
+            continue
+        receiver = func.value
+        name = getattr(receiver, "id", None)
+        if name is None:
+            continue
+        canonical = aliases.get(name, name)
+        if canonical.split(".")[-1] == SEAM_MODULE or SEAM_MODULE in name:
+            out.add(func.attr)
+    return out
 
 
 def _named_callees(node) -> set[str]:
@@ -1970,7 +2027,11 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # re-splits the whole file per call, which cost 90 s on this tree.
             source = "\n".join(lines[node.lineno - 1:node.end_lineno])
             kind: str | None = None
-            if SEAM_CALL in called:
+            # ⛔ `#13447`: the seam MODULE's own calls are the same gate — see
+            # `SEAM_MODULE`. Credited before the ungated set, because a writer that
+            # reaches `derived_embedding.encode` HAS reached `encode_for_row`.
+            seam_module_calls = _seam_module_calls(node, aliases)
+            if SEAM_CALL in called or seam_module_calls:
                 callee, kind = SEAM_CALL, "gated"
             elif set(UNGATED_CALLS) & called:
                 callee = sorted(set(UNGATED_CALLS) & called)[0]
