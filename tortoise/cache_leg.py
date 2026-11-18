@@ -293,7 +293,13 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     process writes, which is the question the split turns on; an arm whose fold
     returns no count is still counted when its statement matched 0 rows (see
     `FalkorProjection._apply_event`'s `_skip` bound), so the number is an upper
-    bound, deliberately erring that way rather than under-reporting. Two targets
+    bound on ATTEMPTED lane operations, deliberately erring that way rather than
+    under-reporting. ⛔ ONE EXCEPTION, stated rather than left to the reference:
+    the hook runs on the fold's RETURN, so a fold that issues a statement and
+    then RAISES — `_upsert` writes props and THEN edges; `_fold_session_deleted`
+    deletes the Source and THEN the Session — is a landed write this registry
+    does not count at all. The bound is therefore "no under-report for a fold
+    that RETURNED", not an absolute. Two targets
     in one process is normal for a deployment that writes the registry graph as
     well as tenant graphs. What is pathological is the TENANT's target absent
     from this list — or present under a store the deployment does not read.

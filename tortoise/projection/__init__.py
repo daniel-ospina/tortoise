@@ -4643,7 +4643,10 @@ def note_live_write_target(proj) -> None:
     Called from every gateway that writes the cache WITHOUT folding a record,
     and from the fold itself, so the bound is stated rather than implied:
 
-    * the fold (`FalkorProjection.apply`) — once per fold that LANDED;
+    * the fold (`FalkorProjection.apply`) — once per fold that RETURNED having
+      landed a write (the hook runs on the wrapper's post-return path, so a fold
+      that lands a statement and then RAISES is counted as nothing — see
+      `_skip`'s bound, which states that one exception);
     * the structural-edge mint (`edges._record_structural_edges`) — once per
       mint, which is NOT "only a genuinely new row": its gate is
       `MERGE … RETURN count(*) > 0`, true for an idempotent re-MERGE of an edge
