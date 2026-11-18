@@ -6796,8 +6796,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # CI checks the repo out at one commit and a shallow/filtered clone need not carry another
     # head's tree — the limit `test_the_legacy_head_really_predates_the_flip` names for its own
     # head, and the reason `test_the_merge_head_honours_line_is_what_that_head_carries` below
-    # SKIPS when the orphan is not in this clone (it is carried by NO ref) and re-measures
-    # on a clone that does hold it, instead of asserting from memory in either direction.
+    # SKIPS when the orphan is not in this clone (no ref TIP equals it; `refs/pull/12950/head`
+    # carries it) and re-measures on a clone that does hold it, instead of asserting from
+    # memory in either direction.
     # ⛔ AN EARLIER CUT OF THIS COMMENT SAID THE OPPOSITE AND IS DELETED, not softened: it called
     # `:20236` "QUOTED HISTORY, not a re-measurement" because `2584a86ec1` was said to be ABSENT
     # from this box, quoting `fatal: Not a valid object name` — which `git cat-file -t` refutes
@@ -6811,9 +6812,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "05-verify.md D5 should state the MERGE head `2584a86ec1`'s own `_honours` line "
         "(`:20236`) immediately after naming that head, and this reads "
         f"{_honours_merge_head_value!r} — that figure is that head's own, recorded "
-        "there at `2584a86ec1` when a clone that still carries that REBASE ORPHAN "
-        "reads `git show 2584a86ec1:tortoise/sdk.py` (`git ls-remote origin` matches "
-        "no ref for it, so a fresh clone cannot re-read it); if it moves, correct it "
+        "there at `2584a86ec1` when a clone carries that REBASE ORPHAN "
+        "(`git show 2584a86ec1:tortoise/sdk.py`; no ref TIP equals it, and a clone "
+        "must `git fetch origin refs/pull/12950/head` first); if it moves, correct it "
         "in the same commit that changes the record, not by carrying this head's "
         "number into it")
 
@@ -7469,13 +7470,20 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
     nor a `commit` is by itself evidence about the figure. The arm distinguishes the two:
     it reads the line when the object is present (the real check) and SKIPS with a
     stated reason when it is not, because a `fatal` cannot mean "the sha is wrong" when
-    the same `fatal` is what every clean checkout of this repo returns.
+    the same `fatal` is what every clean checkout of this repo returns. ⛔ AND "NO REF
+    CARRIES IT" IS FALSE (#13489 review, P1 — MEASURED): `git ls-remote origin | grep -c
+    2584a86ec1` -> 0 counts ref TIPS equal to the sha, which is not a containment test.
+    `refs/pull/12950/head` is advertised by the same remote (`git ls-remote origin
+    refs/pull/12950/head` -> `4e8f00dc…`, PR #12950's merged head) and CONTAINS the orphan
+    (`git fetch origin refs/pull/12950/head && git merge-base --is-ancestor 2584a86ec1
+    FETCH_HEAD` -> rc=0), which is why this clone holds the object at all.
 
     ⛔ AND THE COVERAGE LIMIT IS STATED, not implied: CI checks this repo out with a
     bare `actions/checkout@v4` (`python-ci.yml`, default `fetch-depth: 1`), where no
     other head exists by construction, so on CI this arm SKIPS — the figure is
-    re-checkable only on a clone that still carries the orphan. That is WEAKER than the
-    docstring used to claim, and saying so here is the only honest place to say it.
+    re-checkable by fetching `refs/pull/12950/head` on a full clone (see above), not only
+    where an old clone happens to have kept the object. That is WEAKER than the docstring
+    used to claim, and saying so here is the only honest place to say it.
 
     NON-VACUITY, MEASURED on a box that holds the object: reds if the definition moves
     off `:20236` at that head (the value is read THERE, not here).
@@ -7491,9 +7499,13 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
         pytest.skip(
             f"{head} (the MERGE head D5 quotes `:20236` for) is not carried by this "
             "clone, so the figure is UNCHECKED here, not disproved. It is a REBASE "
-            "ORPHAN: `git ls-remote origin` matches no ref for it, so a fresh clone "
-            "and CI's `fetch-depth: 1` checkout both lack it by construction. Re-arm "
-            "on a box that still holds it with `git fetch origin " + head + "`."
+            "ORPHAN: no ref TIP equals it (`git ls-remote origin` matches none) and a "
+            "clone's default refspec does not fetch `refs/pull/*`, so a fresh clone "
+            "and CI's `fetch-depth: 1` checkout both lack it by construction — but it "
+            "IS carried by `refs/pull/12950/head`, so re-arm anywhere with `git fetch "
+            "origin refs/pull/12950/head` (fetching the bare sha, `git fetch origin " + head + "`,"
+            " is REFUSED: `fatal: couldn't find remote ref`, because an unadvertised "
+            "sha is not a ref name)."
             f" git: {shown.stderr.strip()}")
     hits = [
         _n for _n, _line in enumerate(shown.stdout.splitlines(), 1)
