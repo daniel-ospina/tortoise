@@ -1,3 +1,14 @@
+---
+title: "Evidence — #13436 P7, the three write-path costs, measured"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-17
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#13436, #13445, #13220/#13447 derive-and-encode seam, record write path, docs/evidence/9558-record-write-cost"
+---
+
 # `#13436` P7 — the three write-path costs, measured (diagnosis only)
 
 **Nothing here is optimised, and nothing here proposes an optimisation.** `#13436` names the failure

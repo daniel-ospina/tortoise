@@ -1,3 +1,14 @@
+---
+title: "The storage picture — where the layer is going, and where it hurts"
+type: research
+domain: platform
+doc_status: draft
+created: 2026-11-17
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#13232, #13224, storage layer, record/cache split, STORAGE-ARCHITECTURE.md"
+---
+
 # The storage picture — where the layer is going, and where it hurts
 
 **Issue:** `#13232` · **Written:** 2026-11-17 · **Read at:** `d1bfef778f` (branch `research/13232-storage-picture`)
