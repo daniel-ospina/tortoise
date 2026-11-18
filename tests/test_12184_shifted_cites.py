@@ -198,7 +198,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
 #: header must carry, target file, 1-based line **on this branch's tree**, verbatim fragment on that
 #: line). Five of these
-#: are reached by `_PINS` already; the rest, including `projection/entities.py:5666`, were in NO pin at all
+#: are reached by `_PINS` already; `:2485`, `:2542` and `projection/entities.py:5666` were in NO pin at all
 #: before this one, and the header named none of the eight — which is the defect
 #: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
 #: ⚠️ The sdk/hosted_api rows here were `main`'s figures until `#13363` re-derived them: that branch's
@@ -451,7 +451,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         # A SELF-INFLICTED one: an alternative counting basis was described as "±5 … the numerator does not
         # move — it is 124 under either basis". Both halves are claims about MEASUREMENT, and both were
         # asserted rather than measured: the basis-INVARIANCE is false (counting the two-code-span pair adds
-        # `cache_projection.py:2464`, a `main`-set address, so the numerator moves to 124 from 123), and "±5"
+        # `cache_projection.py:2485`, a `main`-set address, so the numerator moves to 123 from 122), and "±5"
         # names a fixed offset for a denominator that moves by whatever the counting decision moves it by. A
         # reader told to compare numerators across bases would have "corrected" a correct figure by
         # arithmetic — the offset-not-content failure, one level down.
@@ -724,7 +724,8 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
     # `_MAIN_HEAD_FIGURES` guard carries. BOTH use sites below ITERATE this tuple, so a row deleted to
     # silence a re-point red simply stops existing in both: its content pin and the "the header names
     # it" assertion vanish together and nothing reds — the false PASS the sibling arm was added for,
-    # one table over. Fourteen is the `main`-set group the `#13124` review measured; a fifteenth is a
+    # one table over. EIGHT is the group the `#13124` review measured; the other six are Round 8's, and a
+    # fifteenth is a
     # re-derivation to make deliberately, not silently.
     assert len(_MAIN_SET_MISSED) == 14, (
         f"_MAIN_SET_MISSED carries {len(_MAIN_SET_MISSED)} rows, not 14 — both use sites iterate this "
