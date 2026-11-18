@@ -284,13 +284,16 @@ def _ontology_status_section() -> str:
 #: a gutted disclosure passed by borrowing a word from the next block (measured:
 #: v3.37 review, round 5). `test_ontology_legacy_pin_reads_the_note_not_the_section`
 #: drives each one BOTH bare and QUOTED (`> ---`), with no blank line.
-#: ⛔ AND `<` IS NARROWED TO THE INTERRUPTING FORMS (1-6 of CommonMark's HTML-block
-#: list, plus a tag that closes): a bare `<` also matched an AUTOLINK, which is
-#: INLINE, so a legitimate prose continuation `<https://…>` was cut and the note
-#: lost entirely — a false RED on a line that never started a block (round 6).
+#: ⛔ AND `<` IS NARROWED TO THE INTERRUPTING FORMS — CommonMark HTML-block types
+#: 1-6: comment `<!--`, declaration `<!` + an ASCII letter (doctype/entity), PI `<?`,
+#: CDATA, a closing tag, and a tag name followed by whitespace or `>`. A bare `<`
+#: also matched an AUTOLINK, which is INLINE, so a legitimate prose continuation
+#: `<https://…>` was cut and the note lost (a false RED, round 6) — and dropping the
+#: `![A-Za-z]` half of that narrowing re-opened the opposite hole on `<!DOCTYPE>`
+#: (round 7). Both directions are pinned in the test beside this class.
 _BLOCK_START_RE = re.compile(
     r"^(?:[#>|]|[-*+]\s|\d+[.)]\s|=+\s*$|(?:[-*_][ \t]*){3,}$|```|~~~"
-    r"|<(?:!--|\?|!\[CDATA\[|/[A-Za-z]|[A-Za-z][A-Za-z0-9-]*(?:\s|/?>)))")
+    r"|<(?:!--|![A-Za-z]|\?|!\[CDATA\[|/[A-Za-z]|[A-Za-z][A-Za-z0-9-]*(?:\s|/?>)))")
 
 
 def _unwrap(text: str) -> str:
@@ -698,16 +701,36 @@ def test_ontology_legacy_pin_reads_the_note_not_the_section():
                 f"rule absorbed the block after it into the disclosure: {note!r}")
     # ...and the over-approximation the OTHER way: an AUTOLINK is inline, not a block
     # start, so a marker-dropped continuation carrying one must still be read.
+    # ⛔ THE WORD UNDER TEST SITS ONLY ON THE CONTINUATION. The first cut put
+    # `` `archived` `` on the note's own line too, so the assertion passed even when
+    # the class CUT the continuation — the pin proved nothing (v3.37 review, round 7).
     autolink = (
         "### Point Status Vocabulary (canonical)\n"
         "\n"
-        "> **`retracted`, `outdated` and `archived` are read-side legacy**,\n"
-        "<https://example.com/12855> not statuses.\n"
+        "> **`retracted` and `outdated` are read-side legacy**, not statuses,\n"
+        "<https://example.com/12855> and stored rows may still hold `archived`.\n"
     )
     auto_note = _read_side_legacy_note(autolink)
     assert "read-side legacy" in auto_note and "`archived`" in auto_note, (
         "an autolink is INLINE, so a continuation carrying one is still the note; "
         f"the block-start class cut it: {auto_note!r}")
+    # ⛔ AND A REAL HTML BLOCK *IS* A BLOCK START — CommonMark type 4 (`<!` + an ASCII
+    # letter: doctype, entity) interrupts a paragraph, so the line after it must not be
+    # absorbed. Dropping `![A-Za-z]` from the class let a note missing `archived` borrow
+    # it from the prose after `<!DOCTYPE html>` (v3.37 review, round 7).
+    for html_block in ("<!DOCTYPE html>", '<!ENTITY x "y">', "<div>", "<!-- c -->",
+                       "<?php x ?>", "<![CDATA[ x ]]>", "</span>"):
+        html_fixture = (
+            "### Point Status Vocabulary (canonical)\n"
+            "\n"
+            "> **`retracted` and `outdated` are read-side legacy**, not statuses.\n"
+            f"{html_block}\n"
+            "rows may still hold `archived`.\n"
+        )
+        html_note = _read_side_legacy_note(html_fixture)
+        assert "`archived`" not in html_note, (
+            f"`{html_block}` is an HTML BLOCK start, so it ends the note; the class "
+            f"absorbed the prose after it: {html_note!r}")
 
 
 def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):

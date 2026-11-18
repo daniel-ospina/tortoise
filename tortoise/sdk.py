@@ -6667,9 +6667,14 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                     # at this head: the refusal above is the #13035
                     # goalState-coherence arm, NOT `update_entity refused the
                     # status transition 'live' -> 'archived'` — that message is
-                    # UNREACHABLE for `archived`, because `_read_caller_status`
-                    # normalises the word to `deprecated` at `:53521` before
-                    # `_ALLOWED_TRANSITIONS` is read at `:53614`. And `retracted`
+                    # UNREACHABLE for `archived`, because `_read_caller_status(...,
+                    # kind=":Point")` (this function's own call) normalises the word
+                    # to `deprecated` BEFORE the
+                    # `_ALLOWED_TRANSITIONS.get(...)` read below it. ⛔ NAMED, NOT
+                    # NUMBERED: a line number here went stale twice in one review
+                    # (the sibling lane's +9 lines, then this comment's own +1 — the
+                    # pointer is exactly the artifact that moves when the file does).
+                    # And `retracted`
                     # is not a declared target of `live` either: it is a spelling
                     # that normalises to `deprecated`, which IS a declared target.
                     # So the message prescribes the DECLARED word on each carrier,
