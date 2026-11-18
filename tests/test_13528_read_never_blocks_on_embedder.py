@@ -179,13 +179,14 @@ def sdk(tmp_path):
         # ⛔ The fixtures are ORDER DEPENDENT on purpose: every test lists `sdk`
         # BEFORE `cold_embedder` / `warm_embedder`, so this runs while the
         # simulated load has not started. `get` is patched to the absent answer so
-        # priming cannot trigger a REAL load into the window either — and
-        # `await_read_ready_reason` is patched to the same answer for the same
-        # reason: with `TORTOISE_EMBEDDER_WARMUP` restored to 1 it would otherwise
-        # kick a background load and leave the embedder warm for the cold tests.
-        with mock.patch.object(EmbeddingModel, "get", lambda *_a, **_k: None), \
-                mock.patch.object(EmbeddingModel, "await_read_ready_reason",
-                                  classmethod(lambda _cls, _budget: None)):
+        # priming cannot trigger a REAL load into the window either.
+        #
+        # ⛔ `await_read_ready_reason` IS NOT PATCHED (#13528 review P2-3). A
+        # second mock here was dead weight: `tests/conftest.py` pins
+        # `TORTOISE_EMBEDDER_WARMUP=0` process-wide, and the predicate returns at
+        # its FIRST check ("warm-up disabled") before it can spawn anything — so
+        # at fixture time it neither loads the model nor warms the singleton.
+        with mock.patch.object(EmbeddingModel, "get", lambda *_a, **_k: None):
             sdk.tortoise_fts_query(_QUERY, limit=3)
         assert not EmbeddingModel.loaded(), (
             "priming must not load the embedder — the cold-window tests need it COLD")
@@ -303,6 +304,13 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
     # this compares against 4 ms rather than 4 000 ms — a bar the message two
     # lines down says is the wrong number, and a flake door on the contended
     # 4-worker carve-out lane (#13528 review F2, pre-existing).
+    #
+    # ⛔ A PIN, NOT A DISCRIMINATOR (#13528 review P2-2). On THIS single-threaded
+    # row ``pre_handler`` stays ~0.1 ms even with the defect restored — the whole
+    # load lands in ``embed_get`` above, which is the frame that reddens — so the
+    # queueing property stated below is BOUNDED here, not proven. It is kept to
+    # stop the number drifting with the unit; measuring the queue itself needs
+    # more than one concurrent read.
     assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
         f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms of a "
         f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a read must not "
@@ -411,6 +419,65 @@ def test_a_designed_absence_is_refused_with_not_installed(sdk, monkeypatch):
             f"#5275 forbids an armed refusal from carrying the designed-absence "
             f"term — failure_kind must be not_installed, got "
             f"{excinfo.value.failure_kind!r}")
+    finally:
+        monkeypatch.undo()
+        EmbeddingModel._reset()
+
+
+#: The ``failure_kind`` vocabulary ``EmbedderUnavailableError`` documents
+#: (``tortoise/exceptions.py``). Spelled here so a published kind is checked
+#: against the CLOSED SET itself, not only against the constant the seam reads —
+#: a constant compared with itself agrees with itself (#13528 review P2).
+_DOCUMENTED_FAILURE_KINDS = frozenset(
+    {"not_installed", "load_failed", "load_timeout", "model_unavailable"})
+
+
+def test_an_unmapped_decline_term_fails_closed_on_the_refusal(monkeypatch):
+    """⛔ A MISS FAILS CLOSED — the mapping's own hole, pinned (#13528 review P2-2).
+
+    ``_READ_DECLINE_FAILURE_KIND.get(kind, kind)`` published ANY unmapped
+    leg-trace term as ``failure_kind``, re-opening one line below the sentence
+    that claims the two vocabularies cannot be conflated: ``failure_kind`` is a
+    CLOSED set (``not_installed`` / ``load_failed`` / ``load_timeout`` /
+    ``model_unavailable``) and a trace term outside it says the forbidden thing
+    again. The fallback is the class's own documented "no kind was recorded"
+    answer, so an unknown reason is reported as an unknown CAUSE.
+
+    ``encode_failed`` is the example the seam's own comment names: a real trace
+    term this mapping deliberately has no entry for.
+
+    ⛔ THE ROW PINS THE POLICY'S **VALUE**, NOT ONLY ITS IDENTITY (#13528 review
+    P2, cycle 2). The first version of this row compared the published kind
+    against ``_FAILURE_KIND_FALLBACK`` — the same constant the seam reads — so
+    setting that constant to ``"encode_failed"`` or to a wrong-but-in-set
+    ``"load_failed"`` left it GREEN. A constant that agrees with itself proves
+    nothing: the fallback's value IS the policy, so it is asserted against the
+    LITERAL here, and the published kind is checked against the closed set the
+    exception documents (``tortoise/exceptions.py``), not just the seam's copy.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+    EmbeddingModel._reset()
+    assert "encode_failed" not in embeddings._READ_DECLINE_FAILURE_KIND, (
+        "this row is only meaningful while 'encode_failed' is UNMAPPED — if it "
+        "gains an entry, pick another unmapped trace term for the miss policy")
+    assert embeddings._FAILURE_KIND_FALLBACK == "model_unavailable", (
+        "the fallback's VALUE is the policy, and comparing it against itself "
+        "cannot catch a changed value: ``model_unavailable`` is "
+        "EmbedderUnavailableError's documented 'no kind was recorded' answer")
+    try:
+        with pytest.raises(EmbedderUnavailableError) as excinfo:
+            EmbeddingModel._unavailable(context="read: unmapped decline",
+                                       kind="encode_failed")
+        assert excinfo.value.failure_kind in _DOCUMENTED_FAILURE_KINDS, (
+            f"the refusal published {excinfo.value.failure_kind!r}, which is not "
+            f"one of the kinds EmbedderUnavailableError documents "
+            f"({sorted(_DOCUMENTED_FAILURE_KINDS)}) — a trace term outside that "
+            f"set is exactly the conflation the mapping exists to prevent")
+        assert excinfo.value.failure_kind == "model_unavailable", (
+            f"an unmapped decline term must be reported as the documented "
+            f"fallback 'model_unavailable' (cause UNKNOWN), got "
+            f"{excinfo.value.failure_kind!r} — any other in-set kind asserts a "
+            f"cause nobody established")
     finally:
         monkeypatch.undo()
         EmbeddingModel._reset()
