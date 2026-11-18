@@ -612,7 +612,14 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # Shrinkage is the dangerous direction — the sweep must keep measuring the
     # surface it was written for. Growth (a new envelope tool) is fine and is
     # covered by the loop itself.
-    assert typed >= 10 and unions >= 2, (
+    # ⛔ `unions` is 1 at this head, not 2: the sweep reads the ADVERTISED registry, and
+    # #11609 lane P6 retired `tortoise_delete_entity` — the second `anyOf` door. Its shim
+    # still carries the union schema (a retired name keeps answering, #3883), but a shim is
+    # not advertised, so it is not in this population. The floor stays at the measured
+    # number because its job is NON-VACUITY: with 1 union the `_SAFE_FAILURE`-admitted
+    # branch above still runs, and the moment that door went the branch would be skipped
+    # silently if this were 0.
+    assert typed >= 10 and unions >= 1, (
         f"sweep found {typed} typed + {unions} union envelopes; measured at "
         "10 + 2 after #11609 batch 1 archived `tortoise_packs_list` (11 + 2 when "
         "this guard was written). Shrinkage is what this floor guards, so it "
