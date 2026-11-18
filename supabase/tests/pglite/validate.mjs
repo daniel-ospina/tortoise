@@ -179,7 +179,10 @@ await db.exec(`
 // function. Drop the stale 3-arg overload before applying so the harness
 // mirrors that end state exactly.
 // ENUMERATED FROM DISK, in the APPLIER'S order — the VERSION substring compared
-// as a string, never the whole filename. `supabase db push` re-sorts local paths
+// as a string. (A name that does not match `^([0-9]+)_` falls back to the whole
+// filename below, which is unreachable for an APPLIED migration: the CLI skips
+// those, so they never hold a definition — the fallback only keeps the sort total.)
+// `supabase db push` re-sorts local paths
 // by the version before applying (`sortMigrationPathsByVersion` in
 // `apps/cli/src/command-internal/migration-history.ts`, v2.122.1), so the replay
 // below should use its key. The two orders agree UNLESS one version is a proper
