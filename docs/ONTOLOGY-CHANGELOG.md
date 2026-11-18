@@ -81,7 +81,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >   rather than rewriting it.
 >
 > **Two residues this edit leaves, named so the owner sees them rather than inheriting them silently:**
-> §5's *Point Status Vocabulary* table and a §9 comparison row still present the retired six words as the
+> §5's *Point Status Vocabulary* table and a §10.5 decision row (`docs/ONTOLOGY.md:1527`) still present the retired six words as the
 > model vocabulary. They fall outside the six approved hunks, and the CRITICAL RULE at
 > `docs/ONTOLOGY.md:41` forbids editing them without the owner's approval of that exact text — the
 > corrective text is proposed on #11824 and applies only once it is approved.

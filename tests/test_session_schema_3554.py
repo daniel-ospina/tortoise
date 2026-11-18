@@ -2954,7 +2954,7 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     # ``comment 1234567890``, ``comment `1234567890` ``, ``comment-id: 1234567890``,
     # and the permalink ``#issuecomment-1234567890``.
     # ⛔ THE PLURAL ``comments 1234567890`` IS REFUSED even though the file itself
-    # uses that style (the v3.32 block): accepting it
+    # uses that style (the v3.32 block, ``docs/ONTOLOGY-CHANGELOG.md:361``): accepting it
     # re-opens the issue-number arm below. A reader who hits a red on that form is
     # looking at a deliberate refusal, not a broken pin — rewrite it in the
     # singular or as a permalink.
