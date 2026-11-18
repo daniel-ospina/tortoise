@@ -84,8 +84,8 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > **Three residues this edit leaves, named so the owner sees them rather than inheriting them silently:**
 > §5's *Point Status Vocabulary* table and a §10.5 decision row (`docs/ONTOLOGY.md:1527`) still present the retired six words as the
 > model vocabulary. They fall outside the six approved hunks, and the CRITICAL RULE at
-> `docs/ONTOLOGY.md:41` forbids editing them without the owner's approval of that exact text — the
-> corrective text is proposed on #11824 and applies only once it is approved.
+> `docs/ONTOLOGY.md:41` forbids editing them without the owner's approval of that exact text, so
+> they are left untouched here and apply only once that approval is given on #11824.
 >
 > The third is a **model-versus-code disagreement inside §4.2's row**, which says *"`retracted` is not
 > among the §4.2 declared verbs and the write guard REFUSES it"*. The shipped guard does the opposite and
