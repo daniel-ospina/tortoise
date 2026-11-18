@@ -978,6 +978,20 @@ class EmbeddingModel:
         needed). The ``get()`` exits are preserved by a different mechanism:
         each passes ``kind=None``, so this function never runs on them — which
         is why the historical ``failure_kind`` values cannot drift here.
+
+        ⛔ THE SECOND BEHAVIOUR CHANGE, RECORDED HERE BECAUSE IT IS NOT THE ONE
+        THE ``no_embedder`` NOTE NAMES. ``main`` published an UNMAPPED reason as
+        ITSELF (``_READ_DECLINE_FAILURE_KIND.get(kind, kind)``), so
+        ``_unavailable(kind="encode_failed")`` put ``failure_kind="encode_failed"``
+        on the wire — a value outside the closed set the class documents, and
+        indistinguishable from a newly added kind. That arm exists on ``main``
+        only for a caller that has not been written yet; with this rule it cannot
+        be reached at all. It is pinned by
+        ``tests/test_embedding_model_required.py::
+        test_an_unmapped_trace_reason_is_never_published_as_itself``, which is the
+        row #13543's comment asks for: without it, a future refactor that
+        special-cased only ``no_embedder``/``load_in_flight`` and restored the
+        pass-through for everything else would re-open the trap silently.
         """
         if reason in FAILURE_KINDS:
             return reason

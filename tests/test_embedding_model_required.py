@@ -259,6 +259,52 @@ def test_every_declared_kind_passes_through_the_translation(monkeypatch, kind):
     assert EmbeddingModel._as_failure_kind(kind) == kind
 
 
+@pytest.mark.parametrize("reason", ["encode_failed", "breaker_open"])
+def test_an_unmapped_trace_reason_is_never_published_as_itself(monkeypatch, reason):
+    """An UNMAPPED reason is translated, never put on the wire verbatim (#13543).
+
+    ``main`` did this:
+
+    ```python
+    failure_kind = _READ_DECLINE_FAILURE_KIND.get(kind, kind)
+    ```
+
+    and ``.get(kind, kind)`` publishes **any** unmapped leg-trace term straight
+    into ``failure_kind`` — a CLOSED set. Measured on ``main``:
+    ``_unavailable(kind="encode_failed")`` → ``failure_kind == "encode_failed"``,
+    and the same for ``"breaker_open"``. It is unreachable today only because
+    the sole caller (``tortoise/sdk.py``) passes one of the four known terms — a
+    trap for the next caller.
+
+    ``_as_failure_kind`` has no pass-through arm, so the trap is closed in code.
+    ⛔ THIS ROW IS WHAT KEEPS IT CLOSED (#13543 comment item 1: *"it does need a
+    row, or a future dict-style refactor re-opens it silently"*). Without it a
+    translator that special-cased only the two trace words its docstring names
+    — ``no_embedder`` and ``load_in_flight`` — and restored ``.get(kind, kind)``
+    for everything else kept EVERY other row in this diff green while
+    re-publishing ``encode_failed`` as itself (agent-infra#3442 shape: a fix that
+    closes a fail-open path with no assertion that reds when it reopens).
+
+    The assertions are LITERALS, never "equals the constant the seam reads":
+    comparing the answer against the vocabulary it is derived from proves
+    nothing (the #13544 trap, recorded in ``MEMORY.md`` under ``[vocab]``).
+    """
+    monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", None)
+    published = EmbeddingModel._as_failure_kind(reason)
+    assert published == "model_unavailable", (
+        f"an unmapped reason ({reason!r}) names no cause of its own; with nothing "
+        f"recorded the documented fallback is the honest answer — publishing the "
+        f"trace word itself puts a value outside FAILURE_KINDS on the wire")
+    assert published in FAILURE_KINDS
+
+    monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "load_failed")
+    published = EmbeddingModel._as_failure_kind(reason)
+    assert published == "load_failed", (
+        "a cause recorded by the time the refusal is raised must be named for an "
+        "unmapped reason too, not only for the two trace words the docstring lists")
+    assert published in FAILURE_KINDS
+
+
 # --------------------------------------------------------------------------
 # warm_up()'s NEVER-raises contract is preserved (#2952).
 # --------------------------------------------------------------------------
