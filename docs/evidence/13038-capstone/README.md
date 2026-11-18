@@ -245,3 +245,13 @@ owner already named in the table above.
 
 The instrument is the arbiter for that last row: **if a slice moves the drift test and not the
 scoreboard, the scoreboard wins.**
+
+**Measured 2026-11-18 — the Q5/Q6 rows moved (#13302).** The ended-scope read shipped on the SDK
+read (`tortoise_fts_query(..., ended_scope=True)`), and the instrument's Q5 and Q6 recipes now ask
+it. Re-run on this box, same fixture, one fresh reader per run: **before `3 right · 3 wrong` →
+after `5 right · 1 wrong`**. Q5 and Q6 are `right`; Q2–Q4 hold; **Q1 stays `wrong`** (its cause is
+*reach*, a different gap — an `entity_type`-scoped read never names an Object commitment unless the
+caller guesses its name — and no lifecycle slice moves it). Both boards, both readers' verdicts and
+the exact commands are in [`13302/`](13302/README.md); this bundle's own four files are untouched,
+because the baseline above is the FIRST scoreboard and a later run must not overwrite the record of
+what it measured.
