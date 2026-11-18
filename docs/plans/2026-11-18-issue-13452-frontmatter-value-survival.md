@@ -391,14 +391,21 @@ population claim, round 3 found (D) inert for block/flow plus three over-blocks 
 measurement, fixed, and covered by the matrix. Because the cap is spent, the *diff* then went to the
 **head-bound code review**, which found two more real defects — **(B) tautological** and **(C)
 unreachable behind the escape branch** — both verified by measurement, fixed, and now covered by M1 and
-M16 / M18. The attestation for #13476 is recorded at its FINAL head (`9f25dc79c9` — present in this
-clone, so `git show 9f25dc79c9` opens it, though it is **not an ancestor of `main`**
-(`git merge-base --is-ancestor 9f25dc79c9 origin/main` exits 1); #13476's merged state on `main` is
-the squash `a5f1e7db46`. Cited by sha because that is the head the record is bound to, with the two
-resolvable pointers named beside it. ⛔ This said *"not an object in this clone, so a reader here
-cannot open it"* until review round 5: `git cat-file -t 9f25dc79c9` answers `commit` — true only
-that it is not on `main`, and the wrong half sent a reader to a remote API for evidence already
-here), and that record
+M16 / M18. The attestation for #13476 is recorded at its FINAL head (`9f25dc79c9`) — a sha that is
+**not an object in this clone and cannot be obtained**: no ref here reaches it
+(`git rev-list --all | grep -c '^9f25dc79c9'` = **0**), `git cat-file -t 9f25dc79c9` and
+`git show 9f25dc79c9` both fail (`Not a valid object name` / `unknown revision`), `git fetch origin
+9f25dc79c95d` answers `couldn't find remote ref`, and `git merge-base --is-ancestor 9f25dc79c9
+origin/main; echo $?` prints **128**, not `1`. A sha that is present only because some command
+fetched it is not durable — git drops unreachable objects when it repacks, and this one is gone
+(measured at `9f12429a52`; `git cat-file --batch-check` reports `missing`). #13476's merged state on
+`main` is the squash **`a5f1e7db46`** (`git cat-file -t` → `commit`), which IS obtainable, so that
+is the pointer to cite; `9f25dc79c9` is kept beside it only because the record is bound to that head.
+⛔ Two rounds wrote this line differently and each was wrong in ONE direction: it said *"not an
+object in this clone, so a reader here cannot open it"* (true, and it was "corrected" away), then
+*"present in this clone, so `git show 9f25dc79c9` opens it"* until an independent re-measure — a
+`cat-file` reading that reproduced when it was taken and not afterwards. The form that cannot rot is
+the squash on `main`), and that record
 is `not-clean` with two findings — the escape one fixed in #13484, and the counter residuals now
 listed in §9. #13484's own attestation is minted at its own final head, after this section.
 
