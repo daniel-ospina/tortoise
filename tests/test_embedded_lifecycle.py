@@ -563,10 +563,25 @@ def test_no_new_raw_embedded_constructions():
     # entry must say why it constructs raw outside the carve-out).
     missing = [rel for rel in RAW_EMBEDDED_ALLOWLIST
                if not (tests_dir / rel).exists()]
+    # ONE entry per file (#13466 review): the literal is a SET, so a second
+    # identical entry is deduped by Python and invisible to every check here
+    # — the justification one included, because `_allowlist_line_comment`
+    # binds to the FIRST source occurrence and would read the wrong line.
+    # That happened for real: this branch's `#13492` registration and
+    # `main`'s own copy are identical strings in a set literal, so the merge
+    # kept both with no conflict, and the only guard was ruff's B033 inside
+    # `agent-infra-ci / lint` — NOT a required context. Counted from SOURCE,
+    # since the set cannot hold the duplicate to count.
+    duplicated = [rel for rel in sorted(RAW_EMBEDDED_ALLOWLIST)
+                  if len(_allowlist_entry_tails(rel)) > 1]
     unjustified = [rel for rel in RAW_EMBEDDED_ALLOWLIST
                    if Path(rel).stem not in carve_out
                    and "#" not in _allowlist_line_comment(rel)]
     assert not missing, f"stale RAW_EMBEDDED_ALLOWLIST entries: {missing}"
+    assert not duplicated, (
+        f"RAW_EMBEDDED_ALLOWLIST names a file more than once — fold the "
+        f"entries into ONE, keeping every half of the rationale: "
+        f"{duplicated}")
     assert not unjustified, (
         f"non-carve-out allowlist entries need a `#` justification on "
         f"their line: {unjustified}")
@@ -582,17 +597,28 @@ def test_no_new_raw_embedded_constructions():
 _EMBEDDED_ALLOWLIST_SRC: str | None = None
 
 
-def _allowlist_line_comment(rel: str) -> str:
-    """The tail of the allowlist entry's source line ('' when the entry
-    carries no `#` justification). Reads RAW_EMBEDDED_ALLOWLIST from source
-    so the justification check stays in lockstep with the list."""
+def _allowlist_entry_tails(rel: str) -> list[str]:
+    """The tail of EVERY allowlist entry line naming ``rel``, in source
+    order ('' entries carry no `#` justification).
+
+    Reads RAW_EMBEDDED_ALLOWLIST from SOURCE because the literal is a SET:
+    a duplicated entry is deduped by Python and leaves no runtime trace, so
+    the count must come from the text. More than one tail means the file is
+    listed twice, which `test_no_new_raw_embedded_constructions` reds on."""
     global _EMBEDDED_ALLOWLIST_SRC
     if _EMBEDDED_ALLOWLIST_SRC is None:
         _EMBEDDED_ALLOWLIST_SRC = Path(__file__).read_text()
-    m = re.search(rf'^\s*"{re.escape(rel)}"(.*)$', _EMBEDDED_ALLOWLIST_SRC, re.M)
-    if not m:
-        return ""
-    return m.group(1)
+    return re.findall(rf'^\s*"{re.escape(rel)}"(.*)$',
+                      _EMBEDDED_ALLOWLIST_SRC, re.M)
+
+
+def _allowlist_line_comment(rel: str) -> str:
+    """The tail of the allowlist entry's source line ('' when the entry
+    carries no `#` justification). FIRST occurrence only, which is correct
+    solely because the duplicate pin in
+    `test_no_new_raw_embedded_constructions` forbids a second one."""
+    tails = _allowlist_entry_tails(rel)
+    return tails[0] if tails else ""
 
 
 
