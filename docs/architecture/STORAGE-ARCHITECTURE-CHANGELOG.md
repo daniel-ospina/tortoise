@@ -2594,10 +2594,11 @@ than on one of them as it was.
 and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
 sentence immediately following the changed ones — same paragraph, not the next one — was itself revised on `main` by
 `#13435` in the same window (it now says *“held for a row the record already has”* and carries the two-population
-clause; its greppable span *"size is the ledger rather than the latency: the graph-side copy is bytes on provisioned,
-unevictable RAM held for a row"* **continues** the sentence opening *"What holds at EVERY size is the ledger rather than
-the latency"* — split after "EVERY" by the hard wrap, which is why a contiguous span inside it is quoted rather than
-the opening words), and this rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
+clause; its greppable span is *"size is the ledger rather than the latency"* — `grep -c` → **1** in the design
+document, and short enough to paste back out of **this** file, whose own hard wrap breaks the long form — and it
+**continues** the sentence opening *"What holds at EVERY size is the ledger rather than the latency"* — split after
+"EVERY" by the hard wrap, which is why a contiguous span inside it is quoted rather than the opening words), and
+this rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
 ledger/sequencing conclusion are what this entry claims survived; nothing here re-states the neighbouring sentence as
 though it were unchanged. No decision was reopened, no figure was retired, and nothing here authorises removal — the
 record-first sequencing and its release boundary are untouched (§12.1c's DECIDED block, `#11395` comment `6956793300`).
