@@ -67,7 +67,7 @@ body say opposite things (§1.5, an owner-lane question already recorded on `#13
 |---|---|---|---|
 | **D-a** | **KEEP** — the entity fingerprint is part of the product | `#11395` comment `6781921075`, owner, 2026-11-10 | removal and the stopping of the write are both refused; the fingerprint is kept *"not because [it] is currently earning its keep — that is unproven in either direction"* |
 | **D-b** | **REOPEN GRANTED for the graph copy** | `#11395` comment `6956793300`, owner, 2026-11-17 | graph copy may be removed / stop being written **once the record holds and indexes that label**; record first, graph removal second, **never in one release** |
-| **D-c** | **index them, in Postgres** | `#13220` (CLOSED COMPLETED 2026-11-17), owner | *"if indexing improves search for Object/Subject/Event of course we want that, and we just need it in Postgres and the search aligned with that"*; the index half of §14.3 V3 and V2 |
+| **D-c** | **index them, in Postgres** | `#13220` (CLOSED COMPLETED 2026-11-17), owner | *"if indexing improves search for Object/Subject/Event of course we want that, and we just need it in Postgres and the search aligned with that and everything armed and working"*; the index half of §14.3 V3 and V2 |
 | **D-d** | **the vector index does not live in FalkorDB** | `STORAGE-ARCHITECTURE.md` §12.1c (`docs/architecture/STORAGE-ARCHITECTURE.md:1169`), owner, 2026-11-07 | four further resident HNSWs on the most expensive resource we have are ruled out; a pgvector index on a table the record already owns is the cheap shape |
 | **D-e** | **capability-first placement** | `#13082`, owner, 2026-11-16 | *anything no graph query reads is Postgres-only by default*; RAM ≈ **584×** the price of disk; **~78 MB of RAM per solo tenant** is the ceiling |
 | **D-f** | **presence is ownership** | `#5004` (`CLOSED`, consolidated under `#5048`) + `tortoise/embeddings.py:1806-1815` | a record-TRUTH vector (a `Point`'s) must never be dropped on a slow embedder — a cold `None` there is a **recorded CLEAR that a rebuild reproduces** |
@@ -162,7 +162,7 @@ recorded there):**
 
 | change | evidence | does it satisfy D-b's condition? |
 |---|---|---|
-| Columns, generated vector, HNSW index exist for both labels | migration `20261117000001` | **half** — "holds" yes (for rows written after deploy), "indexes" yes |
+| Columns, generated vector, HNSW index exist for both labels | migration `20261117000001` | **half** — "indexes" yes; "holds" only for **rows written after deploy**, which is not a statement about the pre-existing population (the migration's own header: *"THE COLUMN ARRIVES EMPTY"*), and `STORAGE-ARCHITECTURE.md:1640` says so (*"\"the record holds them\" is a statement about ROWS, not about columns"*) |
 | The live writer fills them | `record_writer.derived_embedding_columns` (`:1755`, called `:2092`) | yes, on the live path only |
 | **The record does not *serve* them** | `record_vector.LABEL_SERVED` (`:164-174`) excludes both; `#13422` | ⛔ **no** — `#13220`'s ordered step 2 (*"the record demonstrably serves it"*) is unmet |
 | The graph legs still read the graph copies — a brute-force scan (`:4439-4446`), not an index | `search_engine.py:4439-4446` + `:148` | ⛔ **no** — the copy is the *only* serving copy for these labels today |
@@ -181,7 +181,7 @@ Verified from primary sources (rung 3, `web_fetch`). Convergence is **evidence, 
 
 | system | where the vector lives | second copy? | disagreement handling |
 |---|---|---|---|
-| **Graphiti / Zep** (the system our own §12.1c argument cites) | **on the graph node, in the graph store, indexed there.** Neo4j: `CALL db.create.setNodeVectorProperty(n, "name_embedding", …)`; FalkorDB: `SET n.name_embedding = vecf32($entity_data.name_embedding)` — one `MERGE … SET` per node, vector included | **none** | **structurally unreachable**: the vector is written in the same statement as the node's own properties, so there is no store to disagree with. Source: `getzep/graphiti` `graphiti_core/models/nodes/node_db_queries.py` |
+| **Graphiti / Zep** (the comparable our own §12.2c table records) | **on the graph node, in the graph store, indexed there.** Neo4j: `CALL db.create.setNodeVectorProperty(n, "name_embedding", …)`; FalkorDB: `SET n.name_embedding = vecf32($entity_data.name_embedding)` — the vector is named in the node's own save statement | **none** | **no second store to disagree with**: the vector is written by the node's own save statement, so there is nothing to reconcile. (⚠️ not a universal: the Neptune arm joins an empty list to `""` when the embedding is absent, and the Neo4j arm omits the vector write when `has_aoss` is set. The finding is *one copy, co-written*, not *mandatory*.) Source: `getzep/graphiti` `graphiti_core/models/nodes/node_db_queries.py` |
 | **mem0** | entities *"stored once and embedded"*; graph is platform-native, no external graph DB; the **earlier** shape connected an external graph store and has been retired | **none stated**; the docs assert single storage of the entity | not described — **unknown** from primary docs |
 | **Microsoft GraphRAG** | embeddings produced in the **offline indexing pipeline** (`graphrag index`), a batch build, not a per-request write | none — one derived index set | re-index; no online reconciliation |
 | **Neo4j native vector index** (general pattern) | vector is a **node/relationship property**, indexed in-graph | none | not applicable |
@@ -210,7 +210,7 @@ our own answer in progress (count + unique-key backfill).
 | **A** | **Adopt now** — stop writing `:Object`/`:Subject.embedding`, strip the property, retire `:Event`/`:Source` too | ⛔ **the dense leg for two labels** (`LABEL_SERVED` has no record route; `#13422`) — a measured recall regression framed as a saving; ⛔ **record-restore fidelity** for those labels (no encoder on that path, §1.4); ⛔ **contradicts D-b's own sequencing** (*"not in one release"*), i.e. it is a second reversal, not the granted one |
 | **B** | **Do not adopt** — keep both copies and the double encode | the RAM rent (7,865 + 4,893 vectors, unindexed); the **double encode** on every derived-entity write; the **two-store divergence** class (`#13412`, `#13418`) stays open |
 | **C** | **Adopt a narrower version — retire `:Event`/`:Source` graph copies only**, leaving the ruled pair alone | requires the `#13220`-vs-merged-doc wording decision (§1.5) before it can even be scoped; and `:Source`'s record vector is **not derivable at all today** (`#13418`), so this option is *smaller than it looks* and would ship a hole for plain sources |
-| **D** | **Hold R1 as an authorised, ordered step with a named trigger**, and spend now on the three things that make the trigger testable (§2.6) | the rent and the double encode persist until the trigger fires; and "authorised but not scheduled" is exactly the state that decays into drift |
+| **D** | **Hold R1 as an authorised, ordered step with a named trigger**, and spend now on the four things that make the trigger testable (§2.5/§2.6) | the rent and the double encode persist until the trigger fires; and "authorised but not scheduled" is exactly the state that decays into drift |
 
 ### 2.5 Recommendation — **D**, with C held behind the wording decision
 
@@ -220,13 +220,18 @@ missing is the **precondition it names**, and the precondition is missing for a 
 the only serving copy and then report the loss as a storage win.
 
 **The trigger, stated so it can be checked rather than remembered** — R1's step 2 becomes actionable when **all
-three** hold:
+four** hold:
 
 1. `record_vector.LABEL_SERVED` carries `object` and `subject` **and** the record leg applies the `#689`
    terminal-status cage (`#13422`'s own gate).
-2. `record-restore` encodes or restores the vector for those labels, so a record→cache rebuild is not
+2. **The pre-existing population has crossed.** *"The record holds them"* is a statement about **ROWS, not
+   columns** (`STORAGE-ARCHITECTURE.md:1640`): the migration's column *"ARRIVES EMPTY"* and only the live write
+   seam fills it, so the `:Object`/`:Subject` vectors written before the deploy are **not** in the record. **A
+   one-time copy of those rows is part of step 1**, not step 2 — otherwise step 2 deletes history that never
+   crossed, which is the exact deletion the sequencing exists to prevent, one release later and harder to see.
+3. `record-restore` encodes or restores the vector for those labels, so a record→cache rebuild is not
    silently vectorless (§1.4).
-3. A per-label census exists on a **named** graph (`tools/dod_5090_probe.py --census`), so the removal's
+4. A per-label census exists on a **named** graph (`tools/dod_5090_probe.py --census`), so the removal's
    saving and its blast radius are both counted instead of quoted from retired arithmetic.
 
 **The honest case against D:**
@@ -310,7 +315,7 @@ R2 changes an **invariant**, not a ruling sentence. Two recorded statements, bot
 
 | family | who | shape |
 |---|---|---|
-| **embed at ingest, synchronously** | Graphiti/Zep — the node's own save statement carries the vector (`SET n.name_embedding = vecf32($entity_data.name_embedding)` on FalkorDB; `db.create.setNodeVectorProperty(n, "name_embedding", …)` on Neo4j, `graphiti_core/models/nodes/node_db_queries.py`), so a node is never persisted without one | the write is not complete until the vector exists; **no repair path needed** |
+| **embed at ingest, synchronously** | Graphiti/Zep — the node's own save statement names the vector (`SET n.name_embedding = vecf32($entity_data.name_embedding)` on FalkorDB; `db.create.setNodeVectorProperty(n, "name_embedding", …)` on Neo4j, `graphiti_core/models/nodes/node_db_queries.py`), so the embedding and the node's properties are written together and there is no second store to reconcile | the write is not complete until the vector exists; **no repair path needed** |
 | **embed in an offline batch index** | Microsoft GraphRAG (*"indexing can be an expensive operation"*; the pipeline builds the index) | the "write" *is* the index build; retrieval reads a finished artifact |
 
 ⇒ **Neither family does our bounded shape** ("write the row now, maybe without a vector, repair later"). That
@@ -433,10 +438,11 @@ bounded path. Neither survives as an unqualified "adopt".
   separately in the same comment, *"**After the record serves them**: stop writing …"*. **Both clauses are
   quoted because the grant words the condition two ways and this dossier applies the stricter one (serve, not
   merely index)** — `#13220`'s last comment records that the *indexes* reading is *"a condition satisfied at the
-  end of step 1"*, which would admit removal in the same release the grant forbids. On either reading the
-  record holds them (migration `20261117000001`) and **does not serve them** (`LABEL_SERVED`, `#13422`). Removing
+  end of step 1"*, which would admit removal in the same release the grant forbids. On either reading, the record
+  has the **columns** and the live writer fills **rows written after deploy** — it does **not** yet hold the
+  pre-existing population (`:1640`), and **does not serve either label** (`LABEL_SERVED`, `#13422`). Removing
   the copy today deletes the only serving copy for two labels and then reports the loss as a saving. **Adopt the
-  trigger in §2.5, fund the three items that make it checkable, and run §2.6's experiment to settle whether the
+  trigger in §2.5, fund the four conditions that make it checkable, and run §2.6's experiment to settle whether the
   fingerprint earns its keep.**
 - **R2 — do not adopt full deferral; the admissible half is already shipped.** The four derived-entity folds
   are already bounded (0.25 s, `#13229`), and `Point` is excluded by a *record semantic*
