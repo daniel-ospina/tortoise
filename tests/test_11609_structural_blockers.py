@@ -287,37 +287,49 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     # `def build(): FastAPIRouterAdapter = object; return FastAPIRouterAdapter(x)` reported a
     # site for `object(x)`: a FALSE BLOCK the pin did not previously emit.
     chains: dict[int, tuple[ast.AST, ...]] = {}
+    #: Whether a node runs on only SOME executions of its block — inside an `if`/`try`/`match`/
+    #: loop/`with` arm. A binding there is a JOIN, not an overwrite (`_bind`).
+    conditional: dict[int, bool] = {}
+    #: The statements that make their subtree conditional. `Try` marks its body, handlers and
+    #: `orelse` alike: over-approximating an arm that cannot be attributed costs a re-read of
+    #: the pin, while under-approximating one is the false PASS this reader exists to prevent.
+    branches = (ast.If, ast.Try, ast.TryStar, ast.While, ast.For, ast.AsyncFor,
+                ast.With, ast.AsyncWith, ast.ExceptHandler, ast.Match, ast.match_case)
 
     def _chain(node: ast.AST) -> tuple[ast.AST, ...]:
         return chains.get(id(node), ())
 
-    def _walk(node: ast.AST, stack: tuple[ast.AST, ...]) -> None:
+    def _walk(node: ast.AST, stack: tuple[ast.AST, ...], branched: bool = False) -> None:
         chains[id(node)] = stack
+        conditional[id(node)] = branched
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             # Decorators and default values are EVALUATED in the enclosing block, so they are
             # attributed there; the body and the parameters are the new block.
             for decorator in getattr(node, "decorator_list", ()):
-                _walk(decorator, stack)
+                _walk(decorator, stack, branched)
             for default in node.args.defaults:
-                _walk(default, stack)
+                _walk(default, stack, branched)
             for default in node.args.kw_defaults:
                 if default is not None:
-                    _walk(default, stack)
+                    _walk(default, stack, branched)
             inner = (*stack, node)
+            # a new BLOCK starts unconditional: conditional-ness is relative to the block that
+            # contains the binding, never inherited across a block boundary.
             for child in (node.body if isinstance(node.body, list) else [node.body]):
-                _walk(child, inner)
+                _walk(child, inner, False)
             return
         if isinstance(node, ast.ClassDef):
             for decorator in node.decorator_list:
-                _walk(decorator, stack)
+                _walk(decorator, stack, branched)
             for base in [*node.bases, *(keyword.value for keyword in node.keywords)]:
-                _walk(base, stack)
+                _walk(base, stack, branched)
             inner = (*stack, node)
             for child in node.body:
-                _walk(child, inner)
+                _walk(child, inner, False)
             return
+        deeper = branched or isinstance(node, branches)
         for child in ast.iter_child_nodes(node):
-            _walk(child, stack)
+            _walk(child, stack, deeper)
 
     _walk(tree, ())
 
@@ -325,6 +337,39 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     CLASS_BINDING = "class"
     MODULE_BINDING = "module"
     SHADOWED = "shadowed"
+
+    def _bind(env: dict[str, set[str]], name: str, kind: str, node: ast.AST) -> None:
+        """Record that `name` may hold `kind` after `node` runs.
+
+        ⛔ A CONDITIONAL BINDING IS A JOIN, NOT AN OVERWRITE (`#13585 review round 4` F1). The
+        env holds the SET of values a name may hold on some path, so an assignment inside an
+        `if`/`try`/`except`/`match`/loop arm ADDS a possibility and an UNCONDITIONAL one
+        REPLACES the set. That is the ordinary join at a control-flow merge, and it answers the
+        branch-conditional class BY CONSTRUCTION rather than one shape at a time.
+
+        What it fixes, measured: the import guard this tree actually uses —
+
+            try:
+                from tortoise.tool_registry import FastAPIRouterAdapter
+            except ImportError:                      # pragma: no cover
+                FastAPIRouterAdapter = None
+            def wire(app, handlers):
+                return FastAPIRouterAdapter(app).register_all(TOOL_REGISTRY, handlers)
+
+        — reported `[]` at the pre-join head, because the ordered replay applied the `except`
+        assignment AFTER the import and dropped the name, while `except ImportError` arms are
+        live in this repo (`tortoise/__main__.py`). The two arms are mutually exclusive and NO
+        source order chooses between them, so the honest reading of the name after the guard is
+        `{class, shadowed}` — and a call of it may well be the adapter, which is the direction
+        this pin must never get wrong. A conditional shadow of an adapter binding is therefore
+        REPORTED (the branch where the shadow does not run is a real wiring), and the
+        UNCONDITIONAL shadow rows assert the other direction so this cannot decay into
+        "always report".
+        """
+        if conditional.get(id(node), False):
+            env[name] = env.get(name, set()) | {kind}
+        else:
+            env[name] = {kind}
 
     def _key(chain: tuple[ast.AST, ...]) -> int | None:
         return id(chain[-1]) if chain else MODULE
@@ -348,7 +393,8 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     #: every read in that block, exactly as Python's compile-time scoping does), and the value
     #: each of those names holds as the walk sees it.
     binds: dict[int | None, set[str]] = {MODULE: set()}
-    envs: dict[int | None, dict[str, str]] = {MODULE: {}}
+    #: name -> the SET of binding kinds it may hold (see `_bind`)
+    envs: dict[int | None, dict[str, set[str]]] = {MODULE: {}}
 
     declared_global: dict[int | None, set[str]] = {}
     declared_nonlocal: dict[int | None, set[str]] = {}
@@ -409,26 +455,31 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         elif isinstance(node, ast.ClassDef):
             _note_binding(node.name, chain)
 
-    def _resolve(name: str, chain: tuple[ast.AST, ...], env_map: dict) -> str | None:
-        """The value `name` holds as seen from `chain`: a binding kind, or None if unbound.
+    def _resolve(name: str, chain: tuple[ast.AST, ...], env_map: dict) -> set[str] | None:
+        """The SET of kinds `name` may hold as seen from `chain`, or None if unbound.
 
-        A name bound in an INNER block stops the search even when its value is not the adapter
-        (`SHADOWED`) — that is Python's own shadowing rule, and it is what stops a module-level
-        import from lending its meaning to a call whose own block rebinds the name.
+        A name bound in an INNER block stops the search even when none of its possible values
+        is the adapter (`{SHADOWED}`) — that is Python's own shadowing rule, and it is what
+        stops a module-level import from lending its meaning to a call whose own block rebinds
+        the name. Within ONE block the value is a SET because a branch may bind it on only some
+        paths (`_bind`), and the block that binds it is the block that owns every read of it.
         """
         for key in _lookup_keys(chain):
             if name in binds.get(key, ()):
-                return env_map.get(key, {}).get(name, SHADOWED)
+                return env_map.get(key, {}).get(name, {SHADOWED})
         return None
 
-    def _kind(dotted: str | None, chain: tuple[ast.AST, ...], env_map: dict) -> str | None:
-        """CLASS_BINDING / MODULE_BINDING / None for the dotted name as seen from `chain`."""
+    def _kind(dotted: str | None, chain: tuple[ast.AST, ...], env_map: dict) -> set[str] | None:
+        """The possible kinds of the dotted name as seen from `chain` (None when unbound)."""
         if dotted is None:
             return None
         root, _, rest = dotted.partition(".")
         kind = _resolve(root, chain, env_map)
         if rest:
-            return CLASS_BINDING if (kind == MODULE_BINDING and rest == _ADAPTER_CLASS) else None
+            return ({CLASS_BINDING}
+                    if (kind is not None and MODULE_BINDING in kind
+                        and rest == _ADAPTER_CLASS)
+                    else None)
         return kind
 
     def _resolves_to_class(dotted: str | None, chain: tuple[ast.AST, ...], env_map: dict) -> bool:
@@ -438,14 +489,16 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         if tail == _ADAPTER_CLASS and _is_module_name(head):
             # a fully dotted path with no bound root (`tortoise.tool_registry.FastAPIRouterAdapter`)
             return True
-        return _kind(dotted, chain, env_map) == CLASS_BINDING
+        kind = _kind(dotted, chain, env_map)
+        return kind is not None and CLASS_BINDING in kind
 
     def _resolves_to_module(dotted: str | None, chain: tuple[ast.AST, ...], env_map: dict) -> bool:
         if dotted is None:
             return False
         if "." in dotted and _is_module_name(dotted):
             return True  # `tortoise.tool_registry` spelled out
-        return _kind(dotted, chain, env_map) == MODULE_BINDING
+        kind = _kind(dotted, chain, env_map)
+        return kind is not None and MODULE_BINDING in kind
 
     def _apply_import_or_definition(node: ast.AST, chain: tuple[ast.AST, ...]) -> None:
         env = envs.setdefault(_key(chain), {})
@@ -454,23 +507,25 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
             # definition is itself a binding. An import-only reading made
             # `FastAPIRouterAdapter(app)` inside `tool_registry.py` invisible — the one module
             # the docstring above names as the legitimate wiring site.
-            env[node.name] = CLASS_BINDING if node.name == _ADAPTER_CLASS else SHADOWED
+            _bind(env, node.name,
+                  CLASS_BINDING if node.name == _ADAPTER_CLASS else SHADOWED, node)
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 bound = alias.asname or alias.name.split(".", 1)[0]
                 if alias.name == _ADAPTER_CLASS:
-                    env[bound] = CLASS_BINDING
+                    _bind(env, bound, CLASS_BINDING, node)
                 elif _is_module_name(alias.name):
                     # `from tortoise import tool_registry as tr` — the spelling this very file
                     # uses for `mcp_server` (`from tortoise import mcp_server as ms`), so it is
                     # a realistic regression path rather than an exotic one.
-                    env[bound] = MODULE_BINDING
+                    _bind(env, bound, MODULE_BINDING, node)
                 else:
-                    env.setdefault(bound, SHADOWED)
+                    _bind(env, bound, SHADOWED, node)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 bound = alias.asname or alias.name.split(".", 1)[0]
-                env[bound] = MODULE_BINDING if _is_module_name(alias.name) else SHADOWED
+                _bind(env, bound, MODULE_BINDING if _is_module_name(alias.name) else SHADOWED,
+                      node)
 
     def _apply_assignment(node: ast.Assign | ast.AnnAssign, chain: tuple[ast.AST, ...]) -> None:
         env = envs.setdefault(_key(chain), {})
@@ -481,12 +536,13 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         for target in targets:
             for name in _target_names(target):
                 if class_bound:
-                    env[name] = CLASS_BINDING
+                    _bind(env, name, CLASS_BINDING, node)
                 elif module_bound:
-                    env[name] = MODULE_BINDING
+                    _bind(env, name, MODULE_BINDING, node)
                 else:
-                    # a reassignment that resolves to neither DROPS the name (see docstring).
-                    env[name] = SHADOWED
+                    # a reassignment that resolves to neither DROPS the name (see docstring)…
+                    # unless it sits in a BRANCH, where it only ADDS a possibility (`_bind`).
+                    _bind(env, name, SHADOWED, node)
 
     def _apply_parameters(node: ast.AST, chain: tuple[ast.AST, ...]) -> None:
         """Bind a function's parameters in ITS block.
@@ -513,7 +569,9 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
             elif _resolves_to_module(resolved, chain, envs):
                 resolvable[param.arg] = MODULE_BINDING
         for name in _parameter_names(args):
-            env[name] = resolvable.get(name, SHADOWED)
+            # unconditional BY DEFINITION — every parameter binds when the block is entered,
+            # so this replaces rather than joins.
+            env[name] = {resolvable.get(name, SHADOWED)}
 
     # FORWARD-REFERENCE PRE-PASS. Two ordered passes so a chain declared below its use
     # (`A = B` before `B = FastAPIRouterAdapter`) still resolves, while staying deterministic:
@@ -548,7 +606,7 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     # and that direction is the false PASS this reader exists to prevent. Arm 2 resolves through
     # the SAME scope chain as arm 1, so it restores every site the positional arm loses while
     # still honouring a same-block shadow (which is what `#13585 review P3` measured).
-    final_envs: dict[int | None, dict[str, str]] = {
+    final_envs: dict[int | None, dict[str, set[str]]] = {
         key: dict(env) for key, env in envs.items()
     }
 
@@ -1043,10 +1101,15 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     # own test and this wiring had none: reverting it to the pre-PR
     # `"rest_spec" in source.read_text(...)` comprehension reded NO row, because the scanned
     # population's only mention of the field sits in the one module that comprehension excludes
-    # by name. Glob + name exclusion + predicate now live in ONE function (`_rest_spec_scan`)
+    # by path. Glob + path exemption + predicate now live in ONE function (`_rest_spec_scan`)
     # that both this pin and its falsifier drive, so a revert of ANY of the three reds a row.
-    # What remains unfalsifiable is this STATEMENT, by construction — a test cannot falsify its
-    # own call — so the guarantee is scoped to the seam rather than claimed for the call site.
+    # ⛔ THIS STATEMENT IS PINNED TOO, by AST-reading this file
+    # (`test_the_real_pin_drives_the_seam_instead_of_re_inlining_it`). "A test cannot
+    # falsify its own call" was WRONG: the repo already does it
+    # (`tests/test_13302_ended_read.py:227` parses its own source), and the cost of not doing
+    # it is measured — reverting this line to the pre-PR inline substring comprehension left
+    # 5 passed / 0 failed, because `grep -rn rest_spec tortoise/` outside `tool_registry.py`
+    # is 0. The seam holds the predicate; this proves the seam is what runs.
     readers = _rest_spec_scan(repo)
     # ⛔ `tool_registry.py` is NOT exempt — it is where the route-deriving code LIVES, so a
     # filename exclusion leaves the one module that could host the loop unwatched (measured:
@@ -1305,6 +1368,53 @@ def test_the_adapter_reading_is_not_spelling_blind():
     ), "a wiring bound in an ENCLOSING block was missed by the nested call — the closure reads " \
        "that local, and reporting `[]` here would leave the pin green over a real registry-derived " \
        "route"
+    # ⛔ BRANCH-CONDITIONAL BINDINGS (`#13585 review round 4` F1). The import guard below is the
+    # idiom this tree actually uses (`except ImportError` arms are live in
+    # `tortoise/__main__.py`), and the ordered replay applied the `except` assignment AFTER the
+    # import — dropped the name, reported `[]` for a module that really derives its routes. The
+    # env now holds the SET of values a name may hold, so an arm that no source order can choose
+    # between ADDS a possibility instead of overwriting one. Measured on the pre-join head: `[]`;
+    # the control WITHOUT the guard: `[3]`.
+    assert _adapter_instantiation_sites(
+        "try:\n"
+        "    from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "except ImportError:                      # pragma: no cover\n"
+        "    FastAPIRouterAdapter = None\n"
+        "def wire(app, handlers):\n"
+        "    return FastAPIRouterAdapter(app).register_all(TOOL_REGISTRY, handlers)\n"
+    ), ("an `except ImportError: FastAPIRouterAdapter = None` guard dropped the class for a later "
+        "REAL wiring — the two arms are mutually exclusive and no source ORDER chooses between "
+        "them, so the name is possibly the adapter after the guard and the call is a site")
+    assert _adapter_instantiation_sites(
+        "if _HAS_FASTAPI:\n"
+        "    from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "else:\n"
+        "    FastAPIRouterAdapter = None\n"
+        "A = FastAPIRouterAdapter(app)\n"
+    ), "an `if`/`else` binding of the adapter reports NO instantiation — the same join the " \
+       "`try`/`except` row needs, and the reason the fix is a VALUE SET rather than one more " \
+       "shape-specific exception"
+    # …and a CONDITIONAL shadow OVER-reports rather than under-reports, deliberately: on the
+    # branch where the shadow does not run the call IS the adapter, so reporting it is right and
+    # a re-read of the pin answers it. The UNCONDITIONAL shadow rows below are the mirror that
+    # keeps this from decaying into "always report".
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "if _DEBUG:\n"
+        "    A = object\n"
+        "A(app)\n"
+    ), ("a CONDITIONAL shadow of an adapter binding dropped the name for the whole module — an "
+        "arm that may not run cannot erase the binding that holds on the other arm")
+    # the mirror, and the one that keeps the join honest: an UNCONDITIONAL shadow DOES win.
+    assert _adapter_instantiation_sites(
+        "try:\n"
+        "    from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "except ImportError:\n"
+        "    FastAPIRouterAdapter = None\n"
+        "FastAPIRouterAdapter = dict\n"
+        "FastAPIRouterAdapter(x)\n"
+    ) == [], ("an UNCONDITIONAL rebinding after a guarded import still reads as an instantiation "
+              "— the join must replace on a path that always runs, not accumulate forever")
     # and the forward-reference half must survive the per-position read: Python resolves a name
     # at CALL time, so a chain declared below its use still instantiates the adapter.
     assert _adapter_instantiation_sites(
@@ -1408,16 +1518,78 @@ def test_the_rest_spec_scan_is_wired_to_the_attribute_reader(tmp_path):
     (product / "sub" / "reads.py").write_text(
         "for e in TOOL_REGISTRY:\n    app.add_api_route(e.rest_spec.path, handler)\n",
         encoding="utf-8")
-    # the exempt-by-name module is NOT exempt from this test: the exclusion is the scan's own,
-    # so a substring predicate would report `comment_only.py` regardless of it.
-    (product / "tool_registry.py").write_text("x = 1  # rest_spec\n", encoding="utf-8")
+    # the exempt-by-name module is NOT exempt from this test: the exclusion is the scan's own.
+    # ⛔ It carries a REAL attribute read, not a comment (#13585 review P3#2). With only
+    # `x = 1  # rest_spec` the attribute predicate rejected it on its own, so DELETING the name
+    # exclusion left this row GREEN while the message promised "the name exclusion was lost" as
+    # a covered cause — an assertion advertising a detection it does not perform, which is the
+    # same overstatement this PR removes. Measured: with the read below in place, removing the
+    # exemption from `_rest_spec_readers` reports this module and reds this row.
+    (product / "tool_registry.py").write_text(
+        "app.add_api_route(entry.rest_spec.path, handler)\n", encoding="utf-8")
+    # ⛔ THE EXEMPTION IS BOUND TO THE ONE MODULE, NOT TO A BASENAME (`#13585 review round 4`
+    # F3). `source.name != "tool_registry.py"` exempted EVERY file of that name under
+    # `tortoise/`, while the stricter reader that stands in for the exemption is called on ONE
+    # exact path — so a second `tool_registry.py` in a subpackage was graded by NEITHER arm:
+    # excluded by name from the scan, never opened by the adapter-scoped read. The no-man's-land
+    # is exactly where a hand-rolled route loop would live, so the exemption names the defining
+    # module's PATH and anything else of that name is scanned like any other file. Measured at
+    # the pre-fix head: this read was reported by neither reader (`[]` from the scan); with the
+    # path-bound exemption it is reported by the scan, and reverting to the basename test drops
+    # it from this list again.
+    (product / "sub" / "tool_registry.py").write_text(
+        "for e in TOOL_REGISTRY:\n    app.add_api_route(e.rest_spec.path, handler)\n",
+        encoding="utf-8")
 
-    assert _rest_spec_scan(tmp_path) == ["tortoise/sub/reads.py"], (
+    assert _rest_spec_scan(tmp_path) == ["tortoise/sub/reads.py",
+                                        "tortoise/sub/tool_registry.py"], (
         "the `rest_spec` scan is not wired to the ATTRIBUTE reader over a RECURSIVE walk — a "
         "comment-only module was reported, the real attribute read was missed, a subpackage "
-        "was never reached, or the name exclusion was lost — so the F2 fix could be undone "
-        "silently with every row green"
+        "was never reached, the DEFINING module's exclusion was lost, or a second "
+        "`tool_registry.py` was exempted by BASENAME while the reader that replaces the "
+        "exemption is bound to one exact path — so the F2/F3 fixes could be undone silently "
+        "with every row green"
     )
+
+
+def test_the_real_pin_drives_the_seam_instead_of_re_inlining_it():
+    """Pin the PIN's own call statement, by reading this file's AST (#13585 review P3#3).
+
+    The previous revision declared the wiring behaviourally unfalsifiable — "a test cannot
+    falsify its own call statement". That is false, and this repo already does the opposite:
+    `tests/test_13302_ended_read.py:227` parses its OWN source and asserts on every `from_uri(`
+    call in it, and `test_11656_endpoint_kind_binding_scope.py` / `test_10180_promote_default_graph.py`
+    do the same. The cost of not doing it is measured: replacing `readers = _rest_spec_scan(repo)`
+    with the pre-PR inline `"rest_spec" in source.read_text(...)` comprehension left 5 passed /
+    0 failed, because `grep -rn rest_spec tortoise/` outside `tool_registry.py` is 0 — the revert
+    stays invisible until some product module happens to mention the field in prose, which is
+    exactly the false-BLOCK F2 removes.
+
+    So this residual is a chosen trade-off no longer, it is closed: the pin must reach the
+    predicate THROUGH the seam, and the seam's own test pins the seam.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    pin = next(
+        (node for node in tree.body
+         if isinstance(node, ast.FunctionDef)
+         and node.name == "test_the_served_route_is_hand_written_and_nothing_reads_the_row"),
+        None,
+    )
+    assert pin is not None, "the served-route pin was renamed — re-point this falsifier"
+    called = {
+        node.func.id
+        for node in ast.walk(pin)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_rest_spec_scan" in called, (
+        "the served-route pin does not call `_rest_spec_scan` — if it computes `readers` some "
+        "other way (the pre-PR inline `\"rest_spec\" in source.read_text(...)` comprehension), "
+        "the seam is bypassed and a revert of the F2 fix reds no row (measured: 5 passed / 0 "
+        "failed on the revert)")
+    direct = {"_rest_spec_readers", "_rest_spec_attribute_reads"} & called
+    assert not direct, (
+        f"the served-route pin calls {sorted(direct)} directly — the predicate must be reached "
+        "through the seam, or the recursive walk and the name exclusion are unpinned again")
 
 
 def test_the_excluded_module_is_graded_by_the_same_predicate(tmp_path):
@@ -1470,7 +1642,8 @@ def _is_rest_spec_read(node: ast.AST) -> bool:
     """The ONE predicate for a static `rest_spec` read: attribute, `getattr`, constant subscript.
 
     ⛔ Shared by BOTH readers on purpose (`#13585 review` P3 — the EXCLUDED module was graded
-    by a weaker spelling reader). `_rest_spec_readers` exempts `tool_registry.py` by name
+    by a weaker spelling reader). `_rest_spec_readers` exempts the DEFINING module's path
+    (not a basename, `#13585 review round 4` F3)
     because `_rest_spec_use_outside_the_adapter` is supposed to be the STRICTER read for it;
     while each held its own predicate, that claim was false: the replacement matched
     `ast.Attribute(attr="rest_spec")` and `add_api_route` CALL nodes only, so a read spelled
@@ -1518,9 +1691,11 @@ def _rest_spec_scan(root: Path) -> list[str]:
     name exclusion TOGETHER with the predicate means the falsifier drives the same code the pin
     does, and a revert of any of the three reds a row.
 
-    Stated rather than hidden: the enclosing pin's one-line call of THIS function is still not
-    falsifiable — a test cannot falsify its own call statement — which is why the claim there
-    is "the seam is pinned", not "the call site is pinned".
+    Stated rather than hidden: the enclosing pin's one-line call of THIS function is not
+    falsifiable BEHAVIOURALLY — and that residual is now CLOSED, not declared impossible. "A test
+    cannot falsify its own call statement" was false: `tests/test_13302_ended_read.py:227` parses
+    its OWN source and asserts on every `from_uri(` call in it, so
+    `test_the_real_pin_drives_the_seam_instead_of_re_inlining_it` does the same here.
     """
     scanned = sorted((root / "tortoise").rglob("*.py"))
     return _rest_spec_readers(scanned, root)
@@ -1529,17 +1704,27 @@ def _rest_spec_scan(root: Path) -> list[str]:
 def _rest_spec_readers(paths: list[Path], root: Path) -> list[str]:
     """Root-relative paths of product modules that READ the `rest_spec` field.
 
-    The scan's call site, extracted so it is falsifiable (#13585 review P3#1) — see
-    `test_the_rest_spec_scan_is_wired_to_the_attribute_reader`. `tool_registry.py` is excluded
-    by name here because it is read as its own AST below (`_rest_spec_use_outside_the_adapter`),
+    The PER-FILE half of the scan. `_rest_spec_scan` is the seam the pin drives (#13585 review
+    P2#1) — this docstring called ITSELF "the scan's call site", which was true only before the
+    seam existed, and labelled the finding "P3#1" while the recorded review numbers it P2.
+    `tool_registry.py` is excluded
+    here because it is read as its own AST below (`_rest_spec_use_outside_the_adapter`),
     which is stricter: legitimate uses must sit INSIDE `FastAPIRouterAdapter`, and it flags every
     static read spelling this reader does (`_is_rest_spec_read`, shared by both — the exclusion
     is only as good as the reader that replaces it).
+    ⛔ THE EXEMPTION IS ONE PATH, NOT ONE BASENAME (`#13585 review round 4` F3). It used to read
+    `source.name != "tool_registry.py"`, which exempted every file of that name anywhere under
+    `tortoise/`, while the stricter reader that stands in for the exemption is called on exactly
+    `tortoise/tool_registry.py` — so a second `tool_registry.py` in a subpackage was graded by
+    NEITHER arm, excluded by name from this one and never opened by that one. A no-man's-land is
+    the wrong failure for a pin whose claim is "nothing but that adapter derives a route from a
+    row", so the exemption names the defining module's PATH.
     """
+    exempt = (root / "tortoise" / "tool_registry.py").resolve()
     return [
         str(source.relative_to(root))
         for source in paths
-        if source.name != "tool_registry.py" and _rest_spec_attribute_reads(source)
+        if source.resolve() != exempt and _rest_spec_attribute_reads(source)
     ]
 
 
