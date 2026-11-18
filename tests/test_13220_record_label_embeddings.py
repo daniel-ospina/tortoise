@@ -28,9 +28,9 @@ from pathlib import Path
 
 import pytest
 
+import tortoise.derived_embedding as derived_embedding
 import tortoise.record_projection as rp
 import tortoise.record_vector as rv
-import tortoise.derived_embedding as derived_embedding
 import tortoise.record_writer as rw
 
 _MIGRATION = (Path(__file__).resolve().parent.parent
