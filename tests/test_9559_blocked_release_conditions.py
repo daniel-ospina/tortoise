@@ -1858,9 +1858,15 @@ def _strip_sql_comments(sql: str) -> str:
             continue
         if ch == "'":
             in_literal = True
-            # `E'…'` / `e'…'` — the `E` must abut the quote and start its own token
+            # `E'…'` / `e'…'` — the `E` must abut the quote and start its own token,
+            # which it does unless the preceding character CONTINUES an identifier or
+            # a number (`_`, an alnum). ⛔ A closing `"` is NOT such a character: it
+            # ENDS a quoted identifier, so `"a"E'…'` starts a fresh token and the
+            # escape rule must still apply — excluding `"` here left that form blind
+            # to EOF (`SELECT "a"E'\'' AS q; -- c` kept its comment), which is this
+            # fix's own fail-open in miniature.
             escape_literal = bool(i) and sql[i - 1] in "Ee" and (
-                i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] in '_"'))
+                i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] == "_"))
             out.append(ch)
             i += 1
             continue
@@ -2599,6 +2605,25 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
     assert _strip_sql_comments("SELECT e'\\'' AS q; -- c\n") == "SELECT e'\\'' AS q; \n", (
         "the lowercase `e'…'` spelling must escape its quote too — if only `E'` is "
         "recognised, a body written `e'\''` blinds the strip to end of file again")
+
+    # 6. The prefix test must not SUPPRESS the rule after a CLOSED quoted identifier.
+    #    `""` ends an identifier, so `"a"E'…'` starts a fresh token and the escape
+    #    still applies. An earlier cut listed `"` among the characters that continue a
+    #    token, which turned the rule off for exactly that form and left
+    #    `SELECT "a"E'\'' AS q; -- c` with its comment INTACT — the E-escape fail-open
+    #    restored by one set member. Measured: with `"` in that set this row's input
+    #    came back verbatim; without it the comment is removed.
+    assert _strip_sql_comments('SELECT "a"E\'\\\'\' AS q; -- c\n') == (
+        'SELECT "a"E\'\\\'\' AS q; \n'), (
+        "a closing `\"` does not continue a token: `\"a\"E'…'` must still be read as "
+        "an escape string, or the comment after it survives")
+    # Non-vacuity, both ways round: the `E` rule is still SUPPRESSED where the `E`
+    # really is the tail of a longer word, so the assertion above cannot be satisfied
+    # by simply deleting the prefix test altogether.
+    assert _strip_sql_comments("SELECT aE'\\'' AS q; -- c\n") == (
+        "SELECT aE'\\'' AS q; -- c\n"), (
+        "`aE'…'` is an identifier tail, not an escape string — if the prefix test is "
+        "gone entirely this strips, and the row above stops discriminating")
 
 
 def test_a_quoted_IDENTIFIER_is_not_a_literal_and_cannot_blind_the_strip():
