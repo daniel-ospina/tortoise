@@ -63,8 +63,12 @@ sources**, not a narrative: "X is true — because <source>", one claim per line
 claim:
 
 1. `tortoise_create_entity(type="point", name=<the claim>,
-   extractedFrom=<source url>, props={"sourceKind": "T1"})` — file the claim
-   with its provenance. Tiers are the SourceKind taxonomy in
+   props={"pointKind": "statement", "sourceKind": "T1"})` — file the claim
+   with its tier. ⛔ NOT `extractedFrom=`: that leg belonged to the retired
+   `create_point` door, and the arm `create_entity` does not take it
+   (`signature (type, name, props, goalState)` — passing it raises
+   `TypeError: got an unexpected keyword argument`). The provenance gap is
+   #13577. Tiers are the SourceKind taxonomy in
    `how-to-use-tortoise`: T0 direct observation … T4 speculative. A claim with
    no tier is a claim you cannot grade later.
 2. Connect it to **itself** — the claims in this round support or contradict
