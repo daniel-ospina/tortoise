@@ -741,22 +741,37 @@ def _warn_readiness_contradictory(path: str | None, cov) -> None:
 
 
 def _warn_readiness_multitenant() -> None:
+    """Say ONCE PER PROCESS that one journal cannot serve several tenants.
+
+    ⛔ IT NAMES THE DECLARATION IN PROSE AND NEVER READS IT (#9192's reader
+    pin). This module must not touch the process-global tenant variables —
+    `tests/test_9192_tenant_armed_by_request.py::
+    test_the_env_pair_has_no_reader_outside_the_gated_resolver` allows those
+    literals only inside `record_writer`'s gated resolver, and the earlier cut
+    of this warning imported `RECORD_SINGLE_TENANT_ENV` to format its message.
+    That import is a READER as far as the AST pin can tell, and it is the exact
+    shape the pin exists to refuse (a copy of the read shape beside the gate).
+    Naming the variable in an operator message is not a read — `cache_leg.py`
+    already spells it the same way — and the only thing this function needs is
+    the WORD the operator can search for, never the value.
+    """
     global _WARNED_MULTITENANT
     with _WARN_LOCK:
         if _WARNED_MULTITENANT:
             return
         _WARNED_MULTITENANT = True
-    from .record_writer import RECORD_SINGLE_TENANT_ENV
 
     logging.getLogger(LOG_NAME).warning(
         "record dense leg: %s names ONE journal, but this process did not "
-        "declare single tenancy (%s is unset), so the per-tenant backfill "
+        "declare single tenancy (TORTOISE_RECORD_SINGLE_TENANT is unset), so "
+        "the per-tenant backfill "
         "coverage of EACH tenant cannot be measured — comparing one tenant's "
         "journal against another tenant's rows is a wrong answer, not a weak "
         "one (#9192). Every tenant on this process keeps the graph branch, "
         "which is a correct answer, until the journal is declared per tenant "
-        "(#13366); set %s=1 ONLY in a process that serves one graph",
-        RECORD_JOURNAL_ENV, RECORD_SINGLE_TENANT_ENV, RECORD_SINGLE_TENANT_ENV)
+        "(#13366); set TORTOISE_RECORD_SINGLE_TENANT=1 ONLY in a process that "
+        "serves one graph",
+        RECORD_JOURNAL_ENV)
 
 
 def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
