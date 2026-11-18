@@ -33,6 +33,45 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.37 (2026-11-17 — §5's vocabulary table states the model, not the code; the last six-word restatements go):**
+>
+> **Owner approval of the exact changes:** 2026-11-17, given in-session (*"good > easy"* — the structurally
+> correct fix, not the smallest diff). The artifact is the text itself.
+>
+> **Why a second entry.** v3.36 fixed the §4 field tables but left two older restatements of the retired
+> six-word vocabulary, deliberately: they fell outside the approved hunks. The owner has now approved
+> fixing them, and the *shape* matters — the §5 table carried a `Write path` column, which is why it could
+> go stale: it mixed the model (what a status means) with the implementation (which verb writes it), and
+> the code's verbs are not yet the model's verbs. The build detail belongs in this changelog; the model
+> belongs in the ontology.
+>
+> **What changed:**
+>
+> - **§5 *Point Status Vocabulary*** is now a **four-row model table** — `draft`, `live`, `deprecated`,
+>   `superseded` — with the `Write path` column removed. `live` transitions to `deprecated`/`superseded`
+>   (no longer `retracted`), a `deprecated` row is added (*ended, nothing replaced it*; `archived` is its
+>   write-side synonym), and `superseded` keeps its successor obligation and its edge-disposition note.
+> - A note beneath the table states that **`retracted`, `outdated` and `archived` are read-side legacy** —
+>   no verb produces them, every reader treats them as ended over stored rows (#12855), and the `outdated`
+>   boolean remains a second, flag-based dead marker (#2498) that readers **including EP's currency
+>   predicate** must go on honouring.
+> - **One remaining §5 vocabulary restatement** — the problem-family note at `docs/ONTOLOGY.md:1042`
+>   ("the claim point is superseded/retracted") — now reads `superseded/deprecated`. A one-word correction
+>   inside the same section the table governs, not a new rule.
+> - **§10.5's decision row** (`docs/ONTOLOGY.md:1527`, the "potentially invalidated" comparison) no longer
+>   restates the six-word set; it names the four and marks the other three as read-side legacy. Its original
+>   point — belief is measured by posterior variance, not by a status word — is unchanged.
+>
+> **What did NOT change:** every §4 field row (v3.36 already settled them), the `challenged is NOT a state`
+> note, the `Write path` facts themselves (unchanged; they are recorded in the code and in this file's own
+> git history, not in the model), and every stored value. No claim is made here that the code already produces only the four words:
+> `retract_point` still writes `retracted` by Cypher, tracked on #11824.
+>
+> **Residue this entry leaves:** none known in the vocabulary — the model now says four words everywhere it
+> states the vocabulary, and the one place the code diverges from it (`retract_point` writing `retracted`) is
+> named in the table's own note rather than left to be discovered. The open question is EP's *description* across entity kinds, which is being audited
+> separately and will arrive as its own approval.
+>
 > **Changelog v3.36 (2026-11-17 — one four-word lifecycle vocabulary; `guideline` leaves `goalState`):**
 >
 > **Owner approval of the exact changes:** the ruling these hunks apply is on record on **#11824**,
