@@ -505,12 +505,19 @@ def test_the_prefetch_event_budget_declines_and_bounds_the_event_read(monkeypatc
     # this pin is about the EVENT bound, so the row shape must not be able to
     # red it.
     monkeypatch.setattr(record_vector, "_rows_as_dicts",
-                        lambda cur, sql, params: [{"id": "o_13422_row",
-                                                   "has_embedding_vec": True}])
+                        lambda cur: [{"id": "o_13422_row",
+                                      "has_embedding_vec": True}])
+    class _NoopCursor:
+        """The prefetch's `execute` — the rows it returns are stubbed above."""
+
+        def execute(self, sql, params=None):
+            pass
+
     monkeypatch.setattr(cp, "node_from_row", lambda label, row: object())
     monkeypatch.setattr(cp, "read_lifecycle_events", _events)
     assert record_vector._folded_terminal_keys(
-        object(), None, record_vector._Scope(org_id="org", graph_id="graph"),
+        object(), _NoopCursor(),
+        record_vector._Scope(org_id="org", graph_id="graph"),
         "object", None) is None, (
         "an over-budget journal prefetch must decline, never fold a TRUNCATED "
         "event stream (an unapplied terminal fold serves the row)")

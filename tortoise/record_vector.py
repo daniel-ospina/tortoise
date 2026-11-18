@@ -623,15 +623,25 @@ def _fold_prefetch_select(table: str) -> str:
     return rendered
 
 
-def _rows_as_dicts(cur: Any, sql: str, params: tuple) -> list[dict[str, Any]]:
-    """`SELECT` rows as dicts, by column name — a local three-line helper.
+def _rows_as_dicts(cur: Any) -> list[dict[str, Any]]:
+    """The rows a cursor just fetched, as dicts by column name.
 
     ⛔ NOT `cache_projection._rows`: that is a private of a module this one
     already imports lazily for the fold, and reaching into it would couple two
     modules' internals for a `zip`. The shape, not the function, is what both
     need.
+
+    ⛔ AND IT TAKES NO STATEMENT — the `execute` stays at the CALL SITE, with the
+    statement written there. That is not style: `tools/cypher_inventory.py`
+    classifies an `execute` by resolving its first argument, so a shared helper
+    taking `sql` as a parameter makes every call site an **unresolvable door
+    call** — counted in the Cypher census's `unresolved` bucket, which is where a
+    migration-candidate is looked for. A Postgres `SELECT` recorded as an
+    unclassifiable CYPHER statement is a false row in exactly the document that
+    exists to decide what may move off the graph. Written at the call site, the
+    same statement resolves and lands in the `non_cypher_door_calls` bucket that
+    exists for it.
     """
-    cur.execute(sql, params)
     columns = [d[0] for d in (cur.description or ())]
     return [dict(zip(columns, row, strict=False)) for row in cur.fetchall()]
 
@@ -711,8 +721,7 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
     # unregistered (string) type. The question here is only NULL-ness, so it is
     # asked in SQL and never parsed in Python — a caster this module does not own
     # is not worth depending on for a boolean.
-    rows = _rows_as_dicts(
-        cur,
+    cur.execute(
         f"SELECT {_fold_prefetch_select(table)}, "
         f"       (t.embedding_vec IS NOT NULL) AS has_embedding_vec "
         f"FROM public.{table} AS t "
@@ -721,6 +730,7 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
         f"LIMIT %s",
         (scope.org_id, scope.graph_id, _FOLDED_PREFETCH_ROW_BUDGET + 1),
     )
+    rows = _rows_as_dicts(cur)
     if len(rows) > _FOLDED_PREFETCH_ROW_BUDGET:
         # See _FOLDED_PREFETCH_ROW_BUDGET: a bounded decline, never a truncated
         # fold (a dropped row is a terminal key this leg would serve).
