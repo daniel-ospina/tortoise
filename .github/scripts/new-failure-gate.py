@@ -46,6 +46,12 @@ FAIL CLOSED, IN BOTH DIRECTIONS (the whole safety of the change)
   an empty id set on a red leg, a missing shared module, a listing that names no failing
   job for a red leg — each is 2, never 0. "Unknown" is not "no new failure".
 
+  A subprocess that runs out of BUDGET is the same class: `NFG_SUBPROCESS_TIMEOUT` bounds
+  one call (default 300 s) and `NFG_TOTAL_BUDGET_S` bounds them ALL together (default
+  780 s), each call getting `min(per-call, remaining)` — so a slow runner ends in an
+  UNMEASURED that NAMES the budget it spent instead of a job killed at its cap (#13513).
+  Both are read once, at `Runner` construction; an unreadable value is UNMEASURED.
+
   A failure whose log yields NO identity becomes `job-unreadable::<slug>` — the same
   key `ci-failure-set.sh::run_failed_job_ids` emits (#7131), carrying no signature, so
   the shared decision BLOCKS it by construction. Attribution at JOB granularity says so
@@ -91,6 +97,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 EXIT_CLEAN = 0
@@ -142,6 +149,58 @@ _UNCONDITIONAL_LEGS = frozenset({
 
 class Unmeasured(Exception):
     """Anything we could not read. Always exit 2, never 0 (#9984 constraint 1)."""
+
+
+# ── the two bounds on a subprocess, and why there are TWO (#13513) ────────────
+#
+# `ci-introduced-failure` feeds the REQUIRED aggregate, and its expensive calls are the
+# main-baseline sweeps (`ci-failure-set.sh --main-union-rates/--main-union-signatures`
+# over `--main-runs 10`): they query ten main runs' failing sets through the API and read
+# each failing job's log. Both were bounded by one hardcoded `timeout=300` and nothing
+# else, and on 2026-11-18 that literal was MEASURED to be shorter than the work: run
+# 44308191683 attempt 2 raised `Unmeasured` on `--main-union-rates` at exactly 300 s,
+# while a DIFFERENT PR's run completed the same sweep an hour earlier — so the sweep sits
+# near the bound and the gate reds the required check whenever the runner is slow. Measured
+# consequences the same morning: every PR that reached this predicate was blocked, and TWO
+# of the three were blocked on a baseline the gate could not read (this timeout, plus a
+# pruned main log — #10765) rather than on anything they introduced. Tracked as #13513.
+#
+# ⛔ A PER-CALL BOUND ALONE WOULD NOT FIX IT, and would be strictly worse. The sweeps are
+# SEQUENTIAL, so N calls x per-call can exceed the job's own `timeout-minutes` — and a job
+# killed at that cap reports `timed_out`, which the aggregate reds with NO message naming
+# what ran out. The module must reach its OWN verdict (UNMEASURED, saying which budget
+# was spent) BEFORE the runner would kill it, so the second bound is enforced ACROSS
+# calls: every subprocess gets `min(per-call, remaining)` of a TOTAL budget that sits
+# below the job cap. Fail-closed is unchanged — running out is still exit 2, never a pass.
+#
+# Both are env-overridable because the right per-call number belongs to the caller that
+# knows the sweep's cost (the workflow declares both). A malformed or non-positive
+# override is UNMEASURED, never silently clamped: a bound that cannot be read is not a
+# bound, and defaulting on it would hide the misconfiguration that made it unreadable.
+_SUBPROCESS_BOUND_ENV = "NFG_SUBPROCESS_TIMEOUT"
+_TOTAL_BUDGET_ENV = "NFG_TOTAL_BUDGET_S"
+_DEFAULT_SUBPROCESS_BOUND_S = 300.0
+_DEFAULT_TOTAL_BUDGET_S = 780.0
+
+
+def _seconds_env(name: str, default: float) -> float:
+    """A positive, finite number of seconds from `name`, or `Unmeasured`."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise Unmeasured(
+            f"{name}={raw!r} is not a number of seconds ({exc}) — the budget cannot "
+            "be read, so nothing was certified"
+        ) from exc
+    if not value > 0 or value == float("inf"):
+        raise Unmeasured(
+            f"{name}={raw!r} is not a positive finite number of seconds — the budget "
+            "cannot be read, so nothing was certified"
+        )
+    return value
 
 
 #: The Actions jobs-log endpoint's OWN per-line stamp: a bare ISO-8601 instant and a
@@ -231,18 +290,43 @@ def resolve_predicate(agent_infra: str) -> tuple[Path, Path]:
 class Runner:
     """`gh` + `python3` invocation, with a recorded-fixture seam for the tests."""
 
-    def __init__(self, *, gh: str, repo: str, token: str | None):
+    def __init__(self, *, gh: str, repo: str, token: str | None,
+                 subprocess_bound: float | None = None,
+                 total_budget: float | None = None):
         self.gh = gh
         self.repo = repo
         self.env = dict(os.environ)
         if token:
             self.env["GH_TOKEN"] = token
         self.env.setdefault("GH_HOST", "github.com")
+        self.subprocess_bound = (
+            subprocess_bound if subprocess_bound is not None
+            else _seconds_env(_SUBPROCESS_BOUND_ENV, _DEFAULT_SUBPROCESS_BOUND_S))
+        self.budget = (total_budget if total_budget is not None
+                       else _seconds_env(_TOTAL_BUDGET_ENV, _DEFAULT_TOTAL_BUDGET_S))
+        self.deadline = time.monotonic() + self.budget
+
+    def _bound(self, what: str) -> float:
+        """The timeout for the NEXT subprocess: `min(per-call, remaining budget)`.
+
+        Never a fresh per-call window: the calls are sequential and share one budget,
+        or the module could outlive the job that feeds the required check and die as
+        `timed_out` instead of reaching its own UNMEASURED verdict (#13513).
+        """
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise Unmeasured(
+                f"{what}: the verification budget ({self.budget:.0f}s, "
+                f"{_TOTAL_BUDGET_ENV}) is spent — the baseline could not be measured "
+                "inside it, so nothing was certified"
+            )
+        return max(1.0, min(self.subprocess_bound, remaining))
 
     def _run(self, argv: list[str], *, what: str) -> str:
+        bound = self._bound(what)
         try:
             proc = subprocess.run(
-                argv, capture_output=True, text=True, env=self.env, timeout=300
+                argv, capture_output=True, text=True, env=self.env, timeout=bound
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise Unmeasured(f"{what}: could not run {argv[0]!r} ({exc})") from exc
@@ -348,9 +432,10 @@ class Runner:
         failure to run), so it cannot go through `_run`. Every OTHER non-zero is
         still a measurement failure and the caller must refuse on it.
         """
+        bound = self._bound(what)
         try:
             proc = subprocess.run(
-                argv, capture_output=True, text=True, env=self.env, timeout=300
+                argv, capture_output=True, text=True, env=self.env, timeout=bound
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise Unmeasured(f"{what}: could not run {argv[0]!r} ({exc})") from exc
