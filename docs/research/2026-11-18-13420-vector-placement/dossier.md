@@ -16,7 +16,9 @@ aboutObjects: STORAGE-ARCHITECTURE.md §2.0/§12.1c/§14.3 V3/§17.1/§17.2, #11
 **This is a dossier. It implements nothing, retires nothing, and changes no writer flag.** The owner makes
 the decision; this document exists so that decision is made on measured ground rather than a summary of one.
 
-Prepared 2026-11-18 at `340d500491` on branch `research/13420-vector-placement`.
+Prepared 2026-11-18 at `6264dc670c` on branch `research/13420-vector-placement` (the citations were
+re-derived after a rebase onto main; the code files cited are byte-identical between the original base
+`340d500491` and this one — `git diff --stat 340d500491..6264dc670c -- tortoise/ supabase/migrations/` is empty).
 
 ## Method, rungs, and what this dossier could not do
 
@@ -66,7 +68,7 @@ body say opposite things (§1.5, an owner-lane question already recorded on `#13
 | **D-a** | **KEEP** — the entity fingerprint is part of the product | `#11395` comment `6781921075`, owner, 2026-11-10 | removal and the stopping of the write are both refused; the fingerprint is kept *"not because [it] is currently earning its keep — that is unproven in either direction"* |
 | **D-b** | **REOPEN GRANTED for the graph copy** | `#11395` comment `6956793300`, owner, 2026-11-17 | graph copy may be removed / stop being written **once the record holds and indexes that label**; record first, graph removal second, **never in one release** |
 | **D-c** | **index them, in Postgres** | `#13220` (CLOSED COMPLETED 2026-11-17), owner | *"if indexing improves search for Object/Subject/Event of course we want that, and we just need it in Postgres and the search aligned with that"*; the index half of §14.3 V3 and V2 |
-| **D-d** | **the vector index does not live in FalkorDB** | `STORAGE-ARCHITECTURE.md` §12.1c (`docs/architecture/STORAGE-ARCHITECTURE.md:1122`), owner, 2026-11-07 | four further resident HNSWs on the most expensive resource we have are ruled out; a pgvector index on a table the record already owns is the cheap shape |
+| **D-d** | **the vector index does not live in FalkorDB** | `STORAGE-ARCHITECTURE.md` §12.1c (`docs/architecture/STORAGE-ARCHITECTURE.md:1169`), owner, 2026-11-07 | four further resident HNSWs on the most expensive resource we have are ruled out; a pgvector index on a table the record already owns is the cheap shape |
 | **D-e** | **capability-first placement** | `#13082`, owner, 2026-11-16 | *anything no graph query reads is Postgres-only by default*; RAM ≈ **584×** the price of disk; **~78 MB of RAM per solo tenant** is the ceiling |
 | **D-f** | **presence is ownership** | `#5004` (`CLOSED`, consolidated under `#5048`) + `tortoise/embeddings.py:1806-1815` | a record-TRUTH vector (a `Point`'s) must never be dropped on a slow embedder — a cold `None` there is a **recorded CLEAR that a rebuild reproduces** |
 | **D-g** | **the bounded write** | PR `#13229` (issue `#13224`), 2026-11-17 | derived-entity folds wait `WRITE_EMBED_BUDGET_S = 0.25 s` then write the row **without** a vector; p95 **20,414 ms → 268 ms** |
@@ -97,7 +99,7 @@ body say opposite things (§1.5, an owner-lane question already recorded on `#13
   explicitly. ⚠️ This is the one cost that **R1 would remove outright** and that R2's "narrower" option
   (§3, option C2) would remove without any placement change.
 - ⚠️ **No per-label census exists at this head.** The `12,657 vectors ≈ 19.4 MB` figure is a **2026-09-24**
-  count whose own instrument docstring forbids re-quoting it (`STORAGE-ARCHITECTURE.md:1594`); a 2026-10-08
+  count whose own instrument docstring forbids re-quoting it (`STORAGE-ARCHITECTURE.md:1650`); a 2026-10-08
   reading on graph point `1a11cb1dd2c-873e2b26263d` found **3,742 embeddings / 5.48 MiB total**, with no
   per-label split. **The two are not a series.** The instrument that settles it is
   `tools/dod_5090_probe.py --census` on a **named** graph.
@@ -120,14 +122,21 @@ gains an encoder, `record-restore` lands `:Object`/`:Subject` nodes without vect
 will ever put them back.** That is not a new risk — it is the exact failure shape the 2026-11-10 ruling
 existed to prevent, one release later.
 
-### 1.5 The `:Event`/`:Source` question is *already* an open owner-lane disagreement
+### 1.5 The `:Event`/`:Source` question is an owner-lane disagreement that main has only *half* closed
 
 `#13220`'s own body says their graph copies *"may be retired under `#13082`'s rule once the record serves
-them"*, and its step 3 orders it. The **merged** `STORAGE-ARCHITECTURE.md` says the opposite at `:1584` and
-`:1594` (*"nothing here retires them either: no ruling does"*). `#13220`'s last comment records both sides and
-asks the owner for wording, with an unmerged fix at `refs/heads/rescue/13350-cycle4-record-facts`
-(`20190edc98`). **R1's narrower variant (§2, option C) cannot be decided before that sentence is.** This
-dossier does not re-litigate it — it names it.
+them"*, and its step 3 orders it. The merged `STORAGE-ARCHITECTURE.md` said the opposite (*"nothing here
+retires them either: no ruling does"*). `#13220`'s last comment recorded both sides and asked the owner for
+wording.
+
+**Update at `6264dc670c` (PR `#13395`, merged 2026-11-18):** main has taken the **release boundary** back
+(*"in a later release and never in the same one"* is stated again at several sites) and the §14.3 lead now
+separates the two rules explicitly — *"the record-first condition is general; the written authorisation to
+retire a graph copy is scoped, and that comment gives it for `:Object`/`:Subject` only"*. ⚠️ **The residual is
+narrower but not gone:** the V3 row still reads *"nothing here retires them either: no ruling does"*
+(`:1650`), which is true about **owner rulings** and false as an answer to *"what orders this work?"* —
+`#13220`'s step 3 does. **R1's narrower variant (§2.4, option C) cannot be scoped before that sentence is
+settled**, and this dossier does not re-litigate it — it names it.
 
 ## §2 — R1 · retire the graph-side `:Object`/`:Subject` vector copies
 
@@ -157,7 +166,7 @@ recorded there):**
 | The live writer fills them | `record_writer.derived_embedding_columns` (`:1755`, called `:2092`) | yes, on the live path only |
 | **The record does not *serve* them** | `record_vector.LABEL_SERVED` (`:164-174`) excludes both; `#13422` | ⛔ **no** — `#13220`'s ordered step 2 (*"the record demonstrably serves it"*) is unmet |
 | The graph legs still read the graph copies — a brute-force scan (`:4439-4446`), not an index | `search_engine.py:4439-4446` + `:148` | ⛔ **no** — the copy is the *only* serving copy for these labels today |
-| The **resolution** half is now measured — **the falsifier's recall half only** | `#11901`: the capture prior's `limit=3` returns the exact stored entity **184/300 = 61.3 %** hybrid (55.3 % keyword-only); widening 3→15 reaches **73.0 %**; surface-variant pairs attach **0.0 %** in phase-1 exact-`_norm` at every k. The dense leg helps by class (definite descriptions **down** 76.1 %→62.8 %; identifiers **up** 21.1 %→46.7 %; paths 33.3 %→96.7 %) | **Not an answered falsifier.** The KEEP ruling's falsifier asks for *"the similarity leg on and off … and whether the duplicate-entity rate moves"*; `#11901` measured candidate recall@k in **phase 1 only** (`STORAGE-ARCHITECTURE.md:1594`: *"the phase-2 LLM resolver … is unmeasured here … never the duplicate rate itself"*). ⇒ **the recall half is measured and positive; the duplicate-rate half and the end-to-end capture path are unrun** (§2.6) |
+| The **resolution** half is now measured — **the falsifier's recall half only** | `#11901`: the capture prior's `limit=3` returns the exact stored entity **184/300 = 61.3 %** hybrid (55.3 % keyword-only); widening 3→15 reaches **73.0 %**; surface-variant pairs attach **0.0 %** in phase-1 exact-`_norm` at every k. The dense leg helps by class (definite descriptions **down** 76.1 %→62.8 %; identifiers **up** 21.1 %→46.7 %; paths 33.3 %→96.7 %) | **Not an answered falsifier.** The KEEP ruling's falsifier asks for *"the similarity leg on and off … and whether the duplicate-entity rate moves"*; `#11901` measured candidate recall@k in **phase 1 only** (`STORAGE-ARCHITECTURE.md:1650`: *"the phase-2 LLM resolver … is unmeasured here … never the duplicate rate itself"*). ⇒ **the recall half is measured and positive; the duplicate-rate half and the end-to-end capture path are unrun** (§2.6) |
 | `:Event`/`:Source` retiredness is now contradicted between two merged texts | §1.5 | not a condition — a **wording** decision for the owner |
 
 ⇒ **The precondition is unmet, and it is unmet in the one way that matters**: removing the graph copy today
@@ -259,7 +268,7 @@ settle the **restore** gap (§1.4), which needs a code fix, not an experiment.
 
 R2 changes an **invariant**, not a ruling sentence. Two recorded statements, both load-bearing:
 
-- **`STORAGE-ARCHITECTURE.md` §3 / §17.1** (`:320`, `:1673`): the architecture is `derived = replay(journal)`,
+- **`STORAGE-ARCHITECTURE.md` §3 / §17.1** (`:320`, `:1729`): the architecture is `derived = replay(journal)`,
   and §17.1's rule is that **the write** is the one place state is minted — *"two writers"* is the defect class
   the chokepoint exists to prevent. A write that completes **without** its payload makes a derived row a
   function of process state, not of the journal.
@@ -362,12 +371,12 @@ record.**
 
 | earlier alternative | where it was considered | is R1/R2 the same thing? |
 |---|---|---|
-| **§12.1c option 1** — vectors stay in the graph (status quo of that debate) | `STORAGE-ARCHITECTURE.md:1122`, 2026-09-24 → **not** adopted 2026-11-07 | **No.** R1 *retires* the graph copy; option 1 *keeps* it. R1 is closer to option 2 applied one level deeper |
+| **§12.1c option 1** — vectors stay in the graph (status quo of that debate) | `STORAGE-ARCHITECTURE.md:1169`, 2026-09-24 → **not** adopted 2026-11-07 | **No.** R1 *retires* the graph copy; option 1 *keeps* it. R1 is closer to option 2 applied one level deeper |
 | **§12.1c option 2** — vectors move to Postgres, graph keeps node + edges (the index decision) | same, **adopted 2026-11-07** (D-d) | **R1 is option 2's unexplained remainder**: option 2 moved the *index*; the *copy* was left behind by D-a for a reason that has since been spent (D-b). R1 finishes the move option 2 started — it is **not** a new proposal |
 | **§12.1c option 3** — a dedicated vector store | same, rejected: *"a third system to run — and it buys nothing over option 2 at our size"* | **No**, but note: **R2's full deferral with a worker + queue is a fourth runtime**, and that objection applies to it as much as to option 3 |
 | **`20261109000001`'s candidate (b)** — one `public.embedding` table across six labels | `supabase/migrations/20261109000001_record_embedding_vector.sql` (block *"WHY `public.object` AND `public.subject` GET NO VECTOR COLUMN"*) | **No.** Rejected for a reason R1 must respect: a second row per vector the tenancy-erasure cascade must reach (*"the erasure spans both stores"* defect). R1 removes a copy; candidate (b) adds one |
 | **`20261109000001`'s candidate (a)** — add the column to `object`/`subject` | same block, rejected then (*"populated by NOTHING"*) | **Already reversed** 2026-11-17 by `20261117000001`, with **two** `OVERRIDES:` markers. Not R1 — it is R1's precondition |
-| **`#4997`** — *"stop storing OR index them"* framing | `:1118`; closed 2026-10-05 as the **defect census** | **No — and it is the false choice the record already rejects**: *"keep the vectors, make them searchable, and put them where RAM is cheap"* |
+| **`#4997`** — *"stop storing OR index them"* framing | `:1127`; closed 2026-10-05 as the **defect census** | **No — and it is the false choice the record already rejects**: *"keep the vectors, make them searchable, and put them where RAM is cheap"* |
 | **`#11901`** — *"the FalkorDB index is not earned"* | §14.3 V3 row; measured 2026-11-12 | **Not R1.** It answers *index or scan*, in **FalkorDB**; it does not answer *keep or remove the copy* — and its own measurement is what shows the fingerprint is **used** |
 | **R2's earlier form** — *"synchronous embedding is the structural cause of the stall"* | `#13224`'s framing, offered as a structural candidate | **Rejected as a diagnosis** by PR `#13229`: the cause was the cold load on the request thread; *"`Subject` was simply the door that arrived first"*. R2 today is **the same proposal with the diagnosis removed** — which is why §3.2's warm-encode evidence matters: what remains is a design preference, not a measured defect |
 
