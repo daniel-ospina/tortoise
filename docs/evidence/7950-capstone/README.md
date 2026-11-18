@@ -282,8 +282,10 @@ a direct raw-handle property write it reports `field_mismatches` (the value-dive
 But a check nothing runs observes nothing: `#9189` supplies the **trigger** (an operator-scheduled
 sweep, not a call inside the capture turn) and with it a real cache reader and a real exit code, and
 **no schedule drives it yet** — that interval is whoever installs the timer, and nothing in the tree
-does. `reconcile()`'s own docstring names the remaining dependency: *"until the record's own read
-path exists (#7970) and the cache is projected one way from it (#7971)."*
+does. `reconcile()`'s own docstring still gates on a premise the tree has since satisfied: *"until the
+record's own read path exists (#7970) and the cache is projected one way from it (#7971)."* Both
+landed (`#7970` and `#7971` **CLOSED COMPLETED**, the cutover ARMED since 2026-11-18), so the docstring
+is behind the tree and the gap this section measures is the **timer**, not that dependency.
 
 **The field half — closed on `#8615`.** With readers carrying the real property maps, a **clean**
 record-sourced rebuild now reports `field_mismatches=0`: `Point:p1.embedding` is `[0.1, 0.2]`
