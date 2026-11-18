@@ -833,7 +833,12 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #:   sites, not one: the four graph folds (`projection/entities.py`) and the
 #:   RECORD's own derivation (`record_writer.derived_embedding_columns`, #13220),
 #:   which runs before the cache fold — measured: one `ObjectRegistered` create
-#:   gave `graph_fold` +1 AND `record_derivation` +1.
+#:   gave `graph_fold` +1 AND `record_derivation` +1. They are two CALLS in
+#:   sequence, not one call that counts twice: a projection fold invoked on its
+#:   own gives `graph_fold` alone and a `derived_embedding_columns` call on its
+#:   own gives `record_derivation` alone (both measured, and pinned by
+#:   `test_13417_vectorless_rows.py`). The distinction matters to anyone
+#:   reconciling the number against a single write path.
 #:
 #: Which is why the label is the LEG plus the cause, and why the two are never
 #: summed into one number an operator is asked to interpret:

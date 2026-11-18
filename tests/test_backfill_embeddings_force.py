@@ -1472,3 +1472,53 @@ def test_a_surface_never_writes_the_neighbour_it_does_not_sweep(
     assert by_kind[False] == pytest.approx(provenance_vector), (
         "the provenance :Source sharing this url must be UNTOUCHED — the write "
         "carried no kind_pred, so it rewrote a surface it never swept (#12570)")
+
+
+def test_the_event_branch_discriminator_reaches_the_write(proj, monkeypatch):
+    """#12570 review cycle-2 finding 2: ``Event`` has NO ``kind_pred``.
+
+    ``LABEL_CONFIG["Event"]`` declares no ``kind_pred`` (its two SURFACES are
+    ``:Event``'s two BRANCHES), so `_write_where` contributes no discriminator
+    for this label — the predicate that put a row on the ``AgentSession`` branch
+    (``n.eventKind = 'AgentSession'``) reached the COLLECT and then stopped. The
+    write for such a row was ``eventId`` + null-safe ``name``/``keywords``/
+    ``topics``/``content_metadata``, so a ``:Event`` carrying a DIFFERENT
+    ``eventKind`` but agreeing on those five was matched and written.
+
+    ⛔ The sharpest instance is a ``meeting``: `_force_reembed_graph` PURGES
+    meeting embeddings and every collect branch excludes meetings, so a meeting
+    is only ever vectorless by design — and this hole let an AgentSession row
+    re-embed one it never collected, silently undoing the purge.
+
+    The assertion is the meeting's STORED VECTOR (``None`` — still purged), not
+    the counts: the defect left ``updated`` correct, because the wrong node was
+    written and reported.
+    """
+    g = _g(proj)
+    shared = {
+        "eventId": "shared-1",
+        "name": "standup",
+        "keywords": ["falkordb", "migration"],
+        "topics": ["storage"],
+        "content_metadata": json.dumps({"summary": "the summary"}),
+    }
+    _create(g, "Event", {**shared, "eventKind": "AgentSession"})
+    _create(g, "Event", {**shared, "eventKind": "meeting"})  # purged: NULL
+
+    mod = _load_backfill()
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+
+    stats = _backfill_run(mod, proj, ["Event"])
+    assert stats["updated"] == 1, stats
+
+    rows = g.query(
+        "MATCH (n:Event {eventId: $e}) RETURN n.eventKind, n.embedding",
+        params={"e": "shared-1"}).result_set
+    assert len(rows) == 2, rows
+    by_kind = {kind: stored for kind, stored in rows}
+    assert by_kind["AgentSession"] is not None, (
+        "the collected AgentSession row must carry its own vector")
+    assert by_kind["meeting"] is None, (
+        "the meeting sharing every other component must stay PURGED — the write "
+        "carried no eventKind, so it rewrote a branch it never swept (#12570)")

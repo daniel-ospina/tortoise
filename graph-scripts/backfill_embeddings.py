@@ -568,9 +568,21 @@ def _write_where(label: str, branch: str) -> str:
 #: ⛔ The FIRST member is the row's KEY (``_id``), which the write addresses as
 #: ``row.id`` — every remaining member is an identity component.
 _EVENT_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    # ⛔ `n.eventKind` is an identity component on BOTH branches, and it is the
+    # branch DISCRIMINATOR (#12570 review, cycle 2 finding 2). `Event` declares
+    # no `kind_pred` in LABEL_CONFIG, so `_write_where` contributes nothing for
+    # this surface — the discriminator that put the row on this branch
+    # (`n.eventKind = 'AgentSession'`, and the `_MEETING_EXCLUSION` in the
+    # sibling) reaches the write ONLY through this tuple. Omitting it left the
+    # write able to address a `:Event` that agreed on the other five components
+    # while carrying a different `eventKind` — including a `meeting` node that
+    # `_force_reembed_graph`'s purge exists to keep vectorless, re-embedded by a
+    # row it never collected. Appended LAST on purpose: `_row_text` reads
+    # `row[1]`/`row[2]`/`row[3]`/`row[4]` positionally, so a new member may only
+    # ever be added at the END of a branch's tuple.
     "AgentSession": (("_id", "n.eventId"), ("_name", "n.name"),
                      ("_keywords", "n.keywords"), ("_topics", "n.topics"),
-                     ("_cm", "n.content_metadata")),
+                     ("_cm", "n.content_metadata"), ("_kind", "n.eventKind")),
     "other": (("_id", "n.eventId"), ("_subject", "n.subject"),
               ("_kind", "n.eventKind"), ("_object", "n.object")),
 }

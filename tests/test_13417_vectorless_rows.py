@@ -303,6 +303,31 @@ def test_the_record_leg_is_counted_apart_from_the_graph_fold(cold_window):
         f"repair is selected by the leg: {counted}")
 
 
+def test_one_cold_create_declines_once_per_LEG(cold_window, proj):
+    """One logical create reaches BOTH bounded legs — and they do not collide.
+
+    The live write path runs the RECORD's derivation (`record_writer`) and then
+    the graph fold, so a single cold create declines twice; an operator reading
+    either number alone under-counts by half. ⛔ The two legs are separate CALLS,
+    not one — so this invokes them in the order the live path does (the same
+    sequence measured on the live path), rather than pretending a projection fold
+    reaches the record leg. What it pins is that the two labels are distinct AND
+    additive for one entity: a mutant that funnels both through one label reds
+    here even though each isolation test above would still pass.
+    """
+    from tortoise.record_writer import derived_embedding_columns
+
+    entity = {"id": "o-joint", "name": "joint leg entity"}
+    before = _no_vector_counts()
+    derived_embedding_columns({"type": "ObjectRegistered", **entity})  # leg 1
+    proj._upsert_object(dict(entity))                                  # leg 2
+    counted = _delta(before, _no_vector_counts())
+    assert counted == {f"{_RECORD}:budget_expired": 1,
+                       f"{_GRAPH}:budget_expired": 1}, (
+        "one logical create must decline once per LEG, each under its own label "
+        f"— a single-key result means one leg is invisible: {counted}")
+
+
 def test_the_embed_gate_stays_off_this_channel(monkeypatch):
     """#5008's gate decline is a DESIGNED absence — never the #13229 cost.
 
