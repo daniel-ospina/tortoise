@@ -2,12 +2,20 @@
 
 THE DEFECT THIS PINS
 --------------------
-Two inserts on this branch shift every `file.py:NNNN` citation BELOW them:
+Inserts on this branch shift every `file.py:NNNN` citation BELOW them. Re-measured at this head with
+`git diff origin/main...HEAD --unified=0` (the deltas the first draft of this file carried — `+3` at
+`search_engine.py:2842`, `+2` at `cache_projection.py:2128` — describe an OLDER head, so they are kept
+only as the history the paragraph below refers to):
 
-* `tortoise/search_engine.py` — `run_fts_query`'s `_searchText`-per-door docstring, **+3** at `:2842`
-  (`git diff origin/main...HEAD --unified=0` -> `@@ -2842 +2842,4 @@`);
-* `tortoise/cache_projection.py` — the `_searchText` comment rewrite, **+2** at `:2128` (`@@ -2128,3
-  +2128,5 @@`).
+* `tortoise/search_engine.py` — **+7** at `:3745`, **+2** at `:3767`, **+6** at `:3990` (15 lines below
+  `:3990`), so every cite past it moves by `+15`;
+* `tortoise/cache_projection.py` — **+1** at `:266`, **+20** at `:1490`, and **+42** more between
+  `:3130` and `:3252` (63 lines below `:3252`);
+* `tortoise/sdk.py` — **+5** at `:1139`, **+3** at `:45737`.
+
+⛔ Every number in this file is derived from CONTENT (`tests/_cite_resolution.py`), never by adding a
+delta to the number that was already there: a delta applied to a cite that had already been corrected
+is exactly the false correction below.
 
 The documents below are EVIDENCE: a reader re-verifies a passage by opening the line it cites, so a
 cite that is one line off reads exactly like a correct one and silently discounts the passage.
@@ -123,8 +131,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2886", _SE, 2886, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2728", _SE, 2728, "def recency_tie_clause"),
-    (_M3_BRIEF, "tortoise/search_engine.py:4904", _SE, 4904, "for rank, (pid, _score) in enumerate(ranked)"),
-    (_M3_BRIEF, "`search_engine.py:4823`", _SE, 4823, "def rrf_fusion("),
+    (_M3_BRIEF, "tortoise/search_engine.py:4919", _SE, 4919, "for rank, (pid, _score) in enumerate(ranked)"),
+    (_M3_BRIEF, "`search_engine.py:4838`", _SE, 4838, "def rrf_fusion("),
     # --- docs/architecture/ENTITY-VERDICT-BANDS.md — the D-1 row "the retrieval filter is status-only"
     # ⚠️ This row is a SECOND false correction, of the same class this file exists for. The document
     # cited `search_engine.py:2973-2997`; other PRs' inserts had already moved the status filter to
@@ -134,7 +142,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # is anchored on the line that IS the filter, so the next offset-only edit reds instead of shipping.
     (_EVIDENCE, "search_engine.py:3079-3094", _SE, 3079, "if label in _STATUS_FILTERED_LABELS"),
     # --- docs/evidence/13083-capability-census/README.md
-    (_CENSUS, "cache_projection.py:2715", _CP, 2715, "tail_denied = forbidden | {"),
+    (_CENSUS, "cache_projection.py:2736", _CP, 2736, "tail_denied = forbidden | {"),
     (_AUDIT, 'sdk.py:21668', 'tortoise/sdk.py', 21668, 's.summary=CASE WHEN $sum'),
     (_AUDIT, '`:21791`', 'tortoise/sdk.py', 21791, 's.summary, s.topics, s.'),
     (_AUDIT, 'hosted_api.py:22919', 'tortoise/hosted_api.py', 22919, 'MERGE (s:Source {url:$did})'),
@@ -215,10 +223,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3447`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2886'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2728'): 1,
-    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4904'): 1,
-    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4823`'): 1,
+    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4919'): 1,
+    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4838`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3079-3094'): 1,
-    ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2715'): 1,
+    ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2736'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21668'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21791`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22919'): 3,
@@ -335,6 +343,13 @@ def _resolve(pins, repo: Path = REPO) -> list[str]:
     return errors
 
 
+def _only_line(source_lines: list[str], fragment: str) -> int:
+    """The single 1-based line carrying *fragment* — an ambiguous anchor is a red, never a guess."""
+    hits = [n for n, text in enumerate(source_lines, 1) if fragment in text]
+    assert len(hits) == 1, f"{fragment!r} is at {hits} — re-derive by content, do not pick one"
+    return hits[0]
+
+
 def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
     """Fails on the pre-fix tree: the m3 brief names `:4552` and §5 names `:3392`/`:3388`."""
     errors = _resolve(_PINS)
@@ -342,17 +357,33 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
 
 
 def test_the_resolver_reds_on_a_double_applied_offset() -> None:
-    """Negative control — the exact defect: 4904 + 3 = 4907 is the `#7704` note, not the loop.
+    """Negative control — the exact defect: the loop's line `+3` is the `#7704` note, not the loop.
 
     Reachable: it is the shipped pre-fix state of the m3 brief, reintroduced here by mutating a COPY of
     the shipped row with the cite token LEFT INTACT, so the failure is reported by the CONTENT arm and
     cannot be satisfied by the token arm (which is what a re-pointed token would trip first).
+
+    ⛔ THE PAIR IS DERIVED FROM THE TREE, NOT WRITTEN DOWN. This control used to hardcode `4904`/`4907`,
+    which were `main`'s lines — so a legitimate insert in `search_engine.py` (this branch's own `+15`)
+    reddened it, and a guard that ordinary work breaks is a guard the next lane "fixes" by deleting it.
+    Deriving both lines keeps the control's claim (the documented `+3` really does land on the `#7704`
+    note) while surviving every insert ABOVE the pair; the geometry assert is what still reds if an
+    insert lands BETWEEN them, which is the only movement that can falsify the `+3`.
     """
-    row = (_M3_BRIEF, "tortoise/search_engine.py:4904", _SE, 4904, "for rank, (pid, _score) in enumerate(ranked)")
-    doubled = (row[0], row[1], row[2], 4907, row[4])
+    source = (REPO / _SE).read_text(encoding="utf-8").splitlines()
+    loop = "for rank, (pid, _score) in enumerate(ranked)"
+    note = "# #7704 (MEASURED MECHANISM"
+    loop_line = _only_line(source, loop)
+    note_line = _only_line(source, note)
+    assert note_line == loop_line + 3, (
+        f"the brief's documented `+3` no longer names the `#7704` note: the loop is at {loop_line}, the "
+        f"note at {note_line}. Re-derive the offset BY CONTENT before trusting any `+3` in this file."
+    )
+    row = (_M3_BRIEF, f"tortoise/search_engine.py:{loop_line}", _SE, loop_line, loop)
+    doubled = (row[0], row[1], row[2], note_line, row[4])
     errors = _resolve((doubled,))
     assert errors, "a spurious +3 must red the resolver"
-    assert ":4907" in errors[0] and "#7704" in errors[0]
+    assert f":{note_line}" in errors[0] and "#7704" in errors[0]
     assert "is gone" not in errors[0], "the content arm must be the one that fires"
 
 
