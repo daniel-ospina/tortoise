@@ -480,6 +480,55 @@ def test_the_live_seam_threads_the_derived_columns_into_replay(encoder, monkeypa
     assert derived[1] == {"embedding": [0.125] * 384}, derived
 
 
+def test_replay_forwards_the_derived_columns_to_the_PLAN(monkeypatch):
+    """The junction below the live seam, which had no witness (review of #13265 P2).
+
+    ⛔ MEASURED GAP: `replay()` forwards `derived=derived` into `replay_plan(`,
+    and DELETING that kwarg reds THIS test and nothing else — every other test in
+    `test_13220_record_label_embeddings.py test_record_schema_placement.py
+    test_cache_projection.py test_record_projection.py` stays GREEN (the whole
+    four-file set passes without the forward). The seam test spies
+    `record_projection.replay` (so it stops one call short) and
+    `test_the_derived_vector_lands_in_the_object_COLUMN` calls `replay_plan`
+    directly — both ends pinned, the wire between them not. With that kwarg gone
+    the live path binds nothing and both HNSW-indexed fingerprint columns stay
+    empty while every test is green: the same class as the finding the seam test
+    exists for, one call deeper.
+
+    The spy RAISES on arrival instead of returning a plan: everything after this
+    call in `replay()` needs a real connection (and, on the `allocate=True` arm,
+    a live allocator — this test passes `allocate=False`, so it is the connection
+    that would be needed), and the fact under test is the FORWARD, not the
+    execution.
+    """
+    seen: dict[str, object] = {}
+
+    class _Stop(Exception):
+        """Deliberate: this asserts the call, not the execution."""
+
+    def _spy(records, **kwargs):
+        seen["records"] = list(records)
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(rp, "replay_plan", _spy)
+    derived = {0: {"embedding": [0.125] * 384}}
+    with pytest.raises(_Stop):
+        rp.replay(
+            [{"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"}],
+            None, org_id="org", graph_id="g", position=False, derived=derived)
+
+    assert seen["records"] == [
+        {"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"}], (
+        "the spy did not receive the caller's records — the assertion below would "
+        "pass over a call that never happened")
+    assert seen.get("derived") == derived, (
+        "`replay()` did NOT forward `derived` to `replay_plan`: the record's "
+        "derived columns are computed, handed to the seam, then dropped one call "
+        "deeper, so both HNSW-indexed fingerprint columns stay empty on the live "
+        f"path. Got: {seen.get('derived')!r}")
+
+
 def test_a_label_with_no_rule_binds_no_embedding_column():
     """Without `derived`, the plan is byte-identical to `main`'s."""
     record = {"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"}

@@ -179,12 +179,53 @@ def test_the_registry_serves_the_anchored_surface_and_nothing_else():
     }
 
 
+#: A served read whose boundary is a UNION over labels, or a TEMPLATE over labels,
+#: has no ONE ``(label, property)`` coordinate — and minting a placeholder pair for
+#: it would hand `declared_key(*coordinate)` a coordinate no store can resolve
+#: (``"Label"`` is not a ``node_label``; ``"interface-E key"`` is not a property).
+#: These reads carry ``coordinate=None`` and state their shape in
+#: ``cypher``/``reason`` instead — pinned here, so the exception cannot be claimed
+#: silently, and so there is ONE rule rather than an exemption carved out of it.
+#:
+#: ⛔ ``{read: the token its `cypher` must carry}``, not a bare set (#13392 review:
+#: the set version had weakened the shape claim to *non-emptiness* — `assert
+#: read.cypher and read.reason` — so "this read's `cypher` says it is a union"
+#: stopped being asserted by anything once the TEMPLATE read joined the set. The
+#: token is what keeps `coordinate=None` a STATED shape rather than an exemption
+#: nothing checks. `READ_NODE_BY_KEY`'s token is its unfilled placeholders: it is
+#: a TEMPLATE over labels, so no concrete label appears in its `cypher`.
+MULTI_COORDINATE_READS: dict[str, str] = {
+    rs.READ_ENTITY_UNION_BY_ID: "union",
+    rs.READ_NODE_BY_KEY: "<Label>",
+}
+
+
 def test_every_served_read_carries_its_parity_rule_and_its_coordinate():
     for name in rs.served_reads():
         read = rs.ANCHORED_READS[name]
         assert read.parity, name
-        assert read.coordinate, name
         assert read.cypher, name
+        if read.coordinate is None:
+            assert name in MULTI_COORDINATE_READS, (
+                f"{name} declares no coordinate and is not a declared "
+                f"multi-coordinate read — every served read either carries a real "
+                f"(label, property) pair or says here why it cannot")
+            assert read.cypher and read.reason, name
+            shape = MULTI_COORDINATE_READS[name]
+            assert shape.lower() in read.cypher.lower(), (
+                f"{name} declares itself a multi-coordinate read ({shape!r}), but "
+                f"its cypher does not say so: {read.cypher!r} — the shape claim is "
+                f"what keeps `coordinate=None` from being a silent exemption"
+                f" (#13392 review: 'non-empty' is not a shape)")
+        else:
+            label, prop = read.coordinate
+            assert label and prop, name
+            assert label not in {"Label", "union"}, (
+                f"{name}'s coordinate label {label!r} is a PLACEHOLDER — it names "
+                f"no stored label, so declared_key(*coordinate) mints a coordinate "
+                f"nobody can resolve (#13353 review, finding 6). A read that is a "
+                f"template or a union has no one coordinate: give it `None` and "
+                f"declare it in MULTI_COORDINATE_READS.")
 
 
 def test_every_exclusion_names_who_else_answers_the_same_read():

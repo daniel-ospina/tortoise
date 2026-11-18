@@ -1645,9 +1645,237 @@ def test_the_restore_verb_still_exists():
 
 
 # --------------------------------------------------------------------------- #
+# ── the live definition: last by VERSION PREFIX, and the function's OWN body ──
+#
+# Three rules, each measured against what a REPLAY does rather than against what a
+# filename happens to look like. The first two rest on #1095's own premise: every
+# migration basename matches `^([0-9]+)_` (ANY digit count — `.github/scripts/
+# check-migration-append-only:131`), and a correction to an applied migration
+# arrives as a NEW file, never an edit.
+#
+# 1. THE LIVE DEFINITION IS THE LAST ONE IN THE CLI'S **VERSION** ORDER, and only a
+#    name the CLI would APPLY can be it.
+#    ⛔ THE CLI RE-SORTS BY THE VERSION SUBSTRING — NOT BY FILENAME, and not
+#    numerically. Measured at the version `.github/workflows/supabase-deploy.yml
+#    :243` pins (`supabase/setup-cli@v1`, `2.122.1`): `apps/cli/src/
+#    command-internal/migration-history.ts:323-331` `sortMigrationPathsByVersion()`
+#    keys on the `[1]` group of `/^([0-9]+)_(.*)\.sql$/u` (`:67`), compared by
+#    `compareMigrationVersions = (a, b) => a < b ? -1 : a > b ? 1 : 0`
+#    (`migration-timestamp.format.ts:56-57`) — a LEXICAL compare of the version
+#    string. Both `findPendingMigrations` and `includeAllPending` (the
+#    `--include-all` path this repo's deploy uses) pass through it — they live in
+#    `apps/cli/src/command-internal/migration-pending.ts` (:51 and :97 are the two
+#    `sortMigrationPathsByVersion(localMigrations)` call sites there), reached from
+#    `db-push-core.ts:10-13`, and the CLI's own comment (`migration-history.ts:
+#    317-322`) states the divergence from filename order:
+#    *"File-name order and version order only agree while versions are the same
+#    width: `20260420010000_b.sql` sorts before `20260420_a.sql` by name (`'0'` <
+#    `'_'`) but after it by version."*
+#    ⚠️ Quoted, not adopted: that sentence's necessity is loose, and this tree is
+#    its counterexample — 72 fourteen-digit and 16 four-digit prefixes, and the
+#    two orders are IDENTICAL over them, because unequal WIDTH alone does not
+#    disagree. The operative condition is a version that is a proper PREFIX of
+#    another, which is what the fixture below exercises.
+#    So `sorted(<Path>)` is WRONG for a prefix PAIR: with the guarded definition in
+#    `2026111700_…` and the guard dropped in `20261117000003_…` (`'0'` < `'_'`),
+#    the filename compare picks the SUPERSEDED file and the gate reads a body the
+#    applier overwrote — measured, GREEN over `RETURN v_audit;` with no fail-closed
+#    arm (#13393). A PARSED-VERSION sort is wrong too, in the other direction
+#    (`9999999999999_…` sorts after `20261117000003_…` lexically and before it
+#    numerically), which is what the old rule was guarding against. Neither is the
+#    applier's order: the applier's key is the version string, compared as a
+#    string. So a file whose basename does not match `^([0-9]+)_` is not a
+#    candidate at ALL: the CLI SKIPS it (`.github/scripts/
+#    check-migration-append-only` → "applied by NOBODY"), and a definition nobody
+#    applies can never be the live one. Conformance is a FILTER, never a re-sort —
+#    and the sort is by version, never by the whole name.
+# 2. THE BODY IS THE FUNCTION'S OWN, not first-function-to-last-function in the
+#    file. Multi-function migrations are ordinary here — measured at this head,
+#    `20260915000001_tenancy_team_to_org.sql` defines 13 functions, and three
+#    others define 3–5 — so a slice from the file's first `AS $$` to its last `$$`
+#    lets a SIBLING function's `RAISE WARNING` satisfy the assertion.
+# 3. THE SELECTOR IS CLOSED OVER THE DEFINITION'S SPELLING SPACE. `CREATE
+#    [OR REPLACE] FUNCTION [schema.]name` tolerates an optional `OR REPLACE`, an
+#    optional schema qualifier, quoted identifiers and any keyword case — and this
+#    directory already writes the `DROP FUNCTION …; CREATE FUNCTION …` spelling
+#    (13 definitions across 6 migrations). A pattern that accepted only
+#    `CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot` was INVISIBLE
+#    to a correction written the other way, and the gate stayed GREEN over a live
+#    body that had lost its guard — the same false PASS one spelling further in.
+#    The residual is stated rather than enumerated: after the comment strip below,
+#    a file that merely MENTIONS the function is still not a candidate, because
+#    this matches a DEFINITION.
+_RESIDENCY_DEFS_RX = re.compile(
+    r"create\s+(?:or\s+replace\s+)?function\s+"
+    r"(?:\"?public\"?\s*\.\s*)?\"?postgres_residency_snapshot\b\"?",
+    re.IGNORECASE)
+
+_DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """``sql`` with every `--` line comment and `/* … */` block comment removed.
+
+    ⛔ BOTH COMMENT FORMS, because PostgreSQL accepts both and the server executes
+    neither. An earlier cut stripped only `--` and declared the residual closed on
+    that basis; block comments are legal, a `--` split does not touch them, and
+    they NEST — `/* outer /* inner */ still outer */` ends at the SECOND `*/`.
+
+    ⛔ WHY THAT MATTERS RATHER THAN BEING A NIT: this function feeds BOTH the
+    candidate scan and the body scan. With only `--` stripped, a newer migration
+    whose sole content is a `/* … */` copy of a superseded, GUARDED body became the
+    live definition, its quoted `AS $$` opened the body scan, and all three
+    assertions went green over a live function that had lost its arm — the exact
+    false PASS the selection exists to close, reachable from the comment form the
+    residual claimed could only RED.
+
+    String literals are NOT parsed — single-quoted (#13382's unlanded hardening) or
+    dollar-quoted. For the TWO COMMENT FORMS MODELLED ABOVE the direction is
+    fail-closed: a `--` inside a literal truncates that line, which can only REMOVE
+    text an assertion needs.
+
+    ⛔ THE DOLLAR-QUOTED CASE IS NOT FAIL-CLOSED, and an earlier cut of this
+    docstring claimed the whole function was. A migration whose sole content is
+    `SELECT $x$ … CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()
+    … $$ … $$ … $x$;` is left INTACT here, so the declaration inside the literal
+    survives the candidate scan in `_defining_migrations`, and `_function_body`
+    then anchors on it and returns the `$$…$$` quoted INSIDE the literal — a body
+    that is never executed. That is fail-OPEN: it can ADD an arm the live function
+    does not have, the opposite of the residual above.
+
+    ⛔ NOT FIXED HERE, and deliberately: making `$tag$` regions opaque would also
+    hide the plpgsql bodies this whole window exists to read, because a plpgsql
+    body IS dollar-quoted (#13390). That makes it a design change, not a strip
+    tweak. Open, reproduced on `main`, and recorded as item 1 of #13393 (P2
+    fail-open) — which is why that issue stays OPEN after #13398: the selector
+    order was one of its items, this literal case is not.
+    """
+    out: list[str] = []
+    i, n, depth = 0, len(sql), 0
+    while i < n:
+        pair = sql[i:i + 2]
+        if depth:
+            if pair == "/*":
+                depth += 1
+                i += 2
+            elif pair == "*/":
+                depth -= 1
+                i += 2
+                if not depth:
+                    # one space, so the tokens either side cannot fuse
+                    out.append(" ")
+            else:
+                i += 1
+            continue
+        if pair == "/*":
+            depth = 1
+            i += 2
+            continue
+        if pair == "--":
+            line_end = sql.find("\n", i)
+            i = n if line_end < 0 else line_end
+            continue
+        out.append(sql[i])
+        i += 1
+    return "".join(out)
+
+
+def _replayable_migration(path: Path) -> bool:
+    r"""Whether the CLI would APPLY this file at all.
+
+    The CLI's pattern is `^([0-9]+)_(.*)\.sql$` (`.github/scripts/
+    check-migration-append-only`) and anything else is silently SKIPPED by
+    `db push` — applied by nobody, so it cannot hold the live definition. This is
+    a FILTER, not a sort key: ordering is the CLI's compare of the VERSION
+    substring (see `_version_prefix` / `_defining_migrations`).
+    """
+    return re.fullmatch(r"[0-9]+_.*\.sql", path.name) is not None
+
+
+def _version_prefix(path: Path) -> str:
+    r"""The CLI's own sort key for an APPLYABLE basename.
+
+    `sortMigrationPathsByVersion` (`apps/cli/src/command-internal/
+    migration-history.ts:323-331`, supabase/cli `v2.122.1`) sorts by the `[1]`
+    group of `^([0-9]+)_(.*)\.sql$` (`:67`) and compares it with
+    `compareMigrationVersions` (`migration-timestamp.format.ts:56-57`), which is
+    `a < b ? -1 : a > b ? 1 : 0` — a LEXICAL compare of the version string, not a
+    numeric one and not the whole filename.
+
+    Only meaningful after `_replayable_migration` has admitted the name; a
+    non-conforming basename returns `""` so ordering stays total rather than
+    raising on a name the CLI would have skipped anyway.
+    """
+    m = re.fullmatch(r"([0-9]+)_.*\.sql", path.name)
+    return m.group(1) if m else ""
+
+
+def _defining_migrations(
+    migrations: Path, decl_rx: re.Pattern[str],
+) -> list[Path]:
+    """Every migration that DEFINES ``decl_rx``'s function, oldest → newest.
+
+    Ordered by the VERSION SUBSTRING, compared lexically — the CLI's own order
+    (`db push` re-sorts local paths by version before applying; see
+    `_version_prefix` and the header note above). ⛔ NOT `sorted(<Path>)`: the
+    filename compare disagrees with the applier on a prefix pair, and picks the
+    superseded definition (#13393). ⛔ NOT a numeric sort either. Only names the
+    CLI would apply are candidates, so a non-conforming basename cannot become the
+    live definition. Selection is by CONTENT, never by filename beyond that: the
+    append-only rule guarantees the next correction lands under a new name.
+
+    The declaration is searched for with comments stripped (`_strip_sql_comments`),
+    so a migration whose HEADER merely quotes the DDL — in `--` prose OR in a
+    `/* … */` block — is not treated as defining it. That would otherwise select a
+    file with no body of its own and let the body scan read the QUOTED text.
+    """
+    found = [
+        p for p in migrations.glob("*.sql")
+        if _replayable_migration(p)
+        and decl_rx.search(_strip_sql_comments(p.read_text(encoding="utf-8")))
+    ]
+    return sorted(found, key=_version_prefix)
+
+
+def _function_body(sql: str, decl_rx: re.Pattern[str]) -> str | None:
+    """The EXECUTED text of the function ``decl_rx`` names, comments gone.
+
+    ⛔ BOUNDED BY THE FUNCTION'S OWN DELIMITERS, at both ends. The opening
+    dollar-quote is the FIRST one after the matched declaration, and the body ends
+    at that SAME tag — PostgreSQL's rule is `$tag$ … $tag$`, the tag being part of
+    the delimiter (postgresql.org → "Dollar-quoted string constants"). So a
+    sibling function's statements are never scanned, and a `$function$`-tagged
+    body — what `pg_dump` emits — works.
+
+    ⛔ AND IT IS THE **LAST** DECLARATION IN THE FILE, not the first. `CREATE OR
+    REPLACE` executes in order, so a file that defines the function twice is left
+    holding its SECOND definition — the live one. Anchoring on the first
+    (``decl_rx.search``) measured GREEN over a file whose earlier definition still
+    carried the guard while the live one did not: the scan read the SUPERSEDED
+    body and reported a fail-closed arm that the executed function had lost — the
+    same false PASS this window exists to close, one position further in.
+
+    Returns ``None`` when the declaration or its delimiters cannot be found, so
+    the caller REDs with a message naming the file instead of silently scanning
+    the wrong text.
+    """
+    code = _strip_sql_comments(sql)
+    decls = list(decl_rx.finditer(code))
+    if not decls:
+        return None
+    decl = decls[-1]
+    opener = _DOLLAR_TAG.search(code, decl.end())
+    if opener is None:
+        return None
+    closer = code.find(opener.group(0), opener.end())
+    if closer < 0:
+        return None
+    return code[opener.end():closer]
+
+
+# --------------------------------------------------------------------------- #
 # The fail-CLOSED arm of the refresh has no runtime gate, so it gets a
 # source-level one — scoped to the function BODY, never to the file.
-# --------------------------------------------------------------------------- #
 def test_the_refresh_keeps_its_fail_closed_arm():
     """The empty-audit guard and its warning are asserted at SOURCE level, and the
     limitation is stated rather than papered over.
@@ -1673,37 +1901,373 @@ def test_the_refresh_keeps_its_fail_closed_arm():
     guard (the zeroing then fires over an empty audit — a fleet-wide fail-open),
     or delete the `RAISE WARNING` arm (the operator signal vanishes silently).
     """
-    candidates = sorted(
-        (_REPO / "supabase" / "migrations").glob("*_postgres_residency_zero_*.sql"))
+    # ⛔ SELECTED BY WHAT THE FILE CONTAINS, NOT BY ITS NAME. A glob on
+    # `*_postgres_residency_zero_*` binds this gate to one filename, and the
+    # append-only rule (#1095) GUARANTEES the next correction arrives under a NEW
+    # name — so a gate keyed on `zero` would keep asserting over a superseded body
+    # and stay green while the live function lost its guard. The candidate set is
+    # therefore every migration that DEFINES the function, and the LAST one in the
+    # CLI's own VERSION order is the live definition — see `_defining_migrations`
+    # for why that is the version substring compared lexically, and neither a
+    # filename compare nor a parsed-version sort.
+    # The declaration pattern is module-level because the rows below pin IT; a test
+    # that re-spelled the pattern would prove nothing about the gate.
+    defs_rx = _RESIDENCY_DEFS_RX
+    candidates = _defining_migrations(_REPO / "supabase" / "migrations", defs_rx)
     assert candidates, (
-        "no forward migration replaces postgres_residency_snapshot() any more — "
-        "the erased-org fix (an org the audit stops reporting must not be frozen "
+        "no migration DEFINES postgres_residency_snapshot() any more — the "
+        "erased-org fix (an org the audit stops reporting must not be frozen "
         "stale) has no home; restore it as an APPEND-ONLY migration (#1095)")
-    sql = candidates[-1].read_text(encoding="utf-8")
-
-    # The executed text: from the function's `AS $$` to its closing `$$;`, minus
-    # `--` comments (the header's prose must not satisfy this).
-    marker = "AS $$"
-    assert sql.count(marker) >= 1, (
-        f"{candidates[-1].name} declares no `AS $$` body — the scan below cannot "
-        "reach the executed statements")
-    body = sql[sql.index(marker) + len(marker):]
-    body = body[:body.rindex("$$")]
-    code = "\n".join(line.split("--", 1)[0] for line in body.splitlines())
+    live = candidates[-1]
+    # The executed text: the function's OWN dollar-quoted body (whatever its tag),
+    # minus BOTH comment forms — the header's prose must not satisfy this, and a
+    # sibling function in the same file must not either.
+    code = _function_body(live.read_text(encoding="utf-8"), defs_rx)
+    assert code is not None, (
+        f"{live.name} is the newest migration DEFINING "
+        "postgres_residency_snapshot(), but its dollar-quoted body cannot be "
+        "located (no declaration followed by a `$tag$ … $tag$` pair) — the scan "
+        "below cannot reach the executed statements")
 
     guard = re.compile(
         r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0\s+THEN")
     assert guard.search(code), (
-        "the zeroing UPDATE is no longer GUARDED on the audit having reported "
-        "somebody. `postgres_per_org_bytes()` returns `orgs: '[]'` when "
-        "`journal_event` is empty, and an unguarded `NOT EXISTS` is then TRUE for "
-        "EVERY residency row — one refresh re-stamps the whole table to 0 bytes "
-        "with a fresh instant, every org passes every cap, and the reader's "
-        "`unreported` refusal can never fire. Re-add the guard")
+        f"{live.name}: the zeroing UPDATE is no longer GUARDED on the audit "
+        "having reported somebody. `postgres_per_org_bytes()` returns "
+        "`orgs: '[]'` when `journal_event` is empty, and an unguarded `NOT EXISTS` "
+        "is then TRUE for EVERY residency row — one refresh re-stamps the whole "
+        "table to 0 bytes with a fresh instant, every org passes every cap, and "
+        "the reader's `unreported` refusal can never fire. Re-add the guard")
     assert re.search(r"RAISE\s+WARNING", code), (
-        "the empty-audit branch no longer RAISE WARNINGs — the rows are still left "
-        "untouched, so nothing data-visible changes, and the only operator signal "
-        "that the gauge is refusing everyone would be gone silently")
+        f"{live.name}: the empty-audit branch of postgres_residency_snapshot() no "
+        "longer RAISE WARNINGs — the rows are still left untouched, so nothing "
+        "data-visible changes, and the only operator signal that the gauge is "
+        "refusing everyone would be gone silently")
     assert re.search(r"RETURN\s+QUERY\s+SELECT\s+v_written\s*\+\s*v_zeroed", code), (
-        "`orgs_written` no longer counts the zeroed rows — the refresh would report "
-        "fewer writes than it made, which is the figure the operator reads")
+        f"{live.name}: `orgs_written` no longer counts the zeroed rows — the "
+        "refresh would report fewer writes than it made, which is the figure the "
+        "operator reads")
+
+
+def test_the_live_definition_is_the_LAST_BY_VERSION_and_only_applied_names_qualify(tmp_path):
+    r"""The live definition is the last one the CLI APPLIES — VERSION order, no re-sort.
+
+    `check-migration-append-only` accepts ANY digit count (`^([0-9]+)_`), so the two
+    orders the applier could plausibly use DISAGREE on real, permitted names. Both
+    disagreements are exercised here, because a fixture that shows only one of them
+    pins the wrong rule:
+
+    * **prefix pair** — `2026111700_…` vs `20261117000003_…`: `'0' < '_'` puts the
+      SHORTER (older) name LAST under a filename compare, while the version strings
+      `"2026111700" < "20261117000003"` put the longer one last. `db push` re-sorts
+      by the version substring (`sortMigrationPathsByVersion`, supabase/cli
+      `v2.122.1` — the version `.github/workflows/supabase-deploy.yml:243` pins), so
+      the LONGER prefix is what production leaves live. Measured on `main` before
+      this row existed: the filename compare selected the superseded definition and
+      the gate reported GREEN over `RETURN v_audit;` with no fail-closed arm
+      (#13393). This half reddens if the sort key goes back to `sorted(<Path>)`.
+    * **numeric trap** — `9999999999999_…` sorts AFTER `20261117000003_…` as a
+      string but BEFORE it as an integer, so the version order keeps the `9…`
+      correction live. This half reddens if the key goes back to `int(prefix)`.
+
+    And both halves assert the applier's FILTER: a basename `db push` skips — the
+    CLI's pattern is `^([0-9]+)_(.*)\.sql$`, so `init_postgres_residency.sql` is
+    "applied by NOBODY" — is never a candidate, no matter where it sorts.
+    """
+    decl = "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()"
+    body = "{decl}\nRETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql;\n"
+    unapplied = "init_postgres_residency.sql"
+
+    def _write(directory, names):
+        directory.mkdir()
+        for name in names:
+            (directory / name).write_text(
+                "-- " + name + "\n" + body.format(decl=decl), encoding="utf-8")
+        got = [
+            p.name for p in _defining_migrations(directory, _RESIDENCY_DEFS_RX)
+        ]
+        assert unapplied not in got, (
+            f"a basename the CLI never applies cannot hold the live definition: {got}")
+        return got
+
+    # (a) the prefix pair — the ONLY shape where filename order and version order
+    # disagree with the version ordering coming out AHEAD.
+    superseded, live = (
+        "2026111700_postgres_residency_gauge.sql",
+        "20261117000003_postgres_residency_zero_vanished.sql",
+    )
+    got = _write(tmp_path / "pair", (superseded, live, unapplied))
+    assert got == sorted(got, key=lambda n: n.split("_", 1)[0]), (
+        f"selection is not in the CLI's VERSION order: {got}")
+    assert got[-1] == live, (
+        "the live definition must be the LAST file in the applier's VERSION order, "
+        f"not the filename-last one; selected {got[-1]!r} of {got}")
+    # Non-vacuity: the FILENAME order really is a different answer here, so this row
+    # cannot pass by re-reading its own expectation.
+    assert sorted(got)[-1] != live, (
+        "the filename and version orders no longer disagree on this fixture — "
+        "re-derive a prefix pair, or this row has stopped testing the sort key")
+
+    # (b) the numeric trap — lexical and integer order disagree the other way round.
+    numeric_live = "9999999999999_postgres_residency_fix1.sql"
+    got = _write(tmp_path / "numeric",
+                 ("0001_postgres_residency_gauge.sql", live, numeric_live, unapplied))
+    assert got[-1] == numeric_live, (
+        "the live definition must be the last file in the applier's STRING order — "
+        f"`9…` sorts after `2026…` lexically; selected {got[-1]!r} of {got}")
+    assert max(got, key=lambda n: int(n.split("_", 1)[0])) != numeric_live, (
+        "the integer and string orders no longer disagree on this fixture — "
+        "re-derive a fixture where they do (that is the only numeric re-sort this "
+        "row can catch)")
+
+
+def test_the_body_scan_is_bounded_to_the_named_function():
+    """#13346 review F1: a SIBLING function must not satisfy the gate.
+
+    The slice this replaces ran from the file's FIRST `AS $$` to its LAST `$$`,
+    so in a multi-function migration (ordinary here: one file defines 13
+    functions, three others 3–5) the snapshot's own `RAISE WARNING` could be
+    deleted and the assertion would still pass on a neighbour's. Measured
+    consequence of the old shape: `code` below matched `RAISE WARNING`.
+    """
+    defs_rx = _RESIDENCY_DEFS_RX
+    sql = (
+        "-- HEADER: -- the guard is IF jsonb_array_length(v_audit->'orgs') > 0\n"
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  IF jsonb_array_length(v_audit->'orgs') > 0 THEN\n"
+        "    RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "  END IF;\n"  # ⛔ this branch LOST its RAISE WARNING arm
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n"
+        "\n"
+        "-- an unrelated function bundled into the same correction, as ordinary\n"
+        "-- migrations do — ITS warning is not the snapshot's\n"
+        "CREATE OR REPLACE FUNCTION public.some_other_thing()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  RAISE WARNING 'a neighbour notice';\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n"
+    )
+
+    code = _function_body(sql, defs_rx)
+    assert code is not None
+    assert re.search(r"RETURN\s+QUERY\s+SELECT\s+v_written\s*\+\s*v_zeroed", code)
+    assert not re.search(r"RAISE\s+WARNING", code), (
+        "the neighbour's RAISE WARNING leaked into the snapshot's body — the "
+        "gate would report green on a function that silently lost its arm")
+    assert not re.search(r"some_other_thing", code), (
+        "a sibling function's text is inside the scanned body")
+
+    # Non-vacuity: the slice this replaces DID include the neighbour's warning.
+    old_body = sql[sql.index("AS $$") + len("AS $$"):]
+    old_code = "\n".join(
+        line.split("--", 1)[0]
+        for line in old_body[:old_body.rindex("$$")].splitlines())
+    assert re.search(r"RAISE\s+WARNING", old_code), (
+        "the pre-fix first-`AS $$`-to-last-`$$` slice no longer contains the "
+        "neighbour's RAISE WARNING — re-measure whether F1 still has a subject")
+
+
+def test_the_body_scan_honours_a_named_dollar_tag():
+    """A `$function$`-tagged body (what `pg_dump` emits) is still bounded.
+
+    PostgreSQL's dollar-quote rule is `$tag$ … $tag$`, the tag being part of the
+    delimiter — so a body carrying a literal `$$` inside a string must not end the
+    scan early, and the extractor must not assume the tag is `$$`.
+    """
+    decl_rx = re.compile(r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.tagged\b")
+    sql = (
+        "CREATE OR REPLACE FUNCTION public.tagged()\n"
+        "RETURNS void AS $function$\n"
+        "BEGIN\n"
+        "  RAISE WARNING 'mentions $$ inside a string value';\n"
+        "  RETURN;\n"
+        "END;\n"
+        "$function$ LANGUAGE plpgsql;\n"
+        "CREATE OR REPLACE FUNCTION public.after()\n"
+        "RETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql;\n"
+    )
+    code = _function_body(sql, decl_rx)
+    assert code is not None
+    assert "RAISE WARNING" in code
+    assert "after" not in code, f"the scan ran past the closing tag: {code!r}"
+
+
+# --------------------------------------------------------------------------- #
+def test_the_body_window_is_the_LIVE_definition_not_the_first_one():
+    """A file that defines the function twice leaves the SECOND definition live.
+
+    `CREATE OR REPLACE` executes in order, so a migration that redefines the
+    function later in its own body is left holding the later one. Anchoring the
+    window on the FIRST declaration read the SUPERSEDED body — measured: a guarded
+    earlier cut followed by an unguarded live one came back WITH the guard, so every
+    assertion built on this function passed over a live body that had lost its
+    fail-closed arm. Two definitions in one migration is not this directory's habit;
+    the window must not depend on that.
+    """
+    decl_rx = re.compile(r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.twice\b")
+    guarded = (
+        "BEGIN\n"
+        "  IF jsonb_array_length(v_audit->'orgs') > 0 THEN\n"
+        "    RETURN;\n"
+        "  END IF;\n"
+        "END;\n")
+    unguarded = "BEGIN\n  RETURN;\nEND;\n"
+    head = "CREATE OR REPLACE FUNCTION public.twice() RETURNS void AS $$"
+    tail = "$$ LANGUAGE plpgsql;\n"
+
+    superseded_guarded = _function_body(
+        head + guarded + tail + head + unguarded + tail, decl_rx)
+    assert superseded_guarded is not None
+    assert "jsonb_array_length" not in superseded_guarded, (
+        "the window read the FIRST definition, which the second one supersedes: "
+        f"{superseded_guarded!r}")
+
+    live_guarded = _function_body(
+        head + unguarded + tail + head + guarded + tail, decl_rx)
+    assert live_guarded is not None and "jsonb_array_length" in live_guarded, (
+        f"the window missed the live (last) definition: {live_guarded!r}")
+
+
+
+# The two REVIEW findings on this selector — both "the gate asserts over text the
+# server does not execute", one spelling further in than the defect it replaced.
+# --------------------------------------------------------------------------- #
+def test_the_selector_is_closed_over_the_definition_spelling_space(tmp_path):
+    """The gate's OWN pattern sees every legal spelling of the definition.
+
+    ⛔ WHY A SPELLING SPACE AND NOT A LIST OF SEEN SPELLINGS. A first cut matched
+    only `CREATE OR REPLACE FUNCTION`, then only `CREATE [OR REPLACE] FUNCTION
+    public.<name>`. Each round closed the spelling the round before had missed and
+    left the next one open, and every miss is the same failure: a correction this
+    gate cannot SEE, so it asserts over the SUPERSEDED body and reports green while
+    the live function has lost its fail-closed arm. What follows
+    `CREATE [OR REPLACE] FUNCTION` is a CLOSED set — an optional schema qualifier,
+    an optional quoted identifier, then the name — so the pattern is written over
+    the space, not over the spelling anyone happened to use.
+
+    Each arm below is a file that DEFINES the function and must therefore be a
+    candidate; the last two are controls that must NOT be, because a file that
+    only MENTIONS the function has no body for the gate to read.
+    """
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    defining = {
+        "20261117000001_or_replace_qualified.sql":
+            "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()",
+        "20261117000002_create_only.sql":
+            "CREATE FUNCTION public.postgres_residency_snapshot()",
+        "20261117000003_unqualified.sql":
+            "CREATE OR REPLACE FUNCTION postgres_residency_snapshot()",
+        "20261117000004_lowercase.sql":
+            "create or replace function public.postgres_residency_snapshot()",
+        "20261117000005_quoted.sql":
+            'CREATE OR REPLACE FUNCTION "public"."postgres_residency_snapshot"()',
+    }
+    for name, decl in defining.items():
+        (migrations / name).write_text(
+            f"{decl}\nRETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql;\n",
+            encoding="utf-8")
+    (migrations / "20261117000006_mentions_in_line_comment.sql").write_text(
+        "-- the body lives in 20261117000001; see "
+        "public.postgres_residency_snapshot() there\nSELECT 1;\n",
+        encoding="utf-8")
+
+    got = [p.name for p in _defining_migrations(migrations, _RESIDENCY_DEFS_RX)]
+    missing = sorted(set(defining) - set(got))
+    assert not missing, (
+        f"the selector cannot SEE {missing} — a correction written that way is not "
+        "a candidate, so the gate keeps asserting over the superseded body and "
+        f"reports green while the live function is unguarded. candidates={got}")
+    assert "20261117000006_mentions_in_line_comment.sql" not in got, (
+        "a file that merely MENTIONS the function was selected as defining it — "
+        "the body scan would then read a file that has no body")
+
+    # Non-vacuity: the pattern this replaces MISSES three of the five, so the row
+    # reddens the moment the space narrows back.
+    narrower = re.compile(
+        r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.postgres_residency_snapshot\b")
+    narrow_got = [
+        p for p in migrations.glob("*.sql")
+        if narrower.search(_strip_sql_comments(p.read_text(encoding="utf-8")))
+    ]
+    assert len(narrow_got) < len(got), (
+        "the narrower pattern sees as much as the shipped one — this row has lost "
+        "its subject; re-measure which spellings the gate still needs to accept")
+
+
+def test_a_block_comment_cannot_supply_the_live_body(tmp_path):
+    """REVIEW FINDING (P2, fail-open): `/* … */` is legal SQL and was not stripped.
+
+    The residual this replaces claimed a quoted DDL header "can only make the gate
+    assert over a newer, comment-only file and RED, never pass over a live body it
+    did not read". That enumeration named only `--`. Block comments are legal,
+    a `--` split does not touch them, and `sql.index("AS $$")` took the first
+    occurrence ANYWHERE in the file, comments included — so a newer migration whose
+    sole content is a `/* … */` copy of a superseded GUARDED body became the live
+    definition, the quoted `AS $$` opened the scan, and all three assertions went
+    GREEN while the real live body had lost its guard.
+
+    Both halves are pinned: such a file is not a candidate, and the nesting rule
+    (`/* /* */ */` ends at the SECOND `*/`) is honoured.
+    """
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    live_name = "20261117000003_postgres_residency_zero_vanished.sql"
+    (migrations / live_name).write_text(
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  IF TRUE THEN\n"            # ⛔ the live body has LOST its guard
+        "    RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "  END IF;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n",
+        encoding="utf-8")
+    comment_only = (
+        "/* superseded body, kept for the record:\n"
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  IF jsonb_array_length(v_audit->'orgs') > 0 THEN\n"
+        "    RAISE WARNING 'the audit reported nobody';\n"
+        "    RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "  END IF;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n"
+        "*/\n"
+    )
+    (migrations / "20990101000001_quoted_body.sql").write_text(
+        comment_only, encoding="utf-8")
+
+    candidates = _defining_migrations(migrations, _RESIDENCY_DEFS_RX)
+    assert [p.name for p in candidates] == [live_name], (
+        "the block-comment-only file was selected as the live definition — the "
+        f"gate would then read QUOTED text and report green: {[p.name for p in candidates]}")
+    code = _function_body((migrations / live_name).read_text(encoding="utf-8"),
+                          _RESIDENCY_DEFS_RX)
+    assert code is not None
+    assert not re.search(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)", code), (
+        "the live body's lost guard was satisfied by the quoted text — the false "
+        "PASS is back")
+
+    # Non-vacuity: the `--`-only strip this replaces DID select the comment file.
+    line_strip_only = [
+        p for p in migrations.glob("*.sql")
+        if _RESIDENCY_DEFS_RX.search(
+            "\n".join(ln.split("--", 1)[0] for ln in
+                      p.read_text(encoding="utf-8").splitlines()))
+    ]
+    assert len(line_strip_only) == 2, (
+        "the `--`-only scan no longer sees the block-comment file — this row has "
+        f"lost its subject: {[p.name for p in line_strip_only]}")
+
+    # Nesting: `/* outer /* inner */ still outer */` ends at the SECOND `*/`.
+    assert _strip_sql_comments(
+        "A /* outer /* inner */ still-outer */ B").split() == ["A", "B"], (
+        "block comments do not NEST — the scan ends at the first `*/`, so text the "
+        "server never executes is read as SQL")

@@ -1508,6 +1508,17 @@ install defeats the purpose of hosting locally.
 - `FalkorProjection.from_uri` accepts `docker://`, `redis://`, and `rediss://`.
   The `redis://`/`rediss://` schemes exist for the **hosted API** (Fly), which
   resolves `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` at runtime (entrypoint.sh).
+  ⚠️ **A shell INSIDE the machine sees `TORTOISE_DB_URI` SET AND EMPTY**
+  (#13320 note 2): `fly.toml`'s `[env]` block ships `TORTOISE_DB_URI = ""`, and
+  `entrypoint.sh` only *replaces* that value for the process it execs — it tests
+  `-n` and `export`s `FALKORDB_CLOUD_URI` into it, so the APP is correct while
+  `fly ssh console` (which reads `[env]`, not the entrypoint) hands an operator
+  the empty string. An operator script that then does
+  `os.environ.setdefault("TORTOISE_DB_URI", uri)` keeps the empty value (the key
+  is present, so `setdefault` is a no-op) and dies with
+  `RuntimeError: TORTOISE_DB_URI is empty in production`. ASSIGN it instead —
+  `os.environ["TORTOISE_DB_URI"] = os.environ["FALKORDB_CLOUD_URI"]` — which is
+  what the #13320 reproduction does.
 - Restart the MCP server after changing the URI (resolved once at startup).
 
 **Self-hosted authenticated MCP (`serve --http`, #702):** local stdio is
@@ -4210,7 +4221,7 @@ operator who read the line above as "CI defends this" would never run it.
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 | TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `migrations_head` row: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` — **not by that `/health` read**, but it **WAS measured, 2026-11-05T23:07:38Z**, by the fail-closed drift gate (see §"Arming the Postgres record" below: both migrations RECORDED APPLIED). Re-read `/health` before reusing any *endpoint* value here; the LEDGER question is the gate's to answer, and `/health` cannot answer it at all. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so **the arming is not the remaining work.** ⛔ **The remaining work is ORDERED, and it is not "migration + backup":** the 2026-11-03 decision puts a **verified backup FIRST** (*"No migration runs on an unbacked store"*), and **that first step is the live blocker** — a missing `TORTOISE_RECORD_BACKUP_DSN` (see the credential table in §"Arming the Postgres record"). This row is not a licence to run the apply. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
-| TORTOISE_RECORD_SERVE | — (a **mode flag**, not a credential: no secret to provision) | — | — (unset everywhere, so CI stays `off`) |
+| TORTOISE_RECORD_SERVE | ✅ **A live Fly secret, armed `prefer` out-of-band** (a **mode flag**, not a credential — no secret material to rotate) — declared `fly-only:#13209`, so it is deliberately absent from version control; the `fly secrets unset` in §"Arming the READ path" below must delete that declaration in the same change | — | — (no GitHub secret, so CI stays `off`) |
 
 ### Arming the READ path — `TORTOISE_RECORD_SERVE` (epic #7879, #12941)
 
@@ -4231,7 +4242,7 @@ The three modes (`tortoise/record_serve.py` — `serve_mode()`, ONE parser and O
 |---|---|---|
 | *unset* / `off` (**DEFAULT**) | the cache, exactly as before #12941 | the shipped default. A typo reads OFF too — an unrecognised value is OFF by design |
 | **`prefer`** | **the record first**, then the cache with a NAMED, COUNTED fallback | ✅ **RECOMMENDED.** Every armed read reads its own writes, and the dogfood keeps working when the record is slow, down, unasked or has no tenant to ask |
-| `record` | the record only — a miss is an absence, an outage RAISES | strict / verification lanes. **No cache branch**: any record failure is a 500 or a refusal on every read |
+| `record` | the record only — a miss is an absence, an outage RAISES | strict / verification lanes. **No cache branch**: any record failure is a 500 or a refusal on every read. ⚠️ One door qualifies the middle clause: the BARE by-id entity door (`tortoise_get_entity(<id>)`, #13093) serves only the labels whose record parity is measured, and it can never answer an absence while EITHER blocker stands — an unserved label (`Event`, `Source` — #9721) **or** a `Source` nameable by a bare `id` that the record only addresses by `url` (`record_serve.ENTITY_UNION_ADDRESS_RESIDUALS`, #13351). So TODAY **every** miss on that door — including one for a label it DOES serve — is `not-hot`, never an absence, and the **`record` arm** counts nothing for it |
 
 ⚠️ **`prefer` is RECORD-FIRST, not "cache when warm".** `_from_record()` runs before any cache
 consult — that is deliberate (`record_serve`'s `MODES` block, #10602's lane design). The
@@ -4265,15 +4276,45 @@ fly secrets unset TORTOISE_RECORD_SERVE -a tortoise-y4mjjq        # back to the 
 
 **Reading the fallback counter.** `record_serve.fallback_counts()` returns the process's counts by
 reason — `record-unavailable`, `record-miss`, `record-tenant-unresolved`,
-`record-read-lane-refused`, `record-read-bound-miss`. ⚠️ It is **process-local**: it is not published
+`record-read-lane-refused`, `record-read-bound-miss`, `record-label-not-served`. ⚠️ It is
+**process-local**: it is not published
 on `/health` today, so it is readable in-process (and from tests) but **not** from the pod. Do not
-read its absence as "no fallbacks happened".
+read its absence as "no fallbacks happened". (`record-label-not-served` is the by-id entity door's
+own reason — #13093: the record answered `no row` for the labels that door serves, and the labels it
+does NOT serve could still hold the node. Its repairs are per-label parity (#9721) *and* a
+Source-by-`id` probe, so it is kept apart from `record-miss`, whose repair is a backfill.)
+⚠️ It is counted in `prefer` mode only: the `record` arm of that door names and counts NOTHING,
+because nothing fell back there — read the `residency` marker for that arm, not the counter.
+
+⛔ **On an armed deployment the union door's FALSY absent answer is unreachable for a NAMED id.**
+Because coverage is incomplete, every absent name — including one neither store holds — answers
+`{"residency": "not-hot", …}`, which is TRUTHY. (The empty key is the one exception: it names nothing,
+so in the ARMED modes it answers `{}` without touching either store. `off` is unchanged — it delegates to
+the cache accessor exactly as it did before #13093.) An operator or client that tests `if out:` reads
+the marker as a found node; read the `residency` field instead. This is stated on
+`TortoiseSDK.get_entity`'s own docstring, and it is why the internal readers pass `cache_only=True`.
 
 **Verification.** `tests/test_12941_read_your_writes.py` pins the seam and every door DB-free (a fake
 record, a fake cache) — read-your-writes, `not-hot`-is-never-empty, the byte-identical default, and
 the bound. `tests/test_record_serve.py` owns the seam's own unit contract.
 
 ⛔ **Arming is an OWNER action.** Nothing in the code arms it, and no deploy sets it.
+
+**Provenance — the deploy's gate knows this name is out-of-band BY DESIGN.** It is declared
+`fly-only:#13209` in `.github/scripts/fly-managed-secrets.txt` (#13209), and that is why the
+fail-closed Fly secret-provenance check no longer reports it as `UNDECLARED`: the ruling above
+("no deploy sets it") *is* the property the `fly-only:` token records, so the absence of a
+version-control managing source is deliberate, not drift. Two consequences follow, and both are
+load-bearing:
+
+- ⛔ **Do not "fix" it by declaring `gh-secret:` or by moving the value into `fly.toml [env]`.**
+  Either one makes the deploy the managing source — the ruling above, reversed — and `fly-toml-env`
+  also breaks the revert: `fly secrets unset` would then return the `[env]` value instead of the
+  shipped `off` default, so turning the mode off would need a code change rather than the one
+  operator step above.
+- ⚠️ **The declaration is a LIVE state, not a permanent one.** The checker refuses a `fly-only:`
+  name that no longer exists on Fly, so the `flyctl secrets unset` above must delete that line in
+  the same change — fail-closed on purpose, so a revert is visible in review.
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 

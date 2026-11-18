@@ -302,6 +302,15 @@ try:
 except Exception:  # observability never denies a usable graph
     _note_local_cache = None
 
+# #12943 (reopened): the TENANT/CACHE-GRAPH grading half, imported under the same
+# guard and for the same reason (`_bind_record_tenant` is on the hosted write
+# path, and a broken observability seam must not refuse a request that could be
+# served).
+try:
+    from .cache_leg import note_tenant_graph as _note_tenant_graph
+except Exception:  # observability never denies a usable graph
+    _note_tenant_graph = None
+
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
 register_kind("checkpoint-item")
@@ -12357,6 +12366,23 @@ def canonical_org_graph_name(tenant: str) -> str:
     return f"org_{bare_tenant_id(tenant)}"
 
 
+def _uri_graph_name(db_uri: str | None) -> str | None:
+    """The URI's own graph name, or ``None`` for an embedded construction.
+
+    The `urlparse(...).path.lstrip("/") or "tortoise"` step had THREE verbatim
+    copies in this module (`_get_proj`, `_graph_census`'s read, and
+    `_cache_graph_name`) — and `_derive_graph_name`'s own docstring exists
+    because a caller that names a graph outside a projection must derive it
+    IDENTICALLY. A drift in this step makes a caller compare against a name the
+    projection never opens (a false mismatch, or a missed one), so it is one
+    function now, used by all three.
+    """
+    if db_uri is None:
+        return None
+    from urllib.parse import urlparse
+    return urlparse(db_uri).path.lstrip("/") or "tortoise"
+
+
 def _derive_graph_name(*, namespace: str | None,
                        graph_name: str | None,
                        uri_graph: str | None = None) -> str:
@@ -15174,10 +15200,7 @@ class TortoiseSDK:
             # Resolve the URI's own graph name first (used as the fallback
             # when no namespace is set — preserves the conftest per-session
             # test graph, #221).
-            uri_graph: str | None = None
-            if self._db_uri is not None:
-                from urllib.parse import urlparse
-                uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
+            uri_graph = _uri_graph_name(self._db_uri)
 
             graph_name = _derive_graph_name(
                 namespace=self._namespace, graph_name=self._graph_name,
@@ -16187,6 +16210,34 @@ class TortoiseSDK:
                 f"(got {org_id!r}, {graph_id!r})"
             )
         self._record_tenant = (org_id, graph_id)
+        # #12943 (reopened): the tenant and the CACHE graph are two answers, and
+        # until this line nothing compared them. The hosted REST lane takes both
+        # from one credential, so they cannot drift THERE — but this method is
+        # also the seam any other lane binds through (a script, a maintenance
+        # job, a future door), and a tenant that names a graph this SDK does not
+        # fold into files the record row under one graph and the cache node in
+        # another: the write lands, `record-reconcile` reports the whole tenant
+        # missing, and every counter reads healthy (the measured shape of the
+        # issue's 8 objects / 0 nodes). Graded HERE, at the binding, because
+        # this is the moment both values exist — see
+        # `tortoise.cache_leg.tenant_graph_reason` for the three shapes it
+        # deliberately does NOT grade and why silence is the right answer there.
+        # Cheap: a name derivation that opens nothing (no projection, no
+        # socket) plus one regex on the name.
+        if _note_tenant_graph is not None:
+            _note_tenant_graph(cache_graph=self._cache_graph_name(),
+                               org_id=org_id, graph_id=graph_id)
+
+    def _cache_graph_name(self) -> str:
+        """The cache graph this SDK WILL fold into — derived, never opened.
+
+        The projection's own derivation (`_derive_graph_name`), so a caller can
+        name the graph without paying a connect, a version probe or an index
+        check. Used by `_bind_record_tenant`'s tenant/cache grading (#12943).
+        """
+        return _derive_graph_name(namespace=self._namespace,
+                                  graph_name=self._graph_name,
+                                  uri_graph=_uri_graph_name(self._db_uri))
 
     def _record_write_failure(self, reason: str, exc: BaseException) -> None:
         """Count and report one armed record write that did not happen (#9188).
@@ -23186,10 +23237,10 @@ class TortoiseSDK:
         # silently MISSING from the index-served Point dense leg (#8429) — the
         # write seam exists so a server-owned vector is always the typed,
         # indexable shape. (#8316 has since normalised a right-width `List` at
-        # the READ boundary, so the "expected Null or Vectorf32 but was List"
-        # abort this comment used to cite no longer happens for the right-width
-        # case; a wrong-width or non-numeric value still aborts the MATCH —
-        # #8430.) That is the #4521 class on the LIVE path
+        # the READ boundary, and #8430 drops a stored value the read cannot
+        # consume — a wrong width or a non-numeric value — instead of aborting
+        # the whole MATCH; a wrong-width TYPED row is its declared residual.)
+        # That is the #4521 class on the LIVE path
         # (#4521 / PR #7740 fixed only the replay's `_revise_point`). The
         # derived vector is SERVER-owned, so it is cast and CLEARED first,
         # exactly like `_revise_point`: `vecf32()` alone is not enough,
@@ -59291,6 +59342,23 @@ class TortoiseSDK:
         how the internal-reader tests pin those arms, and their contract says
         the interception must work `regardless of how it is spelled`.
 
+        ⛔ **ON AN ARMED DEPLOYMENT, ``{}`` IS NOT REACHABLE FROM THIS DOOR FOR A
+        NAMED ID — EVERY ABSENT *NAME* ANSWERS THE TRUTHY ``not-hot`` SHAPE.**
+        (The one exception is the EMPTY key, which names nothing and therefore
+        answers ``{}`` — in the ARMED modes, where the short-circuit below runs.
+        ``off`` never reaches it: that mode delegates to the accessor unchanged,
+        byte for byte, which is what ``off`` means and why an empty key there
+        behaves exactly as it did before #13093.)
+        The coverage rule (`record_serve.entity_coverage_complete`) is `False`
+        while ``Event``/``Source`` lack measured parity (#9721) AND a Source
+        cannot be addressed by a bare ``id`` at all
+        (``record_serve.ENTITY_UNION_ADDRESS_RESIDUALS``), so the falsy arm above
+        is unreachable for a named id and a caller MUST read the ``residency``
+        field rather than the truthiness of the answer. That is why the ten
+        internal readers pass `cache_only=True` instead of testing truthiness, and
+        it is the one migration an external caller of this door owes: `if out:`
+        no longer distinguishes found from absent while the record seam is armed.
+
         ``off`` — the default — is byte-identical to the pre-#13093 call: one
         cache query through the accessor, no record consult, no added key, and
         no residency marker (this door does not read the ``partial``
@@ -59306,9 +59374,26 @@ class TortoiseSDK:
         store a write has not finished projecting. Serving it would also hand
         them a TRUTHY ``{"residency": …}`` where they test ``or MISSING`` / ``or
         {}`` and read it as a found node. This is the same internal-vs-caller
-        split ``get_point``'s opt-in ``served_out`` sink makes; here it is a
-        method split because a bare ``get_entity`` caller carries no parameter by
-        which a mid-write one could be told apart.
+        split ``get_point``'s opt-in ``served_out`` sink makes; here it is the
+        ``cache_only=True`` keyword, declared AT THE CALL SITE rather than by a
+        second method name — the internal-reader arms are pinned by intercepting
+        this method BY NAME, and their contract says that interception must hold
+        regardless of how the call is spelled (``test_11926_derived_invalidation``).
+        ⚠️ The flag is a DEFAULT, not a structural guarantee: a new internal caller
+        that forgets it gets the seam — a bounded record round trip on the caller's
+        thread, and then, mid-write, EITHER a raise (record unavailable, or no
+        tenant to scope the read — ⛔ both of those raise in ``record`` mode ONLY:
+        in ``prefer`` they are named, counted fallbacks) OR a projection miss. The
+        miss is the arm that bites in EITHER mode: in ``prefer`` it hands back the
+        cache's answer (this marker only when the cache misses too), while in
+        ``record`` there is no cache branch at all — the answer is ``props is
+        None`` from the record itself, and
+        :func:`record_serve.entity_absent_wire` mints the TRUTHY
+        ``{"residency": "not-hot"}`` this docstring warns about two paragraphs up,
+        where an ``or MISSING`` test reads it as a found node (absence IS
+        established there — ``served_from == "record"`` — and what keeps the falsy
+        ``{}`` arm unreachable is the entity union's incomplete coverage, not the
+        mode).
         """
         if cache_only:
             return self._get_entity(id_val)
@@ -59352,6 +59437,22 @@ class TortoiseSDK:
             # The pre-#13093 shape, byte for byte: one cache query, no consult,
             # no attribution, no marker.
             return self._get_entity(id_val)
+
+        # ⛔ AN EMPTY KEY NAMES NO NODE, SO NO STORE IS CONSULTED — not the
+        # record and NOT THE CACHE. This has to short-circuit here, BEFORE the
+        # tenant resolution and the record round trip: the record's reader
+        # refuses an empty key as STRUCTURAL (`read_node`), so an armed
+        # `get_entity("")` would go from `{}` to an exception while `off` stayed
+        # absent — the same id answering two ways depending on a deployment flag.
+        # And it answers `{}` ITSELF rather than delegating to `_get_entity`:
+        # that would build a graph handle, which `record` mode exists to avoid
+        # (the laziness the point door pins with `handle_opens == 0`). ⚠️ The
+        # CACHE's own view of an empty key is not something this door should be
+        # deciding: no fold WRITES such a node (`projection._writable_id` refuses
+        # it), so it is a state only a raw write can create — and `record` mode
+        # must not go looking in the store it exists to replace.
+        if not id_val:
+            return {}
 
         # ⛔ ONE COORDINATE SPELLING (#13322 review observation 3).
         # `record_serve.serve_entity` builds `union:<labels>:<id>`; a second
@@ -59933,10 +60034,7 @@ class TortoiseSDK:
         """
         from .record_writer import is_usable_tenant, record_tenant_effective
 
-        uri_graph: str | None = None
-        if self._db_uri is not None:
-            from urllib.parse import urlparse
-            uri_graph = urlparse(self._db_uri).path.lstrip("/") or "tortoise"
+        uri_graph = _uri_graph_name(self._db_uri)
         graph_name = _derive_graph_name(
             namespace=self._namespace, graph_name=self._graph_name,
             uri_graph=uri_graph)

@@ -549,6 +549,346 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
         f"its reopen exactly once ({mints}) — `None` for EVERYTHING is not the fix")
 
 
+def test_a_FALSY_isClosed_with_NO_position_still_withholds_the_open_word(sdk):
+    """The STATUS-word path to `"open"` had no pin — the gap this one closes.
+
+    `fall_through` becomes `"open"` two ways — a stage/slot PROP is present, or the
+    legacy `status` word maps to it through `_STATUS_TO_STATE` (`in_progress`,
+    `live`, `open`). Every other falsy pin exercises the first way or a
+    non-`"open"` word, so a narrowing of the arm to position-carrying rows survived
+    the whole suite while restoring the measured defect for this one.
+
+    A position-less row is ordinary: a first ingest that records no stage fold leaves
+    none, and a pre-S0 row may never have had any. It is not live either (the
+    Integer-`0` marker fails `coalesce(n.isClosed, false) = false`), so the close
+    fold is never dispatched for it and `"open"` mints a `-closed` on every poll of a
+    CLOSED issue — the same unbounded journal growth, reached without a stage prop.
+    """
+    oid = "github-issue-acme/repo1-1"
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    # The word and the marker through the PUBLIC DOOR; the row carries no position.
+    sdk.update_knowledge(oid, status="live", isClosed=0)
+    proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) "
+                 "REMOVE o.pipelineStageId, o.pipelineSlot")
+    stored = proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.status, o.isClosed, "
+        "typeof(o.isClosed), o.pipelineStageId, o.pipelineSlot").result_set[0]
+    # PREMISE PIN, not coverage: a door or a projection that started coercing the
+    # marker, dropping the word, or recording a position would leave the pin below
+    # passing for a shape it is not about — so the precondition is asserted, never
+    # assumed. The diff adds READS only, so these can not vary under a mutation of
+    # it and must not be counted as guards (#13326 F2, agent-infra#3442 rule 3).
+    assert stored[1] == 0 and stored[2] == "Integer", (
+        f"the door did not store the uncoerced integer this pin is about: {stored!r}")
+    assert stored[0] == "live", (
+        f"the word this pin is about (one that maps to `open`) was not stored: {stored!r}")
+    assert stored[3] is None and stored[4] is None, (
+        f"the precondition is not the POSITION-LESS shape: {stored!r}")
+    # GitHub CLOSED over the row: the withheld `"open"` is what made this loop.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+    kinds = sorted(r[0] for r in proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-issue-acme/repo1-1' "
+        "RETURN e.eventKind").result_set)
+    assert mints == [0, 0, 0], (
+        "a position-less row with a falsy marker was read as OPEN from its status "
+        f"word, so a CLOSED issue minted a close per poll ({mints}); events {kinds}")
+    assert "github.issue.closed" not in kinds, (
+        f"a false close was minted through the status-word path: {kinds}")
+    # …and the reopen direction records nothing either — `None` is the answer, not
+    # `"closed"`: this row has no `"closed"` reading to preserve.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", closed_at=None, updated_at="2026-07-23T08:00:00Z")]
+    assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
+        "a falsy-marker row with no position and no `closed` word must record no "
+        "transition in either direction")
+
+
+def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
+    """#13326 (measured on `origin/main` `54682177bc`), the half that had no pin: `isClosed=0`.
+
+    ⚠️ Attribution corrected (#13326 review P3): this half was NOT #13288 round-2 `F1`
+    — that finding is "the position arm shadows the unresolvable guard, and the new
+    comment says it cannot", and no #13288 comment mentions `isClosed=0`, `Integer`,
+    or a falsy non-boolean marker. The closest prior record is #13289's review P3
+    ("a falsy non-boolean `outdated` (`0`, `''`) reads live in Python but terminal in
+    Cypher — RECORDED, NOT FIXED") — the same excluded middle one FIELD over; the
+    `isClosed` field itself was found for #13326.
+
+    `create_object(..., isClosed=1)` is documented at the truthy pin BELOW
+    (`test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`); the
+    FALSY half is reachable through EITHER props door — there is no partition to
+    justify (#13326 review, second lane: `create_object("x", objectKind=
+    "core:issue", isClosed=0)` stores `['x', 0, 'Integer']` too, measured). Every
+    props door stores the marker VERBATIM and none coerces; the `update_knowledge`
+    spelling below is the one this pin uses (measured on the merged head:
+    `typeof(o.isClosed)` → `['Integer']`). The two sides then disagree
+    irreconcilably: this module reads it by `bool()` (→ live), while the fold's
+    live-holder probe compares `coalesce(n.isClosed, false) = false` in Cypher,
+    where `0 = false` is FALSE under FalkorDB's strict types (measured:
+    `RETURN 0 = false, typeof(0)` → `[False, 'Integer']`; vendor-documented, and
+    `toBoolean(0)` is the explicit coercion). So the row has NO live holder, and no
+    CLOSING fold is dispatched for it — the marker is never repaired from the close
+    side. (Trigger-reach is a separate fact and the module docstring states it: a
+    `github.issue.reopened` fold reached by NAME DOES rewrite the marker, which is
+    exactly why the arm keeps a `"closed"` answer wherever the position or a legacy
+    `status` word already records an end.)
+
+    Measured pre-fix on the merged head, four polls of a CLOSED issue: mints
+    `[1, 1, 1, 1]`, four permanent `-closed` Events, the row byte-identical. The
+    read now WITHHOLDS THE `"open"` ANSWER for a falsy non-boolean marker on a
+    position that records no end — it answers `None` where the answer would
+    otherwise be `"open"`, which gates the transition arm off. It does NOT answer
+    `None` everywhere (#13326 review P2): where the position records an end, or a
+    legacy `status` word already says closed, the `"closed"` answer is kept, because
+    that is the reading the reopen fold reaches and REPAIRS.
+
+    ⛔ The `[0,0,0,0]` polls alone do NOT test that answer (#13326 F2): the
+    reading this arm REJECTS, `"closed"`, mints nothing there either, because
+    GitHub says closed and `issue_to_event` needs a change. The discriminator at
+    the end — a REOPEN over the same row — is what separates them.
+    """
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    # The PUBLIC DOOR, exactly as a caller reaches it — not a raw query.
+    sdk.update_knowledge("github-issue-acme/repo1-1", isClosed=0)
+    stored = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
+        "RETURN o.isClosed, typeof(o.isClosed), o.pipelineSlot"
+    ).result_set[0]
+    assert stored[0] == 0 and stored[1] == "Integer", (
+        "the door did not store the uncoerced integer this pin is about: "
+        f"{stored!r}")
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(4)]
+    kinds = sorted(r[0] for r in proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-issue-acme/repo1-1' "
+        "RETURN e.eventKind").result_set)
+    row_after = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
+        "RETURN o.isClosed, o.pipelineSlot").result_set[0]
+    assert mints == [0, 0, 0, 0], (
+        "`isClosed=0` has no live holder, so no fold can ever run on it — but it "
+        f"was read as OPEN and every poll minted another close ({mints}); events "
+        f"now {kinds}")
+    assert kinds == ["github.issue.open"], f"a false close was minted: {kinds}"
+    # PREMISE PIN, not coverage: the diff adds a READ, and a read never writes, so
+    # this row can not vary under any mutation of it. It states the cost of the
+    # `None` answer honestly — the marker really is left unrepaired — and must not
+    # be counted as a guard (#13326 F2, agent-infra#3442 rule 3).
+    assert row_after == [0, stored[2]], (
+        f"the row must be untouched by the polls: {row_after!r}")
+    # ⛔ THE DISCRIMINATOR (#13326 F2). Every assertion above is byte-identical under
+    # the answer this arm REJECTS — `return "closed"` — so on its own the pin cannot
+    # fault the decision it defends. The transition arm is gated on
+    # `prev_state is not None`, so a REOPEN separates the two: `None` mints nothing,
+    # while `"closed"` mints exactly one `-reopened` (that is the reading
+    # `issue_to_event` acts on). This is the same observation the truthy pin uses.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", closed_at=None, updated_at="2026-07-23T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)]
+    assert mints == [0, 0], (
+        "the falsy marker was READ as a state instead of as unplaceable: a reopen "
+        f"over it minted ({mints}) — the `\"closed\"` answer this arm rejects")
+
+
+def test_a_FALSY_isClosed_on_an_ENDED_position_still_records_its_reopen(sdk):
+    """#13326 review F1 (P1): the falsy arm must not SHADOW the position arm.
+
+    `done` is a terminal slot, so the ordinary shape of any closed issue's row is
+    `isClosed=True` + `done`/`terminal`; one `update_knowledge(id, isClosed=0)` —
+    the same public door the sibling pin uses — turns it into a falsy marker on an
+    ENDED position. Answering `None` for that shape (i.e. placing the falsy arm
+    ABOVE the position arm — `is_position_ended`) costs the row its entire remaining
+    close/reopen history: `prev_state=None` gates the transition arm off on every
+    poll, so a reopen mints nothing, no fold runs, the marker is never rewritten
+    to a real boolean, and the row never becomes reachable again.
+
+    The position axis is the determinant of ended-ness (§6), and it is also the
+    axis the fold WRITES and can therefore reconcile — so the ended reading wins
+    here and the marker is repaired by the fold, exactly as it is for the truthy
+    half. This pin fails on the arm order #13326 found (arm above the position
+    arm) and passes on both the pre-#13326 reader and this one: the narrowing is
+    required to PRESERVE this history, not to fix the measured bug.
+    """
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    # Close it through the normal fold — the shape every closed issue has.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    assert _run(_indexer(t), sdk)["events_minted"] == 1
+    # …then plant the verbatim integer through the PUBLIC DOOR.
+    sdk.update_knowledge("github-issue-acme/repo1-1", isClosed=0)
+    stored = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.isClosed, "
+        "typeof(o.isClosed), o.pipelineStageId, o.pipelineSlot"
+    ).result_set[0]
+    assert stored[0] == 0 and stored[1] == "Integer", (
+        f"the door did not store the uncoerced integer this pin is about: {stored!r}")
+    assert tuple(stored[2:]) == ("done", "terminal"), (
+        "the precondition is not the shape this pin is about (an ENDED position "
+        f"carrying a falsy marker): {stored!r}")
+    # THE ENDED POSITION WINS: the row is READ as closed, so a closed issue over it
+    # mints nothing (the falsy arm answering `None` would also mint nothing — see
+    # the discriminator below for the observation that separates them).
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)]
+    assert mints == [0, 0], (
+        f"a reopen/close was minted over an already-ended position ({mints})")
+    # ⛔ THE DISCRIMINATOR: the reopen after it must be RECORDED (one mint). Under
+    # `prev_state=None` — the answer a "falsy marker is always unplaceable" arm
+    # gives — the transition arm is gated off and this is 0.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", closed_at=None, updated_at="2026-07-23T08:00:00Z")]
+    assert _run(_indexer(t), sdk)["events_minted"] == 1, (
+        "the row stopped recording transitions once a falsy marker landed on an "
+        "ENDED position — its close/reopen history is over (the falsy arm shadowed "
+        "the position arm)")
+    # …and the fold REPAIRED the marker, which is what re-arms the row for ever.
+    repaired = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.isClosed, "
+        "typeof(o.isClosed), o.pipelineSlot"
+    ).result_set[0]
+    assert repaired[1] == "Boolean" and repaired[0] is False, (
+        f"the fold did not repair the marker to a real boolean: {repaired!r}")
+    assert repaired[2] == "active", (
+        f"the reopen must leave a live position: {repaired!r}")
+    assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
+        "the repaired row must be settled — nothing further to record")
+
+
+def test_a_FALSY_isClosed_on_a_TERMINAL_BY_ID_row_still_records_its_reopen(sdk):
+    """#13326 review F3 (P2): the arm order is load-bearing, and the DECLARED selector had no shape.
+
+    `test_a_FALSY_isClosed_on_an_ENDED_position_still_records_its_reopen` plants its
+    marker on a row whose BOTH axis props read terminal (`("done", "terminal")`), so
+    the `pipelineSlot` prop alone already answers ended and an arm placed ABOVE the
+    position read passes every one of its assertions. The row this pin adds is the
+    one only the DECLARED selector covers: the slot PROP is stale (`active`) while
+    the stage DECLARATION by id is terminal — `apply_stage_fold` resolves the stage
+    by id, so the fold sees an ended position, while the `pipelineSlot` prop alone
+    says not-ended. Under this head the reopen mints `1`; under the falsy arm placed
+    above the position read it answers `None`, the transition arm is gated off, and
+    it mints `0`.
+
+    Honest scope (#13289 merge): the collapsed `position_ended` predicate means the
+    "arm inserted between two position arms" mutant no longer exists as a shape, so
+    this pin's arm-order half now coincides with the sibling pin's — what it adds is
+    the DECLARED-over-PROP precedence, which no other test exercises.
+    """
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    # Close it through the normal fold — the shape every closed issue has.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    assert _run(_indexer(t), sdk)["events_minted"] == 1
+    # …then plant terminal-BY-ID + a STALE live slot prop + the verbatim integer,
+    # all through the PUBLIC DOOR.
+    sdk.update_knowledge("github-issue-acme/repo1-1",
+                         pipelineStageId="done", pipelineSlot="active", isClosed=0)
+    proj = sdk._get_proj()
+    stored = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.pipelineStageId, "
+        "o.pipelineSlot, o.isClosed, typeof(o.isClosed)").result_set[0]
+    assert tuple(stored) == ("done", "active", 0, "Integer"), (
+        "the precondition is not the shape this pin is about (terminal by id, a "
+        f"stale live slot prop, a falsy marker): {stored!r}")
+    # THE ENDED DECLARATION WINS: the row is READ as closed, so the settled close
+    # mints nothing per poll.
+    assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
+        "a close was minted per poll over a position ended BY ID")
+    # ⛔ THE DISCRIMINATOR (the gap this pin closes): with the falsy arm placed ABOVE
+    # the position read, this row answers `None` — the `pipelineSlot` prop alone said
+    # not-ended — and this is 0.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", closed_at=None, updated_at="2026-07-23T08:00:00Z")]
+    assert _run(_indexer(t), sdk)["events_minted"] == 1, (
+        "the terminal-by-id row stopped recording transitions once a falsy marker "
+        "landed on it — the falsy arm was placed above the position read")
+
+
+def test_a_FALSY_isClosed_on_a_LEGACY_status_row_still_records_its_reopen(sdk):
+    """#13326 review (round 3) F1 (P2): the arm must withhold `"open"` ONLY.
+
+    A POSITION-LESS legacy row (`status='completed'`, no `pipelineStageId` /
+    `pipelineSlot` — the shape a pre-S0 binary left) that also carries the verbatim
+    integer marker reaches neither the position test nor the wider-term arm:
+    `'completed'` is in neither `commit_ops.OBJECT_TERMINAL_STATUSES`
+    (`commit_ops.py:88-89`) nor `live.TERMINAL_EXCLUDED_STATUSES`
+    (`live.py:97-115`). Before this PR it fell through to `_STATUS_TO_STATE` and
+    read `"closed"` — and CONVERGED, because that reading IS the one the reopen
+    fold reaches and repairs: a GitHub reopen mints `-reopened`,
+    `_reopen_targets_closed` is True for an Integer-`0` row exactly as for a
+    truthy one (one registered incarnation, no live holder), an absent `cur_id`
+    skips `apply_stage_fold`'s identity guards, and
+    `stage_move_refusal(None, …, is_closed=bool(0)=False, reopen=True)` admits the
+    move and writes `isClosed=False` plus a live slot (`pipeline.py:397-435`).
+
+    An arm answering `None` for EVERY falsy marker drops that reopen for ever —
+    no mint ⇒ no fold ⇒ no repair, every poll — which is exactly the silent false
+    negative `_row_is_frozen`'s arm documents for `status='completed'` +
+    `outdated` + `isClosed=false`. So the arm withholds only the `"open"` answer,
+    and this pin is the observation that separates the two arms: it is RED under
+    the unconditional-`None` arm (0 mints) and GREEN here (1 mint + a repaired
+    marker).
+    """
+    oid = "github-issue-acme/repo1-1"
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    # The MARKER through the PUBLIC DOOR (the verbatim integer this PR is about);
+    # the legacy `status` word by a RAW write, because today's door REFUSES it —
+    # "a position word written as a status" (`lifecycle_vocabulary.py:313`) — so
+    # this shape exists only on a row a pre-S0 binary wrote. Raw graph writes are
+    # the legitimate simulation of legacy data (`live.py:100-108`, #2901). No
+    # pipeline props: that is what makes the row position-less.
+    sdk.update_knowledge(oid, isClosed=0)
+    proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) "
+                 "SET o.status='completed' "
+                 "REMOVE o.pipelineStageId, o.pipelineSlot")
+    stored = proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.status, o.isClosed, "
+        "typeof(o.isClosed), o.pipelineStageId, o.pipelineSlot").result_set[0]
+    assert stored[1] == 0 and stored[2] == "Integer", (
+        f"the door did not store the uncoerced integer this pin is about: {stored!r}")
+    assert stored[0] == "completed", (
+        f"the legacy word this pin is about was not stored: {stored!r}")
+    assert stored[3] is None and stored[4] is None, (
+        f"the precondition is not the POSITION-LESS legacy shape: {stored!r}")
+    # GitHub CLOSED over a row read "closed": nothing to record, no loop.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
+        "a transition was minted over a legacy row read `closed`")
+    # ⛔ THE DISCRIMINATOR: the reopen this reading makes reachable must be
+    # RECORDED (one mint) and must repair the marker — the unconditional-`None`
+    # arm gates the transition off and mints 0.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", closed_at=None, updated_at="2026-07-23T08:00:00Z")]
+    assert _run(_indexer(t), sdk)["events_minted"] == 1, (
+        "the falsy arm swallowed the `closed` answer a legacy status word gives a "
+        "position-less row, so the reopen the fold WOULD apply was dropped for ever")
+    repaired = proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.isClosed, typeof(o.isClosed), "
+        "o.pipelineSlot").result_set[0]
+    assert repaired[1] == "Boolean" and repaired[0] is False, (
+        f"the fold did not repair the marker to a real boolean: {repaired!r}")
+    assert repaired[2] == "active", (
+        f"the reopen must leave a live position: {repaired!r}")
+    assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
+        "the repaired row must be settled — nothing further to record")
+
+
 def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
     """#13222 review round 2, finding 1 (P1): reading a SUBSET of the fold's decision.
 

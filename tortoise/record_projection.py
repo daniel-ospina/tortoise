@@ -2287,6 +2287,120 @@ def _jsonb_cache_clear() -> None:
     _JSONB_CACHE.update({"at": float("-inf"), "names": frozenset()})
 
 
+def _scan_sql(sql: str):
+    """Split `sql` into `(start, end, kind)` spans: "code", "literal", or a comment.
+
+    ⛔ THIS IS THE ONE SCANNER, and it is a scanner rather than a regex for the
+    reasons `_strip_sql_comments` records below. It exists SEPARATELY because a
+    caller sometimes needs to know WHAT a character is, not just what survives:
+    `;` inside a string literal is not a statement terminator, and reading it as
+    one hides a declaration (measured: `DEFAULT 'a;b'` before a `CHECK (…)` made
+    the constraint's own statement look like `b',` and the declaration vanished —
+    `tests/test_record_schema_placement.py`'s props-ban read). `code` vs the rest
+    is the answer, and nobody should grow a second scanner to get it.
+    """
+    i, n, start = 0, len(sql), 0
+    while i < n:
+        char = sql[i]
+        if char == "$":
+            delimiter = re.match(r"\$[A-Za-z_]*\$", sql[i:])
+            if delimiter:
+                tag = delimiter.group(0)
+                close = sql.find(tag, i + len(tag))
+                end = n if close == -1 else close + len(tag)
+                if i > start:
+                    yield (start, i, "code")
+                yield (i, end, "literal")
+                i = start = end
+                continue
+        if sql.startswith("/*", i):
+            # ⛔ POSTGRESQL NESTS BLOCK COMMENTS (`/* a /* b */ c */` is ONE
+            # comment), so a first `*/` is NOT the end. `find()` was the whole
+            # implementation and it measured a real misread: a commented-out
+            # `ADD CONSTRAINT … props_no_derived` inside an outer comment stayed in
+            # the text as CODE once the inner `*/` closed it, so a downstream
+            # reader could take a disabled declaration for an executed one
+            # (measured on the props-ban read, review of #13265 round 5).
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if sql.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                elif sql.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            if i > start:
+                yield (start, i, "code")
+            yield (i, j, "block_comment")
+            i = start = j
+            continue
+        if char == '"':
+            # PostgreSQL DOUBLE-QUOTED IDENTIFIERS can contain `'`, `;`, `--` and
+            # `/*`, all of which are DATA there. Not skipping them made the scanner
+            # read an identifier's `--` as a comment and DELETE real DDL after it on
+            # the same line — measured: `ALTER TABLE … RENAME COLUMN "a--b" TO c;`
+            # followed by a real props-ban DROP left BOTH the parse and the guard's
+            # count blind to that DROP, i.e. a silent green pass. `""` is an escaped
+            # quote, the same rule as `''` in a literal.
+            j = i + 1
+            while j < n:
+                if sql[j] == '"':
+                    if j + 1 < n and sql[j + 1] == '"':
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            i = j
+            continue
+        if sql.startswith("--", i):
+            j = i
+            while j < n and sql[j] != "\n":
+                j += 1
+            if i > start:
+                yield (start, i, "code")
+            yield (i, j, "line_comment")
+            i = start = j
+            continue
+        if char == "'":
+            # `E'…'` / `e'…'` — a backslash escapes ONLY there: a PLAIN `'C:\'` is
+            # a complete literal under `standard_conforming_strings=on` (the PG
+            # default), so treating every literal as escape-carrying swallows the
+            # closing quote and never leaves quote mode (#11075 review P2).
+            # ⛔ NOT "any preceding E": `LIKE'C:\'` ends with the `E` of `LIKE`,
+            # so arming escapes there made the literal swallow the rest of the file
+            # and a real `DROP` after it became invisible — GREEN over a dropped ban
+            # (round 11 P3, measured; latent because the corpus's `E'…'` are all
+            # space-preceded). The prefix must be a FREE-standing `e`/`E`.
+            escapes = (
+                i > 0
+                and sql[i - 1] in ("E", "e")
+                and (i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] in "_$"))
+            )
+            j = i + 1
+            while j < n:
+                if escapes and sql[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":  # '' — an escaped quote
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            if i > start:
+                yield (start, i, "code")
+            yield (i, j, "literal")
+            i = start = j
+            continue
+        i += 1
+    if start < n:
+        yield (start, n, "code")
+
+
 def _strip_sql_comments(sql: str) -> str:
     """The migration text with `--` and `/* … */` comments removed.
 
@@ -2295,71 +2409,28 @@ def _strip_sql_comments(sql: str) -> str:
     string (a `COMMENT ON COLUMN` right below one of these files does) would be
     truncated by the regex form. The newline of a `--` comment is KEPT, so a
     column definition on the following line stays `^`-anchored for
-    :data:`_COLUMN_TYPE_RE`.
+    :data:`_COLUMN_TYPE_RE`. LITERALS are kept verbatim, including a `$$` body,
+    because that is where the narrowing migrations put the `ALTER COLUMN … TYPE`
+    the reader must see.
     """
-    out: list[str] = []
-    i, n = 0, len(sql)
-    quote = False
-    #: Is the OPEN literal an `E'…'` one, where a backslash escapes? A PLAIN
-    #: `'C:\'` is a COMPLETE literal under `standard_conforming_strings=on` (the
-    #: PG default), so treating every literal as backslash-escaped swallows the
-    #: closing quote, never leaves quote mode, and preserves every later comment
-    #: — including a narrowing migration's DOWN direction, which is the misread
-    #: this function exists to prevent (#11075 review P2, measured).
-    escapes = False
-    dollar = ""  # an open `$$` / `$tag$` delimiter, "" when none
-    while i < n:
-        char = sql[i]
-        if dollar:
-            if sql.startswith(dollar, i):
-                out.append(dollar)
-                i += len(dollar)
-                dollar = ""
-                continue
-            out.append(char)
-            i += 1
-            continue
-        if quote:
-            out.append(char)
-            if escapes and char == "\\" and i + 1 < n:
-                # A backslash escape, and ONLY where it IS one.
-                out.append(sql[i + 1])
-                i += 2
-                continue
-            if char == "'":
-                if i + 1 < n and sql[i + 1] == "'":  # '' — an escaped quote
-                    out.append("'")
-                    i += 2
-                    continue
-                quote = False
-            i += 1
-            continue
-        if char == "$":
-            # `$tag$ … $tag$`: the shape every `DO $$ … $$` migration uses, and
-            # the body may legitimately contain `--` and `'`.
-            match = re.match(r"\$[A-Za-z_]*\$", sql[i:])
-            if match:
-                dollar = match.group(0)
-                out.append(dollar)
-                i += len(dollar)
-                continue
-        if sql.startswith("/*", i):
-            close = sql.find("*/", i + 2)
-            i = n if close == -1 else close + 2
-            continue
-        if sql.startswith("--", i):
-            while i < n and sql[i] != "\n":
-                i += 1
-            continue
-        if char == "'":
-            quote = True
-            # `E'…'` / `e'…'` — set from the character just emitted, so an
-            # ordinary `EXECUTE '…'` literal (nor the `E` of a preceding word) is
-            # not misread as an escape-carrying one.
-            escapes = bool(out) and out[-1] in ("E", "e")
-        out.append(char)
-        i += 1
-    return "".join(out)
+    # ⛔ A BLOCK COMMENT BECOMES ONE SPACE, deliberately NOT nothing. In PostgreSQL
+    # a comment is WHITESPACE, so deleting it merges the tokens around it:
+    # `DROP/* the ban is being retired */CONSTRAINT chk_…` became
+    # `DROPCONSTRAINT chk_…`, which matches no pattern, so a REAL DROP was
+    # invisible and the props-ban pin stayed green over a database whose ban had
+    # been dropped (round 9 P2, measured). Every removed comment gets the space,
+    # line comments included: their newline would also separate tokens, but one
+    # rule for both is simpler to reason about than two.
+    #
+    # DOUBLE-QUOTED IDENTIFIERS are skipped whole (see the scanner), so a `'`, `;`,
+    # `--` or `/*` inside one is data and never opens a literal, a statement or a
+    # comment. Before that, a `--` inside an identifier deleted the rest of its
+    # line, and a real DROP on that line vanished from BOTH the parse and the
+    # props-ban guard's count — silent, because both lost the same event.
+    return "".join(
+        sql[start:end] if kind in ("code", "literal") else " "
+        for start, end, kind in _scan_sql(sql)
+    )
 
 
 def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
@@ -3064,11 +3135,33 @@ GENERATED_COLUMNS: frozenset[str] = frozenset({
 #: volatile_property_is_ever_stored` is the capstone that demanded this: without
 #: it the column alone made a carried `embedding` storable as authority.
 #:
-#: ⚠️ `event`/`source` are NOT here, and that is not an oversight: their
-#: `embedding` is a PRIMARY property the journal DOES carry (`#5004`'s stamp, a
-#: caller's vector through `add_event(**extra)`), so a carried value is a value
-#: the graph also honours — refusing it there would make the record poorer than
-#: the history (Interface A's failure).
+#: ⚠️ `event`/`source` are NOT here, and that is not an oversight — but this is
+#: TWO different reasons, and stating one for both was false for the second
+#: (review of #13265 P3, verified in the fold):
+#:
+#:   * **`event`** — a PRIMARY property the journal DOES carry (`#5004`'s stamp,
+#:     a caller's vector through `add_event(**extra)`) and `_upsert_event`
+#:     HONOURS it (`embedding = inner.get("embedding")`), so refusing it here
+#:     would make the record poorer than the history (Interface A's failure).
+#:     `derived_embedding_columns` closes the other side: `EventRecorded` derives
+#:     NOTHING when the record already carries a vector, so the two routes cannot
+#:     disagree.
+#:   * **`source`** — the same NAME, a different property. `_upsert_source`
+#:     computes no vector at all and `_upsert_document` derives one from
+#:     `title`+`content` wherever the GRAPH derives one (`suppress_embedding`
+#:     suppresses both, which `derived_embedding_columns` mirrors) — and it never
+#:     READS a carried `embedding`, so no `:Source` writer honours one and a
+#:     `source.embedding` is not "record-truth the graph also holds".
+#:     ⚠️ CONSEQUENCE, stated because nothing pins it: for a `DocumentCreated`
+#:     record the derived binding runs AFTER the split (`col_values[column] =
+#:     value` in `_declared_mutations`), so a CARRIED `source.embedding` is
+#:     OVERWRITTEN by the derived vector on the derived route — the value the
+#:     graph holds, so that route is the parity-correct one — while a replay that
+#:     passes NO `derived` (today: `tools/record_runner.py`) keeps the carried
+#:     value: one journal line, two different `public.source.embedding` values
+#:     depending on route. Deriving is the right side to be on; making the
+#:     no-derived route agree is the `record_runner` half of the follow-up the
+#:     migration header names.
 DERIVED_COLUMNS: dict[str, frozenset[str]] = {
     "object": frozenset({"embedding"}),
     "subject": frozenset({"embedding"}),
