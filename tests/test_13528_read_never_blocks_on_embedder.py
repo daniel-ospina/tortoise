@@ -278,7 +278,9 @@ def test_the_re_armed_read_reports_load_in_flight(monkeypatch):
     try:
         # The spent-attempt state, built directly: the latch is SET and no load
         # thread is alive, which is exactly what `start_warm_up` answers `None`
-        # for (#1156-1158 returns the thread when it IS alive).
+        # for — it returns the thread when it IS alive, and the latch then no
+        # longer re-arms (`tortoise/embeddings.py`, `start_warm_up`'s
+        # `_warm_up_started` branch).
         monkeypatch.setattr(EmbeddingModel, "_instance", None)
         monkeypatch.setattr(EmbeddingModel, "_last_failed_at", None)
         monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", None)
