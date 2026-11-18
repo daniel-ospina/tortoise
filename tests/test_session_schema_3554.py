@@ -3785,7 +3785,7 @@ def test_every_positional_changelog_pointer_lands_on_a_release_header() -> None:
     records (`docs/00_index.md`: cited by SYMBOL, not by line, because a symbol
     cannot re-stale): cite the release (``v3.NN``) or the permalink of the
     comment the block quotes. A positional pointer is tolerated only where a pin
-    requires one for a block's IDENTITY (the SCOPE pin below reads
+    requires one for a block's IDENTITY (the SCOPE pin above reads
     `docs/ONTOLOGY-CHANGELOG.md:<line>` beside the issue that block records), and
     even there it must resolve to a release header.
 
