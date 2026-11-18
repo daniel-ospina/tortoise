@@ -697,19 +697,16 @@ def test_direct_route_entity_unhashable_status_is_a_violation_not_a_crash(
 
 def test_direct_route_object_and_event_status_values_are_refused_in_phase_1_like_the_writer(
         sdk):
-    """Both labels this arm covers now REFUSE a non-plain-word `status` — measured.
+    """⛔ BOTH halves of the old premise are RETIRED — #11824 S0 and #13100.
 
-    ⛔ #11824 S0 RETIRED the `:Object` premise this test was built on. Its old
-    name was `..._object_status_values_not_over_rejected` (before the #13100
-    rename: `..._object_and_event_status_values_not_over_rejected`), and it
-    asserted that a NON-PERSISTABLE `:Object` status (a dict) passes Phase 1
+    Its old name was `..._object_and_event_status_values_not_over_rejected`, and
+    it asserted a NON-PERSISTABLE `:Object` status (a dict) passes Phase 1
     because the `:Object` writer "does NOT validate: the value is DROPPED". That
     was measured before S0 put the lifecycle door on the `:Object` arm. Measured
-    at this head, the writer now REFUSES it:
+    at this head, the writer REFUSES it:
     `create_entity("object", …, status={"a": 1})` raises
     *"a status must be a plain string, and dict is not one"*, so Phase 1 refusing
-    it is WRITER AGREEMENT rather than over-rejection. Asserting the old shape
-    would pin a divergence the slice exists to remove.
+    it is WRITER AGREEMENT rather than over-rejection.
 
     ⛔ The `:Event` half is a REFUSAL now too (#13100), which is why the merge
     resolution of this file is a COMPOSITE and neither side's whole body

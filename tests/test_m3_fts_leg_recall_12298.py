@@ -1388,11 +1388,12 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # stacked head whose `search_engine.py` inserts do not all survive to this tree), so §1's locator
     # test was PERMANENTLY RED while the DOCUMENT was right — the mirror of the drift it guards.
     # Re-derived by content at this tree: `grep -n -F 'CALL db.idx.fulltext.queryNodes'
-    # tortoise/search_engine.py` -> 3078 (the statement's Cypher ends at 3086),
-    # `grep -n -F 'def recency_tie_clause('` -> 2708,
+    # tortoise/search_engine.py` -> 3078 (the statement's Cypher spans 3078-3087: the
+    # `"LIMIT $limit"` line is 3086 and the tuple's closing paren is 3087, which `origin/main`
+    # counts IN the span — measured, not picked), `grep -n -F 'def recency_tie_clause('` -> 2708,
     # `grep -n -F 'for rank, (pid, _score) in enumerate(ranked):'` -> 4707.
     ("tortoise/search_engine.py", 3078, "CALL db.idx.fulltext.queryNodes",
-     "`:3078-3086`"),
+     "`:3078-3087`"),
     ("tortoise/search_engine.py", 2708, "def recency_tie_clause(",
      "`search_engine.py:2708`"),
     ("tortoise/search_engine.py", 4707,
@@ -1402,11 +1403,13 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # branches' index-manifest work), so the declaration 20346 -> 20401, the def
     # 20774 -> 20829 and the loop 21224 -> 21279. Re-derived by CONTENT at the
     # stacked head, never by adding a delta.
-    # ⛔ RE-DERIVED AGAIN at the `origin/main` `31bdd1dd` merge: the stacked tree had
-    # moved them once more — declaration 20401 -> 20542, def 20829 -> 20970, call
-    # 21279 -> 21420 — measured with the same three CONTENT greps (the fragment above
-    # each row), never by adding the merge's delta. The pin was RED at this head and
-    # the fix is the locator, not a relaxed assertion.
+    # ⛔ RE-DERIVED AT THIS MERGE HEAD: the three projection locators below were +141/+141/+141
+    # stale against `tortoise/projection/__init__.py` as `origin/main` carries it (measured with
+    # `grep -n -F '"Object", "name", "FULLTEXT"' tortoise/projection/__init__.py` -> 20542,
+    # `grep -n -F 'def _create_fulltext_index('` -> 20970,
+    # `grep -n -F 'self._create_fulltext_index(label, fields)'` -> 21420). The arm that reads this
+    # row resolves the SYMBOL by content and then holds the brief's own number equal to it, so a
+    # stale triple here is a PERMANENT red that says nothing about the mechanism it guards.
     ("tortoise/projection/__init__.py", 20542, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:20542`"),
     ("tortoise/projection/__init__.py", 20970, "def _create_fulltext_index(",

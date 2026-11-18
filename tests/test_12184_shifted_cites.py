@@ -91,7 +91,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_M3_BRIEF, "tortoise/search_engine.py:2866", _SE, 2866, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2708", _SE, 2708, "def recency_tie_clause"),
     (_M3_BRIEF, "tortoise/search_engine.py:4707", _SE, 4707, "for rank, (pid, _score) in enumerate(ranked)"),
-    (_M3_BRIEF, "`search_engine.py:4626`", _SE, 4626, "def rrf_fusion("),
+    # ⛔ RE-POINTED at #13248's merge of `origin/main` `31bddb1dd9`: this row used to pin the
+    # BARE spelling (`` `search_engine.py:4626` ``) against the `def`, because the brief's prose
+    # cited the function. That prose now cites the DISCARD — `:4707`, the `for rank, (pid,
+    # _score) in enumerate(ranked)` loop, which is what the sentence ("discards each leg's
+    # score") actually names, and which the brief's own table row at `:126` already cited. The
+    # bare token is still a DISTINCT arm from the row above it (that one pins the
+    # `tortoise/`-prefixed spelling on the table row, this one the parenthesised bare spelling
+    # on the prose line), so the row is re-pointed rather than dropped — deleting it would take
+    # the pin set below the bound `test_the_pinned_documents_are_the_ones_this_diff_shifted`
+    # asserts, which is the "delete the row to go green" failure that bound exists for.
+    (_M3_BRIEF, "`search_engine.py:4707`", _SE, 4707, "for rank, (pid, _score) in enumerate(ranked)"),
     # --- docs/architecture/ENTITY-VERDICT-BANDS.md — the D-1 row "the retrieval filter is status-only"
     # ⚠️ This row is a SECOND false correction, of the same class this file exists for. The document
     # cited `search_engine.py:2973-2997`; other PRs' inserts had already moved the status filter to
