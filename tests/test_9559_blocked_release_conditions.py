@@ -1745,10 +1745,15 @@ def _strip_sql_comments(sql: str) -> str:
     `E`, quote, backslash, quote, quote — spells ONE quote character and closes at its
     THIRD `'`: quote 1 opens, the escaped quote is quote 2, quote 3 closes.
     An earlier cut modelled only the `''` doubling, so it paired quote 2 with quote 3
-    as one escaped quote and left the literal OPEN to end of file — the strip then
-    returned the file VERBATIM, every
-    comment in it survived, a `/* … */` note quoting a guarded body satisfied the
-    assertion, and the gate went GREEN over a live function with no fail-closed arm.
+    as one escaped quote and left the literal OPEN to end of file — and nothing AFTER
+    that literal was processed: every comment below it survived, a `/* … */` note
+    quoting a guarded body satisfied the assertion, and the gate went GREEN over a
+    live function with no fail-closed arm. (⛔ The whole file is NOT returned: text
+    ABOVE the escaped literal is still processed, so a migration carrying its usual
+    leading `-- header` loses that header and looks stripped — measured — while every
+    comment BELOW it survives. Say it this way round, or the next lane runs a
+    migration that starts with a header, sees the strip working, and concludes this
+    bug was imaginary.)
     Measured, on this head, with a body carrying `E'\''` before such a note:
     `note_survived=True`, `GUARD_IN_BODY=True`; with the `E'\''` replaced by `'x'`,
     `note_survived=False`. That is the same false PASS as the row above reached
@@ -2465,8 +2470,10 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
     carries the quote character as `E'\\''` closes that literal at its THIRD `'`
     (quote 1 opens, the escaped quote is quote 2, quote 3 closes). The pre-fix scan
     modelled only the `''` doubling, paired quote 2 with quote 3 as one escaped quote,
-    and stayed in literal state to END OF FILE — so `_strip_sql_comments` returned the
-    file VERBATIM. Every comment survived, including a `/* … */` note quoting a guarded
+    and stayed in literal state to END OF FILE — so `_strip_sql_comments` stopped
+    processing BELOW that point (text above it still is; a leading `-- header` is
+    removed, which is what makes the failure look like a working strip). Every comment
+    below it survived, including a `/* … */` note quoting a guarded
     body, and the guard assertion was satisfied by the NOTE while the executed
     function had lost the arm. Same false PASS as the row above, one spelling further
     in.
@@ -2521,13 +2528,14 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
         "the fixture removed no comment — the pre-fix cut would pass this row too")
 
     # 4. The scope of the rule, which is the part a reader is most likely to get
-    #    wrong: only `E'…'` escapes a quote with a backslash. A BARE literal (and the
+    #    wrong: only an escape string (`E'…'` / `e'…'`) lets a backslash escape a
+    #    quote. A BARE literal (and the
     #    `U&'…'` spelling, which writes its quote by DOUBLING) ends at that quote —
     #    so the `--` after it is still a comment and must still be removed.
-    #    ⛔ These two are the row's ONLY defence against applying the `E` rule to every
+    #    ⛔ These three are the row's defence against applying the `E` rule to every
     #    literal, and that mutant is fail-OPEN on valid SQL (it keeps the comment), so
     #    they are pinned here rather than in prose. Measured: with the prefix test
-    #    replaced by `escape_literal = True`, this row reddened; without these two
+    #    replaced by `escape_literal = True`, this row reddened; without these
     #    assertions the whole file stayed green (33 passed) under that mutant.
     assert _strip_sql_comments("SELECT 'a\\' AS x; -- c\n") == "SELECT 'a\\' AS x; \n", (
         "a bare literal ends at the quote after a backslash (standard_conforming_"
@@ -2538,3 +2546,13 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
     assert _strip_sql_comments("SELECT U&'a''b' -- c\n") == "SELECT U&'a''b' \n", (
         "a `U&'…'` literal closes on `''` like a bare one; if it stopped doing so, a "
         "comment in the tail would survive")
+
+    # 5. BOTH halves of the escape rule, because dropping one is a partial revert
+    #    nothing else observes: the docstring claims `E'…'` AND `e'…'`, so the
+    #    lowercase spelling is pinned on its own. Measured: with the prefix test
+    #    narrowed to `sql[i - 1] == "E"`, this row reddened; before this assertion the
+    #    whole file stayed green (33 passed) under that mutant, while a body spelling
+    #    the quote `e'\''` went back to blinding the strip to end of file.
+    assert _strip_sql_comments("SELECT e'\\'' AS q; -- c\n") == "SELECT e'\\'' AS q; \n", (
+        "the lowercase `e'…'` spelling must escape its quote too — if only `E'` is "
+        "recognised, a body written `e'\''` blinds the strip to end of file again")
