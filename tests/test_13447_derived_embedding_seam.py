@@ -206,23 +206,65 @@ def test_a_bounded_decline_is_not_memoised(monkeypatch):
     assert len(calls) == 1, calls
 
 
-def test_the_four_live_doors_carry_the_scope():
-    """The doors that write a derived record AND fold it are the ones decorated.
+def test_the_four_live_doors_carry_the_scope(monkeypatch):
+    """The doors that write a derived record AND fold it OPEN the scope, not merely carry a wrapper.
 
-    ⛔ A missing decorator is a COST regression, never a wrong vector — that is why
-    this is an enumeration rather than a behavioural assertion per door: the
-    behaviour is measured on the real halves above, and what a door contributes is
-    exactly "open the scope across the pair".
+    ⛔ A missing decorator is a COST regression, never a wrong vector — which is why the enumeration
+    shape is right for "which doors exist". What it must NOT be is `__wrapped__ is not None`
+    (`#13447` review cycle 9, P3): ANY `functools.wraps`-style decorator satisfies that, so the
+    PR's headline — a write pays ONE model call — could be reverted on all four doors with every
+    suite green. Measured on the old arm: replacing `EventAPI._emit`'s `@one_encode_scope` with a
+    no-op decorator that sets `__wrapped__` left `99 passed` across the four seam-related suites,
+    while the door bound no memo at all.
+
+    So the claim is now driven BEHAVIOURALLY: the real `write_scope` is wrapped in a recorder and
+    each door is CALLED (a dummy receiver, so the body raises immediately — the scope is what this
+    row is about), then the recorded scope is asserted to have bound a MEMO. A no-op decorator
+    records nothing and reds; the honest decorator records `(qualname, True)`.
     """
+    import contextlib
+
     from tortoise.api import EventAPI
     from tortoise.mining import ConversationMiner
     from tortoise.sdk import TortoiseSDK
 
-    for door in (EventAPI._emit, ConversationMiner._emit_event,
-                 TortoiseSDK._apply_and_journal, TortoiseSDK._create_entity):
-        assert getattr(door, "__wrapped__", None) is not None, (
-            f"{door.__qualname__} does not carry `one_encode_scope` — that door "
-            f"pays two model calls for one text (#13447)")
+    real_scope = de.write_scope
+    opened: list[tuple[str, bool]] = []
+
+    @contextlib.contextmanager
+    def _recording_scope(name: str = "live-write"):
+        with real_scope(name) as memo:
+            opened.append((name, de._MEMO.get() is memo))
+            yield memo
+
+    monkeypatch.setattr(de, "write_scope", _recording_scope)
+
+    # (door, args that reach the decorator and fail INSIDE the body) — the dummy receiver makes the
+    # body raise at its first attribute access, which is exactly what this row wants: the scope has
+    # already opened by then, and nothing real is written.
+    doors = (
+        (EventAPI._emit, (object(), "object.registered")),
+        (ConversationMiner._emit_event, (object(), {})),
+        (TortoiseSDK._apply_and_journal, (object(), object(), {})),
+        (TortoiseSDK._create_entity, (object(), "Object", "x", {}, "object.registered")),
+    )
+    for door, args in doors:
+        opened.clear()
+        # The dummy receiver makes the body raise at its first attribute access; the SCOPE is the claim.
+        with contextlib.suppress(Exception):
+            door(*args)
+        expected = getattr(getattr(door, "__wrapped__", None), "__qualname__", None)
+        assert opened, (
+            f"{door.__qualname__} opened NO `write_scope` when called — it does not carry "
+            f"`one_encode_scope`, so that door pays two model calls for one text (#13447). "
+            f"`__wrapped__` alone is NOT evidence: any `functools.wraps` decorator satisfies it.")
+        assert all(binds for _, binds in opened), (
+            f"{door.__qualname__} ran its scope WITHOUT binding a memo: {opened!r} — a scope that "
+            f"binds nothing dedupes nothing")
+        if expected is not None:
+            assert opened[0][0] == expected, (
+                f"{door.__qualname__} opened the scope under {opened[0][0]!r}, not its own "
+                f"{expected!r} — the door name is what an operator reads in the memo trace")
 
 
 # ════════════════════════════════════════════════════════════════════════════
