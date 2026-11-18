@@ -662,8 +662,12 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     # ⛔ THE WHOLE ENUMERATION, not one entry (review cycle 3, F1). `#13466` re-pointed FOUR of its
     # entries to working-tree values and NOTHING red, because this arm asserted only the Object entry.
     # ⚠️ This comment said "three" while the failure message below said "FOUR" (review cycle 5): the
-    # measured set is `:7025-7028`, `:7031-7044`, `:3070` and `:2876` — `git diff b64290529b^ b64290529b
-    # -- docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` prints exactly those four moves.
+    # measured set is `:7025-7028`, `:7031-7044`, `:3070` and `:2877`->`:2882` — `git diff b64290529b^
+    # b64290529b -- docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` prints exactly those four moves.
+    # ⚠️ `:2876` is that entry's address at `ae54df166d` (the value the loop below pins), NOT the value
+    # that commit moved: the header already read `:2877` at `b64290529b^`, one line stale before it was
+    # touched — which is this file's own thesis, so the two numbers are named with their heads instead
+    # of one token standing for both (review cycle 6, P3).
     # Each value below is measured AT `ae54df166d` — `git show ae54df166d:tortoise/search_engine.py |
     # grep -nF '<fragment>'` — and each is the reading this arm protects. The dual-head form for the one
     # entry that had drifted at EVERY pass (`sdk.py`'s second `capture_redactions` writer) is the shape
