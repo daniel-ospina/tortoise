@@ -133,6 +133,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_EVIDENCE, "search_engine.py:3079-3094", _SE, 3079, "if label in _STATUS_FILTERED_LABELS"),
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2715", _CP, 2715, "tail_denied = forbidden | {"),
+    (_AUDIT, 'sdk.py:21668', 'tortoise/sdk.py', 21668, 's.summary=CASE WHEN $sum'),
+    (_AUDIT, '`:21791`', 'tortoise/sdk.py', 21791, 's.summary, s.topics, s.'),
+    (_AUDIT, 'hosted_api.py:22919', 'tortoise/hosted_api.py', 22919, 'MERGE (s:Source {url:$did})'),
+    (_AUDIT, '`:22731`', 'tortoise/hosted_api.py', 22731, 'def _execute_commit_writes'),
+    (_AUDIT, '`:33583`', 'tortoise/hosted_api.py', 33583, 'MERGE (p:PackInstall {namespace: $ns})'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -200,6 +205,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3079-3094'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2715'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21668'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21791`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22919'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22731`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33583`'): 1,
 }
 
 
@@ -245,9 +255,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "124 of this document's 211",
-        "dedupes the 316 as-written spellings to 211 — 105",
-        "316 written spellings → 211 pairs → 105 collisions → 124 drifters of the 211 comparable",
+        "123 of this document's 210",
+        "dedupes the 316 as-written spellings to 210 — 106",
+        "316 written spellings → 210 pairs → 106 collisions → 123 drifters of the 210 comparable",
         "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
@@ -340,7 +350,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    assert len(_PINS) == 39
+    assert len(_PINS) == 44
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
