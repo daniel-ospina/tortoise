@@ -325,5 +325,5 @@ is the finding that removed three steps from the plan.
 
 Twelve structural doors: **9 in S1/S2** (8 envelope-only + `search`), **2 in S3** (stale
 reason, no work), **1 (`query`) in S4**. Nine `NO_CONTAINER_YET`: all in S5. Nothing is retired
-by this change, and no door is removed from `PROTECTED` — S1/S3 are not implemented, so none
-of the twelve reasons has been *acted on* yet (one has been shown false, and is reported).
+by this change, and no door is removed from `PROTECTED` — none of S1–S4 is implemented, so
+none of the twelve reasons has been *acted on* yet (one has been shown false, and is reported).

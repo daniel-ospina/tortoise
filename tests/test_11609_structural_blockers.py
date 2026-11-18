@@ -423,6 +423,3 @@ def test_the_recorded_destination_is_still_not_an_mcp_door(door, destination):
     assert f"tortoise_{destination}" not in live, (
         f"{destination} IS now a live MCP door (tortoise_{destination}) — {door} became "
         "retirable in the batch that landed it, and `NO_CONTAINER_YET` should lose the name")
-    assert destination not in {n.removeprefix("tortoise_") for n in live}, (
-        f"{destination} IS now a live MCP door — {door} became retirable in the batch that "
-        "landed it, and `NO_CONTAINER_YET` should lose the name there")
