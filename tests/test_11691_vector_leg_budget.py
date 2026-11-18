@@ -547,7 +547,13 @@ def test_the_sdk_helper_threads_the_budget_it_is_given(monkeypatch):
 
     assert sdk_mod._record_vector_searcher(_WithTenant(), timeout_ms=BUDGET_MS)
     assert seen[-1] == {"carried": ("org_9", "graph_9"),
-                        "timeout_ms": BUDGET_MS}, seen[-1]
+                        "timeout_ms": BUDGET_MS,
+                        # #13610: the coverage DENOMINATOR, forwarded from the
+                        # projection the read already holds. It is `None` here
+                        # because this double has none — and `None` is the SAFE
+                        # answer (the gated labels decline, the graph keeps the
+                        # read), never a silent "verified".
+                        "graph_population": None}, seen[-1]
     # Omitted -> None, which leaves the door's own bound in place.
     assert sdk_mod._record_vector_searcher(_WithTenant())
     assert seen[-1]["timeout_ms"] is None, seen[-1]
