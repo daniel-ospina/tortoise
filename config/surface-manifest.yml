@@ -146,7 +146,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: bab4854d897b1de5092e1ef0648e5b8007c48b0a
+cut_at_commit: 8fd3fe87edbec0a5aab21026c0410205dc7d5aec
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1764,12 +1764,11 @@ rows:
     is by argument: claim_id = one claim''s EP posterior {mean,variance,alpha,beta}, and include_provenance adds
     the chain behind it; topic = the dated belief chain for a topic; session = what happened last session, including
     its confidence changes; calibrate (or no selector) = the graph-wide calibration audit; recompute=True = RE-DERIVE
-    the posterior by EP belief propagation (factors/evidence/anchors, max_hops, rel_filter, direction) — the arm
-    tortoise_compute_confidence retires into; recall=True = what is true and high-confidence right now, re-ranked
-    by the multiplicative confidence gate, with mode=state|gaps|subgraph|custom — the arm tortoise_recall retires
-    into. ONE arm per call. It is NOT write-free: the claim_id arm reaches get_confidence, whose lazy consistency
-    pass dreams a dirty root, and recompute=True writes posteriors by definition — which is why this door is tiered
-    maintenance rather than read.'
+    the posterior by EP belief propagation (factors/evidence/anchors, max_hops, rel_filter, direction); recall=True
+    = what is true and high-confidence right now, re-ranked by the multiplicative confidence gate, with mode=state|gaps|subgraph|custom.
+    ONE arm per call. It is NOT write-free: the claim_id arm reaches get_confidence, whose lazy consistency pass
+    dreams a dirty root, and recompute=True writes posteriors by definition — which is why this door is tiered maintenance
+    rather than read.'
   dependency: declares TortoiseSDK.check_confidence (resolves)
   lifecycle: active
   used_by: never called
