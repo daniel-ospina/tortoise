@@ -160,20 +160,38 @@ def test_a_refused_rebuild_pays_NO_model_call(encoder):
     assert proj.query("MATCH (n) RETURN count(n)").result_set[0][0] == 0
 
 
-def test_a_second_restore_of_the_same_view_is_byte_identical(encoder):
+def test_a_second_restore_of_the_same_view_is_byte_identical(encoder, monkeypatch):
     """§2.0's determinism, on the restore path: same view ⇒ same graph.
 
     This is what makes `bounded=False` on the rebuild load-bearing rather than
     stylistic: a restore that declined an encode inside a wait budget would make
     the output a function of wall-clock timing, so two restores of ONE record could
     differ (#13447's seam asks unbounded there on purpose).
+
+    ⛔ THE DECLINE IS INJECTED FOR THE SECOND RESTORE, and that is the whole
+    difference between a witness and a claim (#13447 review cycle 3, issue 5). The
+    `encoder` fixture patches `await_write_ready_reason` to answer `None`, so an
+    earlier cut of this test passed even with `derive_row` mutated to `bounded=True`
+    — there was no decline to observe, and the assertion could not vary under the
+    edit it names. A declining bound now makes the mutation visible: correct code
+    never consults it (`bounded=False`), and a bounded rebuild would land `o-null`
+    vectorless on the second pass, so `first != second`.
     """
     proj = _projection()
     view = _view()
     proj.rebuild_from_record(view, confirm_destructive=True)
     first = {key: _props(proj, "Object", key)
              for key in ("o-stored", "o-null")}
+
+    import tortoise.embeddings as emb
+    monkeypatch.setattr(emb.EmbeddingModel, "await_write_ready_reason",
+                        classmethod(lambda cls, budget: "budget_expired"))
+
     proj.rebuild_from_record(view, confirm_destructive=True)
     second = {key: _props(proj, "Object", key)
               for key in ("o-stored", "o-null")}
+    assert second["o-null"].get("embedding") is not None, (
+        "the second restore DECLINED an encode under a wait budget — the rebuild "
+        "must ask unbounded (`bounded=False`), or two restores of one record "
+        "differ as a function of wall-clock timing (§2.0)")
     assert first == second
