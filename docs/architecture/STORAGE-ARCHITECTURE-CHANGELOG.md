@@ -2538,16 +2538,20 @@ whose section number sends a reader to an unrelated lever is the one thing it ex
 comment recording the correction.
 
 **⚠️ And every location above is cited by heading NAME, not by line number — a review finding, and the fix for its
-root.** Earlier revisions of this entry cited `:1169`, `:1244`, `:1206–1211`, then `:1250` and `:1213–1217`. **Every one
-of those was correct when written, and every one went stale inside this single PR**, because each later commit added
-lines above them: one revision's `:1244` came to point at §12.1d's *"the index earns very little today"* item — a
-LATENCY paragraph, in the entry whose whole purpose is to establish that §12.2 is not the latency section — and another's
-ledger range came to start inside this PR's own new text while stopping a line before the clause it named. ⛔ **The
-citation guards were green through all of it**, because they check line PRESENCE and say so
-(`tests/test_docs_citation_refs.py`: *"This is line PRESENCE, not semantic correctness"*), so a passing guard was never
-evidence here. The rule this repo already records is the fix — *"assertions by NAME — never by line number, and never by
-row ordinal. Both go stale the same way"* (`docs/architecture/S2-DECISION-SEAM.md`) — and it is what this entry now
-does.
+root.** Earlier revisions of this entry cited `:1241`, `:1244`, `:1206–1211`, then `:1250` and `:1213–1217` (plus
+§12.1b's `:1080–1168`). ⚠️ **Those cites did not fail the same way, and the difference is the point:**
+`:1241` — the entry's FIRST version — was **wrong on arrival** (§12.2 was already at `:1244` on this base); `:1244` and
+`:1206–1211` were **correct when written and rotted** under later commits in this same PR — a rebase plus this PR's own
+insertions above them — the first arriving at §12.1d's *"the index earns very little today"* item, a LATENCY paragraph,
+in the entry whose whole purpose is to establish that §12.2 is not the latency section, and the second ending one line
+before the clause it named; while `:1169`, `:1250`, `:1213–1217` and `:1080–1168` were each **correct when written and
+still correct at this head**. So the failure is not "a later commit moved every number": line numbers in a document
+this size are **unreliable in BOTH directions** — wrong on arrival, and rotting on the next edit — and which one a given
+writer gets is not something the writer can see. ⛔ **And the citation guards were green through all of it**, because
+they check line PRESENCE and say so (`tests/test_docs_citation_refs.py`: *"This is line PRESENCE, not semantic
+correctness"*), so a passing guard was never evidence here. The rule this repo already records is the fix —
+*"assertions by NAME — never by line number, and never by row ordinal. Both go stale the same way"*
+(`docs/architecture/S2-DECISION-SEAM.md`) — and it is what this entry now does.
 
 **⚠️ And the pre-removal readings are now labelled as such — a review finding, fixed before merge.** The first landed
 version said the app path *"pays"* the `queryNodes` round trips, present tense, and concluded *"both slower than the
@@ -2572,10 +2576,10 @@ than on one of them as it was.
 **What did NOT change.** The argument for option 2 is untouched **by this change**: it rests on the **ledger**
 (provisioned, unevictable RAM for a row the record already holds, §12.1a / §14.3 V1) and on the **size dependence**,
 and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
-sentence immediately below the changed paragraph was itself revised on `main` by `#13435` in the same window (it now
-says *“held for a row the record already has”* and carries the two-population clause — the paragraph opening
-*"What holds at EVERY size is the ledger rather than the latency"*), and this
-rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
+sentence immediately following the changed ones — same paragraph, not the next one — was itself revised on `main` by
+`#13435` in the same window (it now says *“held for a row the record already has”* and carries the two-population
+clause; it opens *"size is the ledger rather than the latency: the graph-side copy is bytes on provisioned, unevictable
+RAM held for a row"*), and this rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
 ledger/sequencing conclusion are what this entry claims survived; nothing here re-states the neighbouring sentence as
 though it were unchanged. No decision was reopened, no figure was retired, and nothing here authorises removal — the
 record-first sequencing and its release boundary are untouched (§12.1c's DECIDED block, `#11395` comment `6956793300`).
