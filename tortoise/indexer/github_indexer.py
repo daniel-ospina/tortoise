@@ -327,7 +327,7 @@ def _row_is_frozen(status, outdated) -> bool:
     ⚠️ The invariant is "the CLOSING direction has no live holder", NOT "no
     writer can clear it" — the stronger claim is false. A coherent un-supersede
     (``update_entity(obj, status='live', supersededBy=None, supersededAt=None)``,
-    admitted at ``sdk.py:54063-54072`` — the NOT MONOTONE exception, documented
+    admitted at ``sdk.py:54213-54222`` — the NOT MONOTONE exception, documented
     at ``cache_projection.py:807``) DOES clear ``superseded``, and this read
     resumes the moment it does because the answer is derived from the stored row
     and never cached. What ``_upsert_object`` guarantees is narrower and is the
@@ -359,7 +359,7 @@ def _row_is_frozen(status, outdated) -> bool:
     # refuse it at intake (`lifecycle_vocabulary.py:279-286`, reached from S0's
     # `_read_caller_status` on both the update and create paths). It is kept readable
     # because rows persist — `lifecycle_vocabulary.py:263-264` records the history
-    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:53911-53913`
+    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:54061-54063`
     # enumerates the routes from the other side (a pre-fix SDK, a raw Cypher producer, a
     # JSONL replay of either) — and this repo deliberately keeps readers wider than its
     # doors (`live.py:100-108`). ⛔ Deliberately NOT citing the individual `sdk.py` call
@@ -1315,8 +1315,11 @@ class GitHubIndexer:
         axis, OR one of the guards below applies — a latched word (always), an
         unplaceable position, or a WIDE (`outdated`) term. ⚠️ The WIDE term is the
         per-direction case, not a blanket `None`: its CLOSE fold is never dispatched
-        (no live holder), so it answers the POSITION where the row HAS one, the WORD
-        where it has none, and `None` only where that position is live (`_project_issue`).
+        (no live holder), so it answers the POSITION where the row has an ENDED one,
+        `None` where that position is LIVE (it must get no opinion, and a close minted
+        against a row with no live holder re-fires for ever), and the WORD where the
+        row has no position at all — except where that word is `open`, which is
+        withheld for the same reason (`_project_issue`).
 
         ⛔ #13143 (S0 reader sweep): this read `Object.status` ONLY, and S0 moved
         the connector folds off that axis — a close now folds the terminal STAGE
@@ -1342,7 +1345,7 @@ class GitHubIndexer:
         answer the POSITION, and `None` only where the position is live
         (`_row_is_frozen` — the close fold is unreachable for them, the reopen fold
         is not). "Written once and never cleared" was the earlier, WRONG summary:
-        a coherent un-supersede does clear `superseded` (`sdk.py:54063-54072`). Answering `"closed"` there was the fix's own regression:
+        a coherent un-supersede does clear `superseded` (`sdk.py:54213-54222`). Answering `"closed"` there was the fix's own regression:
         it is a SUPERSET of the fold's guard set, and a superset re-fires exactly
         as a subset does.
         """
@@ -1392,7 +1395,7 @@ class GitHubIndexer:
         # `deprecated`) on an issue that stays OPEN on GitHub: `[1, 1, 1]` before
         # this arm.
         # ⚠️ "While set", not "for ever": a coherent un-supersede DOES clear
-        # `superseded` (`sdk.py:54063-54072`; the NOT-MONOTONE bullet at
+        # `superseded` (`sdk.py:54213-54222`; the NOT-MONOTONE bullet at
         # `cache_projection.py:807`), so the earlier "permanent" wording was one claim
         # too strong. It does not weaken the answer: this read derives from the
         # STORED row, so it resumes on the write that clears the word, and until
@@ -1632,7 +1635,7 @@ class GitHubIndexer:
         # position, the row every props door can produce — `update_knowledge(id,
         # isClosed=0)` stores the integer verbatim: `update_knowledge`
         # (`sdk.py:22388-22563`) relays through `_update_entity_any` to
-        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54512`)
+        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54662`)
         # applies the caller's props unchanged — `isClosed` is no reserved name, so
         # nothing coerces it) then records NO transition at all: `prev_state is None`
         # gates the mint off and nothing repairs the marker, so nothing re-fires.
