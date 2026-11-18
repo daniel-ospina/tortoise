@@ -826,9 +826,21 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #:   this counter while the dense leg loses NOTHING — measured: warm create →
 #:   vector present; cold re-write of the same id → counter +1, vector still
 #:   present. ``graph_fold`` is therefore an **UPPER BOUND** on new holes, never
-#:   an exact row count. The exact end state is the repair's own reading
-#:   (`graph-scripts/backfill_embeddings.py --dry-run` /
-#:   `_residual_missing`), which is what actually reconciles the graph.
+#:   an exact row count. The end state is the repair's own reading
+#:   (`graph-scripts/backfill_embeddings.py --dry-run` / `_residual_missing`),
+#:   which is what actually reconciles the graph.
+#:   ⛔ **"Loses nothing" holds only where the fold cannot change the text on
+#:   match** — `_upsert_subject`/`_upsert_object`, whose `ON MATCH` never rewrites
+#:   `name`. `_upsert_event` (`ON MATCH SET e += $props`, carrying
+#:   `subject`/`object`) and `_upsert_document`
+#:   (`s._searchText=coalesce($st, …)`) DO rewrite their text, and they preserve
+#:   the stored vector while doing it — so a cold re-write of changed text leaves
+#:   a **STALE** vector, describing text the node no longer holds. That is not a
+#:   missing vector and not a counted hole above: the null-only repair cannot
+#:   collect it, and `_residual_missing` / `--dry-run` therefore read CLEAN over
+#:   it. Measured 2026-11-18; only `--force-re-embed` repairs it, and the
+#:   fold-level fix is #13451. Read the repair's reading as exact for
+#:   `embedding IS NULL`, never as "no divergence here".
 #: * **ONE live create can decline once per LEG.** There are TWO bounded call
 #:   sites, not one: the four graph folds (`projection/entities.py`) and the
 #:   RECORD's own derivation (`record_writer.derived_embedding_columns`, #13220),
@@ -7742,9 +7754,11 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
     #13417 adds ``derived_embed_declines`` — the DERIVED-entity embedding WRITES a
     bounded write declined, keyed ``"<leg>:<cause>"``. It is an UPPER BOUND on
     rows missing a vector (a cold re-write of an already-embedded row counts and
-    loses nothing), and its two legs have different repairs; see the counter's
-    own docstring for both, and read the repair's ``_residual_missing`` for the
-    exact end state.
+    loses nothing where the fold cannot rewrite its text on match), and its two
+    legs have different repairs; see the counter's own docstring for both. The
+    repair's ``_residual_missing`` is exact for ``embedding IS NULL`` rows and
+    BLIND to a stale vector left by a changed-text re-write (#13451), so read it
+    as "no NULL vectors here", not as "no divergence here".
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
