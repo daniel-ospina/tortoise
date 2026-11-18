@@ -7734,6 +7734,238 @@ def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# #13331 — JOURNAL COVERAGE: naming the ONE disagreement the split can produce
+# ══════════════════════════════════════════════════════════════════════════
+#
+# The live chokepoint (`tortoise/live_write.py`) appends the journal and then
+# projects it. The append is a file write and the projection is Postgres, so the
+# pair CANNOT share one transaction (#13210 §7: "it is a JSONL file — it
+# cannot"), and the only direction that disagreement may take is JOURNAL AHEAD
+# OF RECORD — the direction `derived = replay(journal)` heals. What makes that a
+# guarantee rather than a hope, and lives here so every caller shares one
+# reading:
+#
+#   * :func:`journal_coverage` — the record's own answer to "which journal
+#     positions has this tenant consumed", so the disagreement has a NAME and one
+#     reader (`record_reconcile`, `record_vector`) rather than a different count
+#     in each tool. The cutover rule itself (#9190) is
+#     `_refuse_an_enumerated_replay`'s and is asked by `replay()` at execute
+#     time; the live path reports that refusal as its NAMED disagreement, never
+#     as a silent renumbering.
+
+#: One scan, four facts: the high-water mark, the row count, the LOW edge, and
+#: how many of the positions the JOURNAL currently enumerates the record holds.
+#: `unprojected` is therefore `enumerated - within_prefix`, which is exact for the
+#: prefix the journal claims (a hole below `high` is still count(*)ed here; the
+#: record's own contiguity is :func:`_first_gap`'s separate question).
+_COVERAGE_SQL = """
+SELECT coalesce(max(seq), 0) AS high_seq,
+       count(*) AS present,
+       coalesce(min(seq), 0) AS min_seq,
+       count(*) FILTER (WHERE seq <= %s) AS within_prefix
+FROM public.journal_event
+WHERE org_id = %s AND graph_id = %s
+"""
+
+#: A hole BETWEEN two rows. It cannot see the prefix edge (`min(seq) > 1`), which
+#: is why :class:`JournalCoverage` carries `min_seq` as its own fact.
+_FIRST_GAP_SQL = """
+WITH paged AS (
+    SELECT seq, lead(seq) OVER (ORDER BY seq) AS nxt
+    FROM public.journal_event
+    WHERE org_id = %s AND graph_id = %s
+)
+SELECT min(seq) + 1 AS gap
+FROM paged
+WHERE nxt IS NOT NULL AND nxt <> seq + 1
+"""
+
+
+@dataclass(frozen=True)
+class JournalCoverage:
+    """How much of a journal the record holds — the ONE coverage reading.
+
+    ``enumerated`` is the caller's fact (``EventLog.position()``): this module
+    reads the RECORD, never the journal file, so a number it derived itself
+    would be a second opinion about the journal rather than a reading of the
+    record. ``None`` means "the caller did not say", and then
+    :attr:`unprojected` is ``None`` too — unknown, never zero (#13331).
+    """
+
+    present: int = 0
+    high_seq: int = 0
+    min_seq: int = 0
+    within_prefix: int = 0
+    first_gap: int | None = None
+    enumerated: int | None = None
+    #: Did this reading MEASURE :attr:`first_gap`? ``JournalCoverage`` is also
+    #: produced by `journal_coverage(..., want_gap=False)` for callers that ask
+    #: only the aggregate question (the dense leg's readiness gate, #13331 review
+    #: F3 — it must not spend the read's budget on a statement it never reads).
+    #: An unmeasured gap must not be reported as a measured ABSENCE: an empty
+    #: `first_gap` would otherwise make :attr:`contiguous` answer ``True`` for a
+    #: record with a hole in the middle, which is the silent-green claim of
+    #: coverage `#5090` Q2 forbids. APPENDED LAST for the positional-rebind
+    #: reason `RecordReconcileResult.journal` is.
+    gap_measured: bool = True
+
+    @property
+    def unprojected_unknown_reason(self) -> str | None:
+        """WHY :attr:`unprojected` is unknown, or ``None`` when it is measured.
+
+        ONE definition of "this leg cannot answer", so every surface that has to
+        explain a ``None`` (the reconcile line, `journal_ready`'s gate) quotes
+        this instead of re-deriving the test — two copies of the condition would
+        drift, and the copy that drifts is the one that reports a clean pass.
+
+        Two shapes, and the second is a CONTRADICTION rather than an absence:
+        a record that holds MORE positions than its journal ENUMERATES cannot be
+        a fold of that journal, so ``max(enumerated - within_prefix, 0)`` would
+        report a measured agreement between two stores that cannot be related —
+        the detectable contradiction `#13371` names, read as green. The
+        arithmetic predates #13331; what makes it dangerous here is that this PR
+        is its second and third consumer (the reconcile verdict at
+        `__main__._cmd_record_reconcile`, and the dense leg's readiness gate at
+        `record_vector._measure_readiness`), so it is refused at the source.
+
+        ⛔ ONE CONDITION, NOT TWO (#13345 review F2). The first cut of this guard
+        refused only ``enumerated == 0 and present > 0`` — the shape where the
+        journal is EMPTY. The same impossibility one shape over went unguarded:
+        a rotated/replaced journal that has since received a few lines enumerates
+        **5** while the record holds **100**, so ``within_prefix == 5``,
+        ``unprojected == 0``, the verdict is ``clean``/exit 0 and the dense leg
+        arms — a measured agreement with a file that is 95 positions SHORTER than
+        the record. ``present > enumerated`` subsumes the empty-journal arm and
+        is the invariant this module already states: a projection is consistent
+        with a processed PREFIX of the log, so a replay of the journal reproduces
+        exactly the log — never fewer rows than the record holds. Every healthy
+        graph satisfies it (the documented cut-over order re-bases the allocator
+        from the journal's own ``row_max``, so one record row is one journal
+        line), so no correct deployment is refused by this.
+        """
+        if self.enumerated is None:
+            return "the journal could NOT be counted"
+        if int(self.present) > int(self.enumerated):
+            if int(self.enumerated) == 0:
+                return (f"the journal enumerates NO records while the record "
+                        f"holds {int(self.present)} of its positions — that "
+                        f"file cannot be the journal that fed this record")
+            return (f"the record holds {int(self.present)} of the journal's "
+                    f"positions while the journal enumerates only "
+                    f"{int(self.enumerated)} records — a record cannot hold a "
+                    f"position its journal never issued, so that file cannot "
+                    f"be the journal that fed this record")
+        return None
+
+    @property
+    def unprojected(self) -> int | None:
+        """Journal positions the record does NOT hold, or ``None`` if unknown.
+
+        The disagreement #13331 names. ``0`` is the healthy answer and is
+        reachable only with a known ``enumerated``; a caller that cannot say how
+        many records its journal holds must not be handed a zero it did not
+        measure — and a file that CANNOT be the record's journal is one of those
+        callers (:attr:`unprojected_unknown_reason`). Both sides genuinely
+        holding nothing (``enumerated == 0``, ``present == 0``) is the one shape
+        that still answers ``0``.
+        """
+        if self.unprojected_unknown_reason is not None:
+            return None
+        return max(int(self.enumerated) - int(self.within_prefix), 0)
+
+    @property
+    def contiguous(self) -> bool | None:
+        """No hole below the high-water mark AND no missing prefix.
+
+        Both edges, because they are different defects: a hole means a middle
+        position was never consumed, a missing prefix means the record starts
+        above position 1 (the ordinary shape for a graph armed after its journal
+        already held lines — `record_runner.read_checkpoint` measures the same
+        edge and refuses to call it contiguous either).
+
+        ``None`` when the gap was NOT measured (:attr:`gap_measured`): the hole
+        edge is then unknown, and a ``True`` derived from an empty `first_gap`
+        nobody read would be a coverage claim no reading supports.
+        """
+        if not self.gap_measured:
+            return None
+        return self.first_gap is None and self.min_seq in (0, 1)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "present": self.present,
+            "high_seq": self.high_seq,
+            "min_seq": self.min_seq,
+            "within_prefix": self.within_prefix,
+            "first_gap": self.first_gap,
+            "enumerated": self.enumerated,
+            "unprojected": self.unprojected,
+            "contiguous": self.contiguous,
+            "gap_measured": self.gap_measured,
+        }
+
+
+def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
+                     enumerated: int | None = None,
+                     want_gap: bool = True) -> JournalCoverage:
+    """Read the record's coverage of one tenant's journal (#13331).
+
+    ``want_gap=False`` SKIPS the second statement (``_FIRST_GAP_SQL``) and
+    reports the hole edge as NOT measured (:attr:`JournalCoverage.gap_measured`,
+    whose :attr:`~JournalCoverage.contiguous` is then ``None``). Use it only
+    where the hole edge is genuinely not asked: the dense leg's readiness gate
+    reads ``unprojected``/``present`` alone, and every statement it issues costs
+    the request's own budget (#13331 review F3). ``unprojected`` is unaffected —
+    it is ``enumerated - within_prefix``.
+
+    SCOPES THE CONNECTION (§R6): `journal_event`'s policy filters on
+    `app.current_org_id`, so an unscoped read returns ZERO rows and this would
+    report a fully-consumed journal as fully unprojected — the silent zero-row
+    shape `#9600` cycle 1 closed for UPDATE-only plans, reintroduced in a
+    reader. `scope_connection` also verifies the GUC and the role, so a
+    bypassing DSN is refused rather than read as "every tenant's rows are this
+    tenant's".
+
+    ⛔ IT RAISES ON A FAILED READ. A coverage reading that failed must not come
+    back as ``present=0`` — that is the vacuous green this whole module refuses
+    elsewhere (`_refuse_vacuous`), one surface over.
+    """
+    cursor = scope_connection(conn, org_id)
+    try:
+        cursor.execute(_COVERAGE_SQL, (0 if enumerated is None else int(enumerated),
+                                       org_id, graph_id))
+        row = cursor.fetchone()
+        if not row:
+            raise RecordProjectionError(
+                "the record's coverage read returned no row — an aggregate over "
+                "an empty set always returns one, so this is not 'empty', it is "
+                "unreadable; refusing rather than reporting zero consumed "
+                "(#13331)")
+        if isinstance(row, Mapping):
+            high, present, low, within = (row["high_seq"], row["present"],
+                                          row["min_seq"], row["within_prefix"])
+        else:
+            high, present, low, within = row[0], row[1], row[2], row[3]
+        high, present, low = int(high or 0), int(present or 0), int(low or 0)
+        within = int(within or 0)
+        gap = None
+        if present and want_gap:
+            cursor.execute(_FIRST_GAP_SQL, (org_id, graph_id))
+            gap_row = cursor.fetchone()
+            if gap_row:
+                gap = gap_row["gap"] if isinstance(gap_row, Mapping) else gap_row[0]
+                gap = None if gap is None else int(gap)
+    finally:
+        cursor.close()
+    return JournalCoverage(
+        present=present, high_seq=high, min_seq=low, within_prefix=within,
+        first_gap=gap,
+        enumerated=None if enumerated is None else int(enumerated),
+        gap_measured=bool(want_gap),
+    )
+
+
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
            position: bool = True,

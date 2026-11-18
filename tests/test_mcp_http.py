@@ -142,7 +142,13 @@ class TestContextVarsAndSdk:
         assert "tortoise_org_create" not in HTTP_ALLOWED
         assert "tortoise_backfill_v25" not in HTTP_ALLOWED
         assert "tortoise_ingest_corpus" not in HTTP_ALLOWED
-        assert "tortoise_create_point" in HTTP_ALLOWED
+        # ⛔ A LIVE WRITE DOOR, not a remembered one: this spot-check is here to prove
+        # the allow-list is POPULATED with writes, so it must name a door the registry
+        # still advertises. It named `tortoise_create_point` until #11609 lane P1
+        # retired that door forward into `create_entity`'s `type="point"` arm — at
+        # which point `HTTP_ALLOWED` (derived from the live surface) correctly stopped
+        # carrying it and this assertion became a stale-name red, not a finding.
+        assert "tortoise_create_entity" in HTTP_ALLOWED
         assert "tortoise_query" in HTTP_ALLOWED
 
 
@@ -1095,9 +1101,13 @@ class TestOnboardingToolGating:
             assert not (self.REMOVED_ONBOARDING_TOOLS & names), (
                 f"removed onboarding tools listed after completion: "
                 f"{self.REMOVED_ONBOARDING_TOOLS & names}")
-            # Steady-state surface unaffected
+            # Steady-state surface unaffected. The point-shaped spot-check names the
+            # ADVERTISED door: `tortoise_create_point` retired into `create_entity`'s
+            # `type="point"` arm in #11609 lane P1 and is served only as a shim, so it
+            # is (correctly) no longer listed — what this pin guards is that a
+            # steady-state write doorway stays listed, not that door specifically.
             assert "tortoise_query" in names
-            assert "tortoise_create_point" in names
+            assert "tortoise_create_entity" in names
             assert "tortoise_manage_sources" in names
 
     def test_gate_cache_no_refetch_within_ttl(self, monkeypatch):

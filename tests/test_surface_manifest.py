@@ -139,9 +139,19 @@ def test_the_guard_reds_when_a_public_method_is_added(tmp_path):
 
 
 def test_an_exemption_cannot_outlive_the_fact_it_records(tmp_path):
-    """A method marked exempt that has since become reachable must be un-exempted."""
+    """A method marked exempt that has since become reachable must be un-exempted.
+
+    ⛔ THE REPRESENTATIVE CANNOT BE A METHOD NOTHING REACHES, and `create_point`
+    became exactly that in #11609 lane P1: `tortoise_create_point` carried the
+    `sdk_method: create_point` binding, so when the door retired nothing bound the
+    method any more and `exemption: True` stopped being a lie. The guard was right
+    to stay silent — the TEST was reading a fact that had expired. `create_entity`
+    is bound by the live `tortoise_create_entity`, so the property still holds.
+    """
     doc = _manifest()
-    target = next(r for r in doc["rows"] if r.get("method") == "create_point")
+    target = next(r for r in doc["rows"] if r.get("method") == "create_entity")
+    assert target.get("exemption") is False, (
+        "the representative must START unexempted — otherwise this case proves nothing")
     target["exemption"] = True
     modified = tmp_path / "exempt.yml"
     modified.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
@@ -383,10 +393,20 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "canonical-mcp-tools.md's parenthetical stopped stating the door wave's subtraction and "
         "its result; that is half the movement this container's own arithmetic records"
     )
-    assert int(door_wave.group(2)) == live, (
-        f"canonical-mcp-tools.md says the door wave lands the surface on {door_wave.group(2)} "
-        f"advertised tools; the manifest derives {live}"
-    )
+    # ⛔ A WAVE'S OWN RESULT IS HISTORY; THE HEAD IS THE LAST WAVE'S RESULT. #11609 lane P1
+    # appended a second door-retirement wave (`create_point`/`diary_write` -> the new
+    # `type="point"`/`type="diary"` arms), so `door_wave`'s 48 is now an intermediate
+    # figure and binding it to `live` is a false RED on a correct record. The wave after
+    # it is bound instead, by its own sentence, and `door_wave` stays asserted as the
+    # arithmetic it is (the generic equation check above already evaluates `48 − 2 = 46`).
+    p1_wave = re.search(r"#11609 lane P1's\s*−(\d+)\s*=\s*(\d+)", arithmetic)
+    assert p1_wave, (
+        "canonical-mcp-tools.md's parenthetical no longer states the #11609 lane P1 "
+        "subtraction and its result; that is the wave that lands the surface on THIS "
+        "head, so without it the block above binds an intermediate figure")
+    assert int(p1_wave.group(2)) == live, (
+        f"canonical-mcp-tools.md says the last door wave lands the surface on "
+        f"{p1_wave.group(2)} advertised tools; the manifest derives {live}")
     # ⛔ NEITHER SIDE IS FOUND BY POSITION (#13052 review at 0881a403, then at 7a61cde, both
     # P3). The parenthetical is a RUNNING record that has already grown twice, so an index into
     # `equations` retargets on the next append, and a first-match regex retargets on the next
@@ -417,9 +437,14 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "match a plus-chain at all, so it reds here. If the record grows, extend this pin "
         "in the same change rather than reshaping the sentence to fit it"
     )
-    assert int(advertised_eq.group(2)) - int(door_wave.group(1)) == live, (
+    # Both door waves subtract now, so the composition needs BOTH terms: the first one
+    # (`door_wave`) is the intermediate result the advertised equation stops at, and the
+    # second (`p1_wave`) is the head.
+    assert (int(advertised_eq.group(2)) - int(door_wave.group(1))
+            - int(p1_wave.group(1))) == live, (
         f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
-        f"{door_wave.group(1)} = {int(advertised_eq.group(2)) - int(door_wave.group(1))}, "
+        f"{door_wave.group(1)} − {p1_wave.group(1)} = "
+        f"{int(advertised_eq.group(2)) - int(door_wave.group(1)) - int(p1_wave.group(1))}, "
         f"not {live}"
     )
     assert int(retired_eq.group(2)) == retired, (
@@ -5255,7 +5280,11 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # and there is no `+ n` term. No container row arrives here, the SDK pin does not move
     # (94, inherited from `main`), and no row is archived: `archive/mcp-tools/` is for doors
     # with NO destination.
-    assert live["mcp"] == manifest["counts"]["tools"] == 48
+    # #11609 lane P1 (THIS PR): 48 -> 46. The two POINT-shaped doors retire FORWARD into
+    # `create_entity`'s new `type="point"`/`type="diary"` ARMS, i.e. onto a container that
+    # was already advertised, so the live delta is exactly −2 with no `+ n` term and the
+    # SDK pin does not move (94 — only MCP names retire here).
+    assert live["mcp"] == manifest["counts"]["tools"] == 46
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -5277,16 +5306,20 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # `record_decision`; `update_knowledge` already had one) and FOUR doors were retired
     # (`supersede` -> `supersede_knowledge`, `update_entity` -> `update_knowledge`,
     # `file_decision` -> `write_question`, `file_human_approval` -> `record_decision`).
-    # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
-    # approved targets still ABSENT from the live class (see the 23 the declaration gate
-    # prints), so naming them as delivered here was false.
+    # ⛔ `adjust_relationship` and `refresh_confidence` were approved targets still ABSENT
+    # here; #11609 P3 implemented them along with the other nine, so this comment no longer
+    # describes the tree (see the P3 line below).
     # 110 -> 94 on 2026-11-16 (#12901 wave 2): the canonical control-plane partition
     # (`N1`–`N6`) left the PUBLIC surface — sixteen members, every body privatised as the
     # seam its hosted caller now uses — so the live set shrank again without touching the
     # approved 40 (none of the sixteen was an approved row). 110 is this tree's BEFORE:
     # the wave branched before #12951's READ/QUERY containers, so its own "118 -> 102"
     # never saw that wave's -8. The manifest under test is the one re-cut HERE.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 94
+    # 94 -> 105 on 2026-11-18 by #11609 P3 (#12901's SDK leg): the eleven approved names
+    # that had no `def` were implemented. The LIVE count rises, which no earlier line in
+    # this comment chain does — every other move was a removal. The off-surface 66 does not
+    # move: an implemented approved name is not surplus (105 − 39 approved-and-live = 66).
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 105
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():
@@ -5320,17 +5353,45 @@ def test_the_compliance_check_is_RED_on_todays_gap(capsys):
     # arithmetic (#4185 review finding).
     assert (targets["mcp"], targets["sdk"]) == (27, 40), (
         "#3540 ruling B added the consolidated source-management tool: 26 -> 27")
-    assert (live["mcp"], live["sdk"]) != (27, 40), (
+    assert (live["mcp"], live["sdk_declared"]) != (27, 40), (
         "the gap has closed — update this test's premise (it exists to pin the RED)"
     )
     rc = tc.main(["surface-target-check.py"])
     out = capsys.readouterr().out
     assert rc == 1, out
     assert f"{targets['mcp']} MCP tools / {targets['sdk']} SDK methods" in out, out
-    assert f"{live['mcp']} MCP tools / {live['sdk']} SDK methods" in out, out
+    # The SDK leg's printed count is the DECLARED-resolving axis (#11609): 40 of 40 — GREEN
+    # on that leg, while the MCP leg keeps this run RED. Both are asserted, because a
+    # compliance check that went green here would be the false PASS the #10034 fix guards.
+    assert f"{live['mcp']} MCP tools / {live['sdk_declared']} SDK methods" in out, out
+    assert live["sdk_declared"] == targets["sdk"], (
+        "the SDK leg is no longer the RED one — if it regressed, this test hides it"
+    )
     assert f"Δ {live['mcp'] - targets['mcp']:+d}" in out, out
-    assert f"Δ {live['sdk'] - targets['sdk']:+d}" in out, out
+    assert f"Δ {live['sdk_declared'] - targets['sdk']:+d}" in out, out
     assert "OVER TARGET" in out, out
+
+
+def _live_stub(mcp: int, sdk: int) -> dict:
+    """A `live_surface()` result stub carrying EVERY key the tool now reads.
+
+    Two axes, deliberately separate (#11609): `sdk_declared` is the COMPLIANCE count
+    (declared names that resolve — what the verdict compares to the target), while `sdk`
+    and `sdk_public_methods` are the `dir()`-shaped public-method count kept as the
+    reported fallback. A stub carrying only one of them would make these tests exercise a
+    shape the real instrument never returns.
+    """
+    return {
+        "mcp": mcp,
+        "sdk": sdk,
+        "sdk_declared": sdk,
+        "sdk_public_methods": sdk,
+        "sdk_resolved": [f"m{i}" for i in range(sdk)],
+        "sdk_unresolved": [],
+        "declared": [f"m{i}" for i in range(sdk)],
+        "tools": [],
+        "sdk_methods": [],
+    }
 
 
 def test_a_surface_UNDER_the_target_is_labelled_UNDER_not_OVER(monkeypatch, capsys):
@@ -5343,7 +5404,7 @@ def test_a_surface_UNDER_the_target_is_labelled_UNDER_not_OVER(monkeypatch, caps
     monkeypatch.setattr(
         tc,
         "live_surface",
-        lambda: {"mcp": 20, "sdk": 30, "tools": [], "sdk_methods": []},
+        lambda *_a, **_kw: _live_stub(mcp=20, sdk=30),
     )
     rc = tc.main(["surface-target-check.py"])
     out = capsys.readouterr().out
@@ -5363,7 +5424,7 @@ def test_the_compliance_check_is_GREEN_when_the_live_surface_equals_the_target(
     monkeypatch.setattr(
         tc,
         "live_surface",
-        lambda: {"mcp": 27, "sdk": 40, "tools": [], "sdk_methods": []},
+        lambda *_a, **_kw: _live_stub(mcp=27, sdk=40),
     )
     rc = tc.main(["surface-target-check.py"])
     out = capsys.readouterr().out

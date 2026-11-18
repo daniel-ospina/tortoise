@@ -10660,8 +10660,28 @@ def _item_type_text(item: dict) -> str:
     return _type_text(item.get("type"))
 
 
+#: The label each ENTITY-ITEM `type=` writes — and, load-bearing, ingest's
+#: PHASE-1 VOCABULARY: `_validate_bundle` uses this map as the `entities[]` type
+#: ALLOW-LIST (`:31120`), step 3 dispatches on the same labels, and the
+#: connection-endpoint gate resolves an item's label through it.
+#: ⛔ IT DECIDES THINGS — so a key added here must come with a step-3 writer
+#: branch in the SAME batch (#13556 review N1). `point`/`diary` were added here
+#: for a `create_entity` MESSAGE, and the bundle path then accepted items that
+#: step 3 refused with `Phase2Error` — after step 2 had already committed the
+#: bundle's points, the #2422/#7925 partial-mutation class this file closes in
+#: half a dozen comments. They live in `_CREATE_ENTITY_TYPE_ARMS` only; both
+#: land on `:Point` (ONE belief kind, #10977), never on a label of their own.
 _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
                        "event": "Event", "document": "Source"}
+
+
+#: The `type=` values `TortoiseSDK.create_entity` DISPATCHES on — its arms, and
+#: the whole vocabulary of its `unknown type` message.
+#: ⛔ SEPARATE FROM `_ENTITY_ITEM_LABELS` ON PURPOSE (#13556 review N1): that map
+#: is ingest's Phase-1 allow-list and `point`/`diary` have no ingest writer, so
+#: adding them there opens a validation gate instead of extending a message. A
+#: message may name a type the ingest bundle cannot carry; a gate may not.
+_CREATE_ENTITY_TYPE_ARMS = (*_ENTITY_ITEM_LABELS, "point", "diary")
 
 
 def _indefinite(phrase: str) -> str:
@@ -13896,6 +13916,19 @@ def _refusal_repr(value) -> str:
     return text if type(text) is str else str.__str__(text)
 
 
+#: The graph backends THIS deployment can actually provision at creation.
+#:
+#: Read by ``create_memory_graph`` (approved row 29), which takes ``backend`` at
+#: creation because the surface doc makes the backend immutable once a graph exists
+#: (`docs/product/beta-sdk-surface.md` → "Backend is now fixed at creation", the
+#: reason `set_memory_graph_backend` was deleted rather than kept). The set is stated
+#: HERE, as data, so the refusal names the same values the method accepts;
+#: a backend this SDK cannot provision is refused instead of stored and discovered
+#: later. A single entry today because the data plane is FalkorDB in BOTH modes —
+#: graph registry rows are metadata; the points live in the same engine.
+_GRAPH_BACKENDS: tuple[str, ...] = ("falkordb",)
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -16093,11 +16126,29 @@ class TortoiseSDK:
         # (after event.update(extra)), matching the graph branch order.
         if _jsonl_actor is not None:
             event["actor_user_id"] = _jsonl_actor
+        # #13331 — ONE CHOKEPOINT (epic #7879 surface S2). The append, the
+        # record projection and the cache fold are now ONE call, so this door
+        # cannot order them differently from the SDK's or the miner's. The
+        # append stays inside the caller's `try` (it is the commit point; a
+        # failure is this door's accounting, not a record refusal) and the
+        # chokepoint never withdraws it: the truth store does not wait for a
+        # derived store (see `tortoise/live_write.py`).
+        from . import live_write
+
         try:
             # #9190: the append's return value IS the record's journal position;
             # it is threaded to the record so layer 1 stops being empty on live
             # writes. `None` (an in-memory log) means there is nothing to number.
-            seq = log.append(event)
+            live_write.write(
+                # ⛔ NO `tenant=` HERE (#13345 review P3-2): it is consumed only by
+                # `live_write`'s DEFAULT project, and this door supplies its own
+                # (`_write_record_projection`), which reads `self._record_tenant`
+                # itself and hands it to `write_live_record` by value. Passing it
+                # here was inert and read as load-bearing.
+                event, log=log, fold=False,
+                record_sink=record_sink,
+                project=self._write_record_projection,
+                scope_label="sdk._emit_event")
         except Exception as exc:
             # The graph mutation already succeeded — a log-write failure must
             # not crash the caller or pretend the write failed. Rebuild parity
@@ -16139,19 +16190,12 @@ class TortoiseSDK:
             # before/after delta can be moved by another thread's failure.
             return False
         # ── the Postgres record (#9188, epic #7879) ────────────────
-        # The append COMMITTED at this line (§17.1), so the record write runs
-        # after it and before any cache fold: truth first, then the projection.
-        # It is fail-soft for the SAME reason the append's own failure is — the
-        # graph write stands, and raising here would hand the caller a failure
-        # for a record that persisted while killing the fold too. The loss is
-        # observable instead (``monitoring.metrics()["record_write_failures"]``)
-        # and ``replay`` heals it from the journal.
-        if record_sink is not None:
-            # #10000: the outcome travels to the caller that has to decide
-            # whether the record holds this write (`_write_capture_turns`).
-            record_sink.append(self._write_record_projection(event, seq=seq))
-        else:
-            self._write_record_projection(event, seq=seq)
+        # #13331: the record write and the `record_sink` hand-off now happen
+        # INSIDE `live_write.write` (step 2 of the chokepoint), after the append
+        # and before the fold this door does not own. `_write_record_projection`
+        # is still the SDK's own record half (its import guard, durability read
+        # and fail-soft accounting have one home), it is just no longer
+        # ORDERED here.
         return True
 
     def _write_record_projection(self, record: dict,
@@ -29231,6 +29275,69 @@ class TortoiseSDK:
         return result
 
     # ── Operator action consolidation (epic #888 W2) ──────────────────
+    def adjust_relationship(self, operator_id: str, *,
+                            bias: float | None = None,
+                            precision: float | None = None,
+                            consistency: float | None = None,
+                            directness: float | None = None) -> dict:
+        """Change how much an existing epistemic link contributes — approved row 25.
+
+        Row 25: *"Change an existing epistemic link's strength. **Annotating a link is
+        `update_knowledge` on it**"*. So this door moves the four graded dimensions that
+        SCALE the link's EP weight; it is not the annotation door (``update_knowledge``),
+        and it is not disagreement — that is a NAND (#2315).
+
+        PARTIAL BY READ-MODIFY-WRITE, deliberately. ``annotate_operator`` takes all four
+        terms because the four are AVERAGED, so it cannot express "change one": it would
+        need a value for each. A caller of THIS row passes only the dimension(s) it is
+        adjusting; every term it leaves out is read off the link's current annotation,
+        coalescing to ``ANNOTATION_TERM_NEUTRAL`` (0.5) when the link was never rated —
+        the same default the weight formula itself applies. An unstated term is therefore
+        never silently reset to a value the caller did not choose.
+
+        ⛔ The read-back is GUARDED, because a silent reset is the defect this shape can
+        produce. ``get_point`` returns a TRUTHY dict carrying no node properties when
+        nobody who could see the node was consulted (the #7952 residency marker), so
+        "no ``annotator_bias`` on it" does NOT mean "never annotated". Writing neutral
+        over a real annotation because the store could not be read is exactly the
+        corruption the read-modify-write exists to avoid, so an unreadable node REFUSES
+        instead of defaulting.
+        """
+        from .weights import ANNOTATION_TERM_NEUTRAL as _neutral
+
+        point = self.get_point(operator_id)
+        if not point:
+            raise ValueError(f"Operator {operator_id!r} not found")
+        if not point.get("id"):
+            raise ValueError(
+                f"Operator {operator_id!r} could not be read back, so its current "
+                "annotation is unknown and a partial adjust would overwrite the terms "
+                "the caller did not state. Nothing was written."
+            )
+        current = {
+            "bias": point.get("annotator_bias"),
+            "precision": point.get("annotator_precision"),
+            "consistency": point.get("annotator_consistency"),
+            "directness": point.get("annotator_directness"),
+        }
+        requested = {
+            "bias": bias,
+            "precision": precision,
+            "consistency": consistency,
+            "directness": directness,
+        }
+        for term, value in requested.items():
+            if value is None:
+                existing = current[term]
+                requested[term] = _neutral if existing is None else existing
+        return self.annotate_operator(
+            operator_id,
+            bias=requested["bias"],
+            precision=requested["precision"],
+            consistency=requested["consistency"],
+            directness=requested["directness"],
+        )
+
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
         """Annotate an operator Point with structured epistemic dimensions.
@@ -34654,6 +34761,26 @@ class TortoiseSDK:
                 _find(ref)
                 _union(cowner, ref)
         return {ref: _find(ref) for ref in list(parent)}
+
+    def write_knowledge_batch(self, bundle: dict, granularity: str = "bulk", *,
+                              promotion_policy: str = "gated") -> dict:
+        """Write many interconnected things in ONE call — approved row 13.
+
+        `docs/product/beta-sdk-surface.md` row 13: *"Write many interconnected things
+        in one call — claims, entities, sources and the links between them —
+        atomically."*
+
+        ⛔ A DELEGATION, and that is the design rather than a shortcut. This name is the
+        approved SPELLING of ``ingest`` (epic #888 W4), which already writes points,
+        entities, sources and connections coherently — all nodes first, then the
+        connections between them, which is the shape row 13's "atomically" names. A
+        second implementation here would give the surface two writes for one operation:
+        a caller using the approved name would get different semantics from a caller
+        using the engine's, with nothing red in between. The parameters are forwarded
+        verbatim for the same reason — a re-shaped argument list is that drift with
+        extra steps.
+        """
+        return self.ingest(bundle, granularity, promotion_policy=promotion_policy)
 
     def ingest(self, bundle: dict, granularity: str = "bulk", *,
                promotion_policy: str = "gated") -> dict:
@@ -40288,6 +40415,78 @@ class TortoiseSDK:
             direction=direction, include_draft=include_draft, stats=stats)
         return list(ops), anchors_out
 
+    def refresh_confidence(self, scope: str = "changed", *,
+                           claims: list[str] | None = None) -> dict:
+        """Recompute confidence after changes — approved row 26, with the scope STATED.
+
+        Row 26 requires the scope to be an ARGUMENT rather than a silent choice:
+        *"Recompute confidence after changes. Two scopes: the changed nodes, or the whole
+        graph — stated as a parameter, not chosen silently."*
+
+          ``scope="changed"`` (the default) — the graph's dirty roots: the claims a
+              write has already marked stale. This is ``compute_confidence()``'s no-arg
+              path, which runs local EP over exactly those roots. ``claims=`` narrows it
+              to a caller-supplied subset.
+          ``scope="graph"`` — every live claim as an anchor, i.e. the whole graph.
+              O(len(claims)) to enumerate and priced accordingly; it is the expensive
+              answer and the only way to reach a belief a dirty flag never touched.
+
+        ⛔ **"Every live claim" is the CLAIM population, not "every Point".** The walk
+        passes ``point_kind="claim"``, so entities, sources, documents and events are
+        never collected as anchors: they carry no operator inputs, so the only thing
+        they could contribute is a longer enumeration that still answers with claim
+        posteriors. ``list_knowledge`` takes ``kind=`` as the COLLECTION selector and
+        forwards ``point_kind=`` to ``paginated_query`` (which filters ``pointKind``
+        through the one shared kind expander), so leaving it unset walked every
+        non-operator Point in the graph (#11609 P3 review F4).
+
+        ⛔ **An empty anchor set is answered, not re-scoped.** It reaches
+        ``compute_confidence(anchors=[])``, whose named ``no_factors`` result is the
+        honest answer to "the whole graph holds no live claim". It must never fall
+        through to ``compute_confidence()``'s no-arg path, which answers about the DIRTY
+        ROOTS — a narrower question that comes back looking like a whole-graph pass,
+        the exact failure the unknown-scope refusal below exists to prevent.
+
+        ⛔ Any other value is REFUSED rather than defaulted. "Recompute something" is not
+        a scope, and guessing one is wrong in both directions: a whole-graph pass is a
+        cost the caller did not ask for, while a changed-nodes pass silently answers a
+        narrower question than the caller asked — and both come back looking like a
+        complete answer.
+
+        Delegates to ``compute_confidence``, whose precedence is documented as
+        ``factors > anchors > no-arg local EP over the dirty roots``; this method selects
+        a branch of that one engine and adds no belief propagation of its own.
+        """
+        if scope == "changed":
+            if claims:
+                return self.compute_confidence(anchors=list(claims))
+            return self.compute_confidence()
+        if scope == "graph":
+            anchors: list[str] = []
+            offset = 0
+            page = 200
+            while True:
+                chunk = self.list_knowledge(
+                    kind="claim", point_kind="claim", limit=page, offset=offset)
+                rows = chunk.get("results") or []
+                anchors.extend(
+                    row["id"] for row in rows if row.get("id")
+                )
+                if not chunk.get("hasMore") or not rows:
+                    break
+                offset += len(rows)
+            # ``anchors=[]`` (never the no-arg path): an empty graph is a real answer
+            # to "the whole graph", reported as ``no_factors`` over zero anchors.
+            # The no-arg path would answer about the dirty roots instead — a different,
+            # narrower question wearing the whole-graph label.
+            return self.compute_confidence(anchors=anchors)
+        raise ValueError(
+            f"Unknown confidence scope {scope!r}. Row 26 defines exactly two: "
+            "'changed' (the dirty roots) and 'graph' (every live claim). The scope is "
+            "never chosen silently, so an unrecognised one is refused rather than "
+            "defaulted."
+        )
+
     def compute_confidence(self, factors=None, evidence=None,
                            anchors: list[str] | None = None,
                            max_hops: int = 1,
@@ -45748,6 +45947,15 @@ class TortoiseSDK:
                 # resolved (a load still IN FLIGHT has recorded no failure of its
                 # own, so ``_last_failure_kind`` alone would answer the
                 # designed-absence term).
+                # ⛔ ``kind`` is a LEG-TRACE reason, and ``_unavailable``
+                # translates it into the refusal's ``failure_kind`` vocabulary
+                # (#13528 review P1-1). The rule, not a fixed pair: a reason
+                # already in that vocabulary (``load_failed`` / ``load_timeout``)
+                # IS the cause and passes unchanged; ``no_embedder`` /
+                # ``load_in_flight`` are trace-only words and are translated to
+                # the RECORDED kind, else ``model_unavailable``. So a recorded
+                # kind outranks the in-flight term — reconcile a refusal against
+                # ``_last_failure_kind``, never against a trace-word mapping.
                 EmbeddingModel._unavailable(
                     context="read: embedder not warm within the read's budget",
                     kind=_read_decline)
@@ -49923,6 +50131,82 @@ class TortoiseSDK:
         )
         return {"graph_id": gid, "name": name, "kind": kind, "namespace": ns}
 
+    def create_memory_graph(self, org_id: str, name: str, *,
+                            backend: str = "falkordb",
+                            kind: str = "custom",
+                            namespace: str | None = None) -> dict:
+        """Provision a memory graph — approved row 29, with `name` and `backend`.
+
+        Row 29: *"Provision a memory graph — one per end-customer, or per agent. Takes
+        `name` and `backend` at creation."*
+
+        Takes ``org_id`` explicitly, matching the row-29..33 siblings already on the
+        surface (``list_memory_graphs``, ``update_memory_graph``,
+        ``restore_memory_graph``): a builder provisions graphs FOR an account it
+        administers, which is a different question from "which account am I" — the
+        question the caller-scoped actor rows (34-39) answer.
+
+        ``backend`` is VALIDATED against ``_GRAPH_BACKENDS`` and then recorded on the
+        reply, because the surface doc makes it immutable once the graph exists (that is
+        why ``set_memory_graph_backend`` was deleted, not kept). ⛔ It is not accepted
+        and ignored: a ``**kwargs`` funnel that takes an argument and does nothing with
+        it is the exact defect the surface doc records for ``operator_action``'s
+        silently-dropped ``credibility``.
+
+        Delegates the registry/control-plane write to ``_graph_create``, which owns the
+        mode split (Supabase mode returns the deterministic id without a registry node;
+        selfhost writes the ``Graph`` node).
+        """
+        if backend not in _GRAPH_BACKENDS:
+            raise ValueError(
+                f"Unsupported memory-graph backend {backend!r}. This deployment can "
+                f"provision {', '.join(repr(b) for b in _GRAPH_BACKENDS)}. The backend is "
+                "fixed at creation (row 29), so one this deployment cannot provision is "
+                "refused here rather than stored and discovered later."
+            )
+        created = self._graph_create(org_id, name, kind=kind, namespace=namespace)
+        return {**created, "backend": backend}
+
+    def delete_memory_graph(self, org_id: str, graph_id: str, *,
+                            purge: bool = False) -> dict:
+        """Destroy a memory graph — approved row 32. Default RECOVERABLE; `purge=True`
+        is refused, and the refusal says where erasure actually happens.
+
+        Row 32: *"Destroy a memory graph. **`purge=True` for irreversible erasure; the
+        default is a recoverable delete**."*
+
+        ``purge=False`` delegates to ``_graph_delete``: a soft tombstone with
+        ``deleted_at`` stamped (which starts the grace window) that
+        ``restore_memory_graph`` can undo. That is row 32's stated default, and the keys
+        bound to the graph die with it.
+
+        ⛔ ``purge=True`` REFUSES, and the refusal NAMES the real path instead of faking
+        one. Irreversible erasure belongs to the purge sweep
+        (``backup_sweep._purge_tombstone``): it needs a storage handle, it honours the
+        grace window, and it tears down the backup families BEFORE stamping ``purged_at``
+        — the prop whose documented meaning is "data physically erased". None of that is
+        reachable from an SDK client, and stamping the tombstone here would publish
+        "erased" over data that still exists — worse than a refusal, because it is
+        unrecoverable in the other direction. Nothing is deleted on this path, so a
+        caller who asked for erasure is never told it happened.
+
+        ⚠️ This makes the ``purge=True`` half of row 32 a KNOWN, REPORTED GAP rather than
+        a silent one; the recoverable half — the documented default — is delivered.
+        """
+        if purge:
+            raise ValueError(
+                "delete_memory_graph(purge=True) is not available from the SDK: "
+                "irreversible erasure runs through the purge sweep (grace window + "
+                "backup teardown), which needs a storage handle an SDK client does not "
+                "hold. NOTHING WAS DELETED. Use delete_memory_graph(purge=False) for the "
+                "recoverable delete and let the sweep purge the tombstone."
+            )
+        return {
+            "graph_id": graph_id,
+            "deleted": self._graph_delete(org_id, graph_id),
+            "purge": False,
+        }
+
     def list_memory_graphs(self, org_id: str) -> list[dict]:
         """List this account's memory graphs (default graph first).
 
@@ -50485,6 +50769,361 @@ class TortoiseSDK:
                 out.append(props)
         return out
 
+    def _tenancy_tenant(self, what: str) -> str:
+        """The caller's OWN account for the actor rows (34-39) — or a refusal.
+
+        ⛔ These six take NO ``org_id`` parameter, and that is a recorded decision rather
+        than an omission. Row 28's ``get_organisation_account`` states the reasoning for
+        the whole tenancy block: *"reading an account by a caller-supplied id is the
+        cross-tenant read row 28 must not allow"*. A customer-facing "who has access" or
+        "list my credentials" call must not be ADDRESSABLE by argument, so the tenant is
+        resolved from the SDK's own seam — ``record_tenant_effective`` (carried > scope >
+        env pair), the same resolution every write uses, so a read and a write in one
+        session cannot disagree about whose account they mean.
+
+        ⛔ WHY THIS RAISES INSTEAD OF RETURNING AN EMPTY LIST: ``[]`` reads as "this
+        account has no members" / "no credentials" — a reassuring answer produced by
+        having asked NOBODY, and one a caller has no way to distinguish from a real
+        empty. A caller that cannot be told whose account to read is told THAT, with the
+        arm-specific remedy appended by ``record_writer`` (the one module allowed to name
+        the env literals, #9192), so the fix is in the message.
+        """
+        from .exceptions import ControlPlaneError
+        from .record_writer import (
+            _refused_tenant_env_note,
+            is_usable_tenant,
+            record_tenant_effective,
+        )
+
+        tenant = record_tenant_effective(self._record_tenant)
+        if not is_usable_tenant(tenant):
+            raise ControlPlaneError(
+                f"{what} needs a BOUND account: this SDK names no tenant, and addressing "
+                "another account's tenancy by a caller-supplied id is the cross-tenant "
+                "door the tenancy rows must not open (#10015). Bind it one of the two "
+                "supported ways: on the hosted REST lane the credential carries the "
+                "tenant on the SDK it opens; elsewhere enter "
+                "record_writer.use_record_tenant(org_id, graph_id)."
+                + _refused_tenant_env_note()
+            )
+        return tenant[0]
+
+    def create_key(self, *, name: str | None = None,
+                   graph_id: str | None = None,
+                   scopes: list[str] | None = None,
+                   expires_at: str | None = None,
+                   created_by: str = "sdk") -> dict:
+        """Mint a credential — approved row 34. The credential CARRIES the tenant.
+
+        Row 34: *"Mint a credential scoped to one memory graph. **The credential carries
+        the tenant** — the client does not pass a graph id."* Note precisely what that
+        forbids: the client that later USES the key never passes a graph id, because the
+        key is already scoped to one. ``graph_id`` here is what the minting builder
+        SCOPES the new key to — omit it and the key is account-wide (the engine's
+        existing ``graph_id=None`` shape, which resolves to the default graph).
+
+        Takes no ``org_id``; the tenant comes from this SDK's own bound account
+        (``_tenancy_tenant``), which refuses by NAMING the mode when nothing is bound.
+
+        Delegates to ``_apikey_create`` — the single mint, so the properties that matter
+        are the ones the rest of the product already relies on: only the SHA-256 hash is
+        stored, the plaintext comes back exactly ONCE, and the mint is audited.
+
+        ⛔ **Mode-aware, in the delegate.** ``_apikey_create`` owns the split, the same
+        way ``_graph_create`` and ``_membership_remove`` own theirs: on the hosted
+        (Supabase) control plane the key is minted into the ``api_keys`` table through
+        ``hosted_api._mint_key`` — the ONE low-level key write, with its serialized
+        ``max_api_keys`` cap gate — because that is the table ``resolve_api_key`` (the
+        auth path) reads. Minting a registry node there would produce a credential that
+        authenticates nowhere, and a registry-only org lookup would refuse an account
+        that exists (#11609 P3 review F3).
+        """
+        org_id = self._tenancy_tenant("create_key")
+        return self._apikey_create(
+            org_id,
+            created_by,
+            graph_id=graph_id,
+            scopes=scopes,
+            name=name,
+            expires_at=expires_at,
+        )
+
+    def list_keys(self, *, graph_id: str | None = None,
+                  include_revoked: bool = False) -> list[dict]:
+        """List this account's credentials — approved row 35.
+
+        Row 35: *"List a memory graph's credentials."* Returns ROWS, never a bare count:
+        the two console diagnostics that used to answer this question
+        (``graph_key_ids``, ``graph_active_key_count``) both fold into this row precisely
+        because a number with no rows behind it cannot be acted on.
+
+        ``graph_id`` narrows to one graph's credentials. A revoked key is an audit
+        tombstone, so it is EXCLUDED by default and included with ``include_revoked=True``
+        — carrying ``revoked_at``, so a caller can tell "revoked" from "never minted".
+
+        ⛔ The plaintext is never listed, because it is never stored: the reply carries
+        ``key_prefix`` (the first 10 characters), which is what identifies a key in the
+        console and what the lookup surfaces match on.
+
+        ⛔ Reads the mode-appropriate store: the hosted control plane's ``api_keys``
+        table (``org_api_keys``) when that is the control plane, the registry ``APIKey``
+        nodes otherwise — the same split, and the same reason, as ``list_members``.
+        On the hosted deployment the credentials the auth path resolves live in
+        ``api_keys``, so a registry read there would report a funded account as
+        credential-less: a reassuring ``[]`` produced by having asked the wrong store
+        (#11609 P3 review F3). Branching before the registry also keeps this READ from
+        minting the ``{ns}_control_plane`` graph (#669's read-side mint).
+
+        Takes no ``org_id`` — see ``_tenancy_tenant``.
+        """
+        org_id = self._tenancy_tenant("list_keys")
+        from .supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+            org_api_keys,
+        )
+
+        if is_supabase_enabled():
+            hosted = org_api_keys(
+                get_control_plane(), org_id, graph_id=graph_id)
+            return [
+                {
+                    "id": row.get("id"),
+                    "key_prefix": row.get("key_prefix"),
+                    "graph_id": row.get("graph_id"),
+                    "name": row.get("name"),
+                    "scopes": list(row.get("scopes") or []),
+                    "created_at": row.get("created_at"),
+                    "created_by": row.get("created_by"),
+                    "expires_at": row.get("expires_at"),
+                    "revoked_at": row.get("revoked_at"),
+                }
+                for row in hosted
+                if include_revoked or row.get("revoked_at") is None
+            ]
+        reg = self._get_registry()
+        cypher = "MATCH (k:APIKey {org_id:$tid})"
+        params: dict = {"tid": org_id}
+        if graph_id is not None:
+            cypher += " WHERE k.graph_id = $gid"
+            params["gid"] = graph_id
+        rows = reg.query(
+            cypher + " RETURN k.id, k.key_prefix, k.graph_id, k.name, k.scopes, "
+            "k.created_at, k.created_by, k.expires_at, k.revoked_at",
+            params=params,
+        ).result_set
+        out: list[dict] = []
+        for (key_id, prefix, gid, name, scopes, created_at, created_by,
+             expires_at, revoked_at) in rows:
+            if revoked_at is not None and not include_revoked:
+                continue
+            out.append({
+                "id": key_id,
+                "key_prefix": prefix,
+                "graph_id": gid,
+                "name": name,
+                "scopes": list(scopes) if scopes else [],
+                "created_at": created_at,
+                "created_by": created_by,
+                "expires_at": expires_at,
+                "revoked_at": revoked_at,
+            })
+        return out
+
+    def revoke_key(self, key_id: str) -> dict:
+        """Revoke a credential — approved row 36, including its rotation recipe.
+
+        Row 36: *"Revoke a credential. **Rotation is mint-then-revoke — the new key is
+        live before the old dies**."* The ORDER therefore belongs to the caller
+        (``create_key`` then ``revoke_key``), and this call is idempotent so a retried
+        rotation cannot fail on the second attempt — revoking an already-revoked key
+        returns ``already=True`` rather than raising.
+
+        ⛔ OWNERSHIP IS CHECKED BEFORE THE WRITE, because ``_apikey_revoke`` resolves the
+        owning org FROM THE ROW: by key id alone it would revoke any account's
+        credential. The key must belong to the tenant this SDK is bound to, or the call
+        refuses and writes nothing — an unreachable-by-argument rule is only worth
+        stating if the door that DOES take an id enforces it too.
+
+        Delegates the write to ``_apikey_revoke`` so the ``revoked_at`` stamp and the
+        audit record are the ones the rest of the product already writes.
+
+        ⛔ Mode-aware, like ``list_keys``: on the hosted (Supabase) control plane the
+        revocation is the ``api_keys`` row PATCH (``supabase_control.revoke_api_key``,
+        resolved through ``api_key_by_id``) — the table ``resolve_api_key`` reads, so a
+        registry-only lookup here answered ``{"revoked": False, "reason": "not found"}``
+        for a LIVE key on the very deployment row 36 exists for, which made row 36's
+        documented mint-then-revoke rotation a no-op (#11609 P3 review F3). The
+        ownership check runs FIRST in both arms, and the already-revoked arm stays
+        idempotent. No registry audit node is written on the hosted arm — the hosted
+        lane's audit is the REST surface's ``_async_audit``, and the zero-registry-write
+        cutover contract (#765) forbids one here.
+        """
+        from .exceptions import ControlPlaneError
+
+        org_id = self._tenancy_tenant("revoke_key")
+        from .supabase_control import (
+            api_key_by_id,
+            get_control_plane,
+            is_supabase_enabled,
+            revoke_api_key,
+        )
+
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            row = api_key_by_id(cp, key_id)
+            if row is None:
+                # Absence is reported as absence, not as a revoked key: a caller that
+                # mistyped an id must not read a success.
+                return {"revoked": False, "reason": "not found", "key_id": key_id}
+            if row.get("org_id") != org_id:
+                raise ControlPlaneError(
+                    f"Credential {key_id!r} does not belong to this account, so it was "
+                    "not revoked. Nothing was written."
+                )
+            if row.get("revoked_at") is not None:
+                return {"revoked": True, "already": True, "key_id": key_id}
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            revoke_api_key(cp, key_id, now)
+            return {"revoked": True, "key_id": key_id, "revoked_at": now}
+
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.org_id",
+            params={"id": key_id},
+        ).result_set
+        if not rows:
+            # Absence is reported as absence, not as a revoked key: a caller that
+            # mistyped an id must not read a success.
+            return {"revoked": False, "reason": "not found", "key_id": key_id}
+        if rows[0][0] != org_id:
+            raise ControlPlaneError(
+                f"Credential {key_id!r} does not belong to this account, so it was not "
+                "revoked. Nothing was written."
+            )
+        return self._apikey_revoke(key_id)
+
+    def add_member(self, user_id: str, role: str = "member") -> dict:
+        """Grant a person access to the account — approved row 37.
+
+        ``role`` is validated by the delegate (``owner`` / ``admin`` / ``member``), which
+        also enforces the org's ``max_users`` cap and its existence. Those checks live in
+        ONE place on purpose: a second validator here would be a second opinion about
+        who may join an account, and the two would eventually disagree.
+
+        Takes no ``org_id`` — see ``_tenancy_tenant``. Delegates to ``_membership_create``.
+        """
+        org_id = self._tenancy_tenant("add_member")
+        return self._membership_create(org_id, user_id, role)
+
+    def list_members(self) -> list[dict]:
+        """List who has access — approved row 38.
+
+        Answers with active AND invited memberships (an invitee who has not accepted yet
+        has access in every sense the admin who granted it cares about), and reads the
+        mode-appropriate store: the Supabase seam (``org_members``) when that is the
+        control plane, the registry ``Membership`` nodes otherwise — the same split, and
+        the same predicate, as ``list_memory_graphs``.
+
+        Takes no ``org_id`` — see ``_tenancy_tenant``. It REFUSES rather than returning
+        ``[]`` when no tenant is bound, because an empty list reads as "nobody has
+        access", which is the one wrong answer an access listing must never invent.
+        """
+        org_id = self._tenancy_tenant("list_members")
+        from .supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+            org_members,
+        )
+
+        if is_supabase_enabled():
+            return org_members(get_control_plane(), org_id)
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (m:Membership {org_id:$tid}) "
+            "WHERE m.status IN ['active', 'invited'] "
+            "RETURN m.user_id, m.role, m.status, m.invited_email",
+            params={"tid": org_id},
+        ).result_set
+        return [
+            {
+                "user_id": user_id,
+                "role": role,
+                "status": status,
+                "email": invited_email or "",
+            }
+            for (user_id, role, status, invited_email) in rows
+        ]
+
+    def _membership_remove(self, org_id: str, user_id: str) -> bool:
+        """Remove a membership in the mode-appropriate store — row 39's write.
+
+        Mirrors ``_membership_create`` for the write half. Owner memberships are
+        REFUSED: an account with no owner has no one who can mint keys, remove keys, or
+        re-add an owner, so "remove the owner" is a self-lockout rather than an
+        administrative action. Both modes PATCH a status rather than deleting the row
+        (``removed``), so the membership history survives — the same reason a revoked key
+        keeps its ``revoked_at`` — and both match by ``user_id`` OR ``identity`` so an
+        anonymous-agent member is removable like a human one.
+
+        Returns False when no membership matched; raises when the target is the owner.
+        """
+        from .exceptions import ControlPlaneError
+        from .supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+            membership_role,
+            set_membership,
+        )
+
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            role = membership_role(cp, org_id, user_id)
+            if role is None:
+                return False
+            if role == "owner":
+                raise ControlPlaneError(
+                    "The account owner cannot be removed: with no owner there is nobody "
+                    "who can re-add one. Transfer ownership first. Nothing was written."
+                )
+            set_membership(cp, org_id, user_id, status="removed")
+            return True
+        reg = self._get_registry()
+        target = reg.query(
+            "MATCH (m:Membership {org_id:$tid, user_id:$uid}) RETURN m.role",
+            params={"tid": org_id, "uid": user_id},
+        ).result_set
+        if not target:
+            return False
+        if target[0][0] == "owner":
+            raise ControlPlaneError(
+                "The account owner cannot be removed: with no owner there is nobody who "
+                "can re-add one. Transfer ownership first. Nothing was written."
+            )
+        reg.query(
+            "MATCH (m:Membership {org_id:$tid, user_id:$uid}) "
+            "SET m.status='removed'",
+            params={"tid": org_id, "uid": user_id},
+        )
+        return True
+
+    def remove_member(self, user_id: str) -> dict:
+        """Revoke a person's access — approved row 39.
+
+        Takes no ``org_id`` — see ``_tenancy_tenant``. Delegates to
+        ``_membership_remove``, which owns the mode split and the owner safeguard.
+
+        A missing membership is reported as ``removed: False`` rather than raised: the
+        caller's goal (this person has no access) is already true, and turning an
+        idempotent re-run into an error is how a retried removal fails after it worked.
+        """
+        org_id = self._tenancy_tenant("remove_member")
+        return {
+            "user_id": user_id,
+            "removed": self._membership_remove(org_id, user_id),
+        }
+
     def _apikey_create(self, org_id: str, created_by: str,
                       *, graph_id: str | None = None,
                       scopes: list | None = None,
@@ -50539,6 +51178,25 @@ class TortoiseSDK:
                     _ESCALATION_SCOPES & set(scopes))) + ".",
             )
 
+        from .supabase_control import is_supabase_enabled
+
+        if is_supabase_enabled():
+            # The hosted control plane's keys live in ``api_keys``, not in the registry:
+            # a registry node there is a credential nothing authenticates with, and
+            # ``_org_get``'s ``Team`` read would refuse an org that exists. The hosted
+            # arm is its own method so the registry path below stays byte-identical.
+            return self._apikey_create_hosted(
+                org_id, created_by,
+                graph_id=graph_id,
+                scopes=scopes,
+                created_by_key_id=created_by_key_id,
+                delegation_depth=delegation_depth,
+                prefix=prefix,
+                name=name,
+                created_via=created_via,
+                expires_at=expires_at,
+            )
+
         org = self._org_get(org_id)
         if org is None:
             raise ControlPlaneError(f"Team {org_id!r} not found")
@@ -50588,6 +51246,83 @@ class TortoiseSDK:
                      resource_type="apikey", resource_id=kid)
         return {"id": kid, "key_prefix": key_prefix, "api_key": api_key,
                 "org_id": org_id, "created_at": now}
+
+    def _apikey_create_hosted(self, org_id: str, created_by: str,
+                              *, graph_id: str | None = None,
+                              scopes: list | None = None,
+                              created_by_key_id: str | None = None,
+                              delegation_depth: int | None = None,
+                              prefix: str = "tt_",
+                              name: str | None = None,
+                              created_via: str | None = None,
+                              expires_at: str | None = None) -> dict:
+        """Mint into the hosted control plane's ``api_keys`` table (#11609 P3 F3).
+
+        The Supabase arm of :meth:`_apikey_create`, kept in its own method so the
+        registry path stays byte-identical. On this deployment the credential the auth
+        path resolves is a row in ``api_keys`` (``supabase_control.resolve_api_key``),
+        NOT a registry ``APIKey`` node — and ``_graph_create``'s recorded #765 cutover
+        means no ``Team`` node exists to look up either, so the registry arm refused an
+        org that exists.
+
+        ⛔ It DELEGATES to ``hosted_api._mint_key``, the ONE low-level key write (D14:
+        "never re-implemented"). That is where the ``max_api_keys`` cap gate lives —
+        pre-checked in Python and re-applied authoritatively inside the serialized
+        ``provision_api_key`` RPC — along with the per-graph ACL hook and the
+        ``tk_``/``tt_`` prefix convention. Re-implementing any of that here would be a
+        second opinion about how many keys an account may hold. The import is deferred
+        because ``hosted_api`` imports this module at load time.
+
+        Returns the SAME envelope the registry arm returns, so ``create_key`` is one
+        contract on both modes: ``{id, key_prefix, api_key, org_id, created_at}``, with
+        the plaintext present exactly once.
+        """
+        from .exceptions import ControlPlaneError
+        from .supabase_control import get_control_plane, org_by_id
+
+        # The registry arm's org check, in this mode's vocabulary: a tenant that is
+        # bound but names no account must be refused, not minted against. (The cap gate
+        # inside ``_mint_key`` SKIPS itself when the org row is absent — it documents
+        # that "the caller's org check already ran" — so this check is load-bearing.)
+        if org_by_id(get_control_plane(), org_id) is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
+
+        from tortoise.hosted_api import _KeyCapExceeded, _mint_key
+
+        try:
+            minted = _mint_key(
+                org_id,
+                graph_id=graph_id,
+                scopes=scopes,
+                delegation_depth=delegation_depth,
+                caller_key_id=created_by_key_id,
+                session_user_id=created_by,
+                prefix=prefix,
+                # An SDK-minted credential is a PROVISIONED durable key, not one of the
+                # 24h bootstrap/session rows #2481's predicate excludes: absent is
+                # recorded as "provisioned" rather than left NULL, which is the same
+                # default every hosted caller of ``_mint_key`` gets.
+                created_via=created_via or "provisioned",
+                name=name,
+                expires_at=expires_at,
+            )
+        except _KeyCapExceeded as exc:
+            # A private HTTP-layer exception must never escape a public SDK method as
+            # itself; a cap refusal is a control-plane answer, in the same class the
+            # registry arm raises when the org is missing.
+            raise ControlPlaneError(
+                f"Team {org_id!r} is at its API-key cap (max_api_keys), so nothing was "
+                "minted. Rotate: mint the replacement first, then revoke the old "
+                "credential (row 36) — revoking frees the slot."
+            ) from exc
+        return {
+            "id": minted["id"],
+            "key_prefix": minted["key_prefix"],
+            "api_key": minted["key_plaintext"],
+            "org_id": org_id,
+            "created_at": minted["created_at"],
+        }
+
     def _apikey_revoke(self, key_id: str) -> dict:
         """Revoke an API key (soft delete — sets revoked_at). Idempotent."""
         from datetime import datetime, timezone
@@ -51367,13 +52102,15 @@ class TortoiseSDK:
                                    journal_armed=bool(self._event_log_path))
         # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
         # funnel only ever creates Subject/Object/Event/Document/Source —
-        # ``create_entity("Point", …)`` raises `unknown type`
-        # (``_ENTITY_ITEM_LABELS``) — so a ``pointKind`` riding it is a stray
-        # property on a label the calibration gate never reads
-        # (``_CALIBRATION_GATED_LABELS = ("Point",)``), and refusing it failed an
-        # unrelated write (measured: ``create_object(..., props={'point_kind':
-        # padded})``) over a name this gate has no business with. The Point doors
-        # are where it belongs.
+        # this funnel never receives a `:Point` write — since #11609 the
+        # `type="point"`/`"diary"` arms RELAY to `create_point` and never reach
+        # here at all, which is the same shape as before (they did not exist, and
+        # ``create_entity("Point", …)`` was an `unknown type`) — so a
+        # ``pointKind`` riding it is a stray property on a label the calibration
+        # gate never reads (``_CALIBRATION_GATED_LABELS = ("Point",)``), and
+        # refusing it failed an unrelated write (measured: ``create_object(...,
+        # props={'point_kind': padded})``) over a name this gate has no business
+        # with. The Point doors are where it belongs.
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the
@@ -54975,6 +55712,21 @@ class TortoiseSDK:
             required; D10 (ONTOLOGY v3.15 §4.4) retires ``:Document`` — a
             document is a ``:Source``, so this routes through the deprecated
             label alias and journals ``DocumentCreated``)
+          - point    → a ``:Point`` claim. ``props={"pointKind": …}`` is the
+            kind (the same way ``subjectKind``/``objectKind`` are carried, and
+            for the same reason: the container has no per-kind parameters), and
+            an UNSENT kind defaults to ``statement`` — ONE belief kind, so a
+            point is ``:Point {pointKind: statement}``, never a new kind
+            (#10977). ``name`` is the claim's CONTENT (the point door's
+            ``content``), and the write RELAYS to ``create_point`` so every gate
+            on that path is reached unchanged. ``dedup`` defaults to ``True``
+            here because the retired ``tortoise_create_point`` door declared it
+            so; ``create_point``'s own default is ``False`` (#11609).
+          - diary    → a ``:Point {pointKind: 'diary'}``. ``name`` is the entry
+            and ``props`` carries ``authoredBy`` (REQUIRED — the retired
+            ``tortoise_diary_write`` named the agent as its first argument),
+            plus ``topic``/``wing``. A caller-supplied ``pointKind`` that
+            contradicts ``diary`` is REFUSED, never silently re-filed.
 
         Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
         ``nudges`` lists top related Points (by name/content token overlap) with
@@ -54985,6 +55737,12 @@ class TortoiseSDK:
         (``no_source`` only for documents, where its remedy is real;
         ``extracted_from_inert`` on any type that declares an unwired ref).
         Advisory only: never a block, and it never changes what is stored.
+
+        The ``point``/``diary`` arms return the SAME ``{node, nudges}`` shape
+        and compute their nudges, but their ``node`` is whatever
+        ``create_point`` returned (minus its transient ``advisories``, which
+        move to the top level) — a Point's node is its property bag, including
+        the ``valid_to_shaped`` receipt (#9202).
 
         #9964 — THE KIND DECIDES THE LAYER. The classifier's entity partition
         merges objects and subjects, so a kind it returns can belong to the
@@ -55559,10 +56317,19 @@ class TortoiseSDK:
             node = self._create_entity("Document", did, {
                 "title": name, "documentKind": documentKind, **props},
                 "DocumentCreated", is_episodic=is_episodic)
+        elif t == "point" or t == "diary":
+            # ONE branch, not two: the arms differ in NOTHING here — the door's own
+            # `dedup` semantics are replayed inside `_absorbed_point_write` from the
+            # `t` it receives, so a split body would be two copies of one call that
+            # ruff reds as SIM114 (agent-infra-ci / lint). `t` still rides through
+            # unchanged, which is what lets the two arms disagree later without this
+            # line deciding anything.
+            return self._absorbed_point_write(
+                t, name, props, is_episodic=is_episodic, guard=_guard)
         else:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
-                f"{', '.join(_ENTITY_ITEM_LABELS)}")
+                f"{', '.join(_CREATE_ENTITY_TYPE_ARMS)}")
         # ── #8171: MATERIALIZE the provenance a caller declared inline ──────
         # `extractedFrom` is a recognised prop on this door — it rides the
         # generic passthrough and is stored on the node.
@@ -55996,6 +56763,139 @@ class TortoiseSDK:
         scored.sort(key=lambda r: (-r["score"], r["candidate"]))
         return [{k: r[k] for k in ("candidate", "suggested_relation", "reason")}
                 for r in scored[:limit]]
+
+    def _absorbed_point_write(self, t: str, name: str, props: dict, *,
+                              is_episodic: bool | None = None,
+                              guard: object | None = None) -> dict:
+        """The `type="point"` and `type="diary"` arms of `create_entity` (#11609).
+
+        `tortoise_create_point` and `tortoise_diary_write` retire FORWARD into
+        `create_entity`, and these arms are what make that retirement legal: the
+        `PROTECTED` table in `tests/test_11609_door_retirement.py` records
+        *"create_entity has no point arm"* / *"…no diary arm"* as the reason
+        neither door could retire, and a door may only leave that table in the
+        batch that makes its stated reason FALSE.
+
+        ⛔ BOTH ARMS RELAY TO `create_point` — they do not re-implement it. The
+        point write path is ~600 lines of gates with their own recorded rulings
+        (kind approval #5475, invisible-kind #9287, narrative #10000, the status
+        vocabulary #11824, the validity window #5352, content-hash dedup #6110,
+        provenance inference #3263 …). A second spelling of any of it here would
+        be the drift this file keeps paying for, and the ONE promise the
+        retirement makes is "the same node" — which is only provable by
+        reaching the same code. `create_point` STAYS an SDK method (it is the
+        door's SDK surface, and this arm makes no surface change); only the MCP
+        NAME retires.
+
+        ⛔ THE ARMS RETURN BEFORE THE ENTITY POST-PROCESSING, and that is
+        load-bearing rather than tidy. The code below the dispatch materialises
+        `extractedFrom` for the labels in `_ENTITY_SOURCE_LABELS` and otherwise
+        reports the ref as INERT — but `create_point` DOES wire a declared
+        `extractedFrom` (and infers one from `session_id`, #3263), so falling
+        through would duplicate that work and attach an `extracted_from_inert`
+        advisory to a write whose source was in fact materialised.
+
+        ⛔ TWO ARMS, ONE BODY — the split is for
+        `_create_entity_dispatch_arms()`, which reads the dispatch as
+        `^        (?:el)?if t == "([a-z_]+)":$` and would not see a combined
+        `elif t in (…):`. Each `type=` value must therefore be its OWN one-line
+        branch; the behaviour they share lives here.
+        """
+        # ⛔ THE KIND IS THE CALLER'S, NOT THIS ARM'S — except where the
+        # discriminator already decided it. `type="point"` is a DOOR, not a kind:
+        # `props={"pointKind": …}` says which kind, exactly as
+        # `subjectKind`/`objectKind` do one arm up, and an UNSENT kind defaults to
+        # `statement` (the ontology's claim default, #10977 — a point is
+        # `:Point {pointKind: statement}`, ONE belief kind, never a new kind).
+        # `type="diary"` pins the kind, so a caller-supplied `pointKind` that
+        # CONTRADICTS it is refused rather than silently re-filing the write: the
+        # retired `tortoise_diary_write` took no kind argument at all, and a
+        # container that answers `type="diary"` with a `statement` is exactly
+        # the "deletes the door and keeps the name, with no capability behind
+        # either" failure the door-retirement suite exists to catch.
+        declared_kind = props.pop("pointKind", None)
+        if declared_kind is None:
+            declared_kind = props.pop("point_kind", None)
+        if t == "diary":
+            # `_type_text` is the ONE primitive both sides of this seam read a
+            # `type`/kind with (content, lowercased, no subclass dispatch), so a
+            # `" Diary "` spelling is the same kind and a NON-STR reads as blank
+            # — "not supplied", the same rule `named_kind` applies. Either way
+            # the write below is a `pointKind='diary'`, which is exactly what
+            # `type='diary'` promised.
+            if declared_kind is not None and _type_text(declared_kind) not in (
+                    "", "diary"):
+                raise ValueError(
+                    "create_entity(type='diary') pins the kind — the write "
+                    f"declares pointKind={declared_kind!r}. A diary entry is "
+                    "a :Point {pointKind: 'diary'}; write a different kind "
+                    "with type='point'.")
+            # `tortoise_diary_write(agent_name, …)` could not be called without
+            # its author, so neither can the arm that absorbs it. A NAMED
+            # refusal, not a silent default: `authoredBy` is what makes a diary
+            # entry attributable. `None` (absent) is the only value refused — a
+            # blank string is accepted exactly as the retired door accepted it
+            # (#1934: never invent a refusal).
+            if props.get("authoredBy") is None:
+                raise ValueError(
+                    "create_entity(type='diary') requires authoredBy — the "
+                    "agent the entry is written by. The retired "
+                    "tortoise_diary_write named it as its first argument.")
+            point_kind = "diary"
+        else:
+            point_kind = "statement" if declared_kind is None else declared_kind
+            # ⛔ The retired door's DEDUP DEFAULT, not `create_point`'s. They
+            # differ and the difference is a silent behaviour change: the MCP
+            # `tortoise_create_point` declares `dedup: bool = True`, so a
+            # migrating caller that omits it FOLDS (the door's own docstring is
+            # largely about that fold), while `create_point`'s SDK default is
+            # False. Carrying `create_point`'s default here would turn every
+            # migrated re-write into a duplicate Point.
+            # ⛔ `tortoise_diary_write` passed NO dedup, so the diary arm does
+            # not acquire one: it keeps `create_point`'s default, which is what
+            # the door did.
+            props.setdefault("dedup", True)
+        point = self.create_point(
+            point_kind, name, is_episodic=is_episodic, **props)
+        return self._absorbed_point_result(point, name, guard)
+
+    def _absorbed_point_result(self, point: dict, text: str,
+                               guard: object | None = None) -> dict:
+        """The container's reply for a POINT-shaped arm (#11609).
+
+        The two arms that relay to `create_point` (`type="point"` and
+        `type="diary"`) get the container's `{node, nudges}` shape, not the
+        point's own flat dict — the same asymmetry `_flat_entity_result`
+        resolves in the other direction for the legacy `create_*` aliases.
+        Neither the retired door nor `create_point` is changed by this: they keep
+        answering exactly as they did, which is what the shipped shim serves.
+
+        ⛔ THE TRANSIENT KEYS MOVE, THEY ARE NOT COPIED. `create_point` returns
+        two things that are NOT node properties — `advisories` (the #8171/#9964
+        note, never journaled) and the `valid_to_shaped` receipt (#9202) — and
+        leaving `advisories` inside `node` would put it where every other arm
+        does not, so a caller switching on `result.get("advisories")` would see
+        nothing on the point arm alone. The receipt stays ON the node: it is a
+        statement about THIS caller's `validTo`, which is exactly where the point
+        door puts it.
+
+        Nudges are COMPUTED here rather than returned empty. An empty list is
+        indistinguishable from "this claim relates to nothing", and a claim is
+        the write most in need of the IMPL/NAND suggestion — the cost of the
+        scan is documented on `_nudge_candidates` (#13436: 12.3-13.3 ms at both
+        1,000 and 5,000 Points; its 400-row cap is constant) and it is the price
+        of the CONTAINER's shape, which the door it absorbed never paid because
+        the door does not promise nudges at all.
+        """
+        node = dict(point)
+        advisories = node.pop("advisories", None)
+        return {
+            "node": node,
+            **_kind_guard_payloads(guard),
+            "nudges": self._nudge_candidates(
+                text, exclude_ids=[node.get("id")]),
+            **({"advisories": advisories} if advisories else {}),
+        }
 
     def _flat_entity_result(self, result: dict) -> dict:
         """Bare node a legacy ``create_*`` alias returns, plus #8171 advisories.

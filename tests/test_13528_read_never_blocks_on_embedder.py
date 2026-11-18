@@ -53,6 +53,7 @@ import contextlib
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -282,8 +283,17 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
     still be able to say which half it died in), and on the cold path NEITHER
     may hold the load: the read declines instead of waiting, so ``embed_get``
     is a fast decision rather than a stall, and ``embed_encode`` never opens at
-    all. ``pre_handler`` must stay small too — the 7.2–9.3 s it published in
-    production was reads QUEUED behind workers parked in the load.
+    all.
+
+    ⛔ ``pre_handler`` IS DELIBERATELY NOT ASSERTED HERE (#13535 review finding
+    1). It is charged from the timeline's start to the FIRST mark, and the first
+    mark is ``embed_get`` — emitted BEFORE the acquire (``sdk.py``) — so in a
+    single-threaded read it holds argument validation and nothing else: it is
+    structurally sub-millisecond, passes on the pre-change tree, and no mutation
+    of this diff can redden it. The production 7.2–9.3 s was a QUEUE of reads
+    waiting for a worker slot, which ONE READ cannot construct; that shape is
+    built for real in
+    ``test_a_read_queued_behind_loaders_does_not_breach_pre_handler`` below.
     """
     timeline = begin()
     with request_stages(timeline):
@@ -298,15 +308,103 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
         f"embed_get took {spent[STAGE_EMBED_GET]} ms of a {_LOAD_S * 1000:.0f} ms "
         f"load — the read is waiting on it again instead of declining inside its "
         f"{READ_EMBED_BUDGET_S * 1000:.0f} ms budget (measured pre-fix: 7857.3 ms)")
-    # ⛔ ``spent_ms()`` IS MILLISECONDS (``read_stages.Timeline.spent_ms``), so
-    # the bar needs the same ``* 1000.0`` the frame above it carries. Without it
-    # this compares against 4 ms rather than 4 000 ms — a bar the message two
-    # lines down says is the wrong number, and a flake door on the contended
-    # 4-worker carve-out lane (#13528 review F2, pre-existing).
-    assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
-        f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms of a "
-        f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a read must not "
-        f"queue behind workers parked in the embedder load")
+
+
+# ── the QUEUE: production's `pre_handler` breach, built for real ──────────
+
+#: Worker slots in the simulated read lane. Production is 8
+#: (``monitoring.CONTROL_PLANE_READ_WORKERS``); two is the smallest pool that
+#: can hold a queue at all, and the property under test — "a read waiting for a
+#: slot does not inherit the load" — does not get truer with more slots.
+_READ_LANE_WORKERS = 2
+
+
+def _read_with(timeline, sdk):
+    """One read with ``timeline`` bound, the way the transport seam binds it.
+
+    The seam constructs the timeline on the request's own thread and binds it
+    around the handler; the executor thread is this harness's stand-in for that
+    handler, so the bind happens HERE and not at submit time.
+    """
+    with request_stages(timeline):
+        _read(sdk)
+
+
+def test_a_read_queued_behind_loaders_does_not_breach_pre_handler(
+        sdk, cold_embedder):
+    """Indicator 4 — the half a single-threaded read structurally cannot show.
+
+    Production's ``pre_handler`` breach (7.2–9.3 s) was not middleware: the read
+    lane is 8 daemon workers and every worker that entered ``get()`` parked in
+    the load, so reads that had ARRIVED but not yet started waited for a slot.
+    ``pre_handler`` is measured from the request's ARRIVAL to its first stage
+    mark (``read_stages.ReadStages.mark``), so the queue wait lands there and
+    nowhere else.
+
+    So the shape is BUILT, not assumed: ``_READ_LANE_WORKERS`` reads occupy the
+    pool while the load is in flight, and a THIRD is submitted behind them with
+    its timeline anchored at its own submit time — ``begin(started_at=…)``, the
+    parameter that exists for exactly this, so the wait for a slot is charged to
+    ``pre_handler`` rather than silently dropped.
+
+    ⛔ IT MUST REDDEN ON THE PRE-CHANGE CODE (#13528 indicator 4). With the
+    blocking acquire restored the two occupying reads sit in ``get()`` for the
+    whole ``_LOAD_S`` load, so the third starts only after the load and its
+    ``pre_handler`` is ≈ the load. The pre-change path is reproduced exactly by
+    answering ``None`` from ``await_read_ready_reason`` (``None`` is precisely
+    "acquire it, the old way" — the arm the warm-up opt-out already takes), and
+    the measured mutation is recorded in the commit that added this row.
+
+    Post-fix each occupying read declines inside ``READ_EMBED_BUDGET_S``, so the
+    third starts after about one budget — three orders of magnitude under the
+    bar.
+
+    ⛔ THE ROW MUST ALSO PROVE THE QUEUE FORMED, not just that it was cheap
+    (#13540 review P2). ``spent_ms()`` OMITS a stage that accrued no time
+    (``read_stages.ReadStages.spent_ms``), so ``spent.get(STAGE_PRE_HANDLER, 0.0)``
+    answers ``0.0`` for "waited 0 ms" AND for "nothing was ever marked" — and
+    the upper bar alone passes on the second. With the occupiers' futures
+    discarded, two reads that RAISED would free the pool instantly and this row
+    would silently degenerate into the inert guard it replaces. So the
+    occupiers are collected (a raise is a red, not a free pass) and the LOWER
+    side is pinned: ``pre_handler`` must be PRESENT and must carry the wait the
+    fix leaves it (one ``READ_EMBED_BUDGET_S`` decline, halved for headroom;
+    measured post-fix: 261.2 ms against the 125 ms floor).
+    """
+    lane = ThreadPoolExecutor(max_workers=_READ_LANE_WORKERS,
+                             thread_name_prefix="read13528")
+    try:
+        occupiers = [lane.submit(_read, sdk) for _ in range(_READ_LANE_WORKERS)]
+        arrival = time.monotonic()
+        timeline = begin(started_at=arrival)
+        queued = lane.submit(_read_with, timeline, sdk)
+        queued.result(timeout=_LOAD_S + 10)
+        for occupier in occupiers:
+            occupier.result(timeout=_LOAD_S + 10)
+    finally:
+        lane.shutdown(wait=True)
+
+    elapsed = time.monotonic() - arrival
+    spent = timeline.spent_ms()
+    assert STAGE_PRE_HANDLER in spent, (
+        f"the queued read never marked {STAGE_PRE_HANDLER}, got {spent!r} — the "
+        f"queue was not built, so the upper bar below would pass vacuously")
+    assert spent[STAGE_PRE_HANDLER] >= READ_EMBED_BUDGET_S * 1000.0 * 0.5, (
+        f"the queued read accrued only {spent[STAGE_PRE_HANDLER]} ms of "
+        f"pre_handler, under the "
+        f"{READ_EMBED_BUDGET_S * 1000.0 * 0.5:.0f} ms floor — the third read did "
+        f"not wait for a worker slot, so this row proves nothing (post-fix "
+        f"measured 261.2 ms: one budgeted decline of the read ahead of it)")
+    assert spent[STAGE_PRE_HANDLER] < _LOAD_S / 2 * 1000.0, (
+        f"the queued read accrued {spent[STAGE_PRE_HANDLER]} ms of "
+        f"pre_handler against a {_LOAD_S / 2 * 1000:.0f} ms bar — a read waiting "
+        f"for a worker slot is paying the LOAD before it starts (production: "
+        f"pre_handler 7.2–9.3 s; pre-change this row measures ≈ the load)")
+    assert elapsed < _LOAD_S / 2, (
+        f"a read queued behind {_READ_LANE_WORKERS} loaders took {elapsed:.2f}s "
+        f"(bar: {_LOAD_S / 2:.1f}s) — each read it queues behind must decline "
+        f"inside its {READ_EMBED_BUDGET_S * 1000:.0f} ms budget instead of "
+        f"parking in the load")
 
 
 # ── the counter-tests: the fix may not become "stop embedding" ────────────
@@ -467,6 +565,24 @@ def test_a_spent_read_attempt_is_rearmed_and_spawned(monkeypatch):
             f"the re-armed read waited {elapsed:.2f}s (budget "
             f"{READ_EMBED_BUDGET_S}s) — it must SPAWN the retry and decline, "
             f"not sit out the budget for the attempt it just restarted")
+
+        # ⛔ END-TO-END, ON THE STATE THIS TEST ALREADY BUILT (#13548 review F2).
+        # Everything above reaches the real defect state — a stale recorded
+        # ``load_failed`` behind a ``load_in_flight`` decline — so the REFUSAL is
+        # asserted here rather than only on the translator. ``main``'s fixed dict
+        # answered ``model_unavailable`` for this decline (the "nothing was
+        # recorded" fallback) while a cause WAS recorded, which is #13543. This
+        # is the row that reds under that dict on the REAL path, not a
+        # re-statement of the translator's own rows.
+        monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+        with pytest.raises(EmbedderUnavailableError) as excinfo:
+            EmbeddingModel._unavailable(
+                context="read: embedder not warm within the read's budget",
+                kind=decline)
+        assert excinfo.value.failure_kind == "load_failed", (
+            "the refusal must name the cause that was recorded, got "
+            f"{excinfo.value.failure_kind!r} — `model_unavailable` here means "
+            "the recorded cause was replaced by the nothing-recorded fallback")
         assert EmbeddingModel._warm_up_started is True, (
             "the re-arm must SPAWN the retry before answering, or the answer "
             "is a claim about a load that does not exist")
@@ -512,6 +628,107 @@ def test_a_rearm_that_cannot_spawn_answers_absent(monkeypatch):
             "read would read it as an attempt in flight")
     finally:
         monkeypatch.undo()
+        EmbeddingModel._reset()
+
+
+def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
+    """The translator's recorded-cause arm, pinned directly (#13528 review P2).
+
+    ``load_in_flight`` names no failure, but a load CAN fail between the read's
+    decline and the raise that carries it, and ``_last_failure_kind`` then holds
+    the operator's real answer. The earlier shape special-cased ``no_embedder``
+    and returned the ``model_unavailable`` fallback for everything else, so that
+    recorded cause was discarded. This is the READ PATH's real state, not a
+    hypothetical: a failure older than ``_FAIL_COOLDOWN_S`` leaves
+    ``load_in_flight`` on the trace with a recorded kind, and ``_as_failure_kind``
+    then reports that kind. ``test_a_spent_read_attempt_is_rearmed_and_spawned``
+    builds exactly that state (``_last_failure_kind = "load_failed`` with
+    ``_last_failed_at`` older than the cooldown) and this file pins the
+    translation it feeds BOTH ways: the direct rows below, and the end-to-end
+    refusal at the end of that test.
+
+    ⛔ THE SECOND BEHAVIOUR CHANGE IS PINNED HERE TOO (#13548 review F1).
+    ``no_embedder`` with NOTHING recorded now answers ``model_unavailable``;
+    ``main``'s dict answered ``not_installed``. That is deliberate — the
+    contract's wording puts the fallback on "no kind was recorded", and a
+    designed-absence word is not itself a cause — and the two ``no_embedder``
+    arms below are what stop a re-added ``no_embedder -> not_installed`` special
+    case from shipping green, which is the #5275 mis-attribution one arm over.
+
+    ⛔ THE #13543 DEFECT THIS PINS. ``main`` translated with a FIXED dict
+    (``_READ_DECLINE_FAILURE_KIND``) that ignored ``_last_failure_kind`` entirely
+    and answered ``model_unavailable`` for ``load_in_flight`` — the contract's
+    documented "nothing was recorded" fallback — so an ARMED process was told
+    silence while the operator's real answer sat in ``_last_failure_kind``. The
+    two recorded-state assertions below (``load_failed``, ``not_installed``) are
+    the rows that red under that dict; the ``load_timeout`` row is a pass-through
+    the dict also got right.
+    """
+    EmbeddingModel._reset()
+    try:
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == \
+            "model_unavailable", (
+            "with nothing recorded the contract's documented fallback is the "
+            "honest answer — the load was in flight, nothing broke")
+
+        assert EmbeddingModel._as_failure_kind("no_embedder") == \
+            "model_unavailable", (
+            "with nothing recorded even the designed-absence trace word names no "
+            "cause of its own — the fallback is the honest answer, not "
+            "`not_installed`")
+
+        EmbeddingModel._last_failure_kind = "load_failed"
+        assert EmbeddingModel._as_failure_kind("no_embedder") == "load_failed", (
+            "the recorded kind outranks the designed-absence trace word too — "
+            "the special-case shape this replaces")
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == "load_failed", (
+            "a cause recorded by the time the refusal is raised must be named, "
+            "not replaced by the fallback")
+
+        EmbeddingModel._last_failure_kind = "not_installed"
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == "not_installed", (
+            "the recorded kind is the answer whatever it is, not only for "
+            "`no_embedder` — the special-case shape this replaces")
+
+        assert EmbeddingModel._as_failure_kind("load_timeout") == "load_timeout", (
+            "a reason already in the refusal's vocabulary is passed through")
+    finally:
+        EmbeddingModel._reset()
+
+
+def test_the_refusal_names_a_recorded_cause_for_a_trace_only_decline(monkeypatch):
+    """⛔ THE CALL SITE, PINNED END-TO-END (#13543 review round 2).
+
+    ``test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason`` pins
+    the TRANSLATOR. A translator that is correct but no longer CALLED is the
+    defect restored: reverting ``failure_kind = cls._as_failure_kind(kind)`` back
+    to the removed fixed dict at the ``_unavailable`` seam leaves the helper
+    intact and every translator row above green (measured at this head: with the
+    call site reverted the two files are `2 failed, 47 passed` — the two reds are
+    THIS row and the end-to-end refusal block inside
+    ``test_a_spent_read_attempt_is_rearmed_and_spawned``; the translator rows stay
+    green, which is the gap this pair closes).
+    Driven through ``_unavailable`` — the seam that actually
+    writes ``failure_kind`` onto the refusal — so that revert reds here.
+
+    Shape copied from ``test_a_designed_absence_is_refused_with_not_installed``:
+    the predicate and ``_unavailable`` are the two halves of the seam, and the
+    assertion is on the KIND the caller receives, never on a trace word.
+    """
+    EmbeddingModel._reset()
+    monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+    monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "load_failed")
+    try:
+        with pytest.raises(EmbedderUnavailableError) as excinfo:
+            EmbeddingModel._unavailable(
+                context="read: embedder not warm within the read's budget",
+                kind="load_in_flight")
+        assert excinfo.value.failure_kind == "load_failed", (
+            "the REFUSAL must carry the cause that was recorded, got "
+            f"{excinfo.value.failure_kind!r} — `model_unavailable` here means "
+            "the translator is no longer consulted at the seam, i.e. the "
+            "#13543 defect is back even though `_as_failure_kind` is correct")
+    finally:
         EmbeddingModel._reset()
 
 

@@ -264,22 +264,102 @@ def read_targets(
     }
 
 
-def live_surface() -> dict:
-    """The live surface, EXECUTED from the declaration — never read as text."""
+def live_surface(declaration: Path | None = None) -> dict:
+    """The live surface, EXECUTED — the DECLARED names that resolve (#10034, #11609).
+
+    ⛔ THE SDK LEG IS MEASURED ON THE DECLARATION'S OWN AXIS, which is #10034's own
+    reasoning carried one step further. #10034 fixed HALF of this instrument: it moved
+    the TARGET from a regex over prose to the declaration, "so '40' and '149' were
+    numbers from two different instruments, and neither could see a method that was
+    added". The live leg was left counting ``dir(TortoiseSDK)`` — every public method
+    that happens to exist — and those are answers to two different questions:
+
+      * the TARGET asks **"how many approved names does the product promise?"** — a set
+        of 40 NAMES, 39 methods plus the row-1 entry point;
+      * ``dir()`` asks **"how many public methods does the class currently carry?"** —
+        which includes all 66 off-surface methods that #4282 Phase 2 removes. It can
+        only ever agree with a 40-name target by accident (or by the removals being
+        complete), so it reports a 2.4x "OVER TARGET" on a class that is UNDER-target
+        on the question the owner actually ruled.
+
+    The two are not interchangeable and neither is wrong — but only the first is
+    COMPLIANCE with the ruling. So the SDK leg of the verdict is now "of the declared
+    names, how many resolve?", which is the same axis the MCP leg has always used (the
+    names in ``TOOL_REGISTRY``) and the same axis ``tools/sdk_surface_declaration.py``
+    grades on.
+
+    ⛔ THE FALLBACK IS KEPT AND STILL REPORTED, not deleted: ``sdk_public_methods`` is
+    the ``dir()`` count, printed as context beside the verdict. It is what answers "has
+    the surface GROWN an unapproved method?" — the question the growth pin
+    (``high_water_counts``) enforces — and dropping it would trade one blind spot for
+    another. It simply no longer decides the SDK verdict, because a count of everything
+    cannot be compared to a count of what was approved.
+    """
     try:
+        import tortoise
         from tortoise.sdk import TortoiseSDK
         from tortoise.tool_registry import TOOL_REGISTRY
     except Exception as exc:
         raise TargetUnreadable(
             f"could not import the surface declaration: {type(exc).__name__}: {exc}"
         ) from exc
+
+    from tools.sdk_surface_declaration import (
+        DeclarationUnreadable,
+        load_declaration,
+    )
+
+    try:
+        declared = load_declaration(declaration)
+    except DeclarationUnreadable as exc:
+        raise TargetUnreadable(str(exc)) from exc
+
     tools = sorted(entry.name for entry in TOOL_REGISTRY)
-    sdk = sorted(
+    class_members = set(dir(TortoiseSDK))
+    #: The row-1 name (``Tortoise(...)``) is not a CLASS MEMBER — it names the
+    #: ``TortoiseSDK`` class, exposed lazily on the package (see
+    #: ``tortoise/__init__.py``'s ``__getattr__``). ``tortoise/__all__.py`` records
+    #: exactly that distinction, so resolving it against the package is not a loophole;
+    #: resolving it against the class would be a check that can never pass.
+    ENTRY_POINT = "Tortoise"
+
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for name in declared["__all__"]:
+        if name == ENTRY_POINT:
+            ok = callable(getattr(tortoise, name, None))
+        else:
+            ok = name in class_members and callable(getattr(TortoiseSDK, name, None))
+        (resolved if ok else unresolved).append(name)
+
+    public_methods = sorted(
         name
-        for name in dir(TortoiseSDK)
+        for name in class_members
         if not name.startswith("_") and callable(getattr(TortoiseSDK, name))
     )
-    return {"mcp": len(tools), "sdk": len(sdk), "tools": tools, "sdk_methods": sdk}
+    return {
+        "mcp": len(tools),
+        #: ⚠️ ``sdk`` is the PUBLIC-METHOD count and KEEPS that meaning. It is a SHARED
+        #: instrument — `tests/test_surface_manifest.py` pins it against the manifest's
+        #: `counts.sdk_public_methods` ("a compliance check that measured a DIFFERENT
+        #: surface than the drift gate would be two instruments disagreeing about what 'the
+        #: surface' is"). Redefining it to mean the declared-resolving count would have
+        #: made that pin compare two different questions, which is the #10034 defect this
+        #: change exists to fix, reintroduced in the opposite direction. The compliance
+        #: axis is a SEPARATE key below, and only the SDK leg's verdict reads it.
+        "sdk": len(public_methods),
+        "tools": tools,
+        "sdk_methods": public_methods,
+        #: The fallback view, kept and still reported: ``dir()``-shaped, answers "has the
+        #: surface GROWN an unapproved method?" — the growth pin's question.
+        "sdk_public_methods": len(public_methods),
+        #: The COMPLIANCE axis (#11609): of the DECLARED names, how many resolve. 39 method
+        #: rows on the class plus row 1's entry point on the package = 40.
+        "sdk_declared": len(resolved),
+        "declared": list(declared["__all__"]),
+        "sdk_resolved": resolved,
+        "sdk_unresolved": unresolved,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -288,11 +368,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--canonical-doc", default=str(CANONICAL_DOC))
     parser.add_argument("--beta-doc", default=str(BETA_DOC))
     parser.add_argument("--declaration", default=None)
+    parser.add_argument(
+        "--leg",
+        choices=("all", "sdk", "mcp"),
+        default="all",
+        help=(
+            "which leg's verdict this run returns. 'all' (the default) keeps the "
+            "original semantics — any differing leg exits 1 — and is the only form "
+            "that may be read as a statement about the WHOLE surface. A single leg is "
+            "for verifying that leg on its own (e.g. the SDK declaration resolving 40/40 "
+            "while the MCP migration is still open); it says nothing about the others."
+        ),
+    )
     args = parser.parse_args(argv[1:])
 
     try:
         targets = read_targets(args.canonical_doc, args.beta_doc, args.declaration)
-        live = live_surface()
+        live = live_surface(args.declaration)
     except TargetUnreadable as exc:
         print(f"::error::{exc}")
         print(f"REFUSED {exc}")
@@ -306,22 +398,40 @@ def main(argv: list[str] | None = None) -> int:
         f"pr={approval['pr']} date={approval['date']}"
     )
     print(f"  target:    {targets['mcp']} MCP tools / {targets['sdk']} SDK methods")
-    print(f"  live:      {live['mcp']} MCP tools / {live['sdk']} SDK methods")
+    print(
+        f"  live:      {live['mcp']} MCP tools / {live['sdk_declared']} SDK methods"
+        "   ← the DECLARED names that resolve"
+    )
+    # The SDK leg's axis is "declared names that resolve", so say which ones did not —
+    # a count without the names is a number a reader cannot act on.
+    named = len(live["sdk_resolved"]) + len(live["sdk_unresolved"])
+    print(
+        f"             SDK declaration: {len(live['sdk_resolved'])}/{named} names resolve "
+        f"({len(live['sdk_resolved']) - 1} of {named - 1} method rows + the row-1 entry point)"
+    )
+    if live["sdk_unresolved"]:
+        print(f"             unresolved: {', '.join(live['sdk_unresolved'])}")
+    print(
+        f"             fallback view (not the verdict): class carries "
+        f"{live['sdk_public_methods']} public SDK method(s) — the remainder are "
+        "off-surface, removed by #4282 Phase 2"
+    )
     print("")
 
     problems: list[str] = []
-    for label, live_n, target_n in (
-        ("MCP tools", live["mcp"], targets["mcp"]),
-        ("SDK methods", live["sdk"], targets["sdk"]),
+    for label, leg, live_n, target_n in (
+        ("MCP tools", "mcp", live["mcp"], targets["mcp"]),
+        ("SDK methods", "sdk", live["sdk_declared"], targets["sdk"]),
     ):
         delta = live_n - target_n
         ratio = (live_n / target_n) if target_n else float("inf")
         verdict = "OK" if delta == 0 else ("OVER TARGET" if delta > 0 else "UNDER TARGET")
+        note = "" if args.leg in ("all", leg) else "   [not this run's leg]"
         print(
             f"  {label:12s} live {live_n:>4} → target {target_n:>4}   "
-            f"(Δ {delta:+d}, {ratio:.1f}x) {verdict}"
+            f"(Δ {delta:+d}, {ratio:.1f}x) {verdict}{note}"
         )
-        if delta != 0:
+        if delta != 0 and args.leg in ("all", leg):
             problems.append(
                 f"{label}: live {live_n} != approved target {target_n} (Δ {delta:+d})"
             )
@@ -339,7 +449,8 @@ def main(argv: list[str] | None = None) -> int:
             "deliberately not in the required CI gate while the gap is open."
         )
         return 1
-    print("OK — the live surface matches the owner-approved target.")
+    scope = "" if args.leg == "all" else f" (--leg {args.leg} — this leg only)"
+    print(f"OK — the live surface matches the owner-approved target{scope}.")
     return 0
 
 
