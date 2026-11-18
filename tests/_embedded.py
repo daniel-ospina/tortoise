@@ -1388,8 +1388,11 @@ _SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
 # widens what a sweep is permitted to destroy. That is a deliberate acceptance
 # (one declaration beats two that can drift), and it is recorded here rather
 # than left to be discovered: an editor of `sdk.py::_TENANT_GRAPH_PREFIXES` is
-# editing a delete gate too. Add a prefix only for a family the composer both
-# mints and strips.
+# editing a delete gate too. ⚠️ Add a prefix only for a family the composer
+# STRIPS — mint status is NOT the test for membership: `team_` is strip-only
+# (`sdk.py` mints `org_` and only `org_`, post-#3543) and it must stay, because
+# pre-#3543 graphs are still named that way and a sweep that dropped it could
+# never reclaim them.
 _PRODUCT_GRAPH_PREFIXES = _TENANT_GRAPH_PREFIXES
 #   input: GRAPH.LIST, OPT-IN ONLY. THE #3634 CENSUS COHORT, as recorded on
 #   issue #3634: each entry below is a name verified present in that census,

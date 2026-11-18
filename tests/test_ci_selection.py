@@ -18284,8 +18284,10 @@ def test_every_custom_runs_on_label_is_declared_to_actionlint():
 def test_the_pool_canary_provisions_before_a_failed_step_can_skip_it():
     """A later `!cancelled()` harness needs a provisioner that is ALSO `!cancelled()`.
 
-    `repo-harnesses` is the tree's only job pinned to the pool's own labels
-    (`ci.yml`, #10237 canary), so every one of its steps runs on a bare agent and
+    `repo-harnesses` was the tree's ONLY job pinned to the pool's own labels when this
+    contract was written (`ci.yml`, #10237 canary); two housekeeping jobs now share that
+    class (`closes-coherence.yml`, `redis-guard.yml`, #13596), so re-derive the population
+    rather than trusting this sentence. Every one of its steps runs on a bare agent and
     the job carries a tool contract ahead of the harnesses. Two polarities in that
     contract are easy to get wrong and neither is visible on the hosted image
     these were written against:

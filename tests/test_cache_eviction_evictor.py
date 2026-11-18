@@ -138,7 +138,8 @@ def test_lane_graph_name_is_owned_by_the_sweep_s_ownership_record(lane):
     `_journal_append` is the third half of the raw-client contract BECAUSE the
     session-end sweep reads the journal through `owns_by_ownership_record`
     (`tests/_embedded.py::_SWEEP_OWNED_PREFIXES` = `test_`, `tortoise_test`,
-    `team_`, `org_`). A journaled name outside that vocabulary makes the append
+    `org_`, `team_` — the tenant half is the composer's own tuple, #13205). A
+    journaled name outside that vocabulary makes the append
     INERT: `_sweep_drop` classifies it `preserved`, drops nothing, and then
     removes the journal anyway — so the graph this fixture minted can never be
     reclaimed, and `_owned_survivors` will not report it as a leak either. That

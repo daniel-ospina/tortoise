@@ -131,10 +131,14 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 300 files finds exactly 13 — the verb-at-end-of-line scan alone finds **177** (one
-`#13399` added is a COMMENT line ending “post-merge”, which the case-insensitive predicate counts, and
-`tortoise/ended.py` carries none of it), which is why
-the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
+predicate over the same 300 files finds exactly 13 — the verb-at-end-of-line scan alone finds **178**,
+and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
+enumerated, and the other **165** are a COMMENT or docstring line that simply ENDS on the word (“any
+failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
+“(#13330 post-merge” that `#13399` added, …) with nothing following, which the case-insensitive
+predicate counts and which is why the predicate has to be stated — `tortoise/ended.py` carries none of
+the 178, so the count does not ride on that file — and none of the 13 is an executable Cypher literal
+split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,071, and `-i` without the exclusion 2,410 — ⛔ both over

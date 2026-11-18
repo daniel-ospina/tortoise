@@ -149,16 +149,74 @@ def test_create_document_is_a_parallel_writer_not_an_alias_FINDING(monkeypatch):
         "create_document now delegates to create_entity — the divergence is closed")
 
 
-def test_create_entity_still_refuses_a_type_it_does_not_absorb(monkeypatch):
-    """`create_point` is NOT `type=`-routable — a Point is another layer, not another kind.
+def test_create_entity_refuses_a_type_that_is_no_arm(monkeypatch):
+    """The funnel's closed set stays CLOSED — `unknown type` is what a NON-arm meets.
 
-    Recorded rather than silently accepted: the absorption ledger's `create_point` row is
-    not reachable through this door, and a merge that swallowed it would either have to
-    grow the door's accepted types (a behaviour change) or lie about the mapping.
+    ⛔ THIS ROW USED TO NAME `point` AS THE REFUSAL, and that premise is gone. It read
+    *"`create_point` is NOT `type=`-routable — a Point is another layer, not another
+    kind"*, and recorded the absorption ledger's `create_point` row as unreachable
+    through this door. `#11609` lane P1 is the change that premise invited: it retired
+    `tortoise_create_point`/`tortoise_diary_write` FORWARD into this funnel, so
+    `type="point"`/`type="diary"` are dispatch ARMS now — and a `"point"` refusal here
+    would be the regression, not the guard. The teeth stay where they were (a `type=`
+    that is no arm is still refused); the arms' ROUTING is pinned by the relay row below.
     """
     real = TortoiseSDK.create_entity
     with pytest.raises(ValueError, match="unknown type"):
-        real(_sdk(), "point", "a claim")
+        # ⚠️ `"Point"` would NOT do: `_type_text` lowercases `type=` (content), so
+        # `"Point"` IS the `point` arm. This name is no arm at any casing.
+        real(_sdk(), "NotAKind", "a claim")
+
+
+def test_create_entity_relays_the_point_arms_it_absorbed(monkeypatch):
+    """`type="point"`/`"diary"` reach the point writer by RELAY, at every casing.
+
+    The merge that absorbed them (#11609 lane P1, on top of the same door this file gates)
+    made `create_entity` the door for a Point claim and a diary entry. What has to hold is
+    not "an arm exists" — `tests/test_11609_door_retirement.py` derives that from the
+    dispatch source — but that the arm still **relays**: the ~600 lines of point gates
+    (invisible kind #9287, kind approval #5475, narrative #10000, the validity window
+    #5352 …) live in ONE writer, and a re-implementation here would be the second spelling
+    the whole file exists to prevent. Substituting `_absorbed_point_write` is what makes
+    that observable: an inlined copy would never call the spy.
+
+    ⛔ `"POINT"` IS THE SAME ARM — ``_type_text`` is content, one primitive for both sides
+    of the seam — so the arm must not be reachable at one spelling only.
+    """
+    inst = _sdk()
+    relayed: list[tuple] = []
+
+    def relay(t, name, props, *, is_episodic=None, guard=None):
+        relayed.append((t, name, dict(props), is_episodic, guard))
+        return {"node": {"id": "relayed"}, "nudges": []}
+
+    monkeypatch.setattr(inst, "_absorbed_point_write", relay)
+    for spelling, arm in (("point", "point"), ("diary", "diary"), ("POINT", "point")):
+        out = inst.create_entity(
+            spelling, "a claim", is_episodic=False, pointKind="statement")
+        assert out == {"node": {"id": "relayed"}, "nudges": []}, (
+            f"create_entity(type={spelling!r}) did not return the point writer's own "
+            f"result — got {out!r}, so the arm post-processes instead of relaying")
+        got_t, got_name, got_props, got_episodic, got_guard = relayed[-1]
+        assert got_t == arm, (
+            f"create_entity(type={spelling!r}) relayed t={got_t!r}, not {arm!r} — the "
+            "writer replays `dedup` from the arm it is HANDED, so the spelling decides "
+            "which semantics land")
+        assert got_name == "a claim", (
+            f"the point arm dropped the claim text: relayed name={got_name!r}")
+        assert got_props == {"pointKind": "statement"}, (
+            f"the point arm did not carry the caller's props through unchanged: "
+            f"relayed {got_props!r}")
+        assert got_episodic is False
+        # The KIND GUARD's decision is taken ONCE, at the funnel, and handed over — the
+        # writer consumes it (`_absorbed_point_result` → `_kind_guard_payloads`), so a
+        # `guard=None` call would silently drop `kind_guard_overridden` from the reply.
+        assert got_guard is not None, (
+            f"create_entity(type={spelling!r}) relayed guard=None — the arm re-resolves "
+            "the guard instead of carrying the funnel's one decision to the reply")
+        assert got_guard.layer == arm, (
+            f"create_entity(type={spelling!r}) relayed a guard resolved for "
+            f"{got_guard.layer!r}, not {arm!r}")
 
 
 # ── 2b. link_entities dispatches on the relation ─────────────────────────────

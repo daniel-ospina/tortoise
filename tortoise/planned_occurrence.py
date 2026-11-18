@@ -700,11 +700,33 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     """
     from . import pipeline
 
+    # ⛔ THE RENDERING, not `__eq__`. A `str` subclass whose `__ne__` lies
+    # returns False for `event_kind != OCCURRENCE_EVENT_KIND` and slips past this
+    # refusal while `create_entity` files it under the name — the exact inversion
+    # this guard exists to make unrepresentable: the plan advances to terminal
+    # `held` and the read serves it as *planned and never happened*, with nothing
+    # raising. That is the same rule `is_plan_kind` (:176) and
+    # `lifecycle_props_by_rendering` (:730) already follow (#13578 review,
+    # finding 1). ⛔ Its TWIN DOOR is `settle_plan`'s `stage not in (…)` below — a
+    # caller-supplied-`str` comparison that trusted `__eq__` the same way, and
+    # it is repaired in this same change (#13586 review, finding 1): closing one
+    # door and stating the class is shut is how the other one stays open.
+    # Normalising ONCE means the value WRITTEN is the same value CHECKED —
+    # otherwise the guard compares one kind and the store keeps another.
+    kind = (str.__str__(event_kind) if isinstance(event_kind, str)
+            else event_kind)
     # ⛔ BEFORE the resolve and before ANY write: a refused call leaves nothing
     # behind (the same rule the two `_owned`/collision guards below follow).
-    if not isinstance(event_kind, str) or event_kind not in OCCURRENCE_EVENT_KINDS:
+    # ⛔ A NON-`str` is REFUSED, never compared: `!=` on an arbitrary object is
+    # that object's OWN `__ne__`, so a non-`str` liar (`__ne__` → False) skipped
+    # this refusal and reached `create_entity(eventKind=<object>)` — the same
+    # inversion, one type-check away (#13586 review, finding 2). `is_plan_kind`
+    # (:176) already fails CLOSED for a non-`str`; this guard follows the same
+    # rule, and the kind test below is over the RENDERING (`kind`), never over
+    # the caller's `__eq__`.
+    if not isinstance(kind, str) or kind not in OCCURRENCE_EVENT_KINDS:
         raise ValueError(
-            f"Refused: `event_kind={event_kind!r}` cannot be the Event that "
+            f"Refused: `event_kind={kind!r}` cannot be the Event that "
             f"records an OCCURRENCE. This call's `{OCCURRENCE_REL}` link is the "
             f"claim that the plan happened, and an occurrence is told apart from "
             f"a MENTION of the plan by the linked Event's kind — so the Event "
@@ -713,7 +735,7 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
             f"this with no `event_kind` to record that the plan happened; to "
             f"record something merely ABOUT the plan (a note, an email summary, "
             f"a reminder), write the Event directly — "
-            f"`create_entity('event', <name>, eventKind={event_kind!r}, "
+            f"`create_entity('event', <name>, eventKind={kind!r}, "
             f"aboutObject=<plan id>)` — which is a mention and never reads as "
             f"the occurrence. Nothing has been written.")
 
@@ -771,7 +793,7 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
             f"id>)`, which is a MENTION and never reads as the occurrence.")
     event_name = name or cur.get("name") or plan_id
     created = sdk.create_entity(
-        "event", event_name, eventKind=event_kind,
+        "event", event_name, eventKind=kind,
         **({"startedAt": at} if at is not None else {}),
         aboutObject=plan_id,
         **event_props)
@@ -817,7 +839,24 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
     """
     from . import pipeline
 
-    if stage not in (STAGE_MISSED, STAGE_CANCELLED):
+    # ⛔ THE RENDERING, not `__eq__` — the same rule (and the same measured
+    # bypass) as `record_occurrence` above. `stage not in (…)` IS an `__eq__`
+    # test, so a `str` subclass whose `__eq__` returns True is CONTAINED and this
+    # refusal does not fire; the value then reaches `advance_stage`, whose
+    # `resolve` does `ref.strip()` — and `str.strip()` on a subclass returns an
+    # exact `str` — so `held` resolves and the terminal move APPLIES: the plan
+    # ends as held with no :Event recording it, and
+    # :func:`planned_without_occurrence` serves it as *planned and never
+    # happened*. That is the unrecoverable direction this module names
+    # (:648-651) and the exact inversion this refusal exists to make
+    # unrepresentable (#13586 review, finding 1). Normalising ONCE means the
+    # value CHECKED is the value MOVED.
+    # ⛔ The same NON-`str` arm as `record_occurrence` above: `not in` on an
+    # arbitrary object consults its own `__eq__`, so a non-`str` liar is
+    # "contained" and this refusal never fires (#13586 review, finding 2). Refuse
+    # it, rather than ask it.
+    stage = str.__str__(stage) if isinstance(stage, str) else stage
+    if not isinstance(stage, str) or stage not in (STAGE_MISSED, STAGE_CANCELLED):
         raise ValueError(
             f"Refused: {stage!r} is not a no-occurrence ending. WHAT TO DO: use "
             f"{STAGE_MISSED!r} or {STAGE_CANCELLED!r} here; if it DID happen, "

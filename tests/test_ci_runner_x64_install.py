@@ -4468,7 +4468,7 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
         "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
         f"{counts}"
     )
-    assert counts["ubuntu-latest"] == 80, (
+    assert counts["ubuntu-latest"] == 78, (
         "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
         "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
         f"not assume {counts['ubuntu-latest']} is right: {counts}"
@@ -5369,7 +5369,11 @@ def test_the_correlated_probe_figure_is_the_same_naive_count_at_this_head():
     87 / 13, `#12464`'s head -> 89 / 13 (its `consent-key-drift.yml` contributes the job's
     `runs-on:` line and a comment line that quotes it — both are in the pre-strip population), and
     `#13098`'s head -> 90 / 13 (`cypher-diff.yml`'s single `runs-on: ubuntu-latest` line — one
-    axis only, which is why the second stayed at 13 and the pin still had to be re-derived). The
+    axis only, which is why the second stayed at 13 and the pin still had to be re-derived), and
+    `#13596`'s head -> 88 / 13 (both housekeeping jobs LEFT `ubuntu-latest` for
+    `[self-hosted, self-hosted-x64]`: one `runs-on:` line each and no comment line quoting the
+    label, so the first axis fell by two and the second did not move — the mirror image of
+    `#13098`). The
     rule is the sentence's own — every LINE containing `runs-on` AND the label
     token, whole-line comments included (that is what "before it stripped whole-line comments"
     means), which is a different population from the sibling job-count pin above (that one
@@ -5410,4 +5414,102 @@ def test_the_correlated_probe_figure_is_the_same_naive_count_at_this_head():
         f"{naive['ubuntu-latest']} / {naive['ubuntu-24.04']} — re-derive the sentence; do not "
         "carry an axis from the tree the page used to describe (the `ubuntu-24.04` axis sat two "
         "merges behind when this pin was written)"
+    )
+
+
+# ── 13. every static POOL-ONLY pin is named in the runbook's departure record ─────────────────
+def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
+    r"""⛔ A PIN WITH NO `OVERRIDES:` LINE READS AS AN ACCIDENT OF HISTORY, NOT A DECISION (#13596).
+
+    `#13596` moved `closes-coherence.yml`'s `closes-coherence` and `redis-guard.yml`'s
+    `redis-guard` onto `[self-hosted, self-hosted-x64]` — a POOL-ONLY pin, the class the runbook
+    refuses as a DEFAULT — and re-derived none of the page's invariant text. Review found the tree
+    and the runbook DISAGREEING in three places: `exactly one job in the default tree names one`
+    (three did), `Two departures are recorded below` (four existed), and `The override is scoped to
+    ONE job` (three). Each statement was TRUE when written; nothing read them against the tree, so
+    the correction was left to whoever next noticed.
+
+    So the pin is over the RECORD, not over the sentence's arithmetic: every job whose static
+    `runs-on:` names a pool-only label must be named, TOGETHER with its workflow file, inside one of
+    the page's `**OVERRIDES:**` departure blocks. A new pin is then either recorded where the next
+    lane reads it or it reds here — which is the whole of the `OVERRIDES:` rule, made executable.
+
+    Non-vacuity (measured at head `439f408d1971`, where the two workflows are already pooled but
+    the record is not): delete the "Residual: the two #13596 housekeeping pins" departure block and
+    this reds naming BOTH `closes-coherence.yml::closes-coherence` and
+    `redis-guard.yml::redis-guard`. Revert the two `runs-on:` values instead and it is green — the
+    defect it pins is the unrecorded pin, which only exists while both halves are in the tree, so
+    the `assert pins` arm below keeps an empty scan from passing as agreement.
+    """
+    import yaml
+
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    # A departure block is one PARAGRAPH that OPENS with the marker — the page writes the
+    # justification across several wrapped lines, so splitting on a blank line is what keeps a block
+    # whole. ⛔ `**OVERRIDES:**` also appears MID-SENTENCE in prose this page carries (a reference
+    # bullet quoting the marker, `:566`): a paragraph merely CONTAINING the marker is not a departure
+    # record, and letting one count meant a pin named inside that prose read as recorded. A leading
+    # blockquote marker (`> **OVERRIDES:** …`) is still a record — that is how the page quotes the
+    # version-pin suspension.
+    def _opens_with_marker(paragraph: str) -> bool:
+        return paragraph.lstrip().lstrip(">").lstrip().startswith("**OVERRIDES:**")
+
+    blocks = [p for p in re.split(r"\n[ \t]*\n", runbook) if _opens_with_marker(p)]
+    assert blocks, (
+        "the runbook carries no `**OVERRIDES:**` departure block at all — every POOL-ONLY pin on "
+        "this page is then unrecorded, and this pin has nothing to check them against"
+    )
+
+    wf_dir = REPO_ROOT / ".github" / "workflows"
+    # The pool's OWN labels: `self-hosted` and the custom arch markers, which no GitHub-hosted
+    # runner carries (`tests/test_runner_tool_contract.py::_POOL_ONLY_LABEL` is the sibling).
+    pool_only = re.compile(r"(?<![\w-])self-hosted(?:-(?:x64|arm64))?(?![\w-])", re.IGNORECASE)
+    pins: list[str] = []
+    for path in sorted([*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")]):
+        workflow = yaml.safe_load(path.read_text()) or {}
+        for job, body in (workflow.get("jobs") or {}).items():
+            if not isinstance(body, dict) or "runs-on" not in body:
+                continue
+            value = body["runs-on"]
+            labels = value.get("labels") if isinstance(value, dict) else value
+            if labels is None:  # a `group:` with no `labels:` names no static label — skipped, as
+                continue  # the extractor's `group:`-only arm does (it is a report, not a refusal)
+            labels = [labels] if isinstance(labels, str) else labels
+            if any(pool_only.search(str(m)) for m in labels):
+                pins.append(f"{path.name}::{job}")
+
+    assert pins, (
+        "no workflow pins a POOL-ONLY label any more, so this pin checks nothing — if the #10237 "
+        "canary and the #13596 housekeeping pins were all removed, delete this pin in the same "
+        "change rather than leaving a green scan over an empty population"
+    )
+
+    def _recorded(block: str, pin: str) -> bool:
+        r"""Does ONE departure block name BOTH halves of this pin, each as a NAME?
+
+        ⛔ A raw substring test makes one leg IMPLIED by the other wherever a name is a substring of
+        a sibling name, and the tree has both shapes live:
+
+        * JOB inside its own FILE — `closes-coherence` ⊂ `closes-coherence.yml`, `redis-guard` ⊂
+          `redis-guard.yml`: the two pins this pin exists for. A block naming ONLY the files read as
+          recorded, and so did a block naming a job that does not exist.
+        * FILE inside a LONGER FILE — `ci.yml` ⊂ `python-ci.yml`: a block naming only
+          `python-ci.yml` read as recording `ci.yml::repo-harnesses`, the #10237 canary's pin.
+
+        So BOTH halves are matched on `[\w.-]` boundaries: the occurrence inside `<name>.yml` does
+        not count, while ``` `closes-coherence` job ``` and `(`ci.yml:1556`)` do.
+        """
+        workflow, job = pin.split("::")
+        return all(
+            re.search(rf"(?<![\w.-]){re.escape(part)}(?![\w.-])", block) is not None
+            for part in (workflow, job)
+        )
+
+    unrecorded = [pin for pin in pins if not any(_recorded(block, pin) for block in blocks)]
+    assert not unrecorded, (
+        "a job is pinned to a POOL-ONLY label with no recorded departure: " + ", ".join(unrecorded)
+        + ". Add an `**OVERRIDES:**` departure block to `docs/ops/ci-runner-x64.md` naming the "
+        "workflow and the job, its measured premise and its accepted WAIT (no hosted half), and "
+        "carry the same line on the issue/decision comment the next lane reads — a pin with no "
+        "record reads identically to an accident of history."
     )
