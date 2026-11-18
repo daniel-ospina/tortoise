@@ -297,7 +297,15 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
         f"embed_get took {spent[STAGE_EMBED_GET]} ms of a {_LOAD_S * 1000:.0f} ms "
         f"load — the read is waiting on it again instead of declining inside its "
         f"{READ_EMBED_BUDGET_S * 1000:.0f} ms budget (measured pre-fix: 7857.3 ms)")
-    assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2, (
+    # ⛔ ``spent_ms()`` is MILLISECONDS (``read_stages.py``), so the bar needs the
+    # same ``* 1000.0`` the ``embed_get`` assertion above carries. Without it the
+    # bound was 4 ms, not the 4 000 ms its own message describes — a flake door
+    # on the contended 4-worker carve-out lane, where a real read's
+    # ``pre_handler`` (transport arrival → first mark) easily exceeds 4 ms on an
+    # otherwise healthy read (#13535 review F2). The measurement this bound
+    # exists to catch is the 9 295 ms production figure in the module docstring,
+    # so 4 000 ms keeps every bit of its discriminating power.
+    assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
         f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms — a read must not "
         f"queue behind workers parked in the embedder load")
 
@@ -406,6 +414,116 @@ def test_a_designed_absence_is_refused_with_not_installed(sdk, monkeypatch):
             f"{excinfo.value.failure_kind!r}")
     finally:
         monkeypatch.undo()
+        EmbeddingModel._reset()
+
+
+# ── the spent-attempt re-arm: the READ-side twin of the write path ───────
+
+
+def test_a_spent_read_attempt_is_re_armed_and_the_retry_SPAWNED(monkeypatch):
+    """The arm at ``embeddings.py:1392-1395`` — both halves (#13528 review F1).
+
+    ``start_warm_up`` latches once per process, so a READ that finds the attempt
+    spent has to do two things or the state is never recovered: re-arm the latch
+    (or the load is never retried, and a transient failure disables embedding for
+    the whole process) **and start the retry before answering** (or the answer
+    describes a load that is not running).
+
+    ⛔ WHY THE ANSWER IS THE ASSERTION, not a formality: ``absent_reason()`` here
+    returns ``no_embedder`` — ``_reset()`` leaves ``_last_failed_at`` unset, and
+    with no attributable failure that method's documented answer is the
+    DESIGNED-ABSENCE term. So the pre-change ``return cls.absent_reason()`` told
+    an operator to install the ``embeddings`` extra for a load that was merely
+    restarting, and nothing in CI noticed: reverting these three lines left every
+    row in this file — and in the write-path file — green. The write-side twin
+    has its own row (``test_a_spent_load_attempt_does_not_charge_the_budget``);
+    this is the read side of the same arm.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    try:
+        # The latch is SPENT and nothing is running, so ``start_warm_up()``
+        # answers None from its "already started, thread dead" arm.
+        EmbeddingModel._warm_up_started = True
+        EmbeddingModel._warm_up_thread = None
+
+        # The retry is SPAWNED for real, so stub the WORKER the spawned thread
+        # runs. The join happens inside the patch: the thread resolves
+        # ``cls.warm_up`` at CALL time, so leaving the window before it ran would
+        # let it reach the real loader.
+        with mock.patch.object(EmbeddingModel, "warm_up", lambda *_a, **_k: True):
+            decline = EmbeddingModel.await_read_ready_reason(READ_EMBED_BUDGET_S)
+            spawned = EmbeddingModel._warm_up_thread
+            if spawned is not None:
+                spawned.join(timeout=_LOAD_S)
+
+        assert decline == "load_in_flight", (
+            f"a spent attempt that is being RESTARTED must answer "
+            f"load_in_flight — {decline!r} is the designed-absence term for a "
+            f"state where nothing was ever absent (#13528 review P2-2)")
+        assert EmbeddingModel._warm_up_started is True, (
+            "the spent attempt must be RE-ARMED **and started** — a re-arm alone "
+            "declines while starting nothing, so the load is never retried")
+        assert spawned is not None, (
+            "the retry must be SPAWNED before answering, or "
+            "load_in_flight is a claim about a load that is not running")
+    finally:
+        thread = EmbeddingModel._warm_up_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=_LOAD_S)
+        EmbeddingModel._reset()
+
+
+def test_a_re_arm_that_cannot_spawn_falls_back_to_the_recorded_absence(
+        monkeypatch):
+    """The arm's second exit: no lane to hand the load to ⇒ ``absent_reason()``.
+
+    The honest ``load_in_flight`` requires an attempt to actually START.
+    ``start_warm_up`` re-reads ``TORTOISE_EMBEDDER_WARMUP`` on entry, so it can
+    still answer ``None`` immediately after the re-arm if the flag was switched
+    off underneath us. Answering ``load_in_flight`` there would name a load
+    nobody started, so the arm falls back to ``absent_reason()`` — which, with no
+    load failure observed by this process, is the designed-absence term
+    ``no_embedder``. Pinned because it is the one path where the truthful term
+    is NOT ``load_in_flight``, and a future simplification to "always answer
+    load_in_flight" would silently lie instead of reddening.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    calls = {"n": 0}
+
+    def _enabled_then_off() -> bool:
+        # Call 1: the opt-out check. Call 2: the first ``start_warm_up`` (the
+        # latch is spent, so it answers None). Call 3: the post-re-arm
+        # ``start_warm_up`` — the flag is OFF by now.
+        calls["n"] += 1
+        return calls["n"] <= 2
+
+    try:
+        EmbeddingModel._warm_up_started = True
+        EmbeddingModel._warm_up_thread = None
+        with mock.patch("tortoise.embeddings._embedder_warmup_enabled",
+                        _enabled_then_off):
+            decline = EmbeddingModel.await_read_ready_reason(READ_EMBED_BUDGET_S)
+
+        assert calls["n"] == 3, (
+            f"this row drives a 3-call arm (opt-out check, first "
+            f"`start_warm_up`, post-re-arm `start_warm_up`) and saw "
+            f"{calls['n']} — at 2 the retry was never ATTEMPTED, so the fallback "
+            f"asserted below is the arm's ONLY exit instead of its last one "
+            f"(that is the mutant ``return cls.absent_reason()`` straight after "
+            f"``_rearm_warm_up()``, which this pair of rows exists to kill)")
+        assert decline == "no_embedder", (
+            f"a re-arm that cannot START an attempt has no background lane, so "
+            f"the answer must fall back to the recorded absence — got {decline!r}"
+        )
+        assert decline == EmbeddingModel.absent_reason(), (
+            "the fallback must be ``absent_reason()`` itself, not a lookalike")
+        assert EmbeddingModel._warm_up_started is False, (
+            "no attempt can start, so nothing may be latched as started")
+        assert EmbeddingModel._warm_up_thread is None, (
+            "the fallback must not claim a thread it did not spawn")
+    finally:
         EmbeddingModel._reset()
 
 
