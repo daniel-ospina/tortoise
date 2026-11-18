@@ -22,9 +22,19 @@ WHAT IT DOES NOT DO. It does not assert the section's WORDING, its repair-route
 list, or its citation style — those were `#10852`'s state-locking arms and are
 retired with the module that held them (`#13554` carries the rest of that class).
 It asserts one thing, in one direction: every `test_*` the section names is
-defined. It also derives the universe of definitions from `tests/*.py` rather than
-a hand-spelled module list, so a test that MOVES or is RENAMED cannot leave the
-arm green about a name it no longer defines.
+defined SOMEWHERE under `tests/`. It derives that universe from the tree rather
+than a hand-spelled module list, so a RENAMED leg reds this arm instead of
+leaving a dead cite looking like proof.
+
+WHAT IT DELIBERATELY DOES NOT SEE — a cross-file MOVE. `_DEFINED` is a name-only
+union over `tests/*.py`, so if a cited leg keeps its name and moves to another
+module, this arm stays GREEN even though the section's sentence now names the
+wrong FILE. That is by design, not an oversight: which module a leg lives in is a
+wording claim about the document, and `#13439`'s rule retires exactly that class
+(`CONTRIBUTING.md`). Asserting module attribution here would rebuild the pin this
+PR deletes — reword-or-move the prose, and the arm is supposed to be silent about
+it (measured: moving a cited leg to another module leaves `1 passed`; renaming it
+reds on the cite).
 """
 from __future__ import annotations
 
@@ -43,8 +53,26 @@ TESTS = ROOT / "tests"
 #: matching the bare shape without those guards red the guard on its own path
 #: instead of on a cited leg (the same arm the write-site guard carries in
 #: `tests/test_10000_source_prose.py`).
-_CITED = re.compile(r"(?<![/\w])(test_[a-z0-9_]+)(?!\.py)")
-_DEFINED = re.compile(r"^def (test_[a-z0-9_]+)\(", re.MULTILINE)
+#:
+#: ⛔ `[A-Za-z0-9_]` and the closing `(?![A-Za-z0-9_])` are load-bearing together,
+#: for two different reasons. A name-only `[a-z0-9_]` class TRUNCATES a cite that
+#: carries an uppercase letter (`test_theWidget` matched as `test_the`, measured),
+#: which reports a name the author never wrote; and allowing uppercase alone is
+#: not enough, because the alternation-free class lets the engine BACKTRACK to a
+#: shorter match that satisfies `(?!\.py)`, so `test_foo_cites.py` would still
+#: describe a fragment. The alnum lookahead makes the match `maximal` — a
+#: truncated prefix can never be the answer — and the `.py` lookahead then skips
+#: the filename whole.
+_CITED = re.compile(r"(?<![/\w])(test_[A-Za-z0-9_]+)(?!\.py)(?![A-Za-z0-9_])")
+
+#: A `def test_…(` at the start of a line, allowing indentation and `async`.
+#: ⛔ `^def ` alone is a FALSE RED generator: the tree carries `async def test_…`
+#: functions (`rg -n 'async def test_' tests/` — deliberately no count here, a
+#: number in this comment re-stales on the next test anyone adds), and a cited leg
+#: that became async would vanish from the universe while still being defined.
+#: Same for an indented definition inside a class.
+_DEFINED = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(test_[A-Za-z0-9_]+)[ \t]*\(",
+                      re.MULTILINE)
 
 
 def _pin_section() -> str:
@@ -56,8 +84,12 @@ def _pin_section() -> str:
         "exactly one — a reworded or duplicated heading leaves this arm "
         "inspecting the wrong prose while it reads as coverage")
     start = starts[0] + 1
+    # ⛔ Both levels end the section. Bounding only at `### ` would run the arm
+    # over the NEXT chapter when the pin section is the last `### ` before a
+    # `## ` heading — the same wrong-prose failure the heading-count assert
+    # above exists to prevent, arriving through the end bound instead.
     end = next((i for i in range(start, len(lines))
-                if lines[i].startswith("### ")), len(lines))
+                if lines[i].startswith(("## ", "### "))), len(lines))
     return "\n".join(lines[start:end])
 
 

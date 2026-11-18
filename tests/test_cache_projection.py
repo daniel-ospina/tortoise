@@ -870,11 +870,11 @@ def test_the_fold_defaults_keys_are_property_space_and_their_columns_exist():
     `projected_columns('object')` dropping `object_kind` REDs this test on the
     own-table arm while `test_the_declared_fold_defaults_are_the_folds_own_constants`
     (which pins the fold's CLAUSES against the declared table, not the columns)
-    stays GREEN — a COLUMN-side drift is exactly what only this arm sees; and
-    adding `"widgetKind"` to `FOLD_ON_CREATE_DEFAULTS["Object"]` REDs this test
-    on the own-table arm AND that antecedent pin, because a new fold default is
-    the one edit both are built to see. Neither arm is unique here, and this
-    docstring does not claim it is.
+    stays GREEN — the antecedent pin names the fold's CLAUSES, so a column-side
+    drift does not reach it; and adding `"widgetKind"` to
+    `FOLD_ON_CREATE_DEFAULTS["Object"]` REDs this test on the own-table arm AND
+    that antecedent pin, because a new fold default is the one edit both are built
+    to see. Neither arm is unique here, and this docstring does not claim it is.
     """
     owned = dict(_FOLD_LABEL_TABLES)
     column_space = {table: set(cp.projected_columns(table))
