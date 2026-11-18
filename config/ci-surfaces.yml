@@ -5769,8 +5769,9 @@ surfaces:
   # `TORTOISE_TEST_CARVE_OUT=1`, the same lane as its sibling above.
   - test_mention_write_11239.py
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
-  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — a bare List node is not in the HNSW index at all (#8429), so the write seam keeps it the typed shape; the READ boundary now normalises a right-width List (#8316), so only a wrong-width or NON-NUMERIC value still aborts the MATCH (#8430) (embedded_only + carve_out)
-  - test_update_point_derived_embedding_4520.py  # #4520 residual: `update_point(content=…)`'s DERIVED embedding must go through the clear-then-set seam, not the bare `+=` merge (a bare List node is not in the HNSW index — #8429 — and a small-Δ `vecf32` overwrite is silently discarded on the embedded engine); the caller-supplied branch stays verbatim (PR #3018), and the read boundary normalises a right-width List (#8316) — embedded_only + carve_out
+  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — a bare List node is not in the HNSW index at all (#8429), so the write seam keeps it the typed shape; the READ boundary normalises a right-width List (#8316) and DROPS a stored value it cannot consume — a wrong width, a NON-NUMERIC value — instead of aborting the MATCH (#8430) (embedded_only + carve_out)
+  - test_update_point_derived_embedding_4520.py  # #4520 residual: `update_point(content=…)`'s DERIVED embedding must go through the clear-then-set seam, not the bare `+=` merge (a bare List node is not in the HNSW index — #8429 — and a small-Δ `vecf32` overwrite is silently discarded on the embedded engine); the caller-supplied branch stays verbatim (PR #3018), and the read boundary normalises a right-width List (#8316) and drops a value it cannot consume instead of aborting the MATCH (#8430) — embedded_only + carve_out
+  - test_embedding_boundary_8419_8430.py  # #8430 + #8419: the embedding BOUNDARY — what we compose and what the read can read. #8430: a wrong-width or NON-NUMERIC stored List is DROPPED by the read seam instead of aborting the whole dense MATCH (one bad node must cost only its own row; the wrong-width TYPED residual is pinned, not fixed — size() raises on a Vectorf32 on both engines). #8419: `_upsert_document` embeds the `_searchText` surface the node HOLDS, never the retired `content` prop (embedded_only + carve_out)
   - test_verbatim_embedding_read_8316.py  # #8316: a caller-supplied embedding stays VERBATIM (PR #3018) but the dense READ must normalise the plain-List shape at its own boundary — one verbatim node otherwise aborts the whole MATCH and degrades every node to FTS-only recall (embedded_only + carve_out)
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
@@ -7481,6 +7482,12 @@ surfaces:
   - test_run_protocol.py
   - test_sdk_adapter_cap.py
   - test_search_engine.py
+  - test_verbatim_index_cohort_8429.py  # #8429: a VERBATIM (plain-List) embedding is invisible to the
+  # HNSW index leg — the index holds Vectorf32 only, so the node is not in the cohort and the leg used to
+  # record a healthy `ok`/count 0. Two hermetic mechanism pins (a zero-row index answer falls through to the
+  # scan and says so; a NON-empty one does not scan) plus two live pins that need a real HNSW index and skip
+  # loudly without one: the cohort gap closes, and the declared residual (a non-empty index answer still hides
+  # a verbatim node) stays visible.
   # #11702 (#2206's successor): the belief-presence contract on this surface's own five files —
   # `search_engine.py`'s ep_state/presence predicate, `why.py`'s `ep` block (the block /v1/context, the
   # volunteer reflex and the webhook serve), `volunteer.py`'s `_eligible` absent-mean gate (a belief-less
@@ -11564,6 +11571,15 @@ carve_out:
 # registration it would collect and SKIP every case via the marker hook, a
 # permanently green and permanently unexecuted gate on main (the #4047 shape).
 - test_verbatim_embedding_read_8316.py
+# #8430 / #8419: the module-level `embedded_only` guard for the embedding BOUNDARY.
+# #8430 asserts a real embedded store's stored plain-`List` shapes (a wrong width,
+# a non-numeric value) are DROPPED by the read seam rather than aborting the whole
+# dense MATCH; #8419 drives `_upsert_document` against a real embedded store and
+# asserts the encoder receives the `_searchText` surface. A URI-set lane would
+# redirect the construction onto the server and certify nothing — and without this
+# registration it would collect and SKIP every case via the marker hook, a
+# permanently green and permanently unexecuted gate on main (the #4047 shape).
+- test_embedding_boundary_8419_8430.py
 # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
 # without this registration every URI-set lane collects the file and SKIPS that
 # case via the marker hook — the SDK guard would be a permanently green and
@@ -12961,6 +12977,11 @@ durations:
   test_onboarding_email_http.py: 0.7  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.1
   test_projection_version_gate.py: 1.4  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.2
   test_search_engine.py: 0.9  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
+  test_verbatim_index_cohort_8429.py: 2.0  # the row must EXIST, not merely default (`tools/ci_selection.py --integrity` reds `manifest drift` without it): the two MECHANISM
+  # pins are hermetic (a graph double, no server); the two COHORT pins construct a live
+  # FalkorDB SDK and skip loudly where the URI gate is unset, so on a URI-less lane the
+  # file costs the import + the probe. The figure is the skip-lane reading, not a claim
+  # about the docker leg — `tools/ci_timing.py --refresh-durations` replaces it from junit.
   test_session_capture_e2e.py: 5.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 8.9
   test_stop_writes.py: 0.8  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.4
   test_subscriptions.py: 0.8  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.7

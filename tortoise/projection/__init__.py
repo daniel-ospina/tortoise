@@ -22931,8 +22931,10 @@ class FalkorProjection(
                 # (#8429). Before #8316 the flip to `List` also aborted the
                 # whole dense READ (`Type mismatch: expected Null or Vectorf32
                 # but was List`); the read boundary now normalises a right-width
-                # `List`, so only a wrong width or a non-numeric value still
-                # aborts the MATCH (#8430). The `CASE` keeps
+                # `List`, and #8430 DROPS a stored value the read cannot consume
+                # (a wrong width, a non-numeric value) instead of aborting the
+                # whole MATCH — a wrong-width TYPED row is its declared residual.
+                # The `CASE` keeps
                 # this clause's existing wipe-on-None semantics (`$embedding` is
                 # None for empty content and on encoder failure) while casting
                 # every real vector — `vecf32(NULL)` is not relied upon.
