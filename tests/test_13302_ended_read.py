@@ -1,0 +1,339 @@
+"""#13302 — the read whose question is "what ended, and how?".
+
+THE DEFECT THESE PIN (measured by capstone #13038, `docs/evidence/13038-capstone/`):
+a default-scope read answers *currency*, and correctly leaves ended records out, but
+there was **no read whose question was the other one**. A customer asking *"has anything
+we relied on been withdrawn?"* got a degraded corpus ranking (2 rows, 0 of 2 sharing a
+word with the question, score 0.0); the retracted claim surfaced only under
+``include_terminal`` — and *"what was planned and never happened?"* returned 0 rows
+because the cancelled plan was correctly excluded and nothing enumerated the ended
+population. So both answers read as "nothing has ever ended".
+
+WHAT IS PINNED HERE, and each one is a behaviour (a returned SET), never "a predicate
+was called":
+
+* a withdrawn claim is discoverable **without its id** — no query, no terminal flag,
+  no name guess;
+* a cancelled plan is discoverable, and a **live** plan is never returned as
+  "never happened" (a live record is not in the ended population at all);
+* the answer says **how** it ended — the lifecycle word, the successor it names, or the
+  terminal stage with its ``outcome`` — and the time it ended where the record carries
+  one;
+* the **default** read is unchanged: the same records are still excluded, so this is an
+  additional way to ask rather than a change to what "current" means.
+
+The selector is the ONE shared currency predicate (`live._terminal_expression`, taken in
+the positive direction), so the ended population cannot drift from what every reader
+filters on. Two shapes below prove it rather than assert it: a record ended ONLY by the
+position axis (`isClosed` with no status at all, and a terminal stage with no status) is
+returned, and a record whose ``status`` is a word the model does not treat as an ending is
+not.
+
+Lane: docker (a live FalkorDB) — the read is Cypher over a real store, so an embedded
+fake would test nothing. Skips when no store is reachable (the shipped convention,
+`tests/_live_utils.py`).
+"""
+from __future__ import annotations
+
+import os
+import sys
+import uuid
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests import _live_utils  # noqa: E402, RUF100
+
+
+def _probe(candidates):
+    env_uri = os.environ.get("TORTOISE_DB_URI")
+    for uri in candidates:
+        if not uri:
+            continue
+        proj = None
+        try:
+            from tortoise.projection import FalkorProjection
+
+            proj = FalkorProjection.from_uri(uri)
+            proj.g.query("RETURN 1")
+            return True, uri
+        except Exception:
+            if uri == env_uri:
+                break
+            continue
+        finally:
+            if proj is not None:
+                try:  # noqa: SIM105
+                    proj.close()
+                except Exception:
+                    pass
+    return False, None
+
+
+_AVAILABLE, _WORKING_URI = _probe([
+    os.environ.get("TORTOISE_DB_URI"),
+    _live_utils.docker_uri("tortoise_test_13302"),
+    _live_utils.legacy_uri("tortoise_test_13302"),
+])
+
+_docker_only = pytest.mark.skipif(
+    not _AVAILABLE,
+    reason="live FalkorDB not available (the ended read is Cypher over a real store)")
+
+#: A pack-style pipeline a plan kind declares. The stage NAMES are deliberately NOT
+#: used by the read (only the slot is, design §4.1), so one stage is named with a word
+#: the model never treats as an ending and the terminal ones with its own outcome.
+PLAN_PIPELINE = {
+    "defaultStage": "scheduled",
+    "stages": [
+        {"id": "scheduled", "label": "Scheduled", "order": 0, "slot": "entry"},
+        {"id": "missed", "label": "Missed", "order": 1, "slot": "terminal",
+         "outcome": "lost"},
+        {"id": "cancelled", "label": "Cancelled", "order": 2, "slot": "terminal",
+         "outcome": "withdrawn"},
+        {"id": "held", "label": "Held", "order": 3, "slot": "terminal",
+         "outcome": "completed"},
+    ],
+}
+
+
+def _uri() -> str:
+    return (os.environ.get("TORTOISE_DB_URI")
+            or (_WORKING_URI
+                or _live_utils.docker_uri("tortoise_test_13302", password=None)))
+
+
+@pytest.fixture()
+def sdk(monkeypatch):
+    """A fresh graph namespace and an SDK pointed at the live store."""
+    monkeypatch.setenv("TORTOISE_DB_URI", _uri())
+    from tortoise.sdk import TortoiseSDK
+
+    return TortoiseSDK(namespace=f"test13302_{uuid.uuid4().hex[:10]}")
+
+
+def _ended(sdk, **kwargs):
+    """The read under test: the ended population of a family."""
+    kwargs.setdefault("limit", 50)
+    return sdk.tortoise_fts_query(None, ended_scope=True, **kwargs)
+
+
+def _ids(rows) -> set[str]:
+    return {r["id"] for r in rows}
+
+
+# ── the two questions the capstone could not answer ─────────────────────────────
+
+
+@_docker_only
+def test_a_withdrawn_claim_is_discoverable_without_knowing_its_id(sdk):
+    """Q6. The answer must arrive with NO id, NO query and NO terminal flag."""
+    keep = sdk.create_point(kind="statement", content="the venue is booked")
+    dead = sdk.create_point(kind="statement", content="The beach club confirmed our booking.")
+    sdk.retract_point(dead["id"])
+
+    rows = _ended(sdk, entity_type="point")
+    by_id = {r["id"]: r for r in rows}
+
+    assert dead["id"] in by_id, (
+        "the retracted claim must be served by the ended read without its id being "
+        "supplied — that is the whole question (#13302)"
+    )
+    # The positive control: a live claim must not appear, or the read would just be
+    # "everything".
+    assert keep["id"] not in by_id
+    assert by_id[dead["id"]]["status"] == "retracted"
+
+
+@_docker_only
+def test_a_cancelled_plan_is_discoverable_and_a_live_plan_is_not_never_happened(sdk):
+    """Q5. The plan is found by its STATE, and a live plan is not in the population."""
+    from tortoise import pipeline
+
+    pipeline.seed_pipeline(sdk._get_proj().g, "core:testplan", PLAN_PIPELINE)
+    cancelled = sdk.create_object("Thursday partner call", objectKind="core:testplan")
+    pipeline.advance_stage(sdk, cancelled["id"], "core:testplan", "cancelled")
+    live = sdk.create_object("Launch event", objectKind="core:testplan")
+
+    rows = {r["id"]: r for r in _ended(sdk, entity_type="object")}
+
+    assert cancelled["id"] in rows
+    assert live["id"] not in rows, (
+        "a plan that has not ended must never be served as 'planned and never "
+        "happened' — it is not in the ended population at all"
+    )
+    stage = rows[cancelled["id"]]["stage"]
+    assert stage["slot"] == "terminal"
+    assert stage["outcome"] == "withdrawn"
+    # Nothing records that it happened — the other half of the answer.
+    assert rows[cancelled["id"]]["linkedEvents"] == []
+
+
+@_docker_only
+def test_a_plan_that_happened_carries_its_occurrence(sdk):
+    """`linkedEvents` separates "planned, never happened" from "planned and held".
+
+    Without this the two are the same row: both ended on a terminal stage. The
+    occurrence is an Event wired `aboutObject` — the product's own link.
+    """
+    from tortoise import pipeline
+
+    pipeline.seed_pipeline(sdk._get_proj().g, "core:testplan", PLAN_PIPELINE)
+    held = sdk.create_object("Launch event", objectKind="core:testplan")
+    sdk.create_event("Launch event held", "occurrence", aboutObject=held["id"])
+    pipeline.advance_stage(sdk, held["id"], "core:testplan", "held")
+
+    row = {r["id"]: r for r in _ended(sdk, entity_type="object")}[held["id"]]
+    assert row["stage"]["outcome"] == "completed"
+    assert row["linkedEvents"], "the occurrence event must be visible on the row"
+
+
+# ── "how it ended" ─────────────────────────────────────────────────────────────
+
+
+@_docker_only
+def test_a_superseded_record_names_its_successor(sdk):
+    old = sdk.create_point(kind="decision", content="the entry tier is 29")
+    new = sdk.create_point(kind="decision", content="the entry tier is 39")
+    sdk.supersede_point(old["id"], new["id"])
+
+    row = {r["id"]: r for r in _ended(sdk, entity_type="point")}[old["id"]]
+    assert row["status"] == "superseded"
+    # A Point names its successor by the CORRECTS edge, NOT by a property.
+    assert row["successorId"] == new["id"]
+
+
+@_docker_only
+def test_a_deprecated_record_says_nothing_replaced_it(sdk):
+    gone = sdk.create_object("Old onboarding flow", objectKind="process")
+    sdk.update_knowledge(gone["id"], status="deprecated")
+
+    row = {r["id"]: r for r in _ended(sdk, entity_type="object")}[gone["id"]]
+    assert row["status"] == "deprecated"
+    assert row["successorId"] is None
+
+
+@_docker_only
+def test_an_ended_record_carries_the_time_it_ended_where_it_has_one(sdk):
+    """A supersede stamps a window end; the read reports it (and the raw fields)."""
+    old = sdk.create_point(kind="decision", content="the tier is 29")
+    new = sdk.create_point(kind="decision", content="the tier is 39")
+    sdk.supersede_point(old["id"], new["id"])
+
+    row = {r["id"]: r for r in _ended(sdk, entity_type="point")}[old["id"]]
+    assert row["endedAt"], "a supersede stamps the predecessor's end — it must be served"
+    assert row["endedAt"] == row["validTo"] or row["endedAt"] == row["expiredAt"]
+
+
+# ── the selector is the ONE shared currency predicate ──────────────────────────
+
+
+@_docker_only
+def test_a_record_ended_only_by_the_position_axis_is_returned(sdk):
+    """`isClosed` with NO status at all — the shape #13034 taught the predicate to read.
+
+    A read that selected on a status list would miss it, which is the defect the
+    shared predicate exists to prevent: this test fails for any second vocabulary.
+    """
+    closed = sdk.create_object("Closed by marker only", objectKind="process",
+                              isClosed=True)
+
+    rows = {r["id"]: r for r in _ended(sdk, entity_type="object")}
+    assert closed["id"] in rows
+    assert rows[closed["id"]]["status"] in (None, "")
+    assert rows[closed["id"]]["isClosed"] is True
+
+
+@_docker_only
+def test_a_word_the_model_does_not_treat_as_an_ending_is_not_returned(sdk):
+    """The population is "ended", not "has a status"."""
+    live = sdk.create_object("Still current", objectKind="process", status="live")
+    draft = sdk.create_point(kind="statement", content="a draft claim", status="draft")
+
+    assert live["id"] not in _ids(_ended(sdk, entity_type="object"))
+    assert draft["id"] not in _ids(_ended(sdk, entity_type="point"))
+
+
+# ── the default is unchanged ───────────────────────────────────────────────────
+
+
+@_docker_only
+def test_the_default_read_is_byte_for_byte_the_current_picture(sdk):
+    """`ended_scope` is an ADDITION: nothing about "current" moves."""
+    keep = sdk.create_point(kind="statement", content="the venue is booked")
+    dead = sdk.create_point(kind="statement", content="the venue booked the beach club")
+    sdk.retract_point(dead["id"])
+
+    default = sdk.tortoise_fts_query("venue", entity_type="point", limit=50)
+    default_ids = _ids(default)
+
+    assert keep["id"] in default_ids
+    assert dead["id"] not in default_ids, (
+        "the default read must still exclude the retracted claim — an ended-scope "
+        "parameter may not change what 'current' means"
+    )
+
+
+# ── bounded, ordered, and honest about its own completeness ────────────────────
+
+
+@_docker_only
+def test_the_page_is_bounded_and_reports_whether_it_is_the_whole_population(sdk):
+    for i in range(3):
+        pid = sdk.create_point(kind="statement", content=f"withdrawn claim {i}")
+        sdk.retract_point(pid["id"])
+
+    full_tr: dict = {}
+    full = sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+                                  limit=50, _truncation_out=full_tr)
+    cut_tr: dict = {}
+    cut = sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+                                 limit=2, _truncation_out=cut_tr)
+
+    assert len(full) == 3 and len(cut) == 2
+    # A page that is not full proves the population is the rows returned…
+    assert full_tr["truncated"] is False
+    assert full_tr.get("_exact") is True
+    # …and a full page does not claim to be complete.
+    assert cut_tr["truncated"] is True
+    assert cut_tr.get("_exact") is False
+
+
+@_docker_only
+def test_a_subject_is_served_by_its_own_carriers(sdk):
+    """The read is one shape across the families, each read by ITS OWN spellings."""
+    subj = sdk.create_subject("Acme", subjectKind="organization")
+    sdk.supersede_knowledge(subj["id"], sdk.create_subject(
+        "Acme Corp", subjectKind="organization")["id"])
+
+    rows = {r["id"]: r for r in _ended(sdk, entity_type="subject")}
+    assert subj["id"] in rows
+    assert rows[subj["id"]]["name"] == "Acme"
+    assert rows[subj["id"]]["status"] == "superseded"
+    assert rows[subj["id"]]["successorId"]
+
+
+# ── refusals: a state question is not a relevance read ─────────────────────────
+
+
+@_docker_only
+def test_a_query_beside_ended_scope_is_refused_rather_than_dropped(sdk):
+    """A silently dropped query would serve a whole population as the answer."""
+    with pytest.raises(ValueError) as exc:
+        sdk.tortoise_fts_query("has anything been withdrawn", entity_type="point",
+                              ended_scope=True)
+    message = str(exc.value)
+    assert "ended_scope" in message
+    assert "query" in message
+    # The repair is named (AX §5): an admissible refusal leaves a writable way out.
+    assert "omit" in message
+
+
+@_docker_only
+def test_a_family_without_a_lifecycle_is_refused_not_answered_empty(sdk):
+    """`[]` is a factual claim; an Event has no ending this model defines."""
+    with pytest.raises(ValueError) as exc:
+        sdk.tortoise_fts_query(None, entity_type="event", ended_scope=True)
+    assert "event" in str(exc.value).lower()
