@@ -438,10 +438,26 @@ _FOLDED_STATUS = "\x00folded"
 #: row; it is derived by replaying the record's journal through the ONE fold
 #: (`_folded_terminal_keys`). A label whose status IS a column keeps the cheap
 #: SQL predicate; a label whose status is folded pays two prefetch reads for the
-#: cage. Both are the SAME cage — same vocabulary, same exclusion — which is
-#: what `tests/test_13422_object_subject_dense_leg.py` pins structurally: every
+#: cage. Both apply the SAME vocabulary and the same exclusion, which is what
+#: `tests/test_13422_object_subject_dense_leg.py` pins structurally: every
 #: label in `search_engine._STATUS_FILTERED_LABELS` has an entry here, so a family
 #: added to that tuple cannot silently skip the exclusion on the record leg.
+#:
+#: ⛔ THE FOLDED ARM'S POPULATION IS THE FOLD'S POPULATION, BOUNDS INCLUDED — and
+#: its bounds are NAMED, not assumed away (`#13466` cycle 3, P2). The one-home rule
+#: requires this leg to consume `apply_event_stream_folds` rather than invent a
+#: second fold, so wherever that fold and the live graph fold disagree, this leg
+#: answers with the fold. Two such disagreements are RECORDED as open in that home
+#: (`cache_projection.py:1001` `(a-2)` — a delete-then-re-create ordering answers
+#: `absent`/`live` where the graph holds `archived`; `:1014` `(b)`/`(c)` in the
+#: opposite, conservative direction), measured there over an exhaustive sweep. So
+#: the honest statement is NOT "the record can never serve a row the graph hides":
+#: it is that the record leg serves exactly the fold's answer, and the fold has a
+#: named, bounded, pre-existing ordering gap owned on `#9974`. ⚠️ That gap is
+#: NOT introduced here and is not this leg's to close — closing it in `record_vector`
+#: would be the second declaration the rule forbids — but a reader must not infer a
+#: guarantee this change did not make. Today nothing ships it: `cutover_armed()` is
+#: OFF, so the graph answers. See the comment relayed to `#9974`.
 _STATUS_COLUMN: dict[str, tuple[str, bool]] = {
     "point": ("status", True),
     "operator": ("status", True),
@@ -514,9 +530,12 @@ def _sql_literal(value: str) -> str:
 #: whose fold calls an enormous number of Objects terminal would make that array
 #: the dominant cost of the read's statement. Past this bound the leg DECLINES its
 #: turn (:class:`RecordVectorDeclined`, which the caller answers from the graph
-#: with the identical cage applied in Cypher) — so the failure direction hides
-#: nothing and serves nothing terminal. Materialising the fold, which makes the
-#: list disappear, is what removes the bound.
+#: with the identical cage applied in Cypher) — so the bound itself can neither
+#: hide a live row nor serve a terminal one: it only changes WHICH LEG answers, and
+#: the graph leg's cage is the live fold's. (What the record CAN serve is the FOLD's
+#: answer, whose own ordering bounds are named at :data:`_STATUS_COLUMN` and owned
+#: on `#9974` — that is a property of the one home, not of this bound.)
+#: Materialising the fold, which makes the list disappear, is what removes the bound.
 #:
 #: ⚠️ WHEN IT CAN FIRE, stated because the first cut of this constant was justified
 #: by a cost that was not this one (`#13466` review P2). The prefetch reads the

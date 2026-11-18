@@ -316,10 +316,18 @@ def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
         "the column arm's two statements must fit strictly inside the read")
     folded_share = record_vector.record_statement_ms(
         budget, record_vector.RECORD_LEG_STATEMENTS_PER_READ + 1)
-    assert folded_share * 3 < budget, (
-        f"the folded arm's three statements must also leave a reserve "
-        f"({folded_share} x 3 >= {budget}) — otherwise the graph branch is handed "
-        "a floored timeout and the label's real path returns nothing")
+    # ⛔ THE RESERVE'S SIZE, not merely that it is positive (`#13466` cycle 3, P3):
+    # `folded_share * 3 < budget` is TRUE at the FAILING divisor too
+    # (`record_statement_ms(500, 3) == 166`, and 498 < 500) — so it measured
+    # nothing. What the `#11691` guarantee actually is, is that at least ONE FULL
+    # statement share is left for the graph branch: at the failing divisor that is
+    # 500 - 498 = 2 ms, which is the empty-result path this pin exists to prevent.
+    reserve = budget - folded_share * 3
+    assert reserve >= folded_share, (
+        f"the folded arm leaves only {reserve} ms of a {budget} ms read for the "
+        f"graph branch after three {folded_share} ms statements — less than one "
+        "full share, so a cancelled kNN hands the label's real path a floored "
+        "timeout and it returns nothing")
     # …and the divisor really is one more where it is decided.
     tree = ast.parse(MODULE.read_text())
     func = next(node for node in ast.walk(tree)
@@ -332,11 +340,20 @@ def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
 def test_the_prefetch_does_not_select_the_payload_columns():
     """⛔ `SELECT *` ON THE PREFETCH IS A MEASURED 2.0 s -> 27 ms (`#13466` P2).
 
-    The fold reads no vector and no jsonb, but `SELECT *` materialises
-    `embedding` (jsonb, ~2.5 KB/row) and the generated `embedding_vec` (~7 KB/row)
-    for every row of the label. Measured on 8,000 rows: ~2.0 s with the payload,
-    ~27 ms without — i.e. at a 166 ms statement share the leg could never answer on
-    any tenant of realistic size, while claiming a bound it could not reach.
+    The fold reads no vector and no jsonb, but `SELECT *` materialises both for
+    every row of the label. Per-row sizes, measured with `pg_column_size` on
+    `pgvector/pgvector:pg16`: `embedding_vec` is a FIXED `vector(384)` =
+    **1,544 B** (fixed-width, so it cannot be larger), and `embedding` jsonb for a
+    384-element array is **4.6–7.7 KB** depending on whether the floats are
+    short-repr or full-precision. Measured on 8,000 rows: **~2.0 s** with the
+    payload, **~0.19 s** without, against the **125 ms** per-statement share a
+    500 ms read gives three folded statements plus the graph's reserve.
+
+    ⚠️ The first version of this docstring carried the two figures REVERSED
+    ("jsonb ~2.5 KB, `embedding_vec` ~7 KB") and the COLUMN arm's 166 ms share
+    (`#13466` cycle 3, P3). Both are corrected here rather than left, because this
+    is the test that defends the narrowing and a wrong cost model here is how the
+    next lane re-derives the wrong fix.
     """
     from tortoise.cache_projection import GENERATED_COLUMNS
     from tortoise.record_projection import table_columns
