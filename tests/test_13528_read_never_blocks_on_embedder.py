@@ -632,6 +632,22 @@ def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
     recorded kind, and ``_as_failure_kind`` then reports that kind. It is pinned
     at the seam because no fixture reproduces that staleness — not because the
     arm is unreachable.
+
+    ``no_embedder`` is the same shape of input and is pinned here for the same
+    reason (#13534 review round 6, P3): the RULE is the translator's, so the
+    unconditional ``no_embedder -> not_installed`` that ``main``'s
+    ``_READ_DECLINE_FAILURE_KIND`` dict applied is now just one state of it —
+    the state where that kind was RECORDED. With nothing recorded the honest
+    answer is the documented ``model_unavailable`` fallback, and that is
+    reachable: ``absent_reason()`` publishes ``no_embedder`` whenever
+    ``_last_failure_kind`` is unset, which is the #4123 "provisioning succeeded,
+    the load still broke" exit, so an armed refusal in that state must not say
+    ``not_installed`` ("install the extra") about an extra that IS installed.
+    ⛔ Restoring ``main``'s unconditional mapping reds THIS row and no other —
+    measured on this head with the first assertion below reverted to
+    ``no_embedder -> not_installed``: ``1 failed``, and the translator's
+    ``load_in_flight`` assertions beside it still pass, so the red is
+    attributed to the missing-cause arm and not to the arm above.
     """
     EmbeddingModel._reset()
     try:
@@ -639,6 +655,12 @@ def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
             "model_unavailable", (
             "with nothing recorded the contract's documented fallback is the "
             "honest answer — the load was in flight, nothing broke")
+
+        assert EmbeddingModel._as_failure_kind("no_embedder") == \
+            "model_unavailable", (
+            "with nothing recorded, the designed-absence TRACE word names no "
+            "cause — an armed refusal must fall back to the documented kind "
+            "rather than assert `not_installed` about an installed extra")
 
         EmbeddingModel._last_failure_kind = "load_failed"
         assert EmbeddingModel._as_failure_kind("load_in_flight") == "load_failed", (
