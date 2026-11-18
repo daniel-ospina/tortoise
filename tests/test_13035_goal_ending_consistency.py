@@ -1246,9 +1246,10 @@ def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
     raised again — the caller was sent in a circle.
 
     ⛔ The review's own suggested replacement (``status='archived'`` "works on both
-    layers") is FALSIFIED on THIS carrier, and MEASURED here: a live goal Point
-    refuses ``status='archived'`` — but by the **goalState-coherence arm**, not by
-    any §5 reservation: ``update_knowledge(<live goal Point>, status='archived')``
+    layers") is FALSIFIED on THIS carrier, and MEASURED here (see the two closed
+    assertions below, not an artifact elsewhere): a live goal Point refuses
+    ``status='archived'`` — but by the **goalState-coherence arm**, not by any §5
+    reservation: ``update_knowledge(<live goal Point>, status='archived')``
     raises *"status='archived' ends the goal, but goalState='active' still describes
     a live commitment"* (#13035), and the same call on a PLAIN Point is accepted and
     stored as ``deprecated`` (v3.37: ``archived`` is that word's declared synonym;
@@ -1257,6 +1258,17 @@ def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
     grepping it.
     """
     goal = sdk.create_point("goal", "GOAL - successor repair", goalState="active")
+    # ⛔ THE CARRIER CLAIM ABOVE, PERFORMED — a status word ALONE on a LIVE goal
+    # Point is refused by the goalState-coherence arm, while the same word on a
+    # plain Point is accepted and stored as `deprecated`. Both are closed here so
+    # the docstring's "MEASURED here" names an assertion in this test.
+    status_only = sdk.create_point("goal", "GOAL - successor repair [status only]",
+                                   goalState="active")
+    with pytest.raises(ValueError, match="still describes a live commitment"):
+        sdk.update_knowledge(status_only["id"], status="archived")
+    plain = sdk.create_point("statement", "plain - archived synonym")
+    assert sdk.update_knowledge(plain["id"], status="archived")["status"] == (
+        "deprecated"), "a PLAIN Point must still accept `archived`, as `deprecated`"
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(goal["id"], goalState="superseded",
                              status="superseded")
@@ -1833,23 +1845,27 @@ def test_the_SUCCESSOR_repairs_prescribe_the_NAME_the_carrier_RESOLVES(sdk):
 
 
 def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
-    """F2 (P3) — the `abandoned` arm first-named `status='archived'`, which a
-    `:Point` goal's own door REFUSES, so the repair was a circle.
+    """F2 (P3) — the `abandoned` arm first-named a legacy spelling on a carrier
+    where it is not the DECLARED word, and justified it with three claims that
+    are measurably false.
 
-    ``_ALLOWED_TRANSITIONS`` is ``live -> {deprecated, superseded}`` and declares
-    no route to ``archived`` (§5 v3.37's four rows name those two targets and
-    deleted the *"reserved — no v1 write path"* row, which survives only as
-    ``deprecated``'s write-side synonym);
-    ``_update_entity``'s Point status arm enforces it. This PR already made the
-    SIBLING `superseded` arm carrier-aware and pinned it
-    (``test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT``) — the
-    `abandoned` arm kept the carrier-blind wording, and every message assertion
-    on it used an OBJECT fixture, so nothing measured the Point path.
+    Measured at this head: ``_ALLOWED_TRANSITIONS`` is
+    ``live -> {deprecated, superseded}`` — it declares no route to ``archived``,
+    and ``retracted`` is not a target either; both are *spellings* that
+    ``_read_caller_status`` normalises to ``deprecated`` (``ONTOLOGY`` v3.37's
+    four words, #11824). The pre-fix message said the Point's declared
+    transitions were "exactly {retracted, superseded}", called ``archived``
+    "REFUSED there as reserved" (a §5 row deleted in v3.37), and called
+    ``deprecated`` a "legacy spelling … accepted on goals whose door carries
+    it" — while this PR prescribes exactly that word on the SIBLING arm. The
+    three ``not in`` assertions below are RED on that text.
 
-    ⛔ MEASURED before the fix: the message contained no ``status='retracted'``
-    at all (so the first ``in`` assertion was FALSE), and performing the word it
-    did first-name on a Point raised
-    ``update_entity refused the status transition 'live' -> 'archived'``.
+    ⛔ MEASURED before the fix, so the circle is stated precisely: a ``status``
+    word ALONE is refused by the #13035 goalState-coherence arm (*"status=
+    'archived' ends the goal, but goalState='active' still describes a live
+    commitment"*, through ``_sanitize_props``) — not by ``update_entity refused
+    the status transition 'live' -> 'archived'``, a message that is unreachable
+    for ``archived`` because normalisation runs before the transition map.
     """
     goal = sdk.create_point("goal", "GOAL - abandoned repair [point]",
                             goalState="active")
@@ -1857,18 +1873,23 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
         sdk.update_knowledge(goal["id"], goalState="abandoned")
     msg = str(exc.value)
     assert "REFUSED" in msg, msg
-    # the message names the :Point route — the CANONICAL word, the one
-    # `_ALLOWED_TRANSITIONS['live']` declares (measured: `{deprecated, superseded}`)
+    # the message prescribes the :Point DECLARED word, the way the sibling arm
+    # does, and DISCLOSES the legacy spellings instead of prescribing one
     assert "status='deprecated'" in msg, msg
     # ...and it discloses that the retired spellings normalise to it, instead of
     # repeating the "`archived` is reserved on Points" §5 row v3.37 deleted.
     # ⛔ THE WHOLE CLAUSE, not the bare word `normalise`: a one-token pin is
     # satisfied by "…do NOT normalise to it" (v3.37 review, round 4).
     assert "'retracted' and 'archived' are the spellings that normalise" in msg, msg
-    # ⛔ the pre-fix prescription, PERFORMED, is refused — this is the circle
-    with pytest.raises(ValueError) as refused:
+    # ⛔ each of these is a clause the pre-fix text carried and the primary
+    # source falsifies, so each `not in` is a red on that text:
+    assert "{retracted, superseded}" not in msg, msg          # live's targets
+    assert "REFUSED there as reserved" not in msg, msg         # deleted §5 row
+    assert "the legacy 'deprecated' spelling" not in msg, msg   # it IS the word
+    # ⛔ the pre-fix prescription, PERFORMED, is refused — and the REASON the
+    # door gives is the #13035 goalState-coherence arm, not a §5 reservation
+    with pytest.raises(ValueError, match="still describes a live commitment"):
         sdk.update_knowledge(goal["id"], status="archived")
-    assert "archived" in str(refused.value), refused.value
     # ⛔ and the prescription the message now names LANDS, in ONE write — the word
     # the message NAMES (`deprecated`), not its synonym: pinning the synonym would
     # stay green if `deprecated` were refused from `live` (v3.37 review, round 4).
@@ -1876,12 +1897,17 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
     node = sdk.get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
     assert node["status"] == _CANONICAL_ENDED, node
-    # ...and the synonym the message DISCLOSES lands the same ending, so the
-    # disclosure is true rather than decorative
-    goal_legacy = sdk.create_point("goal", "GOAL - abandoned repair [legacy]",
-                                  goalState="active")
-    sdk.update_knowledge(goal_legacy["id"], goalState="abandoned", status="retracted")
-    legacy_node = sdk.get_point(goal_legacy["id"])
+    # ...and BOTH synonyms the message DISCLOSES land the same ending, so the
+    # disclosure is true rather than decorative — and `archived`, which the pre-fix
+    # text called "REFUSED there as reserved", is not refused at all
+    for spelling in ("retracted", "archived"):
+        goal_legacy = sdk.create_point(
+            "goal", f"GOAL - abandoned repair [{spelling}]", goalState="active")
+        sdk.update_knowledge(goal_legacy["id"], goalState="abandoned",
+                             status=spelling)
+        legacy_node = sdk.get_point(goal_legacy["id"])
+        assert legacy_node["goalState"] == "abandoned", legacy_node
+        assert legacy_node["status"] == _CANONICAL_ENDED, legacy_node
     assert legacy_node["status"] == _CANONICAL_ENDED, legacy_node
     # both surfaces agree the goal is over — the rule the message serves
     assert (node["goalState"] in RETIRED_GOAL_STATES,
@@ -1897,8 +1923,12 @@ def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
     at ``test_the_create_door_cannot_RESURRECT_an_ended_goal_by_naming_both`` only
     checks ``ALREADY ENDED``, so this clause was unconstrained.
 
-    ⛔ MEASURED before the fix: the Point route was absent from the message, so
-    ``status='retracted'`` was FALSE.
+    ⛔ AND THE POINT WORD IT ADDED WAS A LEGACY SPELLING, justified by a deleted
+    §5 row: the message called `archived` *"REFUSED there as reserved"*, while
+    ``LIFECYCLE_STATUS_SYNONYMS`` normalises it to ``deprecated`` — which v3.37
+    makes §5's declared target from ``live`` (measured below: the prescribed pair
+    LANDS on this very door). The ``not in`` / ``status='deprecated'`` assertions
+    are RED on that text.
     """
     ended = sdk.create_point("goal", "GOAL - ended [finality-point]",
                              goalState="abandoned", status="retracted")
@@ -1907,11 +1937,19 @@ def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
                          id=ended["id"], goalState="met", status="live")
     msg = str(exc.value)
     assert "ALREADY ENDED" in msg, msg
-    # the :Point route this message names is the CANONICAL ending word — v3.37's
-    # `deprecated`; `retracted` is its declared synonym and normalises to it
+    # the :Point half names the DECLARED word and discloses the spellings
     assert "status='deprecated'" in msg, msg
+    assert "'retracted' and 'archived' are its legacy spellings" in msg, msg
+    assert "REFUSED there as reserved" not in msg, msg
     assert "supersededBy=<successor name>" in msg, msg
     # the ending survived the refused write
     after = sdk.get_point(ended["id"])
     assert after["goalState"] == "abandoned", after
     assert after["status"] == _CANONICAL_ENDED, after
+    # ⛔ and the pair the message prescribes LANDS — on this same door, for the
+    # same node, so the repair is performable rather than merely worded
+    kept = sdk.create_point("goal", "GOAL - revived [finality-point, canonical]",
+                            id=ended["id"], goalState="abandoned",
+                            status="deprecated")
+    assert kept["status"] == _CANONICAL_ENDED, kept
+    assert kept["goalState"] == "abandoned", kept

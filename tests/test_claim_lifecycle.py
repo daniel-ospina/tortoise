@@ -80,8 +80,11 @@ def test_retracted_is_terminal(sdk_factory, tmp_path):
 
 
 def test_retract_archived_is_terminal(sdk_factory, tmp_path):
-    # plan-review P2 boundary: archived is terminal. v1 has no SDK path to
-    # archived (reserved), so set it via the graph directly to exercise the guard.
+    # plan-review P2 boundary: archived is terminal. No SDK path STORES the literal
+    # word — `status='archived'` is ACCEPTED and normalised to `deprecated`
+    # (`LIFECYCLE_STATUS_SYNONYMS`, #11824; the "reserved on Points" row §5 used to
+    # carry was deleted in v3.37) — so seed a stored `archived` row via the graph
+    # directly to exercise the guard on the row a pre-#11824 writer left behind.
     sdk = sdk_factory(tmp_path)
     p = sdk.create_point("statement", "archived")
     sdk._get_proj().g.query(
