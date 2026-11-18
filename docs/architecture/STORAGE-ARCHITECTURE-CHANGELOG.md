@@ -2532,15 +2532,20 @@ is where it is measured. The correction moves a citation, not a number.
 
 **⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
 as **§12.2**'s. The paragraph is inside **§12.1c** (`### 12.1c ⭐ DECISION (RESOLVED 2026-11-07)` at `:1169`), and
-§12.2 — *the lever is "what gets an embedding"* — begins at `:1241`; the DECIDED block that follows the paragraph is
+§12.2 — *the lever is "what gets an embedding"* — begins at `:1244`; the DECIDED block that follows the paragraph is
 §12.1c's too. This entry states the measured location rather than propagating the issue's, because a changelog entry
 whose section number sends a reader to an unrelated lever is the one thing it exists to prevent. The issue carries a
 comment recording the correction.
 
-**What did NOT change.** The argument for option 2 is untouched: it rests on the **ledger** (provisioned, unevictable
-RAM for a row the record already stores, §12.1a / §14.3 V1) and on the **size dependence**, and both survive verbatim.
-No decision was reopened, no figure was retired, and nothing here authorises removal — the record-first sequencing and
-its release boundary are untouched (§12.1c's DECIDED block, `#11395` comment `6956793300`).
+**What did NOT change.** The argument for option 2 is untouched **by this change**: it rests on the **ledger**
+(provisioned, unevictable RAM for a row the record already holds, §12.1a / §14.3 V1) and on the **size dependence**,
+and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
+sentence immediately below the changed paragraph was itself revised on `main` by `#13435` in the same window (it now
+says *“held for a row the record already has”* and carries the two-population clause, `:1206–1211`), and this
+rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
+ledger/sequencing conclusion are what this entry claims survived; nothing here re-states the neighbouring sentence as
+though it were unchanged. No decision was reopened, no figure was retired, and nothing here authorises removal — the
+record-first sequencing and its release boundary are untouched (§12.1c's DECIDED block, `#11395` comment `6956793300`).
 
 **Why it is recorded rather than silently reworded.** This is the class `#13395` exists to fix — a design document
 stating a conclusion its own measurements contradict — and the `#13395` review found it as a P2 **after** the sibling
