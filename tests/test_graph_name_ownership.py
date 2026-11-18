@@ -76,24 +76,49 @@ def test_the_register_is_tied_to_the_real_symbols():
 def test_the_product_family_is_an_ALIAS_of_the_composer_that_strips_it():
     """#13205/#13490: ONE declaration of the tenant family, and it is `sdk.py`'s.
 
-    `_PRODUCT_GRAPH_PREFIXES` and the tenant half of `_SWEEP_OWNED_PREFIXES`
-    must be the COMPOSER's own tuple **by object identity**. The register test
-    above cannot see this: it builds its expectation from the same module
-    attribute (`entry["set"] is getattr(embedded, name)`), so re-inlining the
-    literal `("org_", "team_")` at either site leaves it green — and a copy
-    that kept a spelling the composer had dropped would then widen a
-    `DETACH DELETE` gate over a family nothing mints. Hence `is`, not `==`:
-    an equal-but-redeclared tuple is exactly the drift, and it is the failure
-    that makes this test a lie.
+    TWO pins, because the two sites tie to the composer in DIFFERENT ways — and
+    saying which is which is the point:
+
+    * `_PRODUCT_GRAPH_PREFIXES` is the composer's tuple **by object identity**
+      (`is`). The register test above cannot see this one: it builds its
+      expectation from the same module attribute
+      (`entry["set"] is getattr(embedded, name)`), so re-inlining the literal
+      `("org_", "team_")` here leaves it green.
+    * the tenant half of `_SWEEP_OWNED_PREFIXES` **cannot** share identity — it
+      is composed into a longer tuple, so a slice is a fresh object. It is
+      pinned at the SOURCE instead: the declaration must still be a tuple
+      literal that UNPACKS `_TENANT_GRAPH_PREFIXES`. A value-identical re-inline
+      (`("test_", "tortoise_test", "org_", "team_")`) is a second declaration,
+      which IS the drift, and no comparison of the VALUE can tell it from the
+      composed form.
+
+    What that drift costs is stated where the alias is made (`tests/_embedded.py`):
+    this set gates an irreversible `DETACH DELETE` + `GRAPH.DELETE`.
     """
     from tortoise import sdk
 
     assert embedded._PRODUCT_GRAPH_PREFIXES is sdk._TENANT_GRAPH_PREFIXES
-    assert _SWEEP_OWNED_PREFIXES[len(("test_", "tortoise_test")):] \
-        == sdk._TENANT_GRAPH_PREFIXES
-    # The two non-tenant stems must stay AHEAD of the composed family, or the
-    # slice above would be measuring the wrong end of the tuple.
+
+    tree = ast.parse((REPO / "tests" / "_embedded.py").read_text(encoding="utf-8"))
+    decl = next(
+        n for n in tree.body
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_SWEEP_OWNED_PREFIXES"
+                for t in n.targets))
+    assert isinstance(decl.value, ast.Tuple), (
+        "the sweep's journal vocabulary is no longer a tuple literal")
+    unpacked = [e.value.id for e in decl.value.elts
+                if isinstance(e, ast.Starred) and isinstance(e.value, ast.Name)]
+    assert unpacked == ["_TENANT_GRAPH_PREFIXES"], (
+        "the tenant half of _SWEEP_OWNED_PREFIXES must UNPACK "
+        "`_TENANT_GRAPH_PREFIXES`, not restate its spelling — a restated tuple "
+        "is the drift the alias exists to prevent, and it would let the sweep "
+        "keep a prefix the composer dropped. Found starred element(s): "
+        f"{unpacked}")
+
+    # And the composed value must still be what the sweep documents it accepts.
     assert _SWEEP_OWNED_PREFIXES[:2] == ("test_", "tortoise_test")
+    assert set(_SWEEP_OWNED_PREFIXES[2:]) == set(sdk._TENANT_GRAPH_PREFIXES)
 
 
 def test_the_wipe_literal_is_a_subset_of_the_journal_set():

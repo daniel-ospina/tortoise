@@ -192,24 +192,25 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_3516_client_captured_at.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     # #10046: the two `namespace="registry"` matches in this module are TEXT fed
-    # to `ast.parse`, never a construction. `test_a_literal_namespace_is_not_an
+    # to `ast.parse`, never a construction — `test_a_literal_namespace_is_not_an
     # _org_scoped_site` hands the record-tenant scanner a synthetic source
-    # snippet and asserts the round-3 predicate excludes a string-literal
-    # namespace; the other is the same literal quoted in that test's own
-    # docstring. Both are kept byte-for-byte `"registry"` ON PURPOSE — that is
-    # the spelling PROD resolves and the exact shape the doubled-predicate P1
-    # mis-counted — so they are declared here rather than renamed to a `test_*`
-    # namespace, which would make the pin exercise a spelling no prod lane uses
-    # (and the docstring `grep` a literal it no longer explains). The guard greps
-    # file TEXT, so it cannot tell this from a real construction; MEASURED:
-    # without this row it reds on BOTH of those matches — the docstring sample
-    # and the `registry = 'def f():\n    return _make_sdk(namespace="registry")'`
-    # string — → `test-slow (e)` → python-ci-gate, which is how it was found.
-    # ⛔ NO LINE NUMBERS, deliberately (#10723 review F3): an earlier revision
-    # cited them and they were stale by the very next head, because both matches
-    # ride the END of a file that keeps growing. Name the construct, not the
-    # line — the same rule `tortoise/mcp_auth.py`'s anchors now follow.
-    "test_10047_record_every_lane.py": {"registry": "synthetic-source"},
+    # snippet, and the other is the same literal quoted in that test's own
+    # docstring. ⛔ **NO ROW, and that is deliberate (#13490 review 2).** This
+    # guard used to grep file TEXT, so it could not tell a string sample from a
+    # real construction and both matches red `test-slow (e)` without a row. The
+    # span scanner now classifies STRING and COMMENT tokens first
+    # (`_namespace_literals_in_source`), so both matches are skipped as samples
+    # and the declaration below went dead. **A dead routing row is not harmless:
+    # it would silently ROUTE a real `namespace="registry"` construction added
+    # to this file later** — the fail-OPEN direction. MEASURED at this head:
+    # `_namespace_literals_in_source(test_10047_record_every_lane.py)` yields
+    # `[]`, so re-adding the row buys nothing and costs that silence.
+    #
+    # (The two matches are still `"registry"` ON PURPOSE — that is the spelling
+    # PROD resolves and the exact shape the doubled-predicate P1 mis-counted.
+    # Renaming either to a `test_*` namespace would make the pin exercise a
+    # spelling no prod lane uses.)
+    #
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
     # is the same construction the endpoint under test uses, and the behaviour
@@ -587,8 +588,8 @@ def _string_and_comment_spans(src: str) -> list[tuple[int, int]]:
     returned, so the failure direction is "scan more", never "skip the file".
     """
     starts = [0]
-    for line in src.splitlines(keepends=True):
-        starts.append(starts[-1] + len(line))
+    for line in src.split("\n"):
+        starts.append(starts[-1] + len(line) + 1)
     spans: list[tuple[int, int]] = []
     try:
         for tok in tokenize.generate_tokens(io.StringIO(src).readline):
