@@ -119,10 +119,13 @@ FAMILIES: dict[str, dict[str, str]] = {
 #: 10 000 ms is the VENDOR's own general-query default, not a guess: FalkorDB's
 #: GraphRAG client ships ``ConnectionConfig.query_timeout_ms = 10_000``, and
 #: ``GRAPH.QUERY`` takes its per-query ``TIMEOUT`` in milliseconds and terminates
-#: the statement on expiry (``Query timed out``). The scan stays BOUNDED — a
-#: wedged store degrades (zero rows, ``incomplete``, a ``degraded`` leg) and never
-#: hangs this read — and a caller that supplies its own budget (the capstone's
-#: ``_elevated_timeout_ms``) always wins over this default.
+#: the statement on expiry (``Query timed out``). The scan stays BOUNDED — it
+#: never hangs this read: a wedged store degrades (zero rows, ``incomplete``, a
+#: ``degraded`` leg) when the caller supplied a sink to carry that marking, and
+#: otherwise raises the store's error rather than serving an unmarked empty
+#: (``tortoise_fts_query``'s ended arm, #13302 review round 2) — and a caller
+#: that supplies its own budget (the capstone's ``_elevated_timeout_ms``) always
+#: wins over this default.
 ENDED_SCAN_BUDGET_MS = 10_000
 
 #: The ending-time fields, in the order ``endedAt`` resolves them. Declared here

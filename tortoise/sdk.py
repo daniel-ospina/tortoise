@@ -44831,9 +44831,13 @@ class TortoiseSDK:
         keeps every existing surface answering exactly what it answered before.
         The scan it issues is BOUNDED by `ended.ENDED_SCAN_BUDGET_MS`
         (10 000 ms — FalkorDB's own general-query default, not the 500 ms leg
-        budget: #13302 review F1), overridable by the caller's own budget; a
-        budget it overruns degrades to zero rows + `incomplete` + a `degraded`
-        leg rather than raising (#13302 review F1).
+        budget: #13302 review F1), overridable by the caller's own budget. A
+        budget it overruns degrades — zero rows, `incomplete`, a `degraded`
+        leg — **when the caller passes a sink that can carry that marking**
+        (`leg_trace`, `read_status_out` or `_truncation_out`); with none there
+        is nowhere for the marking to go, so it raises the store's error
+        instead of returning a bare `[]` that would claim "nothing of that
+        family ever ended" (#13302 review round 2).
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
