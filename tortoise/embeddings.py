@@ -1764,8 +1764,18 @@ def _in_replay_scope() -> bool:
         return True
 
 
+#: The two LEGS a bounded write belongs to — they have DIFFERENT repairs, so
+#: the count is never summed across them (#13417).
+BOUNDED_SCOPE_GRAPH_FOLD = "graph_fold"
+BOUNDED_SCOPE_RECORD_DERIVATION = "record_derivation"
+
+
 def encode_for_row(
-    content: str, expected_dim: int | None, *, bounded: bool = False,
+    content: str,
+    expected_dim: int | None,
+    *,
+    bounded: bool = False,
+    bounded_scope: str = BOUNDED_SCOPE_GRAPH_FOLD,
 ) -> list[float] | None:
     """The EMBED-gated submission step for a WRITTEN row (#5008).
 
@@ -1818,13 +1828,24 @@ def encode_for_row(
     repairable from the graph and `derived = replay(journal)` still holds.
 
     ⚠️ **The decline is COUNTED, not merely logged (#13417).** Every bounded
-    decline increments `monitoring.metrics()["rows_written_without_vector"]`
-    under the cause it declined for, because §17.2 requires that the
-    truth↔derived divergence the bound creates be checkable, and `#13156` rules
-    out inferring it from the read side (a budget-cancelled dense leg reads like
-    a slow store). The count is emitted from THIS seam rather than from each
-    fold, so a new writer cannot leave it behind — the same reason the gate
-    lives here.
+    decline increments `monitoring.metrics()["derived_embed_declines"]` under
+    the LEG it belongs to and the cause it declined for, because §17.2 requires
+    that the truth↔derived divergence the bound creates be checkable, and
+    `#13156` rules out inferring it from the read side (a budget-cancelled dense
+    leg reads like a slow store). The count is emitted from THIS seam rather
+    than from each caller, so a new writer cannot leave it behind — the same
+    reason the gate lives here.
+
+    ⛔ **`bounded_scope` is a CALLER's fact, not this seam's**, and it is
+    required because the seam cannot infer it: the two legs are repaired
+    differently. `graph_fold` (the four folds, the default) is repaired by
+    `graph-scripts/backfill_embeddings.py`; `record_derivation`
+    (`record_writer.derived_embedding_columns`, #13220) leaves the RECORD's
+    `embedding` column NULL, and that tool reads graph nodes — it would report
+    zero residual over this population. The seam also cannot see whether the row
+    already held a vector, so `graph_fold` counts a cold RE-write that lost
+    nothing; `monitoring.DERIVED_EMBED_DECLINE_COUNT` states both limits and the
+    repair that reconciles exactly.
 
     ⚠️ **Deliberately NOT routed through here**, so the boundary is written
     down rather than inferred: `encode_batch_for_store` (the session TURN
@@ -1870,14 +1891,14 @@ def encode_for_row(
             # per row, and the cause travels with the line so the one entry an
             # operator reads names what actually happened (#13229 review F2).
             _note_embed_skip(1)
-            _note_vectorless_write(decline)
+            _note_vectorless_write(bounded_scope, decline)
             _note_cold_write(WRITE_EMBED_BUDGET_S, reason=decline)
             return None
     return encode_for_store(content, expected_dim)
 
 
-def _note_vectorless_write(reason: str) -> None:
-    """Count the row this bounded decline stores WITHOUT a vector (#13417).
+def _note_vectorless_write(scope: str, reason: str) -> None:
+    """Count the WRITE this bounded decline leaves without a vector (#13417).
 
     TOTAL, and every occurrence — unlike `_note_cold_write`, which is latched to
     one line per process per cause so a bulk write cannot storm the log. The log
@@ -1891,13 +1912,16 @@ def _note_vectorless_write(reason: str) -> None:
     this is swallowed: monitoring is an observation, not a dependency.
 
     ⛔ It does NOT count `#5008`'s gate declines — those are a DESIGNED absence
-    (identifier-only text), permanent and unrepairable, and parking them on the
-    same channel as the #13229 cost would make the channel's non-zero value
-    unattributable. See `monitoring.ROWS_WRITTEN_WITHOUT_VECTOR_COUNT`.
+    (identifier-only text), permanent and unrepairable — nor a post-bound refusal
+    (a wrong-width store, or an encoder that raised). Both are permanent and
+    operator-actionable in a different way, and parking either beside a real cold
+    window would make the channel's non-zero value unattributable. See
+    `monitoring.DERIVED_EMBED_DECLINE_COUNT` for the full boundary and for the
+    two limits this seam cannot see.
     """
     try:
-        from .monitoring import record_row_without_vector
-        record_row_without_vector(reason)
+        from .monitoring import record_derived_embed_decline
+        record_derived_embed_decline(scope, reason)
     except Exception:
         pass
 

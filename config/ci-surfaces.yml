@@ -1717,6 +1717,17 @@ surfaces:
   # other two arms of the same ownership; cross-surface registration is deliberate, while a
   # SECOND row within one surface is what `--integrity` reds.
   - test_13224_cold_embedder_write_bound.py
+  # #13417: the DERIVED-entity write's own omission counter
+  # (`tortoise/monitoring.py`) and the backfill that repairs it
+  # (`graph-scripts/backfill_embeddings.py`, a file that matches no named
+  # SOURCE_PATTERN and therefore selects `core` by fallback — the same shape the
+  # #13224 row above records). The file is a `carve_out:` member, so this row is
+  # the CLASSIFICATION record, not the leg trigger: `select()` subtracts a
+  # carve-out member from `test_files` and the carve-out job runs it.
+  # Cross-surface registration is deliberate (the `eval` row is the
+  # `tortoise/embeddings.py` arm); a SECOND row within one surface is what
+  # `--integrity` reds.
+  - test_13417_vectorless_rows.py
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
   # #2446 (phase 2 of #2427): the member OWN-KEY slice — atomic session-key
   # replace (POST /v1/session/key replace_key_id) + enable/disable-own, and the
@@ -10475,6 +10486,10 @@ surfaces:
   - eval/write_path/test_write_path_operator_receipt.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
+  # #13417: `tortoise/embeddings.py` is an `eval`-surface subject (the
+  # `encode_for_row` bounded seam the counter is emitted from) — the same module
+  # arm the #13224 rows record.
+  - test_13417_vectorless_rows.py
   # #4194: the write path now embeds turns via tortoise/embeddings.py's
   # compute_embeddings (the batch form of compute_embedding); a change to
   # that module selects `eval`, so this file is dual-registered here and in
@@ -11384,6 +11399,17 @@ slow_files:
 # Mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by test_ci_selection
 # + test_markers).
 carve_out:
+# #13417: the loop test drives real DERIVED-entity folds and the backfill against
+# its OWN embedded `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`),
+# so a URI lane would redirect that construction into the shared lane container
+# and grade a graph shared with every other run — the measured shape recorded on
+# #5084 (which is exactly how the sibling `test_backfill_embeddings_force.py`,
+# registered on `eval` only and absent here, produces a red on its second run in
+# one container). Routed here so the URI-unset carve-out job runs it as designed;
+# the stem is mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` (the pin is
+# `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
+# DECLARED in `tests/test_markers.py::test_no_redirect_stems_registry_exact`.
+- test_13417_vectorless_rows.py
 # #5140: the behavioural half of the `ingestedAt` fix constructs its own
 # embedded `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`),
 # so under a URI lane the redirect would flip it to the shared server. Routed

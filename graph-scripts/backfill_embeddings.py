@@ -520,17 +520,23 @@ def _write_identity(label: str, branch: str) -> list[tuple[str, int]]:
 
     ⚠️ The residual this deliberately accepts: if two nodes are indistinguishable
     by every component here (same key, same discriminator, same text) they BOTH
-    receive the same vector — and they should, because the vector describes text
-    they both carry identically.
+    receive the same vector, because it describes text they carry identically —
+    correct for a DERIVED vector. ⛔ **It is NOT safe for a VERBATIM one:** a
+    `:Point` may hold a caller-supplied vector (PR #3018's recorded shape) that
+    is not the encode of its text, and such a twin is overwritten by this write.
+    That is PRE-EXISTING (the pre-fix MATCH also matched every node sharing the
+    id, and it requires the duplicate-id graph #12570 exists for) and is accepted
+    here rather than hidden: distinguishing the twins needs a per-node handle this
+    tool deliberately does not use (`id(n)` is reused after a delete).
     """
     if label == "Event":
-        if branch == "AgentSession":
-            # _row_text: session_embedding_text(row[1], summary(row[4]), row[2],
-            # row[3]) — name, keywords, topics, content_metadata.
-            return [("n.name", 1), ("n.keywords", 2),
-                    ("n.topics", 3), ("n.content_metadata", 4)]
-        # _row_text: " ".join(filter(None, [subject, eventKind, object])).
-        return [("n.subject", 1), ("n.eventKind", 2), ("n.object", 3)]
+        # #12570 review: derived from `_EVENT_COLUMNS`, the SAME structure the
+        # collect's RETURN is built from — never a third positional spelling. The
+        # first member is the key (`row.id`); every other member is an identity
+        # component, and its index is the collected-column index.
+        return [(expr, index)
+                for index, (_alias, expr) in enumerate(_EVENT_COLUMNS[branch])
+                if index != 0]
     return [(_text_expr(label), 1)]
 
 
@@ -549,6 +555,31 @@ def _write_where(label: str, branch: str) -> str:
     for i, (expr, _row_index) in enumerate(_write_identity(label, branch)):
         parts.append(_null_safe_eq(expr, f"row.k{i}"))
     return " AND ".join(parts)
+
+
+#: The ``Event`` surface's collected COLUMN layout, one tuple of
+#: ``(alias, cypher expression)`` per branch — the ONE spelling shared by
+#: `_label_branches`' RETURN (the collect), `_row_text` (the composition reads,
+#: by index) and `_write_identity` (the write's address). #12570's review found
+#: the layout restated a THIRD time as bare positional indices there, with
+#: nothing linking them to the RETURN string; this is the single structure both
+#: derive from, so no edit can desynchronise them silently.
+#:
+#: ⛔ The FIRST member is the row's KEY (``_id``), which the write addresses as
+#: ``row.id`` — every remaining member is an identity component.
+_EVENT_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "AgentSession": (("_id", "n.eventId"), ("_name", "n.name"),
+                     ("_keywords", "n.keywords"), ("_topics", "n.topics"),
+                     ("_cm", "n.content_metadata")),
+    "other": (("_id", "n.eventId"), ("_subject", "n.subject"),
+              ("_kind", "n.eventKind"), ("_object", "n.object")),
+}
+
+
+def _event_return(branch: str) -> str:
+    """The collect query's RETURN for one ``Event`` branch (``_EVENT_COLUMNS``)."""
+    return ", ".join(f"{expr} AS {alias}"
+                     for alias, expr in _EVENT_COLUMNS[branch])
 
 
 def _label_branches(label: str, *, force: bool) -> list[tuple[str, str, str]]:
@@ -577,14 +608,12 @@ def _label_branches(label: str, *, force: bool) -> list[tuple[str, str, str]]:
         return [
             ("AgentSession",
              f"{kind_pred}{null_pred}n.eventKind = 'AgentSession'",
-             "n.eventId AS _id, n.name AS _name, n.keywords AS _keywords, "
-             "n.topics AS _topics, n.content_metadata AS _cm"),
+             _event_return("AgentSession")),
             ("other",
              f"{kind_pred}{null_pred}{_MEETING_EXCLUSION} AND "
              "(n.eventKind IS NULL OR n.eventKind <> 'AgentSession') "
              f"AND n.{cfg['text_prop']} IS NOT NULL",
-             "n.eventId AS _id, n.subject AS _subject, n.eventKind AS _kind, "
-             "n.object AS _object"),
+             _event_return("other")),
         ]
     # Aliased columns: Source's id_prop == url AND its text is the url too, so a
     # bare ``RETURN n.url, n.url`` is "Multiple result columns with the same
@@ -1399,8 +1428,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         _print_completeness(stats)
         print(f"\nDone: {stats['scanned']} scanned, {stats['updated']} re-embedded, "
-              f"{stats['skipped']} skipped (no text, encoder unavailable, or no "
-              f"key), {stats['unreachable']} unreachable (no key: no re-run can "
+              f"{stats['skipped']} skipped (no text, encoder unavailable, no key, "
+              f"or the row's own node was not found at write time — text moved or "
+              f"node deleted, which a re-run DOES repair), "
+              f"{stats['unreachable']} unreachable (no key: no re-run can "
               f"repair), "
               f"{stats['meeting_purged']} meeting embeddings purged")
         return 0
@@ -1445,7 +1476,9 @@ def main(argv: list[str] | None = None) -> int:
         grand_unreachable += s["unreachable"]
 
     print(f"\nDone: {grand_scanned} scanned, {grand_updated} embedded, "
-          f"{grand_skipped} skipped (no text, encoder unavailable, or no key), "
+          f"{grand_skipped} skipped (no text, encoder unavailable, no key, or the "
+          f"row's own node was not found at write time — text moved or node "
+          f"deleted, which a re-run DOES repair), "
           f"{grand_unreachable} unreachable (no key: no re-run can repair)")
     return 0
 

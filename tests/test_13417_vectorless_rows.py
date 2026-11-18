@@ -28,7 +28,7 @@ WHAT IS ASSERTED
 The loop, end to end (#13417's Definition of Done):
 
     cold window → the row is written with NO vector
-                → the count fires (a number, not an inference)
+                → the count fires on monitoring.metrics() (a number, not an inference)
                 → the backfill runs
                 → THAT row is repaired, its neighbour is not touched
                 → a second backfill run finds nothing left to repair
@@ -63,10 +63,18 @@ _BACKFILL = _REPO_ROOT / "graph-scripts" / "backfill_embeddings.py"
 
 _DIM = 384
 
-#: The four causes ``EmbeddingModel.await_write_ready_reason`` can return. Spelled
-#: here rather than imported so the test fails if the vocabulary is silently
-#: renamed out from under the metric's label.
+#: The four causes ``EmbeddingModel.await_write_ready_reason`` can return.
+#: Spelled here AND asserted equal to the module's own constants
+#: (``test_the_metric_label_vocabulary_is_the_seam_s_own``), because the counter
+#: emits them into a Prometheus label: a silent rename forks the series and an
+#: operator's existing alert reads zero forever. A comment claiming that pin is
+#: not a pin — the assertion is.
 _CAUSES = ("not_installed", "fail_cooldown", "attempt_spent", "budget_expired")
+
+#: ``"<leg>:<cause>"``, the counter's one label value (#13417). The two legs are
+#: never summed: they have different repairs.
+_GRAPH = "graph_fold"
+_RECORD = "record_derivation"
 
 
 class _FakeEmbed:
@@ -125,7 +133,7 @@ def warm_window(monkeypatch):
 
 
 def _no_vector_counts() -> dict[str, int]:
-    return monitoring.rows_written_without_vector_counts()
+    return monitoring.derived_embed_decline_counts()
 
 
 def _delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
@@ -166,8 +174,9 @@ def test_a_bounded_decline_increments_the_count_under_its_cause(cause, monkeypat
     before = _no_vector_counts()
     assert encode_for_row(f"label-me {cause}", _DIM, bounded=True) is None
     after = _no_vector_counts()
-    assert _delta(before, after).get(cause) == 1, (
-        f"a row stored without a vector must be counted under {cause!r}: "
+    expected = f"{_GRAPH}:{cause}"
+    assert _delta(before, after).get(expected) == 1, (
+        f"a write that produced no vector must be counted under {expected!r}: "
         f"{_delta(before, after)}"
     )
 
@@ -183,7 +192,7 @@ def test_the_count_is_a_running_total_not_a_latched_line(cold_window):
     before = _no_vector_counts()
     for i in range(3):
         assert encode_for_row(f"latch-{i}", _DIM, bounded=True) is None
-    assert _delta(before, _no_vector_counts()) == {"budget_expired": 3}
+    assert _delta(before, _no_vector_counts()) == {f"{_GRAPH}:budget_expired": 3}
 
 
 def test_a_warm_write_does_not_increment_the_count(warm_window):
@@ -212,6 +221,88 @@ def test_the_unbounded_default_never_consults_the_count(monkeypatch):
     assert _delta(before, _no_vector_counts()) == {}
 
 
+def test_the_metric_label_vocabulary_is_the_seam_s_own():
+    """The four causes are the SEAM's constants, not a hand-copied literal.
+
+    The counter emits them into a Prometheus label value. A silent rename forks
+    the series, and an operator's existing alert on `reason="budget_expired"`
+    then reads zero forever while the rows go unobserved — so the vocabulary is
+    asserted against `tortoise.embeddings`, not merely spelled here.
+    """
+    assert set(_CAUSES) == {
+        embeddings._WRITE_DECLINE_NOT_INSTALLED,
+        embeddings._WRITE_DECLINE_FAIL_COOLDOWN,
+        embeddings._WRITE_DECLINE_ATTEMPT_SPENT,
+        embeddings._WRITE_DECLINE_BUDGET_EXPIRED,
+    }
+
+
+def test_a_cold_re_write_of_an_embedded_row_counts_but_loses_nothing(
+        proj, monkeypatch):
+    """⛔ THE COUNTER'S OVER-STATEMENT, PINNED (#13417 review).
+
+    The count is emitted at the SEAM, which knows the encoder declined and does
+    NOT know whether the row already held a vector. Every DERIVED fold's write
+    clause preserves a stored vector against a null incoming one
+    (`vector_write.set_embedding_clause`, `preserve_on_null=True`), so a cold
+    re-registration of an already-embedded entity — the ordinary ON MATCH path —
+    increments the counter while the dense leg loses nothing.
+
+    ⛔ This is why `graph_fold` is documented as an UPPER BOUND on new holes, not
+    an exact row count, and why the exact end state is read from the repair
+    (`_residual_missing`) rather than from the counter. Pinned so the docstring
+    cannot drift from the behaviour in either direction: a future change that
+    makes the count exact must delete this test AND the caveat together.
+    """
+    g = proj.db.select_graph(proj.graph_name)
+    # ⚠️ The warm and cold windows are switched INSIDE this test on purpose: two
+    # fixtures would race, and the last patch applied is the one that governs both
+    # creates — which is how this arm silently measured the cold path twice.
+    fake = _FakeEmbed()
+    monkeypatch.setattr(embeddings, "compute_embedding", fake)
+    monkeypatch.setattr(EmbeddingModel, "await_write_ready_reason",
+                        classmethod(lambda cls, budget: None))
+    # warm: the row genuinely gets a vector
+    proj._upsert_subject({"id": "s-warmrow", "name": "already embedded"})
+    assert _stored_vector(g, "Subject", "id", "s-warmrow") is not None, (
+        "precondition: the warm create must store a vector")
+
+    # cold: same id, same text — ON MATCH, so the vector is PRESERVED
+    monkeypatch.setattr(EmbeddingModel, "await_write_ready_reason",
+                        classmethod(lambda cls, budget: "budget_expired"))
+    before = _no_vector_counts()
+    proj._upsert_subject({"id": "s-warmrow", "name": "already embedded"})
+    counted = _delta(before, _no_vector_counts())
+    assert counted == {f"{_GRAPH}:budget_expired": 1}, (
+        f"the seam counts every bounded decline, including this one: {counted}")
+    assert _stored_vector(g, "Subject", "id", "s-warmrow") is not None, (
+        "…and the stored vector SURVIVES it — so the counter over-states the "
+        "rows the dense leg lost. `graph_fold` is an upper bound.")
+
+
+def test_the_record_leg_is_counted_apart_from_the_graph_fold(cold_window):
+    """⛔ ONE live create declines once per LEG, and the legs repair differently.
+
+    The record's own derivation (`record_writer.derived_embedding_columns`,
+    #13220) is a SECOND bounded call site, and it runs BEFORE the cache fold. Its
+    decline leaves `public.{object,subject,event}.embedding` NULL, which
+    `graph-scripts/backfill_embeddings.py` cannot repair — that tool reads graph
+    nodes and would report zero residual over this population; the repair is a
+    re-derivation/replay. Summing the two legs into one number would hand an
+    operator a count whose stated repair cannot discharge half of it.
+    """
+    from tortoise.record_writer import derived_embedding_columns
+
+    before = _no_vector_counts()
+    out = derived_embedding_columns({"type": "ObjectRegistered",
+                                     "name": "record leg entity"})
+    counted = _delta(before, _no_vector_counts())
+    assert out.columns == {}, out
+    assert counted == {f"{_RECORD}:budget_expired": 1}, (
+        f"the RECORD leg must be counted under {_RECORD!r}, not {_GRAPH!r} — a "
+        f"repair is selected by the leg: {counted}")
+
+
 def test_the_embed_gate_stays_off_this_channel(monkeypatch):
     """#5008's gate decline is a DESIGNED absence — never the #13229 cost.
 
@@ -234,9 +325,9 @@ def test_the_embed_gate_stays_off_this_channel(monkeypatch):
 
 def test_metrics_publishes_the_count():
     """It lands on the surface the fleet serves, not on a log nobody watches."""
-    published = monitoring.metrics().get("rows_written_without_vector")
+    published = monitoring.metrics().get("derived_embed_declines")
     assert isinstance(published, dict), (
-        "monitoring.metrics() must publish rows_written_without_vector — §17.2 "
+        "monitoring.metrics() must publish derived_embed_declines — §17.2 "
         f"requires the divergence be checkable, got {published!r}"
     )
 
@@ -266,7 +357,7 @@ def test_the_loop_cold_write_count_backfill_repairs_exactly_that_row(
     before = _no_vector_counts()
     proj._upsert_subject({"id": "s-cold", "name": cold_name})
     counted = _delta(before, _no_vector_counts())
-    assert counted == {"budget_expired": 1}, (
+    assert counted == {f"{_GRAPH}:budget_expired": 1}, (
         "the cold-window row must be COUNTED as stored without a vector — a "
         f"silent omission is the defect: {counted}"
     )
@@ -315,4 +406,4 @@ def test_the_count_survives_a_burst_the_log_latches(cold_window, proj):
     before = _no_vector_counts()
     for i in range(5):
         proj._upsert_subject({"id": f"s-burst-{i}", "name": f"burst subject {i}"})
-    assert _delta(before, _no_vector_counts()) == {"budget_expired": 5}
+    assert _delta(before, _no_vector_counts()) == {f"{_GRAPH}:budget_expired": 5}
