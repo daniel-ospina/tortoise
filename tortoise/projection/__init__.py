@@ -4643,10 +4643,12 @@ def note_live_write_target(proj) -> None:
     Called from every gateway that writes the cache WITHOUT folding a record,
     and from the fold itself, so the bound is stated rather than implied:
 
-    * the fold (`FalkorProjection.apply`) — once per fold that RETURNED having
-      landed a write (the hook runs on the wrapper's post-return path, so a fold
-      that lands a statement and then RAISES is counted as nothing — see
-      `_skip`'s bound, which states that one exception);
+    * the fold (`FalkorProjection.apply`) — once per fold that RETURNED without a
+      `_skip()` mark. That is a STATEMENT test, not a landed-row test, in BOTH
+      directions: an unmarked arm whose fold returns no count (`SubjectAdded`,
+      `ObjectRegistered`, `DocumentCreated`) is counted even when it issued
+      nothing, and a fold that lands a statement and then RAISES is counted as
+      nothing (see `_skip`'s bound, which states both);
     * the structural-edge mint (`edges._record_structural_edges`) — once per
       mint, which is NOT "only a genuinely new row": its gate is
       `MERGE … RETURN count(*) > 0`, true for an idempotent re-MERGE of an edge
@@ -12759,10 +12761,13 @@ class FalkorProjection(
         """Fold one record into the cache, recording WHERE it landed (#12943).
 
         A THIN WRAPPER, and the wrap is the point: the registry counts a fold
-        that RETURNED HAVING WRITTEN — not one that merely started (a fold that
-        raises after its first statement is a landed write it does not count),
-        and not one a `_skip()` arm marked as issuing no statement (a marked arm
-        returns, and is deliberately not counted). `_apply_event` has several
+        that RETURNED and that no `_skip()` mark covered — not one that merely
+        started (a fold that raises after its first statement is a landed write it
+        does not count), and not one a mark covers (a marked arm returns, and is
+        deliberately not counted). Read "returned" as a STATEMENT test rather than
+        a landed-row test: an unmarked arm whose fold returns no count is counted
+        even when it issued nothing (`_skip`'s bound states that direction).
+        `_apply_event` has several
         early returns (a malformed event is skipped and writes nothing — measured,
         `{"type": 123}` logged "skipping malformed event" and still left
         `{'embedded:…|tortoise': 1}` in the registry) and every statement in it
@@ -12860,16 +12865,15 @@ class FalkorProjection(
             way, and that is the question `cache_write_targets` answers.
 
             ⛔ ONE BOUND ON THAT "never", so it is not read as more than it is:
-            the hook runs on the fold's RETURN (`apply` counts a fold that
-            returned having written — not one that merely started, and not one a
-            `_skip()` arm marked), so a fold that issues its
+            the hook runs on the fold's RETURN, so a fold that issues its
             statements and then RAISES is counted as nothing. It can land and
             still raise — `_upsert` writes props and THEN edges, and
             `_fold_session_deleted` deletes the Source and THEN the Session — so
             the first statement is a landed write this registry does not count.
-            The claim is therefore "never under-reports a fold that RETURNED";
-            closing the interrupted case belongs at the fold's own statement
-            boundary, not in this arm.
+            The claim is therefore "never under-reports a fold that RETURNED",
+            and only that: it says nothing about a fold that WROTE and did not
+            return. Closing the interrupted case belongs at the fold's own
+            statement boundary, not in this arm.
             """
             if _wrote is not None:
                 _wrote[0] = False

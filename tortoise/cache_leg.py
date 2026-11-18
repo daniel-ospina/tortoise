@@ -237,9 +237,12 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     so the endpoint resolution has a single owner.
 
     * ``FalkorProjection.apply`` — the fold every door passes (SDK, REST, MCP,
-      capture, the metadata lanes), counted once per fold that RETURNED having
-      written (a fold that provably wrote nothing is not counted; one that a
-      raise interrupted is not counted either — the exception is stated below);
+      capture, the metadata lanes), counted once per fold that RETURNED and that
+      no `_skip()` mark covered. Read that as a STATEMENT test, not a landed-row
+      test: an UNMARKED arm whose fold returns no count (`SubjectAdded`,
+      `ObjectRegistered`, `DocumentCreated`) is counted even when it issued
+      nothing, and one that a raise interrupted is not counted at all — both
+      directions are stated in full below;
     * ``_record_structural_edges`` — ``create_edge`` and the about-lane mint
       their edges with a raw ``MERGE`` under ``_structural_edge_write_scope`` and
       never pass ``apply``, so without that hook a process whose writes are edges
@@ -308,9 +311,15 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     does not count at all, because the hook runs on the fold's RETURN.
 
     The one claim that holds in the direction that matters: **no under-report for
-    a fold that RETURNED** (and none for a documented no-write arm, since those
-    are marked). The interrupted shape is the named residual, and closing it
-    belongs at the fold's own statement boundary, not here. Two targets
+    a fold that RETURNED** — a returned fold that wrote anything is counted,
+    because the only thing that suppresses the count is a `_skip()` mark, and a
+    mark is placed only where the fold's own return says nothing was written.
+    ⛔ Say nothing stronger than that: "no under-report" holds for folds that
+    RETURNED, NOT for every fold that WROTE (the interrupted shape is the gap),
+    and the marks do not make the count exact in the other direction either — the
+    arms that cannot be marked are counted regardless. The interrupted shape is
+    the named residual, and closing it belongs at the fold's own statement
+    boundary, not here. Two targets
     in one process is normal for a deployment that writes the registry graph as
     well as tenant graphs. What is pathological is the TENANT's target absent
     from this list — or present under a store the deployment does not read.

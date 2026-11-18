@@ -950,11 +950,14 @@ def test_an_UNREADABLE_target_registry_is_NULL_and_never_an_empty_map(monkeypatc
 
 
 def test_a_SKIPPED_fold_is_not_recorded_as_a_landed_write(monkeypatch, tmp_path):
-    """The registry counts folds that RETURNED HAVING WRITTEN.
+    """The registry counts folds that RETURNED and that no `_skip()` mark covered.
 
-    Not folds that merely started (an interrupted fold is a landed write the
-    registry does not count — `_skip`'s bound), and not folds a `_skip()` arm
-    marked as issuing no statement (they return and are deliberately not counted).
+    A STATEMENT test, not a landed-row test: not folds that merely started (an
+    interrupted fold is a landed write the registry does not count — `_skip`'s
+    bound), not folds a mark covers (they return and are deliberately not
+    counted), and equally not "only folds that wrote" — an unmarked no-count arm
+    is counted even when it issued nothing (`_skip`'s bound states that
+    direction too).
 
     A malformed event is logged and skipped (`FalkorProjection.apply`'s own type
     guard) — nothing is written — so counting it would tell an operator the cache
