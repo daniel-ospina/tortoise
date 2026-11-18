@@ -29,20 +29,27 @@ reason rather than a missing arm:
 `list[dict]` *and* it carries a `rest_spec`), so it appears in two rows and is counted once.
 §1.5 shows the **second** of those two recorded reasons is stale — `search` is held by the
 envelope alone — and that changes no row here: a stale reason is reported there, never quietly
-retired from the count. S1 unblocks the 9, and §4's `16 → 7` follows from that count.
+retired from the count. S1 unblocks the 9, and §4's `14 → 5` follows from that count.
+
+⛔ **The `PROTECTED` size is 14 here, not 16.** `#13556` retired `tortoise_create_point` and
+`tortoise_diary_write` from the class, so the table this document reasons about holds **14**
+(`tests/test_11609_door_retirement.py:150`, asserted `:603`). The twelve doors this document is
+about are untouched by that retirement (neither was a structural blocker), so the 9 / 3 / 1 split
+and `− 1` are unchanged; only the total and the derived arithmetic below move. Writing 16 here
+would be honest at this branch's base and FALSE the moment `main` is merged, which is why the
+figures are stated once, against the tree that will carry them.
 
 ⛔ **Reason 2 is FALSE on `main`** and that is this lane's headline finding: no REST route is
 derived from a registry row (§1.5), so retiring those names deletes no route. `issue_insight`
 and `session_context` are therefore **not blocked at all**, and `search` is held only by the
 envelope. The names stay in `PROTECTED` — a stale reason is a reason to report and
 re-decide, never to retire quietly.
-The other 4 `PROTECTED` names are the "no arm on the container" class, and the 9
+The other 2 `PROTECTED` names are the "no arm on the container" class, and the 9
 `NO_CONTAINER_YET` are a separate population; the 9 are measured in §1.4 because the brief
-asks for them, and the 4 no-arm names are already measured by
+asks for them, and the 2 no-arm names are already measured by
 `tests/test_11609_door_retirement.py::TestProtectedDoorsStayLive`
-(`test_create_entity_still_has_no_arm_for_the_write`,
-`test_the_recorded_container_still_has_no_arm_for_it`), which drives the container rather than
-reading a comment — this document does not restate them.
+(`test_the_recorded_container_still_has_no_arm_for_it`), which drives the container
+rather than reading a comment — this document does not restate them.
 
 ---
 
@@ -389,7 +396,7 @@ is the finding that removed three steps from the plan.
 | step | change | unblocks | gate |
 |---|---|---|---|
 | **S1** | `list[dict] \| dict` on `tortoise_list_knowledge`, `tortoise_search_knowledge`, `tortoise_graph_overview`, `tortoise_check_confidence`, `tortoise_explore_connections`, `tortoise_review_link_candidates` | `search_sessions`, `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`, `check_structure`, `calibrate_summary`, **and `search`** (**9**) | **Daniel** — `structuredContent` re-wrap on 6 live tools |
-| **S2** | retire those 9 in S1's batch; move them out of `PROTECTED` (16 → 7) in the same change | the 9 above | follows S1 |
+| **S2** | retire those 9 in S1's batch; move them out of `PROTECTED` (14 → 5) in the same change | the 9 above | follows S1 |
 | **S3** | retire `tortoise_issue_insight` and `tortoise_session_context` — **no route work**, because the `rest_spec` reason is stale (§1.5) | `issue_insight`, `session_context` (**2**) | 27/40 ruling batch; update `PROTECTED` with the evidence |
 | **S4** | re-point `paginated_query` / `query_points_by_tag`, then retire `query` | `query` (**1**) | migration decision |
 | **S5** | land the six missing destinations (`delete_knowledge`, `link_entities`, `poll_events`, `write_knowledge_batch`, `create_memory_graph`, `list_memory_graphs`) | the 9 `NO_CONTAINER_YET` | out of scope here |

@@ -159,6 +159,8 @@ def _imported_names(source: str, module: str) -> set[str]:
 _ADAPTER_CLASS = "FastAPIRouterAdapter"
 #: The module that both DEFINES it and is the only legitimate place it may be wired.
 _ADAPTER_MODULE = "tool_registry"
+#: The registry field whose READ in a product module would re-derive routes from a row.
+_REST_SPEC_FIELD = "rest_spec"
 
 
 def _dotted(node: ast.AST) -> str | None:
@@ -195,11 +197,27 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     DEFINITION in the module that defines it is a binding too, because that module is the one
     place a bare-name wiring is expected.
 
-    Rebindings are applied in SOURCE ORDER (in Python's own sense), and a reassignment that
-    does NOT resolve to the class/module DROPS the name — `A = FastAPIRouterAdapter` …
-    `A = object` … `A()` is not an instantiation of the adapter. Without the drop the reading
-    inherited the opposite defect from the literal it replaced: a FALSE BLOCK, reding the pin
-    with "REST routes ARE registry-derived again" for code that derives nothing.
+    Rebindings are resolved **PER POSITION** (in Python's own sense): each call is graded
+    against the bindings that hold where it stands, so a reassignment that resolves to neither
+    the class nor the module DROPS the name for the calls AFTER it, and leaves the calls BEFORE
+    it alone. Both halves were measured:
+
+    * without the drop, the reading inherited the opposite defect from the literal it replaced
+      — a FALSE BLOCK, `A = FastAPIRouterAdapter` … `A = object` … `A()` reded the pin with
+      "REST routes ARE registry-derived again" for code that derives nothing;
+    * with the drop applied to a FINAL, FILE-GLOBAL map, one `A = something_else` ANYWHERE in a
+      module erased a real wiring earlier in that same module — a product module that does
+      `A = FastAPIRouterAdapter` … `A(app)` and later reuses the bare name `A` for a local
+      reported `[]`, so the pin's headline claim stayed green while routes WERE registry-derived.
+      That is the false PASS this whole reader exists to prevent, so a per-position read is the
+      only shape that holds both directions.
+
+    The per-position pass is SEEDED with a forward-reference pre-pass (two ordered passes over
+    the assignments), because Python resolves a name at CALL time: `B = A` … `A =
+    FastAPIRouterAdapter` … `B(app)` instantiates the adapter even though `B` is bound before
+    `A`. Seeding with the pre-pass result makes those resolve, and the ordered walk then
+    re-applies every binding at its own position, so a later shadow still cannot resurrect a
+    call it precedes.
 
     DELIBERATELY not matched, stated rather than hidden: an instantiation reached through a
     dict or a dynamic import the AST cannot resolve (`registry["FastAPIRouterAdapter"](…)`,
@@ -228,7 +246,7 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     def _resolves_to_module(dotted: str | None) -> bool:
         return dotted is not None and (dotted in module_names or _is_module_name(dotted))
 
-    for node in ast.walk(tree):
+    def _apply_import_or_definition(node: ast.AST) -> None:
         if isinstance(node, ast.ClassDef) and node.name == _ADAPTER_CLASS:
             # ⛔ The DEFINING module is where a bare-name wiring is most likely, so the class
             # definition is itself a binding. An import-only reading made
@@ -250,7 +268,28 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
                 if _is_module_name(alias.name):
                     module_names.add(alias.asname or alias.name.split(".", 1)[0])
 
-    # Rebindings, in SOURCE ORDER. Two ordered passes so a chain declared below its use
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.ImportFrom, ast.Import)):
+            _apply_import_or_definition(node)
+
+    def _apply_assignment(node: ast.Assign | ast.AnnAssign) -> None:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        bound_value = _dotted(node.value) if node.value is not None else None
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if _resolves_to_class(bound_value):
+                local_names.add(target.id)
+                module_names.discard(target.id)
+            elif _resolves_to_module(bound_value):
+                module_names.add(target.id)
+                local_names.discard(target.id)
+            else:
+                # a reassignment that resolves to neither DROPS the name (see docstring).
+                local_names.discard(target.id)
+                module_names.discard(target.id)
+
+    # FORWARD-REFERENCE PRE-PASS. Two ordered passes so a chain declared below its use
     # (`A = B` before `B = FastAPIRouterAdapter`) still resolves, while staying deterministic:
     # an unordered fixpoint would oscillate the moment a later shadow undoes an earlier add.
     assignments = sorted(
@@ -260,21 +299,7 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     )
     for _ in range(2):
         for node in assignments:
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            bound_value = _dotted(node.value) if node.value is not None else None
-            for target in targets:
-                if not isinstance(target, ast.Name):
-                    continue
-                if _resolves_to_class(bound_value):
-                    local_names.add(target.id)
-                    module_names.discard(target.id)
-                elif _resolves_to_module(bound_value):
-                    module_names.add(target.id)
-                    local_names.discard(target.id)
-                else:
-                    # a reassignment that resolves to neither DROPS the name (see docstring).
-                    local_names.discard(target.id)
-                    module_names.discard(target.id)
+            _apply_assignment(node)
 
     # Default-argument bindings: `def build(app, cls=FastAPIRouterAdapter): cls(app)` is a
     # statically readable instantiation, not a dynamic one.
@@ -292,28 +317,44 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
             if default is not None and _resolves_to_class(_dotted(default)):
                 local_names.add(param.arg)
 
-    sites: list[int] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        dotted = _dotted(func)
-        if dotted is not None:
-            if dotted in local_names:
-                sites.append(node.lineno)
-                continue
-            head, _, tail = dotted.rpartition(".")
-            if tail == _ADAPTER_CLASS and (
-                head in module_names or head.rsplit(".", 1)[-1] == _ADAPTER_MODULE
-            ):
-                sites.append(node.lineno)
-                continue
-        if (
+    def _is_instantiation(node: ast.Call) -> bool:
+        dotted = _dotted(node.func)
+        if dotted is not None and _resolves_to_class(dotted):
+            return True
+        return (
             dotted == "getattr"
             and len(node.args) >= 2
             and isinstance(node.args[1], ast.Constant)
             and node.args[1].value == _ADAPTER_CLASS
-        ):
+        )
+
+    # ⛔ ONE SOURCE-ORDERED WALK, seeded with the pre-pass, NOT a final-map lookup (#13537
+    # review F1). The sets above are the pre-pass RESULT; walking the bindings again at their
+    # own positions is what makes a call answer against the bindings that hold WHERE IT
+    # STANDS, so a later `A = object` cannot erase an earlier `A(app)` and an earlier one
+    # cannot lend its meaning to a later call.
+    events: list[tuple[int, int, int, ast.AST]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Call, ast.Import,
+                             ast.ImportFrom, ast.ClassDef)):
+            # `ast.walk` yields parents before children, and a nested call shares its
+            # parent's line — so the column orders them, and the type rank keeps an
+            # assignment/import ahead of a call that starts at the same column. The import and
+            # class-definition bindings are replayed here too, not just consumed by the seed
+            # above: without them the walk would start from the PRE-PASS RESULT (which a later
+            # shadow has already emptied) and the first binding in the file would count for
+            # nothing.
+            rank = 0 if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Import,
+                                         ast.ImportFrom, ast.ClassDef)) else 1
+            events.append((node.lineno, node.col_offset, rank, node))
+    events.sort(key=lambda event: (event[0], event[1], event[2]))
+    sites: list[int] = []
+    for _lineno, _col, _rank, node in events:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            _apply_assignment(node)
+        elif isinstance(node, (ast.ClassDef, ast.ImportFrom, ast.Import)):
+            _apply_import_or_definition(node)
+        elif _is_instantiation(node):
             sites.append(node.lineno)
     return sorted(sites)
 
@@ -735,11 +776,20 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     # (`hosted_api.py:3536`, `selfhost.py:1040`, `__main__.py:17211`), and the vector named
     # here needs only one of them — a two-module scan reported "nothing reads it" for a
     # claim about the product while the third app was unread.
+    # ⛔ AN ATTRIBUTE READ, NOT A SUBSTRING (#13537 review F2). `"rest_spec" in text` is
+    # wrong in the direction that matters for a PRODUCT module: a comment or a docstring that
+    # merely NAMES the field reded these three rows with "routes may be registry-derived
+    # again", a claim about a string — measured: one comment line above `def tortoise_query(`
+    # in `tortoise/mcp_server.py` was enough. That is the same defect the sibling reader above
+    # documents for `FastAPIRouterAdapter` (:190-196), so this scan is an AST read too.
+    # What it still catches: `e.rest_spec.path`, `getattr(e, "rest_spec")`, `e["rest_spec"]`.
+    # What it therefore does NOT catch, stated rather than hidden: a field name built at
+    # runtime (`getattr(e, "rest" + "_spec")`), which no static read can answer.
     readers = [
         str(source.relative_to(repo))
         for source in scanned
         if source.name != "tool_registry.py"
-        and "rest_spec" in source.read_text(encoding="utf-8", errors="replace")
+        and _rest_spec_attribute_reads(source)
     ]
     # ⛔ `tool_registry.py` is NOT exempt — it is where the route-deriving code LIVES, so a
     # filename exclusion leaves the one module that could host the loop unwatched (measured:
@@ -878,6 +928,35 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "FastAPIRouterAdapter = _fake_router_class()\n"
         "FastAPIRouterAdapter(tr)\n"
     ) == [], "a function-local shadow over the module import reads as an instantiation"
+
+    # ⛔ A LATER SHADOW MUST NOT ERASE AN EARLIER WIRING (#13537 review F1). The name sets used
+    # to be resolved once, file-globally, so one `A = <something else>` ANYWHERE in a module
+    # emptied the map for every call in it — a product module that really wires the adapter
+    # reported `[]` and the 3 served-route rows stayed green, which is the false PASS this
+    # reader exists to prevent.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "app = A(app)\n"
+        "A = object\n"
+    ), "a rebinding AFTER the call erased it — the per-position read is file-global again"
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "def wire(app):\n"
+        "    return tr.FastAPIRouterAdapter(app)\n"
+        "def unrelated():\n"
+        "    tr = _fake_thing()\n"
+        "    return tr\n"
+    ), "a shadow in an UNRELATED function erased a real wiring elsewhere in the module"
+    # and the forward-reference half must survive the per-position read: Python resolves a name
+    # at CALL time, so a chain declared below its use still instantiates the adapter.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "C = B\n"
+        "B = A\n"
+        "A = FastAPIRouterAdapter\n"
+        "C(app)\n"
+    ), "a three-link chain declared below its use stopped resolving — the per-position read " \
+       "lost the forward-reference seed"
     # the class DEFINED in the module that defines it, wired by bare name: the one module the
     # helper's own docstring names as the legitimate wiring site.
     assert _adapter_instantiation_sites(
@@ -911,6 +990,70 @@ def test_the_adapter_reading_is_not_spelling_blind():
             path.read_text(encoding="utf-8", errors="replace")))
     }
     assert offenders == {}, offenders
+
+
+def test_the_rest_spec_read_is_an_attribute_not_a_substring(tmp_path):
+    """Falsifier for the repo-wide `rest_spec` scan (#13537 review F2).
+
+    The scan this replaced asked `"rest_spec" in source`, which is right in one direction and
+    wrong in the other: ONE comment or docstring naming the field in any product module reded
+    the three served-route rows with "routes may be registry-derived again" — a claim about a
+    string, on a tree that derives nothing. Both directions are asserted here, and a real
+    attribute read must still be caught in each of its three static spellings.
+    """
+    def reads(text: str) -> list[int]:
+        probe = tmp_path / "probe.py"
+        probe.write_text(text, encoding="utf-8")
+        return _rest_spec_attribute_reads(probe)
+
+    assert reads("# the registry rest_spec is unrelated to this container\n"
+                 "x = 1\n") == [], (
+        "a COMMENT naming the field counts as a read — this is the false BLOCK that reded "
+        "three rows on a pure prose edit")
+    assert reads('"""`rest_spec` is recorded as the route coupling, measured FALSE."""\n'
+                 "x = 1\n") == [], "a DOCSTRING naming the field counts as a read"
+    assert reads("for e in TOOL_REGISTRY:\n"
+                 "    app.add_api_route(e.rest_spec.path, handler)\n"), (
+        "an ATTRIBUTE read (`e.rest_spec`) is not caught — the route-deriving vector this arm "
+        "exists to see would pass")
+    assert reads("spec = getattr(entry, 'rest_spec')\n"), (
+        "`getattr(entry, 'rest_spec')` is not caught")
+    assert reads("spec = entry['rest_spec']\n"), "a constant subscript is not caught"
+
+
+def _rest_spec_attribute_reads(source: Path) -> list[int]:
+    """Line numbers where `source` READS the `rest_spec` field.
+
+    Three shapes count as a read, and prose counts as none: an attribute access
+    (`e.rest_spec`), a `getattr(e, "rest_spec")` call, and a constant subscript
+    (`e["rest_spec"]`). A comment or a docstring is not an `ast.Attribute`, so it cannot red
+    the pin — which is the whole point (#13537 review F2; the sibling reader's docstring above
+    records the identical false BLOCK for the literal `FastAPIRouterAdapter(`).
+
+    Deliberately NOT matched, stated rather than hidden: a field name assembled at runtime
+    (`getattr(e, "rest" + "_spec")`), and `vars(e)["rest_spec"]`. Both are dynamic reads no
+    static pass can answer, and neither is a shape a route-deriving loop is written in.
+    """
+    tree = ast.parse(source.read_text(encoding="utf-8", errors="replace"))
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if (
+            (isinstance(node, ast.Attribute) and node.attr == _REST_SPEC_FIELD)
+            or (
+                isinstance(node, ast.Call)
+                and _dotted(node.func) == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == _REST_SPEC_FIELD
+            )
+            or (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.slice, ast.Constant)
+                and node.slice.value == _REST_SPEC_FIELD
+            )
+        ):
+            lines.add(node.lineno)
+    return sorted(lines)
 
 
 def _rest_spec_use_outside_the_adapter(source: Path) -> list[int]:
