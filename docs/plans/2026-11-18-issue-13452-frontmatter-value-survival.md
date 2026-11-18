@@ -41,7 +41,7 @@ On `main` today, measured through that same consumer across `docs/research/**/*.
   disagreement — see §7's before/after count)
 ```
 
-`tests/test_doc_affiliation_frontmatter.py:254` cannot see any of them:
+`tests/test_doc_affiliation_frontmatter.py:591` cannot see any of them:
 `missing = [key for key in REQUIRED_KEYS if key not in parsed]` asks whether four keys are
 **present**, and `REQUIRED_KEYS` does not even contain the two fields that carry the affiliation
 to other entities.
@@ -179,8 +179,8 @@ rationale drift, or the 2 pre-existing absence reds.
 |---|---|---|---|
 | `tortoise.file_indexer.parse_frontmatter` | python consumer | `tests/test_file_indexer.py` (unchanged) | the read path this fix depends on; **not modified** |
 | `tortoise/docs_miner.py:352` | importer | `tests/test_file_indexer.py` | consumes the same parse; unaffected by quoting data |
-| `tests/test_doc_affiliation_frontmatter.py:492` | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
-| `docs/research/**/*.md` (68 blocks) | data | the arm's glob `:557` | the population the assertion iterates |
+| `tests/test_doc_affiliation_frontmatter.py:509` | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
+| `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at `23cfffc260`) | data | the arm's glob `:574` | the population the assertion iterates |
 | `scripts/check-doc-affiliation.cjs` | commit-time advisory | not CI-wired | **not touched**; deferred per §2 alternative E |
 
 ## 7. Verification plan — measured (PROVE evidence)
@@ -198,11 +198,14 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
    the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
    failure output, not asserted.**
-2. **Fixed tree:** `2 failed, 12 passed` **at this head** — the same 2 failures throughout, and each
-   count is tied to the head that produced it, because tests are appended to this file every round:
-   `8 passed` pre-rebase, `9 passed` at the rebased `36700a89b7` (the extra pass is `#13485`'s own new
-   test, which main added under ours), `10 passed` once the `''`-parity pin landed, `11 passed` once
-   the `"`-backslash pin landed, and `12 passed` once the (C)-ordering pin landed. The 2 are the
+2. **Fixed tree:** `2 failed, 13 passed` **at this head** — `15 collected`, the 2 failures being the
+   ones named below; the file carries exactly **5** tests this PR added (`comm` on the two files'
+   `^def test_` lines against `origin/main`), and each count is tied to the head that produced it,
+   because tests are appended to this file every round:
+   `8 passed` on `main` (`f6793959a2`), `9 passed` at the rebased `36700a89b7` (the extra pass is
+   `#13485`'s own new test, which main added under ours), `10 passed` once the `''`-parity pin
+   landed, `11 passed` once the `"`-backslash pin landed, `12 passed` once the (C)-ordering pin
+   landed, and `13 passed` once the never-closing/`malformed` pin landed in `b0940c7a4f`. The 2 are the
    pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the evidence bundles
    `docs/evidence/13038-capstone/README.md` **+** `docs/evidence/13436-write-path-costs/README.md` —
@@ -430,8 +433,11 @@ NEW branch — and nothing else in the file reds when it goes: measured with the
 `f426ea53fa` (no pin in the file yet) the file stayed at `2 failed, 10 passed` — the same two
 pre-existing absence reds, nothing else noticing — while this shape regressed. Pinned now by
 `test_a_double_quoted_backslash_escape_before_a_comment_is_measured`; with the pin in place the same
-mutant reds this test alone (`-k double_quoted_backslash`), so the file's
-total under that mutant is the 2 pre-existing absence reds **plus** this one — no file-wide count is
+mutant reds this test **and** `test_a_never_closing_quoted_scalar_is_malformed_not_escaped`
+(re-measured at `23cfffc260`: `4 failed, 11 passed` — the 2 pre-existing absence reds plus those 2),
+because that later pin also asserts `_closing_quote('"a\\"') == -1`, which is exactly what the
+backslash skip produces. So this test is **not** the sole custodian of the branch — an earlier
+revision said "this test alone", and the fifth pin falsified it — and no file-wide count is
 printed here, because it moves every time another test is appended (an earlier revision quoted
 `1 failed, 12 deselected` for that filter, which went stale the same way). Same finding shape as the parity
 half above, and the same reason it is worth its own test: `_closing_quote` added branches, and a
@@ -453,7 +459,8 @@ comparison entirely: THAT is the value escaping measurement — the #13452 defec
 prevent — behind green CI, and it is the only branch of this helper whose loss is a fail-open rather
 than a mis-worded remedy; the two pins above are the other class. `test_an_unescaped_quote_is_broken_even_beside_a_legal_escape` now
 pins both shapes (unit-level on `_quoted_style`, which is where the ordering decides) and reds alone
-under that mutant (`3 failed, 11 passed`; the 2 pre-existing reds plus this one).
+under that mutant (re-measured at `23cfffc260`: `3 failed, 12 passed`; the 2 pre-existing reds plus
+this one — the ordering is the one branch that pin really does own exclusively).
 
 **Already fixed — the sequence branch's false diagnosis.** `- 13452` (int) once reported "a
 sequence item has no legal transform, so this is a truncation" while the scalar branch said
@@ -471,17 +478,19 @@ support, which is out of this issue's scope.
 
 **Recorded, not fixed — the guard's sanity counters can red on an empty population.** Two sites in
 `tests/test_doc_affiliation_frontmatter.py` report the same wrong diagnosis as round 5's escape
-finding, and neither is an escape: `:828-829` assert `measured` and `compared` BEFORE
-`assert not failures` (`:830`), so a tree the guard samples sparsely reds on *"measured no
+finding, and neither is an escape: `:848-849` assert `measured` and `compared` BEFORE
+`assert not failures` (`:850`), so a tree the guard samples sparsely reds on *"measured no
 affiliation value at all — re-point this guard"* — advice that points at the guard instead of at
-the value; and `:733` skips `escaped` before `compared += 1` (`:743`), so a tree whose affiliated
+the value; and `:753` skips `escaped` before `compared += 1` (`:763`), so a tree whose affiliated
 values are all escaped leaves the counter legitimately empty and fires the same message. (Line
-numbers are as of this head; the rebase onto `f6793959a2` moved them by **+113** in total
-(`assert measured` went 715 → 828: **+77** from `#13485` rewriting the arm above it, and **+36** from
-this branch's own `_closing_quote` and its docstring) — and an earlier revision of this section still
-cited the pre-rebase `:751-752`,
-`:753`, `:658`, `:666`, which after the rebase land on unrelated code. The sequence branch carries
-the same pair at `:699` / `:703`.) Both are
+numbers are re-measured at `23cfffc260`: `assert measured` sits at `:848`, against `:792` on
+`f6793959a2` — **+77** from `#13485` rewriting the arm above it and a further **+56** from this
+branch's own `_closing_quote`, its docstring and the fifth pin. They move with every appended test,
+so they are re-measured rather than carried: an earlier revision of this section cited the
+pre-rebase `:751-752`,
+`:753`, `:658`, `:666`, and the revision before this one cited `:828-829`/`:830`/`:733`/`:743` — all
+of which had drifted, by the same mechanism. The sequence branch carries
+the same pair at `:719` / `:723`.) Both are
 false blocks of an author's tree, not fail-opens — nothing escapes measurement, they fail closed
 and name a remedy — and both live in the guard, not in the escape branch this PR fixes. Recorded
 here because a reader meets the message before the reason; fixing the ordering is a separate change
@@ -524,6 +533,21 @@ substance — 8 of 8 flagged, every length pair exact — reproduces unchanged. 
 edited: it carries the review attestation the gate reads, and an unrelated edit wipes that proof
 (the rule is in `AGENTS.md`). The corrected figure is recorded here instead.
 
+**Recorded, not fixed — a comment with NO space after the close is a PRE-EXISTING false block.**
+Found by the fresh-context review at `23cfffc260` and re-measured there. `aboutObjects: "x"# note`
+is loadable YAML — `yaml.safe_load` returns `"x"`, and `parse_frontmatter` agrees — but the arm
+reports `('malformed', None)` and prints *"the value is TERMINATED there — remove the inner quote"*,
+the same mis-worded remedy as the finding this PR exists to remove. `'x'# note` behaves the same.
+This is NOT a regression and NOT a new refusal: `main`'s helper (`f6793959a2`) reaches `malformed`
+here too, via `not value.endswith(q)` — `_split_comment` only ever splits at a space-preceded `#`,
+so the raw keeps its trailing comment and never ends in the quote char. The fix neither causes it
+nor clears it, and it is recorded rather than chased for the reason the sibling entry above gives:
+clearing it means teaching the arm to accept a non-space-separated trailing comment after a close,
+which is the same lexer widening and the same out-of-scope boundary. It fails CLOSED — the value is
+reported, never silently skipped — so it cannot ship a defect. It is worth naming because a reader
+meets it the first time anyone writes `"…"#comment`, and because it is the third member of one
+family: the remedy text is wrong, the gate is shut.
+
 ## 10. Rebase onto `main` — the conflict, and why the resolution is additive
 
 This PR carried a POSITIVE conflict with `main` (`mergeStateStatus: DIRTY`), so the rail refused it
@@ -552,18 +576,24 @@ Everything else rebased without a hand-touch, including the `_closing_quote` hel
 
 Measured at the post-rebase head:
 
-- the new test still **discriminates**: replaying the true pre-fix `_split_comment`
-  (`raw[:i].rstrip().endswith(q)`) into a scratch copy of the head reds it
-  (`- single-quoted` / `+ broken`) — the failing assertion is
+- the new test still **discriminates**: replaying the pre-fix close-POSITION test
+  (`raw[:i].rstrip().endswith(q)`) into a scratch copy of the head while leaving the
+  parity-based wholeness check in place reds it (`- single-quoted` / `+ malformed`):
+  the truncated `'the ''KEEP''` now fails `_closing_quote`, so it lands on the
+  no-close branch instead of on `broken`. `+ broken` is what a WHOLE-helper replay
+  produces (old split **and** old `endswith`-only wholeness), which is the replay the
+  test's own docstring describes — measured both ways at this head, so the two
+  verdicts are not interchangeable. The failing assertion is
   `assert style == "single-quoted"` in
-  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:981` at this
+  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:1001` at this
   head; it was `:974` when the mutant was run, and it moves whenever a test is
   appended to this file, so cite it by name, not by line);
 - over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s
   truncation case still `broken`;
 - `main` at `f6793959a2` measures `2 failed, 8 passed` on this file; this head measures
-  `2 failed, 12 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
-  and this PR's own three pins (`''` parity, `"` backslash, and the (C) ordering);
+  `2 failed, 13 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
+  and this PR's own **five** pins (`''` parity, mid-body parity, `"` backslash, the (C) ordering,
+  and the never-closing `malformed` pin);
 - `test_docs_lint_baseline` + `test_docs_lint_gate` + `test_docs_citation_refs` → **106 passed**.
 
 One correction this rebase forced: the pre-existing absence red on the evidence bundles now names

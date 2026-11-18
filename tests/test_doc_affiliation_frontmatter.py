@@ -1077,12 +1077,16 @@ def test_a_double_quoted_backslash_escape_before_a_comment_is_measured(
     This is the one arm the PRE-fix helper already got right (it never scanned
     for a close at all — it cut at the `` #`` whose left side ended in the quote
     char, which this shape satisfies), so the skip is old behaviour preserved by
-    a NEW branch, and nothing else in this file reds when it goes.
+    a NEW branch. When it goes, this test is NOT the only one that reds:
+    ``test_a_never_closing_quoted_scalar_is_malformed_not_escaped`` also asserts
+    ``_closing_quote('"a\\"') == -1``, and that is exactly what the same skip
+    produces, so it reds alongside this one (re-measured at ``23cfffc260``:
+    ``4 failed, 11 passed`` — the 2 pre-existing absence reds plus those 2).
 
     Non-vacuity: deleting the two-line backslash skip in ``_closing_quote``
     leaves the rest of this file GREEN while ``_quoted_style`` returns
-    ``('malformed', None)`` here, so the ``style`` assertion below is the only
-    thing that notices. (No file-wide pass count is quoted: §7 item 2 carries it, and a
+    ``('malformed', None)`` here, so the ``style`` assertion below is the FIRST of
+    two things that notice, not the only one. (No file-wide pass count is quoted: §7 item 2 carries it, and a
     count printed here goes stale the moment another test is appended to this
     file — which has already happened twice.)
     """
