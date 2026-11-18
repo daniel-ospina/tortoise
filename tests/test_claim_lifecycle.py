@@ -1,11 +1,19 @@
 """Claim lifecycle tests — #432 Task 1 (state vocabulary + transition guards).
 
-State vocabulary: draft → live → retracted → superseded (plus outdated/archived
-reserved). challenged is DERIVED (NAND-operator edge on a live point), NOT a
-state. update_point only promotes draft→live; retract/supersede are the
-lifecycle-transition paths and are terminal.
+State vocabulary since #11824 S0 and ONTOLOGY v3.36/v3.37: **four** words,
+draft → live → deprecated/superseded (`superseded` names its successor; if
+nothing replaced it the word is `deprecated`). `retracted`/`outdated`/`archived`
+are NOT states — they are read-side legacy over stored rows, and the
+`retracted` one is still produced by `retract_point`'s own CAS until #11824 S2
+migrates that verb (the §5 note discloses exactly that residual). challenged is
+DERIVED (NAND-operator edge on a live point), NOT a state. update_point only
+promotes draft→live; retract/supersede are the lifecycle-transition paths and
+are terminal.
 """
 from __future__ import annotations
+
+import re
+from pathlib import Path
 
 import pytest
 
@@ -72,8 +80,11 @@ def test_retracted_is_terminal(sdk_factory, tmp_path):
 
 
 def test_retract_archived_is_terminal(sdk_factory, tmp_path):
-    # plan-review P2 boundary: archived is terminal. v1 has no SDK path to
-    # archived (reserved), so set it via the graph directly to exercise the guard.
+    # plan-review P2 boundary: archived is terminal. No SDK path STORES the literal
+    # word — `status='archived'` is ACCEPTED and normalised to `deprecated`
+    # (`LIFECYCLE_STATUS_SYNONYMS`, #11824; the "reserved on Points" row §5 used to
+    # carry was deleted in v3.37) — so seed a stored `archived` row via the graph
+    # directly to exercise the guard on the row a pre-#11824 writer left behind.
     sdk = sdk_factory(tmp_path)
     p = sdk.create_point("statement", "archived")
     sdk._get_proj().g.query(
@@ -214,8 +225,11 @@ def test_all_documented_transitions_allowed(sdk_factory, tmp_path):
     # stored rows hold. A stored word with NO row would DEFER — i.e. silently
     # become transitionable — which is the opposite of terminal.
     #
-    # ⚠️ ONTOLOGY §5 still documents `retracted`, because removing it from that
-    # document needs the owner's exact-text approval and is NOT this slice's.
+    # ONTOLOGY §5 now states the same four words (owner-approved as v3.37), so
+    # this map's legacy rows are the CODE side of a disclosed delta, not a delta
+    # the canonical table contradicts. `tests/test_claim_lifecycle.py`'s
+    # `test_ontology_status_table_matches_the_code_vocabulary` below keeps the
+    # two from drifting apart again in either direction.
 
     assert "live" in _ALLOWED_TRANSITIONS["draft"], \
         "draft → live must be allowed"
@@ -242,6 +256,528 @@ def test_all_documented_transitions_allowed(sdk_factory, tmp_path):
         "deprecated is terminal — no outgoing transitions (#11824 S0)"
     assert _ALLOWED_TRANSITIONS["archived"] == frozenset(), \
         "archived is terminal — no outgoing transitions"
+
+
+#: ONTOLOGY §5's model table — the heading, and the next top-level section that ends it.
+_ONTOLOGY = Path(__file__).resolve().parent.parent / "docs" / "ONTOLOGY.md"
+_STATUS_HEADING = "### Point Status Vocabulary"
+
+
+def _ontology_status_section() -> str:
+    """§5's *Point Status Vocabulary* section, from its heading to the next ``## ``."""
+    text = _ONTOLOGY.read_text(encoding="utf-8")
+    try:
+        tail = text[text.index(_STATUS_HEADING):]
+    except ValueError as e:  # a renamed heading must FAIL, never silently skip
+        raise AssertionError(
+            f"ONTOLOGY.md no longer contains the §5 heading {_STATUS_HEADING!r}; "
+            "update this guard's anchor rather than dropping the check") from e
+    end = re.search(r"\n## ", tail)
+    return tail if end is None else tail[: end.start()]
+
+
+#: The markdown BLOCK STARTS that end a lazy paragraph continuation (CommonMark).
+#: Prose that merely begins with a word — or with a code span — keeps continuing.
+#: ⛔ THE THEMATIC BREAKS, FENCES AND HTML BLOCKS ARE LOAD-BEARING, not completeness
+#: for its own sake: with `---` (and `***`, `___`, ``` ``` ```, `~~~`) missing, the
+#: lazy rule GLUED them to the note and then kept absorbing the lines after them —
+#: a gutted disclosure passed by borrowing a word from the next block (measured:
+#: v3.37 review, round 5). `test_ontology_legacy_pin_reads_the_note_not_the_section`
+#: drives each one BOTH bare and QUOTED (`> ---`), with no blank line.
+#: ⛔ AND `<` IS NARROWED TO THE INTERRUPTING FORMS — CommonMark HTML-block types
+#: 1-6 — because a bare `<` matched an AUTOLINK, which is INLINE, so a legitimate
+#: prose continuation `<https://…>` was cut and the note lost (a false RED, round 6).
+#: ⛔ BUT "NOT A BARE `<`" WAS NOT THE SAME AS "TYPES 1-6": the round-6/7 rewrite
+#: still accepted ANY tag name followed by `>`/whitespace, and CommonMark assigns
+#: exactly that shape to **type 7** (a complete tag on a line of its own), which
+#: **cannot interrupt a paragraph** — so `<span>x</span>`, `<em>x</em>`, `<code>` and
+#: a type-7 CLOSING tag like `</span>` all cut a continuation the renderer keeps, the
+#: same false RED one layer in (measured: this guard, round 9 — the note lost
+#: `archived` on every one of them). `tools/closes_landing.py` had already recorded
+#: the same fact for its own parser ("a type-7 line is INLINE in an open paragraph
+#: and starts nothing", round-50 review P1); this is the second reader of it.
+#: The class below is therefore MIRRORED from the reference implementation's
+#: `reHtmlBlockOpen` (commonmark.js `lib/blocks.js`, types 1-6) rather than hand-
+#: approximated a third time: a by-NAME block list is the only thing that separates
+#: type 6 from type 7.
+_HTML_BLOCK_INTERRUPT_RE = (
+    r"<(?:script|pre|textarea|style)(?:\s|>|$)"      # type 1, case-insensitive
+    r"|<!--"                                          # type 2
+    r"|<\?"                                           # type 3
+    r"|<![A-Za-z]"                                     # type 4 (doctype/entity)
+    r"|<!\[CDATA\["                                     # type 5
+    r"|</?(?:address|article|aside|base|basefont|blockquote|body|caption|center"
+    r"|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure"
+    r"|footer|form|frame|frameset|h[123456]|head|header|hr|html|iframe|legend|li"
+    r"|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section"
+    r"|search|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)"
+    r"(?:\s|/?>|$)"                                  # type 6
+)
+_BLOCK_START_RE = re.compile(
+    r"^(?:[#>|]|[-*+]\s|\d+[.)]\s|=+\s*$|(?:[-*_][ \t]*){3,}$|```|~~~"
+    r"|" + _HTML_BLOCK_INTERRUPT_RE + r")",
+    re.IGNORECASE)
+
+
+def _unwrap(text: str) -> str:
+    """A blockquote paragraph as COMPARABLE text: `>` markers off, whitespace flat.
+
+    Joining the raw lines made a cosmetic rewrap a RED pin (see the docstring below),
+    so the anchor search and every word assertion read this form. Markdown line
+    wrapping carries no meaning; the sentence does.
+    """
+    lines = [re.sub(r"^\s*(?:>\s?)+", "", line) for line in text.splitlines()]
+    return " ".join(" ".join(lines).split())
+
+
+def _read_side_legacy_note(section: str | None = None) -> str:
+    """§5's read-side legacy note: the ONE blockquote PARAGRAPH that says it.
+
+    Scoped to a paragraph, not to §5, because the three retired words appear in
+    text that is NOT the disclosure: the pre-v3.37 table carried them as status
+    ROWS, and §5's tombstone contract names `status='retracted'` in the SAME
+    blockquote. A section-wide search was satisfied by both, so it was green on
+    the buggy table this note exists to correct.
+
+    ⛔ A BLANK-LINE split is not a paragraph split here. MD028 keeps §5's notes as
+    ONE blockquote, so its paragraphs are separated by bare `>` lines and never by
+    a blank line — splitting on `\\n\\s*\\n` returns the whole quote group, which
+    admits the tombstone contract (and any word a later edit puts there) as if it
+    were the disclosure. A bare `>` is therefore the break.
+
+    Reads the paragraph's `>` continuation lines with it — and a CommonMark LAZY
+    continuation too (a wrapped line may omit the `>` marker; the softbreak renders
+    as a space, so the sentence is unchanged). ⛔ WHICH IS WHY THE ANCHOR AND THE
+    WORDS ARE MATCHED UNWRAPPED: the comparison text is the paragraph with its `>`
+    markers stripped and its whitespace collapsed (`_unwrap`). Matching the RAW lines
+    made the promise above false and reddened a pure rewrap with a message claiming
+    the disclosure was MISSING (v3.37 review, rounds 2-4).
+
+    ⛔ AND TWO NOTES ARE REFUSED, NOT JOINED. The paragraph break above replaced a
+    blank-line split whose uniqueness assert (``§5 has 2 blockquote paragraph(s)
+    naming 'read-side legacy'``) was the only thing stopping a GUTTED disclosure
+    from borrowing another paragraph's words: joining them makes the disclosure
+    assertions pass on a note that names none of the retired words (measured —
+    deleting the words from the real note and adding them to a second paragraph
+    beside it left the pin green). Exactly one paragraph must say it.
+
+    Returns ``""`` when no such paragraph exists, so the caller's assertion fails
+    with the reason rather than this helper raising on a doc that lost the note.
+    ``section`` is injectable so the non-vacuity pin can drive it with the pre-v3.37
+    shape (words in the table, no note) without touching the real file.
+    """
+    paragraphs: list[list[str]] = []
+    current: list[str] = []
+    for line in (_ontology_status_section() if section is None else section).splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith(">"):
+            # ⛔ A LAZY CONTINUATION STILL BELONGS TO THE PARAGRAPH (CommonMark): an
+            # unquoted line that does not START a new block continues the open
+            # paragraph, and its softbreak renders as a space. Only a blank line, a
+            # bare `>`, or a real block start ends it — otherwise a rewrap that drops
+            # the marker would red as "the disclosure is missing".
+            if current and stripped and not _BLOCK_START_RE.match(stripped):
+                current.append(stripped)
+                continue
+            if current:
+                paragraphs.append(current)
+                current = []
+            continue
+        if not stripped[1:].strip():  # a bare `>` is the MD028 paragraph break
+            if current:
+                paragraphs.append(current)
+                current = []
+            continue
+        # ⛔ A BLOCK START INSIDE THE QUOTE ENDS THE PARAGRAPH TOO. Blockquote content
+        # is parsed as blocks, so `> ---`, `> ``` `, `> ### H`, `> - item` each start
+        # a new block and end the paragraph — appending them unconditionally let a
+        # note missing a word borrow it from the block after a QUOTED break, the same
+        # false pass the unquoted branch closed (measured: v3.37 review, round 6).
+        body = stripped[1:].lstrip()
+        if body and _BLOCK_START_RE.match(body):
+            if current:
+                paragraphs.append(current)
+                current = []
+            continue
+        current.append(stripped)
+    if current:
+        paragraphs.append(current)
+    matches = [
+        paragraph for paragraph in (_unwrap("\n".join(p)) for p in paragraphs)
+        if "read-side legacy" in paragraph
+    ]
+    if not matches:  # the CALLER fails, and says which words went missing
+        return ""
+    assert len(matches) == 1, (
+        f"§5 has {len(matches)} blockquote paragraph(s) naming 'read-side legacy'; "
+        "exactly one note must disclose the retired words — joining them lets a "
+        "gutted disclosure borrow the words of another paragraph in the same section")
+    return matches[0]
+
+
+def _ontology_status_table_words() -> frozenset[str]:
+    """The status words §5's canonical model table lists, one per row."""
+    section = _ontology_status_section()
+    rows = [ln for ln in section.splitlines() if ln.startswith("|")]
+    assert len(rows) >= 3, (
+        f"§5's status table parsed to {len(rows)} table line(s) — no header + rows; "
+        f"got {rows!r}")
+    words: set[str] = set()
+    for row in rows[1:]:  # rows[0] is the header
+        first = row.split("|")[1].strip()
+        if set(first) <= set("-: "):  # the |---|---| separator
+            continue
+        m = re.fullmatch(r"`([a-z_]+)`", first)
+        assert m is not None, (
+            f"§5's status table has a Status cell this guard cannot read: {first!r}")
+        words.add(m.group(1))
+    assert words, "§5's status table parsed to zero status words"
+    return frozenset(words)
+
+
+def test_ontology_status_table_matches_the_code_vocabulary():
+    """The canonical §5 table states exactly the four words the code accepts.
+
+    This is the leg that would have caught the drift ONTOLOGY v3.37 fixed: §5's
+    table called itself canonical while listing **six** statuses and offering
+    `live → retracted`, contradicting §4.1's approved closed set of four. Nothing
+    parsed the table, so the two canonical statements disagreed for months and
+    the code map was the only side anyone checked.
+
+    NON-VACUOUS on the pre-v3.37 doc: it listed draft/live/retracted/superseded/
+    outdated/archived, so this assertion fails on it in BOTH directions
+    (`retracted`/`outdated`/`archived` declared but not accepted; `deprecated`
+    accepted but undeclared).
+    """
+    declared = _ontology_status_table_words()
+    assert declared == POINT_STATUS_VALUES, (
+        "§5's canonical status table has drifted from the code's write vocabulary "
+        f"(#11824).\n  in the table but not accepted: "
+        f"{sorted(declared - POINT_STATUS_VALUES)}\n  accepted but not in the "
+        f"table: {sorted(POINT_STATUS_VALUES - declared)}")
+
+
+def test_ontology_transitions_column_matches_the_guard_map():
+    """§5's `Transitions to` cells state the transitions the guards actually allow.
+
+    The sibling test above pins the status WORDS; this one pins the EDGES between
+    them, which is the other half of the same table and went stale the same way.
+    The INTERMEDIATE v3.37 table on this branch (`17c81841e8`, before
+    `cd38f7a74b`) stated `draft` → `live` alone while `_ALLOWED_TRANSITIONS`
+    allows a draft point to END before it ever went live (`tortoise/sdk.py`:
+    `"draft": frozenset({"live", "deprecated", "superseded"})`, with the
+    guard-side comment saying so) — and this very file asserts
+    `"deprecated" in _ALLOWED_TRANSITIONS["draft"]` twenty lines up, so the model
+    and its own guard contradicted each other. v3.37 has never SHIPPED: the last
+    released artifact, `origin/main`, is v3.36, and its own table reds this pin by
+    the other path below.
+
+    NON-VACUOUS on both shapes, by different paths (both measured at the refs, not
+    reasoned). On that intermediate 4-column table `draft` parses to `{live}` and
+    reds on the two missing edges. On `origin/main`'s §5 the table has FIVE columns
+    (`Status | Kind | Write path | Transitions to | Notes`), so `cells[2]` is the
+    *Write path* column and the parse yields `frozenset()` — the pin still reds,
+    but on `set()` against `{live, deprecated, superseded}`, not on a missing edge.
+
+    Both shapes are driven as fixtures in
+    ``test_transitions_pin_reds_on_the_tables_it_was_written_for``, so the
+    claim is checkable rather than merely confident.
+    """
+    _transition_edges_by_status(_ontology_status_section())
+
+
+def test_transitions_pin_reds_on_the_tables_it_was_written_for():
+    """Non-vacuity for ``test_ontology_transitions_column_matches_the_guard_map``.
+
+    The pin above claims it would have caught two table shapes, and each claim is
+    only worth the artifact behind it — so each shape is reproduced here in the
+    shape the real doc carried, and the pin is driven with it. Nothing here
+    touches ``docs/ONTOLOGY.md``; the section is injected.
+
+    (a) the INTERMEDIATE v3.37 table (`17c81841e8` -> `cd38f7a74b`, never
+        shipped): four columns, `draft` states `live` alone. The pin must red on
+        the two MISSING EDGES and say ``['live']``.
+    (b) the LAST SHIPPED artifact (`origin/main`, v3.36): FIVE columns, so the
+        cell the pin reads is the `Write path` column — `create_point(status='draft')`
+        and friends, which yield NO `` `word` `` run at all. The pin must still
+        red (it is non-vacuous on main's real doc), but through an EMPTY stated
+        set plus the six-row set assert — and its message must say ``[]``, which
+        is the proof that main's shape is not the `{live}` shape.
+    """
+    intermediate_v337 = (
+        "### Point Status Vocabulary (canonical, #432/#690)\n"
+        "\n"
+        "| Status | Kind | Transitions to | Notes |\n"
+        "|--------|------|----------------|-------|\n"
+        "| `draft` | initial (opt-in, #1088) | `live` | Inert for EP |\n"
+        "| `live` | active | `deprecated`, `superseded` | Full EP |\n"
+        "| `deprecated` | terminal | *(none)* | Ended (#11824) |\n"
+        "| `superseded` | terminal | *(none)* | Replaced |\n"
+    )
+    with pytest.raises(AssertionError) as intermediate_red:
+        _transition_edges_by_status(intermediate_v337)
+    assert "states transitions ['live'] but the guards allow" in str(
+        intermediate_red.value), (
+        "the pin no longer reds on the intermediate v3.37 table's `draft` row "
+        "through the two missing edges — that is the shape it was written for")
+
+    # `origin/main`'s §5 (v3.36): the `Write path` column sits at cells[2].
+    shipped_v336 = (
+        "### Point Status Vocabulary (canonical, #432/#690)\n"
+        "\n"
+        "| Status | Kind | Write path | Transitions to | Notes |\n"
+        "|--------|------|------------|----------------|-------|\n"
+        "| `draft` | initial (opt-in, #1088) | `create_point(status='draft')`, "
+        "`EventAPI._point` | `live` | Inert for EP |\n"
+        "| `live` | active | `create_point`, `update_point` | `retracted`, "
+        "`superseded` | Full EP |\n"
+        "| `retracted` | terminal | `retract_point` | *(none)* | Tombstone |\n"
+        "| `superseded` | terminal | `supersede_point` | *(none)* | Replaced |\n"
+        "| `outdated` | terminal (legacy flag) | `invalidate_point` | *(none)* | Flag |\n"
+        "| `archived` | terminal (reserved) | *(no v1 SDK write path)* | *(none)* | Reserved |\n"
+    )
+    with pytest.raises(AssertionError) as shipped_red:
+        _transition_edges_by_status(shipped_v336)
+    assert "states transitions [] but the guards allow" in str(shipped_red.value), (
+        "the pin does not red on main's five-column table the way the docstring "
+        "says it does (the Write path cell, parsed to an EMPTY set) — if it now "
+        "reads `{live}` there, the column index moved and the docstring is wrong "
+        "again")
+
+
+def _transition_edges_by_status(section: str) -> dict[str, frozenset[str]]:
+    """Each §5 status row's `Transitions to` cell, keyed by status word.
+
+    Refuses rather than skipping on every shape it cannot read (a table of fewer
+    than three lines, a Status cell that is not a bare `` `word` ``), so a table
+    the pin cannot parse is a RED and never a silent pass. ``section`` is
+    injectable so the non-vacuity pin can drive the two table shapes this guard
+    was written for without touching the real file
+    (``test_transitions_pin_reds_on_the_tables_it_was_written_for``).
+    """
+    from tortoise.sdk import _ALLOWED_TRANSITIONS
+
+    rows = [ln for ln in section.splitlines() if ln.startswith("|")]
+    assert len(rows) >= 3, f"§5's table parsed to {len(rows)} line(s); got {rows!r}"
+    seen: dict[str, frozenset[str]] = {}
+    for row in rows[1:]:
+        cells = [c.strip() for c in row.split("|")[1:-1]]
+        if len(cells) < 3 or set(cells[0]) <= set("-: "):
+            continue
+        status_match = re.fullmatch(r"`([a-z_]+)`", cells[0])
+        assert status_match is not None, (
+            f"§5's Transitions pin cannot read this Status cell: {cells[0]!r}")
+        status = status_match.group(1)
+        stated = frozenset(re.findall(r"`([a-z_]+)`", cells[2]))
+        seen[status] = stated
+        assert stated == _ALLOWED_TRANSITIONS[status], (
+            f"§5's `{status}` row states transitions {sorted(stated)} but the guards "
+            f"allow {sorted(_ALLOWED_TRANSITIONS[status])} (#11824). The table is "
+            "canonical; either the row is stale or the guard moved without the doc")
+    assert set(seen) == POINT_STATUS_VALUES, (
+        f"this pin read the transitions of {sorted(seen)}, not the four model words "
+        f"{sorted(POINT_STATUS_VALUES)} — a table row it cannot reach is unpinned")
+    return seen
+
+
+def test_ontology_discloses_the_legacy_words_it_no_longer_lists():
+    """The three retired words stay NAMED in §5 as read-side legacy.
+
+    Dropping them from the table without the note would be indistinguishable from
+    "the engine never stored them" — and it does: `retract_point` still writes
+    `retracted` (#11824 S2 migrates that verb), readers still fold `outdated`, and
+    stored rows still hold `archived`. The note is what makes that residual
+    DISCLOSED rather than discovered, so it is pinned here: a lane that tidies the
+    three words out of §5 entirely fails this test instead of quietly deleting the
+    record of a live divergence. NON-VACUOUS: the pre-v3.37 table satisfied a
+    section-wide search for all three words, so the pin reads the note itself —
+    ``test_ontology_legacy_pin_reads_the_note_not_the_section`` drives that shape
+    and shows the scoped read refusing it.
+    """
+    # ⛔ SCOPED TO THE NOTE, not to §5 as a whole. The pre-v3.37 table listed all
+    # three words as STATUS ROWS, so a section-wide `in section` was satisfied by
+    # the very table this note exists to correct — the guard would have been green
+    # on the buggy doc it was written for. The note is the blockquote paragraph
+    # that follows the table; a word elsewhere in §5 is not a disclosure.
+    note = _read_side_legacy_note()
+    assert note, (
+        "§5 carries no `read-side legacy` blockquote paragraph — the retired words "
+        "must stay DISCLOSED in the note that says the model no longer produces "
+        "them, not merely named somewhere in the section (#12855)")
+    for word in ("retracted", "outdated", "archived"):
+        assert f"`{word}`" in note, (
+            f"§5's read-side legacy note no longer names {word!r} — the retired "
+            "words are read-side legacy over stored rows and must stay disclosed "
+            "(#12855); naming it elsewhere in §5 is not the note")
+    # ⛔ The `assert "read-side legacy" in note` that stood here was DELETED, not
+    # relocated (review P3). `_read_side_legacy_note` selects its paragraphs BY that
+    # substring (`:322`), so a truthy `note` already implies it: no mutation of the
+    # document makes this the assertion that reds — deleting the note reds at the
+    # existence check above, never here. Relocating it to the raw section does not
+    # buy a verdict either, since a non-empty `note` already implies the phrase is
+    # in §5. The verdict is carried by the existence check above and the per-word
+    # checks below, which DO vary on their own mutants.
+    assert "`retract_point`" in note and "still writes `retracted`" in note, (
+        "§5 no longer discloses that `retract_point` still writes `retracted` — that "
+        "is the one place the code diverges from this model (#11824 S2)")
+
+
+def test_ontology_legacy_pin_reads_the_note_not_the_section():
+    """Non-vacuity for the scoping in ``test_ontology_discloses_the_legacy_words…``.
+
+    §5 as it read BEFORE v3.37 satisfied a section-wide word check without carrying
+    any disclosure at all: its six-row table named all three retired words in its
+    Status/Transitions cells (measured against the real artifact — `origin/main`'s
+    §5 — where the section-wide read is GREEN and this scoped read is RED). This
+    pins that the scoped read refuses that shape, so the check above cannot drift
+    back to a whole-section read and keep passing.
+
+    ⛔ It also pins the paragraph BREAK, which a blank-line split gets wrong: §5's
+    notes are one MD028 blockquote, so a blank-line split hands back the whole
+    quote group — tombstone contract included — and a word added there would
+    satisfy the disclosure assertions. The fixture carries the tombstone note with
+    the disclosure paragraph deleted, which must read as NO note at all.
+    """
+    words = ("retracted", "outdated", "archived")
+    pre_v337 = (
+        "### Point Status Vocabulary (canonical, #432/#690)\n"
+        "\n"
+        "| Status | Kind | Transitions to | Notes |\n"
+        "|--------|------|----------------|-------|\n"
+        "| `draft` | initial | `live` | Inert for EP |\n"
+        "| `live` | active | `retracted`, `outdated`, `archived` | Full EP |\n"
+    )
+    for word in words:
+        assert f"`{word}`" in pre_v337, (
+            "the fixture must reproduce the shape the whole-section read passed on")
+    assert _read_side_legacy_note(pre_v337) == "", (
+        "the legacy pin read the retired words out of the TABLE — that is the "
+        "whole-section read this finding raised, and it proves nothing about the "
+        "note")
+    tombstone_only = (
+        pre_v337
+        + "\n"
+        "> **Tombstone contract:** Retracted points stay in the graph "
+        "(`get_point` returns them with `status='retracted'`).\n"
+        ">\n"
+        "> **Consequence:** a stored inverted window is reported, not repaired.\n"
+    )
+    assert _read_side_legacy_note(tombstone_only) == "", (
+        "the note read escaped its paragraph — §5's tombstone contract is in the "
+        "same blockquote, so a blank-line paragraph split would admit it as the "
+        "disclosure")
+    # The split is not cosmetic: with the note PRESENT and a retired word carried
+    # only by the tombstone paragraph beside it, the scoped read must not see that
+    # word — a blank-line split returns both paragraphs as ONE note and does.
+    note_then_tombstone = (
+        "### Point Status Vocabulary (canonical)\n"
+        "\n"
+        "> **`retracted` and `outdated` are read-side legacy**, not statuses.\n"
+        ">\n"
+        "> **Tombstone contract:** stored rows may still hold `archived`.\n"
+    )
+    scoped = _read_side_legacy_note(note_then_tombstone)
+    assert "`retracted`" in scoped and "`outdated`" in scoped, scoped
+    assert "`archived`" not in scoped, (
+        "the scoped read picked up a word from the tombstone paragraph beside the "
+        "note — the paragraph break is being read as a blank line, and §5's notes "
+        "are one MD028 blockquote with bare `>` separators")
+    # ⛔ AND A SECOND NOTE IS REFUSED, NOT JOINED. The blank-line split this pin
+    # replaced asserted exactly ONE paragraph said 'read-side legacy' (measured on
+    # this fixture: `§5 has 2 blockquote paragraph(s) naming 'read-side legacy'`).
+    # Dropping that assert leaves a gutted disclosure able to borrow the retired
+    # words from any other paragraph in §5 — the disclosure test passes while the
+    # note discloses nothing. Driven here so the refusal cannot be deleted quietly.
+    two_notes = (
+        "### Point Status Vocabulary (canonical)\n"
+        "\n"
+        "> **`retracted` is read-side legacy** — and this paragraph names neither "
+        "`outdated` nor `archived`.\n"
+        "\n"
+        "> **Unrelated note.** read-side legacy rows may still hold `outdated` and "
+        "`archived` in storage.\n"
+    )
+    with pytest.raises(AssertionError, match="exactly one note"):
+        _read_side_legacy_note(two_notes)
+    # ⛔ AND A BLOCK START ENDS THE PARAGRAPH TOO — the lazy-continuation allowance
+    # above must not become an ABSORPTION one. Each of these begins a new BLOCK in
+    # CommonMark, so the unquoted prose after it must NOT be read as part of the
+    # disclosure. Measured before the fix (round 5): a note missing `archived`,
+    # followed by `---` and then "rows may still hold `archived`", PASSED the word
+    # check — and so did `***`, `___`, a ``` fence, `~~~` and a `<div>`.
+    for block_start in ("---", "***", "___", "```", "~~~", "<div>", "### Heading",
+                        "| a | b |", "- item", "1. item"):
+        # ⛔ BOTH AXES: the break as a bare line AND inside the quote (`> ---`). The
+        # quoted axis was missed by the first cut of this pin and kept the false pass
+        # open (v3.37 review, round 6).
+        for quoted_break in (block_start, f"> {block_start}"):
+            absorbing = (
+                "### Point Status Vocabulary (canonical)\n"
+                "\n"
+                "> **`retracted` and `outdated` are read-side legacy**, not statuses.\n"
+                f"{quoted_break}\n"
+                "rows may still hold `archived`.\n"
+            )
+            note = _read_side_legacy_note(absorbing)
+            assert "`archived`" not in note, (
+                f"a `{quoted_break}` BLOCK START did not end the note, so the lazy "
+                f"rule absorbed the block after it into the disclosure: {note!r}")
+    # ...and the over-approximation the OTHER way: an AUTOLINK is inline, not a block
+    # start, so a marker-dropped continuation carrying one must still be read.
+    # ⛔ THE WORD UNDER TEST SITS ONLY ON THE CONTINUATION. The first cut put
+    # `` `archived` `` on the note's own line too, so the assertion passed even when
+    # the class CUT the continuation — the pin proved nothing (v3.37 review, round 7).
+    autolink = (
+        "### Point Status Vocabulary (canonical)\n"
+        "\n"
+        "> **`retracted` and `outdated` are read-side legacy**, not statuses,\n"
+        "<https://example.com/12855> and stored rows may still hold `archived`.\n"
+    )
+    auto_note = _read_side_legacy_note(autolink)
+    assert "read-side legacy" in auto_note and "`archived`" in auto_note, (
+        "an autolink is INLINE, so a continuation carrying one is still the note; "
+        f"the block-start class cut it: {auto_note!r}")
+    # ⛔ AND A REAL HTML BLOCK *IS* A BLOCK START — CommonMark types 1-6 interrupt a
+    # paragraph, so the line after one must not be absorbed. Dropping `![A-Za-z]` let a
+    # note missing `archived` borrow it from the prose after `<!DOCTYPE html>` (round 7).
+    # Every type is driven, including the type-6 BY-NAME list's own edge shapes
+    # (`<div/>`, a bare `<div` at end of line) and type 1 (`<script>`, which is NOT in
+    # the type-6 list and is its own arm).
+    for html_block in ("<!DOCTYPE html>", '<!ENTITY x "y">', "<div>", "<!-- c -->",
+                       "<?php x ?>", "<![CDATA[ x ]]>", "<script>", "<pre>",
+                       "<style>", "<textarea>", "<table>", "<h2>", '<div class="x">',
+                       "<div/>", "<div", "</div>", "</table>"):
+        html_fixture = (
+            "### Point Status Vocabulary (canonical)\n"
+            "\n"
+            "> **`retracted` and `outdated` are read-side legacy**, not statuses.\n"
+            f"{html_block}\n"
+            "rows may still hold `archived`.\n"
+        )
+        html_note = _read_side_legacy_note(html_fixture)
+        assert "`archived`" not in html_note, (
+            f"`{html_block}` is an HTML BLOCK start, so it ends the note; the class "
+            f"absorbed the prose after it: {html_note!r}")
+    # ⛔ AND THE OTHER DIRECTION, ONE LAYER IN FROM THE AUTOLINK: a TYPE-7 line cannot
+    # interrupt a paragraph, so a continuation beginning with an INLINE tag — or with
+    # a closing tag whose name is not an HTML block tag — is still the note. The
+    # round-6/7 class accepted any tag name followed by `>`/whitespace, which is
+    # exactly type 7's shape, so every one of these cut the continuation and reddened
+    # a CORRECT disclosure (measured: the note lost `archived` on each).
+    for inline in ("<span>x</span>", "<em>x</em>", "<code>x</code>", "<a href=\"/x\">y</a>",
+                   "</span>", "</em>", "<br />", "<https://example.com/12855>",
+                   "<3 items", "<diverse>"):
+        inline_fixture = (
+            "### Point Status Vocabulary (canonical)\n"
+            "\n"
+            "> **`retracted` and `outdated` are read-side legacy**, not statuses,\n"
+            f"{inline} and stored rows may still hold `archived`.\n"
+        )
+        inline_note = _read_side_legacy_note(inline_fixture)
+        assert "`archived`" in inline_note, (
+            f"`{inline}` is INLINE (a type-7 line cannot interrupt a paragraph), so "
+            f"the continuation is still the note; the block-start class cut it: "
+            f"{inline_note!r}")
 
 
 def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):

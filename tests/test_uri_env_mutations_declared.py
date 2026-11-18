@@ -1441,6 +1441,64 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\.pop\("TORTOISE_DB_URI", None\)$',
         r'^os\.environ\["TORTOISE_DB_URI"\] = uri$',
         r'^os\.environ\["TORTOISE_DB_URI"\] = old$'],
+    # ── test_13302_ended_read.py — DELIBERATE_URI, one SET site ─────────────
+    # `e52460b55e78` (#13416) landed this module with its one mutation site
+    # untriaged, so this register is RED on `main` for it — #12631's class again
+    # (each PR green against the review base, the tip carrying both). The site
+    # is the `sdk` fixture:
+    #     monkeypatch.setenv("TORTOISE_DB_URI", _uri())
+    # and it PINS the lane the module's own availability probe already found:
+    # `_probe([...])` tries the ambient value, the docker seam and the legacy
+    # seam in turn and returns the FIRST one that answered, as `_WORKING_URI`;
+    # `_uri()` prefers the ambient value, then that measured lane, then the
+    # docker seam. Without the setenv the `TortoiseSDK(...)` construction below
+    # would inherit whatever the box holds — i.e. it could land somewhere the
+    # probe never verified, which is the opposite of the reading this file
+    # pins (a live Cypher read over a real store, so an embedded fake would
+    # certify nothing). The mutation is the lane PIN, not a silent downgrade.
+    # `monkeypatch` is the fixture param, so pytest auto-restores it and the
+    # restoration guard is satisfied without any save/restore pair.
+    # ⛔ Anchored to the whole stripped line, like every row above: a future
+    # setenv of a DIFFERENT expression in this file is a different site and
+    # must be triaged rather than riding along on this arm (#11083).
+    "test_13302_ended_read.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
+    # ── test_paired_expansion_ab_2518.py — one EMBEDDED-LANE control and four
+    #    DELIBERATE_URI sites ─────────────────────────────────────────────────
+    # `f462ad3acbb4` (#13267) landed the same untriaged shape, so `main` reds on
+    # four of these five spellings as well. Each site is a different intent and
+    # one sentence does not describe them, which is why they are labelled here
+    # one by one:
+    #   `monkeypatch.delenv("TORTOISE_DB_URI", raising=False)` inside
+    #     `test_the_dense_switch_refusal_fires_before_any_database_is_needed` —
+    #     DELIBERATE_EMBEDDED_LANE, and the ABSENCE of a target IS the assertion:
+    #     the tool must refuse the `TORTOISE_ENTITY_KEY_DENSE` lever with exit 3
+    #     BEFORE it probes a database, so the case stays hermetic and an ambient
+    #     docker/redis URI cannot make a refusal that was meant to be pre-probe
+    #     silently depend on a reachable server.
+    #   the module-level `_falkordb_available()` probe sets a `_probe`-suffixed
+    #     URI (its OWN graph), then restores the captured `old` value — or pops
+    #     the key when there was none — in a `finally`. DELIBERATE_URI, and the
+    #     save/restore pair is what keeps the probe from leaking a lane into
+    #     every later module in the process (#2084's class).
+    #   `monkeypatch.setenv("TORTOISE_DB_URI", f"{uri}_{uuid.uuid4().hex[:10]}")`
+    #     in `test_the_point_arm_reaches_the_lever_and_the_object_arm_cannot` —
+    #     DELIBERATE_URI: the live pair runs against a PER-RUN namespace derived
+    #     from the live URI, so the two arms write graphs this test owns instead
+    #     of the shared env-URI graph. The per-run suffix is load-bearing, not
+    #     cosmetic, which is why the arm is anchored to the `f"{uri}_…"` spelling
+    #     and not to any `setenv("TORTOISE_DB_URI", …)` in the file.
+    # Every site is `monkeypatch` or carries its own restore, so the sibling
+    # restoration guard is satisfied; only the DECLARATION was missing.
+    # ⛔ Anchored to the whole stripped line, per site: the four `os.environ`
+    # spellings above are exactly the probe's three lines plus its restore, so a
+    # future direct `os.environ` write in this module reds until triaged.
+    "test_paired_expansion_ab_2518.py": [
+        r'^monkeypatch\.delenv\("TORTOISE_DB_URI", raising=False\)$',
+        r'^os\.environ\["TORTOISE_DB_URI"\] = f"\{uri\.rstrip\(\'/\'\)\}_probe"$',
+        r'^os\.environ\["TORTOISE_DB_URI"\] = old$',
+        r'^os\.environ\.pop\("TORTOISE_DB_URI", None\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", f"\{uri\}_\{uuid\.uuid4\(\)\.hex\[:10\]\}"\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

@@ -744,6 +744,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # tests/test_ci_selection.py pins the equality) and DECLARED in
     # tests/test_markers.py::test_no_redirect_stems_registry_exact.
     "test_13224_cold_embedder_write_bound",
+    # #13528: the READ-side twin — a read must not spend its budget acquiring the
+    # embedder (`EmbeddingModel.await_read_ready_reason`). Every case builds a
+    # `TortoiseSDK(<tmp_path>)` path store, so the load-bearing reason is the
+    # REDIRECT: a URI-set lane would discard the path and grade a graph this file
+    # never seeded. Registered in all THREE homes — config/ci-surfaces.yml
+    # `carve_out:`, TEST_NO_REDIRECT_STEMS and
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact.
+    "test_13528_read_never_blocks_on_embedder",
 )
 
 _HAS_FALKOR: bool | None = None

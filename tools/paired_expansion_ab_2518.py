@@ -100,6 +100,17 @@ USAGE
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/paired_expansion_ab_2518.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/paired_expansion_ab_2518.py`"
+    )
+
 import argparse
 import collections
 import hashlib
@@ -108,7 +119,6 @@ import math
 import os
 import random
 import shutil
-import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -800,7 +810,12 @@ def read_arm(sdk, items: list[dict], *, arm: str, expansion: bool,
         rows = sdk.tortoise_fts_query(
             query, entity_type=arm, limit=read_limit,
             include_terminal=True, _record_reads=False,
-            _valid_time_rerank=False, leg_trace=trace,
+            _valid_time_rerank=False,
+            # #12297's census: the arm comparison below IS the order the rerank
+            # would move, so it opts out for the identical reason it opts out of
+            # `_valid_time_rerank` — an armed rerank would re-pick the page under
+            # the measurement and charge the difference to entity_key_expansion.
+            _rerank_candidates=False, leg_trace=trace,
             entity_key_expansion=expansion)
         reads += 1
         ids = [str(r.get("id", "")) for r in (rows or [])]
@@ -1172,7 +1187,8 @@ def run(args: argparse.Namespace) -> int:
         # One warm read so the first measured query is not paying a cold cost.
         sdk.tortoise_fts_query("warm", entity_type="point", limit=1,
                                include_terminal=True, _record_reads=False,
-                               _valid_time_rerank=False)
+                               _valid_time_rerank=False,
+                               _rerank_candidates=False)
         item_ids = [it["item_id"] for it in items]
         arms: dict[str, dict] = {}
         for arm in args.arms:

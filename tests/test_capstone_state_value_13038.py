@@ -1876,6 +1876,40 @@ def test_an_empty_linked_events_list_survives_the_served_projection():
     assert "linkedEvents" not in cap._served_row({"id": "live-1", "name": "live"})
 
 
+def test_the_two_successor_facts_survive_the_served_projection():
+    """BOTH successor facts reach a reader — the payload half of #13302's claim.
+
+    #13302 review F2: the projection gained `successorName` and `allSuccessorIds` in
+    `_ended_fields`, and no row asserted either. Deleting both left the whole suite
+    green, which is the SAME defect `test_an_empty_linked_events_list_survives_the_
+    served_projection` above was written for — one key earlier. The product rows in
+    `test_13302_ended_read.py` cannot see it: they read the stub target's rows, which
+    bypass `_served_row`/`_ended_fields` entirely.
+
+    So a reader scoring Q6 could lose the successor NAME (`docs/ONTOLOGY.md:431/:451`
+    — the carrier holds a name, stored verbatim) or the full predecessor set, and the
+    instrument would still report a passing run over an altered answer.
+    """
+    served = cap._served_row({"id": "p1", "name": "Onboarding v2",
+                              "successorName": "Onboarding flow v2",
+                              "allSuccessorIds": ["abc-123", "def-456"]})
+    assert served["successorName"] == "Onboarding flow v2", (
+        "the successor NAME is one of the two facts this PR exists to serve; "
+        "dropping it from the projection puts the pre-fix collapse back at the "
+        "one place a reader actually scores"
+    )
+    assert served["allSuccessorIds"] == ["abc-123", "def-456"], (
+        "the whole predecessor set must reach a reader — one id is not the chain"
+    )
+    # An id-only row serves the id and FABRICATES no name (the two facts stay two).
+    id_only = cap._served_row({"id": "p2", "successorId": "abc-123"})
+    assert id_only["successorId"] == "abc-123"
+    assert "successorName" not in id_only, (
+        "a name may never be fabricated from an id — the served pair is what the "
+        "model actually records"
+    )
+
+
 def test_a_query_less_call_is_not_reported_as_a_corpus_ranking():
     """`NO-RELATION-TO-QUESTION` describes a failed TEXT match; an enumeration is not one.
 
@@ -1891,3 +1925,337 @@ def test_a_query_less_call_is_not_reported_as_a_corpus_ranking():
     )
     cap._signal_refs(ans, {}, {})
     assert not any("NO-RELATION-TO-QUESTION" in s for s in ans.signals)
+
+
+# ── #13302 review F3: the SCOREBOARD's settled renderings ──────────────────────
+#
+# The board is the artifact a human reads to decide whether the product answered,
+# and the pre-fix inline renderings made an ended-scope enumeration read exactly
+# like a plain default-scope search. The diff replaced them with one builder per
+# rendering; nothing pinned that, so restoring the inline copies kept every pin
+# green and left a human to notice (#13302 review F3).
+
+
+def test_an_ended_scope_call_is_labelled_as_one():
+    """A reader must never have to guess WHICH call produced a row.
+
+    Both renderers spell a call through `_search_label`, so the marker has to live
+    in that one builder. Without it the committed evidence shows a retired object
+    served `status=deprecated` by a lookup that looks like a plain read — the trust
+    failure the scoreboard exists to catch.
+    """
+    label = cap._search_label(
+        {"query": None, "entity_type": "point", "ended_scope": True})
+    plain = cap._search_label({"query": None, "entity_type": "point"})
+
+    assert "ended_scope" in label, (
+        "an ended-scope enumeration must be LABELLED as one — it renders "
+        "identically to a query-less default search otherwise"
+    )
+    assert "ended_scope" not in plain, (
+        "a default-scope read must not claim a scope it did not ask for"
+    )
+    # The detail sections pass `tick=False`; the FLAGS may not depend on that, or
+    # the same call renders two ways in one document.
+    assert label == plain.replace(")", ", ended_scope)")
+    assert "ended_scope" in cap._search_label(
+        {"query": None, "entity_type": "point", "ended_scope": True}, tick=False)
+
+
+def _inline_search_label_sites(source: str) -> list[str]:
+    """`fn:lineno` for every f-string in `source` that re-inlines a `search(…)` label.
+
+    A label f-string is recognised by its FIRST literal part being the identifier text
+    `search(`, optionally preceded by the backtick the ticked rendering wraps around
+    it. #13302 review F1: the previous version read `node.values[0].value` BEFORE the
+    `isinstance(…, ast.Constant)` test, so it compared a `str` against `ast.Constant`,
+    which is `False` for every possible input — `offenders` was always `[]` and the
+    pin could never fail. The backtick normalisation is the second half of the same
+    finding: the pre-fix detail renderer's literal was "`search(", so a bare
+    `str.lstrip().startswith("search(")` misses the very shape this scan replaced.
+
+    `_search_label` is skipped — it IS the one builder, by definition.
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(source))
+    offenders: list[str] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if fn.name == "_search_label":  # the ONE builder, by definition
+            continue
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.JoinedStr) or not node.values:
+                continue
+            head = node.values[0]
+            if not isinstance(head, ast.Constant):
+                continue
+            if str(head.value).lstrip("`").startswith("search("):
+                offenders.append(f"{fn.name}:{node.lineno}")
+    return offenders
+
+
+def test_every_search_label_comes_from_the_one_builder():
+    """A re-inlined `f"search(…)"` in a renderer is the defect, so scan for it.
+
+    The behavioural pin above cannot see an inline duplicate: it calls the builder
+    directly, which stays correct while a renderer stops using it. This is the
+    AST shape of the same check `test_search_projects_through_the_served_row_helper`
+    applies to the served-row projection.
+    """
+    offenders = _inline_search_label_sites(inspect.getsource(cap))
+    assert not offenders, (
+        "a `search(...)` label is built inline instead of through "
+        f"`_search_label` (it can drop `ended_scope`): {offenders}"
+    )
+
+
+def test_the_label_scan_flags_the_inline_renderings_it_replaced():
+    """The scan must red on the code it was written to reject (review F1).
+
+    A rule with no failing fixture is untested, and this one HAD no failing fixture:
+    the pre-fix scan was permanently green, so restoring `origin/main`'s exact inline
+    bodies left it passing (rule 3 of the PR's own mutation-attribution block). These
+    are those bodies verbatim — the two ticked detail renderings whose literal is
+    "`search(", and the top table's plain "search(" — so the scan is pinned in BOTH
+    directions, which is how a lint rule is tested everywhere else (ESLint's
+    `RuleTester` pairs `valid` cases with `invalid` ones carrying an expected
+    diagnostic; ruff fixtures mark the triggering line).
+    """
+    pre_fix = '''
+        def _answer_text(answer):
+            bits = []
+            for call in answer.calls:
+                if not call.rows:
+                    bits.append(
+                        f"`search({call.request.get('query')!r}, "
+                        f"{call.request.get('entity_type')}"
+                        f"{', include_terminal' if call.request.get('include_terminal') else ''})`"
+                        f" → 0 rows"
+                    )
+                    continue
+                bits.append(
+                    f"`search({call.request.get('query')!r}, "
+                    f"{call.request.get('entity_type')}`"
+                )
+            return " ".join(bits)
+
+        def _calls_summary(answer):
+            out = []
+            for c in answer.calls:
+                out.append(
+                    f"search({c.get('query')!r}{', +terminal' if c.get('include_terminal') else ''})"
+                    f" → {len(c.get('rows') or [])} rows"
+                )
+            return out
+    '''
+    offenders = _inline_search_label_sites(pre_fix)
+
+    flagged = {site.split(":", 1)[0] for site in offenders}
+    assert flagged == {"_answer_text", "_calls_summary"}, (
+        "the scan must flag the pre-fix inline labels in BOTH renderers; it found "
+        f"{offenders or 'nothing'} — a scan that cannot red is not a pin"
+    )
+    assert len(offenders) == 3, (
+        "all three inline f-strings must be flagged, including the two whose "
+        f"literal starts with a backtick: {offenders}"
+    )
+    # The builder itself is never an offender, in either source.
+    assert _inline_search_label_sites(
+        'def _search_label(request):\n'
+        '    return f"search({request[\'query\']!r})"\n'
+    ) == []
+
+
+def test_both_renderers_carry_the_ended_scope_marker():
+    """The complementary net: assert the RENDERERS' output, not their source shape.
+
+    The scan above is an AST net over one spelling. It cannot see a renderer that
+    still calls `_search_label` but hands it a request without `ended_scope`, and
+    it cannot see a label whose literal does not begin with `search(`. Rendering a
+    real `Call` through both renderers is the behavioural half the #13302 review
+    preferred, kept alongside the scan rather than instead of it.
+
+    Both `_answer_text` branches are pinned: the `→ 0 rows` one and the rows one,
+    the second being the line that prints the retired object in the committed
+    evidence. Restoring the pre-fix inlines makes this fail with the defect's own
+    signature — `` `search(None, object)` → 0 rows `` — while the scan stays local
+    to `tools/`.
+    """
+    request = {"query": None, "entity_type": "object", "ended_scope": True}
+
+    empty = cap.Answer("Q1")
+    empty.calls.append(cap.Call("search", request, True, rows=[]))
+    assert "ended_scope" in cap._answer_text(empty), (
+        "the '→ 0 rows' branch must name the scope — otherwise an empty ended read "
+        "reads as an empty default-scope read"
+    )
+
+    served = cap.Answer("Q1")
+    served.calls.append(
+        cap.Call(
+            "search", request, True,
+            rows=[{"id": "o1", "what": "Onboarding flow v2",
+                   "kind": "object", "status": "deprecated", "score": 0.5}],
+        )
+    )
+    assert "ended_scope" in cap._answer_text(served), (
+        "the rows branch must name the scope — this is the line that renders the "
+        "retired object in the committed evidence"
+    )
+
+    summary = cap._calls_summary(
+        [{"ok": True, "surface": "search", "request": request, "rows": [{"id": "o1"}]}]
+    )
+    assert "ended_scope" in summary, (
+        "the top table must name the scope too — it is the line the scoreboard is "
+        "skimmed on"
+    )
+    assert "`" not in summary, "the summary form is unfenced by contract (`tick=False`)"
+
+
+def test_the_ended_suffix_renders_how_a_row_ended():
+    """The bracket is the reason a row is the answer — and it is not decorative."""
+    suffix = cap._ended_suffix(
+        {"stage": {"slot": "terminal", "outcome": "withdrawn"}, "linkedEvents": []})
+    assert "stage=terminal/withdrawn" in suffix
+    assert "no linked event" in suffix, (
+        "the 'planned and never happened' half must render, or a plan that ended "
+        "and a plan that happened look identical on the board"
+    )
+    assert "successor=Onboarding v2" in cap._ended_suffix(
+        {"successorName": "Onboarding v2"}), "a NAME must render under the name"
+    assert "successor=abc-123" in cap._ended_suffix({"successorId": "abc-123"})
+    assert cap._ended_suffix({"id": "live-1", "status": "live"}) == "", (
+        "a current-scope row carries no ending, so it gains no bracket"
+    )
+
+
+def test_the_ended_signal_states_the_rows_own_ending_and_mints_none():
+    """The signal is the ONE field a reader attributes a failure to.
+
+    `withdrawn record(s)` is a claim the product never made — the ended population
+    is EVERY ending — and a served row's own `status`/`stage.outcome` is where
+    "how" is stated. Both halves are pinned: the wording, and that the word comes
+    from the row rather than from the label.
+    """
+    answer = cap.RECIPES["withdrawn"](_EndedRecordingTarget(), {}, {})
+    signal = next(s for s in answer.signals if "ended record(s)" in s)
+    assert "retracted" in signal, (
+        "the row's OWN ending word must reach the signal — it is the fact the "
+        "reader scores"
+    )
+    assert "withdrawn record" not in signal, (
+        "`withdrawn record(s)` would be a claim the product never made: the ended "
+        "population is every ending, not only withdrawals"
+    )
+
+    class _SupersededTarget(_EndedRecordingTarget):
+        def search(self, query=None, *, entity_type="point", limit=10,
+                   include_terminal=False, ended_scope=False, role=""):
+            call = super().search(query, entity_type=entity_type, limit=limit,
+                                  include_terminal=include_terminal,
+                                  ended_scope=ended_scope, role=role)
+            if ended_scope and entity_type == "point":
+                call.rows = [dict(call.rows[0], status="superseded")]
+            return call
+
+    signal2 = next(
+        s for s in cap.RECIPES["withdrawn"](_SupersededTarget(), {}, {}).signals
+        if "ended record(s)" in s
+    )
+    assert "superseded" in signal2, (
+        "a superseded row must state `superseded`, not inherit the label's word"
+    )
+
+
+class _SupersededPointTarget:
+    """A store shaped like `supersede_point` — the F2 defect's own shape.
+
+    The replaced Point carries the `CORRECTS` edge and **no `supersededBy`**, and a
+    by-id `read_entity` serves `properties(n)` only, so the replaced node comes
+    back with neither carrier. The successor's own search row is where the edge is
+    legible (`supersedes=[<the replaced id>]`), which is exactly what the
+    committed payload of the 13038 run shows.
+    """
+
+    def __init__(self, *, age_link: bool = True):
+        self.age_link = age_link
+
+    def search(self, query=None, *, entity_type="point", limit=10,
+               include_terminal=False, ended_scope=False, role=""):
+        new_row = {"id": "new-1", "what": "the entry tier is 49",
+                   "kind": "statement", "status": "live"}
+        if self.age_link:
+            new_row["supersedes"] = ["old-1"]
+        rows = [
+            {"id": "old-1", "what": "the entry tier is 39", "kind": "statement",
+             "status": "superseded"},
+            new_row,
+        ]
+        return cap.Call("search", {"query": query, "entity_type": entity_type},
+                        True, f"{len(rows)} rows", {}, rows, role=role)
+
+    def read_entity(self, entity_id, *, role=""):
+        node = {"id": entity_id, "content": "the entry tier", "status": "superseded"}
+        if entity_id == "new-1":
+            node["status"] = "live"
+        return cap.Call("read_entity", {"id": entity_id}, True, "one node", {},
+                        [node], role=role)
+
+
+def _q3_signal(target) -> str:
+    answer = cap.RECIPES["why_changed"](
+        target, {"q3_pricing": "old-1", "q4_pricing": "new-1"}, {})
+    return next(s for s in answer.signals if "names-its-successor=" in s)
+
+
+def test_the_q3_signal_tests_the_successor_fact_the_POINT_family_carries():
+    """#13302 review F2: `names-its-successor=False` was true of every Point, forever.
+
+    The signal read `bool(node_old.get("supersededBy"))` on a **Point**, whose
+    successor is the `CORRECTS` edge — and a by-id read serves properties, so the
+    name carrier is absent BY DESIGN. The committed payload shows the
+    contradiction verbatim: `"supersededBy": null` on that node while the same
+    run's judge reason says the successor "carries a supersedes link to the Q3 id,
+    naming the successor". The fact must be looked for on the carrier the FAMILY
+    uses — here the successor's own row — and the signal must SAY which one
+    answered.
+    """
+    signal = _q3_signal(_SupersededPointTarget())
+    assert "names-its-successor=True" in signal, (
+        "a superseded Point whose successor's row names the CORRECTS edge DID name "
+        "its successor; the old signal printed False here for every Point in the "
+        "graph, which is the false signal this replaces"
+    )
+    assert "by edge" in signal and "new-1" in signal, (
+        "the signal must say WHICH carrier answered and name the successor it "
+        "found, or a reader cannot tell 'no successor' from 'not looked for'"
+    )
+
+    class _SupersededObjectTarget(_SupersededPointTarget):
+        def read_entity(self, entity_id, *, role=""):
+            call = super().read_entity(entity_id, role=role)
+            if entity_id == "old-1":
+                # An Object's successor IS a NAME (the `supersededBy` carrier).
+                call.rows[0]["supersededBy"] = "Onboarding flow v2"
+            return call
+
+    named = _q3_signal(_SupersededObjectTarget())
+    assert "names-its-successor=True" in named and "by name" in named, (
+        "an Object's successor is the `supersededBy` NAME — the carrier that "
+        "`tortoise/ended.py` serves as `successorName`, never as an id"
+    )
+    assert "Onboarding flow v2" in named
+
+    silent = _q3_signal(_SupersededPointTarget(age_link=False))
+    assert "names-its-successor=False" in silent, (
+        "with no carrier on the record AND no successor row naming the edge, the "
+        "honest answer is still `False` — the fix is not a constant `True`"
+    )
+    assert "neither carrier" in silent and "CORRECTS edge" in silent, (
+        "a `False` must say which carriers were consulted, or it reads as the "
+        "same unqualified claim the finding rejected"
+    )

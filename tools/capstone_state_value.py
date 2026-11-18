@@ -111,13 +111,23 @@ EXIT CODES
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/capstone_state_value.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/capstone_state_value.py`"
+    )
+
 import argparse
 import json
 import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import traceback
@@ -442,6 +452,62 @@ def _served_row(r: dict) -> dict:
     }
 
 
+def _link_ids(row: dict) -> list[str]:
+    """The ids a served row's ``supersedes`` link names, in whichever shape it has.
+
+    The projection (`_served_row`) reduces the link to ids, while a raw SDK row
+    carries ``[{id, content_snippet, created_at}]`` (`search_engine`'s decorated
+    state). Accepting both keeps this reading the ROW rather than a shape.
+    """
+    out: list[str] = []
+    for link in row.get("supersedes") or []:
+        if isinstance(link, str):
+            out.append(link)
+        elif isinstance(link, dict) and link.get("id"):
+            out.append(link["id"])
+    return out
+
+
+def _successor_carrier(node: dict, served: list) -> tuple[bool, str]:
+    """Does this record name its successor, and BY WHICH of the family's carriers?
+
+    #13302 review F2. The successor is TWO facts and each family carries its own
+    (#13302, `tortoise/ended.py:227`): a **Point**'s is the `CORRECTS` edge —
+    `supersede_point` writes the edge and NO `supersededBy` — while an
+    **Object**/**Subject**'s is the `supersededBy` NAME. A by-id `read_entity`
+    serves the node's PROPERTIES only (`projection._resolve_entity` returns
+    `properties(n)`), so a Point comes back with neither carrier and the old
+    signal's `bool(node.get("supersededBy"))` printed `names-its-successor=False`
+    for every superseded Point in the graph, forever — on the row a judge scores
+    Q3 from, contradicting that same run's own judge reason.
+
+    So the fact is looked for where the FAMILY puts it: the id carrier when the
+    read serves one, the name carrier when the record holds one, and otherwise
+    the successor's own row, which names the Point's `CORRECTS` edge in its
+    `supersedes` link. The carrier is returned WITH the verdict, because "no"
+    from a carrier that was never searched is the false signal this replaces.
+    """
+    oid = node.get("id")
+    ids = [i for i in (node.get("successorId"), *(node.get("allSuccessorIds") or []))
+           if i]
+    if ids:
+        return True, f"by id {ids[0]!r} — the CORRECTS edge"
+    named = node.get("supersededBy") or node.get("superseded_by")
+    if named:
+        return True, f"by name {named!r} — the `supersededBy` carrier"
+    for row in served:
+        if oid and oid in _link_ids(row):
+            return True, (
+                f"by edge — the successor's own row {row.get('id')!r} names it "
+                f"(a Point's successor is the CORRECTS edge)"
+            )
+    return False, (
+        "neither carrier on the replaced record nor a successor row naming the "
+        "edge (a Point's successor is the CORRECTS edge; a by-id read does not "
+        "serve edges)"
+    )
+
+
 def _ended_fields(r: dict) -> dict:
     """The #13302 half of a served row: HOW the record ended, when it says so.
 
@@ -456,9 +522,11 @@ def _ended_fields(r: dict) -> dict:
     other half). Dropping it as falsy would delete exactly that evidence.
     """
     out: dict = {}
-    for key in ("successorId", "endedAt"):
+    for key in ("successorId", "successorName", "endedAt"):
         if r.get(key) is not None:
             out[key] = r[key]
+    if r.get("allSuccessorIds"):
+        out["allSuccessorIds"] = r["allSuccessorIds"]
     if r.get("stage"):
         out["stage"] = r["stage"]
     if r.get("isClosed"):
@@ -675,6 +743,25 @@ class LocalTarget:
                     read_status_out=status,
                     _truncation_out=trunc,
                     leg_trace=trace,
+                    # #12297's census requires every `tools/` caller of this read
+                    # to either opt out or be named in its intentional-keep list.
+                    # This door opts out, as a RECORDED-BASELINE instrument:
+                    # `docs/evidence/13038-capstone/README.md` commits
+                    # `verdicts-baseline.json` so "a later run can be compared
+                    # against" it, and what this read RETURNS is the page the
+                    # lever moves — which rows survive `limit`, and whether a
+                    # retired id appears among them. `sdk.py`'s
+                    # `_rerank_candidates` docstring names this class and records
+                    # that pinning the rerank ALONE is its norm.
+                    # ⚠️ Unlike the `tools/` harnesses in that class this read
+                    # does NOT pin `_valid_time_rerank` — it runs the shipped
+                    # valid-time ordering and pins only the fused rerank, the
+                    # `docs/`-half shape the same docstring describes. So with the
+                    # gate armed the trace reports `reason=order_owned_downstream`
+                    # for a caller that owns no downstream order; noted here so the
+                    # recorded `legs` are not later read as a decision this door
+                    # never made.
+                    _rerank_candidates=False,
                     **extra,
                 )
                 or []
@@ -1218,9 +1305,15 @@ def recipe_why_changed(target: LocalTarget, refs: dict[str, str], spec: dict) ->
         else None,
     }
     if node_old:
+        # #13302 review F2: the successor fact is read off the CARRIER THE FAMILY
+        # USES (a Point's `CORRECTS` edge is only visible on the successor's own
+        # row, never on a by-id property read), and the signal says which one
+        # answered — the alternative is a `False` that means "not looked for".
+        _named, _carrier = _successor_carrier(
+            node_old, ans.rows("default") + ans.rows("include_terminal"))
         ans.signals.append(
             f"replaced node status={node_old.get('status')!r}, "
-            f"names-its-successor={bool(node_old.get('supersededBy'))}"
+            f"names-its-successor={_named} ({_carrier})"
         )
     _require_call(ans, "default", "include_terminal", "replaced_node", "successor_node")
     _signal_refs(ans, refs, spec)
@@ -1366,11 +1459,27 @@ def recipe_withdrawn(target: LocalTarget, refs: dict[str, str], spec: dict) -> A
     if node:
         ans.signals.append(f"claim status={node.get('status')!r} (a by-id read_entity)")
     if ans.rows("ended"):
-        ended_ids = [r.get("id") for r in ans.rows("ended")]
+        # ⛔ "withdrawn record(s)" would be a claim the product never made: the ended
+        # population is EVERY ending (a `superseded` decision is in it too), and this
+        # line is the one field a reader uses to attribute a failure. The row's own
+        # `status`/`stage.outcome` is where "how it ended" is stated.
+        ended_rows = ans.rows("ended")
+
+        def _how(row: dict) -> str:
+            """The row's own "how it ended", never a claim invented here."""
+            word = row.get("status")
+            if word:
+                return str(word)
+            stage = row.get("stage") or {}
+            if stage:
+                return f"{stage.get('slot')}/{stage.get('outcome')}"
+            return "(no word served)"
+
         ans.signals.append(
             "the ended-scope read served "
-            f"{len(ended_ids)} withdrawn record(s) without the id being supplied: "
-            f"{ended_ids}"
+            f"{len(ended_rows)} ended record(s) without the id being supplied — "
+            "each row states how it ended: "
+            + "; ".join(f"{r.get('id')}: {_how(r)}" for r in ended_rows)
         )
     if not ans.rows("by_name"):
         ans.signals.append(
@@ -1667,6 +1776,54 @@ def shlex_split(cmd: str) -> list[str]:
 # ── scoreboard ───────────────────────────────────────────────────────────────────
 
 
+def _search_label(request: dict, *, tick: bool = True) -> str:
+    """`search(<query>, <type>[, <flags>])` — ONE spelling for BOTH renderers.
+
+    A DICT, not a `Call`, because the top table renders from the recorded request
+    (`_calls_summary`) while the detail sections hold a live `Call` — and two
+    builders for one call meant the same read rendered two ways in one document
+    (the top table dropped `entity_type` and spelled the flag `+terminal`).
+
+    `ended_scope` MUST be in it (#13302): without the marker an ended-scope
+    enumeration renders exactly like a query-less default-scope search, i.e. the
+    committed evidence would show a retired object served as `status=deprecated`
+    from a plain read — which is the trust failure the scoreboard EXISTS to catch.
+    A reader must never have to guess which call produced a row.
+    """
+    flags = ""
+    if request.get("include_terminal"):
+        flags += ", include_terminal"
+    if request.get("ended_scope"):
+        flags += ", ended_scope"
+    label = (
+        f"search({request.get('query')!r}, "
+        f"{request.get('entity_type')}{flags})"
+    )
+    return f"`{label}`" if tick else label
+
+
+def _ended_suffix(row: dict) -> str:
+    """How a served row ended, in one bracket — empty for a current-scope row.
+
+    The scoreboard's job is to let a human see WHY a row is the answer. A row that
+    merely prints `status=None` for a plan says nothing; `[stage=terminal/withdrawn,
+    no linked event]` is the answer to "planned and never happened" on its face.
+    """
+    bits: list[str] = []
+    stage = row.get("stage") or {}
+    if stage:
+        bits.append(f"stage={stage.get('slot')}/{stage.get('outcome')}")
+    if row.get("successorId"):
+        bits.append(f"successor={row['successorId']}")
+    elif row.get("successorName"):
+        bits.append(f"successor={row['successorName']}")
+    if "linkedEvents" in row and not row["linkedEvents"]:
+        bits.append("no linked event")
+    if row.get("endedAt"):
+        bits.append(f"endedAt={row['endedAt']}")
+    return f" [{', '.join(bits)}]" if bits else ""
+
+
 def _answer_text(answer: Answer) -> str:
     """One human paragraph of what the product actually served."""
     bits: list[str] = []
@@ -1676,16 +1833,12 @@ def _answer_text(answer: Answer) -> str:
             continue
         if call.surface == "search":
             if not call.rows:
-                bits.append(
-                    f"`search({call.request.get('query')!r}, "
-                    f"{call.request.get('entity_type')}"
-                    f"{', include_terminal' if call.request.get('include_terminal') else ''})`"
-                    f" → 0 rows"
-                )
+                bits.append(f"{_search_label(call.request)} → 0 rows")
                 continue
             shown = "; ".join(
                 f"*{_cut(r.get('what'), 70, redact=False)}* (kind={r.get('kind')}, "
                 f"status={r.get('status')}, rrf={r.get('score')})"
+                f"{_ended_suffix(r)}"
                 for r in call.rows[:4]
             )
             more = "" if len(call.rows) <= 4 else f"; +{len(call.rows) - 4} more"
@@ -1697,9 +1850,7 @@ def _answer_text(answer: Answer) -> str:
                     f"{ov['rows'] - ov.get('zero_overlap_rows', 0)}/{ov['rows']}]"
                 )
             bits.append(
-                f"`search({call.request.get('query')!r}, "
-                f"{call.request.get('entity_type')}"
-                f"{', include_terminal' if call.request.get('include_terminal') else ''})`"
+                f"{_search_label(call.request)}"
                 f" → {len(call.rows)} rows{rel}: {shown}{more}"
             )
         elif call.surface == "read_entity":
@@ -1748,7 +1899,7 @@ def _calls_summary(calls: list[dict]) -> str:
                 else ""
             )
             bits.append(
-                f"search({req.get('query')!r}{', +terminal' if req.get('include_terminal') else ''})"
+                f"{_search_label(req, tick=False)}"
                 f" → {len(c.get('rows') or [])} rows{rel}"
             )
         elif surf == "read_entity":

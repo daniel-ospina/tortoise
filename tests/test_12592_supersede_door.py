@@ -219,14 +219,26 @@ def test_the_refusal_names_this_labels_own_section_of_the_model(sdk):
 
 
 def test_a_point_refusal_prescribes_retract_not_reserved_archived(sdk):
-    """§5 declares `archived` RESERVED on Points, so naming it is unperformable."""
+    """The Point refusal names `retract_point`, and states what `archived` now IS.
+
+    ⛔ THE OLD DOCSTRING PINNED A MODEL FACT v3.37 DELETED. §5's
+    "`archived` | terminal (reserved) | *(no v1 SDK write path)*" row is gone: the
+    word is a declared SYNONYM of `deprecated` (`tortoise/lifecycle_vocabulary.py:95`)
+    and, on a plain Point, is ACCEPTED and stored as `deprecated` (measured). What
+    makes naming it wrong HERE is that it names no VERB — the Point's successorless
+    retirement is the tombstone — so the refusal prescribes the performable Point
+    verb and says why, without re-asserting a reservation §5 no longer carries.
+    """
     node = _make(sdk, "Point", "reserved-archived")
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(node, status="superseded")
     msg = str(exc.value)
     assert "retract_point" in msg, msg
-    assert "RESERVED on Points" in msg, (
-        f"the Point refusal must say `archived` is reserved: {msg!r}")
+    assert "RESERVED on Points" not in msg, (
+        f"the Point refusal still claims `archived` is RESERVED on Points — a row "
+        f"§5 deleted in v3.37 and the synonym map contradicts: {msg!r}")
+    assert "names no verb" in msg, (
+        f"the Point refusal must say why `archived` is not the word here: {msg!r}")
 
 
 @pytest.mark.parametrize("label", ["Object", "Subject"])
@@ -594,7 +606,9 @@ def test_a_hybrid_row_nameless_as_object_is_prescribed_the_point_remedy(sdk):
     ``:Point:Object`` with the Point arm satisfied by an incoming CORRECTS edge
     and the Object arm nameless: the prescription must be the Point one
     (``retract_point``, or the edge ``supersede_knowledge()`` writes on that path).
-    ``archived`` is RESERVED on Points (§5) and this door REFUSES it there, so
+    ``archived`` is not a declared transition on a Point (§5's four rows name
+    `deprecated`/`superseded`, and the "reserved — no v1 write path" row was
+    deleted in v3.37) and this door REFUSES it there, so
     the Object-first wording would prescribe an unperformable repair.
 
     Mutation: choose the wording from ``nameless[0]`` instead of from the BOUND
@@ -613,7 +627,7 @@ def test_a_hybrid_row_nameless_as_object_is_prescribed_the_point_remedy(sdk):
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(node, status="superseded")
     message = str(exc.value)
-    assert "retract_point" in message and "RESERVED" in message, (
+    assert "retract_point" in message and "names no verb" in message, (
         "a hybrid nameless as an Object was prescribed a Point-illegal "
         f"'archived': {message}")
     assert "status='archived'" not in message, message
