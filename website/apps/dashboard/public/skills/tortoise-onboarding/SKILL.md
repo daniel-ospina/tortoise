@@ -971,7 +971,7 @@ connection):
 4. **Wire criteria → options** with `tortoise_create_operator`:
    - `criterion -[IMPL]-> option` — the criterion argues FOR the option,
    - `criterion -[NAND]-> option` — the criterion argues AGAINST the option.
-   A ranking needs ≥1 IMPL edge before `tortoise_compute_confidence` can
+   A ranking needs ≥1 IMPL edge before `tortoise_check_confidence(recompute=True)` can
    produce signal.
 5. **Mitigate, don't NAND, for fit.** When a finding is true but matters
    less, express it on the OPERATOR with
@@ -1019,8 +1019,8 @@ connection):
    multiplier.
 6. **Options can IMPL/NAND each other** — two go well together (IMPL), three
    are mutually exclusive (NAND).
-7. **Rank + sanity-check.** Run `tortoise_compute_confidence` (anchors = the
-   decision/options) → present the ranked options with EP confidence AND the
+7. **Rank + sanity-check.** Run `tortoise_check_confidence(recompute=True)` (anchors =
+   the decision/options) → present the ranked options with EP confidence AND the
    *why*: the top edges that moved each option. Run `tortoise_graph_overview(section="structure_check")`
    to confirm no orphaned operators.
 

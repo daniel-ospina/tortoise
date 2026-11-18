@@ -76,6 +76,12 @@ KNOWN_STALE_TOOL_NAMES = {
         "tortoise_belief_timeline",      # → tortoise_check_confidence(topic=...)
         "tortoise_get_confidence",       # → tortoise_check_confidence(claim_id=...)
         "tortoise_review_connections",   # → tortoise_review_link_candidates(kind="connections")
+        # #11609 P2 retired `recall` into the confidence container's `recall=True` arm.
+        # The mirror is upstream-authored (see the note above), the name still
+        # RESOLVES through the #3883 shim, and the warning names the arm — so an
+        # agent following the skill is redirected rather than broken. Re-cutting
+        # the mirror upstream shrinks this entry back out.
+        "tortoise_recall",               # → tortoise_check_confidence(recall=True, ...)
     },
     "how-to-use-tortoise": {
         "tortoise_fts_query",      # an SDK method name, never a tool
@@ -99,6 +105,10 @@ KNOWN_STALE_TOOL_NAMES = {
         "tortoise_set_point_baseline",  # → tortoise_refresh_confidence(scope="baseline", point_id=…)
         "tortoise_supersede",           # → tortoise_supersede_knowledge(old_id, new_id, …)
         "tortoise_update_point",        # → tortoise_update_knowledge(id, props=…)
+        # #11609 P2 strengthened the confidence container: `compute_confidence` is its
+        # `recompute=True` arm now. Upstream-authored mirror, still resolves via the
+        # #3883 shim (see the note at the top of the map).
+        "tortoise_compute_confidence",  # → tortoise_check_confidence(recompute=True, ...)
     },
     "research-domain": {
         # #4282 → tortoise_graph_overview(section=...) — see the note above.
@@ -108,12 +118,26 @@ KNOWN_STALE_TOOL_NAMES = {
         # mirror is upstream-authored (see the note above), and the retired name
         # still resolves through the #3883 warning shim.
         "tortoise_review_connections",
+        # #11609 P2 → tortoise_check_confidence(recall=True, ...); same reason.
+        "tortoise_recall",
+    },
+    # `tortoise-decide` is one of the three sha-pinned mirrors
+    # (`config/served-skills-upstream.yml`), so its references are NOT re-pointed here:
+    # #11609 P2's arm retirement moved both names off the advertised surface, and both
+    # still resolve through the #3883 shim, whose warning names the arm. A "`--sync`"
+    # from upstream would overwrite a local fix, which is why the ratchet records the
+    # stale name instead of editing the text.
+    "tortoise-decide": {
+        "tortoise_compute_confidence",  # → tortoise_check_confidence(recompute=True, ...)
+        "tortoise_recall",              # → tortoise_check_confidence(recall=True, ...)
     },
     "tortoise-file-finding": {"tortoise_list_sources"},
     # #4282: `tortoise/onboarding/SKILL.md` is the ONE served skill authored in THIS repo
     # (not the external mirror), so its `check_structure`/`overview` references were
     # re-pointed at the container in the same change. This entry is unchanged by that
     # re-pointing — `tortoise_health` predates this batch and still resolves via the shim.
+    # #11609 P2 re-pointed its `tortoise_compute_confidence` references the same way (to
+    # `tortoise_check_confidence(recompute=True)`), so that name does NOT appear here.
     "tortoise-onboarding": {"tortoise_health"},
 }
 
