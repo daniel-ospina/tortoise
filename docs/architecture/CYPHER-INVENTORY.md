@@ -415,6 +415,14 @@ halves:
 2. **Re-run `--check`** and commit the regenerated doc in the same PR that added or removed the
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
+3. ⛔ **`git add` the merge's resolutions BEFORE the census runs — an unresolved path is listed once
+   PER STAGE.** `git ls-files` (what `surface_files` walks) emits stages 1, 2 and 3 of a conflicted
+   path, so a cut taken mid-merge reads one file as three and its statement sites TRIPLE: measured
+   on `#13466`'s third `origin/main` integration, `tortoise/indexer/github_indexer.py` reported 33
+   sites instead of 11 and `sites` read a phantom **1336** against the true **1314** — the exact +22
+   that a stale pin carried until it was re-cut. `--check` cannot see it (the pins and the appendix
+   agree with each other, both being the same wrong cut), so the trap is silent; `main`'s
+   `42ffce6cc2` records the same failure from the other side. Resolve, `git add`, THEN measure.
 
 **This regeneration's base:** `origin/main` **`340d500491`** — the base this branch last merged
 before the one it landed on, **`6264dc670c`**. `main` inserted nothing under `tortoise/` between those
